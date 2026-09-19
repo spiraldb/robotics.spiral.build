@@ -3,10 +3,10 @@
 use super::{
     DatasetClient,
     catalog_rail::{CatalogRail, RailActions, RailSelection},
-    dataset_overview::{DatasetOverview, OverviewActions},
+    dataset_overview::DatasetOverview,
     episode_list::OpenedEpisode,
     episode_playback::EpisodeCamera,
-    episode_streams::{EpisodeStreams, StreamCatalog, StreamChoices},
+    episode_streams::{EpisodeStreams, RecordedStream, StreamCatalog, StreamChoices},
     episode_transport::{EpisodeTimeRange, EpisodeTransport, KeyboardFocus},
     messages_panel::MessagesPanel,
     plots_panel::PlotsPanel,
@@ -15,11 +15,10 @@ use super::{
     timeline_panel::{TimelinePanel, TimelineSubject},
 };
 use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
-use crate::panels::camera_panel::CameraPanelRows;
 use crate::shell::frame::WorkspaceFrame;
 use dioxus::prelude::*;
 use dioxus_workbench::{
-    DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis,
+    DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelPlacement, PanelWorkspace, SplitAxis,
 };
 use spiral_robotics_common::datasets::{DatasetSelection, ProjectResource};
 
@@ -80,8 +79,127 @@ struct DiscoveredStreams {
     result: Result<StreamCatalog, String>,
 }
 
-struct DataLayout;
+#[derive(Clone, Copy)]
+struct DataLayout {
+    layout: Signal<PanelLayout>,
+    customized: Signal<bool>,
+}
+
 impl DataLayout {
+    fn use_layout(canonical: PanelLayout) -> Self {
+        let mut owner = Self {
+            layout: use_signal(|| canonical.clone()),
+            customized: use_signal(|| false),
+        };
+        // Cameras arrive asynchronously. Follow the default until an operator
+        // resizes or docks a panel; after that the native workbench owns it.
+        use_effect(use_reactive((&canonical,), move |(mut canonical,)| {
+            if !*owner.customized.peek() {
+                Self::restore_active(&owner.layout.peek().root, &mut canonical);
+                if *owner.layout.peek() != canonical {
+                    owner.layout.set(canonical);
+                }
+            }
+        }));
+        owner
+    }
+
+    fn observe(mut self, actual: &PanelLayout, canonical: &PanelLayout) {
+        if !Self::same_arrangement(&actual.root, &canonical.root) {
+            self.customized.set(true);
+        }
+    }
+
+    fn same_arrangement(left: &LayoutNode, right: &LayoutNode) -> bool {
+        match (left, right) {
+            (LayoutNode::Tile(left), LayoutNode::Tile(right)) => {
+                left.id == right.id && left.panels == right.panels
+            }
+            (
+                LayoutNode::Split {
+                    id,
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                },
+                LayoutNode::Split {
+                    id: other_id,
+                    axis: other_axis,
+                    ratio: other_ratio,
+                    first: other_first,
+                    second: other_second,
+                },
+            ) => {
+                id == other_id
+                    && axis == other_axis
+                    && ratio == other_ratio
+                    && Self::same_arrangement(first, other_first)
+                    && Self::same_arrangement(second, other_second)
+            }
+            _ => false,
+        }
+    }
+
+    fn restore_active(node: &LayoutNode, next: &mut PanelLayout) {
+        match node {
+            LayoutNode::Tile(tile) => {
+                if let Some(active) = &tile.active {
+                    next.activate(active);
+                }
+            }
+            LayoutNode::Split { first, second, .. } => {
+                Self::restore_active(first, next);
+                Self::restore_active(second, next);
+            }
+        }
+    }
+
+    /// Prefer an explicitly named top view, then retain topic order.
+    fn cameras(catalog: &StreamCatalog) -> Vec<&RecordedStream> {
+        let mut cameras = catalog.videos().collect::<Vec<_>>();
+        cameras.sort_by_key(|stream| {
+            !stream
+                .name()
+                .split(|character: char| !character.is_alphanumeric())
+                .any(|part| part.eq_ignore_ascii_case("top"))
+        });
+        cameras
+    }
+
+    /// Two cameras per row; an odd final camera fills the remaining row.
+    fn camera_grid(camera_ids: &[PanelId], offset: usize) -> Option<LayoutNode> {
+        let first = camera_ids.first()?;
+        let tile = |id: &PanelId, index: usize| {
+            let home = if index == 0 {
+                "cameras".to_owned()
+            } else {
+                format!("cameras-{}", index + 1)
+            };
+            LayoutNode::tile(home, [id.clone()])
+        };
+        let row = match camera_ids.get(1) {
+            Some(second) => LayoutNode::split(
+                format!("camera-columns-{offset}"),
+                SplitAxis::Horizontal,
+                0.5,
+                tile(first, offset),
+                tile(second, offset + 1),
+            ),
+            None => tile(first, offset),
+        };
+        if camera_ids.len() <= 2 {
+            return Some(row);
+        }
+        Some(LayoutNode::split(
+            format!("camera-grid-rows-{offset}"),
+            SplitAxis::Vertical,
+            1.0 / camera_ids.len().div_ceil(2) as f64,
+            row,
+            Self::camera_grid(&camera_ids[2..], offset + 2).unwrap(),
+        ))
+    }
+
     fn initial(camera_ids: &[PanelId], browsing: bool) -> PanelLayout {
         let primary_ids = if browsing {
             vec!["overview", "plots", "messages", "sql", IMPORT_PANEL]
@@ -89,11 +207,11 @@ impl DataLayout {
             vec!["plots", "messages"]
         };
         let primary = LayoutNode::tile("primary", primary_ids.into_iter().map(PanelId::new));
-        let editors = match camera_ids.camera_rows() {
+        let editors = match Self::camera_grid(camera_ids, 0) {
             Some(cameras) => LayoutNode::split(
                 "data-editors",
                 SplitAxis::Horizontal,
-                0.64,
+                0.49,
                 primary,
                 cameras,
             ),
@@ -198,6 +316,7 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
         applied.set(Some(discovered.episode_id.clone()));
         if let Ok(streams) = &discovered.result {
             choices.reset(streams);
+            choices.plot_single_stream(streams);
             if let Some(range) = episode.record().time_range() {
                 choices.load_coverage(streams, range);
             }
@@ -227,7 +346,10 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
             .time_range()
             .unwrap_or_else(|| EpisodeTimeRange::new(0, 0));
         opening_transport.load(range);
-        choices.reset(&StreamCatalog::default());
+        if selection.episode.peek().as_ref() != Some(&opened) {
+            choices.reset(&StreamCatalog::default());
+            applied.set(None);
+        }
         let mut selection = selection;
         selection.dataset.set(Some(opened.dataset().clone()));
         selection.episode.set(Some(opened));
@@ -235,11 +357,6 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
     });
     let open_table = move |resource: ProjectResource| {
         controller.set_sql(resource.table_sql());
-        controller.run_query(studio, *available.peek());
-        selection.activate("sql");
-    };
-    let run_sql = move |sql: String| {
-        controller.set_sql(sql);
         controller.run_query(studio, *available.peek());
         selection.activate("sql");
     };
@@ -312,7 +429,6 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
                     DatasetOverview {
                         dataset: dataset.clone(),
                         inspection: dataset_inspection.clone(),
-                        actions: OverviewActions::new(open_episode, EventHandler::new(run_sql)),
                     }
                 },
                 None => rsx! { WelcomePanel { on_import: start_import } },
@@ -344,7 +460,7 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
 
     let mut camera_ids = Vec::new();
     if let Some(EpisodeStreams::Ready(streams)) = &streams {
-        for stream in streams.videos() {
+        for stream in DataLayout::cameras(streams) {
             if !choices.camera_open(stream.key()) {
                 continue;
             }
@@ -400,6 +516,14 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
         panels.retain(|panel| !matches!(panel.id.as_str(), "catalog" | "overview" | "sql"));
     }
     let initial_layout = DataLayout::initial(&camera_ids, browsing);
+    let placements = panels
+        .iter()
+        .map(|panel| {
+            PanelPlacement::new(panel.id.clone(), panel.home.clone()).with_zone(panel.home_zone)
+        })
+        .collect::<Vec<_>>();
+    let canonical = initial_layout.reconciled(&placements);
+    let layout = DataLayout::use_layout(canonical.clone());
     let episode_open = episode.is_some();
     let mut keyboard = transport.clone();
     rsx! {
@@ -415,6 +539,8 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
             PanelWorkspace {
                 panels,
                 initial_layout,
+                layout: layout.layout,
+                on_layout_change: move |actual| layout.observe(&actual, &canonical),
                 active_panel: (selection.active_panel)(),
                 layout_scope: Some(if browsing { LAYOUT_SCOPE } else { "spiral_robotics.panel-layout.v1.comparison-episode" }.to_owned()),
                 on_panel_activate: move |id: PanelId| { let mut selection = selection; selection.active_panel.set(Some(id)); },
@@ -478,6 +604,101 @@ fn CameraPlaceholder(streams: Option<EpisodeStreams>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_default_layout_uses_two_plus_one_cameras_and_shared_lower_timeline() {
+        let cameras = [
+            PanelId::new("top"),
+            PanelId::new("left"),
+            PanelId::new("right"),
+        ];
+        let layout = DataLayout::initial(&cameras, true);
+        let LayoutNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = &layout.root
+        else {
+            panic!("dataset rail")
+        };
+        assert_eq!(*ratio, 0.21);
+        assert!(matches!(first.as_ref(), LayoutNode::Tile(tile) if tile.id.as_str() == "catalog"));
+        let LayoutNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+            ..
+        } = second.as_ref()
+        else {
+            panic!("timeline row")
+        };
+        assert_eq!(*axis, SplitAxis::Vertical);
+        assert_eq!(*ratio, 0.6);
+        assert!(
+            matches!(second.as_ref(), LayoutNode::Tile(tile) if tile.id.as_str() == "timeline")
+        );
+        let LayoutNode::Split { ratio, second, .. } = first.as_ref() else {
+            panic!("plots and cameras")
+        };
+        assert_eq!(*ratio, 0.49);
+        let LayoutNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+            ..
+        } = second.as_ref()
+        else {
+            panic!("camera rows")
+        };
+        assert_eq!(*axis, SplitAxis::Vertical);
+        assert_eq!(*ratio, 0.5);
+        assert!(matches!(
+            first.as_ref(),
+            LayoutNode::Split {
+                axis: SplitAxis::Horizontal,
+                ratio: 0.5,
+                ..
+            }
+        ));
+        assert!(
+            matches!(second.as_ref(), LayoutNode::Tile(tile) if tile.panels == [cameras[2].clone()])
+        );
+        for count in 0..=6 {
+            let ids = (0..count)
+                .map(|index| PanelId::new(format!("camera-{index}")))
+                .collect::<Vec<_>>();
+            assert!(DataLayout::initial(&ids, true).valid());
+        }
+    }
+
+    #[test]
+    fn data_default_layout_distinguishes_user_geometry_from_tab_activation() {
+        let original = DataLayout::initial(&[PanelId::new("camera-empty")], true);
+        let mut activated = original.clone();
+        activated.activate(&PanelId::new("plots"));
+        assert!(DataLayout::same_arrangement(
+            &original.root,
+            &activated.root
+        ));
+        let mut discovered =
+            DataLayout::initial(&[PanelId::new("top"), PanelId::new("left")], true);
+        DataLayout::restore_active(&activated.root, &mut discovered);
+        assert_eq!(
+            discovered.tile(&"primary".into()).unwrap().active,
+            Some(PanelId::new("plots"))
+        );
+        let mut resized = activated.clone();
+        if let LayoutNode::Split { ratio, .. } = &mut resized.root {
+            *ratio = 0.3;
+        }
+        assert!(!DataLayout::same_arrangement(&original.root, &resized.root));
+        let mut docked = original.clone();
+        docked.dock_panel(&PanelId::new("plots"), &"timeline".into(), DockZone::Center);
+        assert!(!DataLayout::same_arrangement(&original.root, &docked.root));
+    }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn data_layout_keeps_named_homes_for_cameras_and_the_timeline() {

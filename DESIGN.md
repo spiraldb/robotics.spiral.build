@@ -630,14 +630,26 @@ with Plots and Messages tabs, one panel per recorded camera, and the Timeline.
 The canonical first-open Data layout is:
 
 ```text
-┌── 21% ──┬────────── 64% ──────────┬──── 36% ────┐
-│ Datasets│ Plots │ Messages │ SQL   │ camera rows │
-│ rail    │                         │             │
+┌── 21% ──┬────────── 49% ──────────┬──── 51% ────┐
+│ Datasets│ Overview · Plots         │ top  │ left │
+│ rail    │ Messages · SQL           ├──────┴──────┤
+│         │                         │ right       │
 │         ├─────────────────────────┴─────────────┤
 │         │ Timeline — transport, ruler, one row  │
 │         │ per stream with message density       │
 └─────────┴───────────────────────────────────────┘
 ```
+
+The upper workbench takes 60% of the episode workspace and Timeline takes
+40%. Cameras fill a two-column grid; an odd final camera spans its row, and
+an explicitly named top camera appears first. Opening an episode selects
+Plots. These are defaults: resizing or docking a panel preserves the
+operator's arrangement as subsequent cameras arrive.
+
+When exactly one stream has numeric fields, Data plots that stream's usual
+whole-stream selection after its schemas load. Zero or multiple numeric
+streams remain unselected. An explicit plot choice, including deselection,
+wins over an automatic selection still waiting for a schema response.
 
 The Timeline is the navigation hub of an episode: ticking a stream shows it
 (a camera opens its panel; a data stream draws every numeric field in Plots),
@@ -1638,8 +1650,8 @@ ambient browser selection—decides whether execution may begin.
   section; opening one loads `SELECT * … LIMIT 100` into SQL and runs it.
 - **Overview:** Selecting a dataset shows its name, chips for episode count,
   total recorded time, total bytes, and date span from one aggregate query,
-  its declared streams with schema names and counts, and two actions: Open
-  first episode and Query episodes in SQL.
+  and its declared streams with schema names and counts. Episodes open from
+  the Datasets rail; SQL remains available in its own tab.
 - **Timeline:** A 36px transport row holds the episode identity, jump/step/
   play controls, a millisecond clock beside the duration, speed, Loop, a
   buffering note, and zoom. Below it a sticky ruler with round-interval ticks

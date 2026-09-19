@@ -3,77 +3,72 @@
 Draft: September 18, 2026.
 
 Target approximately two minutes of screen action, edited into a one-minute demo.
-Trim typing, navigation, and inference waits. Show a brief Processing state before
-cutting to the actual result; do not imply inference is instantaneous.
+Capture real loading states; allow the take to run longer if loading or inference
+needs more time. Trim waits in the edit without implying an instantaneous result.
+Use a natural, professional tone and leave space for the footage.
 
-The story: inspect a demonstration, identify a questionable moment, build a
-curation recipe, review the model's annotations, and exclude training chunks
-without modifying the original recording.
-
-Delivery: a natural, professional product walkthrough. Explain each action as
-you take it, using clear sentences and contractions where they feel natural.
-Leave space for the footage; avoid casual filler and promotional language.
+The story: inspect a demonstration, build a new curation from three plain-language
+rules, review an automatically identified interval, and finish by inspecting the
+retained episodes. Original recordings remain intact.
 
 ## Two-minute capture plan
 
 | Time | Screen action | Narration |
 | --- | --- | --- |
-| 0:00–0:15 | Start in Data. Browse two episodes and play a short segment. Add the small caption **Simulation demonstration dataset**. | “Imitation learning depends on demonstrations. But human recordings can include pauses, repeated attempts, and mistakes—even when the task ultimately succeeds. We want to be selective about which moments we use for training.” |
-| 0:15–0:35 | Play one visually understandable low-progress candidate, with context before and after it. Show a second short example only if it adds something clear. | “Let's look at this interval more closely. We'd want to understand whether it's helping the task move forward. If it isn't, we should be able to leave it out of training without losing the rest of the episode.” |
-| 0:35–0:45 | Switch to Curation and select the dataset. | “In Curation, we can define those choices as a workflow. I'll start with the dataset we've just been inspecting.” |
-| 0:45–1:05 | Type **“Remove episodes with more than 4,000 messages”** in the natural-language field. Click the blue **Add rule** button once. Show the new editable message-count filter and its graph node, then select the node to inspect the distribution: **100 incoming, 40 excluded, 60 retained** for this filter alone. | “I can describe a rule in plain language—remove episodes with more than four thousand messages—and Spiral adds it to the workflow. The rule stays editable, and the graph shows which episodes it removes.” |
-| 1:05–1:25 | Type **“Remove unproductive moments from training”**. Click **Add rule** once, inspect the new rule, and select its graph node. Let an episode open automatically. Capture Processing briefly. | “Next, I'll ask Spiral to remove unproductive moments from training. It uses a state-of-the-art model to identify these moments automatically. Selecting the step opens an episode so we can review the result.” |
-| 1:25–1:45 | Show the **three synchronized camera feeds, followed by the shared timeline**. Inspect the **Progress score** track. Click an interval flagged by the automatic result to replay the same moment chosen for the opening during rehearsal. | “Spiral identifies these moments automatically. We can click a flagged interval and watch it in context across all three cameras. The workflow leaves those moments out of the training selection while preserving the original recording.” |
-| 1:45–2:00 | Save the recipe. Show a genuinely completed output from this automatic recipe and its actual retained/excluded counts. Identify the evaluated episode scope; do not present a one-episode result as the whole dataset. | “After reviewing the results, I'll save the recipe. Running it applies the workflow and excludes the identified moments from the training selection. The original recordings remain intact.” |
+| 0:00–0:20 | Start recording in **Data**. Click **one episode** and wait for its data, camera feeds, and plots to load. Press **Play**, let it run for about **one second**, then pause. Keep a small **Simulation demonstration dataset** caption visible. | “I'll open a demonstration, wait for its cameras and plots, and play a moment. Even successful demonstrations can contain pauses and repeated attempts we may not want the robot to learn.” |
+| 0:20–0:30 | Click **Curation** directly after that brief playback. Create a **new, empty curation** and select the supported 100-episode bottles dataset. Show that no rules are present. | “I'll start with an empty curation and select the dataset.” |
+| 0:30–0:48 | Type **“remove episodes shorter than 20s”**. Click the blue **Add rule** button once. Show the new editable duration filter and graph node. Pause briefly as the graph updates; capture its transition if present. | “First, I'll ask it to remove episodes shorter than twenty seconds. One click adds the rule, and the graph shows its effect.” |
+| 0:48–1:05 | Type **“remove episodes with fewer than 5000 messages”**. Click **Add rule** once. Show the second filter and pause on the updated graph and its actual counts. The expected graph transition is **79 → 17**: this rule excludes 62 of the remaining episodes. | “Then I'll remove episodes with fewer than five thousand messages. The second rule joins the same workflow.” |
+| 1:05–1:20 | Type **“remove unproductive moments in each episode”**. Click **Add rule** once, then select the new **Remove unproductive moments** node. | “Next, I'll ask Spiral to remove unproductive moments in each episode.” |
+| 1:20–1:38 | Confirm that **episode #14** is selected automatically as the first eligible episode. Show it loading first, with its three synchronized camera feeds. Separately show the progress score loading, then the actual populated timeline. Do not skip straight from rule creation to finished annotations. | “Spiral uses a state-of-the-art model to identify these moments automatically. Once the episode and its scores are ready, we can inspect the result.” |
+| 1:38–1:52 | In episode #14, seek to approximately **45.5 seconds**, just before the **red interval at 46–49 seconds**, and play through it to about 50 seconds. Show the bottle repositioning across all three cameras, with the timeline visible. These are model-flagged chunks selected for exclusion; do not present the model judgment as a confirmed demonstration error. | “Here, the model has flagged a few seconds. We can replay the bottle repositioning from all three cameras before using the result for training.” |
+| 1:52–2:00 | Click **Curated output**. Show the episode list on the left; select an episode to display its details inline on the right, with the graph still above. End here. | “Finally, Curated output lets us inspect the retained episodes and their details. The original recordings stay intact.” |
+
+The desired recording beat after each addition is an animated graph update followed
+by a short pause. The current implementation updates nodes immediately and disables
+node animation. An insertion animation remains an implementation requirement if
+it is essential to this shot; until then, capture the actual update and pause.
 
 ## One-minute edited voiceover
 
-> Imitation learning depends on demonstrations, but successful episodes can still contain pauses and repeated attempts we don't want the robot to learn.
+> I'll open one demonstration, wait for the cameras and plots, and play a moment. Even successful demonstrations can contain pauses and repeated attempts we may not want the robot to learn.
 >
-> Let's review those moments in Spiral.
+> Now, in Curation, I'll start empty and select our dataset.
 >
-> I can describe a rule in plain language: remove episodes with more than four thousand messages. One click adds an editable filter and a graph node showing its impact.
+> First, I'll type “remove episodes shorter than 20s” and add the rule. Then I'll remove episodes with fewer than five thousand messages. Each addition updates the workflow.
 >
-> Next, I'll type “Remove unproductive moments from training” and add that rule. Spiral uses a state-of-the-art model to identify those moments automatically.
+> Next: “remove unproductive moments in each episode.” Spiral uses a state-of-the-art model to identify them automatically.
 >
-> The results appear below three synchronized cameras. We can replay a flagged interval in context and inspect what the automatic workflow will leave out of training.
+> We'll let the episode load, then its progress scores. Here are the flagged moments. We can replay the bottle repositioning across all three cameras and inspect the result.
 >
-> I'll save the recipe, then run it to produce the curated training selection. The original recordings stay intact.
+> Finally, I'll open Curated output: retained episodes on the left, selected episode details on the right. The original recordings stay intact.
 
-Suggested edit: 0–12 seconds for the problem and example, 12–23 for filters,
-23–34 for typing and adding the moment-removal rule, 34–50 for reviewing the
-annotation, and 50–60 for saving and the resulting selection. Keep both exact
-natural-language prompts and their single-click additions visible in the edit.
+Suggested edit: 0–10 seconds for opening one episode in Data, loading, and the
+one-second playback; 10–16 for switching to an empty curation; 16–31 for typing
+and adding both filters; 31–39 for the third rule; 39–52 for the separate loading
+states and interval playback; and 52–60 for Curated output. Keep all three typed
+prompts and their single **Add rule** clicks visible.
 
-## Recording details
+## Recording setup and evidence
 
-- Dataset: select `dataset_warp_sim_bottles_sample` in Studio, containing **100 simulated episodes**. Automatic moment detection in this demo is supported for this sample. Do not select `abc130k_sample` (40 episodes), which is not supported by this task-specific model. Keep the internal dataset identifier out of narration. The human-demonstration discussion motivates the problem; these videos must not be presented as real human teleoperation footage.
-- Filter prompt: **“Remove episodes with more than 4,000 messages”**. Record the actual typing, the single blue **Add rule** click, and the newly added editable condition **Messages > 4000** plus graph node. The exact comma-form prompt passed interpretation-only verification as **Messages > 4000**. The single-click browser flow was verified with the equivalent wording “remove episode whose messages larger than 4000.” The resulting rule has been verified on the 100-episode sample: **40 excluded, 60 retained**. These counts apply when it is the first and only episode filter; use the live counts if the recipe changes. The earlier duration/3,000-message example does not belong in this sequence.
-- Proposed transformation prompt: **“Remove unproductive moments from training”**. Click **Add rule** once. This exact wording passed interpretation-only verification. Inspect the resulting rule during rehearsal; this check did not run episode inference.
-- Choose the opening example **after reviewing the automatic result**. Use an episode that reaches this transform, select a visibly flagged interval, and check the surrounding footage before recording. Describe it as **model-flagged for review** unless the images support a more specific explanation.
-- The transformation uses a built-in selection setting; no threshold adjustment is part of the demo. A flagged interval and completed output under this automatic setting still need confirmation. Earlier manually tuned annotations and counts are not evidence for the current automatic behavior.
-- All three cameras are shown for inspection. Only the original top-camera recording is used for model inference. The timeline is the existing shared episode timeline with an additional progress track.
-- Scores for the currently displayed episode stay in viewer memory; there is no custom persistent score cache. Avoid switching episodes repeatedly during the take because each new selection can start inference.
-- Record the final output counts from a completed run of the same recipe and built-in setting shown in the take. Do not reuse counts from the earlier manually tuned validation run.
+- Select `dataset_warp_sim_bottles_sample`, containing **100 simulated episodes**. This is the supported sample for automatic moment detection. Do not select `abc130k_sample` (40 episodes). Keep internal dataset identifiers out of narration, and do not present simulation footage as human teleoperation recordings.
+- Start from an empty curation, not the existing prepared recipe. Add only these three rules, in the order shown. The intended filter conditions are **Duration < 20 seconds**, then **Messages < 5000**. Import metadata verifies the expected sequence **100 → 79 → 17**: the first filter excludes 21 episodes; the second excludes 62 of the remaining 79. Episodes with exactly 5,000 messages are retained. Confirm these counts in the live graph during rehearsal; previous filter examples do not apply.
+- The third prompt normalizes the obvious typo in “remove unproductive memoments in each episodes” to **“remove unproductive moments in each episode”**, preserving the requested meaning.
+- The duration and transformation prompts were verified in the earlier live recording. The revised **“fewer than 5000 messages”** wording and the new graph counts still need a live rehearsal. The counts above were checked against the imported metadata; they are not a claim that this revised recipe has already been recorded.
+- Use **episode #14** (`01a0b638-a04a-710f-84b8-16a3a84c0a7a`; source episode 46), **60.53 seconds**, **7,268 messages**. It becomes the first eligible episode under these filters, so a new curation selects it automatically. An existing manual selection can persist if it is still eligible; start fresh as scripted.
+- The current Studio model returned all **1,817 frames** for this episode. Its red chunks are **29–30 seconds** and **46–49 seconds**. Use the longer second region for the demo: its three one-second chunks have mean progress rates of approximately **−0.041, −0.274, and −1.607**. The footage shows bottle repositioning/regrasping; the model flags it as low progress, but this is not independently labeled proof of an error.
+- Review the [three-camera excerpt, 44–53 seconds](../exports/demo-candidates-2026-09-18/episode-14-review-44-53s.mp4) before recording. Seek on the timeline to 45.5 seconds and press Play to cover all three adjacent red chunks; clicking a single chunk may play only that chunk and its short context.
+- A recording rehearsal exposed a 1,000-row SQL preview cap in episode score collection. The scoring path now collects its bounded complete result. Regression tests and the backend check passed, and the previously failing 1,019-frame episode loaded its full score track in the live UI.
+- All three cameras are for inspection; the original top-camera recording supplies the model input. Scores for the current episode remain in viewer memory. Switching episodes can start new inference, so establish the example before the take.
 
-## Closing language and product boundaries
+## What the final shot demonstrates
 
-The current actions are **Save** and **Run**. Save persists the recipe revision;
-Run compiles and executes it to produce outputs. There is no combined
-**Compile and save** action yet. If that wording is desired for the recording,
-define and implement the combined behavior first rather than only changing the
-voiceover or button label.
+**Curated output** already supports the retained-episode list and inline details
+below the graph. Clicking it inspects the current recipe's episode selection; it
+does not itself execute the recipe or create a persisted training export. Reviewing
+one episode's progress scores does not prove every retained episode was scored.
 
-An alternative, more technical closing is:
-
-> “I'll save the recipe. When we run it, Spiral optimizes the query, moving filters earlier where it's safe to reduce unnecessary data loading and computation.”
-
-Safe claims include native filter pushdown, projection pruning, and moving
-expensive work after independent filters where semantics permit. Do not claim
-arbitrary transformation reordering, automatic reuse of repeated model calls,
-or a guaranteed minimum amount of data loading. Recipe order can affect results.
-
-The demo produces episode/chunk selections and derived camera views for
-downstream use. It does not demonstrate a one-click training handoff, policy
-training, or improved policy performance. Keep those separate from the curation
-result shown here.
+The requested recording ends at this inspection view. Do not append Save or Run
+to the walkthrough. If execution is shown in a separate demo, distinguish those
+actions: **Save** persists the recipe, and **Run** executes it to produce outputs.
+This walkthrough does not demonstrate policy training or improved policy performance.

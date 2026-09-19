@@ -1,9 +1,5 @@
 //! One dataset at a glance: how much was recorded, and which streams exist.
-use super::{
-    DatasetClient,
-    episode_list::{EpisodePage, OpenedEpisode, SharedSourcePrefix},
-};
-use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
+use super::DatasetClient;
 use crate::format::{
     ByteCountPresentation, GroupedCountPresentation, LongDurationPresentation,
     UtcTimestampPresentation,
@@ -11,24 +7,6 @@ use crate::format::{
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection};
-
-#[derive(Clone, Copy, PartialEq)]
-pub(super) struct OverviewActions {
-    on_open_episode: EventHandler<OpenedEpisode>,
-    on_query: EventHandler<String>,
-}
-
-impl OverviewActions {
-    pub(super) fn new(
-        on_open_episode: EventHandler<OpenedEpisode>,
-        on_query: EventHandler<String>,
-    ) -> Self {
-        Self {
-            on_open_episode,
-            on_query,
-        }
-    }
-}
 
 /// Totals over every member, from one aggregate query.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -79,7 +57,6 @@ impl DatasetFacts {
 pub(super) fn DatasetOverview(
     dataset: DatasetSelection,
     inspection: Option<Result<DatasetInspection, String>>,
-    actions: OverviewActions,
 ) -> Element {
     let facts_dataset = dataset.clone();
     let facts = use_resource(move || {
@@ -98,51 +75,12 @@ pub(super) fn DatasetOverview(
                 .map_err(|error| format!("Reading dataset totals: {error}"))
         }
     });
-    let mut opening = use_signal(|| false);
-    let open_dataset = dataset.clone();
-    let open_first = move |_| {
-        if opening() {
-            return;
-        }
-        opening.set(true);
-        let dataset = open_dataset.clone();
-        spawn(async move {
-            let opened = async {
-                let snapshot = DatasetClient::current()
-                    .run_spiral_query(EpisodePage::sql(&dataset, 0), 2)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let page = EpisodePage::from_snapshot(snapshot, 0)?;
-                let prefix = page.episodes().shared_source_prefix();
-                page.episodes()
-                    .first()
-                    .map(|episode| {
-                        OpenedEpisode::new(
-                            dataset.clone(),
-                            episode.clone(),
-                            episode.record().source_label(prefix),
-                        )
-                    })
-                    .ok_or_else(|| "This dataset has no episodes".to_owned())
-            }
-            .await;
-            opening.set(false);
-            if let Ok(episode) = opened {
-                actions.on_open_episode.call(episode);
-            }
-        });
-    };
-    let query_sql = dataset.episodes_sql();
     let label = dataset.label();
     let streams = inspection
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .map(|detail| detail.topics().to_vec())
         .unwrap_or_default();
-    let has_members = inspection
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .is_none_or(|detail| detail.members().is_some());
     rsx! {
         section { class: "data-overview", "aria-label": "Dataset overview",
             header { class: "data-overview-head",
@@ -156,13 +94,6 @@ pub(super) fn DatasetOverview(
                         Some(Err(error)) => rsx! { span { class: "data-overview-chip data-overview-chip-alert", role: "alert", "{error}" } },
                         None => rsx! { span { class: "data-overview-chip", role: "status", "Counting recordings…" } },
                     }
-                }
-                div { class: "data-overview-actions",
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Solid, size: ActionSize::Standard,
-                        disabled: opening() || !has_members, onclick: open_first,
-                        if opening() { "Opening…" } else { "Open first episode" } }
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Outline, size: ActionSize::Standard,
-                        onclick: move |_| actions.on_query.call(query_sql.clone()), "Query episodes in SQL" }
                 }
                 p { class: "data-overview-copy",
                     "Each episode is one MCAP file. Pick one under Datasets to play it back: cameras, plots and messages share one timeline."

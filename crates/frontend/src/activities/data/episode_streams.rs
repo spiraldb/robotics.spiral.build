@@ -211,9 +211,35 @@ impl PlottableLeaves for MessageField {
 struct PlotSelection {
     fields: BTreeMap<String, Vec<MessageField>>,
     hidden_traces: BTreeSet<String>,
+    requested: BTreeMap<String, bool>,
 }
 
 impl PlotSelection {
+    /// An automatic default is applied only after every data schema is known,
+    /// and never after the operator has made a plot choice.
+    fn select_only_plottable(&mut self, schemas: &BTreeMap<String, StreamSchema>) {
+        if !self.requested.is_empty() {
+            return;
+        }
+        let mut candidate = None;
+        for (key, schema) in schemas {
+            let StreamSchema::Ready(root) = schema else {
+                return;
+            };
+            let fields = root.default_plot_leaves();
+            if fields.is_empty() {
+                continue;
+            }
+            if candidate.is_some() {
+                return;
+            }
+            candidate = Some((key.clone(), fields));
+        }
+        if let Some((key, fields)) = candidate {
+            self.fields.insert(key, fields);
+        }
+    }
+
     fn trace_key(stream: &str, trace: &str) -> String {
         format!("{stream}\u{1f}{trace}")
     }
@@ -302,6 +328,7 @@ impl StreamChoices {
     }
     pub(super) fn toggle_field(&mut self, key: &str, field: MessageField) {
         let mut plots = self.plots.write();
+        plots.requested.insert(key.to_owned(), false);
         let fields = plots.fields.entry(key.to_owned()).or_default();
         if let Some(index) = fields.iter().position(|existing| existing == &field) {
             fields.remove(index);
@@ -327,6 +354,7 @@ impl StreamChoices {
     /// Draw every numeric field of a stream, loading its schema first if needed.
     pub(super) fn set_stream_plotted(&mut self, stream: &RecordedStream, plotted: bool) {
         let key = stream.key().to_owned();
+        self.plots.write().requested.insert(key.clone(), plotted);
         if !plotted {
             self.plots.write().fields.remove(&key);
             return;
@@ -341,13 +369,43 @@ impl StreamChoices {
             if *choices.generation.peek() != generation {
                 return;
             }
-            choices
-                .plots
-                .write()
-                .fields
-                .insert(key, root.default_plot_leaves());
+            let mut plots = choices.plots.write();
+            if plots.requested.get(&key) == Some(&true) {
+                plots.fields.insert(key, root.default_plot_leaves());
+            }
         });
     }
+    /// Called once by Data when an episode opens. Other episode compositions
+    /// can discover cameras without loading numeric schemas or starting plots.
+    pub(super) fn plot_single_stream(&mut self, catalog: &StreamCatalog) {
+        let streams = catalog
+            .streams()
+            .iter()
+            .filter(|stream| stream.kind() == StreamKind::Data)
+            .cloned()
+            .collect::<Vec<_>>();
+        let generation = *self.generation.peek();
+        let mut choices = *self;
+        self.spawn(async move {
+            let mut schemas = BTreeMap::new();
+            for stream in streams {
+                if *choices.generation.peek() != generation {
+                    return;
+                }
+                let Some(root) = choices
+                    .schema_for(stream.key(), stream.read().clone())
+                    .await
+                else {
+                    return;
+                };
+                schemas.insert(stream.key().to_owned(), StreamSchema::Ready(root));
+            }
+            if *choices.generation.peek() == generation {
+                choices.plots.write().select_only_plottable(&schemas);
+            }
+        });
+    }
+
     pub(super) fn trace_hidden(&self, key: &str, trace: &str) -> bool {
         self.plots
             .read()
@@ -357,6 +415,7 @@ impl StreamChoices {
     pub(super) fn toggle_trace(&mut self, key: &str, trace: &str) {
         let trace_key = PlotSelection::trace_key(key, trace);
         let mut plots = self.plots.write();
+        plots.requested.insert(key.to_owned(), false);
         if !plots.hidden_traces.remove(&trace_key) {
             plots.hidden_traces.insert(trace_key);
         }
@@ -481,6 +540,60 @@ mod tests {
             DatasetSelection::new(vec!["dataset_default".into()]).unwrap(),
             "01a0989fb65870a7a5459902f9e3e090".into(),
         )
+    }
+
+    #[test]
+    fn data_default_plot_requires_exactly_one_numeric_stream() {
+        let numeric = StreamSchema::Ready(MessageField::root(&Field::new(
+            "value",
+            DataType::Float64,
+            false,
+        )));
+        let text = StreamSchema::Ready(MessageField::root(&Field::new(
+            "value",
+            DataType::Utf8,
+            false,
+        )));
+        for schemas in [
+            BTreeMap::new(),
+            BTreeMap::from([("text".into(), text.clone())]),
+            BTreeMap::from([
+                ("one".into(), numeric.clone()),
+                ("two".into(), numeric.clone()),
+            ]),
+            BTreeMap::from([
+                ("one".into(), numeric.clone()),
+                ("pending".into(), StreamSchema::Loading),
+            ]),
+            BTreeMap::from([
+                ("one".into(), numeric.clone()),
+                ("failed".into(), StreamSchema::Failed("unavailable".into())),
+            ]),
+        ] {
+            let mut selection = PlotSelection::default();
+            selection.select_only_plottable(&schemas);
+            assert!(selection.fields.is_empty());
+        }
+        let schemas = BTreeMap::from([("numeric".into(), numeric), ("text".into(), text)]);
+        let mut selection = PlotSelection::default();
+        selection.select_only_plottable(&schemas);
+        assert_eq!(
+            selection
+                .fields
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["numeric"]
+        );
+        // An explicit uncheck wins even if the automatic schema read completes later.
+        selection.requested.insert("numeric".into(), false);
+        selection.fields.clear();
+        selection.select_only_plottable(&schemas);
+        assert!(selection.fields.is_empty());
+        // A fresh episode gets a fresh default; the previous user's choice is not global.
+        let mut next_episode = PlotSelection::default();
+        next_episode.select_only_plottable(&schemas);
+        assert_eq!(next_episode.fields.len(), 1);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

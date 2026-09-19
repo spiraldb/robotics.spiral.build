@@ -30,12 +30,6 @@ impl DatasetSelection {
     pub fn can_preview(&self) -> bool {
         self.path.iter().all(|part| !part.contains('.'))
     }
-    pub fn episodes_sql(&self) -> String {
-        format!(
-            "SELECT * FROM spql.mcap.episodes('{}') LIMIT 100",
-            self.sql_name().replace('\'', "''")
-        )
-    }
     pub fn topic_sql(&self, topic: &str) -> String {
         format!(
             "SELECT * FROM spql.mcap.read_topic('{}', '{}') LIMIT 100",
@@ -207,7 +201,7 @@ mod tests {
                 .topic_sql("/camera' --")
                 .contains("'/camera'' --'")
         );
-        assert!(selection.episodes_sql().contains("owner''s"));
+        assert!(selection.topic_sql("/camera").contains("owner''s"));
         assert!(DatasetSelection::new(vec![]).is_err());
         assert!(DatasetSelection::new(vec!["\n".into()]).is_err());
     }

@@ -97,10 +97,14 @@ impl EpisodeProgress {
                 request.episode(),
             )
             .await?
-            .into_preview_drained(expected)
+            .into_internal_rows_drained(expected)
             .await?;
         if rows.truncated() || rows.rows().len() != expected {
-            return Err("Native progress inference returned an incomplete recording.".into());
+            return Err(format!(
+                "Native progress inference returned {} of {expected} expected frames (truncated: {}).",
+                rows.rows().len(),
+                rows.truncated(),
+            ));
         }
         let frames = rows
             .rows()
