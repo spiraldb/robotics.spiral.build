@@ -177,7 +177,8 @@ fn TimelineRows(
     tracks: Vec<TimelineTrack>,
 ) -> Element {
     let mut filter = use_signal(String::new);
-    let mut expanded = use_signal(BTreeSet::<String>::new);
+    let expanded = use_signal(BTreeSet::<String>::new);
+    let mut quiet_open = use_signal(|| false);
     let view = transport.view();
     let duration = transport.duration();
     let seconds = transport.seconds();
@@ -189,13 +190,25 @@ fn TimelineRows(
         _ => None,
     });
     let needle = filter().to_lowercase();
+    let searching = !needle.is_empty();
     let rows = catalog
         .into_iter()
         .flat_map(|catalog| catalog.streams())
-        .filter(|stream| needle.is_empty() || stream.label().to_lowercase().contains(&needle))
+        .filter(|stream| !searching || stream.label().to_lowercase().contains(&needle))
         .cloned()
         .collect::<Vec<_>>();
     let total = catalog.map_or(0, |catalog| catalog.streams().len());
+    // Cameras lead, then streams with something to plot; the rest wait behind
+    // one row until asked for. A search shows every match in place.
+    let choices = subject.as_ref().map(|subject| subject.choices);
+    let (cameras, data): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .partition(|stream| stream.kind() == StreamKind::Video);
+    let (quiet, loud): (Vec<_>, Vec<_>) = data.into_iter().partition(|stream| {
+        !searching && choices.is_some_and(|choices| choices.stream_is_quiet(stream))
+    });
+    let leading = cameras.into_iter().chain(loud).collect::<Vec<_>>();
+    let nothing_listed = leading.is_empty() && quiet.is_empty();
     rsx! {
         div { class: "data-timeline-body", style: "--playhead: {playhead / 100.0:.6}",
             onwheel: move |event: WheelEvent| {
@@ -227,6 +240,7 @@ fn TimelineRows(
                 div { class: "data-timeline-scale",
                     for tick in view.ticks() {
                         div { key: "{tick.seconds()}", class: "data-time-tick", style: "left: {tick.position():.4}%",
+                            "data-edge": if tick.position() > 90.0 { "end" } else { "start" },
                             span { "{tick.label()}" }
                         }
                     }
@@ -246,16 +260,14 @@ fn TimelineRows(
                         EpisodeStreams::Loading => rsx! { div { class: "data-timeline-none", role: "status", "Finding recorded streams…" } },
                         EpisodeStreams::Failed(error) => rsx! { div { class: "data-timeline-none", role: "alert", "Could not read this episode's streams: {error}" } },
                         EpisodeStreams::Ready(catalog) => rsx! {
-                            if rows.is_empty() {
+                            if nothing_listed {
                                 p { class: "data-timeline-none", if catalog.is_empty() { "This episode has no readable streams." } else { "No streams match the filter." } }
                             }
-                            for stream in rows {
-                                StreamRow { key: "{stream.key()}", stream: stream.clone(), transport: transport.clone(), choices: subject.choices,
-                                    expanded: expanded.read().contains(stream.key()),
-                                    on_expand: move |open: bool| {
-                                        if open { expanded.write().insert(stream.key().to_owned()); let mut choices = subject.choices; choices.ensure_schema(&stream); }
-                                        else { expanded.write().remove(stream.key()); }
-                                    },
+                            StreamRows { streams: leading, transport: transport.clone(), choices: subject.choices, expanded }
+                            if !quiet.is_empty() {
+                                QuietStreamsRow { count: quiet.len(), open: quiet_open(), on_toggle: move |_| quiet_open.toggle() }
+                                if quiet_open() {
+                                    StreamRows { streams: quiet, transport: transport.clone(), choices: subject.choices, expanded }
                                 }
                             }
                         },
@@ -263,6 +275,49 @@ fn TimelineRows(
                 }
                 div { class: "data-timeline-cursor", "aria-hidden": "true" }
             }
+        }
+    }
+}
+
+#[component]
+fn StreamRows(
+    streams: Vec<RecordedStream>,
+    transport: EpisodeTransport,
+    choices: StreamChoices,
+    expanded: Signal<BTreeSet<String>>,
+) -> Element {
+    rsx! {
+        for stream in streams {
+            StreamRow { key: "{stream.key()}", stream: stream.clone(), transport: transport.clone(), choices,
+                expanded: expanded.read().contains(stream.key()),
+                on_expand: move |open: bool| {
+                    let mut expanded = expanded;
+                    if open { expanded.write().insert(stream.key().to_owned()); let mut choices = choices; choices.ensure_schema(&stream); }
+                    else { expanded.write().remove(stream.key()); }
+                },
+            }
+        }
+    }
+}
+
+/// One row standing in for the streams with nothing to plot, so the hub
+/// leads with cameras and measurements. They stay one click away, still
+/// selectable for Messages.
+#[component]
+fn QuietStreamsRow(count: usize, open: bool, on_toggle: EventHandler<()>) -> Element {
+    let noun = if count == 1 { "stream" } else { "streams" };
+    let verb = if open { "Hide" } else { "Show" };
+    rsx! {
+        div { class: "data-stream data-stream-fold",
+            div { class: "data-stream-name",
+                Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Icon, class: "data-stream-expand",
+                    aria_expanded: open, aria_label: "{verb} the {count} {noun} with nothing to plot",
+                    onclick: move |_| on_toggle.call(()), ChevronIcon { open } }
+                span { class: "data-stream-expand-space" }
+                span { class: "data-stream-kind", "aria-hidden": "true" }
+                span { class: "data-stream-label", "{count} {noun} with nothing to plot" }
+            }
+            div { class: "data-stream-track" }
         }
     }
 }
@@ -484,6 +539,7 @@ fn DensityTrack(coverage: Option<CoverageState>, transport: EpisodeTransport) ->
             let x0 = view.start() * scale;
             let width = ((view.end() - view.start()) * scale).max(1e-6);
             let tiers = buckets.density_paths();
+            let gaps = buckets.gap_path();
             let moment = |nanos: Option<u64>| {
                 nanos
                     .map(|nanos| range.seconds_of(nanos).precise_clock_label())
@@ -501,6 +557,7 @@ fn DensityTrack(coverage: Option<CoverageState>, transport: EpisodeTransport) ->
                         path { class: "data-density-1", d: "{tiers[0]}" }
                         path { class: "data-density-2", d: "{tiers[1]}" }
                         path { class: "data-density-3", d: "{tiers[2]}" }
+                        path { class: "data-density-gap", d: "{gaps}" }
                     }
                 }
             }
@@ -512,9 +569,38 @@ fn DensityTrack(coverage: Option<CoverageState>, transport: EpisodeTransport) ->
 /// stream draws as a solid band rather than 240 seams.
 trait DensityPaths {
     fn density_paths(&self) -> [String; 3];
+    /// Empty buckets between the first and last message of a dense stream:
+    /// a dropout worth a glance. A sparse stream has spacing, not gaps, and
+    /// draws none.
+    fn gap_path(&self) -> String;
 }
 
 impl DensityPaths for [u32] {
+    fn gap_path(&self) -> String {
+        let Some(first) = self.iter().position(|count| *count > 0) else {
+            return String::new();
+        };
+        let last = self.iter().rposition(|count| *count > 0).unwrap_or(first);
+        let span = &self[first..=last];
+        let occupied = span.iter().filter(|count| **count > 0).count();
+        if occupied * 2 < span.len() {
+            return String::new();
+        }
+        let mut path = String::new();
+        let mut run: Option<(usize, usize)> = None;
+        for (index, count) in span.iter().enumerate() {
+            match (run, *count == 0) {
+                (Some((start, length)), true) => run = Some((start, length + 1)),
+                (Some((start, length)), false) => {
+                    path.push_str(&format!("M{} .42h{length}v.16h-{length}z", first + start));
+                    run = None;
+                }
+                (None, true) => run = Some((index, 1)),
+                (None, false) => {}
+            }
+        }
+        path
+    }
     fn density_paths(&self) -> [String; 3] {
         // Tiers compare against the stream's typical occupied bucket, not its
         // peak: a 30 Hz stream over 240 buckets alternates between 2 and 3
@@ -572,6 +658,21 @@ mod tests {
         assert_eq!(steady[2], "M0 .2h6v.6h-6z");
         assert_eq!([1_u32].density_paths()[2], "M0 .2h1v.6h-1z");
         assert!([0_u32, 0].density_paths().iter().all(String::is_empty));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn only_dense_streams_report_gaps_and_only_between_their_messages() {
+        // A dropout inside a steady stream is a gap; leading and trailing
+        // silence is not.
+        assert_eq!([0_u32, 3, 3, 0, 0, 3, 3, 0].gap_path(), "M3 .42h2v.16h-2z");
+        assert_eq!(
+            [3_u32, 0, 3, 3, 0, 3].gap_path(),
+            "M1 .42h1v.16h-1zM4 .42h1v.16h-1z"
+        );
+        // A sparse stream is spacing, not gaps; a single message has neither.
+        assert_eq!([1_u32, 0, 0, 0, 0, 0, 0, 1].gap_path(), "");
+        assert_eq!([0_u32, 1, 0].gap_path(), "");
+        assert_eq!([0_u32, 0].gap_path(), "");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

@@ -6,6 +6,7 @@
 use super::episode_transport::EpisodeTimeRange;
 use crate::format::{
     ByteCountPresentation, ClockPresentation, GroupedCountPresentation, UtcTimestampPresentation,
+    WallClockPresentation,
 };
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeSelection};
@@ -59,14 +60,24 @@ impl EpisodeRecord {
             .unwrap_or_else(|| "—".into())
     }
     fn recorded_label(&self) -> String {
-        self.timing
-            .message_start_time
-            .map(UtcTimestampPresentation::utc_label)
-            .unwrap_or_else(|| "Unknown time".into())
+        match self.timing.message_start_time {
+            Some(start) if start.has_wall_clock() => format!("Recorded {}", start.utc_label()),
+            Some(_) => "Recorded without a wall clock".into(),
+            None => "Recorded at an unknown time".into(),
+        }
+    }
+    /// What leads an episode row when its file name is only an identifier.
+    fn recorded_head(&self) -> String {
+        match self.timing.message_start_time {
+            Some(start) if start.has_wall_clock() => {
+                format!("Recorded {}", start.utc_time_label())
+            }
+            _ => "Unnamed recording".into(),
+        }
     }
     /// Everything known about the file, for tooltips: when, how much, how big.
     pub(super) fn facts_label(&self) -> String {
-        let mut facts = vec![format!("Recorded {}", self.recorded_label())];
+        let mut facts = vec![self.recorded_label()];
         facts.push(format!("{} messages", self.message_count_label()));
         if let Some(channels) = self.channel_count {
             facts.push(format!("{channels} channels"));
@@ -77,10 +88,11 @@ impl EpisodeRecord {
         facts.join(" · ")
     }
     pub(super) fn recorded_date_label(&self) -> String {
-        self.timing
-            .message_start_time
-            .map(UtcTimestampPresentation::utc_date_label)
-            .unwrap_or_else(|| "—".into())
+        match self.timing.message_start_time {
+            Some(start) if start.has_wall_clock() => start.utc_date_label(),
+            Some(_) => "no wall clock".into(),
+            None => "—".into(),
+        }
     }
     pub(super) fn message_count_label(&self) -> String {
         self.message_count
@@ -108,7 +120,7 @@ impl EpisodeRecord {
             .and_then(|uri| uri.get(shared_prefix..))
             .filter(|relative| !relative.is_empty())
             .unwrap_or_else(|| self.file_name());
-        SourceLabel::split(relative)
+        SourceLabel::split(relative).named_for(self)
     }
 }
 
@@ -131,6 +143,32 @@ impl SourceLabel {
                 tail: None,
             },
         }
+    }
+    /// An identifier-shaped head tells an operator nothing, so the recording
+    /// time takes its place, and an identifier-shaped tail steps aside. The
+    /// full source path stays in the tooltip.
+    fn named_for(mut self, record: &EpisodeRecord) -> Self {
+        if Self::is_identifier(&self.head) {
+            self.head = record.recorded_head();
+        }
+        if self
+            .tail
+            .as_deref()
+            .is_some_and(|tail| tail.rsplit('/').next().is_some_and(Self::is_identifier))
+        {
+            self.tail = None;
+        }
+        self
+    }
+    /// Hex digits joined by dashes or underscores, long enough to be a UUID
+    /// or a content hash; a file extension does not change the verdict.
+    fn is_identifier(text: &str) -> bool {
+        let stem = text.rsplit_once('.').map_or(text, |(stem, _)| stem);
+        let digits = stem
+            .chars()
+            .filter(|character| !matches!(character, '-' | '_'))
+            .collect::<Vec<_>>();
+        digits.len() >= 24 && digits.iter().all(char::is_ascii_hexdigit)
     }
     pub(super) fn head(&self) -> &str {
         &self.head
@@ -160,6 +198,15 @@ impl ListedEpisode {
         } else {
             format!("#{}", self.ordinal)
         }
+    }
+    /// Whether a lowercase search term appears in the ordinal or source path.
+    pub(super) fn matches(&self, needle: &str) -> bool {
+        needle.is_empty()
+            || self.title().to_lowercase().contains(needle)
+            || self
+                .record
+                .source_uri()
+                .is_some_and(|uri| uri.to_lowercase().contains(needle))
     }
 }
 
@@ -347,6 +394,82 @@ mod tests {
         assert_eq!(page.episodes()[0].record().duration_label(), "0:20.5");
         assert_eq!(page.episodes()[0].record().message_count_label(), "11,404");
         assert!(!page.has_more());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn identifier_named_files_read_as_recording_times_or_stay_unnamed() {
+        let page = EpisodePage::from_snapshot(
+            SpiralQuerySnapshot::new(
+                vec![],
+                vec![
+                    row(
+                        "a",
+                        "spfsu://p/attempts/01a07ed2-1ed5-7542-bbf3-15a78c389242/blobs/01a07ed2-1fdd-77a2-a9ae-5c3bbca09151.bin",
+                        1_743_701_335_734_982_912,
+                    ),
+                    row(
+                        "b",
+                        "spfsu://p/attempts/01a0b638-0359-74d2-b28c-3daf15a6ecfa/blobs/01a0b638-099b-7740-a44b-ef08485546ed.bin",
+                        0,
+                    ),
+                ],
+                false,
+            ),
+            0,
+        )
+        .unwrap();
+        let prefix = page.episodes().shared_source_prefix();
+        let [clocked, epoch] = page.episodes() else {
+            panic!("two episodes");
+        };
+        let label = clocked.record().source_label(prefix);
+        assert_eq!(label.head(), "Recorded 17:28:55 UTC");
+        assert_eq!(label.tail(), None);
+        assert_eq!(clocked.record().recorded_date_label(), "2025-04-03");
+        let label = epoch.record().source_label(prefix);
+        assert_eq!(label.head(), "Unnamed recording");
+        assert_eq!(epoch.record().recorded_date_label(), "no wall clock");
+        assert!(
+            epoch
+                .record()
+                .facts_label()
+                .starts_with("Recorded without a wall clock · ")
+        );
+        assert!(!SourceLabel::is_identifier("fold_and_stack_the_skirts"));
+        assert!(SourceLabel::is_identifier(
+            "01a0b638-099b-7740-a44b-ef08485546ed.bin"
+        ));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn a_search_term_matches_the_source_path_or_ordinal_regardless_of_case() {
+        let page = EpisodePage::from_snapshot(
+            SpiralQuerySnapshot::new(
+                vec![],
+                vec![
+                    row(
+                        "a",
+                        "hf://d/x@1/data/Fold_Skirts/episode_aa/episode.fo.mcap",
+                        1,
+                    ),
+                    row(
+                        "b",
+                        "hf://d/x@1/data/place_fruit/episode_bb/episode.fo.mcap",
+                        2,
+                    ),
+                ],
+                false,
+            ),
+            50,
+        )
+        .unwrap();
+        let [skirts, fruit] = page.episodes() else {
+            panic!("two episodes");
+        };
+        assert!(skirts.matches("fold"));
+        assert!(!fruit.matches("fold"));
+        assert!(fruit.matches("#52"));
+        assert!(fruit.matches(""));
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

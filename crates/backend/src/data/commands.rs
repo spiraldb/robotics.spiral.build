@@ -102,10 +102,10 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn topic_coverage(
+    pub(crate) async fn episode_coverage(
         &self,
-        request: spiral_robotics_common::datasets::TopicCoverageRequest,
-    ) -> Result<spiral_robotics_common::datasets::TopicCoverage, BackendCommandError> {
+        request: spiral_robotics_common::datasets::EpisodeCoverageRequest,
+    ) -> Result<Vec<spiral_robotics_common::datasets::StreamCoverage>, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
@@ -115,7 +115,7 @@ impl DataCommands {
                 commands
                     .state
                     .storage()
-                    .topic_coverage(request)
+                    .episode_coverage(request)
                     .await
                     .map_err(Into::into)
             })

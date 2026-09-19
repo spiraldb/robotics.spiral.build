@@ -270,6 +270,12 @@
     @apply absolute left-1 top-1 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
+  /* The last label of a span sits inside the ruler, not clipped off its edge. */
+  .data-time-tick[data-edge="end"] span,
+  .data-plots-tick[data-edge="end"] span {
+    @apply left-auto right-1;
+  }
+
   .timeline-signal-chart-stack {
     @apply relative h-[10.5rem] overflow-hidden bg-canvas;
   }
@@ -4283,6 +4289,18 @@
     @apply font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
+  .data-rail-tables-group {
+    @apply mt-0 border-t-0 pt-0;
+  }
+
+  .data-rail-tables-group > summary {
+    padding-left: 1.25rem;
+  }
+
+  .data-rail-tables-group .data-table-row {
+    padding-left: 2rem;
+  }
+
   .data-table-row {
     @apply flex min-h-7 w-full items-center gap-2 px-3 text-left text-[12px];
     padding-left: 1.25rem;
@@ -4301,8 +4319,10 @@
     @apply m-auto max-w-[30rem] p-8;
   }
 
+  /* Panel titles stay under the 16px readout ceiling; they are not page
+     headings because a tile happens to be wide. */
   .data-welcome h2 {
-    @apply text-[18px] font-semibold;
+    @apply text-[16px] font-semibold;
   }
 
   .data-welcome p {
@@ -4318,7 +4338,7 @@
   }
 
   .data-overview-head h2 {
-    @apply text-[18px] font-semibold leading-tight;
+    @apply text-[16px] font-semibold leading-tight;
     overflow-wrap: anywhere;
   }
 
@@ -4335,16 +4355,12 @@
     background: var(--tone-danger-soft);
   }
 
-  .data-overview-copy {
-    @apply mt-3 max-w-[56ch] text-[12px] leading-relaxed text-ink-soft;
-  }
-
   .data-overview-streams {
     @apply min-h-0 border-t border-line;
   }
 
   .data-overview-streams h3 {
-    @apply px-5 pb-2 pt-4 text-[11px] font-semibold uppercase tracking-wide text-ink-faint;
+    @apply px-5 pb-2 pt-4 text-[12px] font-semibold text-ink;
   }
 
   /* Timeline ------------------------------------------------------------ */
@@ -4360,8 +4376,12 @@
     @apply flex min-h-9 shrink-0 items-center gap-2 border-b border-line px-2 text-[12px];
   }
 
+  /* A fixed slot, so Play sits in the same place for every episode name;
+     the name truncates inside it and gives way only when the tile is too
+     narrow for the controls themselves. */
   .data-transport-identity {
-    @apply flex min-w-0 max-w-[16rem] items-baseline gap-1.5;
+    @apply flex min-w-0 items-baseline gap-1.5;
+    flex: 0 1 14rem;
   }
 
   .data-transport-identity strong {
@@ -4382,9 +4402,11 @@
     color: var(--tone-accent);
   }
 
+  /* The elapsed clock is the Studio's readout role: 16px, the visual
+     maximum, so an operator finds the moment before anything else. */
   .data-transport-clock {
-    @apply flex items-baseline gap-1 font-mono text-[13px] tabular-nums;
-    min-width: 11.5rem;
+    @apply flex items-baseline gap-1 font-mono text-[16px] font-medium leading-none tracking-[-0.02em] tabular-nums;
+    min-width: 11rem;
   }
 
   .data-transport-total {
@@ -4497,7 +4519,11 @@
   }
 
   .data-stream-name {
-    @apply h-7;
+    @apply h-6;
+  }
+
+  .data-stream-fold .data-stream-label {
+    @apply text-ink-soft;
   }
 
   .data-stream[data-selected="true"] .data-stream-name {
@@ -4581,7 +4607,7 @@
   }
 
   .data-stream-track {
-    @apply h-7;
+    @apply h-6;
   }
 
   .data-track {
@@ -4608,20 +4634,31 @@
     @apply block h-full w-full;
   }
 
+  /* Density is structure, so it draws in graphite; the accent is spent on the
+     selected stream, and a dropout inside a dense stream on caution ochre. */
   .data-density path {
+    fill: var(--tone-ink-soft);
+  }
+
+  .data-stream[data-selected="true"] .data-density path {
     fill: var(--tone-accent);
   }
 
   .data-density-1 {
-    opacity: 0.28;
+    opacity: 0.22;
   }
 
   .data-density-2 {
-    opacity: 0.55;
+    opacity: 0.42;
   }
 
   .data-density-3 {
-    opacity: 0.85;
+    opacity: 0.7;
+  }
+
+  .data-density path.data-density-gap {
+    fill: var(--tone-caution);
+    opacity: 1;
   }
 
   .data-field-name {
@@ -4665,7 +4702,7 @@
 
   .data-plots-empty strong,
   .data-messages-empty strong {
-    @apply block text-[13px] font-medium text-ink;
+    @apply block text-[12px] font-semibold text-ink;
   }
 
   .data-plots-empty p,

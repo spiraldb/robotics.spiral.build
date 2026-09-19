@@ -8,7 +8,7 @@ use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema;
 use futures::StreamExt as _;
-use spiral_robotics_common::datasets::{MessageCursor, MessageRead};
+use spiral_robotics_common::datasets::{DatasetInspection, MessageCursor, MessageRead};
 use std::{collections::HashMap, sync::Arc};
 
 impl StorageManager {
@@ -16,10 +16,19 @@ impl StorageManager {
     pub(super) async fn require_topic_revision(&self, request: &MessageRead) -> Result<(), String> {
         let catalog = self.project_store().dataset_catalog();
         let before = catalog.inspect(request.topic().dataset().clone()).await?;
-        if before.dataset().version_id() != request.revision().version() {
+        Self::revision_known(&before, request)
+    }
+
+    /// Whether an inspected dataset still has the topic/schema revision a
+    /// read names. Batched reads inspect once and ask this per stream.
+    pub(super) fn revision_known(
+        inspection: &DatasetInspection,
+        request: &MessageRead,
+    ) -> Result<(), String> {
+        if inspection.dataset().version_id() != request.revision().version() {
             return Err("Dataset revision changed; reopen this episode".into());
         }
-        if !before.topics().iter().any(|topic| {
+        if !inspection.topics().iter().any(|topic| {
             topic.name() == request.topic().topic() && topic.revision() == Some(request.revision())
         }) {
             return Err("This topic/schema revision no longer exists".into());

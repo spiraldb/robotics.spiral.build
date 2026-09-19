@@ -109,6 +109,24 @@ pub(crate) trait UtcTimestampPresentation {
     fn utc_label(self) -> String;
     /// `YYYY-MM-DD` only.
     fn utc_date_label(self) -> String;
+    /// `HH:MM:SS UTC` only.
+    fn utc_time_label(self) -> String;
+}
+
+/// A recording whose clock started at the Unix epoch, as simulators and
+/// bench rigs counting from zero do, carries no wall-clock time. Such a
+/// moment is reported as absent rather than as a day in 1970.
+pub(crate) trait WallClockPresentation {
+    fn has_wall_clock(self) -> bool;
+}
+
+/// 2000-01-01T00:00:00Z in Unix nanoseconds; no robot recording predates it.
+const WALL_CLOCK_FLOOR_NS: u64 = 946_684_800_000_000_000;
+
+impl WallClockPresentation for u64 {
+    fn has_wall_clock(self) -> bool {
+        self >= WALL_CLOCK_FLOOR_NS
+    }
 }
 
 struct CivilDateTime {
@@ -163,6 +181,13 @@ impl UtcTimestampPresentation for u64 {
         let civil = CivilDateTime::from_unix_nanos(self);
         format!("{:04}-{:02}-{:02}", civil.year, civil.month, civil.day)
     }
+    fn utc_time_label(self) -> String {
+        let civil = CivilDateTime::from_unix_nanos(self);
+        format!(
+            "{:02}:{:02}:{:02} UTC",
+            civil.hour, civil.minute, civil.second
+        )
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +214,18 @@ mod presentation_tests {
         );
         assert_eq!(0_u64.utc_label(), "1970-01-01 00:00:00 UTC");
         assert_eq!(951_782_400_000_000_000_u64.utc_date_label(), "2000-02-29");
+        assert_eq!(
+            1_743_701_335_734_982_912_u64.utc_time_label(),
+            "17:28:55 UTC"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn epoch_clocks_are_not_wall_clocks() {
+        assert!(!0_u64.has_wall_clock());
+        assert!(!5_000_000_000_u64.has_wall_clock());
+        assert!(946_684_800_000_000_000_u64.has_wall_clock());
+        assert!(1_743_701_335_734_982_912_u64.has_wall_clock());
     }
 }
 

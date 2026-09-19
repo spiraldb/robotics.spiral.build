@@ -12,6 +12,8 @@
   --ui-line: var(--tone-line, #e8e8e6);
   --ui-accent: var(--tone-accent, #0868b8);
   --ui-accent-ink: var(--tone-accent-ink, #ffffff);
+  /* Text set on the camera mat: status and errors inside a recorded camera. */
+  --ui-camera-ink: rgb(255 255 255 / 0.72);
   --ui-selected: var(--tone-selected, rgb(8 104 184 / 0.1));
   --ui-selected-strong: rgb(8 104 184 / 0.16);
   --ui-danger: var(--tone-danger, #be423d);
@@ -486,7 +488,7 @@
 .data-import-action { padding: 6px 10px; border: 1px solid var(--ui-line); border-radius: 4px; font-size: 12px; background: var(--ui-surface); white-space: nowrap; }
 .data-import-action:disabled { opacity: .5; cursor: default; }
 .data-import-pane { overflow: auto; padding: 28px; max-width: 620px; width: 100%; }
-.data-import-pane h2 { font-size: 20px; font-weight: 500; }
+.data-import-pane h2 { font-size: 16px; font-weight: 600; }
 .data-import-pane p { font-size: 12px; color: var(--ui-ink-soft); line-height: 1.6; margin-top: 10px; overflow-wrap: anywhere; }
 .data-import-pane fieldset { display: flex; flex-direction: column; gap: 16px; margin: 24px 0; }
 .data-import-pane label > span { display: block; margin-bottom: 6px; font-size: 12px; }
@@ -495,11 +497,14 @@
 .data-import-review code { overflow-wrap: anywhere; }
 .data-import-pane .data-import-error { color: var(--ui-danger); }
 
-/* Recorded camera frames keep the dark camera mat inside light panel chrome. */
+/* Recorded camera frames keep the dark camera mat inside light panel chrome.
+   Loading, decoding and failure are told on that same mat, so a camera never
+   flashes from paper to black when its first frame arrives. */
 .episode-camera-panel { display: flex; flex: 1; min-height: 0; flex-direction: column; position: relative; }
 .episode-camera-image { flex: 1; min-height: 0; position: relative; background: var(--tone-camera, #1f1f1f); }
 .episode-camera-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
-.episode-camera-message { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; padding: 16px; text-align: center; font-size: 12px; background: var(--ui-sunken); color: var(--ui-ink-soft); overflow: auto; }
+.episode-camera-message { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; padding: 16px; text-align: center; font-size: 11px; background: var(--tone-camera, #1f1f1f); color: var(--ui-camera-ink); overflow: auto; }
+.episode-camera-message .data-text-action { color: var(--ui-accent-ink); text-decoration: underline; }
 
 /* A square action keeps whatever fill its variant gave it; only the box
    changes. The send control inside the Assistant composer is a filled 24px

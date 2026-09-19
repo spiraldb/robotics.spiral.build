@@ -12,6 +12,7 @@ use crate::components::interaction::{
 };
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
+use std::collections::BTreeMap;
 
 type ResourceCatalog = ReadSignal<Option<Result<Vec<ProjectResource>, String>>>;
 
@@ -89,20 +90,13 @@ pub(super) fn CatalogRail(
                     Some(Err(error)) => rsx! { p { class: "data-rail-note", role: "alert", "{error} Refresh to retry." } },
                     Some(Ok(entries)) => {
                         let needle = filter().to_lowercase();
+                        // A search never hides a dataset: each one stays listed and
+                        // searches its own episodes, so a match in a collapsed dataset
+                        // is found and the operator's expansion choices survive.
                         let datasets = entries.iter().filter(|resource| resource.kind() == "dataset").cloned().collect::<Vec<_>>();
-                        let matching = datasets.iter().filter(|resource| needle.is_empty() || resource.selection().label().to_lowercase().contains(&needle)).cloned().collect::<Vec<_>>();
                         let others = entries
                             .iter()
                             .filter(|resource| resource.kind() != "dataset")
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let shown = datasets
-                            .iter()
-                            .filter(|resource| {
-                                needle.is_empty()
-                                    || matching.contains(resource)
-                                    || selection.dataset.as_ref() == Some(resource.selection())
-                            })
                             .cloned()
                             .collect::<Vec<_>>();
                         rsx! {
@@ -111,11 +105,9 @@ pub(super) fn CatalogRail(
                                     strong { "No datasets yet" }
                                     p { "Import MCAP recordings to create the first one." }
                                 }
-                            } else if shown.is_empty() {
-                                p { class: "data-rail-note", "No datasets match." }
                             }
                             ul { class: "data-dataset-list",
-                                for resource in shown.iter() {
+                                for resource in datasets.iter() {
                                     DatasetBranch {
                                         key: "{resource.resource_id()}",
                                         resource: resource.clone(),
@@ -153,15 +145,18 @@ fn DatasetBranch(
     });
     let name = resource.selection().label();
     let members = inspection.as_ref().and_then(DatasetInspection::members);
-    let open = resource.selection().clone();
+    let select = resource.selection().clone();
+    // A search opens every dataset so its matches show; the operator's own
+    // expansion choice returns when the field clears.
+    let open = expanded() || !filter.is_empty();
     rsx! {
         li { class: "data-dataset", "data-selected": selected,
             div { class: "data-dataset-row",
                 Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Icon, class: "data-dataset-expand",
-                    aria_expanded: expanded(), aria_label: if expanded() { format!("Collapse {name}") } else { format!("Expand {name}") },
-                    onclick: move |_| expanded.toggle(), ChevronIcon { open: expanded() } }
+                    aria_expanded: open, aria_label: if open { format!("Collapse {name}") } else { format!("Expand {name}") },
+                    onclick: move |_| expanded.toggle(), ChevronIcon { open } }
                 button { r#type: "button", class: "data-dataset-name", aria_pressed: selected, title: "{name}",
-                    onclick: move |_| { actions.on_select_dataset.call(open.clone()); expanded.set(true); },
+                    onclick: move |_| { actions.on_select_dataset.call(select.clone()); expanded.set(true); },
                     DataIcon {}
                     span { class: "truncate", "{name}" }
                 }
@@ -169,7 +164,7 @@ fn DatasetBranch(
                     if let Some(members) = members { "{members}" }
                 }
             }
-            if expanded() {
+            if open {
                 DatasetEpisodes { key: "{resource.resource_id()}", dataset: resource.selection().clone(), selected_episode_id, filter, on_open: actions.on_open_episode }
             }
         }
@@ -210,21 +205,26 @@ fn DatasetEpisodes(
             has_more.set(page.has_more());
         }
     });
+    // A search reads every page, so a match on page three is found without a
+    // "Load more" click; the pages stay loaded once the field clears.
+    let searching = !filter.is_empty();
+    use_effect(use_reactive((&searching,), move |(searching,)| {
+        let pending = *page.state().read() == UseResourceState::Pending;
+        let more = matches!(&*page.read(), Some(Ok(page)) if page.has_more());
+        if searching && more && !pending {
+            let next = *offset.peek() + EPISODE_PAGE_SIZE;
+            offset.set(next);
+        }
+    }));
     let pending = *page.state().read() == UseResourceState::Pending;
     let episodes = loaded.read();
     let prefix = episodes.shared_source_prefix();
     let rows = episodes
         .iter()
-        .filter(|episode| {
-            filter.is_empty()
-                || episode.title().contains(&filter)
-                || episode
-                    .record()
-                    .source_uri()
-                    .is_some_and(|uri| uri.to_lowercase().contains(&filter))
-        })
+        .filter(|episode| episode.matches(&filter))
         .cloned()
         .collect::<Vec<_>>();
+    let unmatched = searching && rows.is_empty() && !episodes.is_empty();
     rsx! {
         ul { class: "data-episode-list", "aria-label": "Episodes of {dataset.label()}",
             for episode in rows {
@@ -253,7 +253,7 @@ fn DatasetEpisodes(
                 }
             }
             if pending {
-                li { class: "data-rail-note", role: "status", "Loading episodes…" }
+                li { class: "data-rail-note", role: "status", if searching { "Searching…" } else { "Loading episodes…" } }
             } else if let Some(Err(error)) = &*page.read() {
                 li { class: "data-rail-note", role: "alert",
                     p { "{error}" }
@@ -261,7 +261,9 @@ fn DatasetEpisodes(
                 }
             } else if episodes.is_empty() {
                 li { class: "data-rail-note", "No episodes in this dataset." }
-            } else if has_more() {
+            } else if unmatched && !has_more() {
+                li { class: "data-rail-note", "No episodes match." }
+            } else if has_more() && !searching {
                 li { class: "data-rail-more",
                     Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Link, size: ActionSize::Compact,
                         onclick: move |_| offset.set(offset() + EPISODE_PAGE_SIZE), "Load {EPISODE_PAGE_SIZE} more" }
@@ -291,11 +293,33 @@ fn TableBranches(
     if matching.is_empty() {
         return rsx! {};
     }
+    // Relations Spiral scopes under a dataset (its topic signals and cohorts)
+    // fold under that dataset's name; only project-level tables and views
+    // stay at the top, so the list reads as a handful, not a wall.
+    let (scoped, top_level): (Vec<_>, Vec<_>) = matching
+        .into_iter()
+        .partition(|resource| resource.selection().path().len() > 1);
+    let mut groups = BTreeMap::<String, Vec<ProjectResource>>::new();
+    for resource in scoped {
+        groups
+            .entry(resource.selection().path()[0].clone())
+            .or_default()
+            .push(resource);
+    }
+    let total = top_level.len() + groups.values().map(Vec::len).sum::<usize>();
     rsx! {
         details { class: "data-rail-tables", open: !filter.is_empty(),
-            summary { "Tables & views" span { class: "data-rail-tables-count", "{matching.len()}" } }
+            summary { "Tables & views" span { class: "data-rail-tables-count", "{total}" } }
             ul { class: "data-table-list",
-                for resource in matching { TableRow { key: "{resource.resource_id()}", resource, on_open } }
+                for resource in top_level { TableRow { key: "{resource.resource_id()}", resource, on_open } }
+            }
+            for (dataset, relations) in groups {
+                details { key: "{dataset}", class: "data-rail-tables data-rail-tables-group", open: !filter.is_empty(),
+                    summary { "Relations of {dataset}" span { class: "data-rail-tables-count", "{relations.len()}" } }
+                    ul { class: "data-table-list",
+                        for resource in relations { TableRow { key: "{resource.resource_id()}", resource, on_open } }
+                    }
+                }
             }
         }
     }
@@ -304,13 +328,22 @@ fn TableBranches(
 #[component]
 fn TableRow(resource: ProjectResource, on_open: EventHandler<ProjectResource>) -> Element {
     let label = resource.selection().label();
+    // Inside a dataset's group the dataset is already named; the row shows
+    // the relation's own name and keeps the full name for SQL in its tooltip.
+    let shown = resource
+        .selection()
+        .path()
+        .last()
+        .filter(|_| resource.selection().path().len() > 1)
+        .cloned()
+        .unwrap_or_else(|| label.clone());
     let kind = resource.kind().to_owned();
     let open = resource.clone();
     rsx! {
         li {
             button { r#type: "button", class: "data-table-row", title: "{label} · {kind} · open in SQL",
                 onclick: move |_| on_open.call(open.clone()),
-                span { class: "truncate", "{label}" }
+                span { class: "truncate", "{shown}" }
                 small { "{kind}" }
             }
         }

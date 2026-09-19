@@ -652,20 +652,48 @@ The canonical first-open Data layout is:
 
 The upper workbench takes 60% of the episode workspace and Timeline takes
 40%. Cameras fill a two-column grid; an odd final camera spans its row, and
-an explicitly named top camera appears first. Opening an episode selects
-Plots. These are defaults: resizing or docking a panel preserves the
-operator's arrangement as subsequent cameras arrive.
+an explicitly named top camera appears first. A camera panel is titled
+"Camera ·" plus the part of its stream name that differs from the episode's
+other cameras. Opening an episode selects Plots. These are defaults:
+resizing or docking a panel preserves the operator's arrangement as
+subsequent cameras arrive.
 
-When exactly one stream has numeric fields, Data plots that stream's usual
-whole-stream selection after its schemas load. Zero or multiple numeric
-streams remain unselected. An explicit plot choice, including deselection,
-wins over an automatic selection still waiting for a schema response.
+When the operator has chosen nothing, Data plots the busiest stream with
+numeric fields once every data schema has loaded, so Plots is never empty
+when an episode opens. An explicit plot choice, including deselection, wins
+over an automatic selection still waiting for a schema response.
 
 The Timeline is the navigation hub of an episode: ticking a stream shows it
 (a camera opens its panel; a data stream draws every numeric field in Plots),
 expanding a data stream exposes its fields for one-by-one selection, and
-clicking a stream name selects it for Messages. Cameras, Plots, the ruler,
-and the stream rows share one playhead and one visible span.
+clicking a stream name selects it for Messages. Cameras lead the list, then
+streams with numeric fields; streams with at most one message or no numeric
+fields wait behind one "N streams with nothing to plot" row (a count rule
+and a type rule, never a name rule). Rows are 24px. Density draws in
+graphite, the selected stream's density in the accent, and a dropout inside
+a dense stream as a caution-ochre dash. Cameras, Plots, the ruler, and the
+stream rows share one playhead and one visible span. The transport's
+elapsed clock is the 16px readout; its episode identity holds a fixed 14rem
+slot so Play never moves between episodes, and Space, the arrows and
+Home/End drive the clock whether focus rests inside the workspace or on the
+page itself.
+
+Data speaks the operator's language over storage's. The rail names an
+episode by the part of its source path that differs between files; an
+identifier-shaped name gives way to the recorded time of day, and a
+recording whose clock started at the Unix epoch says "no wall clock" rather
+than a day in 1970. Camera panels read "Camera ·" plus what tells a camera
+from the episode's others. Messages lead with a `time` column on the episode
+clock, then the payload, and keep MCAP bookkeeping (`log_time`,
+`publish_time`, `channel_id`, `chunk_start_offset`, `sample_ordinal`) at the
+end; result headers spell column names as the query did. Plot readouts
+round to the lane's range and keep the exact value in the tooltip; a lane
+without values folds into the footer, and before the first sample the
+readouts hold it as cameras hold their first frame. The Overview owns the
+whole upper row until an episode opens, and its streams ledger prints "all"
+for a stream present in every episode and the deviation in caution. Under
+the datasets, Tables & views keeps project-level relations at the top and
+folds each dataset's own signals and cohorts under its name.
 
 Curation is a contact sheet under a pipeline strip. Under the same 36px
 document bar Workflow uses (glyph · name ▾ · … · state chip Discard Save

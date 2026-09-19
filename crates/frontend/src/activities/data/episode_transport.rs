@@ -248,6 +248,39 @@ impl KeyboardFocus {
     }
 }
 
+/// One key press as the transport reads it: the DOM key name plus the
+/// modifiers that scale a step. Built from a workspace event or from a
+/// listener on the document, so both paths share one vocabulary.
+pub(super) struct TransportKey {
+    name: String,
+    shift: bool,
+    alt: bool,
+    repeating: bool,
+}
+
+impl From<&KeyboardEvent> for TransportKey {
+    fn from(event: &KeyboardEvent) -> Self {
+        let modifiers = event.modifiers();
+        Self {
+            name: event.key().to_string(),
+            shift: modifiers.shift(),
+            alt: modifiers.alt(),
+            repeating: event.is_auto_repeating(),
+        }
+    }
+}
+
+impl From<&web_sys::KeyboardEvent> for TransportKey {
+    fn from(event: &web_sys::KeyboardEvent) -> Self {
+        Self {
+            name: event.key(),
+            shift: event.shift_key(),
+            alt: event.alt_key(),
+            repeating: event.repeat(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum FeedState {
     Loading,
@@ -445,45 +478,46 @@ impl EpisodeTransport {
     pub(super) fn forget(&mut self, topic: &str) {
         self.feeds.write().remove(topic);
     }
-    /// Shared keyboard transport: Space, arrows, Home/End, zoom keys.
+    /// Shared keyboard transport: Space, arrows, Home/End, zoom keys, from a
+    /// workspace event or from a listener on the page itself.
     /// Returns whether the key was consumed.
-    pub(super) fn handle_key(&mut self, event: &KeyboardEvent) -> bool {
+    pub(super) fn handle_key(&mut self, key: impl Into<TransportKey>) -> bool {
         if self.duration() <= 0.0 {
             return false;
         }
-        let modifiers = event.modifiers();
-        let step = if modifiers.shift() {
+        let key = key.into();
+        let step = if key.shift {
             1.0
-        } else if modifiers.alt() {
+        } else if key.alt {
             0.01
         } else {
             0.1
         };
-        match event.key() {
-            Key::Character(character) if character == " " => {
+        match key.name.as_str() {
+            " " => {
                 if KeyboardFocus::on_button() {
                     return false;
                 }
-                if !event.is_auto_repeating() {
+                if !key.repeating {
                     self.toggle();
                 }
             }
-            Key::ArrowLeft => self.step(-step),
-            Key::ArrowRight => self.step(step),
-            Key::Home => self.seek(0.0),
-            Key::End => {
+            "ArrowLeft" => self.step(-step),
+            "ArrowRight" => self.step(step),
+            "Home" => self.seek(0.0),
+            "End" => {
                 let end = self.duration();
                 self.seek(end);
             }
-            Key::Character(character) if character == "+" || character == "=" => {
+            "+" | "=" => {
                 let anchor = self.seconds();
                 self.zoom(0.5, anchor);
             }
-            Key::Character(character) if character == "-" => {
+            "-" => {
                 let anchor = self.seconds();
                 self.zoom(2.0, anchor);
             }
-            Key::Character(character) if character == "0" => self.fit(),
+            "0" => self.fit(),
             _ => return false,
         }
         true

@@ -18,7 +18,6 @@ pub(crate) struct TimelineSignalPoint {
 }
 
 impl TimelineSignalPoint {
-    #[cfg(test)]
     pub(crate) fn value(&self) -> Option<f64> {
         self.value
     }
@@ -63,7 +62,6 @@ impl TimelineSignalSeries {
         self.color.as_deref()
     }
 
-    #[cfg(test)]
     pub(crate) fn points(&self) -> &[TimelineSignalPoint] {
         &self.points
     }
@@ -109,6 +107,13 @@ impl TimelineSignalLane {
 
     pub(crate) fn series(&self) -> &[TimelineSignalSeries] {
         &self.series
+    }
+
+    /// Whether any series of the lane carries a single value.
+    pub(crate) fn has_values(&self) -> bool {
+        self.series
+            .iter()
+            .any(|series| series.points.iter().any(|point| point.value.is_some()))
     }
 }
 

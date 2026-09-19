@@ -8,7 +8,7 @@ pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
     EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
 };
-pub use coverage::{TopicCoverage, TopicCoverageRequest};
+pub use coverage::{EpisodeCoverageRequest, StreamCoverage, TopicCoverage, TopicCoverageRequest};
 pub use h264::H264AccessUnit;
 pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision};
 

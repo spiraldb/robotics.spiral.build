@@ -21,6 +21,7 @@ use dioxus_workbench::{
     DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelPlacement, PanelWorkspace, SplitAxis,
 };
 use spiral_robotics_common::datasets::{DatasetSelection, ProjectResource};
+use wasm_bindgen::JsCast as _;
 
 const LAYOUT_SCOPE: &str = "spiral_robotics.panel-layout.v13.data";
 const IMPORT_PANEL: &str = "data-import";
@@ -268,6 +269,45 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
             );
         }
     });
+    // Space, the arrows and Home/End also work while focus rests on the page
+    // itself, not only inside the workspace. A key pressed inside it is
+    // handled there and never reaches this listener as a page key.
+    let activity = crate::shell::activity::WorkspaceActivity::current();
+    let page_keys = use_hook(|| {
+        let mut transport = transport.clone();
+        let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+            move |event: web_sys::KeyboardEvent| {
+                let on_page = event
+                    .target()
+                    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                    .is_some_and(|element| matches!(element.tag_name().as_str(), "BODY" | "HTML"));
+                if !on_page
+                    || !activity.is_active()
+                    || selection.episode.peek().is_none()
+                    || KeyboardFocus::editing()
+                {
+                    return;
+                }
+                if transport.handle_key(&event) {
+                    event.prevent_default();
+                }
+            },
+        );
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            let _ = document
+                .add_event_listener_with_callback("keydown", listener.as_ref().unchecked_ref());
+        }
+        std::rc::Rc::new(listener)
+    });
+    let page_keys_to_drop = page_keys.clone();
+    use_drop(move || {
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            let _ = document.remove_event_listener_with_callback(
+                "keydown",
+                page_keys_to_drop.as_ref().as_ref().unchecked_ref(),
+            );
+        }
+    });
     let mut choices = StreamChoices::use_choices();
     let controller = QueryController::use_controller(String::new());
 
@@ -316,7 +356,7 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
         applied.set(Some(discovered.episode_id.clone()));
         if let Ok(streams) = &discovered.result {
             choices.reset(streams);
-            choices.plot_single_stream(streams);
+            choices.plot_default_stream(streams);
             if let Some(range) = episode.record().time_range() {
                 choices.load_coverage(streams, range);
             }
@@ -337,7 +377,13 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
             _ => EpisodeStreams::Loading,
         }
     });
-    let dataset_inspection = inspection.read().clone().flatten();
+    // While the chosen dataset's definition loads, the previous dataset's
+    // streams must not appear under the new name.
+    let dataset_inspection = if *inspection.state().read() == UseResourceState::Pending {
+        None
+    } else {
+        inspection.read().clone().flatten()
+    };
 
     let mut opening_transport = transport.clone();
     let open_episode = EventHandler::new(move |opened: OpenedEpisode| {
@@ -468,7 +514,7 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
             panels.push(
                 Panel::new(
                     stream.panel_id(),
-                    stream.label().trim_start_matches('/').to_owned(),
+                    format!("Camera · {}", streams.camera_title(stream)),
                     "cameras",
                     rsx! { EpisodeCamera { request: stream.read().clone(), timeline: transport.range(), transport: transport.clone() } },
                 )
@@ -478,7 +524,10 @@ pub(super) fn DataPanels(#[props(default)] initial_episode: Option<OpenedEpisode
             );
         }
     }
-    if camera_ids.is_empty() {
+    // Until an episode is open there is nothing for a camera column to hold,
+    // so the Overview keeps the whole upper row; the placeholder appears with
+    // the episode and gives way to its cameras as they are found.
+    if camera_ids.is_empty() && episode.is_some() {
         camera_ids.push(PanelId::new("camera-empty"));
         panels.push(
             Panel::new(

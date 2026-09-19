@@ -2,7 +2,7 @@
 use super::DatasetClient;
 use crate::format::{
     ByteCountPresentation, GroupedCountPresentation, LongDurationPresentation,
-    UtcTimestampPresentation,
+    UtcTimestampPresentation, WallClockPresentation,
 };
 use dioxus::prelude::*;
 use serde::Deserialize;
@@ -42,11 +42,15 @@ impl DatasetFacts {
             chips.push(bytes.byte_label());
         }
         if let (Some(first), Some(last)) = (self.first_start, self.last_end) {
-            let (first, last) = (first.utc_date_label(), last.utc_date_label());
-            chips.push(if first == last {
-                first
+            chips.push(if !first.has_wall_clock() {
+                "no wall clock".into()
             } else {
-                format!("{first} → {last}")
+                let (first, last) = (first.utc_date_label(), last.utc_date_label());
+                if first == last {
+                    first
+                } else {
+                    format!("{first} → {last}")
+                }
             });
         }
         chips
@@ -58,23 +62,21 @@ pub(super) fn DatasetOverview(
     dataset: DatasetSelection,
     inspection: Option<Result<DatasetInspection, String>>,
 ) -> Element {
-    let facts_dataset = dataset.clone();
-    let facts = use_resource(move || {
-        let dataset = facts_dataset.clone();
-        async move {
-            let snapshot = DatasetClient::current()
-                .run_spiral_query(DatasetFacts::sql(&dataset), 1)
-                .await
-                .map_err(|error| error.to_string())?;
-            let row = snapshot
-                .into_rows()
-                .into_iter()
-                .next()
-                .ok_or("Dataset totals returned no row")?;
-            serde_json::from_value::<DatasetFacts>(serde_json::Value::Object(row))
-                .map_err(|error| format!("Reading dataset totals: {error}"))
-        }
-    });
+    // The totals belong to this dataset alone: choosing another one re-queries
+    // instead of keeping the first answer under a new name.
+    let facts = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
+        let snapshot = DatasetClient::current()
+            .run_spiral_query(DatasetFacts::sql(&dataset), 1)
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = snapshot
+            .into_rows()
+            .into_iter()
+            .next()
+            .ok_or("Dataset totals returned no row")?;
+        serde_json::from_value::<DatasetFacts>(serde_json::Value::Object(row))
+            .map_err(|error| format!("Reading dataset totals: {error}"))
+    }));
     let label = dataset.label();
     let streams = inspection
         .as_ref()
@@ -95,9 +97,6 @@ pub(super) fn DatasetOverview(
                         None => rsx! { span { class: "data-overview-chip", role: "status", "Counting recordings…" } },
                     }
                 }
-                p { class: "data-overview-copy",
-                    "Each episode is one MCAP file. Pick one under Datasets to play it back: cameras, plots and messages share one timeline."
-                }
             }
             section { class: "data-overview-streams", "aria-label": "Streams",
                 h3 { "Streams" }
@@ -114,7 +113,15 @@ pub(super) fn DatasetOverview(
                                         td { class: "font-medium", "{topic.name()}" }
                                         td { class: "text-ink-soft", "{topic.schemas().join(\", \")}" }
                                         td { class: "text-right tabular-nums", {topic.samples().map(GroupedCountPresentation::grouped_label).unwrap_or_else(|| "—".into())} }
-                                        td { class: "text-right tabular-nums", "{topic.members()}" }
+                                        // A stream in every episode is the rule; the exception
+                                        // is what an operator is looking for.
+                                        td { class: "text-right tabular-nums",
+                                            match detail.members() {
+                                                Some(total) if total == topic.members() => rsx! { span { class: "text-ink-faint", title: "In every episode", "all" } },
+                                                Some(total) => rsx! { span { class: "text-caution", "{topic.members()} of {total}" } },
+                                                None => rsx! { "{topic.members()}" },
+                                            }
+                                        }
                                     }
                                 }
                             }

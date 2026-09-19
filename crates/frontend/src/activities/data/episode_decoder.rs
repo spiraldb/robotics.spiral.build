@@ -186,6 +186,15 @@ impl EncodedCamera {
             .first()
             .map(|packet| packet.microseconds as f64 / 1e6)
     }
+    /// The first recorded frame when `seconds` precedes it: the picture a
+    /// camera holds at the start of an episode instead of an empty mat.
+    pub(super) fn first_frame_after(&self, seconds: f64) -> Option<f64> {
+        self.first_frame_seconds().filter(|first| seconds < *first)
+    }
+    /// The moment to decode for `seconds`, never earlier than the first frame.
+    pub(super) fn held_frame_seconds(&self, seconds: f64) -> f64 {
+        self.first_frame_after(seconds).unwrap_or(seconds)
+    }
 
     pub(crate) fn group_at(&self, seconds: f64) -> Option<Range<usize>> {
         let timestamp = (seconds * 1e6).round() as i64;

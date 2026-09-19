@@ -1,11 +1,50 @@
-//! Message density of one topic across an episode's time range.
+//! Message density of an episode's streams across its time range.
 //!
 //! The Data timeline draws one row per recorded stream. A row needs to show
 //! *when* the stream has messages without downloading the messages, so the
 //! backend counts `log_time` values into a fixed number of equal buckets and
-//! returns only the counts.
+//! returns only the counts. The Timeline asks for every stream in one
+//! request, so its rows fill together rather than one at a time.
 use super::MessageRead;
 use serde::{Deserialize, Serialize};
+
+/// Every stream of one episode, each with its own window and bucket count.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodeCoverageRequest {
+    streams: Vec<TopicCoverageRequest>,
+}
+
+impl EpisodeCoverageRequest {
+    pub const MAX_STREAMS: usize = 256;
+
+    pub fn new(streams: Vec<TopicCoverageRequest>) -> Self {
+        Self { streams }
+    }
+    pub fn streams(&self) -> &[TopicCoverageRequest] {
+        &self.streams
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if self.streams.len() > Self::MAX_STREAMS {
+            return Err(format!(
+                "Coverage covers at most {} streams per request",
+                Self::MAX_STREAMS
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One stream's answer, in request order. A stream that cannot be counted
+/// reports why in its place and never fails the others.
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum StreamCoverage {
+    Ready { coverage: TopicCoverage },
+    Failed { error: String },
+}
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -130,6 +169,34 @@ mod tests {
             Some(window) => read.with_window(window),
             None => read,
         }
+    }
+
+    #[test]
+    fn an_episode_request_is_bounded_and_answers_in_request_order() {
+        let plain = MessageWindow::new((0, 10), vec![]);
+        let one = TopicCoverageRequest::new(read(Some(plain)), 100);
+        assert!(
+            EpisodeCoverageRequest::new(vec![one.clone(); EpisodeCoverageRequest::MAX_STREAMS])
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            EpisodeCoverageRequest::new(vec![one; EpisodeCoverageRequest::MAX_STREAMS + 1])
+                .validate()
+                .is_err()
+        );
+        let failed = serde_json::to_value(StreamCoverage::Failed {
+            error: "gone".into(),
+        })
+        .unwrap();
+        assert_eq!(failed["outcome"], "failed");
+        assert_eq!(failed["error"], "gone");
+        let ready = serde_json::to_value(StreamCoverage::Ready {
+            coverage: TopicCoverage::empty(8),
+        })
+        .unwrap();
+        assert_eq!(ready["outcome"], "ready");
+        assert_eq!(ready["coverage"]["messages"], 0);
     }
 
     #[test]

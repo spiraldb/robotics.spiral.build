@@ -290,12 +290,10 @@ impl ResultColumn {
         }
     }
 
+    /// The column's own name, spelled as the query or schema spelled it, so
+    /// an operator can type it back into SQL.
     pub(super) fn label(&self) -> String {
-        let mut label = self.column.name().replace('_', " ");
-        if let Some(first) = label.get_mut(..1) {
-            first.make_ascii_uppercase();
-        }
-        label
+        self.column.name().to_owned()
     }
 
     /// The type shown under a header when types are requested.
@@ -618,6 +616,6 @@ mod tests {
         assert!(result.is_image());
         assert_eq!(result.priority(), 0);
         assert_eq!(result.kind_label(), "Image");
-        assert_eq!(result.label(), "Frame");
+        assert_eq!(result.label(), "frame");
     }
 }

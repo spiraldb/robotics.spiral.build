@@ -11,7 +11,9 @@ use super::{
 use crate::components::charts::{CharmingChart, ChartPresentation};
 use crate::components::icons::SignalStreamIcon;
 use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
-use crate::components::time_series::{TimelineSignalLane, TimelineSignalLanes, TraceChartLayout};
+use crate::components::time_series::{
+    TimelineSignalLane, TimelineSignalLanes, TimelineSignalPoint, TraceChartLayout,
+};
 use crate::format::{GroupedCountPresentation, PreciseClockPresentation};
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::MessageWindow;
@@ -58,6 +60,7 @@ pub(super) fn PlotsPanel(
             div { class: "data-plots-ruler", "aria-hidden": "true",
                 for tick in view.ticks() {
                     div { key: "{tick.seconds()}", class: "data-plots-tick", style: "--x: {tick.position() / 100.0:.6}",
+                        "data-edge": if tick.position() > 90.0 { "end" } else { "start" },
                         span { "{tick.label()}" }
                     }
                 }
@@ -85,15 +88,15 @@ fn PlotsEmpty(catalog: StreamCatalog, mut choices: StreamChoices) -> Element {
     let mut candidates = catalog
         .streams()
         .iter()
-        .filter(|stream| stream.kind() == StreamKind::Data && stream.samples() != Some(0))
+        .filter(|stream| stream.kind() == StreamKind::Data && !choices.stream_is_quiet(stream))
         .cloned()
         .collect::<Vec<_>>();
     candidates.sort_by_key(|stream| std::cmp::Reverse(stream.samples().unwrap_or(0)));
     candidates.truncate(QUICK_PLOT_STREAMS);
     rsx! {
         div { class: "data-plots-empty",
-            strong { "Nothing plotted yet" }
-            p { "Tick a stream in the Timeline to draw all of its numeric fields, or expand it and pick fields one by one." }
+            strong { "Nothing plotted" }
+            p { "Tick a stream in the Timeline to draw its numeric fields." }
             if !candidates.is_empty() {
                 ul { class: "data-plots-quick", "aria-label": "Plot a stream",
                     for stream in candidates {
@@ -221,6 +224,61 @@ fn StreamPlot(
     }
 }
 
+/// How many decimals a lane's readouts show: enough to tell apart values a
+/// thousandth of the lane's range apart, never fewer than two nor more than
+/// six. The exact stored value stays in the tooltip.
+trait ReadoutPrecision {
+    fn readout_decimals(&self) -> usize;
+}
+
+impl ReadoutPrecision for TimelineSignalLane {
+    fn readout_decimals(&self) -> usize {
+        let (low, high) = self
+            .series()
+            .iter()
+            .flat_map(|series| {
+                series
+                    .points()
+                    .iter()
+                    .filter_map(TimelineSignalPoint::value)
+            })
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| {
+                (low.min(value), high.max(value))
+            });
+        if !low.is_finite() || !high.is_finite() {
+            return 2;
+        }
+        let span = (high - low).max(high.abs().max(low.abs()) * 1e-6);
+        if span <= 0.0 {
+            return 2;
+        }
+        (3.0_f64 - span.log10()).ceil().clamp(2.0, 6.0) as usize
+    }
+}
+
+/// A stored value at reading precision: floating-point text rounds to the
+/// lane's decimals, while integers, booleans and text stay as written.
+trait CompactReadout {
+    fn compact_readout(&self, decimals: usize) -> String;
+}
+
+impl CompactReadout for str {
+    fn compact_readout(&self, decimals: usize) -> String {
+        if !(self.contains('.') || self.contains('e') || self.contains('E')) {
+            return self.to_owned();
+        }
+        let Ok(value) = self.parse::<f64>() else {
+            return self.to_owned();
+        };
+        let rounded = format!("{value:.decimals$}");
+        // A rounded "-0.000" is zero, not a negative reading.
+        match rounded.strip_prefix('-') {
+            Some(digits) if digits.chars().all(|c| c == '0' || c == '.') => digits.to_owned(),
+            _ => rounded,
+        }
+    }
+}
+
 trait TraceNamePresentation {
     /// The part of a trace name that its lane title does not already say.
     fn trace_short_name(&self, lane: &str) -> String;
@@ -247,8 +305,19 @@ fn PlotLanes(
     let view = transport.view();
     let range = transport.range();
     let seconds = transport.seconds();
-    let visible_lanes = plotted
+    // A lane without one value in this episode would be a lane of nothing;
+    // it is named once in the footer instead.
+    let (lanes, empty): (Vec<_>, Vec<_>) = plotted
         .lanes
+        .iter()
+        .cloned()
+        .partition(TimelineSignalLane::has_values);
+    let empty = empty
+        .iter()
+        .map(TimelineSignalLane::label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let visible_lanes = lanes
         .iter()
         .map(|lane| {
             let series = lane
@@ -269,20 +338,29 @@ fn PlotLanes(
     ));
     let id = use_hook(|| format!("data-plot-{}", dioxus::dioxus_core::current_scope_id().0));
     let at = hover().unwrap_or(seconds);
-    let at_ns = range.ns_at(at);
+    // Before the first sample the readouts hold that sample, as the cameras
+    // hold their first frame, instead of a column of dashes.
+    let held_first = plotted
+        .buffer
+        .first_time()
+        .filter(|first| range.ns_at(at) < *first);
+    let at_ns = held_first.unwrap_or_else(|| range.ns_at(at));
     let values = plotted
         .buffer
         .values(&plotted.fields, at_ns)
         .unwrap_or_default();
     let sample = plotted.buffer.sample_time(at_ns).ok().flatten();
-    let height = plotted.lanes.len() as f64 * (LANE_HEIGHT + LANE_GAP);
+    let height = lanes.len() as f64 * (LANE_HEIGHT + LANE_GAP);
     let hover_x = hover().map(|moment| view.percent(moment) / 100.0);
     let mut seek = transport.clone();
     let mut surface = use_signal(|| None::<web_sys::Element>);
     rsx! {
         div { class: "data-plot-lanes", style: "height: {height}px",
             div { class: "data-plot-readouts",
-                for lane in plotted.lanes.iter() {
+                for lane in lanes.iter() {
+                    {
+                    let decimals = lane.readout_decimals();
+                    rsx! {
                     div { key: "{lane.id()}", class: "data-plot-readout", style: "height: {LANE_HEIGHT + LANE_GAP}px",
                         div { class: "data-plot-readout-title", title: lane.label(), "{lane.label()}" }
                         div { class: "data-plot-traces",
@@ -293,19 +371,22 @@ fn PlotLanes(
                                     let key = stream_key.clone();
                                     let color = series.color().unwrap_or(lane.color()).to_owned();
                                     let short = series.name().trace_short_name(lane.label());
-                                    let value = values.get(series.name()).cloned().unwrap_or_else(|| "—".into());
+                                    let exact = values.get(series.name()).cloned().unwrap_or_else(|| "—".into());
+                                    let shown = exact.compact_readout(decimals);
                                     rsx! {
                                         button { key: "{name}", r#type: "button", class: "data-plot-trace", "aria-pressed": !hidden,
-                                            title: if hidden { format!("Show {name}") } else { format!("Hide {name}") },
+                                            title: if hidden { format!("Show {name}") } else { format!("Hide {name} · exact {exact}") },
                                             onclick: move |_| choices.toggle_trace(&key, &name),
                                             span { class: "data-plot-swatch", style: "background: {color}", "aria-hidden": "true" }
                                             span { class: "data-plot-trace-name", "{short}" }
-                                            span { class: "data-plot-trace-value", title: "{value}", "{value}" }
+                                            span { class: "data-plot-trace-value", title: "{exact}", "{shown}" }
                                         }
                                     }
                                 }
                             }
                         }
+                    }
+                    }
                     }
                 }
             }
@@ -338,12 +419,18 @@ fn PlotLanes(
         }
         div { class: "data-plot-foot",
             match sample {
+                Some(sample) if held_first.is_some() => rsx! {
+                    span { "first sample {range.seconds_of(sample).precise_clock_label()}" }
+                },
                 Some(sample) => rsx! {
                     span { "sample {range.seconds_of(sample).precise_clock_label()}" }
                     span { "age {(at - range.seconds_of(sample)).max(0.0):.3} s" }
                     if hover().is_some() { span { class: "data-plot-foot-note", "at cursor" } }
                 },
                 None => rsx! { span { "No message at this time" } },
+            }
+            if !empty.is_empty() {
+                span { class: "data-plot-foot-note", title: "These fields have no value in this episode", "no values: {empty}" }
             }
         }
     }
@@ -352,6 +439,43 @@ fn PlotLanes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::time_series::TimelineSignalSeries;
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn readouts_round_to_the_lane_range_and_keep_integers_whole() {
+        let lane = |values: &[f64]| {
+            let points = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| TimelineSignalPoint::new(index as f64, Some(*value)))
+                .collect();
+            TimelineSignalLane::new("lane", "lane", "#2a78d6")
+                .with_series(vec![TimelineSignalSeries::new("lane", points)])
+        };
+        assert_eq!(lane(&[-1.0, 1.0]).readout_decimals(), 3);
+        assert_eq!(lane(&[0.10, 0.12]).readout_decimals(), 5);
+        assert_eq!(lane(&[0.0, 500.0]).readout_decimals(), 2);
+        assert_eq!(lane(&[0.0, 0.000_000_1]).readout_decimals(), 6);
+        assert_eq!(lane(&[]).readout_decimals(), 2);
+        assert_eq!("-0.23022049286644".compact_readout(3), "-0.230");
+        assert_eq!("-0.0001".compact_readout(3), "0.000");
+        assert_eq!(
+            "18446744073709551615".compact_readout(3),
+            "18446744073709551615"
+        );
+        assert_eq!("true".compact_readout(3), "true");
+        assert_eq!("—".compact_readout(3), "—");
+        let empty =
+            TimelineSignalLane::new("empty", "acceleration[]", "#2a78d6").with_series(vec![
+                TimelineSignalSeries::new(
+                    "acceleration[0]",
+                    vec![TimelineSignalPoint::new(0.0, None)],
+                ),
+            ]);
+        assert!(!empty.has_values());
+        assert!(lane(&[1.0]).has_values());
+    }
+
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn trace_names_drop_what_their_lane_already_says() {
         assert_eq!("position[3]".trace_short_name("position[]"), "[3]");

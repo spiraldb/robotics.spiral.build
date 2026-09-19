@@ -306,6 +306,11 @@ impl MessageBuffer {
         }
         Ok(times.value(row))
     }
+    /// The log time of the first message, if there is one.
+    pub(super) fn first_time(&self) -> Option<u64> {
+        let batch = self.batches.iter().find(|batch| batch.num_rows() > 0)?;
+        Self::time(batch, 0).ok()
+    }
     pub(super) fn at(&self, absolute: u64) -> Result<Option<(&RecordBatch, usize)>, String> {
         for batch in self.batches.iter().rev() {
             let mut low = 0;
@@ -452,6 +457,56 @@ impl MessageBuffer {
             self.next.is_some(),
         ))
     }
+    /// The snapshot for reading along an episode: a `time` column on the
+    /// episode clock leads, the payload follows, and storage bookkeeping
+    /// (`log_time`, `publish_time`, `channel_id`, `chunk_start_offset`,
+    /// `sample_ordinal`) waits at the end of the same table.
+    pub(super) fn snapshot_on_clock(
+        &self,
+        start_ns: u64,
+    ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, String> {
+        use crate::format::PreciseClockPresentation as _;
+        let snapshot = self.snapshot()?;
+        let (bookkeeping, payload): (Vec<_>, Vec<_>) = snapshot
+            .columns()
+            .iter()
+            .cloned()
+            .partition(|column| Self::is_bookkeeping(column.name()));
+        let mut columns = vec![spiral_robotics_common::relations::QueryColumn::new(
+            "time", "Utf8", false,
+        )];
+        columns.extend(payload);
+        columns.extend(bookkeeping);
+        let mut times = Vec::with_capacity(self.rows());
+        for batch in &self.batches {
+            for row in 0..batch.num_rows() {
+                times.push(Self::time(batch, row)?);
+            }
+        }
+        let truncated = snapshot.truncated();
+        let rows = snapshot
+            .into_rows()
+            .into_iter()
+            .zip(times)
+            .map(|(mut row, time)| {
+                let seconds = (i128::from(time) - i128::from(start_ns)) as f64 / 1e9;
+                row.insert(
+                    "time".into(),
+                    serde_json::Value::String(seconds.precise_clock_label()),
+                );
+                row
+            })
+            .collect();
+        Ok(spiral_robotics_common::relations::SpiralQuerySnapshot::new(
+            columns, rows, truncated,
+        ))
+    }
+    fn is_bookkeeping(column: &str) -> bool {
+        matches!(
+            column,
+            "log_time" | "publish_time" | "channel_id" | "chunk_start_offset" | "sample_ordinal"
+        )
+    }
     pub(super) fn batches(&self) -> &[RecordBatch] {
         &self.batches
     }
@@ -461,6 +516,56 @@ impl MessageBuffer {
 mod tests {
     use super::*;
     use arrow_array::{ArrayRef, Float64Array, types::Float64Type};
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn reading_snapshots_lead_with_the_episode_clock_and_end_with_bookkeeping() {
+        let origin = 1_700_000_000_000_000_000u64;
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "log_time",
+                Arc::new(UInt64Array::from(vec![origin, origin + 1_500_000_000])) as ArrayRef,
+            ),
+            ("publish_time", Arc::new(UInt64Array::from(vec![origin; 2]))),
+            ("channel_id", Arc::new(UInt64Array::from(vec![13; 2]))),
+            (
+                "chunk_start_offset",
+                Arc::new(UInt64Array::from(vec![35; 2])),
+            ),
+            ("sample_ordinal", Arc::new(UInt64Array::from(vec![0, 1]))),
+            (
+                "value",
+                Arc::new(Float64Array::from(vec![Some(20.0), None])),
+            ),
+        ])
+        .unwrap();
+        let buffer = MessageBuffer {
+            schema: batch.schema(),
+            batches: vec![batch],
+            next: None,
+        };
+        let snapshot = buffer.snapshot_on_clock(origin).unwrap();
+        let names = snapshot
+            .columns()
+            .iter()
+            .map(spiral_robotics_common::relations::QueryColumn::name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "time",
+                "value",
+                "log_time",
+                "publish_time",
+                "channel_id",
+                "chunk_start_offset",
+                "sample_ordinal"
+            ]
+        );
+        assert_eq!(snapshot.rows()[0]["time"], "0:00.000");
+        assert_eq!(snapshot.rows()[1]["time"], "0:01.500");
+        assert_eq!(snapshot.rows()[0]["value"], 20.0);
+        assert!(!snapshot.truncated());
+    }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn unfamiliar_sensor_fields_preserve_precision_nulls_and_ragged_indices() {

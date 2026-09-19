@@ -56,7 +56,7 @@ fn MessageReader(stream: RecordedStream, transport: EpisodeTransport) -> Element
                 .with_limit(MESSAGE_PAGE_ROWS)
                 .with_cursor(after);
             let buffer = MessageBuffer::load(read.with_window(window), false).await?;
-            let snapshot = buffer.snapshot()?;
+            let snapshot = buffer.snapshot_on_clock(range.start_ns())?;
             Ok::<_, String>((snapshot, buffer.next_cursor().cloned()))
         }
     });

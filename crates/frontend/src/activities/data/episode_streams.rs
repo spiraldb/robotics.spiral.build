@@ -13,14 +13,15 @@ use dioxus::prelude::*;
 use dioxus_workbench::PanelId;
 use futures_util::StreamExt as _;
 use spiral_robotics_common::datasets::{
-    DatasetTopic, EpisodeSelection, EpisodeTopicRequest, MessageRead, MessageWindow, TopicCoverage,
-    TopicCoverageRequest,
+    DatasetTopic, EpisodeCoverageRequest, EpisodeSelection, EpisodeTopicRequest, MessageRead,
+    MessageWindow, StreamCoverage, TopicCoverage, TopicCoverageRequest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const COVERAGE_BUCKETS: u16 = 240;
 pub(super) const MAX_PLOTTED_FIELDS_PER_STREAM: usize = 16;
-const CONCURRENT_COVERAGE_READS: usize = 4;
+
+const CONCURRENT_SCHEMA_READS: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum StreamKind {
@@ -136,11 +137,86 @@ impl StreamCatalog {
             .iter()
             .filter(|stream| stream.kind() == StreamKind::Video)
     }
+    /// The part of a camera's name that tells it from the episode's other
+    /// cameras: `/left-wrist-camera` beside `/top-camera` reads as
+    /// "left-wrist" and "top". A lone camera keeps its whole name.
+    pub(super) fn camera_title(&self, camera: &RecordedStream) -> String {
+        let names = self.videos().map(RecordedStream::name).collect::<Vec<_>>();
+        let name = camera.name();
+        let distinct = if names.len() > 1 {
+            let prefix = names.shared_prefix_len();
+            let suffix = names.shared_suffix_len();
+            name.get(prefix..name.len().saturating_sub(suffix))
+                .unwrap_or("")
+        } else {
+            name
+        };
+        let distinct = distinct.trim_matches(|character: char| !character.is_alphanumeric());
+        if distinct.is_empty() {
+            name.trim_start_matches('/').to_owned()
+        } else {
+            distinct.to_owned()
+        }
+    }
+    /// Data streams, busiest first; ties keep topic order.
+    pub(super) fn data_by_traffic(&self) -> Vec<RecordedStream> {
+        let mut ranked = self
+            .streams
+            .iter()
+            .filter(|stream| stream.kind() == StreamKind::Data)
+            .cloned()
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|stream| std::cmp::Reverse(stream.samples().unwrap_or(0)));
+        ranked
+    }
     pub(super) fn get(&self, key: &str) -> Option<&RecordedStream> {
         self.streams.iter().find(|stream| stream.key() == key)
     }
     pub(super) fn is_empty(&self) -> bool {
         self.streams.is_empty()
+    }
+}
+
+/// The bytes every name in a set shares at its start and at its end, on
+/// character boundaries.
+trait SharedAffixes {
+    fn shared_prefix_len(&self) -> usize;
+    fn shared_suffix_len(&self) -> usize;
+}
+
+impl SharedAffixes for [&str] {
+    fn shared_prefix_len(&self) -> usize {
+        let Some((first, rest)) = self.split_first() else {
+            return 0;
+        };
+        let mut shared = first.len();
+        for other in rest {
+            let common = first
+                .char_indices()
+                .zip(other.chars())
+                .take_while(|((_, left), right)| left == right)
+                .last()
+                .map_or(0, |((index, character), _)| index + character.len_utf8());
+            shared = shared.min(common);
+        }
+        shared
+    }
+    fn shared_suffix_len(&self) -> usize {
+        let Some((first, rest)) = self.split_first() else {
+            return 0;
+        };
+        let mut shared = first.len();
+        for other in rest {
+            let common = first
+                .chars()
+                .rev()
+                .zip(other.chars().rev())
+                .take_while(|(left, right)| left == right)
+                .map(|(character, _)| character.len_utf8())
+                .sum::<usize>();
+            shared = shared.min(common);
+        }
+        shared
     }
 }
 
@@ -215,29 +291,15 @@ struct PlotSelection {
 }
 
 impl PlotSelection {
-    /// An automatic default is applied only after every data schema is known,
-    /// and never after the operator has made a plot choice.
-    fn select_only_plottable(&mut self, schemas: &BTreeMap<String, StreamSchema>) {
-        if !self.requested.is_empty() {
-            return;
+    /// The plot an episode opens with when the operator has chosen nothing.
+    /// Never applied after the operator has made a plot choice, and never
+    /// for a stream without numeric fields. Reports whether it was adopted.
+    fn adopt_default(&mut self, key: &str, fields: Vec<MessageField>) -> bool {
+        if !self.requested.is_empty() || fields.is_empty() {
+            return false;
         }
-        let mut candidate = None;
-        for (key, schema) in schemas {
-            let StreamSchema::Ready(root) = schema else {
-                return;
-            };
-            let fields = root.default_plot_leaves();
-            if fields.is_empty() {
-                continue;
-            }
-            if candidate.is_some() {
-                return;
-            }
-            candidate = Some((key.clone(), fields));
-        }
-        if let Some((key, fields)) = candidate {
-            self.fields.insert(key, fields);
-        }
+        self.fields.insert(key.to_owned(), fields);
+        true
     }
 
     fn trace_key(stream: &str, trace: &str) -> String {
@@ -375,35 +437,56 @@ impl StreamChoices {
             }
         });
     }
-    /// Called once by Data when an episode opens. Other episode compositions
-    /// can discover cameras without loading numeric schemas or starting plots.
-    pub(super) fn plot_single_stream(&mut self, catalog: &StreamCatalog) {
-        let streams = catalog
-            .streams()
-            .iter()
-            .filter(|stream| stream.kind() == StreamKind::Data)
-            .cloned()
-            .collect::<Vec<_>>();
+    /// Called once by Data when an episode opens: reads every data stream's
+    /// schema, busiest first and a few at a time, and plots the first one
+    /// with numeric fields, so Plots is never empty on open. The remaining
+    /// schemas keep loading for the fold and the disabled checks. Other
+    /// episode compositions can discover cameras without any of this.
+    pub(super) fn plot_default_stream(&mut self, catalog: &StreamCatalog) {
+        let ranked = catalog.data_by_traffic();
         let generation = *self.generation.peek();
         let mut choices = *self;
         self.spawn(async move {
-            let mut schemas = BTreeMap::new();
-            for stream in streams {
+            let mut answers = futures_util::stream::iter(ranked)
+                .map(move |stream| {
+                    let mut choices = choices;
+                    async move {
+                        let root = choices
+                            .schema_for(stream.key(), stream.read().clone())
+                            .await;
+                        (stream, root)
+                    }
+                })
+                .buffered(CONCURRENT_SCHEMA_READS);
+            let mut chosen = false;
+            while let Some((stream, root)) = answers.next().await {
                 if *choices.generation.peek() != generation {
                     return;
                 }
-                let Some(root) = choices
-                    .schema_for(stream.key(), stream.read().clone())
-                    .await
-                else {
-                    return;
-                };
-                schemas.insert(stream.key().to_owned(), StreamSchema::Ready(root));
-            }
-            if *choices.generation.peek() == generation {
-                choices.plots.write().select_only_plottable(&schemas);
+                if chosen {
+                    continue;
+                }
+                if let Some(root) = root {
+                    chosen = choices
+                        .plots
+                        .write()
+                        .adopt_default(stream.key(), root.default_plot_leaves());
+                }
             }
         });
+    }
+    /// A stream with nothing to plot: at most one message, or a schema known
+    /// to have no numeric fields. Cameras are never quiet. This is a count
+    /// rule and a type rule, never a name rule.
+    pub(super) fn stream_is_quiet(&self, stream: &RecordedStream) -> bool {
+        if stream.kind() == StreamKind::Video {
+            return false;
+        }
+        stream.samples().is_some_and(|samples| samples <= 1)
+            || matches!(
+                self.schemas.read().get(stream.key()),
+                Some(StreamSchema::Ready(root)) if root.plottable_leaves().is_empty()
+            )
     }
 
     pub(super) fn trace_hidden(&self, key: &str, trace: &str) -> bool {
@@ -462,10 +545,11 @@ impl StreamChoices {
     pub(super) fn coverage(&self, key: &str) -> Option<CoverageState> {
         self.coverage.read().get(key).cloned()
     }
-    /// Count every stream's messages into timeline buckets, a few at a time.
+    /// Count every stream's messages into timeline buckets with one request,
+    /// so the rows fill together instead of one at a time.
     pub(super) fn load_coverage(&mut self, catalog: &StreamCatalog, range: EpisodeTimeRange) {
         let generation = *self.generation.peek();
-        let jobs = catalog
+        let (keys, streams): (Vec<String>, Vec<TopicCoverageRequest>) = catalog
             .streams()
             .iter()
             .filter(|stream| stream.samples() != Some(0))
@@ -481,31 +565,49 @@ impl StreamChoices {
                     ),
                 )
             })
-            .collect::<Vec<_>>();
+            .unzip();
+        if keys.is_empty() {
+            return;
+        }
         {
             let mut coverage = self.coverage.write();
-            for (key, _) in &jobs {
+            for key in &keys {
                 coverage.insert(key.clone(), CoverageState::Loading);
             }
         }
         let mut choices = *self;
         self.spawn(async move {
-            futures_util::stream::iter(jobs)
-                .for_each_concurrent(CONCURRENT_COVERAGE_READS, |(key, request)| async move {
-                    if *choices.generation.peek() != generation {
-                        return;
-                    }
-                    let result = DatasetClient::current().topic_coverage(request).await;
-                    if *choices.generation.peek() != generation {
-                        return;
-                    }
-                    let state = match result {
-                        Ok(coverage) => CoverageState::Ready(coverage),
-                        Err(error) => CoverageState::Failed(error.to_string()),
-                    };
-                    choices.coverage.write().insert(key, state);
-                })
+            let answer = DatasetClient::current()
+                .episode_coverage(EpisodeCoverageRequest::new(streams))
                 .await;
+            if *choices.generation.peek() != generation {
+                return;
+            }
+            let outcomes = match answer {
+                Ok(outcomes) if outcomes.len() == keys.len() => outcomes,
+                Ok(outcomes) => {
+                    let error = format!(
+                        "Coverage answered for {} of {} streams",
+                        outcomes.len(),
+                        keys.len()
+                    );
+                    vec![StreamCoverage::Failed { error }; keys.len()]
+                }
+                Err(error) => vec![
+                    StreamCoverage::Failed {
+                        error: error.to_string()
+                    };
+                    keys.len()
+                ],
+            };
+            let mut coverage = choices.coverage.write();
+            for (key, outcome) in keys.into_iter().zip(outcomes) {
+                let state = match outcome {
+                    StreamCoverage::Ready { coverage } => CoverageState::Ready(coverage),
+                    StreamCoverage::Failed { error } => CoverageState::Failed(error),
+                };
+                coverage.insert(key, state);
+            }
         });
     }
 
@@ -542,58 +644,98 @@ mod tests {
         )
     }
 
-    #[test]
-    fn data_default_plot_requires_exactly_one_numeric_stream() {
-        let numeric = StreamSchema::Ready(MessageField::root(&Field::new(
-            "value",
-            DataType::Float64,
-            false,
-        )));
-        let text = StreamSchema::Ready(MessageField::root(&Field::new(
-            "value",
-            DataType::Utf8,
-            false,
-        )));
-        for schemas in [
-            BTreeMap::new(),
-            BTreeMap::from([("text".into(), text.clone())]),
-            BTreeMap::from([
-                ("one".into(), numeric.clone()),
-                ("two".into(), numeric.clone()),
-            ]),
-            BTreeMap::from([
-                ("one".into(), numeric.clone()),
-                ("pending".into(), StreamSchema::Loading),
-            ]),
-            BTreeMap::from([
-                ("one".into(), numeric.clone()),
-                ("failed".into(), StreamSchema::Failed("unavailable".into())),
-            ]),
-        ] {
-            let mut selection = PlotSelection::default();
-            selection.select_only_plottable(&schemas);
-            assert!(selection.fields.is_empty());
-        }
-        let schemas = BTreeMap::from([("numeric".into(), numeric), ("text".into(), text)]);
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn the_default_plot_is_adopted_once_and_never_over_an_operator_choice() {
+        let numeric = MessageField::root(&Field::new("value", DataType::Float64, false));
+        let text = MessageField::root(&Field::new("value", DataType::Utf8, false));
         let mut selection = PlotSelection::default();
-        selection.select_only_plottable(&schemas);
+        // A stream without numeric fields is never the default, however busy.
+        assert!(!selection.adopt_default("text", text.default_plot_leaves()));
+        assert!(selection.adopt_default("dense", numeric.default_plot_leaves()));
         assert_eq!(
             selection
                 .fields
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["numeric"]
+            ["dense"]
         );
         // An explicit uncheck wins even if the automatic schema read completes later.
-        selection.requested.insert("numeric".into(), false);
+        selection.requested.insert("dense".into(), false);
         selection.fields.clear();
-        selection.select_only_plottable(&schemas);
+        assert!(!selection.adopt_default("dense", numeric.default_plot_leaves()));
         assert!(selection.fields.is_empty());
         // A fresh episode gets a fresh default; the previous user's choice is not global.
         let mut next_episode = PlotSelection::default();
-        next_episode.select_only_plottable(&schemas);
-        assert_eq!(next_episode.fields.len(), 1);
+        assert!(next_episode.adopt_default("dense", numeric.default_plot_leaves()));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn camera_titles_keep_only_what_differs_between_the_episode_cameras() {
+        let titles = |names: &[&str]| {
+            let topics = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    DatasetTopic::new((*name).into(), vec!["foxglove.CompressedVideo".into()])
+                        .with_revision(TopicRevision::new("v".into(), format!("{index:09}")))
+                })
+                .collect();
+            let catalog = StreamCatalog::new(topics, &episode());
+            catalog
+                .videos()
+                .map(|camera| catalog.camera_title(camera))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&["/left-wrist-camera", "/right-wrist-camera", "/top-camera"]),
+            ["left-wrist", "right-wrist", "top"]
+        );
+        assert_eq!(
+            titles(&[
+                "/camera/follower.camera.gripper/video",
+                "/camera/follower.camera.top/video"
+            ]),
+            ["gripper", "top"]
+        );
+        assert_eq!(
+            titles(&[
+                "/cameras/left_camera-images-rgb",
+                "/cameras/top_camera-images-rgb"
+            ]),
+            ["left", "top"]
+        );
+        assert_eq!(titles(&["/cam"]), ["cam"]);
+        // Names that share everything but a suffix keep the whole name when
+        // nothing else is left to show.
+        assert_eq!(
+            titles(&["/top-camera", "/top-camera-2"]),
+            ["top-camera", "2"]
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn data_streams_rank_busiest_first_with_ties_in_topic_order() {
+        let topics = vec![
+            DatasetTopic::new("/a".into(), vec!["Sensor".into()])
+                .with_revision(TopicRevision::new("v".into(), "111111111".into()))
+                .with_coverage(1, Some(600)),
+            DatasetTopic::new("/b".into(), vec!["Sensor".into()])
+                .with_revision(TopicRevision::new("v".into(), "222222222".into()))
+                .with_coverage(1, Some(9_000)),
+            DatasetTopic::new("/c".into(), vec!["Sensor".into()])
+                .with_revision(TopicRevision::new("v".into(), "333333333".into()))
+                .with_coverage(1, Some(600)),
+            DatasetTopic::new("/cam".into(), vec!["foxglove.CompressedVideo".into()])
+                .with_revision(TopicRevision::new("v".into(), "444444444".into()))
+                .with_coverage(1, Some(90_000)),
+        ];
+        let ranked = StreamCatalog::new(topics, &episode())
+            .data_by_traffic()
+            .iter()
+            .map(|stream| stream.name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(ranked, ["/b", "/a", "/c"]);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

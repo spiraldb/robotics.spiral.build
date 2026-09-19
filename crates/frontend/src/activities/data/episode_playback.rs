@@ -134,6 +134,7 @@ fn CameraFrames(
     let clock = transport.clone();
     let drive_requests = requests.clone();
     let drive_topic = topic.clone();
+    let drive_camera = camera.clone();
     use_effect(move || {
         let visible = panel.geometry().visible() && activity.is_active();
         let seconds = clock.seconds();
@@ -142,7 +143,10 @@ fn CameraFrames(
         if !visible || failure.peek().is_some() {
             return;
         }
-        drive_requests.wanted.set(Some(seconds));
+        // A playhead before the first recorded frame holds that frame; an
+        // opened episode shows a picture, never an empty mat.
+        let target = drive_camera.encoded.held_frame_seconds(seconds);
+        drive_requests.wanted.set(Some(target));
         if drive_requests.running.replace(true) {
             return;
         }
@@ -192,7 +196,8 @@ fn CameraFrames(
         });
     });
     let seconds = transport.seconds();
-    let sample = camera.encoded.frame_seconds(seconds);
+    let held_first = camera.encoded.first_frame_after(seconds);
+    let sample = held_first.or_else(|| camera.encoded.frame_seconds(seconds));
     let uncovered = !covered();
     let retry_playback = fresh_playback.clone();
     rsx! {
@@ -210,20 +215,18 @@ fn CameraFrames(
                 button { class: "data-text-action", onclick: move |_| { failure.set(None); covered.set(false); playback.set(retry_playback()); }, "Retry decoding" }
             } }
             else if uncovered {
-                p { class: "episode-camera-message",
-                    match camera.encoded.first_frame_seconds().filter(|first| seconds < *first) {
-                        Some(first) => rsx! { "First frame at {first.precise_clock_label()}" },
-                        None if sample.is_some() => rsx! { "Decoding recorded camera…" },
-                        None => rsx! { "No frame at this time" },
-                    }
+                p { class: "episode-camera-message", role: "status",
+                    if sample.is_some() { "Decoding recorded camera…" } else { "No frame at this time" }
                 }
             }
         }
         if show_frame_timing {
         div { class: "episode-camera-time",
-            if let Some(sample) = sample.filter(|_| !uncovered) {
-                {format!("Frame {} · age {:.3} s", sample.precise_clock_label(), (seconds - sample).max(0.0))}
-            } else { "Recorded camera" }
+            match (sample.filter(|_| !uncovered), held_first) {
+                (Some(first), Some(_)) => rsx! { {format!("First frame {}", first.precise_clock_label())} },
+                (Some(sample), None) => rsx! { {format!("Frame {} · age {:.3} s", sample.precise_clock_label(), (seconds - sample).max(0.0))} },
+                (None, _) => rsx! { "Recorded camera" },
+            }
         }
         }
     }

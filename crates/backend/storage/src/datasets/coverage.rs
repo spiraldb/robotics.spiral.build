@@ -1,22 +1,78 @@
-//! Bucketed message counts for one topic within one episode.
+//! Bucketed message counts for the streams of one episode.
 //!
-//! The Data timeline asks for these per stream, so the query projects only
-//! `log_time` and counts rows as they stream; no message payloads are read.
+//! The Data timeline asks for every stream at once; each stream's query
+//! projects only `log_time` and counts rows as they stream, so no message
+//! payloads are read.
 use super::messages::MessageQuery;
 use crate::{
     StorageManager,
     db::{ArrowColumns, DatabaseSession},
 };
 use futures::StreamExt as _;
-use spiral_robotics_common::datasets::{TopicCoverage, TopicCoverageRequest};
+use spiral_robotics_common::datasets::{
+    EpisodeCoverageRequest, StreamCoverage, TopicCoverage, TopicCoverageRequest,
+};
+
+/// Streams counted at the same time for one request; the rest queue. Each
+/// count is one small query, so an episode's two dozen streams answer in a
+/// few rounds rather than a few seconds each.
+const CONCURRENT_COVERAGE_QUERIES: usize = 8;
 
 impl StorageManager {
-    pub async fn topic_coverage(
+    /// Every stream of an episode, a few queries at a time, answered in
+    /// request order. The batch belongs to one dataset revision, so the
+    /// catalog is inspected once before the counts and checked once after
+    /// them rather than around every stream. One stream that cannot be
+    /// counted reports its error in place instead of failing the others.
+    pub async fn episode_coverage(
         &self,
-        request: TopicCoverageRequest,
+        request: EpisodeCoverageRequest,
+    ) -> Result<Vec<StreamCoverage>, String> {
+        request.validate()?;
+        let Some(first) = request.streams().first() else {
+            return Ok(Vec::new());
+        };
+        let dataset = first.read().topic().dataset();
+        if request
+            .streams()
+            .iter()
+            .any(|stream| stream.read().topic().dataset() != dataset)
+        {
+            return Err("Coverage covers the streams of one dataset per request".into());
+        }
+        let inspection = self
+            .project_store()
+            .dataset_catalog()
+            .inspect(dataset.clone())
+            .await?;
+        let outcomes = futures::stream::iter(request.streams().iter().cloned())
+            .map(|stream| {
+                let known = Self::revision_known(&inspection, stream.read());
+                async move {
+                    let counted = match known {
+                        Ok(()) => self.count_log_times(&stream).await,
+                        Err(error) => Err(error),
+                    };
+                    match counted {
+                        Ok(coverage) => StreamCoverage::Ready { coverage },
+                        Err(error) => StreamCoverage::Failed { error },
+                    }
+                }
+            })
+            .buffered(CONCURRENT_COVERAGE_QUERIES)
+            .collect()
+            .await;
+        self.require_same_revision_after(first.read()).await?;
+        Ok(outcomes)
+    }
+
+    /// Bucket one stream's `log_time`s; the caller has already checked the
+    /// dataset revision.
+    async fn count_log_times(
+        &self,
+        request: &TopicCoverageRequest,
     ) -> Result<TopicCoverage, String> {
         let bounds = request.bounds()?;
-        self.require_topic_revision(request.read()).await?;
         let statement = MessageQuery::new(request.read()).statement(
             "log_time",
             &format!("AND log_time >= {} AND log_time < {}", bounds.0, bounds.1),
@@ -36,7 +92,6 @@ impl StorageManager {
                 }
             }
         }
-        self.require_same_revision_after(request.read()).await?;
         Ok(coverage)
     }
 }
