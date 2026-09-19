@@ -655,8 +655,11 @@ The upper workbench takes 60% of the episode workspace and Timeline takes
 an explicitly named top camera appears first. A camera panel is titled
 "Camera ·" plus the part of its stream name that differs from the episode's
 other cameras. Opening an episode selects Plots. These are defaults:
-resizing or docking a panel preserves the operator's arrangement as
-subsequent cameras arrive.
+resizing or docking a panel preserves the operator's arrangement, and from
+then on only the camera column follows the episode: when the set of
+cameras changes, the grid is rebuilt for the new cameras inside the
+arrangement the operator left, never poured into the tiles the previous
+episode happened to leave behind.
 
 When the operator has chosen nothing, Data plots the busiest stream with
 numeric fields once every data schema has loaded, so Plots is never empty

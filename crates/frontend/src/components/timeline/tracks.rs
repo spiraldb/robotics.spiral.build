@@ -1,5 +1,5 @@
 //! Typed derived tracks on the episode timeline's shared time coordinates.
-use super::{episode_transport::EpisodeTransport, timeline_panel::TrackScrubber};
+use super::{TimelineAction, TimelineInteraction, TimelineScrubber};
 use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq)]
@@ -13,7 +13,7 @@ impl TimelineSample {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum IntervalKind {
     Excluded,
     Unknown,
@@ -27,12 +27,11 @@ impl IntervalKind {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimelineInterval {
     span: (f64, f64),
     label: String,
     kind: IntervalKind,
-    context: f64,
 }
 impl TimelineInterval {
     pub(crate) fn excluded(start: f64, end: f64, label: impl Into<String>) -> Self {
@@ -40,7 +39,6 @@ impl TimelineInterval {
             span: (start, end),
             label: label.into(),
             kind: IntervalKind::Excluded,
-            context: 0.0,
         }
     }
     pub(crate) fn unknown(start: f64, end: f64, label: impl Into<String>) -> Self {
@@ -48,17 +46,10 @@ impl TimelineInterval {
             span: (start, end),
             label: label.into(),
             kind: IntervalKind::Unknown,
-            context: 0.0,
         }
     }
-    /// Playback may include context without moving the annotation itself.
-    pub(crate) fn with_context(mut self, seconds: f64) -> Self {
-        self.context = if seconds.is_finite() {
-            seconds.max(0.0)
-        } else {
-            0.0
-        };
-        self
+    pub(crate) fn span(&self) -> (f64, f64) {
+        self.span
     }
     fn valid(&self) -> bool {
         self.span.0.is_finite() && self.span.1.is_finite() && self.span.1 > self.span.0
@@ -163,16 +154,16 @@ impl TimelineTrack {
             state,
         }
     }
-    pub(super) fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
 }
 
 #[component]
-pub(super) fn NumericTrackRow(track: TimelineTrack, transport: EpisodeTransport) -> Element {
-    let view = transport.view();
+pub(crate) fn NumericTrackRow(track: TimelineTrack, interaction: TimelineInteraction) -> Element {
+    let view = interaction.state().window();
     let value = match &track.state {
-        TimelineTrackState::Ready(series) => series.at(transport.seconds()),
+        TimelineTrackState::Ready(series) => series.at(interaction.state().clock().seconds()),
         _ => None,
     };
     let path = use_memo(use_reactive((&track.state,), move |(state,)| match state {
@@ -202,12 +193,12 @@ pub(super) fn NumericTrackRow(track: TimelineTrack, transport: EpisodeTransport)
                             }
                             path { d: "{path}", class: "data-numeric-line", vector_effect: "non-scaling-stroke" }
                         }
-                        TrackScrubber { transport: transport.clone() }
+                        TimelineScrubber { interaction: interaction.clone() }
                         for interval in series.intervals.iter().filter(|interval| interval.span.1 > view.start() && interval.span.0 < view.end()) {
                             button { r#type: "button", class: "data-numeric-interval", "data-kind": interval.kind.key(),
                                 style: "left:{view.percent(interval.span.0)}%;width:{view.percent(interval.span.1) - view.percent(interval.span.0)}%",
-                                title: "{interval.label} · Play interval", "aria-label": "{interval.label} · Play interval",
-                                onclick: { let mut transport = transport.clone(); let (start, end) = (interval.span.0 - interval.context, interval.span.1 + interval.context); move |_| transport.play_interval(start, end) },
+                                title: "{interval.label}", "aria-label": "{interval.label}",
+                                onclick: { let interaction = interaction.clone(); let interval = interval.clone(); move |_| interaction.emit(TimelineAction::ActivateInterval(interval.clone())) },
                             }
                         }
                     },

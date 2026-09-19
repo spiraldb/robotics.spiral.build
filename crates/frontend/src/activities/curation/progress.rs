@@ -67,9 +67,9 @@ pub(super) fn ProgressEvidence(
     episode: crate::activities::data::OpenedEpisode,
     selection: ProgressSelection,
 ) -> Element {
-    use crate::activities::data::{
-        EpisodeReview, EpisodeTransport, NumericTrack, TimelineInterval, TimelineSample,
-        TimelineTrack, TimelineTrackState,
+    use crate::activities::data::{EpisodeReview, EpisodeTransport};
+    use crate::components::timeline::{
+        NumericTrack, TimelineInterval, TimelineSample, TimelineTrack, TimelineTrackState,
     };
     use spiral_robotics_common::curation::progress::ProgressScoreRequest;
     let transport = EpisodeTransport::use_opened_episode(&episode);
@@ -109,15 +109,9 @@ pub(super) fn ProgressEvidence(
                     let start = chunk.start_ns as f64 / 1e9;
                     let end = chunk.end_ns as f64 / 1e9;
                     if chunk.needs_review {
-                        Some(
-                            TimelineInterval::unknown(start, end, chunk.summary())
-                                .with_context(0.5),
-                        )
+                        Some(TimelineInterval::unknown(start, end, chunk.summary()))
                     } else if !chunk.kept {
-                        Some(
-                            TimelineInterval::excluded(start, end, chunk.summary())
-                                .with_context(0.5),
-                        )
+                        Some(TimelineInterval::excluded(start, end, chunk.summary()))
                     } else {
                         None
                     }
@@ -130,9 +124,13 @@ pub(super) fn ProgressEvidence(
     };
     let failed = matches!(state, TimelineTrackState::Failed(_));
     let tracks = vec![TimelineTrack::new("warp-progress", "Progress score", state)];
+    let mut review = transport.clone();
     rsx! {
         section { class: "curation-evidence curation-progress-evidence",
-            EpisodeReview { episode, transport, tracks }
+            EpisodeReview { episode, transport, tracks, on_interval: move |interval: TimelineInterval| {
+                let (start, end) = interval.span();
+                review.play_interval(start - 0.5, end + 0.5);
+            } }
             if failed { button { class: "curation-input", onclick: move |_| evidence.restart(), "Retry this episode" } }
         }
     }

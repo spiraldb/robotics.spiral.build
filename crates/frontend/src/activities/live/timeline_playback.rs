@@ -1,8 +1,8 @@
 //! Preview clock and replay transport rules, independent of activity and backend access.
 
-use super::panel::TimelinePlayback;
-use super::state::TimelineController;
-use crate::components::preview_clock::PreviewClock;
+use super::timeline_panel::TimelinePlayback;
+use super::timeline_state::TimelineController;
+use crate::components::timeline::PlaybackClock;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::{ReplayPhase, ReplayProgress, ReplayPurpose};
 
@@ -14,39 +14,23 @@ impl TimelineController {
         on_sample: EventHandler<(String, f64)>,
     ) {
         let mut playhead = self.playhead_signal();
-        let mut last_tick = self.preview_tick_signal();
-        // Subscribe the owning component so visibility changes run the lifecycle hook.
-        let _ = is_active();
-        let mut clock = use_future(move || async move {
-            loop {
-                gloo_timers::future::TimeoutFuture::new(33).await;
-                if !self.preview_playing() {
-                    last_tick.set(None);
-                    continue;
-                }
+        PlaybackClock::use_ticker(
+            is_active,
+            use_callback(move |elapsed| {
                 let Some((episode, duration)) = self.preview_target() else {
-                    self.stop_preview();
-                    continue;
+                    return;
                 };
-                let now = js_sys::Date::now() / 1_000.0;
-                let clock = PreviewClock::new(duration, last_tick.replace(Some(now)));
-                let next = clock.advance(playhead(), now);
+                let mut clock = PlaybackClock::new(duration);
+                clock.seek(playhead());
+                clock.advance(elapsed);
+                let next = clock.seconds();
                 playhead.set(next);
                 on_sample.call((episode, next));
                 if next >= duration {
                     self.stop_preview();
                 }
-            }
-        });
-        // use_future resumes its task after a render; apply workspace visibility afterward.
-        use_hook_did_run(move |did_run| {
-            if did_run && is_active() {
-                clock.resume();
-            } else {
-                clock.pause();
-                last_tick.set(None);
-            }
-        });
+            }),
+        );
     }
 
     pub(crate) fn playback(self, replay: Option<&ReplayProgress>) -> TimelinePlayback {
@@ -169,16 +153,16 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn preview_clock_preserves_the_first_frame_and_bounds_delayed_ticks() {
-        assert_eq!(PreviewClock::new(10.0, None).advance(2.0, 100.0), 2.0);
-        assert_eq!(PreviewClock::new(10.0, Some(1.0)).advance(2.0, 100.0), 2.25);
-        assert_eq!(PreviewClock::new(10.0, Some(5.0)).advance(2.0, 4.0), 2.0);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn preview_clock_samples_the_exact_final_frame() {
-        assert_eq!(PreviewClock::new(2.0, Some(1.0)).advance(1.99, 1.2), 2.0);
-        assert_eq!(PreviewClock::new(0.0, Some(1.0)).advance(1.0, 1.2), 0.0);
+    fn preview_clock_bounds_delayed_ticks_and_samples_the_final_frame() {
+        let mut clock = PlaybackClock::new(2.0);
+        clock.seek(1.0);
+        clock.advance(100.0);
+        assert_eq!(clock.seconds(), 1.25);
+        clock.advance(-1.0);
+        assert_eq!(clock.seconds(), 1.25);
+        clock.seek(1.99);
+        clock.advance(0.2);
+        assert_eq!(clock.seconds(), 2.0);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

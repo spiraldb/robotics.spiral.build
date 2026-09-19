@@ -227,22 +227,30 @@
     border-right: 0;
   }
 
-  .timeline-editor > .studio-timeline {
-    height: 100%;
-    border-top: 0;
+  .studio-timeline {
+    @apply h-full min-h-0;
+    --data-name-w: 8.5rem;
+  }
+
+  .studio-timeline .data-transport {
+    @apply flex-wrap py-1;
+  }
+
+  .studio-timeline .data-transport-identity {
+    flex-basis: 8.5rem;
+  }
+
+  .studio-timeline .data-transport-note {
+    min-width: 0;
   }
 
   .timeline-signal-grid {
-    @apply relative grid min-w-[42rem];
-    grid-template-columns: 8.5rem minmax(30rem, 1fr);
+    @apply relative grid;
+    grid-template-columns: var(--data-name-w, 16rem) minmax(12rem, 1fr);
   }
 
   .timeline-signal-labels {
     @apply min-w-0;
-  }
-
-  .timeline-time-label {
-    @apply flex h-8 items-center border-b border-r border-line bg-sunken px-2 text-[10px] text-ink-faint;
   }
 
   .timeline-signal-label {
@@ -253,19 +261,6 @@
     @apply h-px w-3 shrink-0;
   }
 
-  .timeline-signal-data {
-    @apply relative min-w-0;
-  }
-
-  .timeline-time-axis {
-    @apply relative h-8 border-b border-line bg-sunken;
-  }
-
-  .timeline-time-tick {
-    @apply absolute inset-y-0 border-l border-line;
-  }
-
-  .timeline-time-tick span,
   .data-time-tick span {
     @apply absolute left-1 top-1 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint;
   }
@@ -308,10 +303,6 @@
 
   .timeline-signal-empty {
     @apply text-ink-faint;
-  }
-
-  .timeline-playhead {
-    @apply pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-accent;
   }
 
   .studio-workbench-scroll {
@@ -3125,7 +3116,6 @@
     }
   }
 }
-
 
 .settings-field-row {
   display: grid;

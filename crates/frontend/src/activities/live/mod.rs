@@ -18,3 +18,9 @@ pub(crate) mod session;
 mod shortcuts;
 
 pub(crate) mod recording_review;
+
+pub(crate) mod signals;
+mod timeline_panel;
+mod timeline_playback;
+mod timeline_state;
+mod timeline_subject;

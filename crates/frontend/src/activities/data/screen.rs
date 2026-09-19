@@ -21,10 +21,13 @@ use dioxus_workbench::{
     DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelPlacement, PanelWorkspace, SplitAxis,
 };
 use spiral_robotics_common::datasets::{DatasetSelection, ProjectResource};
+use std::collections::BTreeSet;
 use wasm_bindgen::JsCast as _;
 
 const LAYOUT_SCOPE: &str = "spiral_robotics.panel-layout.v13.data";
 const IMPORT_PANEL: &str = "data-import";
+/// The split between the primary tile and the camera column.
+const EDITORS_SPLIT: &str = "data-editors";
 
 #[component]
 pub(crate) fn DataWorkspace(is_active: ReadSignal<bool>) -> Element {
@@ -93,16 +96,128 @@ impl DataLayout {
             customized: use_signal(|| false),
         };
         // Cameras arrive asynchronously. Follow the default until an operator
-        // resizes or docks a panel; after that the native workbench owns it.
+        // resizes or docks a panel; after that they own the geometry, but the
+        // camera column still follows the episode, so a newly opened
+        // episode's cameras take the tiles the grid gives them rather than
+        // whatever the previous episode left behind.
         use_effect(use_reactive((&canonical,), move |(mut canonical,)| {
-            if !*owner.customized.peek() {
-                Self::restore_active(&owner.layout.peek().root, &mut canonical);
-                if *owner.layout.peek() != canonical {
-                    owner.layout.set(canonical);
-                }
+            let current = owner.layout.peek().clone();
+            let next = if *owner.customized.peek() {
+                let Some(next) = Self::with_cameras_of(&current, &canonical) else {
+                    return;
+                };
+                next
+            } else {
+                Self::restore_active(&current.root, &mut canonical);
+                canonical
+            };
+            if current != next {
+                owner.layout.set(next);
             }
         }));
         owner
+    }
+
+    /// The current layout with its camera column replaced by the canonical
+    /// one when the set of camera panels changed; `None` when nothing needs
+    /// to change. Without a camera column to rebuild, the grid opens beside
+    /// the primary tile; without a primary tile, only the canonical tree
+    /// knows where cameras go.
+    fn with_cameras_of(current: &PanelLayout, canonical: &PanelLayout) -> Option<PanelLayout> {
+        if Self::camera_panels(&current.root) == Self::camera_panels(&canonical.root) {
+            return None;
+        }
+        let grid = Self::editors(&canonical.root).map(|(_, cameras)| cameras.clone());
+        let mut next = current.clone();
+        match (Self::editors_mut(&mut next.root), grid) {
+            (Some(editors), Some(grid)) => {
+                if let LayoutNode::Split { second, .. } = editors {
+                    **second = grid;
+                }
+            }
+            (Some(editors), None) => {
+                let primary = match &*editors {
+                    LayoutNode::Split { first, .. } => (**first).clone(),
+                    tile => tile.clone(),
+                };
+                *editors = primary;
+            }
+            (None, Some(grid)) => {
+                let Some(primary) = Self::tile_node_mut(&mut next.root, "primary") else {
+                    return Some(canonical.clone());
+                };
+                let primary_tile = primary.clone();
+                *primary = LayoutNode::split(
+                    EDITORS_SPLIT,
+                    SplitAxis::Horizontal,
+                    0.49,
+                    primary_tile,
+                    grid,
+                );
+            }
+            (None, None) => return None,
+        }
+        Some(next)
+    }
+
+    fn tile_node_mut<'a>(node: &'a mut LayoutNode, id: &str) -> Option<&'a mut LayoutNode> {
+        let is_tile = matches!(node, LayoutNode::Tile(tile) if tile.id.as_str() == id);
+        if is_tile {
+            return Some(node);
+        }
+        match node {
+            LayoutNode::Tile(_) => None,
+            LayoutNode::Split { first, second, .. } => {
+                Self::tile_node_mut(first, id).or_else(|| Self::tile_node_mut(second, id))
+            }
+        }
+    }
+
+    fn is_camera(panel: &PanelId) -> bool {
+        panel.as_str().starts_with("camera:") || panel.as_str() == "camera-empty"
+    }
+
+    fn camera_panels(node: &LayoutNode) -> BTreeSet<String> {
+        match node {
+            LayoutNode::Tile(tile) => tile
+                .panels
+                .iter()
+                .filter(|panel| Self::is_camera(panel))
+                .map(|panel| panel.as_str().to_owned())
+                .collect(),
+            LayoutNode::Split { first, second, .. } => {
+                let mut all = Self::camera_panels(first);
+                all.extend(Self::camera_panels(second));
+                all
+            }
+        }
+    }
+
+    /// The primary tile and the camera column of the editors split.
+    fn editors(node: &LayoutNode) -> Option<(&LayoutNode, &LayoutNode)> {
+        match node {
+            LayoutNode::Tile(_) => None,
+            LayoutNode::Split {
+                id, first, second, ..
+            } if id.as_str() == EDITORS_SPLIT => Some((first, second)),
+            LayoutNode::Split { first, second, .. } => {
+                Self::editors(first).or_else(|| Self::editors(second))
+            }
+        }
+    }
+
+    fn editors_mut(node: &mut LayoutNode) -> Option<&mut LayoutNode> {
+        let is_editors =
+            matches!(node, LayoutNode::Split { id, .. } if id.as_str() == EDITORS_SPLIT);
+        if is_editors {
+            return Some(node);
+        }
+        match node {
+            LayoutNode::Tile(_) => None,
+            LayoutNode::Split { first, second, .. } => {
+                Self::editors_mut(first).or_else(|| Self::editors_mut(second))
+            }
+        }
     }
 
     fn observe(mut self, actual: &PanelLayout, canonical: &PanelLayout) {
@@ -209,13 +324,9 @@ impl DataLayout {
         };
         let primary = LayoutNode::tile("primary", primary_ids.into_iter().map(PanelId::new));
         let editors = match Self::camera_grid(camera_ids, 0) {
-            Some(cameras) => LayoutNode::split(
-                "data-editors",
-                SplitAxis::Horizontal,
-                0.49,
-                primary,
-                cameras,
-            ),
+            Some(cameras) => {
+                LayoutNode::split(EDITORS_SPLIT, SplitAxis::Horizontal, 0.49, primary, cameras)
+            }
             None => primary,
         };
         let visualization = LayoutNode::split(
@@ -747,6 +858,63 @@ mod tests {
         let mut docked = original.clone();
         docked.dock_panel(&PanelId::new("plots"), &"timeline".into(), DockZone::Center);
         assert!(!DataLayout::same_arrangement(&original.root, &docked.root));
+    }
+
+    #[test]
+    fn cameras_follow_the_episode_inside_the_operators_arrangement() {
+        let three = [
+            PanelId::new("camera:/top#a"),
+            PanelId::new("camera:/left#b"),
+            PanelId::new("camera:/right#c"),
+        ];
+        let two = [
+            PanelId::new("camera:/top#d"),
+            PanelId::new("camera:/gripper#e"),
+        ];
+        let mut arranged = DataLayout::initial(&three, true);
+        if let LayoutNode::Split { ratio, .. } = &mut arranged.root {
+            *ratio = 0.3;
+        }
+        let canonical = DataLayout::initial(&two, true);
+        let next = DataLayout::with_cameras_of(&arranged, &canonical).unwrap();
+        assert!(next.valid());
+        assert!(matches!(&next.root, LayoutNode::Split { ratio, .. } if *ratio == 0.3));
+        assert_eq!(next.tile_for_panel(&two[0]).unwrap().as_str(), "cameras");
+        assert_eq!(next.tile_for_panel(&two[1]).unwrap().as_str(), "cameras-2");
+        assert!(next.tile_for_panel(&three[2]).is_none());
+        assert!(next.tile(&"cameras-3".into()).is_none());
+        // The same cameras again change nothing.
+        assert!(DataLayout::with_cameras_of(&next, &canonical).is_none());
+        // Closing the episode removes the camera column and keeps the ratio.
+        let browsing = DataLayout::initial(&[], true);
+        let closed = DataLayout::with_cameras_of(&next, &browsing).unwrap();
+        assert!(closed.valid());
+        assert!(closed.tile(&"cameras".into()).is_none());
+        assert_eq!(
+            closed
+                .tile_for_panel(&PanelId::new("plots"))
+                .unwrap()
+                .as_str(),
+            "primary"
+        );
+        assert!(matches!(&closed.root, LayoutNode::Split { ratio, .. } if *ratio == 0.3));
+        // Reopening from the browsing arrangement grows the camera column
+        // beside the primary tile and still keeps the operator's ratio.
+        let reopened = DataLayout::with_cameras_of(&closed, &canonical).unwrap();
+        assert!(reopened.valid());
+        assert!(matches!(&reopened.root, LayoutNode::Split { ratio, .. } if *ratio == 0.3));
+        assert_eq!(
+            reopened.tile_for_panel(&two[0]).unwrap().as_str(),
+            "cameras"
+        );
+        assert_eq!(
+            reopened
+                .tile_for_panel(&PanelId::new("plots"))
+                .unwrap()
+                .as_str(),
+            "primary"
+        );
+        assert!(DataLayout::editors(&reopened.root).is_some());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

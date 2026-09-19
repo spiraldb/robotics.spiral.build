@@ -1,8 +1,8 @@
 //! State owned by the mounted Live workspace and shared by its panels.
 use super::RecordingClient;
+use super::{signals::SignalStore, timeline_state::TimelineController};
 use crate::activities::data::dataset_catalog::DatasetChoices;
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::panels::timeline::{signals::SignalStore, state::TimelineController};
 use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;

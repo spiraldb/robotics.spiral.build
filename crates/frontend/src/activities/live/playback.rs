@@ -1,17 +1,17 @@
 //! Live's recording policies and cross-panel playback synchronization.
+use super::signals::RecordingTimeline;
 
 use super::timeline_actions::LiveTimelineActions;
 use crate::activities::live::recording_review::{
     EpisodePlaybackTime, EpisodePreview, EpisodePreviewRequest, EpisodePreviewSignals,
 };
 use crate::activities::live::session::LiveSession;
-use crate::panels::recorded_source::RecordedSource;
-use crate::panels::timeline::panel::{
-    RecordedTimelineTraces, RecordingTimeline, SignalSource, StudioTimelineState,
-    TimelineVisualization,
+use crate::activities::live::timeline_panel::{
+    SignalSource, StudioTimelineState, TimelineVisualization,
 };
-use crate::panels::timeline::playback::TimelineReplay;
-use crate::panels::timeline::subject::{TimelineSubject, TimelineTarget};
+use crate::activities::live::timeline_playback::TimelineReplay;
+use crate::activities::live::timeline_subject::{TimelineSubject, TimelineTarget};
+use crate::panels::recorded_source::RecordedSource;
 use dioxus::prelude::*;
 use std::sync::Arc;
 
@@ -172,7 +172,7 @@ impl LiveTimeline {
         let signal_lanes = match episode_preview.as_ref() {
             Some(preview) => Arc::clone(preview.signal_lanes()),
             None if recorded_episode_active => {
-                Arc::new(RecordedTimelineTraces::default().signal_lanes())
+                Arc::new(super::signals::SignalStore::default().timeline_lanes())
             }
             None => live_signal_lanes,
         };
@@ -204,7 +204,7 @@ impl LiveTimeline {
             .replay()
             .filter(|replay| subject.episode_id() == Some(replay.episode()));
         let playback = timeline.playback(replay.as_ref());
-        let disarm_robot_sync = robot_sync && !capabilities.robot_sync().is_allowed();
+        let disarm_robot_sync = robot_sync && !capabilities.robot_sync().is_ok();
         use_effect(use_reactive(
             (&timeline_target, &disarm_robot_sync),
             move |(current_target, must_disarm)| {
@@ -227,8 +227,7 @@ impl LiveTimeline {
             subject,
             source: episode_preview_source,
             state: StudioTimelineState::new(subject_for_state, playhead(), playback)
-                .with_controls(follow_live(), robot_sync)
-                .with_label("Live Timeline"),
+                .with_controls(follow_live(), robot_sync),
             visualization: TimelineVisualization::new(signal_lanes, signal_source, capabilities),
             actions: preview_session.actions(),
         }
@@ -262,7 +261,7 @@ impl LiveTimeline {
     pub(super) fn render(&self) -> Element {
         let subject = self.subject.clone();
         let actions = self.actions;
-        rsx! { crate::panels::timeline::panel::StudioTimeline {
+        rsx! { crate::activities::live::timeline_panel::LiveTimelinePanel {
             state: self.state.clone(), visualization: self.visualization.clone(),
             on_action: move |action| actions.dispatch(subject.clone(), action),
         } }

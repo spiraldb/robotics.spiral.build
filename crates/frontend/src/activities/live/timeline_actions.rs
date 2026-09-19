@@ -5,11 +5,11 @@ use crate::activities::live::recording_review::{
     EpisodePlaybackTime, EpisodePreviewRequest, EpisodePreviewSignals,
 };
 use crate::activities::live::session::LiveSession;
-use crate::panels::timeline::panel::{
-    TimelineAction, TimelineCapabilities, TimelineCaptureAction, TimelineGate,
-    TimelinePreviewAction, TimelineRobotSyncAction,
+use crate::activities::live::timeline_panel::{
+    TimelineAction, TimelineCapabilities, TimelineCaptureAction, TimelinePreviewAction,
+    TimelineRobotSyncAction,
 };
-use crate::panels::timeline::subject::TimelineSubject;
+use crate::activities::live::timeline_subject::TimelineSubject;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::ModeSelection;
 
@@ -34,6 +34,13 @@ impl LiveTimelineActions {
     }
 
     pub(super) fn dispatch(self, subject: TimelineSubject, action: TimelineAction) {
+        let current = self.session.telemetry().recording();
+        if subject.episode_id() != current.as_ref().map(|recording| recording.episode()) {
+            self.session
+                .project()
+                .report("The Timeline subject changed before the action was applied.");
+            return;
+        }
         let controller = self.session.timeline_controller();
         let review_episode = subject.recorded_episode().map(str::to_owned);
         let seek_context = self.session.timeline_seek_context(&subject);
@@ -135,6 +142,12 @@ impl LiveTimelineActions {
                 }
                 if request.committed()
                     && request.moves_robot()
+                    && robot_sync_target.peek().as_ref() == Some(request.target())
+                    && self
+                        .session
+                        .live_timeline_capabilities(&subject)
+                        .robot_sync()
+                        .is_ok()
                     && let Some((episode, robot, source_arm)) = seek_context
                 {
                     self.session.physical_seek(
@@ -211,13 +224,13 @@ impl LiveTimelineActions {
             });
         let capture = match event.key() {
             Key::Character(key) if key.eq_ignore_ascii_case("r") => Some(if recording.is_some() {
-                crate::panels::timeline::panel::TimelineCaptureAction::Stop
+                TimelineCaptureAction::Stop
             } else {
-                crate::panels::timeline::panel::TimelineCaptureAction::Start
+                TimelineCaptureAction::Start
             }),
             Key::Character(key) if key.eq_ignore_ascii_case("x") && recording.is_some() => {
                 if event.modifiers().shift() {
-                    Some(crate::panels::timeline::panel::TimelineCaptureAction::Discard)
+                    Some(TimelineCaptureAction::Discard)
                 } else {
                     event.prevent_default();
                     self.session.project().report_info_from(
@@ -247,48 +260,38 @@ impl LiveSession {
         subject: &TimelineSubject,
     ) -> TimelineCapabilities {
         let record = if let Some(reason) = self.recording_blocker() {
-            TimelineGate::blocked(reason)
+            Err(reason)
         } else {
-            TimelineGate::allowed()
+            Ok(())
         };
         let preview = if subject.recorded_episode().is_none() {
-            TimelineGate::blocked(
-                "Select a completed episode or pause the current recording first.",
-            )
+            Err("Select a completed episode or pause the current recording first.")
         } else if !subject.available() {
-            TimelineGate::blocked(
-                subject
-                    .problem()
-                    .unwrap_or("This Timeline subject is unavailable."),
-            )
+            Err(subject
+                .problem()
+                .unwrap_or("This Timeline subject is unavailable."))
         } else {
-            TimelineGate::allowed()
+            Ok(())
         };
-        let seek = preview.clone();
         let synced_playback = match subject.episode() {
-            Some(episode) => self
-                .replay_blocker(episode)
-                .map(TimelineGate::blocked)
-                .unwrap_or_else(TimelineGate::allowed),
-            None => TimelineGate::blocked("Select a completed episode to play it with robot sync."),
+            Some(episode) => self.replay_blocker(episode).map(Err).unwrap_or(Ok(())),
+            None => Err("Select a completed episode to play it with robot sync.".into()),
         };
         let robot_sync = if !subject.is_paused_recording() && subject.episode().is_none() {
-            TimelineGate::blocked(
-                "Pause or select a completed episode before synchronizing a robot.",
-            )
+            Err("Pause or select a completed episode before synchronizing a robot.")
         } else if !self.telemetry().controls_available() {
-            TimelineGate::blocked("Reconnect telemetry before synchronizing a robot.")
+            Err("Reconnect telemetry before synchronizing a robot.")
         } else if self.telemetry().mode_active()
             && !matches!(self.telemetry().mode(), ModeSelection::Replay { .. })
         {
-            TimelineGate::blocked("Stop the active control mode before synchronizing a robot.")
+            Err("Stop the active control mode before synchronizing a robot.")
         } else if self.timeline_seek_context(subject).is_none() {
-            TimelineGate::blocked("Connect and calibrate a compatible follower to synchronize it.")
+            Err("Connect and calibrate a compatible follower to synchronize it.")
         } else {
-            TimelineGate::allowed()
+            Ok(())
         };
-        TimelineCapabilities::new(record, preview, seek)
-            .with_robot_controls(synced_playback, robot_sync)
+        TimelineCapabilities::new(record, preview.map_err(str::to_owned))
+            .with_robot_controls(synced_playback, robot_sync.map_err(str::to_owned))
     }
 
     fn timeline_seek_context(

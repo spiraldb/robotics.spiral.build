@@ -154,6 +154,11 @@ impl TraceChartLayout {
         }
     }
 
+    pub(crate) fn with_window(mut self, window: (f64, f64)) -> Self {
+        self.window = window;
+        self
+    }
+
     pub(crate) fn with_gap(mut self, gap: f64) -> Self {
         self.lane_gap = gap.max(0.0);
         self
@@ -171,15 +176,10 @@ impl TraceChartLayout {
 }
 
 pub(crate) trait TimelineSignalLanes {
-    fn chart(&self, duration: f64) -> Chart;
     fn chart_with(&self, layout: &TraceChartLayout) -> Chart;
 }
 
 impl TimelineSignalLanes for [TimelineSignalLane] {
-    fn chart(&self, duration: f64) -> Chart {
-        self.chart_with(&TraceChartLayout::sparkline(duration))
-    }
-
     fn chart_with(&self, layout: &TraceChartLayout) -> Chart {
         let mut chart = Chart::new().animation(false);
         if layout.tooltip {
@@ -369,7 +369,12 @@ mod tests {
         );
         assert!(series.has_isolated_samples());
         let lane = TimelineSignalLane::new("sensor", "sensor", "blue").with_series(vec![series]);
-        let chart = serde_json::to_value([lane].as_slice().chart(2.0)).unwrap();
+        let chart = serde_json::to_value(
+            [lane]
+                .as_slice()
+                .chart_with(&TraceChartLayout::sparkline(2.0)),
+        )
+        .unwrap();
         assert_eq!(chart["series"][0]["symbol"], "circle");
         assert_eq!(chart["series"][0]["showSymbol"], true);
         let axis = chart["yAxis"].get(0).unwrap_or(&chart["yAxis"]);
