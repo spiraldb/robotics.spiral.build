@@ -1,52 +1,105 @@
-//! Natural-language and manual authoring share one editable, validated proposal.
-use super::{client::CurationClient, state::CurationController};
+//! One place to add the next step: describe it in words and let the backend
+//! interpret it, or pick a kind and fill in the row that appears.
+use super::{client::CurationClient, pipeline::PipelineSelection, state::CurationController};
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::{
     facts::TopicRef,
     interpretation::{InterpretationRequest, RuleIntent, RuleProposal},
-    rules::{ConditionOp, CurationTransform, TransformOperation},
+    rules::{
+        ConditionOp, ConditionValue, CurationRule, CurationTransform, RuleCondition,
+        TransformOperation,
+    },
 };
 
 #[component]
 pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<String>) -> Element {
-    let mut manual_operation = use_signal(|| "duration".to_owned());
     let mut prompt = use_signal(String::new);
     let mut proposal = use_signal(|| None::<RuleProposal>);
     let mut pending = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
+    // The kind picker remounts after every pick so it always reads its prompt.
+    let mut picks = use_signal(|| 0_u32);
     let can_add = !pending() && !prompt().trim().is_empty();
+    let interpret = {
+        let topics = camera_topics.clone();
+        move |_| {
+            if pending() {
+                return;
+            }
+            pending.set(true);
+            error.set(None);
+            proposal.set(None);
+            let request = InterpretationRequest::new(prompt(), topics.clone());
+            let original = controller.spec();
+            spawn(async move {
+                let result = CurationClient::current().interpret(&request).await;
+                pending.set(false);
+                let current = controller.spec();
+                if current.id() != original.id() || current.source() != original.source() {
+                    error.set(Some(
+                        "The recipe or dataset changed. Add the step again for the current recipe."
+                            .into(),
+                    ));
+                    return;
+                }
+                match result {
+                    Ok(draft) if draft.problems().is_empty() => {
+                        match controller.add_proposal(&draft) {
+                            Ok(()) => prompt.set(String::new()),
+                            Err(message) => error.set(Some(message)),
+                        }
+                    }
+                    Ok(draft) => proposal.set(Some(draft)),
+                    Err(problem) => error.set(Some(problem.to_string())),
+                }
+            });
+        }
+    };
     rsx! {
-        div { class: "curation-section curation-composer",
-            label { r#for: "curation-rule-description", class: "curation-section-title", "Add a rule" }
-            textarea { id: "curation-rule-description", class: "curation-input curation-rule-prompt", rows: "3",
-                placeholder: "Exclude episodes shorter than 5 seconds…", value: "{prompt}", disabled: pending(),
-                oninput: move |event| { prompt.set(event.value()); proposal.set(None); error.set(None); } }
-            Action { purpose: ActionPurpose::Create, variant: ActionVariant::Solid, disabled: !can_add,
-                onclick: { let topics = camera_topics.clone(); move |_| {
-                    if pending() { return; }
-                    pending.set(true); error.set(None); proposal.set(None);
-                    let request = InterpretationRequest::new(prompt(), topics.clone());
-                    let original = controller.spec();
-                    spawn(async move {
-                        let result = CurationClient::current().interpret(&request).await;
-                        pending.set(false);
-                        let current = controller.spec();
-                        if current.id() != original.id() || current.source() != original.source() {
-                            error.set(Some("The recipe or dataset changed. Click Add rule again for the current recipe.".into()));
-                            return;
+        section { class: "curation-section curation-composer", "aria-label": "Add a step",
+            div { class: "curation-section-title", span { "Add a step" } }
+            div { class: "curation-composer-box",
+                label { r#for: "curation-rule-description", class: "sr-only", "Describe a step" }
+                textarea { id: "curation-rule-description", class: "curation-composer-input", rows: "2",
+                    placeholder: "Describe it, e.g. exclude episodes shorter than 5 seconds",
+                    value: "{prompt}", disabled: pending(),
+                    oninput: move |event| { prompt.set(event.value()); proposal.set(None); error.set(None); } }
+                div { class: "curation-composer-actions",
+                    label { r#for: "curation-step-kind", class: "sr-only", "Add a step by kind" }
+                    select { key: "picker-{picks}", id: "curation-step-kind", class: "curation-select curation-step-picker", value: "",
+                        title: "Add a step of a chosen kind and fill it in",
+                        onchange: {
+                            let cameras = camera_topics.clone();
+                            move |event| {
+                                error.set(None);
+                                match add_by_kind(controller, &event.value(), cameras.first()) {
+                                    Ok(Some(draft)) => proposal.set(Some(draft)),
+                                    Ok(None) => proposal.set(None),
+                                    Err(message) => error.set(Some(message)),
+                                }
+                                picks += 1;
+                            }
+                        },
+                        option { value: "", disabled: true, selected: true, "Add by kind…" }
+                        optgroup { label: "Filter",
+                            option { value: "duration", "Episode duration" }
+                            option { value: "message_count", "Message count" }
+                            option { value: "camera_luminance", "Camera brightness" }
                         }
-                        match result {
-                            Ok(draft) if draft.problems().is_empty() => match controller.add_proposal(&draft) {
-                                Ok(()) => prompt.set(String::new()),
-                                Err(message) => error.set(Some(message)),
-                            },
-                            Ok(draft) => proposal.set(Some(draft)),
-                            Err(problem) => error.set(Some(problem.to_string())),
+                        optgroup { label: "Transform",
+                            option { value: "productive_chunks", "Remove unproductive moments" }
+                            option { value: "resize_camera", "Resize camera" }
+                            option { value: "camera_color_profile", "Camera colour profile" }
+                            option { value: "trim_time", "Trim time" }
                         }
-                    });
-                } },
-                if pending() { "Adding…" } else { "Add rule" }
+                    }
+                    Action { purpose: ActionPurpose::Create, variant: ActionVariant::Solid, disabled: !can_add,
+                        aria_busy: pending(), title: "Interpret the description as a step",
+                        onclick: interpret,
+                        if pending() { "Adding…" } else { "Add" }
+                    }
+                }
             }
             if let Some(error) = error() { p { class: "curation-rule-invalid", role: "alert", "{error}" } }
             if let Some(draft) = proposal() {
@@ -60,42 +113,62 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
                             Ok(()) => { proposal.set(None); prompt.set(String::new()); }
                             Err(message) => error.set(Some(message)),
                         }
-                    }, "Add rule" }
+                    }, "Add step" }
             }
-            details { class: "curation-manual-builder",
-                summary { "Build manually" }
-                label { r#for: "curation-manual-operation", class: "curation-section-note", "Operation" }
-                select { id: "curation-manual-operation", class: "curation-select", value: manual_operation(),
-                    onchange: move |event| manual_operation.set(event.value()),
-                    for intent in RuleIntent::ALL { option { value: intent.key(), "{intent.label()}" } }
-                    option { value: "resize_camera", "Resize camera" }
-                    option { value: "camera_color_profile", "Camera colour profile" }
-                    option { value: "trim_time", "Trim time" }
-                }
-                Action { purpose: ActionPurpose::Create, variant: ActionVariant::Quiet,
-                    onclick: { let cameras = camera_topics.clone(); move |_| {
-                        error.set(None);
-                        let operation = ManualTransform::operation(&manual_operation(), cameras.first());
-                        if let Some(operation) = operation {
-                            let id = format!("transform-{}-{:x}", js_sys::Date::now() as u64, (js_sys::Math::random() * u32::MAX as f64) as u64);
-                            controller.edit(|spec| spec.add_transform(CurationTransform::new(id.clone(), "", operation)));
-                            controller.select_pipeline(super::pipeline::PipelineSelection::Step(id));
-                            proposal.set(None);
-                        } else {
-                            let mut draft = RuleProposal::default();
-                            draft.set_intent(RuleIntent::from_key(&manual_operation()));
-                            if draft.problems().is_empty() {
-                                match controller.add_proposal(&draft) {
-                                    Ok(()) => proposal.set(None),
-                                    Err(message) => error.set(Some(message)),
-                                }
-                            } else {
-                                proposal.set(Some(draft));
-                            }
-                        }
-                    } }, "Add rule" }
+        }
+    }
+}
 
+fn fresh_id(prefix: &str) -> String {
+    format!(
+        "{prefix}-{}-{:x}",
+        js_sys::Date::now() as u64,
+        (js_sys::Math::random() * u32::MAX as f64) as u64
+    )
+}
+
+/// Add a step of one kind. Filters over built-in facts and camera transforms
+/// land in the recipe at once, ready to fill in; a kind that still needs a
+/// choice (which camera to measure) comes back as a draft to complete.
+fn add_by_kind(
+    controller: CurationController,
+    key: &str,
+    camera: Option<&String>,
+) -> Result<Option<RuleProposal>, String> {
+    match key {
+        "duration" | "message_count" => {
+            let fact = if key == "duration" {
+                "duration_s"
+            } else {
+                "messages"
+            };
+            let id = fresh_id("rule");
+            let rule = CurationRule::new(
+                id.clone(),
+                "",
+                RuleCondition::new(fact, ConditionOp::Below, ConditionValue::None),
+            );
+            controller.edit(move |spec| spec.add_rule(rule));
+            controller.select_pipeline(PipelineSelection::Step(id));
+            Ok(None)
+        }
+        "camera_luminance" | "productive_chunks" => {
+            let mut draft = RuleProposal::default();
+            draft.set_intent(RuleIntent::from_key(key));
+            if draft.problems().is_empty() {
+                controller.add_proposal(&draft).map(|()| None)
+            } else {
+                Ok(Some(draft))
             }
+        }
+        other => {
+            let operation = ManualTransform::operation(other, camera)
+                .ok_or_else(|| "That kind of step is not available.".to_owned())?;
+            let id = fresh_id("transform");
+            let transform = CurationTransform::new(id.clone(), "", operation);
+            controller.edit(move |spec| spec.add_transform(transform));
+            controller.select_pipeline(PipelineSelection::Step(id));
+            Ok(None)
         }
     }
 }
@@ -113,7 +186,7 @@ fn ProposalEditor(
             .unwrap_or_default()
     });
     rsx! {
-        div { class: "curation-proposal", "aria-label": "Interpreted rule",
+        div { class: "curation-proposal", "aria-label": "Interpreted step",
             label { "Operation"
                 select { class: "curation-select", value: proposal.intent().key(),
                     onchange: { let proposal = proposal.clone(); move |event| { let mut next = proposal.clone(); next.set_intent(RuleIntent::from_key(&event.value())); on_change.call(next); } },

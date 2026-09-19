@@ -52,7 +52,7 @@ pub(super) fn EpisodeSheet(
                     }
                 }
                 dl { class: "curation-stat-grid",
-                    div { class: "curation-stat", dt { "Recorded" } dd { "{episode.message_start_time().map_or_else(|| \"—\".into(), UtcTimestampPresentation::utc_label)}" } }
+                    div { class: "curation-stat", dt { "Recorded" } dd { "{episode.message_start_time().filter(|start| *start > 0).map_or_else(|| \"—\".into(), UtcTimestampPresentation::utc_label)}" } }
                     div { class: "curation-stat", dt { "Duration" } dd { "{episode.duration_seconds().map_or_else(|| \"—\".into(), ClockPresentation::clock_label)}" } }
                     div { class: "curation-stat", dt { "Messages" } dd { "{episode.message_count().map_or_else(|| \"—\".into(), GroupedCountPresentation::grouped_label)}" } }
                     div { class: "curation-stat", dt { "Channels" } dd { "{episode.channel_count().map_or_else(|| \"—\".into(), GroupedCountPresentation::grouped_label)}" } }
@@ -76,10 +76,10 @@ pub(super) fn EpisodeSheet(
                         p { class: "curation-section-note", "This recipe has no filters; every episode was kept." }
                     }
                     ul { class: "curation-verdict-list",
-                        for (index, rule) in judged.rules().iter().enumerate() {
+                        for rule in judged.rules().iter() {
                             li { class: "curation-verdict-row",
                                 "data-fired": verdict.excluded_by().iter().any(|fired| fired == rule.id()),
-                                style: "--rule-tone: {RuleTone::at(index).css()}",
+                                style: "--rule-tone: {RuleTone::of(&judged, rule.id()).css()}",
                                 span { class: "curation-rule-dot", "aria-hidden": "true" }
                                 span { class: "curation-verdict-text", "{rule.condition().sentence(&catalog)}" }
                                 span { class: "curation-verdict-word",

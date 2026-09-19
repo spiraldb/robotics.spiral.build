@@ -398,13 +398,23 @@ put reads as a bench tool.
   identity tints; a run animates its edges and shows skeleton rows until Spiral
   answers. Every inference is display-only and the stored value stays exact in
   tooltips and the row inspector.
-- Curation is a contact sheet: a 26% Recipe column at the left and the
-  Sheet, a run strip over the tile grid, at the right. Every episode is a
-  tile; kept tiles stay in full ink on paper, struck tiles recede onto the
-  recess and carry the words of the rule that removed them in that rule's
-  own tint. The selected episode's evidence docks inside the Sheet as the
-  shared side sheet rather than holding a third panel. Workflow and Curation
-  share one document bar, state chip, switcher, and run strip.
+- Curation is a contact sheet under a pipeline strip: a 26% Recipe column
+  at the left and the Sheet at the right. The strip lays the recipe out in
+  Workflow's stage-card anatomy, narrowed to 180×108 so a recipe fits the
+  pane, on the same dotted canvas (dataset · filters · transforms · curated
+  output), each footer carrying the measured episode count, with the
+  episodes a filter excluded hanging beneath it as a chip in that rule's
+  tint. Selecting a card names the stage in one heading line and
+  lays out its episodes: every episode is a tile; kept tiles stay in full ink
+  on paper, struck tiles recede onto the recess and carry the words of the
+  rule that removed them in that rule's own tint; a numeric filter adds a
+  histogram of what it measured. The selected episode's evidence docks
+  beside the tiles, under the strip, as the shared side sheet; the curated
+  output instead splits its stage in half and always shows one kept
+  episode's evidence. Each recipe row wears the same kind mark and "n · Kind"
+  title as its card.
+  Workflow and Curation share one document bar, state chip, switcher, stage
+  card, canvas controls, and run strip.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -657,24 +667,40 @@ expanding a data stream exposes its fields for one-by-one selection, and
 clicking a stream name selects it for Messages. Cameras, Plots, the ruler,
 and the stream rows share one playhead and one visible span.
 
-Curation is a contact sheet. Under the same 36px document bar Workflow uses
-(glyph · name ▾ · … · state chip Discard Save ▶Run), the `curation-sheet-v2`
-layout scope opens as two tiles: a 26% Recipe column beside the Sheet. There
-is no third panel; the selected episode's evidence docks at the Sheet's
-right edge as the shared 320px side sheet while one is open, so nothing sits
-empty at rest and the whole dataset keeps the height. Workflow and Curation
-share the document bar, state chip, rename form, switcher popover, and run
-strip as one `document-*` / `run-*` class family, so the two document
-activities keep one chrome in the same place. The canonical first-open
-Curation layout is:
+Curation is a contact sheet under a pipeline strip. Under the same 36px
+document bar Workflow uses (glyph · name ▾ · … · state chip Discard Save
+▶Run), the `curation-sheet-v2` layout scope opens as two tiles: a 26% Recipe
+column beside the Sheet. The Sheet begins with a fixed 200px canvas that lays
+the recipe out left to right as `workflow-stage-card`s on the dotted viewport
+(Dataset · 1 · Filter · … · Curated output), narrowed to 180×108 on a 204px
+step, with the episodes a filter excluded hanging 24px beneath it as a 112×24
+chip in that rule's tint. Two fingers pan the strip as they do the Workflow
+graph, a pinch and the shared canvas controls zoom, and selecting a card that
+sits outside the pane slides it into view. Under the strip one 32px stage heading repeats the selected
+card's mark, title, and summary and holds the list's controls (the
+All · Kept · Excluded segments for the dataset, the episode stepper for a
+transform), then the stage's evidence: the tile grid, a histogram of what a
+numeric filter measured, or one eligible episode's cameras and clock for a
+transform. There is no third panel; the selected episode's evidence docks
+beside the tiles, under the strip, as the shared 320px side sheet while one
+is open, so the strip never changes width. The curated output splits its
+stage in half instead, kept tiles beside the first episode's evidence, and
+never shows an empty half. Workflow
+and Curation share the document bar, state chip, rename form, switcher
+popover, stage card, canvas controls, and run strip as one `document-*` /
+`run-*` / `workflow-stage-*` class family, so the two document activities
+keep one chrome in the same place. The canonical first-open Curation layout
+is:
 
 ```text
 ┌── 26% ──┬──────────────── 74% ────────────────┐
-│ Recipe  │ Sheet — run strip over the tile grid │
-│ Source  │                                      │
-│ Measure │  tiles …            ┊ Episode N of M │
-│ Rules   │                     ┊ (side sheet,   │
-│ Transf. │                     ┊  while open)   │
+│ Recipe  │ Sheet — run strip while a run exists │
+│ Dataset │ [Dataset]─[1·Filter]─[2·Filter]─[Out]│
+│ Steps   │            └ 21 excluded             │
+│  1 · F  │ ▣ Dataset · name      All Kept Excl. │
+│  2 · F  │  tiles …            ┊ Episode N of M │
+│  3 · T  │                     ┊ (side sheet,   │
+│ Add step│                     ┊  while open)   │
 └─────────┴──────────────────────────────────────┘
 ```
 

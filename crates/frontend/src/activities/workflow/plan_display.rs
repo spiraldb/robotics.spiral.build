@@ -20,8 +20,7 @@ use workflow_graph::{
 
 use super::highlight::{ExpressionHighlight, SqlHighlight};
 use crate::components::icons::{
-    DataIcon, FitViewIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon,
-    ResultNodeIcon, ZoomInIcon, ZoomOutIcon,
+    DataIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon, ResultNodeIcon,
 };
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, CloseIcon};
 
@@ -321,19 +320,10 @@ fn WorkflowPlanGraph(graph: WorkflowGraph, active: bool) -> Element {
 /// Zoom and fit live on the canvas itself, quiet until needed.
 #[component]
 fn PlanCanvasControls(stage_count: usize) -> Element {
-    let core = use_flow();
     rsx! {
-        div { class: "workflow-canvas-controls", role: "toolbar", "aria-label": "Graph view of {stage_count} stages",
-            onpointerdown: move |event| event.stop_propagation(),
-            Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
-                aria_label: "Zoom in", title: "Zoom in",
-                onclick: move |_| core.zoom_in(200), ZoomInIcon {} }
-            Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
-                aria_label: "Zoom out", title: "Zoom out",
-                onclick: move |_| core.zoom_out(200), ZoomOutIcon {} }
-            Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
-                aria_label: "Fit the whole graph", title: "Fit the whole graph",
-                onclick: move |_| core.fit_view(400), FitViewIcon {} }
+        crate::components::canvas_controls::CanvasControls {
+            label: format!("Graph view of {stage_count} stages"),
+            fit_label: "Fit the whole graph",
         }
     }
 }

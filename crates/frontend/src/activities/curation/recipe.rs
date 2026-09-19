@@ -1,6 +1,8 @@
-//! The recipe column: which dataset, what is measured about each episode,
-//! the rules that exclude, and the transforms the kept episodes receive.
-//! Every control writes the same draft; the sheet answers on Run.
+//! The recipe column: which dataset, the ordered steps that judge and shape
+//! its episodes, and one place to add the next step. Every control writes
+//! the same draft; the sheet answers on Run. Each step row mirrors its
+//! pipeline card (the same kind mark, the same "n · Kind" title), then reads
+//! as one sentence or one named operation.
 
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::CurationStep;
@@ -10,7 +12,7 @@ use spiral_robotics_common::curation::rules::{
 };
 use spiral_robotics_common::datasets::DatasetSelection;
 
-use super::pipeline::PipelineSelection;
+use super::pipeline::{PipelineSelection, StageKind, StageMark};
 use super::sheet::RuleTone;
 use super::state::CurationController;
 use crate::activities::data::DatasetClient;
@@ -62,50 +64,91 @@ fn OrderedRules(controller: CurationController) -> Element {
         .is_some_and(|judged| spec.accepts_output_from(&judged));
     let steps = spec.steps();
     let reorder = super::reorder::RuleReorder::use_binding(controller);
+    let selection = controller.pipeline_selection();
+    let hovered = controller.hovered_rule();
     rsx! {
-        div { class: "curation-section", id: "curation-ordered-rules",
+        section { class: "curation-section curation-steps", id: "curation-ordered-rules", "aria-label": "Recipe steps",
             div { class: "curation-rule-insertion", style: reorder.marker_style(), "aria-hidden": "true" }
             p { id: "curation-reorder-help", class: "sr-only", "Drag to reorder. Or press Space, then arrow keys to move, Space to drop, and Escape to cancel." }
             div { class: "sr-only", "aria-live": "polite", "{reorder.announcement()}" }
-            div { class: "curation-section-title", span { "Rules" } span { "{steps.len()}" } }
+            div { class: "curation-section-title", span { "Steps" } span { "{steps.len()}" } }
             if steps.is_empty() {
                 p { class: "curation-section-note", "Add a filter to exclude whole episodes, or a transform to change their training data." }
             }
             for (index, step) in steps.iter().enumerate() {
-                div { key: "{step.id()}", class: "curation-ordered-rule", id: "curation-rule-{step.id()}",
-                    style: reorder.style(step.id()), "data-dragging": reorder.picked(step.id()),
-                    "data-selected": controller.pipeline_selection() == PipelineSelection::Step(step.id().to_owned()),
-                    onfocusin: { let id = step.id().to_owned(); move |_| controller.select_pipeline(PipelineSelection::Step(id.clone())) },
-                    div { class: "curation-rule-order",
-                        span { "{index + 1}. "
-                            match step { CurationStep::Filter(_) => rsx! { "Filter" }, CurationStep::Transform(_) => rsx! { "Transform" } }
-                        }
-                        button { r#type: "button", class: "curation-reorder-handle", id: "curation-rule-handle-{step.id()}",
-                            "aria-label": "Reorder rule {index + 1}", "aria-describedby": "curation-reorder-help", "aria-pressed": reorder.picked(step.id()),
-                            onpointerdown: { let id = step.id().to_owned(); move |event| reorder.pointer_down(&id, event) },
-                            onpointermove: move |event| reorder.pointer_move(event),
-                            onpointerup: move |event| reorder.pointer_up(event),
-                            onpointercancel: move |event| reorder.pointer_cancel(event),
-                            onlostpointercapture: move |event| reorder.pointer_cancel(event),
-                            onkeydown: { let id = step.id().to_owned(); move |event| reorder.keyboard(&id, event) },
-                            title: "Drag to reorder · Space then arrow keys",
-                            svg { width: "16", height: "16", view_box: "0 0 16 16", fill: "currentColor", "aria-hidden": "true",
-                                for (x, y) in [(5,3),(11,3),(5,8),(11,8),(5,13),(11,13)] { circle { cx: "{x}", cy: "{y}", r: "1.2" } }
+                {
+                    let id = step.id().to_owned();
+                    let is_filter = matches!(step, CurationStep::Filter(_));
+                    let (kind, tone, count) = match step {
+                        CurationStep::Filter(rule) => (
+                            StageKind::Filter,
+                            Some(RuleTone::of(&spec, rule.id())),
+                            counts_current
+                                .then(|| outcome.as_ref().and_then(|outcome| outcome.stage_impacts().iter().find(|impact| impact.id() == rule.id()).map(|impact| format!("{} excluded", impact.excluded()))))
+                                .flatten(),
+                        ),
+                        CurationStep::Transform(transform) => (
+                            StageKind::of_transform(transform.operation()),
+                            None,
+                            counts_current
+                                .then(|| outcome.as_ref().and_then(|outcome| outcome.stage_impacts().iter().find(|impact| impact.id() == transform.id()).and_then(|impact| impact.affected_episodes()).map(|reached| format!("{reached} reached"))))
+                                .flatten(),
+                        ),
+                    };
+                    let select_id = id.clone();
+                    let focus_id = id.clone();
+                    let enter_id = id.clone();
+                    let remove_id = id.clone();
+                    rsx! {
+                        article { key: "{id}", class: "curation-step", id: "curation-rule-{id}",
+                            style: reorder.style(&id),
+                            "data-dragging": reorder.picked(&id),
+                            "data-selected": selection == PipelineSelection::Step(id.clone()),
+                            "data-hovered": is_filter && hovered.as_deref() == Some(id.as_str()),
+                            onclick: move |_| controller.select_pipeline(PipelineSelection::Step(select_id.clone())),
+                            onfocusin: move |_| controller.select_pipeline(PipelineSelection::Step(focus_id.clone())),
+                            // Resting the pointer on a filter lights the tiles it struck.
+                            onmouseenter: move |_| if is_filter { controller.set_hovered_rule(Some(enter_id.clone())) },
+                            onmouseleave: move |_| if is_filter { controller.set_hovered_rule(None) },
+                            header { class: "curation-step-head",
+                                StageMark { kind, tone }
+                                h4 { class: "curation-step-title", "{index + 1} · " if is_filter { "Filter" } else { "Transform" } }
+                                if let Some(count) = count {
+                                    span { class: "curation-step-count", title: if is_filter { "Episodes this filter excluded in the visible run" } else { "Episodes this transform reached in the visible run" }, "{count}" }
+                                }
+                                div { class: "curation-step-tools",
+                                    button { r#type: "button", class: "curation-reorder-handle", id: "curation-rule-handle-{id}",
+                                        "aria-label": "Reorder step {index + 1}", "aria-describedby": "curation-reorder-help", "aria-pressed": reorder.picked(&id),
+                                        onpointerdown: { let id = id.clone(); move |event| reorder.pointer_down(&id, event) },
+                                        onpointermove: move |event| reorder.pointer_move(event),
+                                        onpointerup: move |event| reorder.pointer_up(event),
+                                        onpointercancel: move |event| reorder.pointer_cancel(event),
+                                        onlostpointercapture: move |event| reorder.pointer_cancel(event),
+                                        onkeydown: { let id = id.clone(); move |event| reorder.keyboard(&id, event) },
+                                        title: "Drag to reorder · Space then arrow keys",
+                                        svg { width: "16", height: "16", view_box: "0 0 16 16", fill: "currentColor", "aria-hidden": "true",
+                                            for (x, y) in [(5,3),(11,3),(5,8),(11,8),(5,13),(11,13)] { circle { cx: "{x}", cy: "{y}", r: "1.2" } }
+                                        }
+                                    }
+                                    Action { purpose: ActionPurpose::Remove, variant: ActionVariant::Icon,
+                                        aria_label: "Remove step {index + 1}", title: "Remove step",
+                                        onclick: move |event: Event<MouseData>| {
+                                            event.stop_propagation();
+                                            let id = remove_id.clone();
+                                            controller.edit(move |spec| {
+                                                if is_filter { spec.remove_rule(&id); } else { spec.remove_transform(&id); }
+                                            });
+                                            controller.select_pipeline(PipelineSelection::Source);
+                                        },
+                                        CloseIcon {}
+                                    }
+                                }
+                            }
+                            match step {
+                                CurationStep::Filter(rule) => rsx! { RuleEditor { controller, rule: (*rule).clone(), catalog: catalog.clone() } },
+                                CurationStep::Transform(transform) => rsx! { TransformEditor { controller, transform: (*transform).clone(), catalog: catalog.clone() } },
                             }
                         }
-                        Action { purpose: ActionPurpose::Remove, variant: ActionVariant::Icon,
-                            aria_label: "Remove rule {index + 1}", title: "Remove rule",
-                            onclick: { let id = step.id().to_owned(); let filter = matches!(step, CurationStep::Filter(_)); move |_| {
-                                let id = id.clone(); controller.edit(move |spec| {
-                                    if filter { spec.remove_rule(&id); } else { spec.remove_transform(&id); }
-                                });
-                            } },
-                            CloseIcon {}
-                        }
-                    }
-                    match step {
-                        CurationStep::Filter(rule) => rsx! { RuleEditor { controller, rule: (*rule).clone(), tone: RuleTone::at(index), catalog: catalog.clone(), removed: counts_current.then(|| outcome.as_ref().and_then(|outcome| outcome.stage_impacts().iter().find(|impact| impact.id() == rule.id()).map(|impact| impact.excluded()))).flatten() } },
-                        CurationStep::Transform(transform) => rsx! { TransformEditor { controller, transform: (*transform).clone(), catalog: catalog.clone(), reached: counts_current.then(|| outcome.as_ref().and_then(|outcome| outcome.stage_impacts().iter().find(|impact| impact.id() == transform.id()).and_then(|impact| impact.affected_episodes()))).flatten() } },
                     }
                 }
             }
@@ -162,7 +205,8 @@ fn SourceSection(controller: CurationController) -> Element {
     rsx! {
         div { class: "curation-section curation-source-section",
             "data-selected": controller.pipeline_selection() == PipelineSelection::Source,
-            div { class: "curation-section-title", span { "Source" } }
+            onclick: move |_| controller.select_pipeline(PipelineSelection::Source),
+            div { class: "curation-section-title", span { "Dataset" } }
             match response.as_ref() {
                 Some(Ok(items)) => rsx! {
                     label { r#for: "curation-source", class: "sr-only", "Dataset" }
@@ -241,72 +285,28 @@ impl SourceFacts {
     }
 }
 
+/// A filter reads as one sentence: exclude when fact · comparison · value.
 #[component]
-fn RuleEditor(
-    controller: CurationController,
-    rule: CurationRule,
-    tone: RuleTone,
-    catalog: FactCatalog,
-    removed: Option<u64>,
-) -> Element {
+fn RuleEditor(controller: CurationController, rule: CurationRule, catalog: FactCatalog) -> Element {
     let id = rule.id().to_owned();
-    let hovered = controller.hovered_rule().as_deref() == Some(rule.id());
     let problem = rule.condition().validate(&catalog).err();
-    let condition_id = id.clone();
-    let handle = RuleHandle::new(controller, id);
     rsx! {
-        div {
-            class: "curation-rule",
-            "data-hovered": hovered,
-            style: "--rule-tone: {tone.css()}",
-            div { class: "curation-rule-line",
-                span { class: "curation-rule-dot", "aria-hidden": "true", onmouseenter: handle.enter(), onmouseleave: handle.leave() }
-                span { class: "curation-rule-word", "If" }
+        div { class: "curation-step-body",
+            div { class: "curation-sentence",
+                span { class: "curation-rule-word", "Exclude when" }
                 ConditionEditor {
                     catalog: catalog.clone(),
                     condition: rule.condition().clone(),
                     on_change: move |condition: RuleCondition| {
-                        let id = condition_id.clone();
+                        let id = id.clone();
                         controller.edit(move |spec| if let Some(rule) = spec.rule_mut(&id) { *rule.condition_mut() = condition; });
                     },
-                }
-            }
-            if let Some(removed) = removed {
-                span { class: "curation-rule-count", title: "Episodes excluded at this filter",
-                    onmouseenter: handle.enter(), onmouseleave: handle.leave(),
-                    strong { "{removed}" } " excluded"
                 }
             }
             if let Some(problem) = problem {
                 p { class: "curation-rule-invalid", role: "status", "This rule {problem}." }
             }
         }
-    }
-}
-
-/// The rule's hover handle: entering lights the tiles the rule struck,
-/// leaving settles the sheet.
-#[derive(Clone, Copy)]
-struct RuleHandle {
-    controller: CurationController,
-    id: Signal<String>,
-}
-
-impl RuleHandle {
-    fn new(controller: CurationController, id: String) -> Self {
-        Self {
-            controller,
-            id: use_signal(|| id),
-        }
-    }
-    fn enter<E>(self) -> impl FnMut(E) + 'static {
-        move |_| {
-            let id = self.id.peek().clone();
-            self.controller.set_hovered_rule(Some(id));
-        }
-    }
-    fn leave<E>(self) -> impl FnMut(E) + 'static {
-        move |_| self.controller.set_hovered_rule(None)
     }
 }
 
@@ -403,12 +403,13 @@ fn ConditionEditor(
     }
 }
 
+/// A transform reads as its name over what it does; its fields open in
+/// place when there is something to set.
 #[component]
 fn TransformEditor(
     controller: CurationController,
     transform: CurationTransform,
     catalog: FactCatalog,
-    reached: Option<u64>,
 ) -> Element {
     let id = transform.id().to_owned();
     let problem = transform.validate(&catalog).err();
@@ -428,119 +429,130 @@ fn TransformEditor(
     let only_when_id = id.clone();
     let label_id = id.clone();
     let summary = transform.operation().summary();
+    let kind_label = transform.operation().kind_label();
     let progress_transform = matches!(
         transform.operation(),
         TransformOperation::SelectProgressChunks { .. }
     );
+    // The built-in policy has one name; other transforms lead with what the
+    // user called them, else with what they do.
+    let (name, detail) = if progress_transform {
+        (kind_label.to_owned(), None)
+    } else if transform.label().trim().is_empty() {
+        (summary.clone(), Some(kind_label.to_owned()))
+    } else {
+        (transform.label().to_owned(), Some(summary.clone()))
+    };
     rsx! {
-        div { class: "curation-fact curation-transform", "data-expanded": expanded(),
-            div { class: "curation-fact-summary",
-                Action {
-                    purpose: ActionPurpose::Toggle, variant: ActionVariant::Quiet, class: "curation-fact-disclosure",
-                    aria_expanded: expanded(), title: "{transform.operation().kind_label()} · {summary}",
-                    onclick: move |_| expanded.toggle(),
-                    ChevronIcon { open: expanded() }
-                    span { class: "curation-fact-summary-label", "{transform.title()}" }
-                    if let Some(reached) = reached {
-                        span { class: "curation-rule-count", title: "Incoming episodes this transform reached in the visible run",
-                            strong { "{reached}" } " reached"
-                        }
-                    }
+        div { class: "curation-step-body curation-transform", "data-expanded": expanded(),
+            Action {
+                purpose: ActionPurpose::Toggle, variant: ActionVariant::Quiet, class: "curation-transform-summary",
+                aria_expanded: expanded(), title: if expanded() { "Hide the settings" } else { "Show the settings" },
+                onclick: move |_| expanded.toggle(),
+                ChevronIcon { open: expanded() }
+                span { class: "curation-transform-copy",
+                    span { class: "curation-transform-name", "{name}" }
+                    if let Some(detail) = detail { span { class: "curation-transform-detail", "{detail}" } }
                 }
             }
             if expanded() {
-                if !progress_transform {
-                input {
-                    class: "curation-input curation-fact-label",
-                    "aria-label": "Transform label",
-                    placeholder: "{summary}",
-                    value: "{transform.label()}",
-                    oninput: move |event| {
-                        let id = label_id.clone();
-                        let label = event.value();
-                        controller.edit(move |spec| if let Some(transform) = spec.transform_mut(&id) { transform.set_label(label); });
-                    },
-                }
-                }
-                div { class: "curation-field-grid",
-                    match transform.operation().clone() {
-                        TransformOperation::SelectProgressChunks { selection } => rsx! {
-                            super::progress::ProgressStatus { selection }
-                        },
-                        TransformOperation::CameraColorProfile { topic, profile } => rsx! {
-                            label { r#for: "{transform.id()}-topic", "Camera" }
-                            input { id: "{transform.id()}-topic", class: "curation-input", list: CAMERA_TOPICS_ID, placeholder: "/top-camera",
-                                value: "{topic.topic()}",
-                                oninput: { let set_operation = set_operation.clone(); let profile = profile.clone();
-                                    move |event| set_operation(TransformOperation::CameraColorProfile { topic: TopicRef::new(event.value()), profile: profile.clone() }) } }
-                            label { r#for: "{transform.id()}-profile", "Profile" }
-                            select { id: "{transform.id()}-profile", class: "curation-select", value: "{profile}",
-                                onchange: { let set_operation = set_operation.clone(); let topic = topic.clone();
-                                    move |event| set_operation(TransformOperation::CameraColorProfile { topic: topic.clone(), profile: event.value() }) },
-                                for option in TransformOperation::COLOR_PROFILES {
-                                    option { value: "{option}", selected: option == profile, "{option}" }
+                div { class: "curation-transform-fields",
+                    if !progress_transform {
+                        div { class: "curation-field-grid",
+                            label { r#for: "{transform.id()}-label", "Name" }
+                            input {
+                                id: "{transform.id()}-label",
+                                class: "curation-input curation-transform-label",
+                                placeholder: "{summary}",
+                                value: "{transform.label()}",
+                                oninput: move |event| {
+                                    let id = label_id.clone();
+                                    let label = event.value();
+                                    controller.edit(move |spec| if let Some(transform) = spec.transform_mut(&id) { transform.set_label(label); });
+                                },
+                            }
+                        }
+                    }
+                    div { class: "curation-field-grid",
+                        match transform.operation().clone() {
+                            TransformOperation::SelectProgressChunks { selection } => rsx! {
+                                super::progress::ProgressStatus { selection }
+                            },
+                            TransformOperation::CameraColorProfile { topic, profile } => rsx! {
+                                label { r#for: "{transform.id()}-topic", "Camera" }
+                                input { id: "{transform.id()}-topic", class: "curation-input", list: CAMERA_TOPICS_ID, placeholder: "/top-camera",
+                                    value: "{topic.topic()}",
+                                    oninput: { let set_operation = set_operation.clone(); let profile = profile.clone();
+                                        move |event| set_operation(TransformOperation::CameraColorProfile { topic: TopicRef::new(event.value()), profile: profile.clone() }) } }
+                                label { r#for: "{transform.id()}-profile", "Profile" }
+                                select { id: "{transform.id()}-profile", class: "curation-select", value: "{profile}",
+                                    onchange: { let set_operation = set_operation.clone(); let topic = topic.clone();
+                                        move |event| set_operation(TransformOperation::CameraColorProfile { topic: topic.clone(), profile: event.value() }) },
+                                    for option in TransformOperation::COLOR_PROFILES {
+                                        option { value: "{option}", selected: option == profile, "{option}" }
+                                    }
                                 }
-                            }
-                        },
-                        TransformOperation::ResizeCamera { topic, width, height } => rsx! {
-                            label { r#for: "{transform.id()}-topic", "Camera" }
-                            input { id: "{transform.id()}-topic", class: "curation-input", list: CAMERA_TOPICS_ID, placeholder: "/top-camera",
-                                value: "{topic.topic()}",
-                                oninput: { let set_operation = set_operation.clone();
-                                    move |event| set_operation(TransformOperation::ResizeCamera { topic: TopicRef::new(event.value()), width, height }) } }
-                            label { r#for: "{transform.id()}-size", "Size" }
-                            div { class: "curation-inline-form",
-                                input { id: "{transform.id()}-size", class: "curation-input curation-mono curation-dimension", "aria-label": "Width", inputmode: "numeric",
-                                    value: "{width}",
-                                    oninput: { let set_operation = set_operation.clone(); let topic = topic.clone();
-                                        move |event| if let Ok(width) = event.value().trim().parse::<u32>() { set_operation(TransformOperation::ResizeCamera { topic: topic.clone(), width, height }) } } }
-                                span { class: "curation-rule-word", "×" }
-                                input { class: "curation-input curation-mono curation-dimension", "aria-label": "Height", inputmode: "numeric",
-                                    value: "{height}",
-                                    oninput: { let set_operation = set_operation.clone(); let topic = topic.clone();
-                                        move |event| if let Ok(height) = event.value().trim().parse::<u32>() { set_operation(TransformOperation::ResizeCamera { topic: topic.clone(), width, height }) } } }
-                            }
-                        },
-                        TransformOperation::TrimTime { start_seconds, end_seconds } => rsx! {
-                            label { r#for: "{transform.id()}-start", "From (s)" }
-                            input { id: "{transform.id()}-start", class: "curation-input curation-mono", inputmode: "decimal",
-                                value: "{start_seconds}",
-                                oninput: { let set_operation = set_operation.clone();
-                                    move |event| if let Ok(start) = event.value().trim().parse::<f64>() { set_operation(TransformOperation::TrimTime { start_seconds: start, end_seconds }) } } }
-                            label { r#for: "{transform.id()}-end", "To (s)" }
-                            input { id: "{transform.id()}-end", class: "curation-input curation-mono", inputmode: "decimal", placeholder: "end of episode",
-                                value: end_seconds.map(|end| end.to_string()).unwrap_or_default(),
-                                oninput: { let set_operation = set_operation.clone();
-                                    move |event| { let raw = event.value(); let end = raw.trim(); if end.is_empty() { set_operation(TransformOperation::TrimTime { start_seconds, end_seconds: None }) } else if let Ok(end) = end.parse::<f64>() { set_operation(TransformOperation::TrimTime { start_seconds, end_seconds: Some(end) }) } } } }
-                        },
-                    }
-                }
-                if !progress_transform || transform.condition().is_some() {
-                div { class: "curation-rule-line",
-                    Toggle {
-                        label: "Only when".to_owned(),
-                        checked: transform.condition().is_some(),
-                        onchange: move |only_when: bool| {
-                            let id = only_when_id.clone();
-                            controller.edit(move |spec| if let Some(transform) = spec.transform_mut(&id) {
-                                transform.set_condition(only_when.then(|| RuleCondition::new(BuiltinFact::DurationSeconds.key(), ConditionOp::AtLeast, ConditionValue::None)));
-                            });
-                        },
-                    }
-                    if let Some(condition) = transform.condition().cloned() {
-                        ConditionEditor {
-                            catalog: catalog.clone(),
-                            condition,
-                            on_change: move |condition: RuleCondition| {
-                                let id = condition_id.clone();
-                                controller.edit(move |spec| if let Some(transform) = spec.transform_mut(&id) { transform.set_condition(Some(condition)); });
+                            },
+                            TransformOperation::ResizeCamera { topic, width, height } => rsx! {
+                                label { r#for: "{transform.id()}-topic", "Camera" }
+                                input { id: "{transform.id()}-topic", class: "curation-input", list: CAMERA_TOPICS_ID, placeholder: "/top-camera",
+                                    value: "{topic.topic()}",
+                                    oninput: { let set_operation = set_operation.clone();
+                                        move |event| set_operation(TransformOperation::ResizeCamera { topic: TopicRef::new(event.value()), width, height }) } }
+                                label { r#for: "{transform.id()}-size", "Size" }
+                                div { class: "curation-inline-form",
+                                    input { id: "{transform.id()}-size", class: "curation-input curation-mono curation-dimension", "aria-label": "Width", inputmode: "numeric",
+                                        value: "{width}",
+                                        oninput: { let set_operation = set_operation.clone(); let topic = topic.clone();
+                                            move |event| if let Ok(width) = event.value().trim().parse::<u32>() { set_operation(TransformOperation::ResizeCamera { topic: topic.clone(), width, height }) } } }
+                                    span { class: "curation-rule-word", "×" }
+                                    input { class: "curation-input curation-mono curation-dimension", "aria-label": "Height", inputmode: "numeric",
+                                        value: "{height}",
+                                        oninput: { let set_operation = set_operation.clone(); let topic = topic.clone();
+                                            move |event| if let Ok(height) = event.value().trim().parse::<u32>() { set_operation(TransformOperation::ResizeCamera { topic: topic.clone(), width, height }) } } }
+                                }
+                            },
+                            TransformOperation::TrimTime { start_seconds, end_seconds } => rsx! {
+                                label { r#for: "{transform.id()}-start", "From (s)" }
+                                input { id: "{transform.id()}-start", class: "curation-input curation-mono", inputmode: "decimal",
+                                    value: "{start_seconds}",
+                                    oninput: { let set_operation = set_operation.clone();
+                                        move |event| if let Ok(start) = event.value().trim().parse::<f64>() { set_operation(TransformOperation::TrimTime { start_seconds: start, end_seconds }) } } }
+                                label { r#for: "{transform.id()}-end", "To (s)" }
+                                input { id: "{transform.id()}-end", class: "curation-input curation-mono", inputmode: "decimal", placeholder: "end of episode",
+                                    value: end_seconds.map(|end| end.to_string()).unwrap_or_default(),
+                                    oninput: { let set_operation = set_operation.clone();
+                                        move |event| { let raw = event.value(); let end = raw.trim(); if end.is_empty() { set_operation(TransformOperation::TrimTime { start_seconds, end_seconds: None }) } else if let Ok(end) = end.parse::<f64>() { set_operation(TransformOperation::TrimTime { start_seconds, end_seconds: Some(end) }) } } } }
                             },
                         }
-                    } else {
-                        span { class: "curation-rule-word", "every kept episode" }
+                    }
+                    if !progress_transform || transform.condition().is_some() {
+                        div { class: "curation-sentence",
+                            Toggle {
+                                label: "Only when".to_owned(),
+                                checked: transform.condition().is_some(),
+                                onchange: move |only_when: bool| {
+                                    let id = only_when_id.clone();
+                                    controller.edit(move |spec| if let Some(transform) = spec.transform_mut(&id) {
+                                        transform.set_condition(only_when.then(|| RuleCondition::new(BuiltinFact::DurationSeconds.key(), ConditionOp::AtLeast, ConditionValue::None)));
+                                    });
+                                },
+                            }
+                            if let Some(condition) = transform.condition().cloned() {
+                                ConditionEditor {
+                                    catalog: catalog.clone(),
+                                    condition,
+                                    on_change: move |condition: RuleCondition| {
+                                        let id = condition_id.clone();
+                                        controller.edit(move |spec| if let Some(transform) = spec.transform_mut(&id) { transform.set_condition(Some(condition)); });
+                                    },
+                                }
+                            } else {
+                                span { class: "curation-rule-word", "every kept episode" }
+                            }
+                        }
                     }
                 }
-            }
             }
             if let Some(problem) = problem {
                 p { class: "curation-rule-invalid", role: "status", "This transform {problem}." }

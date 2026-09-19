@@ -301,10 +301,13 @@ impl CurationController {
     pub(super) fn pipeline_selection(&self) -> PipelineSelection {
         self.view.pipeline_selection.read().clone()
     }
+    /// Opening a stage lays out its own episodes: the filter and the open
+    /// episode belong to the stage that was left, so both reset.
     pub(super) fn select_pipeline(mut self, selection: PipelineSelection) {
         if *self.view.pipeline_selection.peek() != selection {
             self.view.pipeline_selection.set(selection);
             self.view.filter.set(SheetFilter::All);
+            self.view.selected_episode.set(None);
         }
     }
     pub(crate) fn filter(&self) -> SheetFilter {

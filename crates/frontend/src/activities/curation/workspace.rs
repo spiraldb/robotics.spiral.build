@@ -17,10 +17,11 @@
 //! removed, open one tile to read its facts beside the sheet and step
 //! through its neighbours with the arrow keys.
 //! FIRST VIEWPORT: one 36px document bar (glyph · name ▾ · Saved · Discard
-//! Save ▶Run); left 26% Recipe (Source, Measurements, Rules, Transforms);
-//! right: the Sheet, a run strip over the tile grid, with the selected
-//! episode's side sheet docked at its right edge while one is open.
-//! FORM: contact sheet with a recipe column and a docked evidence sheet.
+//! Save ▶Run); left 26% Recipe (Source, Rules, Add a rule); right: the
+//! Sheet, a pipeline strip of Workflow's stage cards over one stage heading
+//! and that stage's tiles, with the selected episode's side sheet docked at
+//! its right edge while one is open.
+//! FORM: pipeline strip over a contact sheet, beside a recipe column.
 //! FINISH: unreviewed and undocumented is unfinished; this build ends with the
 //! finish review, the verdict, and DESIGN.md.
 
