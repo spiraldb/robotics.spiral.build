@@ -126,7 +126,7 @@ impl PipelineStage {
             CurationStep::Transform(transform) => (
                 "transform",
                 if matches!(transform.operation(), spiral_robotics_common::curation::rules::TransformOperation::SelectProgressChunks { .. }) {
-                    "WARP progress".to_owned()
+                    "Remove unproductive moments".to_owned()
                 } else { transform.title() },
             ),
         };

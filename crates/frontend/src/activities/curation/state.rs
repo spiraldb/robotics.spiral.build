@@ -10,6 +10,7 @@ use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use dioxus_workbench::PanelId;
 use spiral_robotics_common::curation::facts::CurationFact;
+use spiral_robotics_common::curation::interpretation::RuleProposal;
 use spiral_robotics_common::curation::run::{CurationOutcome, CurationRun, CurationRunSnapshot};
 use spiral_robotics_common::curation::{
     CurationSpec, CurationSummary, CurationValidationReport, DEFAULT_CURATION_NAME,
@@ -158,6 +159,18 @@ impl CurationController {
     pub(crate) fn edit(self, change: impl FnOnce(&mut CurationSpec)) {
         let mut draft = self.document.draft;
         change(&mut draft.write());
+    }
+    pub(crate) fn add_proposal(self, proposal: &RuleProposal) -> Result<(), String> {
+        let identity = format!(
+            "rule-{}-{:x}",
+            js_sys::Date::now() as u64,
+            (js_sys::Math::random() * u32::MAX as f64) as u64
+        );
+        let mut next = self.spec();
+        proposal.apply(&mut next, &identity)?;
+        self.edit(|spec| *spec = next);
+        self.select_pipeline(PipelineSelection::Step(identity));
+        Ok(())
     }
     pub(crate) fn validation(&self) -> CurationValidationReport {
         self.document.draft.read().validate()

@@ -70,7 +70,7 @@ impl RuleIntent {
             Self::Duration => "Filter · episode duration",
             Self::MessageCount => "Filter · message count",
             Self::CameraLuminance => "Filter · camera luminance",
-            Self::ProductiveChunks => "Transform · WARP progress chunks",
+            Self::ProductiveChunks => "Transform · Remove unproductive moments",
             Self::Unresolved => "Choose a rule",
         }
     }
@@ -172,20 +172,12 @@ impl RuleProposal {
         {
             problems.push("Choose when to exclude an episode.".into());
         }
-        if if self.intent == RuleIntent::ProductiveChunks {
-            self.value.is_some_and(|value| !value.is_finite())
-        } else {
-            self.value
+        if self.intent != RuleIntent::ProductiveChunks
+            && self
+                .value
                 .is_none_or(|value| !value.is_finite() || value < 0.0)
-        } {
-            problems.push(
-                if self.intent == RuleIntent::ProductiveChunks {
-                    "Enter a finite cutoff."
-                } else {
-                    "Enter a finite, non-negative threshold."
-                }
-                .into(),
-            );
+        {
+            problems.push("Enter a finite, non-negative threshold.".into());
         }
         if self.intent == RuleIntent::MessageCount
             && self.value.is_some_and(|value| value.fract() != 0.0)
@@ -221,8 +213,11 @@ impl RuleProposal {
                 .clone()
                 .unwrap_or_else(|| super::progress::ProgressSelection::for_dataset(spec.source()));
             selection.resolve_dataset(spec.source());
-            if let Some(value) = self.value {
-                selection.set_minimum_velocity(value);
+            if selection.sources_relation().is_empty() {
+                return Err(match spec.source() {
+                    Some(dataset) => format!("Remove unproductive moments is not available for {}. The current detector supports dataset_warp_sim_bottles_sample and its original recordings. Choose that dataset to use this transformation.", dataset.label()),
+                    None => "Choose dataset_warp_sim_bottles_sample before adding Remove unproductive moments.".into(),
+                });
             }
             selection.validate()?;
             spec.add_transform(CurationTransform::new(
@@ -262,18 +257,48 @@ impl RuleProposal {
     }
 }
 
-/// Exact number candidates, with their original text for semantic binding.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NumberCandidate {
+/// Exact quantities with source evidence; semantic binding selects, never invents, one.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct QuantityCandidate {
     text: String,
     value: f64,
+    duration_scale: Option<f64>,
+    span: std::ops::Range<usize>,
+    context: String,
 }
-impl NumberCandidate {
+impl QuantityCandidate {
     pub fn text(&self) -> &str {
         &self.text
     }
     pub const fn value(&self) -> f64 {
         self.value
+    }
+    /// Normalize only an explicit unit attached to this exact numeric literal.
+    pub fn duration_seconds(&self) -> Option<f64> {
+        self.duration_scale.map(|scale| self.value * scale)
+    }
+    fn duration_suffix(suffix: &str) -> Option<(f64, usize)> {
+        let trimmed = suffix.trim_start();
+        let letters = trimmed.bytes().take_while(u8::is_ascii_alphabetic).count();
+        let scale = match trimmed[..letters].to_ascii_lowercase().as_str() {
+            "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+            "ms" | "msec" | "msecs" | "millisecond" | "milliseconds" => 0.001,
+            "min" | "mins" | "minute" | "minutes" => 60.0,
+            _ => return None,
+        };
+        Some((scale, suffix.len() - trimmed.len() + letters))
+    }
+    fn local_context(text: &str, span: &std::ops::Range<usize>) -> String {
+        let start = text[..span.start]
+            .char_indices()
+            .rev()
+            .nth(48)
+            .map_or(0, |(index, _)| index);
+        let end = text[span.end..]
+            .char_indices()
+            .nth(48)
+            .map_or(text.len(), |(index, _)| span.end + index);
+        text[start..end].to_owned()
     }
     pub fn extract(text: &str) -> Vec<Self> {
         // Keep exponent and grouped-thousands notation together. A malformed
@@ -309,9 +334,22 @@ impl NumberCandidate {
                 && let Ok(value) = normalized.parse::<f64>()
                 && value.is_finite()
             {
+                let mut end = start + token.len();
+                let duration_scale = Self::duration_suffix(&text[end..]).map(|(scale, length)| {
+                    end += length;
+                    cursor = end;
+                    scale
+                });
                 candidates.push(Self {
-                    text: token.to_owned(),
+                    text: if duration_scale.is_some() {
+                        text[start..end].to_owned()
+                    } else {
+                        token.to_owned()
+                    },
                     value,
+                    duration_scale,
+                    span: start..end,
+                    context: Self::local_context(text, &(start..end)),
                 });
             }
         }
@@ -332,11 +370,11 @@ mod tests {
     }
     #[test]
     fn numeric_candidates_preserve_negative_and_fractional_values() {
-        let candidates = NumberCandidate::extract("remove under 2.5 seconds, not 30; -1");
+        let candidates = QuantityCandidate::extract("remove under 2.5 seconds, not 30; -1");
         assert_eq!(
             candidates
                 .iter()
-                .map(NumberCandidate::value)
+                .map(QuantityCandidate::value)
                 .collect::<Vec<_>>(),
             [2.5, 30.0, -1.0]
         );
@@ -344,11 +382,52 @@ mod tests {
     #[test]
     fn scientific_and_grouped_numbers_are_not_split_into_wrong_thresholds() {
         let values =
-            NumberCandidate::extract("1e3 messages or 2,500 messages; -0.5 EV, malformed 2,50")
+            QuantityCandidate::extract("1e3 messages or 2,500 messages; -0.5 EV, malformed 2,50")
                 .iter()
-                .map(NumberCandidate::value)
+                .map(QuantityCandidate::value)
                 .collect::<Vec<_>>();
         assert_eq!(values, [1000.0, 2500.0, -0.5]);
+    }
+    #[test]
+    fn duration_candidates_preserve_compact_and_spaced_units() {
+        for (literal, seconds) in [
+            ("20s", 20.0),
+            ("20 seconds", 20.0),
+            ("500ms", 0.5),
+            ("500 milliseconds", 0.5),
+            ("2min", 120.0),
+            ("1.5 minutes", 90.0),
+            ("2e1s", 20.0),
+        ] {
+            let candidates = QuantityCandidate::extract(&format!("under {literal}"));
+            assert_eq!(candidates.len(), 1, "{literal}");
+            assert_eq!(candidates[0].text(), literal);
+            assert_eq!(candidates[0].duration_seconds(), Some(seconds));
+        }
+        for literal in ["20", "20 messages", "20samples", "20meters"] {
+            let candidates = QuantityCandidate::extract(literal);
+            assert_eq!(candidates.len(), 1, "{literal}");
+            assert_eq!(candidates[0].duration_seconds(), None, "{literal}");
+        }
+    }
+    #[test]
+    fn quantity_evidence_preserves_spans_context_and_distinct_occurrences() {
+        let prompt = "相机 2: exclude below 20s, not 30s; messages over 4,000";
+        let candidates = QuantityCandidate::extract(prompt);
+        assert_eq!(candidates.len(), 4);
+        for candidate in &candidates {
+            assert_eq!(&prompt[candidate.span.clone()], candidate.text());
+            assert!(candidate.context.contains(candidate.text()));
+        }
+        assert_eq!(candidates[0].duration_seconds(), None);
+        assert_eq!(candidates[1].duration_seconds(), Some(20.0));
+        assert_eq!(candidates[2].duration_seconds(), Some(30.0));
+        assert_eq!(candidates[3].value(), 4000.0);
+        let punctuated = QuantityCandidate::extract("4000, then 20s");
+        assert_eq!(punctuated[0].text(), "4000");
+        assert_eq!(punctuated[0].span, 0..4);
+        let repeated = QuantityCandidate::extract("camera 20: under 20s");
+        assert_ne!(repeated[0].span, repeated[1].span);
     }
     #[test]
     fn warp_defaults_resolve_only_for_the_matching_dataset() {
@@ -375,8 +454,32 @@ mod tests {
             proposal
                 .apply(&mut unsupported, "warp")
                 .unwrap_err()
-                .contains("simulated-bottles")
+                .contains("dataset_other")
         );
+        assert!(unsupported.transforms().is_empty());
+    }
+    #[test]
+    fn automatic_progress_ignores_legacy_proposal_cutoffs_and_rejects_abc130k() {
+        let mut proposal = RuleProposal::default();
+        proposal.set_intent(RuleIntent::ProductiveChunks);
+        proposal.set_value(Some(0.5));
+        let mut supported = CurationSpec::new("test", "Test").with_source(
+            crate::datasets::DatasetSelection::new(vec!["dataset_warp_sim_bottles_sample".into()])
+                .unwrap(),
+        );
+        proposal.apply(&mut supported, "automatic").unwrap();
+        let TransformOperation::SelectProgressChunks { selection } =
+            supported.transforms()[0].operation()
+        else {
+            panic!("expected progress selection")
+        };
+        assert_eq!(selection.minimum_velocity(), 0.0);
+        let mut unsupported = CurationSpec::new("test", "Test").with_source(
+            crate::datasets::DatasetSelection::new(vec!["dataset_abc130k_sample".into()]).unwrap(),
+        );
+        let error = proposal.apply(&mut unsupported, "automatic").unwrap_err();
+        assert!(error.contains("dataset_abc130k_sample"));
+        assert!(error.contains("dataset_warp_sim_bottles_sample"));
         assert!(unsupported.transforms().is_empty());
     }
     #[test]

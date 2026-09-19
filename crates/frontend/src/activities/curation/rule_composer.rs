@@ -15,39 +15,51 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
     let mut proposal = use_signal(|| None::<RuleProposal>);
     let mut pending = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
-    let can_interpret = !pending() && !prompt().trim().is_empty();
+    let can_add = !pending() && !prompt().trim().is_empty();
     rsx! {
         div { class: "curation-section curation-composer",
             label { r#for: "curation-rule-description", class: "curation-section-title", "Add a rule" }
             textarea { id: "curation-rule-description", class: "curation-input curation-rule-prompt", rows: "3",
                 placeholder: "Exclude episodes shorter than 5 seconds…", value: "{prompt}", disabled: pending(),
                 oninput: move |event| { prompt.set(event.value()); proposal.set(None); error.set(None); } }
-            Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline, disabled: !can_interpret,
+            Action { purpose: ActionPurpose::Create, variant: ActionVariant::Solid, disabled: !can_add,
                 onclick: { let topics = camera_topics.clone(); move |_| {
                     if pending() { return; }
                     pending.set(true); error.set(None); proposal.set(None);
                     let request = InterpretationRequest::new(prompt(), topics.clone());
-                    let original_source = controller.spec().source().cloned();
+                    let original = controller.spec();
                     spawn(async move {
                         let result = CurationClient::current().interpret(&request).await;
                         pending.set(false);
-                        if controller.spec().source() != original_source.as_ref() { error.set(Some("The dataset changed. Interpret the rule again for its cameras.".into())); return; }
-                        match result { Ok(result) => proposal.set(Some(result)), Err(problem) => error.set(Some(problem.to_string())) }
+                        let current = controller.spec();
+                        if current.id() != original.id() || current.source() != original.source() {
+                            error.set(Some("The recipe or dataset changed. Click Add rule again for the current recipe.".into()));
+                            return;
+                        }
+                        match result {
+                            Ok(draft) if draft.problems().is_empty() => match controller.add_proposal(&draft) {
+                                Ok(()) => prompt.set(String::new()),
+                                Err(message) => error.set(Some(message)),
+                            },
+                            Ok(draft) => proposal.set(Some(draft)),
+                            Err(problem) => error.set(Some(problem.to_string())),
+                        }
                     });
                 } },
-                if pending() { "Interpreting…" } else { "Interpret rule" }
+                if pending() { "Adding…" } else { "Add rule" }
             }
             if let Some(error) = error() { p { class: "curation-rule-invalid", role: "alert", "{error}" } }
             if let Some(draft) = proposal() {
                 ProposalEditor { proposal: draft.clone(), cameras: camera_topics.clone(), on_change: move |next| proposal.set(Some(next)) }
                 for note in draft.notes() { p { class: "curation-section-note", "{note}" } }
                 for problem in draft.problems() { p { class: "curation-rule-invalid", "{problem}" } }
-                Action { purpose: ActionPurpose::Create, variant: ActionVariant::Outline, disabled: !draft.problems().is_empty(),
+                Action { purpose: ActionPurpose::Create, variant: ActionVariant::Solid, disabled: pending() || !draft.problems().is_empty(),
                     onclick: move |_| {
-                        let identity = format!("rule-{}-{:x}", js_sys::Date::now() as u64, (js_sys::Math::random() * u32::MAX as f64) as u64);
-                        let mut problem = None;
-                        controller.edit(|spec| if let Err(message) = draft.apply(spec, &identity) { problem = Some(message); });
-                        if let Some(message) = problem { error.set(Some(message)); } else { proposal.set(None); prompt.set(String::new()); }
+                        if pending() { return; }
+                        match controller.add_proposal(&draft) {
+                            Ok(()) => { proposal.set(None); prompt.set(String::new()); }
+                            Err(message) => error.set(Some(message)),
+                        }
                     }, "Add rule" }
             }
             details { class: "curation-manual-builder",
@@ -72,7 +84,14 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
                         } else {
                             let mut draft = RuleProposal::default();
                             draft.set_intent(RuleIntent::from_key(&manual_operation()));
-                            proposal.set(Some(draft));
+                            if draft.problems().is_empty() {
+                                match controller.add_proposal(&draft) {
+                                    Ok(()) => proposal.set(None),
+                                    Err(message) => error.set(Some(message)),
+                                }
+                            } else {
+                                proposal.set(Some(draft));
+                            }
                         }
                     } }, "Add rule" }
 
@@ -120,16 +139,16 @@ fn ProposalEditor(
                     }
                 }
             }
-            }
             label {
-                if proposal.intent() == RuleIntent::Duration { "Threshold (seconds)" } else if proposal.intent() == RuleIntent::ProductiveChunks { "Cutoff" } else { "Threshold" }
-                input { class: "curation-input", inputmode: "decimal", value: "{number}", placeholder: if proposal.intent() == RuleIntent::ProductiveChunks { "0 (default)" } else { "Enter threshold" },
+                if proposal.intent() == RuleIntent::Duration { "Threshold (seconds)" } else { "Threshold" }
+                input { class: "curation-input", inputmode: "decimal", value: "{number}", placeholder: "Enter threshold",
                     oninput: { let proposal = proposal.clone(); move |event| {
                         let raw = event.value(); number.set(raw.clone()); let mut next = proposal.clone(); next.set_value(raw.parse::<f64>().ok());
                         if next.intent() == RuleIntent::Duration { next.set_unit(Some("seconds".into())); }
                         on_change.call(next);
                     } }
                 }
+            }
             }
         }
     }

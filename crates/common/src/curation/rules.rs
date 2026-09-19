@@ -355,7 +355,7 @@ impl TransformOperation {
     }
     pub const fn kind_label(&self) -> &'static str {
         match self {
-            Self::SelectProgressChunks { .. } => "Select progress chunks",
+            Self::SelectProgressChunks { .. } => "Remove unproductive moments",
             Self::ResizeCamera { .. } => "Resize camera",
             Self::CameraColorProfile { .. } => "Camera colour profile",
             Self::TrimTime { .. } => "Trim time",
@@ -363,11 +363,9 @@ impl TransformOperation {
     }
     pub fn summary(&self) -> String {
         match self {
-            Self::SelectProgressChunks { selection } => format!(
-                "Keep {}-frame chunks with mean WARP velocity at least {}",
-                selection.chunk_frames(),
-                selection.minimum_velocity()
-            ),
+            Self::SelectProgressChunks { .. } => {
+                "Automatically select training chunks using the built-in progress policy".into()
+            }
             Self::ResizeCamera {
                 topic,
                 width,
@@ -440,9 +438,9 @@ impl TransformOperation {
     pub fn image_sql(&self, image: &str) -> Result<String, String> {
         self.validate()?;
         match self {
-            Self::ResizeCamera { width, height, .. } => {
-                Ok(format!("spql.image.resize({image}, CAST({width} AS UINT32), CAST({height} AS UINT32))"))
-            }
+            Self::ResizeCamera { width, height, .. } => Ok(format!(
+                "spql.image.resize({image}, CAST({width} AS UINT32), CAST({height} AS UINT32))"
+            )),
             Self::CameraColorProfile { profile, .. } => Ok(format!(
                 "spql.image.to_rgb({image}, {})",
                 SqlLiteral::text(profile)

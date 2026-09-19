@@ -218,7 +218,11 @@ impl HttpRequest {
             None => request.build(),
         }
         .map_err(CommandError::transport)?;
-        let response = request.send().await.map_err(CommandError::transport)?;
+        let response = request.send().await.map_err(|error| {
+            CommandError::transport(format!(
+                "Could not reach Studio. Check the server connection and retry. ({error})"
+            ))
+        })?;
         Ok((response, abort))
     }
 }

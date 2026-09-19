@@ -1372,7 +1372,7 @@ surface is said twice.
   an ordered rule list, and one Add a rule composer with natural-language
   entry and a folded manual builder. The Sheet presents the horizontal
   pipeline above episode evidence. The selected transform's compact header
-  combines its title, episode picker, and eligible count. WARP shows three
+  combines its title, episode picker, and eligible count. Remove unproductive moments shows three
   recorded camera feeds followed by the shared timeline and its numeric track.
   Its camera row takes the remaining panel height after reserving the timeline;
   the feeds use contain sizing and the progress track stays visible without scrolling.
@@ -1399,7 +1399,7 @@ surface is said twice.
 - **Ordered rules:** Each rule has a numbered kind, a drag handle with keyboard
   reordering, and a remove action. Filter editors show the condition itself;
   there is no enabled switch or exclusion-name field. Transform rows disclose
-  their existing operation-specific fields in place. WARP exposes only Cutoff
+  their existing operation-specific fields in place. Remove unproductive moments exposes only Cutoff
   unless an existing condition also needs to remain visible.
 - **Rule sentence:** The mark, fact, comparison, and value share a compact
   wrapping row. The comparison and its value stay together. Builtin and

@@ -420,7 +420,7 @@ fn TransformStagePreview(
         .map(|transform| match transform.operation() {
             spiral_robotics_common::curation::rules::TransformOperation::SelectProgressChunks {
                 ..
-            } => "WARP progress".to_owned(),
+            } => "Remove unproductive moments".to_owned(),
             _ => transform.title(),
         })
         .unwrap_or_else(|| "Episode review".to_owned());

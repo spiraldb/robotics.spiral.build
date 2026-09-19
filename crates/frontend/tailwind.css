@@ -5437,8 +5437,6 @@
 .curation-flow-stage[data-kind="excluded"] .curation-pipeline-node { background: var(--tone-sunken); border-color: var(--tone-line-strong); }
 .curation-pipeline-node-copy small { font-size: 10px; color: var(--tone-ink-soft); font-variant-numeric: tabular-nums; }
 .curation-flow .df-handle { background: var(--tone-line-strong); border-color: var(--tone-surface); width: 6px; height: 6px; }
-.curation-progress-settings { @apply flex flex-col gap-2; }
-.curation-progress-settings label { @apply flex flex-col gap-1 text-[11px] text-ink-soft; }
 
 #curation-ordered-rules { position: relative; }
 .curation-ordered-rule { position: relative; background: var(--tone-surface); }

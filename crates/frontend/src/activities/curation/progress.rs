@@ -1,23 +1,15 @@
-//! Explicit task-specific scoring settings, shared by both authoring paths.
+//! Fixed automatic progress selection and synchronized episode evidence.
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::progress::ProgressSelection;
 
 #[component]
-pub(super) fn ProgressSettings(
-    selection: ProgressSelection,
-    on_change: EventHandler<ProgressSelection>,
-    #[props(default = true)] edit_threshold: bool,
-) -> Element {
+pub(super) fn ProgressStatus(selection: ProgressSelection) -> Element {
     rsx! {
-        div { class: "curation-progress-settings",
+        p { class: "curation-section-note", role: "status",
             if selection.sources_relation().is_empty() {
-                p { class: "curation-section-note", role: "status", "WARP is available for the imported simulated-bottles dataset with its original recordings." }
+                "Automatic detection is available for dataset_warp_sim_bottles_sample with its original recordings."
             } else {
-                p { class: "curation-section-note", "WARP is ready for this dataset. Select this step to review an episode." }
-                if edit_threshold { label { "Cutoff"
-                    input { class: "curation-input", inputmode: "decimal", value: "{selection.minimum_velocity()}",
-                        oninput: { let selection = selection.clone(); move |event| if let Ok(value) = event.value().parse::<f64>() { if value.is_finite() { let mut next = selection.clone(); next.set_minimum_velocity(value); on_change.call(next); } } } }
-                } }
+                "Automatic detection uses its built-in selection policy. Select this step to review an episode."
             }
         }
     }
@@ -83,9 +75,8 @@ pub(super) fn ProgressEvidence(
     let transport = EpisodeTransport::use_opened_episode(&episode);
     let query_episode = episode.selection();
     let query_selection = selection.clone();
-    // The parent keys this component by recording/model/source. Threshold and
-    // chunk length are intentionally excluded, so edits reuse only this
-    // currently displayed in-memory result.
+    // The parent keys this component by recording/model/source. Only the
+    // currently displayed episode's result lives in this component's memory.
     let mut evidence = use_resource(move || {
         let episode = query_episode.clone();
         let selection = query_selection.clone();
@@ -135,10 +126,10 @@ pub(super) fn ProgressEvidence(
             TimelineTrackState::Ready(NumericTrack::new(samples, Some(threshold), intervals))
         }
         Some(Err(error)) => TimelineTrackState::Failed(error.clone()),
-        None => TimelineTrackState::Loading("Processing this episode with WARP…".to_owned()),
+        None => TimelineTrackState::Loading("Identifying unproductive moments…".to_owned()),
     };
     let failed = matches!(state, TimelineTrackState::Failed(_));
-    let tracks = vec![TimelineTrack::new("warp-progress", "WARP progress", state)];
+    let tracks = vec![TimelineTrack::new("warp-progress", "Progress score", state)];
     rsx! {
         section { class: "curation-evidence curation-progress-evidence",
             EpisodeReview { episode, transport, tracks }

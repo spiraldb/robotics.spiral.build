@@ -465,7 +465,7 @@ fn TransformEditor(
                 div { class: "curation-field-grid",
                     match transform.operation().clone() {
                         TransformOperation::SelectProgressChunks { selection } => rsx! {
-                            super::progress::ProgressSettings { selection, on_change: { let set_operation = set_operation.clone(); move |selection| set_operation(TransformOperation::SelectProgressChunks { selection }) } }
+                            super::progress::ProgressStatus { selection }
                         },
                         TransformOperation::CameraColorProfile { topic, profile } => rsx! {
                             label { r#for: "{transform.id()}-topic", "Camera" }

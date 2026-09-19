@@ -36,6 +36,10 @@ impl ProgressScorer {
 pub struct ProgressSelection {
     scorer: ProgressScorer,
     sources_relation: String,
+    #[serde(
+        default,
+        deserialize_with = "ProgressSelection::automatic_minimum_velocity"
+    )]
     minimum_velocity: f64,
     chunk_frames: u32,
 }
@@ -77,8 +81,13 @@ impl ProgressSelection {
     pub fn set_sources_relation(&mut self, value: String) {
         self.sources_relation = value;
     }
-    pub fn set_minimum_velocity(&mut self, value: f64) {
-        self.minimum_velocity = value;
+    /// Legacy authored cutoffs are decoded into the same fixed policy used by
+    /// new rules. Reading a recipe does not update its persisted document.
+    fn automatic_minimum_velocity<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<f64, D::Error> {
+        let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(0.0)
     }
     pub fn set_chunk_frames(&mut self, value: u32) {
         self.chunk_frames = value;
@@ -90,10 +99,7 @@ impl ProgressSelection {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         {
-            return Err("WARP is currently supported for the imported simulated-bottles dataset with its original recordings".into());
-        }
-        if !self.minimum_velocity.is_finite() {
-            return Err("enter a finite cutoff".into());
+            return Err("automatic detection currently supports the imported simulated-bottles dataset with its original recordings".into());
         }
         if !(1..=4096).contains(&self.chunk_frames) {
             return Err("choose a training chunk length from 1 to 4096 frames".into());
@@ -197,5 +203,26 @@ impl ProgressFrame {
     }
     pub fn support(&self) -> u32 {
         self.support
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_cutoffs_decode_to_the_fixed_automatic_policy() {
+        let original = ProgressSelection::new("warp_sim_bottles_sources_v1".into());
+        for old_cutoff in [0.5, -1.0, 1.0] {
+            let mut document = serde_json::to_value(&original).unwrap();
+            document["minimum_velocity"] = serde_json::json!(old_cutoff);
+            let decoded: ProgressSelection = serde_json::from_value(document.clone()).unwrap();
+            assert_eq!(decoded.minimum_velocity(), 0.0);
+            assert_eq!(decoded, original);
+            assert_eq!(
+                serde_json::to_value(&decoded).unwrap()["minimum_velocity"],
+                0.0
+            );
+            assert_eq!(document["minimum_velocity"], old_cutoff);
+        }
     }
 }

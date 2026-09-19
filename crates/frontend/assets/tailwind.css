@@ -8842,18 +8842,6 @@
   width: 6px;
   height: 6px;
 }
-.curation-progress-settings {
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--spacing) * 2);
-}
-.curation-progress-settings label {
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--spacing) * 1);
-  font-size: 11px;
-  color: var(--tone-ink-soft);
-}
 #curation-ordered-rules {
   position: relative;
 }
