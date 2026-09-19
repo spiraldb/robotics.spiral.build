@@ -281,19 +281,10 @@ impl HuggingFaceDatasetImportSummary {
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
-    pub fn repository(&self) -> &str {
-        &self.source.repository
-    }
-    pub fn resolved_revision(&self) -> &str {
-        &self.source.resolved_revision
-    }
     pub const fn files(&self) -> u64 {
         self.outcome.files
     }
     pub fn relations(&self) -> &[String] {
         &self.outcome.relations
-    }
-    pub fn suggested_sql(&self) -> &str {
-        &self.outcome.suggested_sql
     }
 }

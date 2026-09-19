@@ -39,7 +39,7 @@ impl PlaybackClock {
         self.stop_at = Some(end);
         self.playing = end > self.seconds;
     }
-    pub(crate) fn toggle(&mut self) {
+    fn toggle(&mut self) {
         if self.duration <= 0.0 {
             return;
         }
@@ -94,16 +94,16 @@ impl PlaybackClock {
     pub(crate) fn seconds(self) -> f64 {
         self.seconds
     }
-    pub(crate) fn duration(self) -> f64 {
+    pub(super) fn duration(self) -> f64 {
         self.duration
     }
     pub(crate) fn playing(self) -> bool {
         self.playing
     }
-    pub(crate) fn speed(self) -> f64 {
+    pub(super) fn speed(self) -> f64 {
         self.speed
     }
-    pub(crate) fn looping(self) -> bool {
+    pub(super) fn looping(self) -> bool {
         self.looping
     }
     pub(crate) fn set_playing(&mut self, playing: bool) {
@@ -148,7 +148,7 @@ impl ViewWindow {
     pub(crate) fn end(self) -> f64 {
         self.end
     }
-    pub(crate) fn span(self) -> f64 {
+    pub(super) fn span(self) -> f64 {
         self.end - self.start
     }
     /// Horizontal position of a moment, in percent of the visible width.
@@ -161,7 +161,7 @@ impl ViewWindow {
     pub(crate) fn seconds_at(self, fraction: f64) -> f64 {
         self.start + self.span() * fraction.clamp(0.0, 1.0)
     }
-    pub(crate) fn zoomed(self, factor: f64, anchor: f64, duration: f64) -> Self {
+    pub(super) fn zoomed(self, factor: f64, anchor: f64, duration: f64) -> Self {
         let span = (self.span() * factor).clamp(Self::MIN_SPAN, duration.max(Self::MIN_SPAN));
         let anchor = anchor.clamp(self.start, self.end);
         let ratio = if self.span() > 0.0 {
@@ -172,7 +172,7 @@ impl ViewWindow {
         let start = anchor - span * ratio;
         Self::clamped(start, start + span, duration)
     }
-    pub(crate) fn panned(self, delta: f64, duration: f64) -> Self {
+    pub(super) fn panned(self, delta: f64, duration: f64) -> Self {
         Self::clamped(self.start + delta, self.end + delta, duration)
     }
     fn clamped(start: f64, end: f64, duration: f64) -> Self {

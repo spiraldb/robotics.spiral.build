@@ -33,10 +33,10 @@ impl CheckpointKey {
     pub fn new(run_id: String, step: u64) -> Self {
         Self { run_id, step }
     }
-    pub(crate) fn run_id(&self) -> &str {
+    fn run_id(&self) -> &str {
         &self.run_id
     }
-    pub(crate) const fn step(&self) -> u64 {
+    const fn step(&self) -> u64 {
         self.step
     }
 }
@@ -62,7 +62,7 @@ impl CheckpointArtifact {
         ])
     }
 
-    pub(crate) fn from_bytes(config_json: Vec<u8>, payload: Vec<u8>) -> Result<Self, String> {
+    fn from_bytes(config_json: Vec<u8>, payload: Vec<u8>) -> Result<Self, String> {
         Self::validate_size(config_json.len(), payload.len())?;
         Ok(Self {
             config_json,
@@ -87,7 +87,7 @@ impl CheckpointArtifact {
 
     /// Validate opaque artifact sizes before adapters copy or materialize them
     /// a second time. Overflow and oversized external rows fail closed.
-    pub(crate) fn validate_size(config_bytes: usize, payload_bytes: usize) -> Result<(), String> {
+    fn validate_size(config_bytes: usize, payload_bytes: usize) -> Result<(), String> {
         if config_bytes > MAX_CHECKPOINT_CONFIG_BYTES {
             return Err(format!(
                 "checkpoint configuration exceeds the {MAX_CHECKPOINT_CONFIG_BYTES}-byte limit"

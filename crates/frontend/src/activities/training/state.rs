@@ -45,13 +45,13 @@ pub(crate) struct TrainingRunIdentity {
 }
 
 impl TrainingRunIdentity {
-    pub(crate) fn new(id: String, name: String) -> Self {
+    pub(super) fn new(id: String, name: String) -> Self {
         Self { id, name }
     }
 }
 
 impl TrainingController {
-    pub(crate) fn use_controller(dataset_id: &str) -> Self {
+    pub(super) fn use_controller(dataset_id: &str) -> Self {
         let config_sql = String::new();
         let config_dataset = dataset_id.to_owned();
         let controller = use_hook(|| Self {
@@ -79,20 +79,20 @@ impl TrainingController {
         controller
     }
 
-    pub(crate) fn config(&self) -> TrainingConfig {
+    pub(super) fn config(&self) -> TrainingConfig {
         self.draft.config.read().to_owned()
     }
 
-    pub(crate) fn edit_config(mut self, edit: impl FnOnce(&mut TrainingConfig)) {
+    pub(super) fn edit_config(mut self, edit: impl FnOnce(&mut TrainingConfig)) {
         edit(&mut self.draft.config.write());
     }
 
-    pub(crate) fn set_run_name(mut self, value: String) {
+    pub(super) fn set_run_name(mut self, value: String) {
         self.draft.automatic_run_name.set(false);
         self.draft.config.write().set_run_name(value);
     }
 
-    pub(crate) fn sync_automatic_run_name(mut self, existing_names: &[String]) {
+    pub(super) fn sync_automatic_run_name(mut self, existing_names: &[String]) {
         if self.draft.automatic_run_name.peek().to_owned() {
             self.draft
                 .config
@@ -101,38 +101,38 @@ impl TrainingController {
         }
     }
 
-    pub(crate) fn selected_run(&self) -> Option<String> {
+    pub(super) fn selected_run(&self) -> Option<String> {
         self.history.selected_run.read().to_owned()
     }
 
-    pub(crate) fn opened_runs(&self) -> Vec<String> {
+    pub(super) fn opened_runs(&self) -> Vec<String> {
         self.history.opened_runs.read().to_owned()
     }
 
-    pub(crate) fn starting(&self) -> bool {
+    pub(super) fn starting(&self) -> bool {
         self.commands.starting.read().to_owned()
     }
 
-    pub(crate) fn stopping(&self) -> Option<String> {
+    pub(super) fn stopping(&self) -> Option<String> {
         self.commands.stopping.read().to_owned()
     }
 
-    pub(crate) fn deleting(&self) -> Option<String> {
+    pub(super) fn deleting(&self) -> Option<String> {
         self.commands.deleting.read().to_owned()
     }
 
-    pub(crate) fn open_run(mut self, id: String) {
+    pub(super) fn open_run(mut self, id: String) {
         if !self.history.opened_runs.peek().contains(&id) {
             self.history.opened_runs.write().push(id.clone());
         }
         self.history.selected_run.set(Some(id));
     }
 
-    pub(crate) fn select_run(mut self, id: String) {
+    pub(super) fn select_run(mut self, id: String) {
         self.history.selected_run.set(Some(id));
     }
 
-    pub(crate) fn close_run(mut self, id: String) {
+    pub(super) fn close_run(mut self, id: String) {
         self.history
             .opened_runs
             .write()
@@ -142,7 +142,7 @@ impl TrainingController {
         }
     }
 
-    pub(crate) fn start(
+    pub(super) fn start(
         mut self,
         studio: StudioProjectState,
         history: super::history::TrainingHistory,
@@ -195,7 +195,7 @@ impl TrainingController {
         );
     }
 
-    pub(crate) fn stop(mut self, studio: StudioProjectState, id: String) {
+    pub(super) fn stop(mut self, studio: StudioProjectState, id: String) {
         if self.commands.stopping.peek().is_some() {
             return;
         }
@@ -211,7 +211,7 @@ impl TrainingController {
         });
     }
 
-    pub(crate) fn delete(mut self, studio: StudioProjectState, run: TrainingRunIdentity) {
+    pub(super) fn delete(mut self, studio: StudioProjectState, run: TrainingRunIdentity) {
         if self.commands.deleting.peek().is_some() {
             return;
         }

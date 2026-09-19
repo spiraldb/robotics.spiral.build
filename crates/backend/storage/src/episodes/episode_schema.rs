@@ -42,7 +42,7 @@ pub(super) struct EpisodeSchema;
 
 impl EpisodeSchema {
     /// Arrow shape of the episode header encoded into each MCAP recording.
-    pub(super) fn episodes() -> SchemaRef {
+    fn episodes() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new(db::EPISODE_ID, DataType::Utf8, false),
             Field::new(db::DATASET_ID, DataType::Utf8, false),
@@ -68,7 +68,7 @@ impl EpisodeSchema {
         ]))
     }
 
-    pub(super) fn episode_streams() -> SchemaRef {
+    fn episode_streams() -> SchemaRef {
         let condition = CONDITION_COLUMNS
             .into_iter()
             .map(|name| Field::new(name, OptionalFloatListColumn::data_type(), true));
@@ -91,7 +91,7 @@ impl EpisodeSchema {
         ))
     }
 
-    pub(super) fn joint_samples() -> SchemaRef {
+    fn joint_samples() -> SchemaRef {
         let nullable_f64_list =
             || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
         Arc::new(Schema::new(vec![
@@ -406,7 +406,7 @@ pub(super) struct EpisodeStreamKey {
 }
 
 impl EpisodeStreamKey {
-    pub(super) const fn new(episode_id: String, stream_id: String, ordinal: u32) -> Self {
+    const fn new(episode_id: String, stream_id: String, ordinal: u32) -> Self {
         Self {
             episode_id,
             stream_id,
@@ -428,7 +428,7 @@ pub(super) struct EpisodeStreamRow {
 }
 
 impl EpisodeStreamRow {
-    pub(super) fn joint(key: EpisodeStreamKey, arm: &EpisodeArm) -> Self {
+    fn joint(key: EpisodeStreamKey, arm: &EpisodeArm) -> Self {
         Self {
             key,
             modality: StreamModality::Joint,
@@ -440,7 +440,7 @@ impl EpisodeStreamRow {
         }
     }
 
-    pub(super) fn video(key: EpisodeStreamKey, properties: VideoStreamProperties) -> Self {
+    fn video(key: EpisodeStreamKey, properties: VideoStreamProperties) -> Self {
         Self {
             key,
             modality: StreamModality::Video,
@@ -455,7 +455,7 @@ impl EpisodeStreamRow {
     /// Attach the motor readings recorded for this arm. An observation that
     /// measured nothing is dropped so the columns stay null rather than
     /// claiming an all-empty reading.
-    pub(super) fn with_condition(
+    fn with_condition(
         mut self,
         start: Option<&ArmCondition>,
         peak: Option<&ArmConditionSummary>,
@@ -553,7 +553,7 @@ impl EpisodeStreamRows for [EpisodeStreamRow] {
 
 /// Describe every joint stream before its samples are appended.
 impl EpisodeStart {
-    pub(super) fn stream_rows(&self, completion: &EpisodeCompletion) -> Vec<EpisodeStreamRow> {
+    fn stream_rows(&self, completion: &EpisodeCompletion) -> Vec<EpisodeStreamRow> {
         self.arms()
             .iter()
             .enumerate()

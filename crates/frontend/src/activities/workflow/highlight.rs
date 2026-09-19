@@ -21,7 +21,7 @@ pub(super) enum TokenKind {
 }
 
 impl TokenKind {
-    pub(super) const fn class_name(self) -> &'static str {
+    const fn class_name(self) -> &'static str {
         match self {
             Self::Keyword => "tok-keyword",
             Self::Function => "tok-function",
@@ -37,8 +37,8 @@ impl TokenKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Token {
-    pub(super) kind: TokenKind,
-    pub(super) text: String,
+    kind: TokenKind,
+    text: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,7 +172,7 @@ impl Tokens {
         Self::lex(text, Vocabulary::Sql)
     }
 
-    pub(super) fn expression(text: &str) -> Self {
+    fn expression(text: &str) -> Self {
         Self::lex(text, Vocabulary::Expression)
     }
 

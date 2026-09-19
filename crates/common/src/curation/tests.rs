@@ -100,13 +100,10 @@ fn recipe_edits_invalidate_verdicts_but_renaming_does_not() {
     renamed.set_name("Renamed");
     renamed.set_revision(4);
     renamed.rule_mut("dim").unwrap().set_label("Too dark");
-    renamed.replace_fact(
+    renamed.facts[0] = CurationFact::new(
         "brightness",
-        CurationFact::new(
-            "brightness",
-            "Brightness of the top camera",
-            executed.facts()[0].measure().clone(),
-        ),
+        "Brightness of the top camera",
+        executed.facts()[0].measure().clone(),
     );
     assert!(renamed.accepts_output_from(&executed));
     let mut edited = executed.clone();
@@ -136,10 +133,6 @@ fn sentences_read_the_way_an_operator_would_write_them() {
     assert_eq!(
         spec.transforms()[0].title(),
         "Convert /top-camera as bt709_limited"
-    );
-    assert_eq!(
-        spec.facts()[0].measure().summary(),
-        "Mean brightness of frames 0, 30 of /top-camera"
     );
     let sample = CameraSample::new(TopicRef::new("/top-camera")).sample_sql("ds");
     assert!(sample.contains("WHERE r.id = $1)"));

@@ -27,14 +27,14 @@ pub(crate) struct RobotAdapter<'a> {
 }
 
 impl<'a> RobotAdapter<'a> {
-    pub(super) fn new(state: &'a ProjectContext) -> Self {
+    fn new(state: &'a ProjectContext) -> Self {
         Self {
             state,
             saved_records: None,
         }
     }
 
-    pub(crate) async fn prefetched(state: &'a ProjectContext) -> Result<Self, OperationError> {
+    async fn prefetched(state: &'a ProjectContext) -> Result<Self, OperationError> {
         Ok(Self {
             state,
             saved_records: Some(
@@ -172,7 +172,7 @@ pub(crate) struct DeviceCommands {
 }
 
 impl DeviceCommands {
-    pub(crate) async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, BackendCommandError> {
+    pub(super) async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 SerialPortDiscovery::list(&state).await.map_err(Into::into)
@@ -180,7 +180,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, BackendCommandError> {
+    pub(super) async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 state.cameras().refresh().await.map_err(Into::into)
@@ -194,7 +194,7 @@ impl DeviceCommands {
         let _activity = self.state.admit()?;
         Ok(self.state.hardware().state().telemetry().clone())
     }
-    pub(crate) fn hardware_status(
+    pub(super) fn hardware_status(
         &self,
     ) -> Result<spiral_robotics_common::robots::HardwareStatus, BackendCommandError> {
         let _activity = self.state.admit()?;
@@ -209,7 +209,7 @@ impl DeviceCommands {
             issues,
         ))
     }
-    pub(crate) async fn list_robots(&self) -> Result<Vec<RobotSummary>, BackendCommandError> {
+    pub(super) async fn list_robots(&self) -> Result<Vec<RobotSummary>, BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 let records = state
@@ -226,7 +226,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn save_document(
+    pub(super) async fn save_document(
         &self,
         request: spiral_robotics_common::robots::document::RobotDocumentSave,
     ) -> Result<RobotSummary, BackendCommandError> {
@@ -263,7 +263,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn get_robot(&self, id: String) -> Result<RobotSummary, BackendCommandError> {
+    pub(super) async fn get_robot(&self, id: String) -> Result<RobotSummary, BackendCommandError> {
         self.state
             .execute(
                 move |state, _activity| async move { Self::from(state).present_robot(&id).await },
@@ -271,7 +271,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn delete_robot(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn delete_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 let adapter = RobotAdapter::new(&state);
@@ -283,7 +283,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn connect_robot(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn connect_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 let adapter = RobotAdapter::new(&state);
@@ -295,7 +295,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn disconnect_robot(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn disconnect_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 state
@@ -307,7 +307,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn hold_robot(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn hold_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 RobotControlActions::new(state.hardware().as_ref())
@@ -318,7 +318,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn release_robot(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn release_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 RobotControlActions::new(state.hardware().as_ref())
@@ -329,7 +329,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn set_robot_goal(
+    pub(super) async fn set_robot_goal(
         &self,
         id: String,
         normalized: BTreeMap<String, f64>,
@@ -347,7 +347,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn start_calibration(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn start_calibration(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 CalibrationControlPort::start_calibration(state.hardware().as_ref(), &id)
@@ -357,7 +357,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn finish_calibration(
+    pub(super) async fn finish_calibration(
         &self,
         id: String,
     ) -> Result<RobotSummary, BackendCommandError> {
@@ -376,7 +376,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn cancel_calibration(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn cancel_calibration(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 CalibrationControlPort::cancel_calibration(state.hardware().as_ref(), &id)
@@ -386,7 +386,7 @@ impl DeviceCommands {
             .await
     }
 
-    pub(crate) async fn set_mode(
+    pub(super) async fn set_mode(
         &self,
         selection: ModeSelection,
     ) -> Result<(), BackendCommandError> {

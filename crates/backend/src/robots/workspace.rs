@@ -162,7 +162,7 @@ impl RobotRecord {
             .map(ToOwned::to_owned)
     }
 
-    pub(crate) fn port(&self) -> Option<PortSettings> {
+    pub(super) fn port(&self) -> Option<PortSettings> {
         let port = self.config.root().get("port")?.as_object()?;
         let path = port.get("path")?.as_str()?;
         if path.trim().is_empty() {
@@ -178,7 +178,7 @@ impl RobotRecord {
         ))
     }
 
-    pub(crate) fn camera_object(&self) -> Map<String, Value> {
+    fn camera_object(&self) -> Map<String, Value> {
         self.config
             .root()
             .get("cameras")
@@ -202,7 +202,7 @@ impl RobotRecord {
             .collect()
     }
 
-    pub(crate) fn motors(&self) -> Result<BTreeMap<String, MotorSpec>, WorkspaceError> {
+    pub(super) fn motors(&self) -> Result<BTreeMap<String, MotorSpec>, WorkspaceError> {
         let motors = self
             .config
             .motor_specs()
@@ -216,7 +216,7 @@ impl RobotRecord {
         Ok(motors)
     }
 
-    pub(crate) fn calibration(&self) -> Result<Option<Calibration>, WorkspaceError> {
+    fn calibration(&self) -> Result<Option<Calibration>, WorkspaceError> {
         self.config
             .calibration()
             .filter(|value| !value.is_null())
@@ -310,7 +310,7 @@ impl RobotWorkspace {
         })
     }
 
-    pub(crate) async fn save_document(
+    pub(super) async fn save_document(
         &self,
         request: &spiral_robotics_common::robots::document::RobotDocumentSave,
     ) -> Result<RobotRecord, WorkspaceError> {
@@ -336,7 +336,7 @@ impl RobotWorkspace {
         self.persist(record, expected.as_ref()).await
     }
 
-    pub(crate) async fn save_calibration(
+    pub(super) async fn save_calibration(
         &self,
         id: &str,
         update: CalibrationUpdate<'_>,
@@ -365,7 +365,7 @@ impl RobotWorkspace {
         .await
     }
 
-    pub(crate) async fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
+    pub(super) async fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
         let id = RobotId::try_from(id)?;
         if self
             .project_store

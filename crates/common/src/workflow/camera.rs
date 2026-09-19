@@ -18,13 +18,4 @@ impl CameraBinding {
             field: vec!["value".into(), "data".into()],
         }
     }
-    pub fn topic(&self) -> &str {
-        &self.topic
-    }
-    pub const fn revision(&self) -> &TopicRevision {
-        &self.revision
-    }
-    pub fn field(&self) -> &[String] {
-        &self.field
-    }
 }

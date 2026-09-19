@@ -140,7 +140,7 @@ impl WorkflowToolCatalog {
     pub(super) fn presentation(name: &str) -> ToolPresentation {
         Self::find(name).map_or_else(ToolPresentation::unknown, |tool| tool.presentation())
     }
-    pub(super) fn completion(name: &str, output: &Value) -> ToolCompletion {
+    fn completion(name: &str, output: &Value) -> ToolCompletion {
         Self::find(name).map_or_else(
             || ToolCompletion {
                 summary: "Workflow tool complete".into(),

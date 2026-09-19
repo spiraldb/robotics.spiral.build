@@ -93,7 +93,7 @@ pub(crate) fn ResultNodeIcon() -> Element {
 }
 
 #[component]
-pub(crate) fn FitViewIcon() -> Element {
+pub(super) fn FitViewIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" }
@@ -211,7 +211,7 @@ pub(crate) fn SpinnerIcon() -> Element {
 }
 
 #[component]
-pub(crate) fn CheckIcon() -> Element {
+pub(super) fn CheckIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M3.5 8.5 6.5 11.5 12.5 4.5" }
@@ -220,7 +220,7 @@ pub(crate) fn CheckIcon() -> Element {
 }
 
 #[component]
-pub(crate) fn ZoomInIcon() -> Element {
+pub(super) fn ZoomInIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M8 3.75v8.5M3.75 8h8.5" }
@@ -229,7 +229,7 @@ pub(crate) fn ZoomInIcon() -> Element {
 }
 
 #[component]
-pub(crate) fn ZoomOutIcon() -> Element {
+pub(super) fn ZoomOutIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M3.75 8h8.5" }
@@ -289,7 +289,7 @@ pub(crate) fn DetailsIcon() -> Element {
 
 /// Transport: hold the clock where it is.
 #[component]
-pub(crate) fn PauseIcon() -> Element {
+pub(super) fn PauseIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M5 3.5v9M11 3.5v9" }
@@ -299,7 +299,7 @@ pub(crate) fn PauseIcon() -> Element {
 
 /// Transport: jump to the first message.
 #[component]
-pub(crate) fn SkipToStartIcon() -> Element {
+pub(super) fn SkipToStartIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M4 3.5v9M12 3.5 6 8l6 4.5z" }
@@ -309,7 +309,7 @@ pub(crate) fn SkipToStartIcon() -> Element {
 
 /// Transport: jump to the last message.
 #[component]
-pub(crate) fn SkipToEndIcon() -> Element {
+pub(super) fn SkipToEndIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M12 3.5v9M4 3.5 10 8l-6 4.5z" }
@@ -319,7 +319,7 @@ pub(crate) fn SkipToEndIcon() -> Element {
 
 /// Transport: nudge the playhead backwards by one step.
 #[component]
-pub(crate) fn StepBackIcon() -> Element {
+pub(super) fn StepBackIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M10.5 4 6.5 8l4 4M5 4v8" }
@@ -329,7 +329,7 @@ pub(crate) fn StepBackIcon() -> Element {
 
 /// Transport: nudge the playhead forwards by one step.
 #[component]
-pub(crate) fn StepForwardIcon() -> Element {
+pub(super) fn StepForwardIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M5.5 4 9.5 8l-4 4M11 4v8" }
@@ -360,7 +360,7 @@ pub(crate) fn SignalStreamIcon() -> Element {
 
 /// Fit the whole episode into the visible span.
 #[component]
-pub(crate) fn FitTimeIcon() -> Element {
+pub(super) fn FitTimeIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M2.5 5v6M13.5 5v6M4 8h8M6 6 4 8l2 2M10 6l2 2-2 2" }

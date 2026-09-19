@@ -76,9 +76,6 @@ impl CurationRunSnapshot {
         self.timing.updated_ms = started_ms;
         self
     }
-    pub fn curation_id(&self) -> &str {
-        &self.identity.curation_id
-    }
     pub fn run_id(&self) -> Option<&str> {
         self.identity.run_id.as_deref()
     }
@@ -111,9 +108,6 @@ impl CurationRunSnapshot {
     }
     pub const fn started_ms(&self) -> u64 {
         self.timing.started_ms
-    }
-    pub const fn updated_ms(&self) -> u64 {
-        self.timing.updated_ms
     }
     pub const fn set_phase(&mut self, phase: RunPhase) {
         self.execution.phase = phase;
@@ -214,12 +208,6 @@ pub struct EpisodeFacts {
 }
 
 impl EpisodeFacts {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            ..Self::default()
-        }
-    }
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -291,9 +279,6 @@ impl CurationVerdict {
     }
     pub const fn episode(&self) -> &EpisodeFacts {
         &self.episode
-    }
-    pub const fn facts(&self) -> &BTreeMap<String, serde_json::Value> {
-        &self.facts
     }
     pub fn fact(&self, key: &str) -> Option<&serde_json::Value> {
         self.facts.get(key)
@@ -471,9 +456,6 @@ impl CurationStageImpact {
     }
     pub fn scored_episodes(&self) -> Option<u64> {
         self.scored_episode_ids.as_ref().map(|ids| ids.len() as u64)
-    }
-    pub fn scored_episode_ids(&self) -> &[String] {
-        self.scored_episode_ids.as_deref().unwrap_or_default()
     }
     pub fn set_scored_episode_ids(&mut self, ids: Vec<String>) {
         self.scored_episode_ids = Some(ids);

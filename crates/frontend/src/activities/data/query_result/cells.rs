@@ -420,7 +420,7 @@ pub(super) struct MeasureBar {
 pub(super) struct ResultValue<'a>(pub(super) Option<&'a Value>);
 
 impl ResultValue<'_> {
-    pub(super) fn display(&self) -> String {
+    fn display(&self) -> String {
         match self.0 {
             None | Some(Value::Null) => "—".to_owned(),
             Some(Value::Number(number)) if number.is_f64() => {

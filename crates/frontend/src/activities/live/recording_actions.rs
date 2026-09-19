@@ -14,7 +14,7 @@ use crate::activities::live::session::LiveSession;
 use crate::shell::notifications::MessageSource;
 
 impl LiveSession {
-    pub(crate) fn recording_blocker(self) -> Option<String> {
+    pub(super) fn recording_blocker(self) -> Option<String> {
         if !spiral_robotics_common::identity::DatasetId::is_canonical(
             self.datasets().selected().read().trim(),
         ) {
@@ -36,7 +36,7 @@ impl LiveSession {
         }
     }
 
-    pub(crate) fn start_recording(self) {
+    pub(super) fn start_recording(self) {
         if let Some(reason) = self.recording_blocker() {
             self.project().report(reason);
             return;
@@ -61,7 +61,7 @@ impl LiveSession {
         });
     }
 
-    pub(crate) fn set_recording_paused(self, episode: &str, paused: bool) {
+    pub(super) fn set_recording_paused(self, episode: &str, paused: bool) {
         if self
             .telemetry()
             .recording()
@@ -88,7 +88,7 @@ impl LiveSession {
         }
     }
 
-    pub(crate) fn stop_recording(self, episode: &str, completion: RecordingCompletion) {
+    pub(super) fn stop_recording(self, episode: &str, completion: RecordingCompletion) {
         if self
             .telemetry()
             .recording()
@@ -121,7 +121,7 @@ impl LiveSession {
         });
     }
 
-    pub(crate) fn replay_target(self, episode: &EpisodeInfo) -> Option<(String, Option<String>)> {
+    fn replay_target(self, episode: &EpisodeInfo) -> Option<(String, Option<String>)> {
         let ready = self
             .telemetry()
             .connected_robots()
@@ -155,7 +155,7 @@ impl LiveSession {
         Some((target, Some(source)))
     }
 
-    pub(crate) fn replay_blocker(self, episode: &EpisodeInfo) -> Option<String> {
+    pub(super) fn replay_blocker(self, episode: &EpisodeInfo) -> Option<String> {
         if !episode.usable() {
             Some("This episode did not finish and cannot be replayed.".to_owned())
         } else if self.telemetry().mode_active()
@@ -174,7 +174,7 @@ impl LiveSession {
         }
     }
 
-    pub(crate) fn start_replay(self, episode: &EpisodeInfo, start_seconds: f64) {
+    pub(super) fn start_replay(self, episode: &EpisodeInfo, start_seconds: f64) {
         if let Some(reason) = self.replay_blocker(episode) {
             self.project().report(reason);
             return;
@@ -198,7 +198,7 @@ impl LiveSession {
         });
     }
 
-    pub(crate) fn set_replay_paused(self, episode: &str, paused: bool) {
+    pub(super) fn set_replay_paused(self, episode: &str, paused: bool) {
         if self
             .telemetry()
             .replay()
@@ -224,7 +224,7 @@ impl LiveSession {
         }
     }
 
-    pub(crate) fn stop_replay(self, episode: &str) {
+    pub(super) fn stop_replay(self, episode: &str) {
         if self
             .telemetry()
             .replay()
@@ -254,7 +254,7 @@ pub(crate) struct RecordingCompletion {
 }
 
 impl RecordingCompletion {
-    pub(crate) fn new(keep: bool, on_completed: impl FnOnce(EpisodeInfo) + 'static) -> Self {
+    pub(super) fn new(keep: bool, on_completed: impl FnOnce(EpisodeInfo) + 'static) -> Self {
         Self {
             keep,
             on_completed: Box::new(on_completed),
@@ -269,7 +269,7 @@ pub(crate) struct TimelineSeekBody {
 }
 
 impl TimelineSeekBody {
-    pub(crate) fn new(robot: String, source_arm: Option<String>, seconds: f64) -> Self {
+    pub(super) fn new(robot: String, source_arm: Option<String>, seconds: f64) -> Self {
         Self {
             robot,
             source_arm,
@@ -279,7 +279,7 @@ impl TimelineSeekBody {
 }
 
 impl LiveSession {
-    pub(crate) fn physical_seek(self, episode: String, request: TimelineSeekBody) {
+    pub(super) fn physical_seek(self, episode: String, request: TimelineSeekBody) {
         self.commands().run("", async move {
             RecordingClient::current()
                 .seek_episode(

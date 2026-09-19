@@ -20,7 +20,7 @@ use spiral_robotics_common::recording::RecordingProgress;
 
 /// The complete left-hand workbench for operating a connected pair.
 #[component]
-pub(crate) fn LiveWorkbench(
+pub(super) fn LiveWorkbench(
     project: StudioProjectState,
     hardware: HardwareViewState,
     selection: RobotSelection,

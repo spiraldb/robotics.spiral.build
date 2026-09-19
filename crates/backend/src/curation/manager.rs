@@ -42,7 +42,7 @@ impl CurationManager {
             }),
         }
     }
-    pub(crate) async fn score_episode(
+    pub(super) async fn score_episode(
         &self,
         request: spiral_robotics_common::curation::progress::ProgressScoreRequest,
     ) -> Result<spiral_robotics_common::curation::progress::ProgressScoreResult, OperationError>
@@ -53,7 +53,7 @@ impl CurationManager {
             .await
             .map_err(OperationError::External)
     }
-    pub(crate) async fn preview(
+    pub(super) async fn preview(
         &self,
         curation: &CurationSpec,
     ) -> Result<CurationOutcome, OperationError> {
@@ -133,14 +133,14 @@ impl CurationManager {
         }
         Ok(outcome.with_stage_impacts(impacts))
     }
-    pub(crate) async fn list(&self) -> Result<Vec<CurationSummary>, OperationError> {
+    pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, OperationError> {
         self.inner
             .storage
             .curations()
             .await
             .map_err(OperationError::External)
     }
-    pub(crate) async fn load(&self, id: &str) -> Result<CurationSpec, OperationError> {
+    pub(super) async fn load(&self, id: &str) -> Result<CurationSpec, OperationError> {
         let _save = self.inner.saves.lock().await;
         let stored = self
             .inner
@@ -168,7 +168,7 @@ impl CurationManager {
     }
     /// Save one recipe revision. The submitted revision must equal the stored
     /// one; the saved copy carries the next.
-    pub(crate) async fn save(
+    pub(super) async fn save(
         &self,
         mut curation: CurationSpec,
     ) -> Result<CurationSpec, OperationError> {
@@ -215,10 +215,10 @@ impl CurationManager {
         }
         Ok(curation)
     }
-    pub(crate) fn runs(&self) -> Vec<CurationRun> {
+    pub(super) fn runs(&self) -> Vec<CurationRun> {
         self.inner.runs.all()
     }
-    pub(crate) fn run(&self, id: &str) -> Result<CurationRun, OperationError> {
+    pub(super) fn run(&self, id: &str) -> Result<CurationRun, OperationError> {
         self.inner
             .runs
             .get(id)
@@ -226,7 +226,7 @@ impl CurationManager {
     }
     /// Admit one run of the submitted recipe, unsaved edits included. The
     /// recipe is compiled up front so an invalid one never becomes a run.
-    pub(crate) fn start(&self, mut curation: CurationSpec) -> Result<CurationRun, OperationError> {
+    pub(super) fn start(&self, mut curation: CurationSpec) -> Result<CurationRun, OperationError> {
         curation.set_source(curation.source().cloned());
         let compiled = CurationSql::new(&curation)
             .compile()

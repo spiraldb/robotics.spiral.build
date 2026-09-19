@@ -4,12 +4,12 @@ use sea_orm::entity::prelude::*;
 #[sea_orm(table_name = "curations")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub project: String,
+    pub(super) project: String,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: String,
-    pub name: String,
-    pub revision: i64,
-    pub document: Json,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) revision: i64,
+    pub(crate) document: Json,
     pub updated_ms: i64,
 }
 

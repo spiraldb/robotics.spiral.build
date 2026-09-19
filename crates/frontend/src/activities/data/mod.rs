@@ -26,5 +26,5 @@ pub(crate) use client::DatasetClient;
 pub(crate) use episode_transport::EpisodeTransport;
 
 pub(crate) use episode_list::OpenedEpisode;
-pub(crate) use episode_playback::EpisodeCamera;
+pub(in crate::activities) use episode_playback::EpisodeCamera;
 pub(crate) use episode_streams::StreamCatalog;

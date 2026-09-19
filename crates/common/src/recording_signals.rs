@@ -67,10 +67,6 @@ impl RecordingSignals {
         &self.times
     }
 
-    pub fn live(&self) -> bool {
-        self.live
-    }
-
     /// Fold one telemetry frame into the active take.
     //
     // A single idle frame can be a publication race between recorder state and
@@ -355,7 +351,7 @@ mod tests {
         ));
 
         assert!(store.times.is_empty());
-        assert!(!store.live());
+        assert!(!store.live);
     }
 
     #[test]
@@ -375,7 +371,7 @@ mod tests {
         store.observe(&frame(None, 0.0, vec![]));
         store.observe(&frame(None, 0.0, vec![]));
         assert_eq!(store.times.len(), 2);
-        assert!(!store.live());
+        assert!(!store.live);
 
         store.observe(&frame(
             Some("episode_000002"),
@@ -397,7 +393,7 @@ mod tests {
             ));
         }
         store.observe(&frame(None, 0.0, vec![]));
-        assert!(store.live());
+        assert!(store.live);
         store.observe(&frame(
             Some("take"),
             4.0,
@@ -510,7 +506,7 @@ mod tests {
         assert_eq!(frontend, backend);
         let unchanged = backend.window(frontend.cursor());
         assert!(!unchanged.changes(&frontend));
-        assert!(!frontend.live());
+        assert!(!frontend.live);
     }
 
     #[test]
@@ -528,7 +524,7 @@ mod tests {
         backend.clear();
         frontend.apply_window(backend.window(frontend.cursor()));
         assert!(frontend.times().is_empty());
-        assert!(!frontend.live());
+        assert!(!frontend.live);
         backend.observe(&frame(Some("take"), 0.0, vec![]));
         frontend.apply_window(backend.window(frontend.cursor()));
         assert_eq!(frontend.times(), &[0.0]);

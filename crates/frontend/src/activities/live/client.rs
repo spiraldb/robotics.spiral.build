@@ -28,7 +28,7 @@ impl RecordingClient {
         )
     }
 
-    pub(crate) fn inspect_episode(
+    pub(super) fn inspect_episode(
         &self,
         id: String,
     ) -> impl Future<Output = Result<EpisodeInspectionSnapshot, CommandError>> + use<> {
@@ -43,7 +43,7 @@ impl RecordingClient {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) fn recording_window(
+    pub(super) fn recording_window(
         &self,
         cursor: spiral_robotics_common::recording_signals::RecordingCursor,
     ) -> impl Future<
@@ -53,7 +53,7 @@ impl RecordingClient {
             .request(HttpRequest::new("GET", "/api/recording/signals").query(&cursor))
     }
 
-    pub(crate) fn start_recording(
+    pub(super) fn start_recording(
         &self,
         request: RecordingStart,
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
@@ -63,7 +63,7 @@ impl RecordingClient {
         )
     }
 
-    pub(crate) fn stop_recording(
+    pub(super) fn stop_recording(
         &self,
         keep: bool,
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
@@ -73,7 +73,7 @@ impl RecordingClient {
         )
     }
 
-    pub(crate) fn set_recording_paused(
+    pub(super) fn set_recording_paused(
         &self,
         paused: bool,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
@@ -83,7 +83,7 @@ impl RecordingClient {
         )
     }
 
-    pub(crate) fn seek_episode(
+    pub(super) fn seek_episode(
         &self,
         id: String,
         request: EpisodeSeek,
@@ -98,7 +98,7 @@ impl RecordingClient {
         )
     }
 
-    pub(crate) fn start_replay(
+    pub(super) fn start_replay(
         &self,
         request: ReplayStart,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
@@ -108,7 +108,7 @@ impl RecordingClient {
         )
     }
 
-    pub(crate) fn set_replay_paused(
+    pub(super) fn set_replay_paused(
         &self,
         paused: bool,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {

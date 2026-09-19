@@ -24,7 +24,7 @@ pub(crate) struct QueryExecutionPresentation {
 }
 
 impl QueryExecutionPresentation {
-    pub(crate) fn new(sql: String, max_rows: usize, state: QueryState) -> Self {
+    pub(in crate::activities) fn new(sql: String, max_rows: usize, state: QueryState) -> Self {
         Self {
             sql,
             max_rows,
@@ -32,19 +32,19 @@ impl QueryExecutionPresentation {
         }
     }
 
-    pub(crate) fn sql(&self) -> &str {
+    pub(super) fn sql(&self) -> &str {
         &self.sql
     }
 
-    pub(crate) const fn max_rows(&self) -> usize {
+    const fn max_rows(&self) -> usize {
         self.max_rows
     }
 
-    pub(crate) const fn state(&self) -> &QueryState {
+    const fn state(&self) -> &QueryState {
         &self.state
     }
 
-    pub(crate) fn render(&self) -> Element {
+    pub(in crate::activities) fn render(&self) -> Element {
         rsx! { QueryResultContent { model: self.clone() } }
     }
 }
@@ -59,23 +59,23 @@ pub(crate) struct QueryTab {
 }
 
 impl QueryTab {
-    pub(crate) fn new(id: u64, title: String, model: QueryExecutionPresentation) -> Self {
+    pub(super) fn new(id: u64, title: String, model: QueryExecutionPresentation) -> Self {
         Self { id, title, model }
     }
 
-    pub(crate) const fn id(&self) -> u64 {
+    pub(super) const fn id(&self) -> u64 {
         self.id
     }
 
-    pub(crate) const fn presentation(&self) -> &QueryExecutionPresentation {
+    pub(super) const fn presentation(&self) -> &QueryExecutionPresentation {
         &self.model
     }
 
-    pub(crate) fn replace_presentation(&mut self, model: QueryExecutionPresentation) {
+    pub(super) fn replace_presentation(&mut self, model: QueryExecutionPresentation) {
         self.model = model;
     }
 
-    pub(crate) fn mark_cancelled(&mut self) {
+    pub(super) fn mark_cancelled(&mut self) {
         self.model.state = QueryState::Failed("Cancelled by operator.".to_owned());
     }
 }
@@ -89,7 +89,7 @@ pub(crate) enum QueryState {
 }
 
 #[component]
-pub(crate) fn QueryResultView(controller: super::state::QueryController) -> Element {
+pub(super) fn QueryResultView(controller: super::state::QueryController) -> Element {
     let prefix = use_hook(|| format!("query-{}", dioxus::dioxus_core::current_scope_id().0));
     let tabs = controller.query_tabs();
     let active_id = controller.active_query();

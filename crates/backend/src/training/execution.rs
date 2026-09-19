@@ -32,24 +32,24 @@ pub(crate) struct RunStateChange {
 }
 
 impl TrainingLaunch {
-    pub(crate) fn new(run_id: impl Into<String>, command: TrainingConfig) -> Self {
+    pub(super) fn new(run_id: impl Into<String>, command: TrainingConfig) -> Self {
         Self {
             run_id: run_id.into(),
             command,
         }
     }
 
-    pub(crate) fn run_id(&self) -> &str {
+    pub(super) fn run_id(&self) -> &str {
         &self.run_id
     }
 
-    pub(crate) fn into_parts(self) -> (String, TrainingConfig) {
+    pub(super) fn into_parts(self) -> (String, TrainingConfig) {
         (self.run_id, self.command)
     }
 }
 
 impl TrainingRunIdentity {
-    pub(crate) fn new(id: impl Into<String>, created_ms: i64) -> Self {
+    pub(super) fn new(id: impl Into<String>, created_ms: i64) -> Self {
         Self {
             id: id.into(),
             created_ms,
@@ -58,13 +58,13 @@ impl TrainingRunIdentity {
 }
 
 impl RunStateChange {
-    pub(crate) const fn phase(&self) -> TrainingRunPhase {
+    pub(super) const fn phase(&self) -> TrainingRunPhase {
         self.phase
     }
-    pub(crate) const fn finished_ms(&self) -> Option<i64> {
+    pub(super) const fn finished_ms(&self) -> Option<i64> {
         self.finished_ms
     }
-    pub(crate) fn message(&self) -> Option<&str> {
+    pub(super) fn message(&self) -> Option<&str> {
         self.message.as_deref()
     }
 }

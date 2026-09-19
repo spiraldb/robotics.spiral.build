@@ -29,7 +29,7 @@ pub(crate) struct DataCommands {
 
 /// Settings values admitted together by the data command facade.
 impl DataCommands {
-    pub(crate) async fn project_resources(
+    pub(super) async fn project_resources(
         &self,
     ) -> Result<Vec<ProjectResource>, BackendCommandError> {
         let commands = self.clone();
@@ -47,7 +47,7 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, BackendCommandError> {
+    pub(super) async fn datasets(&self) -> Result<Vec<DatasetSummary>, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
@@ -63,7 +63,7 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn inspect_dataset(
+    pub(super) async fn inspect_dataset(
         &self,
         selection: DatasetSelection,
     ) -> Result<DatasetInspection, BackendCommandError> {
@@ -82,7 +82,7 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn episode_topics(
+    pub(super) async fn episode_topics(
         &self,
         request: spiral_robotics_common::datasets::EpisodeSelection,
     ) -> Result<Vec<spiral_robotics_common::datasets::DatasetTopic>, BackendCommandError> {
@@ -102,7 +102,7 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn episode_coverage(
+    pub(super) async fn episode_coverage(
         &self,
         request: spiral_robotics_common::datasets::EpisodeCoverageRequest,
     ) -> Result<Vec<spiral_robotics_common::datasets::StreamCoverage>, BackendCommandError> {
@@ -122,7 +122,7 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn episode_messages(
+    pub(super) async fn episode_messages(
         &self,
         request: spiral_robotics_common::datasets::MessageRead,
     ) -> Result<Vec<u8>, BackendCommandError> {
@@ -142,14 +142,14 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) fn connection_settings(
+    pub(super) fn connection_settings(
         &self,
     ) -> Result<spiral_robotics_common::settings::SpiralSettings, BackendCommandError> {
         let _activity = self.state.admit()?;
         Ok(self.state.project().connection_settings())
     }
 
-    pub(crate) async fn update_connection(
+    pub(super) async fn update_connection(
         &self,
         change: spiral_robotics_common::settings::SpiralConnectionUpdate,
     ) -> Result<(), BackendCommandError> {
@@ -168,7 +168,7 @@ impl DataCommands {
             .await?
     }
 
-    pub(crate) async fn settings(&self) -> Result<DataSettings, BackendCommandError> {
+    pub(super) async fn settings(&self) -> Result<DataSettings, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
@@ -181,7 +181,7 @@ impl DataCommands {
         self.state.project().settings().await.map_err(Into::into)
     }
 
-    pub(crate) async fn update_settings(
+    pub(super) async fn update_settings(
         &self,
         change: SettingsUpdate,
     ) -> Result<DataSettings, BackendCommandError> {
@@ -224,7 +224,7 @@ impl DataCommands {
         Ok(settings)
     }
 
-    pub(crate) async fn test_spiral(&self) -> Result<ConnectionTest, BackendCommandError> {
+    pub(super) async fn test_spiral(&self) -> Result<ConnectionTest, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
@@ -245,7 +245,7 @@ impl DataCommands {
         }
     }
 
-    pub(crate) async fn test_training_runtime(
+    pub(super) async fn test_training_runtime(
         &self,
     ) -> Result<ConnectionTest, BackendCommandError> {
         let commands = self.clone();
@@ -265,7 +265,7 @@ impl DataCommands {
         ))
     }
 
-    pub(crate) async fn relations(&self) -> Result<RelationCatalog, BackendCommandError> {
+    pub(super) async fn relations(&self) -> Result<RelationCatalog, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
@@ -292,7 +292,7 @@ impl DataCommands {
             .map_err(Into::into)
     }
 
-    pub(crate) async fn query(
+    pub(super) async fn query(
         &self,
         statement: String,
         max_rows: usize,
@@ -305,7 +305,7 @@ impl DataCommands {
     }
 
     /// One exact dataset member's read-only query, with `$1` bound to its UUID.
-    pub(crate) async fn query_for_episode(
+    pub(super) async fn query_for_episode(
         &self,
         request: spiral_robotics_common::relations::EpisodeQueryRequest,
     ) -> Result<SpiralQuerySnapshot, BackendCommandError> {
@@ -347,7 +347,7 @@ impl DataCommands {
             .map_err(Into::into)
     }
 
-    pub(crate) async fn inspect_hugging_face_dataset(
+    pub(super) async fn inspect_hugging_face_dataset(
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetInspection, BackendCommandError> {
@@ -372,7 +372,7 @@ impl DataCommands {
             .map_err(BackendCommandError::from)
     }
 
-    pub(crate) async fn import_hugging_face_dataset(
+    pub(super) async fn import_hugging_face_dataset(
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetImportSummary, BackendCommandError> {
@@ -413,7 +413,7 @@ impl DataCommands {
             .map_err(BackendCommandError::from)
     }
 
-    pub(crate) async fn export_project(&self) -> Result<Vec<u8>, BackendCommandError> {
+    pub(super) async fn export_project(&self) -> Result<Vec<u8>, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()

@@ -32,7 +32,7 @@ where
     R: RobotStore + ?Sized,
     C: RobotConnectionPort + ?Sized,
 {
-    pub(crate) const fn new(store: &'a R, control: &'a C) -> Self {
+    pub(super) const fn new(store: &'a R, control: &'a C) -> Self {
         Self { store, control }
     }
 
@@ -42,20 +42,20 @@ where
     /// tear down a bus. Once it passes, failure is deliberately biased toward a
     /// saved-but-disconnected robot: deleting the SpiralDB row first could leave a
     /// live bus that no configuration or UI card can identify and stop.
-    pub(crate) async fn delete(&self, robot: &str) -> Result<(), OperationError> {
+    pub(super) async fn delete(&self, robot: &str) -> Result<(), OperationError> {
         self.store.ensure_exists(robot).await?;
         self.control.forget(robot).await?;
         self.store.delete(robot).await
     }
 
-    pub(crate) async fn connect(&self, robot: &str) -> Result<(), OperationError> {
+    pub(super) async fn connect(&self, robot: &str) -> Result<(), OperationError> {
         let specification = self.store.connection_spec(robot).await?;
         self.control.connect(specification).await
     }
 
     /// Try one saved robot without turning an unavailable or incomplete arm into
     /// a failure for the persistence action that introduced it.
-    pub(crate) async fn auto_connect_robot(&self, robot: String) -> AutoConnectOutcome {
+    async fn auto_connect_robot(&self, robot: String) -> AutoConnectOutcome {
         let specification = match self.store.connection_spec(&robot).await {
             Ok(specification) => specification,
             Err(error) => {
@@ -74,7 +74,7 @@ where
 
     /// Try every saved robot independently; one invalid or absent arm must not
     /// prevent other usable arms or the Studio itself from starting.
-    pub(crate) async fn auto_connect(&self) -> Vec<AutoConnectOutcome> {
+    pub(super) async fn auto_connect(&self) -> Vec<AutoConnectOutcome> {
         let mut outcomes = Vec::new();
         for robot in self.store.saved_robot_ids().await {
             outcomes.push(self.auto_connect_robot(robot).await);
@@ -97,7 +97,7 @@ pub(crate) struct AutoConnectOutcome {
 }
 
 impl AutoConnectOutcome {
-    pub(crate) fn into_parts(self) -> (String, AutoConnectStatus) {
+    pub(super) fn into_parts(self) -> (String, AutoConnectStatus) {
         (self.robot, self.status)
     }
 }

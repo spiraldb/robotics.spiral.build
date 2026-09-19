@@ -16,7 +16,7 @@ pub(crate) enum Activity {
 }
 
 impl Activity {
-    pub(crate) const fn all() -> [Self; 7] {
+    pub(super) const fn all() -> [Self; 7] {
         [
             Self::Live,
             Self::Data,
@@ -28,7 +28,7 @@ impl Activity {
         ]
     }
 
-    pub(crate) const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Live => "Live",
             Self::Data => "Data",
@@ -66,7 +66,7 @@ impl WorkspaceActivity {
         (self.is_active)()
     }
 
-    pub(crate) const fn activity(self) -> Activity {
+    pub(super) const fn activity(self) -> Activity {
         self.activity
     }
 }

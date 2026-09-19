@@ -75,7 +75,7 @@ impl Camera {
     }
 
     /// Where the camera sits.
-    pub(crate) fn eye(&self) -> Vec3 {
+    fn eye(&self) -> Vec3 {
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         self.target + Vec3::new(cos_pitch * cos_yaw, cos_pitch * sin_yaw, sin_pitch) * self.distance

@@ -712,7 +712,7 @@ impl MotorTravelRange {
     }
 
     /// Travel observed so far, saturating rather than overflowing.
-    pub(crate) fn span(&self) -> i64 {
+    fn span(&self) -> i64 {
         self.maximum.saturating_sub(self.minimum)
     }
 }

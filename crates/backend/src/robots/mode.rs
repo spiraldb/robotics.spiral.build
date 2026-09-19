@@ -22,11 +22,11 @@ pub(crate) struct ModeActions<'a, P: ModeControlPort + ?Sized> {
 }
 
 impl<'a, P: ModeControlPort + ?Sized> ModeActions<'a, P> {
-    pub(crate) const fn new(control: &'a P) -> Self {
+    pub(super) const fn new(control: &'a P) -> Self {
         Self { control }
     }
 
-    pub(crate) async fn set(&self, mode: OperatorMode) -> Result<(), OperationError> {
+    pub(super) async fn set(&self, mode: OperatorMode) -> Result<(), OperationError> {
         match &mode {
             OperatorMode::Idle => {}
             OperatorMode::Manual { robot } if robot.trim().is_empty() => {

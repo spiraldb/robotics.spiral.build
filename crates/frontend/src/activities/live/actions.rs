@@ -17,7 +17,7 @@ pub(crate) enum LiveAction {
 }
 
 impl LiveSession {
-    pub(crate) fn dispatch_live_action(self, action: LiveAction) {
+    pub(super) fn dispatch_live_action(self, action: LiveAction) {
         match action {
             LiveAction::Select(selection) => self.selection().selected().set(selection),
             LiveAction::Point(selection) => self.selection().pointed().set(selection),

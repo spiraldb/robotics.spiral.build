@@ -28,10 +28,10 @@ impl HttpFailure {
             failure: CommandFailure::new(CommandFailureCode::InvalidInput, message),
         }
     }
-    pub(crate) async fn not_found() -> Self {
+    pub(super) async fn not_found() -> Self {
         CommandFailure::new(CommandFailureCode::NotFound, "Unknown API endpoint").into()
     }
-    pub(crate) async fn method_not_allowed() -> Self {
+    pub(super) async fn method_not_allowed() -> Self {
         Self::rejection(
             StatusCode::METHOD_NOT_ALLOWED,
             "HTTP method is not supported for this endpoint",

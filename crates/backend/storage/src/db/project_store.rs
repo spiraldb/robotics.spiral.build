@@ -64,7 +64,7 @@ impl ProjectConnection {
         })
     }
 
-    pub fn discard(&mut self) {
+    pub(crate) fn discard(&mut self) {
         self.state = ProjectConnectionState::Closed;
     }
 
@@ -77,13 +77,13 @@ impl ProjectConnection {
             .map_err(|error| error.to_string())
     }
 
-    pub async fn plan_query(&mut self, sql: impl AsRef<str>) -> Result<Arc<Schema>, String> {
+    pub(crate) async fn plan_query(&mut self, sql: impl AsRef<str>) -> Result<Arc<Schema>, String> {
         self.query_schema(sql.as_ref().into())
             .await
             .map_err(|error| error.to_string())
     }
 
-    pub async fn relation_schema(&mut self, table: &str) -> Result<Option<Schema>, String> {
+    async fn relation_schema(&mut self, table: &str) -> Result<Option<Schema>, String> {
         let relation = RelationName::parse(table).map_err(|error| error.to_string())?;
         self.table_schema(relation)
             .await
@@ -93,7 +93,7 @@ impl ProjectConnection {
 
     /// Read schemas concurrently on independent connections while retaining this
     /// operation's project lock. Never escape an explicit transaction's snapshot.
-    pub(crate) async fn relation_schemas(
+    pub(super) async fn relation_schemas(
         &mut self,
         names: Vec<RelationName>,
     ) -> DatabaseResult<Vec<(RelationName, DatabaseResult<Option<Arc<Schema>>>)>> {
@@ -147,7 +147,7 @@ impl ProjectConnection {
         self.complete_transaction(true).await
     }
 
-    pub async fn rollback(&mut self) -> Result<(), String> {
+    pub(crate) async fn rollback(&mut self) -> Result<(), String> {
         self.complete_transaction(false).await
     }
 
@@ -182,21 +182,6 @@ impl ProjectConnection {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    /// List durable relation names without exposing the driver's catalog
-    /// representation across the storage boundary.
-    pub async fn catalog_relation_names(&mut self) -> Result<Vec<String>, String> {
-        let mut names = self
-            .relations()
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|entry| entry.into_parts().0.into_string())
-            .collect::<Vec<_>>();
-        names.sort();
-        names.dedup();
-        Ok(names)
     }
 }
 
@@ -233,11 +218,11 @@ impl ProjectConnection {
         }
     }
 
-    pub async fn ingest_batch(&mut self, target: &str, batch: RecordBatch) -> Result<(), String> {
+    async fn ingest_batch(&mut self, target: &str, batch: RecordBatch) -> Result<(), String> {
         self.ingest_batches(target, vec![batch]).await
     }
 
-    pub(crate) async fn ingest_batches(
+    async fn ingest_batches(
         &mut self,
         target: &str,
         batches: Vec<RecordBatch>,
@@ -257,19 +242,8 @@ impl ProjectConnection {
             .await
     }
 
-    /// Atomically replace one complete, already provisioned relation.
-    pub async fn replace_batches(
-        &mut self,
-        target: &str,
-        batches: Vec<RecordBatch>,
-    ) -> Result<(), String> {
-        BatchWrite::new(target, batches, BatchWriteMode::ReplaceExisting)
-            .save(self)
-            .await
-    }
-
     /// Replace one derived relation, creating it when necessary.
-    pub async fn replace_or_create_batches(
+    pub(crate) async fn replace_or_create_batches(
         &mut self,
         target: &str,
         batches: Vec<RecordBatch>,
@@ -279,7 +253,7 @@ impl ProjectConnection {
             .await
     }
 
-    pub async fn table_exists(&mut self, target: &str) -> Result<bool, String> {
+    pub(crate) async fn table_exists(&mut self, target: &str) -> Result<bool, String> {
         self.relation_schema(target)
             .await
             .map(|schema| schema.is_some())
@@ -314,7 +288,6 @@ impl ProjectConnection {
 enum BatchWriteMode {
     Append,
     CreateOrAppend,
-    ReplaceExisting,
     ReplaceOrCreate,
 }
 
@@ -342,7 +315,6 @@ impl<'a> BatchWrite<'a> {
         let mode = match self.mode {
             BatchWriteMode::Append => crate::IngestMode::Append,
             BatchWriteMode::CreateOrAppend => crate::IngestMode::CreateOrAppend,
-            BatchWriteMode::ReplaceExisting => crate::IngestMode::ReplaceExisting,
             BatchWriteMode::ReplaceOrCreate => crate::IngestMode::ReplaceOrCreate,
         };
         let batches = futures::stream::iter(self.batches.into_iter().map(Ok)).boxed();
@@ -352,10 +324,7 @@ impl<'a> BatchWrite<'a> {
             crate::RecordBatchStream::new(schema, batches),
         );
         connection.ingest(ingestion).await.map_err(|error| {
-            if matches!(
-                self.mode,
-                BatchWriteMode::ReplaceExisting | BatchWriteMode::ReplaceOrCreate
-            ) {
+            if matches!(self.mode, BatchWriteMode::ReplaceOrCreate) {
                 format!("replacing Spiral table {}: {error}", self.target)
             } else if matches!(self.mode, BatchWriteMode::CreateOrAppend) {
                 format!("creating Spiral table {}: {error}", self.target)
@@ -501,7 +470,7 @@ impl ProjectStore {
         .any(|suffix| *name == format!("{}_{suffix}", self.table_prefix))
     }
 
-    pub fn table_prefix(&self) -> &str {
+    pub(crate) fn table_prefix(&self) -> &str {
         &self.table_prefix
     }
 
@@ -511,7 +480,7 @@ impl ProjectStore {
             .await
     }
 
-    pub async fn connect_exclusive(&self) -> Result<ProjectConnection, String> {
+    pub(crate) async fn connect_exclusive(&self) -> Result<ProjectConnection, String> {
         let operation = self.async_operation_gate.clone().write_owned().await;
         self.open_connection(ProjectOperationLease::Exclusive { _lease: operation })
             .await

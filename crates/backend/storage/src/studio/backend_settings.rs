@@ -5,7 +5,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
-    pub document: Json,
+    pub(super) document: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

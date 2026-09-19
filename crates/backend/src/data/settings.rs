@@ -69,7 +69,7 @@ pub(crate) struct DataSettingsUpdate {
 }
 
 impl UpdateDataSettingsCommand {
-    pub(crate) fn new(
+    pub(super) fn new(
         spiral_endpoint: impl Into<String>,
         project_id: impl Into<String>,
         training_endpoint: impl Into<String>,
@@ -84,44 +84,44 @@ impl UpdateDataSettingsCommand {
         }
     }
 
-    pub(crate) fn with_spfs_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+    pub(super) fn with_spfs_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.spiral_spfs_endpoint = endpoint.into();
         self
     }
 
-    pub(crate) fn with_client(mut self, client_id: impl Into<String>) -> Self {
+    pub(super) fn with_client(mut self, client_id: impl Into<String>) -> Self {
         self.credentials.client_id = client_id.into();
         self
     }
 
-    pub(crate) fn with_client_secret(mut self, secret: Option<String>) -> Self {
+    pub(super) fn with_client_secret(mut self, secret: Option<String>) -> Self {
         self.credentials.client_secret = secret;
         self
     }
 
-    pub(crate) fn with_huggingface_token(mut self, token: Option<String>) -> Self {
+    pub(super) fn with_huggingface_token(mut self, token: Option<String>) -> Self {
         self.credentials.huggingface_token = token;
         self
     }
 
-    pub(crate) fn with_video_enabled(mut self, enabled: bool) -> Self {
+    pub(super) fn with_video_enabled(mut self, enabled: bool) -> Self {
         self.video_enabled = enabled;
         self
     }
 
-    pub(crate) fn spiral_endpoint(&self) -> &str {
+    fn spiral_endpoint(&self) -> &str {
         &self.spiral_endpoint
     }
-    pub(crate) fn spiral_spfs_endpoint(&self) -> &str {
+    fn spiral_spfs_endpoint(&self) -> &str {
         &self.spiral_spfs_endpoint
     }
-    pub(crate) fn project_id(&self) -> &str {
+    fn project_id(&self) -> &str {
         &self.project_id
     }
-    pub(crate) fn client_id(&self) -> &str {
+    fn client_id(&self) -> &str {
         &self.credentials.client_id
     }
-    pub(crate) fn client_secret(&self) -> Option<&str> {
+    fn client_secret(&self) -> Option<&str> {
         self.credentials.client_secret.as_deref()
     }
     pub(crate) fn training_endpoint(&self) -> &str {
@@ -140,7 +140,7 @@ impl DataSettingsUpdate {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (DataSettings, bool) {
+    pub(super) fn into_parts(self) -> (DataSettings, bool) {
         (self.settings, self.session_replaced)
     }
 }

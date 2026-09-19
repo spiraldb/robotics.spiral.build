@@ -20,14 +20,14 @@ impl TrainingCommands {
             })
             .await
     }
-    pub(crate) async fn run(&self, id: String) -> Result<TrainingRun, BackendCommandError> {
+    pub(super) async fn run(&self, id: String) -> Result<TrainingRun, BackendCommandError> {
         let activity = self.state.admit()?;
         self.state.preferences().load().await?;
         self.state.training().ensure_loaded(activity).await?;
         self.state.training().run(&id).map_err(Into::into)
     }
 
-    pub(crate) async fn start_training_run(
+    pub(super) async fn start_training_run(
         &self,
         config: TrainingConfig,
     ) -> Result<TrainingRun, BackendCommandError> {
@@ -45,7 +45,7 @@ impl TrainingCommands {
             .await
     }
 
-    pub(crate) async fn stop_training_run(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn stop_training_run(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, activity| async move {
                 state.preferences().load().await?;
@@ -59,7 +59,7 @@ impl TrainingCommands {
             .await
     }
 
-    pub(crate) async fn delete_training_run(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn delete_training_run(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, activity| async move {
                 state.preferences().load().await?;

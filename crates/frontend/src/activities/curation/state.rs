@@ -37,14 +37,14 @@ pub(crate) enum SheetFilter {
 }
 
 impl SheetFilter {
-    pub(crate) const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::All => "All",
             Self::Kept => "Kept",
             Self::Excluded => "Excluded",
         }
     }
-    pub(crate) const fn admits(self, kept: bool) -> bool {
+    pub(super) const fn admits(self, kept: bool) -> bool {
         match self {
             Self::All => true,
             Self::Kept => kept,
@@ -64,14 +64,14 @@ pub(crate) enum SheetOrder {
 }
 
 impl SheetOrder {
-    pub(crate) const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Recorded => "Dataset order",
             Self::Ascending => "Lowest first",
             Self::Descending => "Highest first",
         }
     }
-    pub(crate) const fn next(self) -> Self {
+    const fn next(self) -> Self {
         match self {
             Self::Recorded => Self::Ascending,
             Self::Ascending => Self::Descending,
@@ -122,7 +122,7 @@ struct CurationViewSignals {
 }
 
 impl CurationController {
-    pub(crate) fn use_controller() -> Self {
+    pub(super) fn use_controller() -> Self {
         let initial = use_hook(Self::fresh_curation);
         use_hook(|| Self {
             document: CurationDocumentSignals {
@@ -152,15 +152,15 @@ impl CurationController {
         })
     }
 
-    pub(crate) fn spec(&self) -> CurationSpec {
+    pub(super) fn spec(&self) -> CurationSpec {
         self.document.draft.read().clone()
     }
     /// Every recipe edit goes through here so the draft stays one value.
-    pub(crate) fn edit(self, change: impl FnOnce(&mut CurationSpec)) {
+    pub(super) fn edit(self, change: impl FnOnce(&mut CurationSpec)) {
         let mut draft = self.document.draft;
         change(&mut draft.write());
     }
-    pub(crate) fn add_proposal(self, proposal: &RuleProposal) -> Result<(), String> {
+    pub(super) fn add_proposal(self, proposal: &RuleProposal) -> Result<(), String> {
         let identity = format!(
             "rule-{}-{:x}",
             js_sys::Date::now() as u64,
@@ -172,16 +172,16 @@ impl CurationController {
         self.select_pipeline(PipelineSelection::Step(identity));
         Ok(())
     }
-    pub(crate) fn validation(&self) -> CurationValidationReport {
+    fn validation(&self) -> CurationValidationReport {
         self.document.draft.read().validate()
     }
-    pub(crate) fn set_name(self, name: String) {
+    pub(super) fn set_name(self, name: String) {
         self.edit(|spec| spec.set_name(name));
     }
 
     /// The run the sheet shows: the selected one, else the latest for this
     /// recipe, with staleness judged against the current draft.
-    pub(crate) fn snapshot(&self) -> CurationRunSnapshot {
+    pub(super) fn snapshot(&self) -> CurationRunSnapshot {
         let draft = self.document.draft.read();
         match self.visible_run() {
             Some(run) => {
@@ -192,12 +192,12 @@ impl CurationController {
             None => CurationRunSnapshot::idle_for(&draft),
         }
     }
-    pub(crate) fn outcome(&self) -> Option<CurationOutcome> {
+    pub(super) fn outcome(&self) -> Option<CurationOutcome> {
         self.visible_run()
             .and_then(|run| run.snapshot().outcome().cloned())
     }
     /// The recipe that produced the visible verdicts.
-    pub(crate) fn judged_spec(&self) -> Option<CurationSpec> {
+    pub(super) fn judged_spec(&self) -> Option<CurationSpec> {
         self.visible_run().map(|run| run.curation().clone())
     }
     fn visible_run(&self) -> Option<CurationRun> {
@@ -212,7 +212,7 @@ impl CurationController {
             .or_else(|| runs.last())
             .cloned()
     }
-    pub(crate) fn curation_runs(&self) -> Vec<CurationRun> {
+    pub(super) fn curation_runs(&self) -> Vec<CurationRun> {
         let id = self.document.draft.read().id().to_owned();
         let mut runs = self
             .runs
@@ -225,7 +225,7 @@ impl CurationController {
         runs.sort_by_key(|run| run.snapshot().started_ms());
         runs
     }
-    pub(crate) fn select_run(mut self, id: String) {
+    pub(super) fn select_run(mut self, id: String) {
         if self
             .curation_runs()
             .iter()
@@ -236,43 +236,43 @@ impl CurationController {
         }
     }
 
-    pub(crate) fn loaded(&self) -> bool {
+    pub(super) fn loaded(&self) -> bool {
         *self.lifecycle.loaded.read()
     }
-    pub(crate) fn load_error(&self) -> Option<String> {
+    pub(super) fn load_error(&self) -> Option<String> {
         self.lifecycle.load_error.read().clone()
     }
-    pub(crate) fn command(&self) -> Option<CurationPendingCommand> {
+    pub(super) fn command(&self) -> Option<CurationPendingCommand> {
         *self.lifecycle.command.read()
     }
-    pub(crate) fn curations(&self) -> Vec<CurationSummary> {
+    pub(super) fn curations(&self) -> Vec<CurationSummary> {
         self.lifecycle.curations.read().clone()
     }
-    pub(crate) fn revision_conflict(&self) -> bool {
+    pub(super) fn revision_conflict(&self) -> bool {
         *self.document.conflict.read()
     }
-    pub(crate) fn unsaved_changes(&self) -> bool {
+    pub(super) fn unsaved_changes(&self) -> bool {
         *self.document.draft.read() != *self.document.baseline.read()
     }
 
-    pub(crate) fn active_panel(&self) -> Option<PanelId> {
+    pub(super) fn active_panel(&self) -> Option<PanelId> {
         self.view.active_panel.read().clone()
     }
-    pub(crate) fn activate_panel(mut self, id: PanelId) {
+    pub(super) fn activate_panel(mut self, id: PanelId) {
         self.view.active_panel.set(Some(id));
     }
-    pub(crate) fn selected_episode(&self) -> Option<String> {
+    pub(super) fn selected_episode(&self) -> Option<String> {
         self.view.selected_episode.read().clone()
     }
     /// The episode whose evidence the side sheet shows; `None` closes it.
-    pub(crate) fn select_episode(mut self, id: Option<String>) {
+    pub(super) fn select_episode(mut self, id: Option<String>) {
         if *self.view.selected_episode.peek() != id {
             self.view.selected_episode.set(id);
         }
     }
     /// The measurement the tiles print: the chosen one while the judged
     /// recipe still declares it, else the first declared measurement.
-    pub(crate) fn lens(&self, judged: &CurationSpec) -> Option<CurationFact> {
+    pub(super) fn lens(&self, judged: &CurationSpec) -> Option<CurationFact> {
         let chosen = self.view.lens.read();
         chosen
             .as_deref()
@@ -280,20 +280,20 @@ impl CurationController {
             .or_else(|| judged.facts().first())
             .cloned()
     }
-    pub(crate) fn set_lens(mut self, key: String) {
+    pub(super) fn set_lens(mut self, key: String) {
         self.view.lens.set(Some(key));
     }
-    pub(crate) fn order(&self) -> SheetOrder {
+    pub(super) fn order(&self) -> SheetOrder {
         *self.view.order.read()
     }
-    pub(crate) fn cycle_order(mut self) {
+    pub(super) fn cycle_order(mut self) {
         let next = self.view.order.peek().next();
         self.view.order.set(next);
     }
-    pub(crate) fn hovered_rule(&self) -> Option<String> {
+    pub(super) fn hovered_rule(&self) -> Option<String> {
         self.view.hovered_rule.read().clone()
     }
-    pub(crate) fn set_hovered_rule(mut self, id: Option<String>) {
+    pub(super) fn set_hovered_rule(mut self, id: Option<String>) {
         if *self.view.hovered_rule.peek() != id {
             self.view.hovered_rule.set(id);
         }
@@ -310,14 +310,14 @@ impl CurationController {
             self.view.selected_episode.set(None);
         }
     }
-    pub(crate) fn filter(&self) -> SheetFilter {
+    pub(super) fn filter(&self) -> SheetFilter {
         *self.view.filter.read()
     }
-    pub(crate) fn set_filter(mut self, filter: SheetFilter) {
+    pub(super) fn set_filter(mut self, filter: SheetFilter) {
         self.view.filter.set(filter);
     }
 
-    pub(crate) fn run_disabled_reason(&self) -> Option<String> {
+    pub(super) fn run_disabled_reason(&self) -> Option<String> {
         if let Some(error) = self.load_error() {
             return Some(format!("Could not load the saved curation: {error}"));
         }
@@ -340,13 +340,13 @@ impl CurationController {
     }
     /// What the recipe still lacks before it can run. Run stays enabled so
     /// the answer is one click away instead of hidden in a tooltip.
-    pub(crate) fn run_problem(&self) -> Option<String> {
+    pub(super) fn run_problem(&self) -> Option<String> {
         self.validation()
             .errors()
             .first()
             .map(|issue| format!("{} {}", issue.message(), issue.recovery()))
     }
-    pub(crate) fn save_disabled_reason(&self) -> Option<String> {
+    pub(super) fn save_disabled_reason(&self) -> Option<String> {
         if !self.loaded() {
             return Some("Loading curation…".into());
         }
@@ -370,7 +370,7 @@ impl CurationController {
         }
         None
     }
-    pub(crate) fn selection_reason(&self) -> Option<String> {
+    pub(super) fn selection_reason(&self) -> Option<String> {
         if !self.loaded() {
             return Some("Loading curations…".to_owned());
         }
@@ -414,7 +414,7 @@ impl CurationController {
         self.lifecycle.load_error.set(None);
     }
 
-    pub(crate) fn save(mut self, studio: StudioProjectState) {
+    pub(super) fn save(mut self, studio: StudioProjectState) {
         if self.save_disabled_reason().is_some() {
             return;
         }
@@ -450,14 +450,14 @@ impl CurationController {
             self.lifecycle.command.set(None);
         });
     }
-    pub(crate) fn discard(self) {
+    pub(super) fn discard(self) {
         if self.command().is_some() {
             return;
         }
         let baseline = self.document.baseline.peek().clone();
         self.install(baseline);
     }
-    pub(crate) fn run(mut self, studio: StudioProjectState) {
+    pub(super) fn run(mut self, studio: StudioProjectState) {
         if self.run_disabled_reason().is_some() {
             return;
         }
@@ -482,13 +482,13 @@ impl CurationController {
             QueryRefresh::current().invalidate(&[QueryDomain::Curation]);
         });
     }
-    pub(crate) fn select_curation(self, id: Option<String>) {
+    pub(super) fn select_curation(self, id: Option<String>) {
         if self.selection_reason().is_some() {
             return;
         }
         self.open_document(id);
     }
-    pub(crate) fn reload_current(mut self) {
+    pub(super) fn reload_current(mut self) {
         self.lifecycle.load_error.set(None);
         let id = self.spec().id().to_owned();
         let known = self.curations().iter().any(|curation| curation.id() == id);
@@ -542,7 +542,7 @@ impl CurationController {
         });
     }
 
-    pub(crate) fn use_polling(self, is_active: ReadSignal<bool>) {
+    pub(super) fn use_polling(self, is_active: ReadSignal<bool>) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         use_effect(move || {
             if sessions.studio_available()
@@ -586,7 +586,7 @@ impl CurationController {
         self.runs.runs.observe(runs);
     }
 
-    pub(crate) fn editor_status(&self) -> Option<CurationEditorStatus> {
+    pub(super) fn editor_status(&self) -> Option<CurationEditorStatus> {
         self.loaded()
             .then(|| CurationEditorStatus::new(self.spec(), self.snapshot()))
     }
@@ -600,7 +600,7 @@ pub(crate) struct CurationEditorStatus {
 }
 
 impl CurationEditorStatus {
-    pub(crate) fn new(curation: CurationSpec, snapshot: CurationRunSnapshot) -> Self {
+    fn new(curation: CurationSpec, snapshot: CurationRunSnapshot) -> Self {
         Self { curation, snapshot }
     }
     pub(crate) fn dataset_label(&self) -> String {

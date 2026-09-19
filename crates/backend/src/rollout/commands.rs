@@ -22,12 +22,12 @@ impl RolloutCommands {
             })
             .await?
     }
-    pub(crate) async fn run(&self, id: String) -> Result<RolloutSnapshot, BackendCommandError> {
+    pub(super) async fn run(&self, id: String) -> Result<RolloutSnapshot, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.rollout().run(&id).await.map_err(Into::into)
     }
 
-    pub(crate) async fn start_rollout(
+    pub(super) async fn start_rollout(
         &self,
         config: RolloutConfig,
     ) -> Result<RolloutSnapshot, BackendCommandError> {
@@ -41,7 +41,7 @@ impl RolloutCommands {
             .await
     }
 
-    pub(crate) async fn stop_rollout(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn stop_rollout(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 state.rollout().stop(&id).await.map_err(Into::into)

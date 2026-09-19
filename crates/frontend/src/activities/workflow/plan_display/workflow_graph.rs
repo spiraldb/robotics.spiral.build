@@ -51,7 +51,7 @@ pub(super) struct StageFact {
 }
 
 impl StageFact {
-    pub(super) fn prose(label: impl Into<String>, value: impl Into<String>) -> Self {
+    fn prose(label: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             value: value.into(),
@@ -59,7 +59,7 @@ impl StageFact {
         }
     }
 
-    pub(super) fn expression(label: impl Into<String>, value: impl Into<String>) -> Self {
+    fn expression(label: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             value: value.into(),
@@ -151,7 +151,7 @@ impl WorkflowStage {
     }
 
     /// Whether this stage brings two row populations together.
-    pub(super) fn combines_inputs(&self) -> bool {
+    fn combines_inputs(&self) -> bool {
         self.is_join() || self.is_set_operation()
     }
 

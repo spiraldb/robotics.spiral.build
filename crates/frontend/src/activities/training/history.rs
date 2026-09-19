@@ -15,7 +15,7 @@ pub(crate) struct TrainingHistory {
 }
 
 impl TrainingHistory {
-    pub(crate) fn use_history(
+    pub(in crate::activities) fn use_history(
         is_active: ReadSignal<bool>,
         selected: impl Fn() -> Option<String> + 'static,
     ) -> Self {
@@ -74,17 +74,17 @@ impl TrainingHistory {
         history
     }
 
-    pub(crate) fn details_loaded(self, id: &str) -> bool {
+    pub(super) fn details_loaded(self, id: &str) -> bool {
         self.detailed_run.read().as_deref() == Some(id)
     }
 
     pub(crate) fn snapshot(self) -> MappedSignal<TrainingSnapshot, Signal<TrainingSnapshot>> {
         self.snapshot.map(|value| value)
     }
-    pub(crate) fn error(self) -> Option<String> {
+    pub(super) fn error(self) -> Option<String> {
         self.error.read().clone()
     }
-    pub(crate) fn loaded(self) -> bool {
+    pub(super) fn loaded(self) -> bool {
         *self.loaded.read()
     }
 }

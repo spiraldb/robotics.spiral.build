@@ -18,14 +18,14 @@ pub(crate) enum TimelineTarget {
 }
 
 impl TimelineSubject {
-    pub(crate) fn empty(label: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(super) fn empty(label: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::Empty {
             label: label.into(),
             reason: reason.into(),
         }
     }
 
-    pub(crate) fn episode_id(&self) -> Option<&str> {
+    pub(super) fn episode_id(&self) -> Option<&str> {
         match self {
             Self::Empty { .. } => None,
             Self::Recording(progress) => Some(progress.episode()),
@@ -33,7 +33,7 @@ impl TimelineSubject {
         }
     }
 
-    pub(crate) fn target(&self) -> Option<TimelineTarget> {
+    pub(super) fn target(&self) -> Option<TimelineTarget> {
         match self {
             Self::Empty { .. } => None,
             Self::Recording(progress) => {
@@ -43,14 +43,14 @@ impl TimelineSubject {
         }
     }
 
-    pub(crate) fn episode(&self) -> Option<&EpisodeInfo> {
+    pub(super) fn episode(&self) -> Option<&EpisodeInfo> {
         match self {
             Self::Episode { episode, .. } => Some(episode),
             Self::Empty { .. } | Self::Recording(_) => None,
         }
     }
 
-    pub(crate) fn duration_seconds(&self) -> f64 {
+    pub(super) fn duration_seconds(&self) -> f64 {
         match self {
             Self::Empty { .. } => 0.0,
             Self::Recording(progress) => progress.elapsed_seconds(),
@@ -59,7 +59,7 @@ impl TimelineSubject {
         .max(0.0)
     }
 
-    pub(crate) fn frames(&self) -> u64 {
+    pub(super) fn frames(&self) -> u64 {
         match self {
             Self::Empty { .. } => 0,
             Self::Recording(progress) => progress.frames(),
@@ -67,18 +67,18 @@ impl TimelineSubject {
         }
     }
 
-    pub(crate) fn recording(&self) -> Option<&RecordingProgress> {
+    pub(super) fn recording(&self) -> Option<&RecordingProgress> {
         match self {
             Self::Recording(progress) => Some(progress),
             Self::Empty { .. } | Self::Episode { .. } => None,
         }
     }
 
-    pub(crate) fn is_paused_recording(&self) -> bool {
+    pub(super) fn is_paused_recording(&self) -> bool {
         self.recording().is_some_and(|progress| progress.paused())
     }
 
-    pub(crate) fn available(&self) -> bool {
+    pub(super) fn available(&self) -> bool {
         match self {
             Self::Empty { .. } => false,
             Self::Recording(progress) => progress.error().is_none(),
@@ -86,7 +86,7 @@ impl TimelineSubject {
         }
     }
 
-    pub(crate) fn problem(&self) -> Option<&str> {
+    pub(super) fn problem(&self) -> Option<&str> {
         match self {
             Self::Empty { reason, .. } => Some(reason),
             Self::Recording(progress) => progress.error(),
@@ -95,7 +95,7 @@ impl TimelineSubject {
     }
 
     /// The episode whose recorded data should be loaded for the current view.
-    pub(crate) fn recorded_episode(&self) -> Option<&str> {
+    pub(super) fn recorded_episode(&self) -> Option<&str> {
         match self {
             Self::Episode { episode, .. } => Some(episode.id()),
             Self::Recording(progress) if progress.paused() => Some(progress.episode()),
@@ -111,7 +111,7 @@ impl From<EpisodeInfo> for TimelineSubject {
 }
 
 impl TimelineTarget {
-    pub(crate) fn episode(&self) -> &str {
+    pub(super) fn episode(&self) -> &str {
         match self {
             Self::Recording(episode) | Self::Episode(episode) => episode,
         }

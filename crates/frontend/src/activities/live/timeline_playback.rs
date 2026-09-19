@@ -8,7 +8,7 @@ use spiral_robotics_common::recording::{ReplayPhase, ReplayProgress, ReplayPurpo
 
 impl TimelineController {
     /// Keep the preview clock mounted, but run it only while its workspace is active.
-    pub(crate) fn use_clock(
+    pub(super) fn use_clock(
         self,
         is_active: ReadSignal<bool>,
         on_sample: EventHandler<(String, f64)>,
@@ -33,7 +33,7 @@ impl TimelineController {
         );
     }
 
-    pub(crate) fn playback(self, replay: Option<&ReplayProgress>) -> TimelinePlayback {
+    pub(super) fn playback(self, replay: Option<&ReplayProgress>) -> TimelinePlayback {
         replay
             .filter(|replay| replay.owns_timeline_transport())
             .map(|replay| {

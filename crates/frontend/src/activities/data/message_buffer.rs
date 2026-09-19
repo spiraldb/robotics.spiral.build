@@ -311,7 +311,7 @@ impl MessageBuffer {
         let batch = self.batches.iter().find(|batch| batch.num_rows() > 0)?;
         Self::time(batch, 0).ok()
     }
-    pub(super) fn at(&self, absolute: u64) -> Result<Option<(&RecordBatch, usize)>, String> {
+    fn at(&self, absolute: u64) -> Result<Option<(&RecordBatch, usize)>, String> {
         for batch in self.batches.iter().rev() {
             let mut low = 0;
             let mut high = batch.num_rows();
@@ -426,9 +426,7 @@ impl MessageBuffer {
     pub(super) fn next_cursor(&self) -> Option<&MessageCursor> {
         self.next.as_ref()
     }
-    pub(super) fn snapshot(
-        &self,
-    ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, String> {
+    fn snapshot(&self) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, String> {
         let columns = self
             .schema
             .fields()

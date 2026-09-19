@@ -9,7 +9,7 @@ pub(crate) struct RecordedArms<'a> {
 }
 
 impl<'a> RecordedArms<'a> {
-    pub(crate) fn new(episode: &'a str, arms: &'a [String], target: &'a str) -> Self {
+    pub(super) fn new(episode: &'a str, arms: &'a [String], target: &'a str) -> Self {
         Self {
             episode,
             arms,
@@ -17,7 +17,7 @@ impl<'a> RecordedArms<'a> {
         }
     }
 
-    pub(crate) fn select(&self, requested: Option<&str>) -> Result<String, OperationError> {
+    pub(super) fn select(&self, requested: Option<&str>) -> Result<String, OperationError> {
         if let Some(arm) = requested {
             if !self.arms.iter().any(|recorded| recorded == arm) {
                 return Err(OperationError::InvalidInput(format!(

@@ -5,7 +5,7 @@ use std::fmt;
 /// A JSON value decoder that refuses duplicate keys recursively.
 pub struct StrictValue(Value);
 impl StrictValue {
-    pub fn into_value(self) -> Value {
+    pub(super) fn into_value(self) -> Value {
         self.0
     }
 }

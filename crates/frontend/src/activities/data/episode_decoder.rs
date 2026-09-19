@@ -181,7 +181,7 @@ impl EncodedCamera {
             .checked_sub(1)?;
         Some(self.packets[index].microseconds as f64 / 1e6)
     }
-    pub(super) fn first_frame_seconds(&self) -> Option<f64> {
+    fn first_frame_seconds(&self) -> Option<f64> {
         self.packets
             .first()
             .map(|packet| packet.microseconds as f64 / 1e6)
@@ -390,7 +390,7 @@ impl DecodedGroup {
         Self::decode_with_budget(camera, range, None).await
     }
 
-    pub(super) async fn decode_with_budget(
+    async fn decode_with_budget(
         camera: &EncodedCamera,
         range: Range<usize>,
         budget: Option<MediaBudget>,

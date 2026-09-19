@@ -236,7 +236,7 @@ impl CurationRule {
     pub fn id(&self) -> &str {
         &self.id
     }
-    pub fn label(&self) -> &str {
+    pub(super) fn label(&self) -> &str {
         &self.label
     }
     pub const fn condition(&self) -> &RuleCondition {
@@ -245,10 +245,11 @@ impl CurationRule {
     pub fn condition_mut(&mut self) -> &mut RuleCondition {
         &mut self.condition
     }
-    pub fn set_label(&mut self, label: impl Into<String>) {
+    #[cfg(test)]
+    pub(super) fn set_label(&mut self, label: impl Into<String>) {
         self.label = label.into();
     }
-    pub const fn order(&self) -> usize {
+    pub(super) const fn order(&self) -> usize {
         self.order
     }
     pub(super) fn set_order(&mut self, order: usize) {
@@ -303,14 +304,6 @@ impl TransformOperation {
         "bt601_525_full",
         "bt601_525_limited",
     ];
-    pub const fn kind_key(&self) -> &'static str {
-        match self {
-            Self::SelectProgressChunks { .. } => "select_progress_chunks",
-            Self::ResizeCamera { .. } => "resize_camera",
-            Self::CameraColorProfile { .. } => "camera_color_profile",
-            Self::TrimTime { .. } => "trim_time",
-        }
-    }
     pub const fn kind_label(&self) -> &'static str {
         match self {
             Self::SelectProgressChunks { .. } => "Remove unproductive moments",
@@ -356,7 +349,7 @@ impl TransformOperation {
             Self::TrimTime { .. } | Self::SelectProgressChunks { .. } => None,
         }
     }
-    pub fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), String> {
         match self {
             Self::SelectProgressChunks { selection } => selection.validate(),
             Self::ResizeCamera {
@@ -449,7 +442,8 @@ impl CurationTransform {
             order: 0,
         }
     }
-    pub fn with_condition(mut self, condition: Option<RuleCondition>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn with_condition(mut self, condition: Option<RuleCondition>) -> Self {
         self.condition = condition;
         self
     }
@@ -505,7 +499,7 @@ impl CurationTransform {
     }
     /// Whether this transform reaches the same episodes with the same
     /// operation as `other`, whatever it is called.
-    pub fn judges_like(&self, other: &Self) -> bool {
+    pub(super) fn judges_like(&self, other: &Self) -> bool {
         self.id == other.id
             && self.condition == other.condition
             && self.operation == other.operation

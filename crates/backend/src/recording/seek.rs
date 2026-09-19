@@ -94,7 +94,7 @@ pub(crate) struct RecordedSeekResult {
 }
 
 impl SeekEpisodeCommand {
-    pub(crate) fn new(episode: impl Into<String>, robot: impl Into<String>, seconds: f64) -> Self {
+    pub(super) fn new(episode: impl Into<String>, robot: impl Into<String>, seconds: f64) -> Self {
         Self {
             episode: episode.into(),
             robot: robot.into(),
@@ -103,14 +103,14 @@ impl SeekEpisodeCommand {
         }
     }
 
-    pub(crate) fn with_source_arm(mut self, source_arm: Option<String>) -> Self {
+    pub(super) fn with_source_arm(mut self, source_arm: Option<String>) -> Self {
         self.source_arm = source_arm;
         self
     }
 }
 
 impl ActiveRecording {
-    pub(crate) fn new(episode: impl Into<String>, paused: bool) -> Self {
+    pub(super) fn new(episode: impl Into<String>, paused: bool) -> Self {
         Self {
             episode: episode.into(),
             paused,
@@ -134,13 +134,13 @@ impl ActiveRecording {
 }
 
 impl SeekActivity {
-    pub(crate) fn new(recording: Option<ActiveRecording>, mode: SeekControlMode) -> Self {
+    pub(super) fn new(recording: Option<ActiveRecording>, mode: SeekControlMode) -> Self {
         Self { recording, mode }
     }
 }
 
 impl SeekTarget {
-    pub(crate) fn new(id: impl Into<String>, robot_type: Option<String>, connected: bool) -> Self {
+    pub(super) fn new(id: impl Into<String>, robot_type: Option<String>, connected: bool) -> Self {
         Self {
             id: id.into(),
             robot_type,
@@ -150,7 +150,7 @@ impl SeekTarget {
         }
     }
 
-    pub(crate) fn with_readiness(mut self, calibrated: bool, problem: Option<String>) -> Self {
+    pub(super) fn with_readiness(mut self, calibrated: bool, problem: Option<String>) -> Self {
         self.calibrated = calibrated;
         self.problem = problem;
         self
@@ -164,7 +164,7 @@ impl SeekTarget {
 }
 
 impl SeekableEpisode {
-    pub(crate) fn new(id: impl Into<String>, arms: Vec<String>, sample_hz: f64) -> Self {
+    pub(super) fn new(id: impl Into<String>, arms: Vec<String>, sample_hz: f64) -> Self {
         Self {
             id: id.into(),
             arms,
@@ -174,7 +174,7 @@ impl SeekableEpisode {
         }
     }
 
-    pub(crate) fn with_state(mut self, problem: Option<String>, unfinished: bool) -> Self {
+    pub(super) fn with_state(mut self, problem: Option<String>, unfinished: bool) -> Self {
         self.problem = problem;
         self.unfinished = unfinished;
         self
@@ -182,7 +182,7 @@ impl SeekableEpisode {
 }
 
 impl SampledArm {
-    pub(crate) fn new(id: impl Into<String>, normalized: BTreeMap<String, Option<f64>>) -> Self {
+    pub(super) fn new(id: impl Into<String>, normalized: BTreeMap<String, Option<f64>>) -> Self {
         Self {
             id: id.into(),
             normalized,
@@ -191,7 +191,7 @@ impl SampledArm {
 }
 
 impl RecordedSample {
-    pub(crate) fn new(seconds: f64, frame: u64, arms: Vec<SampledArm>) -> Self {
+    pub(super) fn new(seconds: f64, frame: u64, arms: Vec<SampledArm>) -> Self {
         Self {
             seconds,
             frame,
@@ -201,7 +201,7 @@ impl RecordedSample {
 }
 
 impl PhysicalSeekPlan {
-    pub(crate) fn new(ticket: u64, robot: impl Into<String>, episode: impl Into<String>) -> Self {
+    fn new(ticket: u64, robot: impl Into<String>, episode: impl Into<String>) -> Self {
         Self {
             ticket,
             robot: robot.into(),
@@ -211,13 +211,13 @@ impl PhysicalSeekPlan {
         }
     }
 
-    pub(crate) fn with_trajectory(mut self, pose: BTreeMap<String, f64>, sample_hz: f64) -> Self {
+    fn with_trajectory(mut self, pose: BTreeMap<String, f64>, sample_hz: f64) -> Self {
         self.pose = pose;
         self.sample_hz = sample_hz;
         self
     }
 
-    pub(crate) fn into_parts(self) -> (u64, String, String, BTreeMap<String, f64>, f64) {
+    pub(super) fn into_parts(self) -> (u64, String, String, BTreeMap<String, f64>, f64) {
         (
             self.ticket,
             self.robot,
@@ -229,11 +229,7 @@ impl PhysicalSeekPlan {
 }
 
 impl RecordedSeekResult {
-    pub(crate) fn new(
-        state: RecordedSeekState,
-        episode: impl Into<String>,
-        robot: impl Into<String>,
-    ) -> Self {
+    fn new(state: RecordedSeekState, episode: impl Into<String>, robot: impl Into<String>) -> Self {
         Self {
             state,
             episode: episode.into(),
@@ -245,18 +241,18 @@ impl RecordedSeekResult {
         }
     }
 
-    pub(crate) fn with_source_arm(mut self, source_arm: impl Into<String>) -> Self {
+    fn with_source_arm(mut self, source_arm: impl Into<String>) -> Self {
         self.source_arm = source_arm.into();
         self
     }
 
-    pub(crate) fn with_times(mut self, requested_seconds: f64, resolved_seconds: f64) -> Self {
+    fn with_times(mut self, requested_seconds: f64, resolved_seconds: f64) -> Self {
         self.requested_seconds = requested_seconds;
         self.resolved_seconds = resolved_seconds;
         self
     }
 
-    pub(crate) fn with_frame(mut self, frame: u64) -> Self {
+    fn with_frame(mut self, frame: u64) -> Self {
         self.frame = frame;
         self
     }
@@ -284,11 +280,11 @@ pub(crate) struct PhysicalSeekActions<'a, P: ?Sized> {
 }
 
 impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
-    pub(crate) fn new(port: &'a P) -> Self {
+    pub(super) fn new(port: &'a P) -> Self {
         Self { port }
     }
 
-    pub(crate) async fn seek(
+    pub(super) async fn seek(
         &self,
         command: SeekEpisodeCommand,
     ) -> Result<RecordedSeekResult, OperationError> {

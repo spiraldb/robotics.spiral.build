@@ -133,11 +133,6 @@ impl EpisodeInfo {
         self
     }
 
-    pub fn with_problem(mut self, problem: Option<String>) -> Self {
-        self.assessment.problem = problem;
-        self
-    }
-
     pub fn id(&self) -> &str {
         &self.identity.id
     }
@@ -168,15 +163,6 @@ impl EpisodeInfo {
     }
     pub const fn sample_hz(&self) -> f64 {
         self.timeline.sample_hz
-    }
-    pub const fn started_ms(&self) -> i64 {
-        self.timeline.started_ms
-    }
-    pub fn source(&self) -> &str {
-        &self.identity.source
-    }
-    pub const fn discarded(&self) -> bool {
-        self.assessment.discarded
     }
     pub fn problem(&self) -> Option<&str> {
         self.assessment.problem.as_deref()
@@ -498,9 +484,6 @@ impl RecordingProgress {
     pub const fn paused(&self) -> bool {
         self.state.paused
     }
-    pub const fn max_follow_error_degrees(&self) -> Option<f64> {
-        self.state.max_follow_error_degrees
-    }
     pub fn error(&self) -> Option<&str> {
         self.state.error.as_deref()
     }
@@ -652,20 +635,8 @@ impl ReplayProgress {
     pub fn episode(&self) -> &str {
         &self.identity.episode
     }
-    pub fn robot(&self) -> &str {
-        &self.identity.robot
-    }
-    pub const fn frame(&self) -> u64 {
-        self.timeline.frame
-    }
-    pub const fn frames(&self) -> u64 {
-        self.timeline.frames
-    }
     pub const fn elapsed_seconds(&self) -> f64 {
         self.timeline.elapsed_seconds
-    }
-    pub const fn duration_seconds(&self) -> f64 {
-        self.timeline.duration_seconds
     }
     pub const fn purpose(&self) -> ReplayPurpose {
         self.transport.purpose
@@ -711,7 +682,7 @@ mod progress_tests {
 
         impl EpisodeTest {
             fn episode(frames: u64, problem: Option<String>) -> EpisodeInfo {
-                EpisodeInfo::new("episode_000001", "default")
+                let mut episode = EpisodeInfo::new("episode_000001", "default")
                     .with_arms(vec![EpisodeArm::new(
                         "follower",
                         Some("so101_follower".to_owned()),
@@ -721,8 +692,9 @@ mod progress_tests {
                     .with_timeline(frames, 2.0)
                     .with_sample_hz(60.0)
                     .with_started_ms(1_770_000_000_000)
-                    .with_assessment(false, Some(3.5))
-                    .with_problem(problem)
+                    .with_assessment(false, Some(3.5));
+                episode.assessment.problem = problem;
+                episode
             }
         }
 

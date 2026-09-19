@@ -50,7 +50,7 @@ impl CommandError {
         }
     }
 
-    pub(crate) fn stale_project() -> Self {
+    pub(super) fn stale_project() -> Self {
         Self::new(
             CommandFailureCode::StaleProject,
             "The project changed before this request completed. Refresh the current project and try again.",
@@ -129,7 +129,7 @@ impl HttpRequest {
         CommandError::decode_response(status, &body)
     }
 
-    pub(crate) async fn bytes(self) -> Result<Vec<u8>, CommandError> {
+    pub(super) async fn bytes(self) -> Result<Vec<u8>, CommandError> {
         let (response, _abort) = self.response("application/vnd.apache.arrow.stream").await?;
         if !(200..300).contains(&response.status()) {
             let status = response.status();

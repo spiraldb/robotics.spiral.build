@@ -13,7 +13,7 @@ pub(crate) struct TimelineController {
 }
 
 impl TimelineController {
-    pub(crate) fn use_controller() -> Self {
+    pub(super) fn use_controller() -> Self {
         use_hook(|| Self {
             playhead: Signal::new(0.0),
             preview: Signal::new(None),
@@ -22,34 +22,34 @@ impl TimelineController {
         })
     }
 
-    pub(crate) const fn playhead_signal(self) -> Signal<f64> {
+    pub(super) const fn playhead_signal(self) -> Signal<f64> {
         self.playhead
     }
 
-    pub(crate) const fn follow_live_signal(self) -> Signal<bool> {
+    pub(super) const fn follow_live_signal(self) -> Signal<bool> {
         self.follow_live
     }
 
-    pub(crate) const fn robot_sync_target_signal(self) -> Signal<Option<TimelineTarget>> {
+    pub(super) const fn robot_sync_target_signal(self) -> Signal<Option<TimelineTarget>> {
         self.robot_sync_target
     }
 
-    pub(crate) fn start_preview(mut self, episode: String, duration_seconds: f64) {
+    pub(super) fn start_preview(mut self, episode: String, duration_seconds: f64) {
         if (self.playhead)() >= duration_seconds {
             self.playhead.set(0.0);
         }
         self.preview.set(Some((episode, duration_seconds)));
     }
 
-    pub(crate) fn stop_preview(mut self) {
+    pub(super) fn stop_preview(mut self) {
         self.preview.set(None);
     }
 
-    pub(crate) fn preview_playing(&self) -> bool {
+    pub(super) fn preview_playing(&self) -> bool {
         self.preview.read().is_some()
     }
 
-    pub(crate) fn preview_target(&self) -> Option<(String, f64)> {
+    pub(super) fn preview_target(&self) -> Option<(String, f64)> {
         self.preview.read().clone()
     }
 }

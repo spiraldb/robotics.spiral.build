@@ -51,11 +51,8 @@ impl CurationSpec {
         self.set_source(Some(source));
         self
     }
-    pub fn with_revision(mut self, revision: u64) -> Self {
-        self.revision = revision;
-        self
-    }
-    pub fn with_fact(mut self, fact: CurationFact) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    fn with_fact(mut self, fact: CurationFact) -> Self {
         self.facts.push(fact);
         self
     }
@@ -63,7 +60,8 @@ impl CurationSpec {
         self.add_rule(rule);
         self
     }
-    pub fn with_transform(mut self, transform: CurationTransform) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    fn with_transform(mut self, transform: CurationTransform) -> Self {
         self.add_transform(transform);
         self
     }
@@ -142,11 +140,6 @@ impl CurationSpec {
     }
     pub fn add_fact(&mut self, fact: CurationFact) {
         self.facts.push(fact);
-    }
-    pub fn replace_fact(&mut self, key: &str, fact: CurationFact) {
-        if let Some(existing) = self.facts.iter_mut().find(|fact| fact.key() == key) {
-            *existing = fact;
-        }
     }
     pub fn add_rule(&mut self, mut rule: CurationRule) {
         self.normalize_order();

@@ -257,10 +257,7 @@ impl CompiledCuration {
         &self.totals_sql
     }
     /// Read every listed episode's verdict from the roster result.
-    pub(super) fn verdicts(
-        &self,
-        roster: &SpiralQuerySnapshot,
-    ) -> Result<Vec<CurationVerdict>, String> {
+    fn verdicts(&self, roster: &SpiralQuerySnapshot) -> Result<Vec<CurationVerdict>, String> {
         roster.rows().iter().map(|row| self.verdict(row)).collect()
     }
     fn verdict(

@@ -36,7 +36,7 @@ impl RecordBatchStream {
 
     /// Keep resources alive until EOF, an error, or stream drop. The input
     /// stream is released before these resources so driver cleanup can finish.
-    pub(crate) fn retain(mut self, resource: impl Send + Sync + 'static) -> Self {
+    pub(super) fn retain(mut self, resource: impl Send + Sync + 'static) -> Self {
         self.retained.push(Box::new(resource));
         self
     }
@@ -129,7 +129,7 @@ impl<T: Into<String>> From<T> for SqlStatement {
 }
 
 impl SqlStatement {
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.text
     }
 
@@ -163,11 +163,11 @@ impl RelationName {
         Ok(Self(name))
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(super) fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub(crate) fn into_string(self) -> String {
+    pub(super) fn into_string(self) -> String {
         self.0
     }
 }
@@ -188,7 +188,7 @@ impl BatchIngestion {
         }
     }
 
-    pub fn into_parts(self) -> (RelationName, IngestMode, RecordBatchStream) {
+    pub(super) fn into_parts(self) -> (RelationName, IngestMode, RecordBatchStream) {
         (self.relation, self.mode, self.batches)
     }
 }
@@ -213,11 +213,11 @@ pub struct RelationMetadata {
 }
 
 impl RelationMetadata {
-    pub fn new(name: RelationName, kind: RelationKind) -> Self {
+    pub(super) fn new(name: RelationName, kind: RelationKind) -> Self {
         Self { name, kind }
     }
 
-    pub fn into_parts(self) -> (RelationName, RelationKind) {
+    pub(super) fn into_parts(self) -> (RelationName, RelationKind) {
         (self.name, self.kind)
     }
 }
@@ -258,15 +258,15 @@ impl DatabaseError {
         Self::new(DatabaseErrorKind::InvalidInput, message)
     }
 
-    pub(crate) fn invalid_state(message: impl Into<String>) -> Self {
+    pub(super) fn invalid_state(message: impl Into<String>) -> Self {
         Self::new(DatabaseErrorKind::InvalidState, message)
     }
 
-    pub fn kind(&self) -> DatabaseErrorKind {
+    pub(super) fn kind(&self) -> DatabaseErrorKind {
         self.kind
     }
 
-    pub(crate) fn message(&self) -> &str {
+    pub(super) fn message(&self) -> &str {
         &self.message
     }
 }

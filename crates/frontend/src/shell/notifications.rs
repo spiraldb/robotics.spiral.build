@@ -19,7 +19,7 @@ pub(crate) enum MessageSeverity {
 }
 
 impl MessageSeverity {
-    pub(crate) const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Info => "Info",
             Self::Success => "Success",
@@ -28,7 +28,7 @@ impl MessageSeverity {
         }
     }
 
-    pub(crate) const fn class_name(self) -> &'static str {
+    pub(super) const fn class_name(self) -> &'static str {
         match self {
             Self::Info => "message-info",
             Self::Success => "message-success",
@@ -60,7 +60,7 @@ pub(crate) enum MessageSource {
 }
 
 impl MessageSource {
-    pub(crate) const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Studio => "Studio",
             Self::Live => "Live",
@@ -93,23 +93,23 @@ struct MessageTiming {
 }
 
 impl StudioMessage {
-    pub(crate) const fn id(&self) -> u64 {
+    pub(super) const fn id(&self) -> u64 {
         self.id
     }
 
-    pub(crate) fn text(&self) -> &str {
+    pub(super) fn text(&self) -> &str {
         &self.text
     }
 
-    pub(crate) const fn severity(&self) -> MessageSeverity {
+    pub(super) const fn severity(&self) -> MessageSeverity {
         self.severity
     }
 
-    pub(crate) const fn source(&self) -> MessageSource {
+    pub(super) const fn source(&self) -> MessageSource {
         self.source
     }
 
-    pub(crate) fn age_label(&self, now_ms: f64) -> String {
+    pub(super) fn age_label(&self, now_ms: f64) -> String {
         let seconds = ((now_ms - self.timing.raised_ms) / 1_000.0).max(0.0);
         if seconds < 60.0 {
             "now".to_owned()
@@ -128,7 +128,7 @@ pub(crate) struct MessageNotice {
 }
 
 impl MessageNotice {
-    pub(crate) fn new(
+    pub(super) fn new(
         text: impl Into<String>,
         severity: MessageSeverity,
         source: MessageSource,
@@ -149,7 +149,7 @@ pub(crate) struct NotificationCenterState {
 }
 
 impl NotificationCenterState {
-    pub(crate) fn push(&mut self, notice: MessageNotice, now_ms: f64) -> u64 {
+    pub(super) fn push(&mut self, notice: MessageNotice, now_ms: f64) -> u64 {
         let MessageNotice {
             text,
             severity,
@@ -175,26 +175,26 @@ impl NotificationCenterState {
         id
     }
 
-    pub(crate) fn messages(&self) -> impl DoubleEndedIterator<Item = &StudioMessage> {
+    pub(super) fn messages(&self) -> impl DoubleEndedIterator<Item = &StudioMessage> {
         self.messages.iter()
     }
 
-    pub(crate) fn latest_prominent(&self, now_ms: f64) -> Option<&StudioMessage> {
+    pub(super) fn latest_prominent(&self, now_ms: f64) -> Option<&StudioMessage> {
         self.messages
             .iter()
             .rev()
             .find(|message| now_ms < message.timing.prominent_until_ms)
     }
 
-    pub(crate) fn unread_count(&self) -> usize {
+    pub(super) fn unread_count(&self) -> usize {
         self.messages.iter().filter(|message| !message.read).count()
     }
 
-    pub(crate) const fn open(&self) -> bool {
+    pub(super) const fn open(&self) -> bool {
         self.open
     }
 
-    pub(crate) fn toggle(&mut self) {
+    pub(super) fn toggle(&mut self) {
         self.open = !self.open;
         if self.open {
             for message in &mut self.messages {
@@ -203,15 +203,15 @@ impl NotificationCenterState {
         }
     }
 
-    pub(crate) fn close(&mut self) {
+    pub(super) fn close(&mut self) {
         self.open = false;
     }
 
-    pub(crate) fn dismiss(&mut self, id: u64) {
+    pub(super) fn dismiss(&mut self, id: u64) {
         self.messages.retain(|message| message.id != id);
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.messages.clear();
     }
 }

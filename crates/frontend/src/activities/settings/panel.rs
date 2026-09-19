@@ -81,7 +81,7 @@ impl SettingsPanelState {
 }
 
 #[component]
-pub(crate) fn SettingsPanel(
+fn SettingsPanel(
     project: StudioProjectState,
     telemetry: HardwareViewState,
     selection: RobotSelection,

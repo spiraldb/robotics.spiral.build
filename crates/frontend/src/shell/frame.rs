@@ -15,7 +15,7 @@ use crate::format::ClockPresentation;
 use crate::shell::activity::Activity;
 
 #[component]
-pub(crate) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activity>) -> Element {
+pub(super) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activity>) -> Element {
     rsx! {
         nav { class: "studio-activity-rail", "aria-label": "Application",
             Action {

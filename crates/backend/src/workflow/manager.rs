@@ -84,7 +84,7 @@ impl WorkflowManager {
             .await
             .map_err(OperationError::External)
     }
-    pub(crate) async fn load(&self, id: &str) -> Result<WorkflowDocument, OperationError> {
+    pub(super) async fn load(&self, id: &str) -> Result<WorkflowDocument, OperationError> {
         let _save = self.inner.saves.lock().await;
         self.load_document(id).await
     }
@@ -117,7 +117,7 @@ impl WorkflowManager {
             .map_err(OperationError::IncompatibleWorkflow)?;
         Ok(document)
     }
-    pub(crate) async fn save(
+    pub(super) async fn save(
         &self,
         mut document: WorkflowDocument,
     ) -> Result<WorkflowDocument, OperationError> {
@@ -168,7 +168,7 @@ impl WorkflowManager {
         }
         Ok(document)
     }
-    pub(crate) async fn plan(&self, workflow: &WorkflowSpec) -> WorkflowPlan {
+    pub(super) async fn plan(&self, workflow: &WorkflowSpec) -> WorkflowPlan {
         match WorkflowQuery::new(self.inner.storage.workflow_store())
             .plan(workflow)
             .await
@@ -180,16 +180,16 @@ impl WorkflowManager {
     pub(crate) fn is_active(&self) -> bool {
         self.inner.runs.is_active()
     }
-    pub(crate) fn runs(&self) -> Vec<WorkflowRun> {
+    pub(super) fn runs(&self) -> Vec<WorkflowRun> {
         self.inner.runs.all()
     }
-    pub(crate) fn run(&self, id: &str) -> Result<WorkflowRun, OperationError> {
+    pub(super) fn run(&self, id: &str) -> Result<WorkflowRun, OperationError> {
         self.inner
             .runs
             .get(id)
             .ok_or_else(|| OperationError::InvalidInput("Unknown workflow run.".into()))
     }
-    pub(crate) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, OperationError> {
+    pub(super) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, OperationError> {
         if !workflow.validate().valid() {
             return Err(OperationError::InvalidInput(
                 "Fix SQL validation errors before running.".into(),

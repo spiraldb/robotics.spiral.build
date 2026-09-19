@@ -391,13 +391,13 @@ pub(crate) struct WorkflowAgentState {
     history_available: bool,
 }
 impl WorkflowAgentState {
-    pub(crate) fn readiness(&self) -> &WorkflowAgentReadiness {
+    pub(super) fn readiness(&self) -> &WorkflowAgentReadiness {
         &self.readiness
     }
-    pub(crate) fn session(&self) -> &WorkflowAgentSession {
+    pub(super) fn session(&self) -> &WorkflowAgentSession {
         &self.session
     }
-    pub(crate) fn history_available(&self) -> bool {
+    pub(super) fn history_available(&self) -> bool {
         self.history_available
     }
 }

@@ -267,10 +267,10 @@ pub(crate) struct ProviderResponse {
 }
 
 impl ProviderResponse {
-    pub(crate) fn content(&self) -> &str {
+    fn content(&self) -> &str {
         &self.content
     }
-    pub(crate) fn tool_calls(&self) -> &[ProviderToolCall] {
+    fn tool_calls(&self) -> &[ProviderToolCall] {
         &self.tool_calls
     }
 }
@@ -347,11 +347,7 @@ pub(crate) struct ProviderCompletion<'a> {
 }
 
 impl<'a> ProviderCompletion<'a> {
-    pub(crate) fn new(
-        messages: &'a [ProviderMessage],
-        tools: &'a [Value],
-        cancel: CancellationToken,
-    ) -> Self {
+    fn new(messages: &'a [ProviderMessage], tools: &'a [Value], cancel: CancellationToken) -> Self {
         Self {
             messages,
             tools,
@@ -361,7 +357,7 @@ impl<'a> ProviderCompletion<'a> {
 }
 
 impl OpenAiProvider {
-    pub(crate) fn new(config: ProviderConfig) -> Result<Self, String> {
+    pub(super) fn new(config: ProviderConfig) -> Result<Self, String> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(90))
@@ -370,7 +366,7 @@ impl OpenAiProvider {
         Ok(Self { config, client })
     }
 
-    pub(crate) async fn complete<F>(
+    async fn complete<F>(
         &self,
         completion: ProviderCompletion<'_>,
         mut on_text_delta: F,
@@ -596,7 +592,7 @@ pub(crate) struct ModelStream {
     cancel: tokio_util::sync::DropGuard,
 }
 impl ModelStream {
-    pub(crate) fn new(
+    pub(super) fn new(
         provider: OpenAiProvider,
         request: spiral_robotics_common::workflow::document::ModelRequest,
     ) -> Self {

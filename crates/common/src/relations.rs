@@ -82,10 +82,6 @@ impl RelationCatalog {
         self
     }
 
-    pub fn scope_id(&self) -> &str {
-        &self.scope_id
-    }
-
     pub fn relations(&self) -> &[CatalogRelation] {
         &self.relations
     }
@@ -125,23 +121,6 @@ impl CatalogRelation {
 
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    pub fn relation_type(&self) -> &str {
-        &self.relation_type
-    }
-
-    pub fn columns(&self) -> &[QueryColumn] {
-        &self.columns
-    }
-
-    pub const fn with_row_count(mut self, row_count: Option<u64>) -> Self {
-        self.row_count = row_count;
-        self
-    }
-
-    pub const fn row_count(&self) -> Option<u64> {
-        self.row_count
     }
 }
 

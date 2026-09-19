@@ -9,7 +9,7 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
-    pub(crate) fn inspect_import(
+    pub(super) fn inspect_import(
         &self,
         source: spiral_robotics_common::datasets::HuggingFaceDatasetSource,
     ) -> impl Future<
@@ -21,7 +21,7 @@ impl DatasetClient {
         self.project
             .request(HttpRequest::new("POST", "/api/datasets/hugging-face/inspect").json(&source))
     }
-    pub(crate) fn import_dataset(
+    pub(super) fn import_dataset(
         &self,
         source: spiral_robotics_common::datasets::HuggingFaceDatasetSource,
     ) -> impl Future<
@@ -34,25 +34,25 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/hugging-face/import").json(&source))
     }
 
-    pub(crate) fn project_resources(
+    pub(super) fn project_resources(
         &self,
     ) -> impl Future<Output = Result<Vec<ProjectResource>, CommandError>> + use<> {
         self.project
             .request(HttpRequest::new("GET", "/api/data-catalog"))
     }
-    pub(crate) fn inspect_dataset(
+    pub(in crate::activities) fn inspect_dataset(
         &self,
         selection: DatasetSelection,
     ) -> impl Future<Output = Result<DatasetInspection, CommandError>> + use<> {
         self.project
             .request(HttpRequest::new("POST", "/api/datasets/inspect").json(&selection))
     }
-    pub(crate) fn current() -> Self {
+    pub(in crate::activities) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) fn list_datasets(
+    pub(in crate::activities) fn list_datasets(
         &self,
     ) -> impl Future<
         Output = Result<Vec<spiral_robotics_common::datasets::DatasetSummary>, CommandError>,
@@ -62,7 +62,7 @@ impl DatasetClient {
     }
 
     /// Recorded camera topics and schema details for one dataset.
-    pub(crate) fn dataset_cameras(
+    pub(in crate::activities) fn dataset_cameras(
         &self,
         selection: &DatasetSelection,
     ) -> impl Future<Output = Result<serde_json::Value, CommandError>> + use<> {
@@ -70,7 +70,7 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/cameras").json(selection))
     }
 
-    pub(crate) fn episode_topics(
+    pub(in crate::activities) fn episode_topics(
         &self,
         request: spiral_robotics_common::datasets::EpisodeSelection,
     ) -> impl Future<
@@ -81,7 +81,7 @@ impl DatasetClient {
     }
 
     /// Message density for every stream of one episode, in request order.
-    pub(crate) fn episode_coverage(
+    pub(super) fn episode_coverage(
         &self,
         request: spiral_robotics_common::datasets::EpisodeCoverageRequest,
     ) -> impl Future<
@@ -91,7 +91,7 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/episode-coverage").json(&request))
     }
 
-    pub(crate) fn episode_messages(
+    pub(super) fn episode_messages(
         &self,
         request: spiral_robotics_common::datasets::MessageRead,
     ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
@@ -100,7 +100,7 @@ impl DatasetClient {
         )
     }
 
-    pub(crate) fn run_spiral_query(
+    pub(in crate::activities) fn run_spiral_query(
         &self,
         statement: String,
         max_rows: usize,
@@ -110,7 +110,7 @@ impl DatasetClient {
         )
     }
     /// A read-only query over one exact episode; `$1` binds its UUID.
-    pub(crate) fn run_episode_query(
+    pub(in crate::activities) fn run_episode_query(
         &self,
         request: &EpisodeQueryRequest,
     ) -> impl Future<Output = Result<SpiralQuerySnapshot, CommandError>> + use<> {

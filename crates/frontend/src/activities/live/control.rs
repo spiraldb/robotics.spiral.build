@@ -36,7 +36,7 @@ impl PendingGoals {
 }
 
 #[component]
-pub(crate) fn JointPanel(
+pub(super) fn JointPanel(
     robot_selection: RobotSelection,
     project: StudioProjectState,
     hardware: HardwareViewState,

@@ -170,7 +170,7 @@ impl TraceChartLayout {
     }
 
     /// Vertical pitch of one lane, including its gap.
-    pub(crate) fn lane_pitch(&self) -> f64 {
+    fn lane_pitch(&self) -> f64 {
         self.lane_height + self.lane_gap
     }
 }

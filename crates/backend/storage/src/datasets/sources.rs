@@ -329,7 +329,7 @@ impl McapDatasetDefinition {
             source: format!("dataset_source_{dataset_id}"),
         }
     }
-    pub(crate) fn quoted(name: &str) -> String {
+    fn quoted(name: &str) -> String {
         name.split('.')
             .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
             .collect::<Vec<_>>()
@@ -362,7 +362,7 @@ impl McapDatasetDefinition {
 pub(crate) struct McapSourceBlob;
 
 impl McapSourceBlob {
-    pub(crate) fn fields() -> Fields {
+    fn fields() -> Fields {
         vec![
             Field::new("bytes", DataType::BinaryView, true),
             Field::new("uri", DataType::Utf8View, true),
@@ -510,7 +510,7 @@ impl crate::ProjectStore {
 }
 
 impl crate::ProjectStore {
-    pub(crate) async fn managed_mcap_datasets(&self) -> Result<Vec<String>, String> {
+    async fn managed_mcap_datasets(&self) -> Result<Vec<String>, String> {
         let client = self.dataset_catalog();
         let resources = client.resources().await?;
         let mut names = Vec::new();
@@ -719,14 +719,6 @@ mod tests {
                 complete_messages = all;
                 }
 
-                for topic in available.into_iter().filter(|topic| topic.schemas().iter().any(|schema| schema == "foxglove.CompressedVideo")) {
-                    let video = storage.episode_video(spiral_robotics_common::datasets::EpisodeTopicRequest::new(
-                        dataset.clone(), topic.name().to_owned(), member.clone()
-                    )).await?;
-                    assert_eq!(video.packets().len(), 8);
-                    let offset = if topic.name().contains("overhead") { 25_000_000 } else { 0 };
-                    assert_eq!(video.packets()[0].timestamp_ns().parse::<u64>().unwrap(), 1_700_000_000_000_000_000 + offset);
-                }
             }
             assert!(storage.episode_topics(
                 spiral_robotics_common::datasets::EpisodeSelection::new(dataset, uuid::Uuid::new_v4().to_string())

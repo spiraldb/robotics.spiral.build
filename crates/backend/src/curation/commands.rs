@@ -9,7 +9,7 @@ pub(crate) struct CurationCommands {
     state: ProjectContext,
 }
 impl CurationCommands {
-    pub(crate) async fn score_episode(
+    pub(super) async fn score_episode(
         &self,
         request: spiral_robotics_common::curation::progress::ProgressScoreRequest,
     ) -> Result<spiral_robotics_common::curation::progress::ProgressScoreResult, BackendCommandError>
@@ -21,7 +21,7 @@ impl CurationCommands {
             .await
             .map_err(Into::into)
     }
-    pub(crate) async fn preview(
+    pub(super) async fn preview(
         &self,
         curation: CurationSpec,
     ) -> Result<spiral_robotics_common::curation::run::CurationOutcome, BackendCommandError> {
@@ -32,7 +32,7 @@ impl CurationCommands {
             .await
             .map_err(Into::into)
     }
-    pub(crate) async fn interpret(
+    pub(super) async fn interpret(
         &self,
         request: spiral_robotics_common::curation::interpretation::InterpretationRequest,
     ) -> Result<spiral_robotics_common::curation::interpretation::RuleProposal, BackendCommandError>
@@ -42,15 +42,15 @@ impl CurationCommands {
             .await
             .map_err(|message| crate::OperationError::InvalidInput(message).into())
     }
-    pub(crate) async fn list(&self) -> Result<Vec<CurationSummary>, BackendCommandError> {
+    pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.curation().list().await.map_err(Into::into)
     }
-    pub(crate) async fn load(&self, id: &str) -> Result<CurationSpec, BackendCommandError> {
+    pub(super) async fn load(&self, id: &str) -> Result<CurationSpec, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.curation().load(id).await.map_err(Into::into)
     }
-    pub(crate) async fn save(
+    pub(super) async fn save(
         &self,
         curation: CurationSpec,
     ) -> Result<CurationSpec, BackendCommandError> {
@@ -60,15 +60,15 @@ impl CurationCommands {
             })
             .await
     }
-    pub(crate) fn runs(&self) -> Result<Vec<CurationRun>, BackendCommandError> {
+    pub(super) fn runs(&self) -> Result<Vec<CurationRun>, BackendCommandError> {
         let _activity = self.state.admit()?;
         Ok(self.state.curation().runs())
     }
-    pub(crate) fn run(&self, id: &str) -> Result<CurationRun, BackendCommandError> {
+    pub(super) fn run(&self, id: &str) -> Result<CurationRun, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.curation().run(id).map_err(Into::into)
     }
-    pub(crate) fn start(&self, curation: CurationSpec) -> Result<CurationRun, BackendCommandError> {
+    pub(super) fn start(&self, curation: CurationSpec) -> Result<CurationRun, BackendCommandError> {
         let _activity = self.state.admit()?;
         let lease = self.state.catalog_lease();
         let _reservation = lease

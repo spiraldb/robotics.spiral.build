@@ -66,10 +66,10 @@ impl RecordedStream {
         })
     }
     /// Stable within the episode; distinct schema variants of one topic differ.
-    pub(crate) fn key(&self) -> &str {
+    pub(in crate::activities) fn key(&self) -> &str {
         &self.key
     }
-    pub(crate) fn label(&self) -> &str {
+    pub(in crate::activities) fn label(&self) -> &str {
         &self.label
     }
     pub(super) fn name(&self) -> &str {
@@ -93,7 +93,7 @@ impl RecordedStream {
     pub(super) fn samples(&self) -> Option<u64> {
         self.topic.samples()
     }
-    pub(crate) fn read(&self) -> &MessageRead {
+    pub(in crate::activities) fn read(&self) -> &MessageRead {
         &self.read
     }
     pub(super) fn panel_id(&self) -> PanelId {
@@ -108,7 +108,10 @@ pub(crate) struct StreamCatalog {
 }
 
 impl StreamCatalog {
-    pub(crate) fn new(mut topics: Vec<DatasetTopic>, episode: &EpisodeSelection) -> Self {
+    pub(in crate::activities) fn new(
+        mut topics: Vec<DatasetTopic>,
+        episode: &EpisodeSelection,
+    ) -> Self {
         topics.sort_by(|left, right| {
             left.name().cmp(right.name()).then_with(|| {
                 left.revision()
@@ -132,7 +135,7 @@ impl StreamCatalog {
     pub(super) fn streams(&self) -> &[RecordedStream] {
         &self.streams
     }
-    pub(crate) fn videos(&self) -> impl Iterator<Item = &RecordedStream> {
+    pub(in crate::activities) fn videos(&self) -> impl Iterator<Item = &RecordedStream> {
         self.streams
             .iter()
             .filter(|stream| stream.kind() == StreamKind::Video)
@@ -159,7 +162,7 @@ impl StreamCatalog {
         }
     }
     /// Data streams, busiest first; ties keep topic order.
-    pub(super) fn data_by_traffic(&self) -> Vec<RecordedStream> {
+    fn data_by_traffic(&self) -> Vec<RecordedStream> {
         let mut ranked = self
             .streams
             .iter()

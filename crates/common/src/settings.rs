@@ -275,10 +275,6 @@ impl SpiralConnectionUpdate {
         self
     }
 
-    pub fn huggingface_token(&self) -> Option<&str> {
-        self.huggingface_token.as_deref()
-    }
-
     pub fn into_parts(self) -> (String, String, String, String, String, bool, Option<String>) {
         (
             self.spiral_endpoint,

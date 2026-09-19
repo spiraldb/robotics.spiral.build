@@ -17,7 +17,7 @@ pub(crate) struct LiveSession {
     recording_signals: Signal<SignalStore>,
 }
 impl LiveSession {
-    pub(crate) fn use_session(
+    pub(super) fn use_session(
         project: StudioProjectState,
         telemetry: HardwareViewState,
         selection: RobotSelection,
@@ -56,25 +56,25 @@ impl LiveSession {
         });
         session
     }
-    pub(crate) fn project(self) -> StudioProjectState {
+    pub(super) fn project(self) -> StudioProjectState {
         self.project
     }
-    pub(crate) fn telemetry(self) -> HardwareViewState {
+    pub(super) fn telemetry(self) -> HardwareViewState {
         self.telemetry
     }
-    pub(crate) fn selection(self) -> RobotSelection {
+    pub(super) fn selection(self) -> RobotSelection {
         self.selection
     }
-    pub(crate) fn commands(self) -> HardwareCommands {
+    pub(super) fn commands(self) -> HardwareCommands {
         HardwareCommands::new(self.project, self.telemetry)
     }
-    pub(crate) fn datasets(self) -> DatasetChoices {
+    pub(super) fn datasets(self) -> DatasetChoices {
         self.datasets
     }
-    pub(crate) fn timeline_controller(self) -> TimelineController {
+    pub(super) fn timeline_controller(self) -> TimelineController {
         self.timeline
     }
-    pub(crate) fn recording_signals(self) -> MappedSignal<SignalStore, Signal<SignalStore>> {
+    pub(super) fn recording_signals(self) -> MappedSignal<SignalStore, Signal<SignalStore>> {
         self.recording_signals.map(|value| value)
     }
 }

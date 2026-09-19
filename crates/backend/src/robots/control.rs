@@ -37,12 +37,12 @@ pub(crate) struct RobotControlActions<'a, P: RobotControlPort + ?Sized> {
 }
 
 impl<'a, P: RobotControlPort + ?Sized> RobotControlActions<'a, P> {
-    pub(crate) const fn new(control: &'a P) -> Self {
+    pub(super) const fn new(control: &'a P) -> Self {
         Self { control }
     }
 
     /// Execute operator-facing robot-control actions as one control-thread command.
-    pub(crate) async fn execute(&self, command: RobotControlCommand) -> Result<(), OperationError> {
+    pub(super) async fn execute(&self, command: RobotControlCommand) -> Result<(), OperationError> {
         let result = match command {
             RobotControlCommand::Hold { robot } => self.control.hold(&robot).await,
             RobotControlCommand::Release { robot } => self.control.release(&robot).await,

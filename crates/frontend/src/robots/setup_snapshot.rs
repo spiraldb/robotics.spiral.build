@@ -19,7 +19,7 @@ pub(crate) struct RobotSetupSnapshot {
 }
 
 impl RobotSetupSnapshot {
-    pub(crate) fn new(mode: ModeStatus) -> Self {
+    pub(super) fn new(mode: ModeStatus) -> Self {
         Self {
             robots: Vec::new(),
             cameras: Vec::new(),
@@ -27,15 +27,15 @@ impl RobotSetupSnapshot {
             issues: Vec::new(),
         }
     }
-    pub(crate) fn with_robots(mut self, robots: Vec<RobotSummary>) -> Self {
+    pub(super) fn with_robots(mut self, robots: Vec<RobotSummary>) -> Self {
         self.robots = robots;
         self
     }
-    pub(crate) fn with_cameras(mut self, cameras: Vec<CameraStatus>) -> Self {
+    pub(super) fn with_cameras(mut self, cameras: Vec<CameraStatus>) -> Self {
         self.cameras = cameras;
         self
     }
-    pub(crate) fn with_issues(mut self, issues: Vec<String>) -> Self {
+    pub(super) fn with_issues(mut self, issues: Vec<String>) -> Self {
         self.issues = issues;
         self
     }

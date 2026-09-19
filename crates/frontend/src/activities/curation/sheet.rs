@@ -40,7 +40,7 @@ impl RuleTone {
     /// Dealt so the first rules sit far from role blue: a lit ring must never
     /// be mistaken for the selected tile's ring. Blue comes last.
     const DEAL: [usize; 6] = [2, 4, 3, 5, 6, 1];
-    pub(super) const fn at(index: usize) -> Self {
+    const fn at(index: usize) -> Self {
         Self(Self::DEAL[index % 6])
     }
     pub(super) fn css(self) -> String {
@@ -737,7 +737,7 @@ impl SheetTile {
         &self.verdict
     }
     /// The tile's own button, where focus returns when its evidence closes.
-    pub(super) fn element_id(ordinal: usize) -> String {
+    fn element_id(ordinal: usize) -> String {
         format!("curation-tile-{ordinal}")
     }
 }

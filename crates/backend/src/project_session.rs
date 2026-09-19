@@ -56,11 +56,11 @@ impl ProjectReadiness {
     }
 
     #[cfg(test)]
-    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<BackendReadiness> {
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<BackendReadiness> {
         self.current.subscribe()
     }
 
-    pub(crate) fn bootstrapping(&self, detail: impl Into<String>) {
+    fn bootstrapping(&self, detail: impl Into<String>) {
         self.current.send_replace(BackendReadiness::new(
             BackendReadinessState::Bootstrapping,
             false,
@@ -260,37 +260,37 @@ impl ProjectSession {
     pub(crate) fn info(&self) -> &ProjectSessionInfo {
         &self.info
     }
-    pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
+    fn workspace(&self) -> &Arc<RobotWorkspace> {
         &self.catalog.workspace
     }
-    pub(crate) fn recording_buffer(&self) -> &Arc<RecordingBuffer> {
+    fn recording_buffer(&self) -> &Arc<RecordingBuffer> {
         &self.catalog.recording_buffer
     }
-    pub(crate) fn storage(&self) -> &Arc<StorageManager> {
+    fn storage(&self) -> &Arc<StorageManager> {
         &self.catalog.storage
     }
-    pub(crate) fn catalog_lease(&self) -> &Arc<CatalogMutationLease> {
+    fn catalog_lease(&self) -> &Arc<CatalogMutationLease> {
         &self.catalog.lease
     }
-    pub(crate) fn preferences(&self) -> &Arc<crate::data::preferences::RuntimePreferences> {
+    fn preferences(&self) -> &Arc<crate::data::preferences::RuntimePreferences> {
         &self.preferences
     }
-    pub(crate) fn recording(&self) -> &Arc<RecordingSessionManager> {
+    fn recording(&self) -> &Arc<RecordingSessionManager> {
         &self.recording
     }
-    pub(crate) fn readiness(&self) -> &ProjectReadiness {
+    fn readiness(&self) -> &ProjectReadiness {
         &self.readiness
     }
-    pub(crate) fn training(&self) -> &Arc<TrainingManager> {
+    fn training(&self) -> &Arc<TrainingManager> {
         &self.activities.training
     }
-    pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
+    fn rollout(&self) -> &Arc<RolloutManager> {
         &self.activities.rollout
     }
-    pub(crate) fn workflow(&self) -> &Arc<WorkflowManager> {
+    fn workflow(&self) -> &Arc<WorkflowManager> {
         &self.activities.workflow
     }
-    pub(crate) fn curation(&self) -> &Arc<CurationManager> {
+    fn curation(&self) -> &Arc<CurationManager> {
         &self.activities.curation
     }
 
@@ -417,20 +417,20 @@ impl ProjectCoordinator {
         self.active.borrow().clone()
     }
     #[cfg(test)]
-    pub(crate) fn subscribe(&self) -> watch::Receiver<Arc<ProjectSession>> {
+    fn subscribe(&self) -> watch::Receiver<Arc<ProjectSession>> {
         self.active.subscribe()
     }
     pub(crate) fn hardware(&self) -> &Arc<HardwareHandle> {
         &self.factory.hardware.hardware
     }
-    pub(crate) fn cameras(&self) -> &Arc<CameraManager> {
+    fn cameras(&self) -> &Arc<CameraManager> {
         &self.factory.hardware.cameras
     }
-    pub(crate) fn video_encoder(&self) -> &VideoEncoderSettings {
+    fn video_encoder(&self) -> &VideoEncoderSettings {
         &self.factory.hardware.video_encoder
     }
 
-    pub(crate) fn resolve(&self, session_id: &str) -> Result<Arc<ProjectSession>, OperationError> {
+    fn resolve(&self, session_id: &str) -> Result<Arc<ProjectSession>, OperationError> {
         let current = self.active();
         if current.info().id() != session_id {
             return Err(OperationError::StaleProject(
@@ -440,7 +440,7 @@ impl ProjectCoordinator {
         Ok(current)
     }
 
-    pub(crate) fn admit(&self, session_id: &str) -> Result<ProjectActivity, OperationError> {
+    fn admit(&self, session_id: &str) -> Result<ProjectActivity, OperationError> {
         let activity = self.factory.admission.admit_activity()?;
         self.resolve(session_id)?;
         Ok(activity)
@@ -625,7 +625,7 @@ impl ProjectCoordinator {
         Ok(DataSettingsUpdate::new(result, true))
     }
 
-    pub(crate) async fn resume(&self, origin: &ProjectSession) -> Result<(), OperationError> {
+    async fn resume(&self, origin: &ProjectSession) -> Result<(), OperationError> {
         self.reload(origin, ProjectPreparation::Resume).await
     }
 

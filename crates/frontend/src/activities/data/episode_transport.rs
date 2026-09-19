@@ -28,7 +28,7 @@ impl EpisodeTimeRange {
     pub(super) fn bounds(self) -> (u64, u64) {
         (self.start_ns, self.end_ns.saturating_add(1))
     }
-    pub(super) fn duration(self) -> f64 {
+    fn duration(self) -> f64 {
         self.end_ns.saturating_sub(self.start_ns) as f64 / 1e9
     }
     pub(super) fn start_ns(self) -> u64 {
@@ -79,7 +79,9 @@ impl PartialEq for EpisodeTransport {
 }
 impl EpisodeTransport {
     /// One caller-owned clock for an inline episode camera and its timeline.
-    pub(crate) fn use_opened_episode(episode: &super::episode_list::OpenedEpisode) -> Self {
+    pub(in crate::activities) fn use_opened_episode(
+        episode: &super::episode_list::OpenedEpisode,
+    ) -> Self {
         let range = episode
             .record()
             .time_range()
@@ -94,7 +96,7 @@ impl EpisodeTransport {
         transport
     }
 
-    pub(crate) fn play_interval(&mut self, start: f64, end: f64) {
+    pub(in crate::activities) fn play_interval(&mut self, start: f64, end: f64) {
         self.clock.write().play_interval(start, end);
     }
     /// One transport per Data workspace; `load` points it at an episode.
@@ -161,10 +163,10 @@ impl EpisodeTransport {
         self.range.set(range);
         self.feeds.write().clear();
     }
-    pub(crate) fn range(&self) -> EpisodeTimeRange {
+    pub(in crate::activities) fn range(&self) -> EpisodeTimeRange {
         *self.range.read()
     }
-    pub(crate) fn seconds(&self) -> f64 {
+    pub(super) fn seconds(&self) -> f64 {
         self.clock.read().seconds()
     }
     /// The playhead as an absolute log time, for latest-message lookups.
@@ -174,10 +176,10 @@ impl EpisodeTransport {
     pub(super) fn seek(&mut self, seconds: f64) {
         self.clock.write().seek(seconds);
     }
-    pub(super) fn pause(&mut self) {
+    fn pause(&mut self) {
         self.clock.write().set_playing(false);
     }
-    pub(super) fn set_speed(&mut self, speed: f64) {
+    fn set_speed(&mut self, speed: f64) {
         self.clock.write().set_speed(speed);
     }
     pub(super) fn view(&self) -> ViewWindow {
@@ -205,12 +207,12 @@ impl EpisodeTransport {
             false
         }
     }
-    pub(crate) fn timeline_state(&self) -> TimelineState {
+    pub(in crate::activities) fn timeline_state(&self) -> TimelineState {
         TimelineState::new(self.generation.read().to_string(), *self.clock.read())
             .with_window(self.view())
             .with_buffering(self.buffering())
     }
-    pub(crate) fn interaction(&self) -> TimelineInteraction {
+    pub(in crate::activities) fn interaction(&self) -> TimelineInteraction {
         let mut transport = self.clone();
         TimelineInteraction::new(
             self.timeline_state(),
@@ -231,7 +233,7 @@ impl EpisodeTransport {
             TimelineAction::ActivateInterval(_) => {}
         }
     }
-    pub(super) fn buffering(&self) -> bool {
+    fn buffering(&self) -> bool {
         self.feeds
             .read()
             .values()

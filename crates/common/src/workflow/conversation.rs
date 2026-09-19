@@ -24,10 +24,10 @@ impl WorkflowConversation {
         }
     }
 
-    pub fn conversation_id(&self) -> &str {
+    fn conversation_id(&self) -> &str {
         self.session.conversation_id()
     }
-    pub fn workflow_id(&self) -> &str {
+    pub(super) fn workflow_id(&self) -> &str {
         self.session.workflow_id()
     }
     pub const fn revision(&self) -> u64 {
@@ -44,16 +44,6 @@ impl WorkflowConversation {
     }
     pub fn provider_messages_mut(&mut self) -> &mut Vec<ProviderMessage> {
         &mut self.provider_messages
-    }
-
-    pub fn ensure_turn(&self, conversation_id: &str, turn_id: &str) -> Result<(), String> {
-        if self.conversation_id() == conversation_id
-            && self.session.active_turn_id() == Some(turn_id)
-        {
-            Ok(())
-        } else {
-            Err("Assistant turn is no longer active.".to_owned())
-        }
     }
 
     pub fn advance(&mut self, now_ms: u64) -> Result<(), String> {
@@ -75,7 +65,7 @@ impl WorkflowConversation {
         Ok(WorkflowJson::new(CONVERSATION_VERSION, payload))
     }
 
-    pub fn decode(encoded: &str) -> Result<Self, String> {
+    fn decode(encoded: &str) -> Result<Self, String> {
         if encoded.len() > MAX_CONVERSATION_BYTES {
             return Err("Assistant history exceeds 16 MiB.".to_owned());
         }
@@ -120,7 +110,7 @@ impl WorkflowConversation {
         Ok(true)
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), String> {
         if [self.workflow_id(), self.conversation_id()]
             .iter()
             .any(|id| id.is_empty() || id.len() > 128)
@@ -227,7 +217,7 @@ impl ProviderMessage {
             _ => None,
         }
     }
-    pub fn tool_call_id(&self) -> Option<&str> {
+    fn tool_call_id(&self) -> Option<&str> {
         self.tool_call_id.as_deref()
     }
     pub fn tool_calls(&self) -> &[ProviderToolCall] {
@@ -464,26 +454,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_turn_cannot_change_another_conversation() {
-        let mut first = WorkflowConversation::new("first");
-        let second = WorkflowConversation::new("second");
-        first
-            .session_mut()
-            .set_active_turn_id(Some("turn-a".to_owned()));
-        assert!(first.ensure_turn(first.conversation_id(), "turn-a").is_ok());
-        assert!(
-            second
-                .ensure_turn(first.conversation_id(), "turn-a")
-                .is_err()
-        );
-        assert!(
-            first
-                .ensure_turn(first.conversation_id(), "old-turn")
-                .is_err()
-        );
-    }
-
-    #[test]
     fn restart_repairs_incomplete_tool_exchange_without_resuming_work() {
         let mut conversation = WorkflowConversation::new("lighting");
         conversation
@@ -510,7 +480,7 @@ mod tests {
         let mut loaded = WorkflowConversation::load(&stored, "lighting").unwrap();
         assert!(loaded.interrupt().unwrap());
         assert_eq!(loaded.session().phase(), WorkflowAgentPhase::Interrupted);
-        assert!(loaded.session().active_turn_id().is_none());
+        assert!(loaded.session().activity.active_turn_id.is_none());
         assert_eq!(
             loaded.session().messages()[0].phase(),
             WorkflowAgentMessagePhase::Failed

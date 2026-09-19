@@ -5,7 +5,7 @@ use crate::{
     TrainingJobCursor, TrainingJobRequest, TrainingJobSnapshot,
 };
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use crate::{
     TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION, TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION,
 };
@@ -39,7 +39,7 @@ impl TrainingBackendProtocol {
             ..Self::current()
         }
     }
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn current() -> Self {
         Self {
             api_id: TRAINING_BACKEND_API_ID.to_owned(),
@@ -189,9 +189,9 @@ impl TrainingBackendInfo {
         fixture.protocol.api_version = api_version;
         fixture
     }
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     /// Constructs health information for a backend implementing this protocol.
-    pub fn new(identity: TrainingBackendIdentity, devices: Vec<String>) -> Self {
+    pub(super) fn new(identity: TrainingBackendIdentity, devices: Vec<String>) -> Self {
         assert!(
             devices.iter().all(|device| !device.trim().is_empty()),
             "backend device names must not be empty"
@@ -254,8 +254,8 @@ pub trait TrainingBackend: Send + Sync {
 }
 
 impl TrainingBackendIdentity {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(
+    #[cfg(test)]
+    pub(super) fn new(
         id: impl Into<String>,
         display_name: impl Into<String>,
         runtime: impl Into<String>,

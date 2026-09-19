@@ -80,7 +80,7 @@ pub(super) enum StageKind {
 impl StageKind {
     /// The Workflow stage tint class; a filter carries its rule's tone
     /// inline instead, so its class only names the shape.
-    pub(super) const fn class_name(self) -> &'static str {
+    const fn class_name(self) -> &'static str {
         match self {
             Self::Source => "workflow-stage-source",
             Self::Filter => "curation-stage-filter",
@@ -109,7 +109,7 @@ impl StageKind {
 }
 
 #[component]
-pub(super) fn StageGlyph(kind: StageKind) -> Element {
+fn StageGlyph(kind: StageKind) -> Element {
     match kind {
         StageKind::Source => rsx! { DataIcon {} },
         StageKind::Filter | StageKind::Trim => rsx! { QueryNodeIcon {} },

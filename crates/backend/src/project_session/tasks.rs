@@ -9,7 +9,7 @@ pub(crate) struct BackendTasks {
 }
 
 impl BackendTasks {
-    pub(crate) fn current() -> Self {
+    pub(super) fn current() -> Self {
         Self {
             handle: tokio::runtime::Handle::current(),
         }

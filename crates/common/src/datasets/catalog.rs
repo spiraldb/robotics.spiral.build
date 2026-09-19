@@ -30,13 +30,6 @@ impl DatasetSelection {
     pub fn can_preview(&self) -> bool {
         self.path.iter().all(|part| !part.contains('.'))
     }
-    pub fn topic_sql(&self, topic: &str) -> String {
-        format!(
-            "SELECT * FROM spql.mcap.read_topic('{}', '{}') LIMIT 100",
-            self.sql_name().replace('\'', "''"),
-            topic.replace('\'', "''")
-        )
-    }
 }
 
 /// One native recording within a dataset.
@@ -192,16 +185,10 @@ impl DatasetInspection {
 mod tests {
     use super::*;
     #[test]
-    fn dataset_paths_and_topics_cannot_escape_preview_sql() {
+    fn dataset_paths_validate_names_and_preview_support() {
         let selection =
             DatasetSelection::new(vec!["a.b".into(), "owner's \"data\"".into()]).unwrap();
         assert!(!selection.can_preview());
-        assert!(
-            selection
-                .topic_sql("/camera' --")
-                .contains("'/camera'' --'")
-        );
-        assert!(selection.topic_sql("/camera").contains("owner''s"));
         assert!(DatasetSelection::new(vec![]).is_err());
         assert!(DatasetSelection::new(vec!["\n".into()]).is_err());
     }

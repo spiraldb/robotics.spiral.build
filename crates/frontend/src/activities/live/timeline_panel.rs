@@ -38,7 +38,7 @@ pub(crate) struct StudioTimelineState {
 }
 
 impl StudioTimelineState {
-    pub(crate) fn new(
+    pub(super) fn new(
         subject: TimelineSubject,
         playhead_seconds: f64,
         playback: TimelinePlayback,
@@ -52,11 +52,11 @@ impl StudioTimelineState {
         }
     }
 
-    pub(crate) const fn playhead_seconds(&self) -> f64 {
+    pub(super) const fn playhead_seconds(&self) -> f64 {
         self.playhead_seconds
     }
 
-    pub(crate) const fn with_controls(mut self, follow_live: bool, sync_robot: bool) -> Self {
+    pub(super) const fn with_controls(mut self, follow_live: bool, sync_robot: bool) -> Self {
         self.follow_live = follow_live;
         self.sync_robot = sync_robot;
         self
@@ -74,7 +74,7 @@ pub(crate) struct TimelineCapabilities {
 }
 
 impl TimelineCapabilities {
-    pub(crate) fn new(record: Result<(), String>, seek: Result<(), String>) -> Self {
+    pub(super) fn new(record: Result<(), String>, seek: Result<(), String>) -> Self {
         Self {
             record,
             seek,
@@ -83,7 +83,7 @@ impl TimelineCapabilities {
         }
     }
 
-    pub(crate) fn with_robot_controls(
+    pub(super) fn with_robot_controls(
         mut self,
         synced_playback: Result<(), String>,
         robot_sync: Result<(), String>,
@@ -93,7 +93,7 @@ impl TimelineCapabilities {
         self
     }
 
-    pub(crate) const fn robot_sync(&self) -> &Result<(), String> {
+    pub(super) const fn robot_sync(&self) -> &Result<(), String> {
         &self.robot_sync
     }
 }
@@ -131,19 +131,19 @@ pub(crate) struct TimelineSeekRequest {
 }
 
 impl TimelineSeekRequest {
-    pub(crate) const fn target(&self) -> &TimelineTarget {
+    pub(super) const fn target(&self) -> &TimelineTarget {
         &self.target
     }
 
-    pub(crate) const fn seconds(&self) -> f64 {
+    pub(super) const fn seconds(&self) -> f64 {
         self.seconds
     }
 
-    pub(crate) const fn moves_robot(&self) -> bool {
+    pub(super) const fn moves_robot(&self) -> bool {
         self.move_robot
     }
 
-    pub(crate) const fn committed(&self) -> bool {
+    pub(super) const fn committed(&self) -> bool {
         self.committed
     }
 }
@@ -242,7 +242,7 @@ pub(crate) struct TimelineVisualization {
 }
 
 impl TimelineVisualization {
-    pub(crate) const fn new(
+    pub(super) const fn new(
         signal_lanes: Arc<[TimelineSignalLane; 6]>,
         signal_source: SignalSource,
         capabilities: TimelineCapabilities,
@@ -256,7 +256,7 @@ impl TimelineVisualization {
 }
 
 #[component]
-pub(crate) fn LiveTimelinePanel(
+pub(super) fn LiveTimelinePanel(
     state: StudioTimelineState,
     visualization: TimelineVisualization,
     on_action: EventHandler<TimelineAction>,
@@ -467,7 +467,6 @@ pub(crate) fn LiveTimelinePanel(
                     }
                 }
             }
-
 
     };
     let signal_chart = signal_lanes

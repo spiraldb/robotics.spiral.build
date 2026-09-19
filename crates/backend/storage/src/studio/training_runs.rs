@@ -4,11 +4,11 @@ use sea_orm::entity::prelude::*;
 #[sea_orm(table_name = "training_runs")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub project: String,
+    pub(super) project: String,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: String,
+    pub(super) id: String,
     pub ordinal: i64,
-    pub document: Json,
+    pub(crate) document: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

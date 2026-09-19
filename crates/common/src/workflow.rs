@@ -100,13 +100,6 @@ impl WorkflowValidationIssue {
     pub fn message(&self) -> &str {
         &self.message
     }
-    pub fn recovery(&self) -> &str {
-        &self.recovery
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn code(&self) -> &str {
-        &self.code
-    }
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -198,12 +191,6 @@ impl WorkflowRunSnapshot {
         self
     }
 
-    pub fn workflow_id(&self) -> &str {
-        &self.identity.workflow_id
-    }
-    pub const fn workflow_revision(&self) -> u64 {
-        self.identity.workflow_revision
-    }
     pub fn run_id(&self) -> Option<&str> {
         self.identity.run_id.as_deref()
     }
@@ -222,9 +209,6 @@ impl WorkflowRunSnapshot {
     pub const fn started_ms(&self) -> u64 {
         self.timing.started_ms
     }
-    pub const fn updated_ms(&self) -> u64 {
-        self.timing.updated_ms
-    }
     pub const fn set_phase(&mut self, phase: WorkflowRunPhase) {
         self.execution.phase = phase;
     }
@@ -242,10 +226,6 @@ impl WorkflowRunSnapshot {
     }
     pub const fn set_updated_ms(&mut self, updated_ms: u64) {
         self.timing.updated_ms = updated_ms;
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_run_id(&mut self, run_id: Option<String>) {
-        self.identity.run_id = run_id;
     }
 }
 
@@ -407,9 +387,6 @@ impl WorkflowAgentMessage {
     pub fn id(&self) -> &str {
         &self.identity.id
     }
-    pub const fn sequence(&self) -> u64 {
-        self.identity.sequence
-    }
     pub const fn role(&self) -> WorkflowAgentRole {
         self.identity.role
     }
@@ -430,9 +407,6 @@ impl WorkflowAgentMessage {
     }
     pub fn tools_mut(&mut self) -> &mut Vec<WorkflowAgentToolSummary> {
         &mut self.content.tools
-    }
-    pub fn set_run_id(&mut self, run_id: Option<String>) {
-        self.content.run_id = run_id;
     }
 }
 
@@ -492,7 +466,7 @@ impl Default for WorkflowAgentSession {
 }
 
 impl WorkflowAgentSession {
-    pub fn new(workflow_id: impl Into<String>, conversation_id: impl Into<String>) -> Self {
+    fn new(workflow_id: impl Into<String>, conversation_id: impl Into<String>) -> Self {
         Self {
             identity: SessionIdentity {
                 workflow_id: workflow_id.into(),
@@ -512,10 +486,10 @@ impl WorkflowAgentSession {
     pub fn workflow_id(&self) -> &str {
         &self.identity.workflow_id
     }
-    pub fn conversation_id(&self) -> &str {
+    fn conversation_id(&self) -> &str {
         &self.identity.conversation_id
     }
-    pub const fn revision(&self) -> u64 {
+    const fn revision(&self) -> u64 {
         self.identity.revision
     }
     pub const fn phase(&self) -> WorkflowAgentPhase {
@@ -524,13 +498,10 @@ impl WorkflowAgentSession {
     pub fn messages(&self) -> &[WorkflowAgentMessage] {
         &self.activity.messages
     }
-    pub fn active_turn_id(&self) -> Option<&str> {
-        self.activity.active_turn_id.as_deref()
-    }
     pub fn error(&self) -> Option<&str> {
         self.activity.error.as_deref()
     }
-    pub const fn set_revision(&mut self, revision: u64) {
+    const fn set_revision(&mut self, revision: u64) {
         self.identity.revision = revision;
     }
     pub const fn set_phase(&mut self, phase: WorkflowAgentPhase) {
@@ -545,17 +516,11 @@ impl WorkflowAgentSession {
     pub fn set_error(&mut self, error: Option<String>) {
         self.activity.error = error;
     }
-    pub const fn set_updated_ms(&mut self, updated_ms: u64) {
+    const fn set_updated_ms(&mut self, updated_ms: u64) {
         self.identity.updated_ms = updated_ms;
     }
-    pub const fn updated_ms(&self) -> u64 {
+    const fn updated_ms(&self) -> u64 {
         self.identity.updated_ms
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn with_revision(mut self, revision: u64) -> Self {
-        self.identity.revision = revision;
-        self
     }
 }
 
@@ -598,14 +563,6 @@ impl WorkflowAgentReadiness {
     pub const fn configured(&self) -> bool {
         matches!(self, Self::Ready { .. })
     }
-
-    pub fn detail(&self) -> &str {
-        match self {
-            Self::Unconfigured { detail } | Self::Ready { detail, .. } | Self::Error { detail } => {
-                detail
-            }
-        }
-    }
 }
 impl WorkflowAgentArtifactReceipt {
     pub fn authored(label: impl Into<String>, revision: u64) -> Self {
@@ -647,9 +604,6 @@ impl WorkflowAgentToolSummary {
     }
     pub fn set_receipt(&mut self, receipt: Option<WorkflowAgentArtifactReceipt>) {
         self.receipt = receipt;
-    }
-    pub fn call_id(&self) -> &str {
-        &self.call_id
     }
     pub fn name(&self) -> &str {
         &self.name

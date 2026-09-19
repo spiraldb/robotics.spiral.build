@@ -380,10 +380,7 @@ impl StoredStudioPreferences {
         ))
     }
 
-    pub(crate) const fn new(
-        training: StoredTrainingRuntimePreference,
-        video: StoredVideoPreference,
-    ) -> Self {
+    const fn new(training: StoredTrainingRuntimePreference, video: StoredVideoPreference) -> Self {
         Self { training, video }
     }
 

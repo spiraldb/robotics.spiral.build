@@ -217,7 +217,7 @@ impl StorageSchema {
     }
 
     /// Whether a value is safe as a logical dataset row identifier.
-    pub fn is_dataset_id(value: &str) -> bool {
+    pub(crate) fn is_dataset_id(value: &str) -> bool {
         spiral_robotics_common::identity::DatasetId::is_canonical(value)
     }
 }

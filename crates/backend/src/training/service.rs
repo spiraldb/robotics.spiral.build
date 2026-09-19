@@ -46,7 +46,7 @@ impl ActTrainingResourceEstimate {
 }
 
 impl TrainingManager {
-    pub(crate) async fn start_validated(
+    pub(super) async fn start_validated(
         &self,
         command: TrainingConfig,
     ) -> Result<TrainingRun, OperationError> {
@@ -58,7 +58,7 @@ impl TrainingManager {
             .map_err(OperationError::conflict)
     }
 
-    pub(crate) async fn delete_inactive(
+    pub(super) async fn delete_inactive(
         &self,
         run_id: &str,
         active_rollout: Option<&str>,

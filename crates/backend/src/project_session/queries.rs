@@ -7,7 +7,7 @@ pub(crate) struct ProjectQueries {
     state: ProjectContext,
 }
 impl ProjectQueries {
-    pub(crate) fn status(&self) -> ProjectStatus {
+    pub(super) fn status(&self) -> ProjectStatus {
         let project = self.state.projects().active();
         ProjectStatus::new(project.info().clone(), project.readiness().current())
     }

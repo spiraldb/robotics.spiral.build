@@ -72,13 +72,13 @@ pub(crate) struct FixedClock {
 
 #[cfg(test)]
 impl FixedClock {
-    pub(crate) const fn new(now_ms: i64) -> Self {
+    const fn new(now_ms: i64) -> Self {
         Self {
             now_ms: std::sync::atomic::AtomicI64::new(now_ms),
         }
     }
 
-    pub(crate) fn set(&self, now_ms: i64) {
+    fn set(&self, now_ms: i64) {
         self.now_ms.store(now_ms, Ordering::Relaxed);
     }
 }

@@ -53,7 +53,7 @@ impl SerialPortDiscovery {
 }
 
 impl SerialPortDiscovery {
-    pub(crate) async fn list(
+    pub(super) async fn list(
         project: &ProjectContext,
     ) -> Result<Vec<SerialPortSummary>, OperationError> {
         let ports = SerialPortDiscovery::scan().await?;

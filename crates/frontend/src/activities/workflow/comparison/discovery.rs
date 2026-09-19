@@ -53,7 +53,7 @@ impl SignalDiscovery {
             _ => Err("Unknown discovery tool.".into()),
         }
     }
-    pub(super) fn preview(output: &SpiralQuerySnapshot) -> Value {
+    fn preview(output: &SpiralQuerySnapshot) -> Value {
         json!({"columns":output.columns(),"sample":Self::safe_value(&json!(output.rows()),0),"truncated":output.truncated(),"notice":"Rows and nested arrays are bounded previews, never population counts."})
     }
     fn safe_value(value: &Value, depth: usize) -> Value {

@@ -18,7 +18,7 @@ pub(crate) enum RunPhase {
 }
 
 impl RunPhase {
-    pub(crate) const fn active(self) -> bool {
+    const fn active(self) -> bool {
         matches!(self, Self::Starting | Self::Running | Self::Stopping)
     }
 
@@ -48,7 +48,7 @@ pub(crate) struct RunRecord {
 }
 
 impl RunRecord {
-    pub(crate) fn new(id: impl Into<String>, phase: RunPhase) -> Self {
+    pub(super) fn new(id: impl Into<String>, phase: RunPhase) -> Self {
         Self {
             id: id.into(),
             phase,
@@ -63,7 +63,7 @@ pub(crate) struct TrainingRunRegistry {
 }
 
 impl TrainingRunRegistry {
-    pub(crate) fn new(
+    pub(super) fn new(
         history_limit: usize,
         runs: impl IntoIterator<Item = RunRecord>,
     ) -> Result<Self, String> {
@@ -91,7 +91,7 @@ impl TrainingRunRegistry {
         })
     }
 
-    pub(crate) fn admit(&mut self, run: RunRecord) -> Result<(), String> {
+    pub(super) fn admit(&mut self, run: RunRecord) -> Result<(), String> {
         if run.id.trim().is_empty() {
             return Err("training run id must not be empty".to_owned());
         }
@@ -115,7 +115,7 @@ impl TrainingRunRegistry {
         Ok(())
     }
 
-    pub(crate) fn transition(&mut self, run_id: &str, next: RunPhase) -> Result<(), String> {
+    pub(super) fn transition(&mut self, run_id: &str, next: RunPhase) -> Result<(), String> {
         let run = self
             .runs
             .iter_mut()
@@ -131,7 +131,7 @@ impl TrainingRunRegistry {
         Ok(())
     }
 
-    pub(crate) fn retained_ids(&self) -> impl Iterator<Item = &str> {
+    pub(super) fn retained_ids(&self) -> impl Iterator<Item = &str> {
         self.runs.iter().map(|run| run.id.as_str())
     }
 }

@@ -4,8 +4,8 @@ use sea_orm::entity::prelude::*;
 #[sea_orm(table_name = "studio_settings")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub project: String,
-    pub document: Json,
+    pub(super) project: String,
+    pub(crate) document: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
 
 #[component]
-pub(crate) fn QueryPanel(
+pub(super) fn QueryPanel(
     studio: StudioProjectState,
     controller: super::state::QueryController,
 ) -> Element {

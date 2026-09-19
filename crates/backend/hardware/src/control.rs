@@ -165,7 +165,7 @@ impl Sample {
         self
     }
 
-    pub fn with_effort(mut self, effort: Option<Vec<Vec<Option<f64>>>>) -> Self {
+    fn with_effort(mut self, effort: Option<Vec<Vec<Option<f64>>>>) -> Self {
         self.effort = effort;
         self
     }
@@ -427,10 +427,6 @@ impl HardwareState {
         self.telemetry.sequence()
     }
 
-    pub const fn loop_hz(&self) -> f64 {
-        self.telemetry.loop_hz()
-    }
-
     pub const fn target_hz(&self) -> f64 {
         self.telemetry.target_hz()
     }
@@ -441,10 +437,6 @@ impl HardwareState {
 
     pub const fn recording(&self) -> Option<&RecordingProgress> {
         self.telemetry.recording()
-    }
-
-    pub const fn replay(&self) -> Option<&ReplayProgress> {
-        self.telemetry.replay()
     }
 
     pub const fn connections(&self) -> &BTreeMap<String, ConnectionStatus> {
@@ -461,10 +453,6 @@ impl HardwareState {
 
     pub const fn telemetry(&self) -> &TelemetryFrame {
         &self.telemetry
-    }
-
-    pub const fn mode_active(&self) -> bool {
-        self.mode.active()
     }
 
     pub fn mode_error(&self) -> Option<&str> {
@@ -495,7 +483,7 @@ impl JointGoals {
         Self::try_from(values)
     }
 
-    pub(crate) fn values(&self) -> &BTreeMap<String, f64> {
+    fn values(&self) -> &BTreeMap<String, f64> {
         &self.0
     }
 }

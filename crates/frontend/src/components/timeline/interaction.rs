@@ -83,10 +83,10 @@ impl TimelineState {
     pub(crate) fn target(&self) -> &str {
         &self.target
     }
-    pub(crate) fn clock(&self) -> PlaybackClock {
+    pub(super) fn clock(&self) -> PlaybackClock {
         self.clock
     }
-    pub(crate) fn window(&self) -> ViewWindow {
+    pub(super) fn window(&self) -> ViewWindow {
         self.window
     }
     pub(super) fn seek_reason(&self) -> Option<&str> {
@@ -160,7 +160,7 @@ impl TimelineInteraction {
     pub(crate) fn new(state: TimelineState, on_action: EventHandler<TimelineEvent>) -> Self {
         Self { state, on_action }
     }
-    pub(crate) fn state(&self) -> &TimelineState {
+    pub(super) fn state(&self) -> &TimelineState {
         &self.state
     }
     pub(crate) fn emit(&self, action: TimelineAction) {

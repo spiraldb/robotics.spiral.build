@@ -24,13 +24,13 @@ struct PairSums {
     right_sum: Option<f64>,
 }
 impl ComparisonBin {
-    pub(super) fn left(&self) -> u64 {
+    fn left(&self) -> u64 {
         self.counts.left_n
     }
-    pub(super) fn right(&self) -> u64 {
+    fn right(&self) -> u64 {
         self.counts.right_n
     }
-    pub(super) fn bucket(&self) -> usize {
+    fn bucket(&self) -> usize {
         self.bucket.max(0) as usize
     }
 }

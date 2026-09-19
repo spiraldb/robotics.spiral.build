@@ -22,7 +22,7 @@ impl ProgressScorer {
     pub const fn version(&self) -> &'static str {
         "warp_sim_bottles_v1"
     }
-    pub fn expression(&self) -> String {
+    fn expression(&self) -> String {
         format!(
             "spql.ai.score_progress(spql.media.from_blob(spql.blob.external(s.source_uri), 'mp4'), CAST(s.start_frame AS UINT64), CAST(s.frame_count AS UINT64), model => {})",
             SqlLiteral::text(self.model())
@@ -44,7 +44,7 @@ pub struct ProgressSelection {
     chunk_frames: u32,
 }
 impl ProgressSelection {
-    pub fn new(sources_relation: String) -> Self {
+    pub(super) fn new(sources_relation: String) -> Self {
         Self {
             scorer: ProgressScorer::WarpSimBottles,
             sources_relation,
@@ -52,12 +52,12 @@ impl ProgressSelection {
             chunk_frames: 30,
         }
     }
-    pub fn for_dataset(dataset: Option<&crate::datasets::DatasetSelection>) -> Self {
+    pub(super) fn for_dataset(dataset: Option<&crate::datasets::DatasetSelection>) -> Self {
         let mut selection = Self::new(String::new());
         selection.resolve_dataset(dataset);
         selection
     }
-    pub fn resolve_dataset(&mut self, dataset: Option<&crate::datasets::DatasetSelection>) {
+    pub(super) fn resolve_dataset(&mut self, dataset: Option<&crate::datasets::DatasetSelection>) {
         self.sources_relation = match dataset
             .map(crate::datasets::DatasetSelection::sql_name)
             .as_deref()
@@ -78,9 +78,6 @@ impl ProgressSelection {
     pub const fn chunk_frames(&self) -> u32 {
         self.chunk_frames
     }
-    pub fn set_sources_relation(&mut self, value: String) {
-        self.sources_relation = value;
-    }
     /// Legacy authored cutoffs are decoded into the same fixed policy used by
     /// new rules. Reading a recipe does not update its persisted document.
     fn automatic_minimum_velocity<'de, D: serde::Deserializer<'de>>(
@@ -88,9 +85,6 @@ impl ProgressSelection {
     ) -> Result<f64, D::Error> {
         let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
         Ok(0.0)
-    }
-    pub fn set_chunk_frames(&mut self, value: u32) {
-        self.chunk_frames = value;
     }
     pub fn validate(&self) -> Result<(), String> {
         if self.sources_relation.is_empty()
@@ -186,9 +180,6 @@ impl ProgressFrame {
     pub fn frame_index(&self) -> u32 {
         self.frame_index
     }
-    pub fn source_frame_index(&self) -> u32 {
-        self.source_frame_index
-    }
     pub fn timestamp_ns(&self) -> u64 {
         self.timestamp_ns
     }
@@ -197,9 +188,6 @@ impl ProgressFrame {
     }
     pub fn progress(&self) -> Option<f64> {
         self.progress
-    }
-    pub fn window_stride(&self) -> u32 {
-        self.window_stride
     }
     pub fn support(&self) -> u32 {
         self.support

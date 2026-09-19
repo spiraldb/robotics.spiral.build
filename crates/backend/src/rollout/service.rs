@@ -84,7 +84,7 @@ pub(crate) struct RolloutAdmission {
 }
 
 impl RolloutAdmission {
-    pub(crate) fn new(session: String, started_ms: i64, config: RolloutConfig) -> Self {
+    pub(super) fn new(session: String, started_ms: i64, config: RolloutConfig) -> Self {
         Self {
             session,
             started_ms,
@@ -120,7 +120,7 @@ pub(crate) struct InferenceTiming {
 }
 
 impl InferenceTiming {
-    pub(crate) fn new(latency_ms: f64, model_ms: f64) -> Self {
+    pub(super) fn new(latency_ms: f64, model_ms: f64) -> Self {
         Self {
             latency_ms,
             model_ms,
@@ -143,7 +143,7 @@ pub(crate) struct PolicyCadence {
 }
 
 impl PolicyCadence {
-    pub(crate) fn new(sample_hz: f64, action_steps: usize) -> Self {
+    pub(super) fn new(sample_hz: f64, action_steps: usize) -> Self {
         Self {
             sample_hz,
             action_steps,
@@ -157,7 +157,7 @@ pub(crate) struct ControlObservation<'a> {
 }
 
 impl<'a> ControlObservation<'a> {
-    pub(crate) fn new(owner: &'a ControlOwner, hardware_error: Option<&'a str>) -> Self {
+    pub(super) fn new(owner: &'a ControlOwner, hardware_error: Option<&'a str>) -> Self {
         Self {
             owner,
             hardware_error,
@@ -171,7 +171,7 @@ pub(crate) struct CleanupResult {
 }
 
 impl CleanupResult {
-    pub(crate) fn new(finished_ms: i64, cleanup: Result<(), String>) -> Self {
+    pub(super) fn new(finished_ms: i64, cleanup: Result<(), String>) -> Self {
         Self {
             finished_ms,
             cleanup,
@@ -212,7 +212,7 @@ pub(crate) struct RolloutCoordinator {
 }
 
 impl RolloutCoordinator {
-    pub(crate) fn new(events: Arc<dyn RolloutEventPort>) -> Self {
+    pub(super) fn new(events: Arc<dyn RolloutEventPort>) -> Self {
         Self {
             active: None,
             snapshot: RolloutSnapshot::default(),
@@ -220,7 +220,7 @@ impl RolloutCoordinator {
         }
     }
 
-    pub(crate) fn admit(&mut self, admission: RolloutAdmission) -> Result<RolloutSnapshot, String> {
+    pub(super) fn admit(&mut self, admission: RolloutAdmission) -> Result<RolloutSnapshot, String> {
         admission.validate()?;
         let RolloutAdmission {
             session,
@@ -253,7 +253,7 @@ impl RolloutCoordinator {
         Ok(self.snapshot.clone())
     }
 
-    pub(crate) fn request_stop(&mut self, session: &str) -> Result<(), String> {
+    pub(super) fn request_stop(&mut self, session: &str) -> Result<(), String> {
         let active = self
             .active
             .as_mut()
@@ -276,7 +276,7 @@ impl RolloutCoordinator {
         Ok(())
     }
 
-    pub(crate) fn stopped_outcome(&self, session: &str) -> Result<ExecutionOutcome, String> {
+    pub(super) fn stopped_outcome(&self, session: &str) -> Result<ExecutionOutcome, String> {
         let active = self.session(session)?;
         if !active.stop_requested {
             return Err(format!("policy session {session:?} was not asked to stop"));
@@ -294,7 +294,7 @@ impl RolloutCoordinator {
         Ok(ExecutionOutcome::Completed(reason))
     }
 
-    pub(crate) fn warming_up(&mut self, session: &str) -> Result<bool, String> {
+    pub(super) fn warming_up(&mut self, session: &str) -> Result<bool, String> {
         let active = self.session(session)?;
         if active.stop_requested {
             return Ok(false);
@@ -314,7 +314,7 @@ impl RolloutCoordinator {
         Ok(true)
     }
 
-    pub(crate) fn record_warmup(
+    pub(super) fn record_warmup(
         &mut self,
         session: &str,
         timing: InferenceTiming,
@@ -342,7 +342,7 @@ impl RolloutCoordinator {
         Ok(())
     }
 
-    pub(crate) fn awaiting_control(&mut self, session: &str) -> Result<bool, String> {
+    pub(super) fn awaiting_control(&mut self, session: &str) -> Result<bool, String> {
         let active = self.session(session)?;
         if active.stop_requested {
             return Ok(false);
@@ -361,7 +361,7 @@ impl RolloutCoordinator {
         Ok(true)
     }
 
-    pub(crate) fn running(
+    pub(super) fn running(
         &mut self,
         session: &str,
         cadence: PolicyCadence,
@@ -392,7 +392,7 @@ impl RolloutCoordinator {
         Ok(true)
     }
 
-    pub(crate) fn observe_control(
+    pub(super) fn observe_control(
         &self,
         session: &str,
         observation: ControlObservation<'_>,
@@ -410,7 +410,7 @@ impl RolloutCoordinator {
         }
     }
 
-    pub(crate) fn record_inference(
+    pub(super) fn record_inference(
         &mut self,
         session: &str,
         timing: InferenceTiming,
@@ -453,7 +453,7 @@ impl RolloutCoordinator {
         Ok(())
     }
 
-    pub(crate) fn record_command(
+    pub(super) fn record_command(
         &mut self,
         session: &str,
         missed_deadline: bool,
@@ -481,7 +481,7 @@ impl RolloutCoordinator {
         Ok(())
     }
 
-    pub(crate) fn record_action_clamp_warning(
+    pub(super) fn record_action_clamp_warning(
         &mut self,
         session: &str,
         warning: String,
@@ -503,7 +503,7 @@ impl RolloutCoordinator {
         Ok(true)
     }
 
-    pub(crate) fn begin_cleanup(
+    pub(super) fn begin_cleanup(
         &mut self,
         session: &str,
         outcome: ExecutionOutcome,
@@ -527,7 +527,7 @@ impl RolloutCoordinator {
         })
     }
 
-    pub(crate) fn finish_cleanup(
+    pub(super) fn finish_cleanup(
         &mut self,
         ticket: CleanupTicket,
         result: CleanupResult,

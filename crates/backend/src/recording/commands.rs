@@ -523,7 +523,7 @@ impl RecordingCommands {
     }
 
     /// Begin a take using the configured teleoperation pair.
-    pub(crate) async fn start_recording(
+    pub(super) async fn start_recording(
         &self,
         request: spiral_robotics_common::recording::RecordingStart,
     ) -> Result<EpisodeInfo, BackendCommandError> {
@@ -548,7 +548,7 @@ impl RecordingCommands {
             .await
     }
 
-    pub(crate) async fn stop_recording(
+    pub(super) async fn stop_recording(
         &self,
         keep: bool,
     ) -> Result<EpisodeInfo, BackendCommandError> {
@@ -562,7 +562,7 @@ impl RecordingCommands {
             .await
     }
 
-    pub(crate) async fn set_recording_paused(
+    pub(super) async fn set_recording_paused(
         &self,
         paused: bool,
     ) -> Result<(), BackendCommandError> {
@@ -577,7 +577,7 @@ impl RecordingCommands {
             .await
     }
 
-    pub(crate) async fn delete_episode(&self, id: String) -> Result<(), BackendCommandError> {
+    pub(super) async fn delete_episode(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 state.require_catalog_ready()?;
@@ -589,7 +589,7 @@ impl RecordingCommands {
             .await
     }
 
-    pub(crate) async fn inspection(
+    pub(super) async fn inspection(
         &self,
         id: String,
     ) -> Result<EpisodeInspectionSnapshot, BackendCommandError> {
@@ -603,7 +603,7 @@ impl RecordingCommands {
             .await
     }
 
-    pub(crate) async fn camera_preview(
+    pub(super) async fn camera_preview(
         &self,
         id: String,
         request: spiral_robotics_common::recording::RecordingCameraRequest,
@@ -618,7 +618,7 @@ impl RecordingCommands {
     }
 
     /// Move a physical follower to one committed recorded sample.
-    pub(crate) async fn seek_episode(
+    pub(super) async fn seek_episode(
         &self,
         id: String,
         robot: String,
@@ -636,7 +636,7 @@ impl RecordingCommands {
             .await
     }
 
-    pub(crate) async fn start_replay(
+    pub(super) async fn start_replay(
         &self,
         episode: String,
         robot: String,
@@ -657,7 +657,7 @@ impl RecordingCommands {
             .await
     }
 
-    pub(crate) async fn set_replay_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
+    pub(super) async fn set_replay_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state, _activity| async move {
                 state.require_catalog_ready()?;

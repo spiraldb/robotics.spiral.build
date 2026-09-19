@@ -15,7 +15,7 @@ pub enum FactKind {
 }
 
 impl FactKind {
-    pub const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Number => "number",
             Self::Text => "text",
@@ -40,17 +40,10 @@ impl TopicRef {
             variant: None,
         }
     }
-    pub fn with_variant(mut self, variant: Option<String>) -> Self {
-        self.variant = variant.filter(|variant| !variant.trim().is_empty());
-        self
-    }
     pub fn topic(&self) -> &str {
         &self.topic
     }
-    pub fn variant(&self) -> Option<&str> {
-        self.variant.as_deref()
-    }
-    pub fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), String> {
         if self.topic.trim().is_empty() {
             return Err("names no topic".into());
         }
@@ -98,7 +91,8 @@ impl CameraSample {
     fn first_frame() -> Vec<u32> {
         vec![0]
     }
-    pub fn with_frames(mut self, frames: Vec<u32>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn with_frames(mut self, frames: Vec<u32>) -> Self {
         self.frames = frames;
         self
     }
@@ -108,7 +102,7 @@ impl CameraSample {
     pub fn frames(&self) -> &[u32] {
         &self.frames
     }
-    pub fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), String> {
         self.topic.validate()?;
         if self.frames.is_empty() {
             return Err("selects no frames".into());
@@ -118,7 +112,7 @@ impl CameraSample {
         }
         Ok(())
     }
-    pub(super) fn frame_indices_sql(&self) -> String {
+    fn frame_indices_sql(&self) -> String {
         let indices = self
             .frames
             .iter()
@@ -151,31 +145,6 @@ impl FieldAggregate {
         Self::Avg,
         Self::Count,
     ];
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::First => "first",
-            Self::Last => "last",
-            Self::Min => "minimum",
-            Self::Max => "maximum",
-            Self::Avg => "average",
-            Self::Count => "count",
-        }
-    }
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::First => "first",
-            Self::Last => "last",
-            Self::Min => "min",
-            Self::Max => "max",
-            Self::Avg => "avg",
-            Self::Count => "count",
-        }
-    }
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|aggregate| aggregate.key() == key)
-    }
 }
 
 /// The measurement behind a declared fact.
@@ -202,26 +171,10 @@ pub enum FactMeasure {
 }
 
 impl FactMeasure {
-    pub const fn kind(&self) -> FactKind {
+    const fn kind(&self) -> FactKind {
         match self {
             Self::CameraBrightness { .. } | Self::CameraScore { .. } => FactKind::Number,
             Self::TopicField { value, .. } | Self::Sql { value, .. } => *value,
-        }
-    }
-    pub const fn kind_key(&self) -> &'static str {
-        match self {
-            Self::CameraBrightness { .. } => "camera_brightness",
-            Self::CameraScore { .. } => "camera_score",
-            Self::TopicField { .. } => "topic_field",
-            Self::Sql { .. } => "sql",
-        }
-    }
-    pub const fn kind_label(&self) -> &'static str {
-        match self {
-            Self::CameraBrightness { .. } => "Camera brightness",
-            Self::CameraScore { .. } => "Camera score",
-            Self::TopicField { .. } => "Topic field",
-            Self::Sql { .. } => "SQL",
         }
     }
     /// The camera this measurement decodes, when it decodes one.
@@ -231,45 +184,7 @@ impl FactMeasure {
             Self::TopicField { .. } | Self::Sql { .. } => None,
         }
     }
-    /// A plain-language account of what is measured.
-    pub fn summary(&self) -> String {
-        match self {
-            Self::CameraBrightness { camera } => format!(
-                "Mean brightness of {} of {}",
-                FrameList(camera.frames()),
-                camera.topic().topic()
-            ),
-            Self::CameraScore { camera, prompt } => format!(
-                "How well {} of {} matches “{prompt}”",
-                FrameList(camera.frames()),
-                camera.topic().topic()
-            ),
-            Self::TopicField {
-                topic,
-                field,
-                aggregate,
-                ..
-            } => format!(
-                "{} of {field} on {}",
-                Capitalized(aggregate.label()),
-                topic.topic()
-            ),
-            Self::Sql { .. } => "Custom SQL returning id and value".to_owned(),
-        }
-    }
-    /// The one thing that tells this measurement from another of its kind:
-    /// the camera, the field and topic, or that it is custom SQL.
-    pub fn detail(&self) -> String {
-        match self {
-            Self::CameraBrightness { camera } => camera.topic().topic().to_owned(),
-            Self::CameraScore { camera, prompt } => {
-                format!("{} · “{prompt}”", camera.topic().topic())
-            }
-            Self::TopicField { topic, field, .. } => format!("{field} on {}", topic.topic()),
-            Self::Sql { .. } => "custom SQL".to_owned(),
-        }
-    }
-    pub fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), String> {
         match self {
             Self::CameraBrightness { camera } => camera.validate(),
             Self::CameraScore { camera, prompt } => {
@@ -351,7 +266,7 @@ impl CurationFact {
     }
     /// Whether this measurement yields the same values as `other`, whatever
     /// it is called.
-    pub fn measures_like(&self, other: &Self) -> bool {
+    pub(super) fn measures_like(&self, other: &Self) -> bool {
         self.key == other.key && self.measure == other.measure
     }
     pub const fn measure(&self) -> &FactMeasure {
@@ -360,7 +275,7 @@ impl CurationFact {
     pub const fn kind(&self) -> FactKind {
         self.measure.kind()
     }
-    pub fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), String> {
         FactKey(&self.key).validate()?;
         if self.label.trim().is_empty() {
             return Err(format!("Measurement “{}” has no label.", self.key));
@@ -400,7 +315,7 @@ impl BuiltinFact {
             Self::SourcePath => "source",
         }
     }
-    pub const fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::DurationSeconds => "Duration (s)",
             Self::Messages => "Messages",
@@ -409,7 +324,7 @@ impl BuiltinFact {
             Self::SourcePath => "Source path",
         }
     }
-    pub const fn kind(self) -> FactKind {
+    const fn kind(self) -> FactKind {
         match self {
             Self::DurationSeconds | Self::Messages | Self::Channels | Self::SizeMegabytes => {
                 FactKind::Number
@@ -487,7 +402,7 @@ impl FactCatalog {
 pub(super) struct FactKey<'a>(pub(super) &'a str);
 
 impl FactKey<'_> {
-    pub(super) fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), String> {
         let key = self.0;
         if key.is_empty() || key.len() > 32 {
             return Err("Measurement keys contain 1–32 characters.".into());
@@ -534,39 +449,5 @@ impl FieldPath<'_> {
             return Err(format!("field path “{path}” is not a dotted identifier"));
         }
         Ok(())
-    }
-}
-
-struct FrameList<'a>(&'a [u32]);
-
-impl std::fmt::Display for FrameList<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            [0] => formatter.write_str("the first frame"),
-            [single] => write!(formatter, "frame {single}"),
-            frames => {
-                let list = frames
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                write!(formatter, "frames {list}")
-            }
-        }
-    }
-}
-
-struct Capitalized<'a>(&'a str);
-
-impl std::fmt::Display for Capitalized<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut characters = self.0.chars();
-        match characters.next() {
-            Some(first) => {
-                write!(formatter, "{}", first.to_uppercase())?;
-                formatter.write_str(characters.as_str())
-            }
-            None => Ok(()),
-        }
     }
 }

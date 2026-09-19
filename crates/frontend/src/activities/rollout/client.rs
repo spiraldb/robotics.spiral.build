@@ -10,17 +10,17 @@ pub(crate) struct RolloutClient {
     project: ProjectClient,
 }
 impl RolloutClient {
-    pub(crate) fn current() -> Self {
+    pub(super) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) async fn runs(&self) -> Result<Vec<RolloutSnapshot>, CommandError> {
+    pub(super) async fn runs(&self) -> Result<Vec<RolloutSnapshot>, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/rollout-runs"))
             .await
     }
-    pub(crate) async fn run(&self, id: &str) -> Result<RolloutSnapshot, CommandError> {
+    pub(super) async fn run(&self, id: &str) -> Result<RolloutSnapshot, CommandError> {
         self.project
             .request(HttpRequest::new(
                 "GET",
@@ -29,7 +29,7 @@ impl RolloutClient {
             .await
     }
 
-    pub(crate) fn start_rollout(
+    pub(super) fn start_rollout(
         &self,
         config: RolloutConfig,
     ) -> impl Future<Output = Result<RolloutSnapshot, CommandError>> + use<> {
@@ -39,7 +39,7 @@ impl RolloutClient {
         )
     }
 
-    pub(crate) fn stop_rollout(
+    pub(super) fn stop_rollout(
         &self,
         id: String,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {

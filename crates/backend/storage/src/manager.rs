@@ -35,10 +35,6 @@ impl StorageManager {
         }
     }
 
-    pub fn studio(&self) -> &crate::StudioProject {
-        &self.studio
-    }
-
     pub(crate) fn project_store(&self) -> &ProjectStore {
         &self.project_store
     }

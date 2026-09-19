@@ -19,7 +19,7 @@ pub(crate) struct RolloutController {
 }
 
 impl RolloutController {
-    pub(crate) fn use_controller(is_active: ReadSignal<bool>) -> Self {
+    pub(super) fn use_controller(is_active: ReadSignal<bool>) -> Self {
         let controller = Self::use_state();
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         let active = use_memo(move || controller.snapshot.read().phase().active());
@@ -85,20 +85,20 @@ impl RolloutController {
             }
         });
     }
-    pub(crate) fn loaded(self) -> bool {
+    pub(super) fn loaded(self) -> bool {
         *self.loaded.read()
     }
 
-    pub(crate) fn error(self) -> Option<String> {
+    pub(super) fn error(self) -> Option<String> {
         self.error.read().clone()
     }
 
-    pub(crate) fn retry(self) {
+    pub(super) fn retry(self) {
         crate::client::queries::QueryRefresh::current()
             .invalidate(&[crate::client::queries::QueryDomain::Rollout]);
     }
 
-    pub(crate) fn snapshot(
+    pub(super) fn snapshot(
         self,
     ) -> MappedSignal<
         spiral_robotics_common::rollout::RolloutSnapshot,
@@ -107,23 +107,23 @@ impl RolloutController {
         self.snapshot.map(|value| value)
     }
 
-    pub(crate) fn checkpoint(&self) -> Option<String> {
+    pub(super) fn checkpoint(&self) -> Option<String> {
         self.checkpoint.read().to_owned()
     }
 
-    pub(crate) fn select_checkpoint(mut self, checkpoint: Option<String>) {
+    pub(super) fn select_checkpoint(mut self, checkpoint: Option<String>) {
         self.checkpoint.set(checkpoint);
     }
 
-    pub(crate) fn duration_draft(&self) -> String {
+    pub(super) fn duration_draft(&self) -> String {
         self.duration_draft.read().to_owned()
     }
 
-    pub(crate) fn duration_seconds(&self) -> Option<u32> {
+    pub(super) fn duration_seconds(&self) -> Option<u32> {
         self.duration_draft.read().bounded_duration()
     }
 
-    pub(crate) fn set_duration_draft(mut self, draft: String) {
+    pub(super) fn set_duration_draft(mut self, draft: String) {
         self.duration_draft.set(draft);
     }
 }

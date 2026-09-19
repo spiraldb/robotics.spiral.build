@@ -637,7 +637,7 @@ impl RolloutManager {
             .collect())
     }
 
-    pub(crate) async fn run(&self, id: &str) -> Result<RolloutSnapshot, crate::OperationError> {
+    pub(super) async fn run(&self, id: &str) -> Result<RolloutSnapshot, crate::OperationError> {
         self.ensure_loaded()
             .await
             .map_err(crate::OperationError::Internal)?;
@@ -653,7 +653,7 @@ impl RolloutManager {
         self.lifecycle.state.borrow().clone()
     }
 
-    pub(crate) async fn start(
+    pub(super) async fn start(
         self: &Arc<Self>,
         config: RolloutConfig,
     ) -> Result<RolloutSnapshot, String> {
@@ -688,7 +688,7 @@ impl RolloutManager {
         Ok(self.snapshot())
     }
 
-    pub(crate) async fn stop(&self, id: &str) -> Result<(), String> {
+    pub(super) async fn stop(&self, id: &str) -> Result<(), String> {
         let active = self.lifecycle.active.recover_lock();
         let Some(active) = active.as_ref() else {
             return Err("no policy rollout is active".to_owned());

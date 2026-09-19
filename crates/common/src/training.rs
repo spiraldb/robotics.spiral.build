@@ -504,7 +504,7 @@ impl TrainingDataSelection {
         "auto".to_owned()
     }
 
-    pub(crate) fn new(
+    fn new(
         run_name: impl Into<String>,
         dataset_id: impl Into<String>,
         sql: impl Into<String>,

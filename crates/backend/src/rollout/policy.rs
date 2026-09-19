@@ -38,7 +38,7 @@ pub(crate) struct PolicyObservationContract {
 }
 
 impl PolicyObservationContract {
-    pub(crate) fn new(
+    pub(super) fn new(
         value_space: impl Into<String>,
         robot_type: impl Into<String>,
         joint_names: Vec<String>,
@@ -52,7 +52,7 @@ impl PolicyObservationContract {
         }
     }
 
-    pub(crate) fn with_capture(mut self, camera_streams: Vec<String>, sample_hz: f64) -> Self {
+    pub(super) fn with_capture(mut self, camera_streams: Vec<String>, sample_hz: f64) -> Self {
         self.camera_streams = camera_streams;
         self.sample_hz = sample_hz;
         self
@@ -67,7 +67,7 @@ pub(crate) struct PolicyImageContract {
 }
 
 impl PolicyImageContract {
-    pub(crate) fn new(
+    pub(super) fn new(
         layout: impl Into<String>,
         normalization: impl Into<String>,
         frame_alignment: impl Into<String>,
@@ -87,7 +87,7 @@ pub(crate) struct PolicySchemaContract {
 }
 
 impl PolicySchemaContract {
-    pub(crate) fn new(artifact: u32, supported: u32) -> Self {
+    pub(super) fn new(artifact: u32, supported: u32) -> Self {
         Self {
             artifact,
             supported,
@@ -96,7 +96,7 @@ impl PolicySchemaContract {
 }
 
 impl PolicyDataContract {
-    pub(crate) fn new(
+    pub(super) fn new(
         observations: PolicyObservationContract,
         images: PolicyImageContract,
         schemas: PolicySchemaContract,
@@ -150,7 +150,7 @@ pub(crate) struct ResolvedCameraBinding {
 }
 
 impl ArtifactIdentity {
-    pub(crate) fn new(
+    pub(super) fn new(
         format: impl Into<String>,
         purpose: impl Into<String>,
         run_id: impl Into<String>,
@@ -163,13 +163,13 @@ impl ArtifactIdentity {
             tensor_namespace: String::new(),
         }
     }
-    pub(crate) fn with_artifact(mut self, step: u64, tensor_namespace: impl Into<String>) -> Self {
+    pub(super) fn with_artifact(mut self, step: u64, tensor_namespace: impl Into<String>) -> Self {
         self.step = step;
         self.tensor_namespace = tensor_namespace.into();
         self
     }
 
-    pub(crate) fn validate_for(
+    pub(super) fn validate_for(
         &self,
         expected_run: &str,
         expected_step: u64,
@@ -194,7 +194,7 @@ impl ArtifactIdentity {
 }
 
 impl PolicyModelContract {
-    pub(crate) fn new(
+    pub(super) fn new(
         state_dimensions: usize,
         action_dimensions: usize,
         image_streams: Vec<String>,
@@ -207,7 +207,7 @@ impl PolicyModelContract {
             image_streams,
         }
     }
-    pub(crate) fn with_action_shape(
+    pub(super) fn with_action_shape(
         mut self,
         action_chunk_size: usize,
         recommended_action_steps: usize,
@@ -219,7 +219,7 @@ impl PolicyModelContract {
 }
 
 impl TargetRobotContract {
-    pub(crate) fn new(
+    pub(super) fn new(
         id: impl Into<String>,
         robot_type: Option<String>,
         joint_names: Vec<String>,
@@ -234,23 +234,23 @@ impl TargetRobotContract {
             problem: None,
         }
     }
-    pub(crate) fn with_cameras(mut self, camera_bindings: Vec<CameraBindingContract>) -> Self {
+    pub(super) fn with_cameras(mut self, camera_bindings: Vec<CameraBindingContract>) -> Self {
         self.camera_bindings = camera_bindings;
         self
     }
-    pub(crate) fn with_availability(mut self, connected: bool, calibrated: bool) -> Self {
+    pub(super) fn with_availability(mut self, connected: bool, calibrated: bool) -> Self {
         self.connected = connected;
         self.calibrated = calibrated;
         self
     }
-    pub(crate) fn with_problem(mut self, problem: Option<String>) -> Self {
+    pub(super) fn with_problem(mut self, problem: Option<String>) -> Self {
         self.problem = problem;
         self
     }
 }
 
 impl CameraBindingContract {
-    pub(crate) fn new(role: impl Into<String>, camera_id: impl Into<String>) -> Self {
+    pub(super) fn new(role: impl Into<String>, camera_id: impl Into<String>) -> Self {
         Self {
             role: role.into(),
             camera_id: camera_id.into(),
@@ -259,32 +259,32 @@ impl CameraBindingContract {
 }
 
 impl ValidatedRolloutContract {
-    pub(crate) fn joint_names(&self) -> &[String] {
+    pub(super) fn joint_names(&self) -> &[String] {
         &self.joint_names
     }
-    pub(crate) fn camera_bindings(&self) -> &[ResolvedCameraBinding] {
+    pub(super) fn camera_bindings(&self) -> &[ResolvedCameraBinding] {
         &self.camera_bindings
     }
-    pub(crate) const fn sample_hz(&self) -> f64 {
+    pub(super) const fn sample_hz(&self) -> f64 {
         self.sample_hz
     }
-    pub(crate) const fn sample_period(&self) -> Duration {
+    pub(super) const fn sample_period(&self) -> Duration {
         self.sample_period
     }
 }
 
 impl ResolvedCameraBinding {
-    pub(crate) fn stream(&self) -> &str {
+    pub(super) fn stream(&self) -> &str {
         &self.stream
     }
-    pub(crate) fn camera_id(&self) -> &str {
+    pub(super) fn camera_id(&self) -> &str {
         &self.camera_id
     }
 }
 
 /// Bind persisted artifact policy, loaded-model shape, and live robot setup.
 impl PolicyDataContract {
-    pub(crate) fn validated_with(
+    pub(super) fn validated_with(
         self,
         model: &PolicyModelContract,
         target: &TargetRobotContract,
@@ -419,7 +419,7 @@ pub(crate) struct ObservationFreshness {
 }
 
 impl ObservationFreshness {
-    pub(crate) fn new(source: impl Into<String>, age: Option<Duration>) -> Self {
+    pub(super) fn new(source: impl Into<String>, age: Option<Duration>) -> Self {
         Self {
             source: source.into(),
             age,
@@ -463,16 +463,16 @@ pub(crate) struct ActionClamp {
 }
 
 impl PreparedActionGoals {
-    pub(crate) fn goals(&self) -> &BTreeMap<String, f64> {
+    pub(super) fn goals(&self) -> &BTreeMap<String, f64> {
         &self.goals
     }
-    pub(crate) fn clamps(&self) -> &[ActionClamp] {
+    pub(super) fn clamps(&self) -> &[ActionClamp] {
         &self.clamps
     }
 
     /// Bind one model action to the exact ordered joint contract before
     /// hardware control.
-    pub(crate) fn from_action(
+    pub(super) fn from_action(
         joint_names: &[String],
         action: &[f32],
     ) -> Result<Self, OperationError> {
@@ -507,16 +507,16 @@ impl PreparedActionGoals {
 }
 
 impl ActionClamp {
-    pub(crate) const fn index(&self) -> usize {
+    pub(super) const fn index(&self) -> usize {
         self.index
     }
-    pub(crate) fn joint(&self) -> &str {
+    pub(super) fn joint(&self) -> &str {
         &self.joint
     }
-    pub(crate) const fn requested(&self) -> f32 {
+    pub(super) const fn requested(&self) -> f32 {
         self.requested
     }
-    pub(crate) const fn applied(&self) -> f32 {
+    pub(super) const fn applied(&self) -> f32 {
         self.applied
     }
 }
@@ -528,7 +528,7 @@ pub(crate) struct JointObservation {
 }
 
 impl JointObservation {
-    pub(crate) fn new(joint: impl Into<String>, normalized: Option<f64>) -> Self {
+    pub(super) fn new(joint: impl Into<String>, normalized: Option<f64>) -> Self {
         Self {
             joint: joint.into(),
             normalized,
@@ -592,21 +592,21 @@ pub(crate) struct ExpectedPolicyOwner<'a> {
 }
 
 impl<'a> ExpectedPolicyOwner<'a> {
-    pub(crate) fn new(robot: &'a str, session: &'a str) -> Self {
+    pub(super) fn new(robot: &'a str, session: &'a str) -> Self {
         Self { robot, session }
     }
 
-    pub(crate) fn robot(&self) -> &str {
+    pub(super) fn robot(&self) -> &str {
         self.robot
     }
 
-    pub(crate) fn session(&self) -> &str {
+    pub(super) fn session(&self) -> &str {
         self.session
     }
 }
 
 impl ControlOwner {
-    pub(crate) fn assess(
+    pub(super) fn assess(
         &self,
         hardware_error: Option<&str>,
         expected: ExpectedPolicyOwner<'_>,

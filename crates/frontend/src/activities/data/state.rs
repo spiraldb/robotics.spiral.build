@@ -29,7 +29,7 @@ struct QueryExecutionSignals {
 }
 
 impl QueryController {
-    pub(crate) fn use_controller(initial_sql: String) -> Self {
+    pub(super) fn use_controller(initial_sql: String) -> Self {
         use_hook(|| Self {
             draft: QueryDraftSignals {
                 sql: Signal::new(initial_sql),
@@ -43,27 +43,27 @@ impl QueryController {
             },
         })
     }
-    pub(crate) fn sql(&self) -> String {
+    pub(super) fn sql(&self) -> String {
         self.draft.sql.read().to_owned()
     }
 
-    pub(crate) fn max_rows(&self) -> usize {
+    pub(super) fn max_rows(&self) -> usize {
         self.draft.max_rows.read().to_owned()
     }
 
-    pub(crate) fn query_tabs(&self) -> Vec<QueryTab> {
+    pub(super) fn query_tabs(&self) -> Vec<QueryTab> {
         self.execution.query_tabs.read().to_owned()
     }
 
-    pub(crate) fn active_query(&self) -> Option<u64> {
+    pub(super) fn active_query(&self) -> Option<u64> {
         self.execution.active_query.read().to_owned()
     }
 
-    pub(crate) fn query_running(&self) -> bool {
+    pub(super) fn query_running(&self) -> bool {
         self.execution.active_request.read().is_some()
     }
 
-    pub(crate) fn select_query(mut self, id: u64) {
+    pub(super) fn select_query(mut self, id: u64) {
         if self
             .execution
             .query_tabs
@@ -75,7 +75,7 @@ impl QueryController {
         }
     }
 
-    pub(crate) fn close_query(mut self, id: u64) {
+    pub(super) fn close_query(mut self, id: u64) {
         if self
             .execution
             .active_request
@@ -95,15 +95,15 @@ impl QueryController {
         self.execution.active_query.set(active);
     }
 
-    pub(crate) fn set_sql(mut self, sql: String) {
+    pub(super) fn set_sql(mut self, sql: String) {
         self.draft.sql.set(sql);
     }
 
-    pub(crate) fn set_max_rows(mut self, rows: usize) {
+    pub(super) fn set_max_rows(mut self, rows: usize) {
         self.draft.max_rows.set(rows);
     }
 
-    pub(crate) fn run_query(mut self, studio: StudioProjectState, query_available: bool) {
+    pub(super) fn run_query(mut self, studio: StudioProjectState, query_available: bool) {
         if !query_available {
             studio.report_warning_from(
                 MessageSource::Data,
@@ -170,7 +170,7 @@ impl QueryController {
         });
     }
 
-    pub(crate) fn cancel_query(mut self) {
+    pub(super) fn cancel_query(mut self) {
         let Some(request) = self.execution.active_request.replace(None) else {
             return;
         };

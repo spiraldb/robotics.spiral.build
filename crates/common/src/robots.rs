@@ -1011,18 +1011,6 @@ impl JointRange {
     pub const fn new(min: i64, center: i64, max: i64) -> Self {
         Self { min, center, max }
     }
-
-    pub const fn min(self) -> i64 {
-        self.min
-    }
-
-    pub const fn center(self) -> i64 {
-        self.center
-    }
-
-    pub const fn max(self) -> i64 {
-        self.max
-    }
 }
 
 /// Live progress of a calibration sweep.
@@ -1103,11 +1091,6 @@ impl CalibrationJointProgress {
     }
     pub const fn ready(&self) -> bool {
         self.ready
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    /// Travel observed so far, in encoder counts.
-    pub fn span(&self) -> i64 {
-        self.max.saturating_sub(self.min)
     }
 }
 
@@ -1201,12 +1184,6 @@ mod tests {
             assert_eq!(serde_json::to_string(&mode).unwrap(), json);
             assert_eq!(serde_json::from_str::<ModeSelection>(json).unwrap(), mode);
         }
-    }
-
-    #[test]
-    fn calibration_span_saturates_instead_of_overflowing() {
-        let progress = CalibrationJointProgress::new("gripper", i64::MIN, 0).with_max(i64::MAX);
-        assert_eq!(progress.span(), i64::MAX);
     }
 
     #[test]

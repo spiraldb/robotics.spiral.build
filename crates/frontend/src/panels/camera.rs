@@ -27,7 +27,7 @@ pub(crate) enum CameraEditorSource {
 }
 
 #[component]
-pub(crate) fn CameraEditor(element_id: String, source: CameraEditorSource) -> Element {
+pub(super) fn CameraEditor(element_id: String, source: CameraEditorSource) -> Element {
     let content = match source {
         CameraEditorSource::Live {
             robot,
@@ -187,14 +187,14 @@ impl<'a> RecordedCameraSourceRequest<'a> {
         }
     }
 
-    pub(crate) fn for_live_assignment(
+    pub(super) fn for_live_assignment(
         self,
         camera: &(String, String, String),
     ) -> CameraEditorSource {
         self.for_stream(&format!("{}.camera.{}", camera.0, camera.1), &camera.1)
     }
 
-    pub(crate) fn for_stream(self, stream_id: &str, label: &str) -> CameraEditorSource {
+    fn for_stream(self, stream_id: &str, label: &str) -> CameraEditorSource {
         let at = self.at;
         CameraEditorSource::Recorded(self.map_camera(|preview| {
             Some(RecordedCamera {

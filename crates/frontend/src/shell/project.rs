@@ -11,7 +11,7 @@ pub(crate) struct ProjectSessionSignals {
     refresh: QueryRefresh,
 }
 impl ProjectSessionSignals {
-    pub(crate) fn use_provider() -> Self {
+    pub(super) fn use_provider() -> Self {
         let refresh = QueryRefresh::use_provider();
         let state = use_signal(ProjectSessionState::default);
         use_context_provider(|| Self { state, refresh })
@@ -22,10 +22,10 @@ impl ProjectSessionSignals {
     pub(crate) fn mounted_session(self) -> Option<ProjectSessionInfo> {
         self.state.read().session().cloned()
     }
-    pub(crate) fn client(self, session: ProjectSessionInfo) -> ProjectClient {
+    pub(super) fn client(self, session: ProjectSessionInfo) -> ProjectClient {
         ProjectClient::new(session, self.state.into(), self.refresh)
     }
-    pub(crate) fn readiness(self) -> spiral_robotics_common::status::BackendReadiness {
+    pub(super) fn readiness(self) -> spiral_robotics_common::status::BackendReadiness {
         self.state.read().readiness()
     }
     pub(crate) fn connected(self) -> bool {
@@ -37,7 +37,7 @@ impl ProjectSessionSignals {
     pub(crate) fn catalog_available(self) -> bool {
         self.state.read().catalog_available()
     }
-    pub(crate) fn accept(mut self, result: Result<ProjectStatus, CommandError>) {
+    fn accept(mut self, result: Result<ProjectStatus, CommandError>) {
         let next = match result {
             Ok(status) => ProjectSessionState::Ready(status),
             Err(_) => ProjectSessionState::Unavailable(self.state.peek().session().cloned()),
@@ -46,7 +46,7 @@ impl ProjectSessionSignals {
             self.state.set(next);
         }
     }
-    pub(crate) fn use_polling(self) {
+    pub(super) fn use_polling(self) {
         let status = QueryPolicy::new(QueryDomain::Project, 1_000).use_resource(|| {
             crate::client::transport::HttpRequest::new("GET", "/api/project/status")
                 .send::<spiral_robotics_common::project::ProjectStatus>()

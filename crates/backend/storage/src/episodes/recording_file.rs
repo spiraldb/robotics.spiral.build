@@ -11,7 +11,7 @@ pub(crate) struct RecordingFile {
 }
 
 impl RecordingFile {
-    pub(crate) fn new(
+    pub(super) fn new(
         store: &crate::ProjectStore,
         episode: &super::FullEpisode,
     ) -> Result<Self, String> {
@@ -37,11 +37,11 @@ impl RecordingFile {
         })
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn save(&self, bytes: &[u8]) -> Result<(), String> {
+    pub(super) fn save(&self, bytes: &[u8]) -> Result<(), String> {
         let parent = self
             .path
             .parent()

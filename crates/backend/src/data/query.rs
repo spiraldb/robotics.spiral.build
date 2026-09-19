@@ -13,23 +13,23 @@ pub(crate) struct QueryCommand {
 }
 
 impl QueryCommand {
-    pub(crate) fn new(statement: impl Into<String>, max_rows: usize) -> Self {
+    pub(super) fn new(statement: impl Into<String>, max_rows: usize) -> Self {
         Self {
             statement: statement.into(),
             max_rows,
         }
     }
 
-    pub(crate) fn statement(&self) -> &str {
+    pub(super) fn statement(&self) -> &str {
         &self.statement
     }
-    pub(crate) fn max_rows(&self) -> usize {
+    pub(super) fn max_rows(&self) -> usize {
         self.max_rows
     }
 }
 
 impl QueryCommand {
-    pub(crate) fn validated(mut self) -> Result<Self, OperationError> {
+    pub(super) fn validated(mut self) -> Result<Self, OperationError> {
         ReadOnlyQuery::new(&self.statement, ReadOnlyQueryMode::Preview)
             .authorize()
             .map_err(|error| OperationError::InvalidInput(error.to_string()))?;

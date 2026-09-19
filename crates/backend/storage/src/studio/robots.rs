@@ -4,10 +4,10 @@ use sea_orm::entity::prelude::*;
 #[sea_orm(table_name = "robots")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub project: String,
+    pub(super) project: String,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: String,
-    pub document: Json,
+    pub(super) id: String,
+    pub(super) document: Json,
     pub updated_ms: i64,
 }
 

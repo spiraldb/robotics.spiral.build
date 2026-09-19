@@ -13,11 +13,11 @@ pub(crate) struct EpisodeQueries<'a> {
 }
 
 impl<'a> EpisodeQueries<'a> {
-    pub(crate) fn new(state: &'a ProjectContext) -> Self {
+    pub(super) fn new(state: &'a ProjectContext) -> Self {
         Self { state }
     }
 
-    pub(crate) fn inspection(
+    pub(super) fn inspection(
         &self,
         episode: String,
     ) -> Result<EpisodeInspectionSnapshot, OperationError> {

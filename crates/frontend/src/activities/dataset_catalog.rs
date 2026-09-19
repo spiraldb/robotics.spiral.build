@@ -73,7 +73,7 @@ pub(crate) struct DatasetChoices {
     catalog: Signal<DatasetCatalogState>,
 }
 impl DatasetChoices {
-    pub(crate) fn use_choices() -> Self {
+    pub(super) fn use_choices() -> Self {
         let choices = use_hook(|| Self {
             selected: Signal::new("default".to_owned()),
             catalog: Signal::new(DatasetCatalogState::default()),
@@ -95,10 +95,10 @@ impl DatasetChoices {
         });
         choices
     }
-    pub(crate) fn selected(self) -> Signal<String> {
+    pub(super) fn selected(self) -> Signal<String> {
         self.selected
     }
-    pub(crate) fn datasets(self) -> Vec<DatasetSummary> {
+    pub(super) fn datasets(self) -> Vec<DatasetSummary> {
         self.catalog.read().datasets().to_vec()
     }
     fn dataset_catalog_error(self) -> Option<CommandError> {
@@ -115,7 +115,7 @@ impl DatasetChoices {
 /// Background failures stay beside the selector. Retrying is also kept inline,
 /// so one catalog failure never creates a notification on every render.
 #[component]
-pub(crate) fn DatasetCatalogFeedback(data: DatasetChoices) -> Element {
+pub(super) fn DatasetCatalogFeedback(data: DatasetChoices) -> Element {
     let available = ProjectSessionSignals::current().catalog_available();
     let error = data.dataset_catalog_error();
     let loading = data.datasets_loading();

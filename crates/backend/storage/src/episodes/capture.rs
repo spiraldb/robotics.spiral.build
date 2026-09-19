@@ -102,7 +102,7 @@ pub struct JointMotorLimits {
 }
 
 impl JointMotorLimits {
-    pub(super) const fn new(
+    const fn new(
         max_temperature_celsius: Option<f64>,
         voltage: JointVoltageRange,
         max_load: Option<f64>,
@@ -137,7 +137,7 @@ pub(super) struct JointVoltageRange {
 }
 
 impl JointVoltageRange {
-    pub(super) const fn new(minimum: Option<f64>, maximum: Option<f64>) -> Self {
+    const fn new(minimum: Option<f64>, maximum: Option<f64>) -> Self {
         Self { minimum, maximum }
     }
 }
@@ -254,7 +254,7 @@ impl EpisodeStart {
         self
     }
 
-    pub(super) fn with_current_timing(self, sample_hz: f64) -> Self {
+    fn with_current_timing(self, sample_hz: f64) -> Self {
         let started_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
@@ -307,7 +307,6 @@ impl EpisodeStart {
 pub struct EpisodeRecordingRequest {
     dataset_id: String,
     source: String,
-    note: Option<String>,
     sample_hz: f64,
     arms: Vec<EpisodeArm>,
     condition: Vec<ArmCondition>,
@@ -318,16 +317,10 @@ impl EpisodeRecordingRequest {
         Self {
             dataset_id,
             source,
-            note: None,
             sample_hz,
             arms: Vec::new(),
             condition: Vec::new(),
         }
-    }
-
-    pub fn with_note(mut self, note: Option<String>) -> Self {
-        self.note = note;
-        self
     }
 
     pub fn with_arms(mut self, arms: Vec<EpisodeArm>, condition: Vec<ArmCondition>) -> Self {
@@ -370,7 +363,7 @@ pub(super) struct ArmConditionSummary {
 }
 
 impl ArmConditionSummary {
-    pub(super) fn new(arm: String) -> Self {
+    fn new(arm: String) -> Self {
         Self {
             arm,
             peak_temperature_celsius: Vec::new(),
@@ -380,7 +373,7 @@ impl ArmConditionSummary {
         }
     }
 
-    pub(super) fn with_extremes(
+    fn with_extremes(
         mut self,
         temperature: ArmConditionThermalExtremes,
         effort: ArmConditionEffortExtremes,
@@ -424,7 +417,7 @@ pub(super) struct ArmConditionThermalExtremes {
 }
 
 impl ArmConditionThermalExtremes {
-    pub(super) const fn new(
+    const fn new(
         peak_temperature_celsius: Vec<Option<f64>>,
         min_voltage_volts: Vec<Option<f64>>,
     ) -> Self {
@@ -442,10 +435,7 @@ pub(super) struct ArmConditionEffortExtremes {
 }
 
 impl ArmConditionEffortExtremes {
-    pub(super) const fn new(
-        peak_load: Vec<Option<f64>>,
-        peak_current_amps: Vec<Option<f64>>,
-    ) -> Self {
+    const fn new(peak_load: Vec<Option<f64>>, peak_current_amps: Vec<Option<f64>>) -> Self {
         Self {
             peak_load,
             peak_current_amps,
@@ -491,7 +481,7 @@ impl EpisodeCompletion {
         self
     }
 
-    pub(super) const fn with_discarded(mut self, discarded: bool) -> Self {
+    const fn with_discarded(mut self, discarded: bool) -> Self {
         self.discarded = discarded;
         self
     }
@@ -649,7 +639,7 @@ impl RecordingBuffer {
         }
         let start = EpisodeStart::new(uuid::Uuid::new_v4().to_string(), request.dataset_id)
             .with_current_timing(request.sample_hz)
-            .with_source(request.source, request.note)
+            .with_source(request.source, None)
             .with_arms(request.arms, request.condition);
         SpiralEpisodeEncoder::new(start.clone())?;
         EpisodeWriter::start(start, Arc::clone(&self.completed))

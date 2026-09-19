@@ -42,7 +42,7 @@ impl EpisodeRecord {
     pub(super) fn id(&self) -> &str {
         &self.id
     }
-    pub(super) fn selection(&self, dataset: &DatasetSelection) -> EpisodeSelection {
+    fn selection(&self, dataset: &DatasetSelection) -> EpisodeSelection {
         EpisodeSelection::new(dataset.clone(), self.id.clone())
     }
     pub(super) fn time_range(&self) -> Option<EpisodeTimeRange> {
@@ -51,7 +51,7 @@ impl EpisodeRecord {
             self.timing.message_end_time?,
         ))
     }
-    pub(super) fn duration_seconds(&self) -> Option<f64> {
+    fn duration_seconds(&self) -> Option<f64> {
         self.timing.duration_ns.map(|nanos| nanos as f64 / 1e9)
     }
     pub(super) fn duration_label(&self) -> String {
@@ -219,7 +219,7 @@ pub(crate) struct OpenedEpisode {
 }
 
 impl OpenedEpisode {
-    pub(crate) fn from_row(
+    pub(in crate::activities) fn from_row(
         dataset: DatasetSelection,
         row: serde_json::Map<String, serde_json::Value>,
     ) -> Result<Self, String> {
@@ -256,10 +256,10 @@ impl OpenedEpisode {
     pub(super) fn label(&self) -> &SourceLabel {
         &self.label
     }
-    pub(crate) fn title(&self) -> String {
+    pub(in crate::activities) fn title(&self) -> String {
         self.listed.title()
     }
-    pub(crate) fn selection(&self) -> EpisodeSelection {
+    pub(in crate::activities) fn selection(&self) -> EpisodeSelection {
         self.listed.record.selection(&self.dataset)
     }
 }

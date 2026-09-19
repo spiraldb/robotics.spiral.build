@@ -23,7 +23,7 @@ impl StudioProjectState {
     pub(crate) fn current() -> Self {
         consume_context()
     }
-    pub(crate) fn now_ms() -> f64 {
+    fn now_ms() -> f64 {
         js_sys::Date::now()
     }
     pub(crate) fn live(self) -> Memo<bool> {
@@ -32,7 +32,7 @@ impl StudioProjectState {
     pub(crate) const fn clock_ms(self) -> Signal<f64> {
         self.backend.clock_ms
     }
-    pub(crate) const fn notifications(self) -> Signal<NotificationCenterState> {
+    pub(super) const fn notifications(self) -> Signal<NotificationCenterState> {
         self.notifications
     }
     pub(crate) fn run_safety<F>(&self, success: impl Into<String>, future: F)
@@ -109,7 +109,7 @@ impl StudioProjectState {
     }
 }
 impl StudioProjectState {
-    pub(crate) fn use_provider() -> Self {
+    pub(super) fn use_provider() -> Self {
         let sessions = ProjectSessionSignals::current();
         let state = Self {
             backend: ProjectBackendSignals {
@@ -121,7 +121,7 @@ impl StudioProjectState {
         use_context_provider(|| state)
     }
 
-    pub(crate) fn use_polling(mut self) {
+    pub(super) fn use_polling(mut self) {
         use_future(move || async move {
             loop {
                 gloo_timers::future::TimeoutFuture::new(250).await;
@@ -130,7 +130,7 @@ impl StudioProjectState {
         });
     }
 
-    pub(crate) fn close_notifications(mut self) {
+    pub(super) fn close_notifications(mut self) {
         self.notifications.write().close();
     }
 }

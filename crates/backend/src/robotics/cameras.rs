@@ -312,7 +312,7 @@ impl CameraManager {
     }
 
     /// Stop a camera's capture thread and release the device.
-    pub(crate) fn close(&self, id: &str) {
+    fn close(&self, id: &str) {
         let stream = self.state.recover_lock().streams.remove(id);
         if let Some(mut stream) = stream {
             stream.shutdown();

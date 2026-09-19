@@ -11,7 +11,7 @@ pub(crate) struct CurationClient {
     project: ProjectClient,
 }
 impl CurationClient {
-    pub(crate) async fn preview(
+    pub(super) async fn preview(
         &self,
         curation: &CurationSpec,
     ) -> Result<spiral_robotics_common::curation::run::CurationOutcome, CommandError> {
@@ -19,7 +19,7 @@ impl CurationClient {
             .request(HttpRequest::new("POST", "/api/curations/preview").json(curation))
             .await
     }
-    pub(crate) async fn score_episode(
+    pub(super) async fn score_episode(
         &self,
         request: &spiral_robotics_common::curation::progress::ProgressScoreRequest,
     ) -> Result<spiral_robotics_common::curation::progress::ProgressScoreResult, CommandError> {
@@ -27,7 +27,7 @@ impl CurationClient {
             .request(HttpRequest::new("POST", "/api/curations/progress-score").json(request))
             .await
     }
-    pub(crate) async fn interpret(
+    pub(super) async fn interpret(
         &self,
         request: &spiral_robotics_common::curation::interpretation::InterpretationRequest,
     ) -> Result<spiral_robotics_common::curation::interpretation::RuleProposal, CommandError> {
@@ -35,17 +35,17 @@ impl CurationClient {
             .request(HttpRequest::new("POST", "/api/curations/interpret").json(request))
             .await
     }
-    pub(crate) fn current() -> Self {
+    pub(super) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) async fn list(&self) -> Result<Vec<CurationSummary>, CommandError> {
+    pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/curations"))
             .await
     }
-    pub(crate) async fn load(&self, id: &str) -> Result<CurationSpec, CommandError> {
+    pub(super) async fn load(&self, id: &str) -> Result<CurationSpec, CommandError> {
         self.project
             .request(HttpRequest::new(
                 "GET",
@@ -53,17 +53,17 @@ impl CurationClient {
             ))
             .await
     }
-    pub(crate) async fn save(&self, curation: &CurationSpec) -> Result<CurationSpec, CommandError> {
+    pub(super) async fn save(&self, curation: &CurationSpec) -> Result<CurationSpec, CommandError> {
         self.project
             .request(HttpRequest::new("POST", "/api/curations/save").json(curation))
             .await
     }
-    pub(crate) async fn runs(&self) -> Result<Vec<CurationRun>, CommandError> {
+    pub(super) async fn runs(&self) -> Result<Vec<CurationRun>, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/curation-runs"))
             .await
     }
-    pub(crate) async fn run(&self, id: &str) -> Result<CurationRun, CommandError> {
+    pub(super) async fn run(&self, id: &str) -> Result<CurationRun, CommandError> {
         self.project
             .request(HttpRequest::new(
                 "GET",
@@ -71,7 +71,7 @@ impl CurationClient {
             ))
             .await
     }
-    pub(crate) async fn start(&self, curation: &CurationSpec) -> Result<CurationRun, CommandError> {
+    pub(super) async fn start(&self, curation: &CurationSpec) -> Result<CurationRun, CommandError> {
         self.project
             .request(HttpRequest::new("POST", "/api/curation-runs").json(curation))
             .await

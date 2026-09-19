@@ -31,7 +31,7 @@ impl TryFrom<&str> for DatasetId {
 }
 
 impl DatasetId {
-    pub(crate) fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         &self.0
     }
 }

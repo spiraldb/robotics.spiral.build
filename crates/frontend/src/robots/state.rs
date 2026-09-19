@@ -123,7 +123,7 @@ impl HardwareViewState {
             && age.is_finite()
             && age < 2.5
     }
-    pub(crate) fn telemetry_age_seconds(&self) -> f64 {
+    fn telemetry_age_seconds(&self) -> f64 {
         let last = (self.last_telemetry_ms)();
         if last <= 0.0 {
             return f64::INFINITY;

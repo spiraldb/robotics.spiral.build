@@ -624,7 +624,7 @@ impl WorkflowStage {
 
 impl ExpressionGraph {
     /// The literal outcomes of a CASE expression, in the order they are tried.
-    pub(super) fn case_outcomes(&self, root: u64) -> Vec<String> {
+    fn case_outcomes(&self, root: u64) -> Vec<String> {
         let mut outcomes = Vec::new();
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {

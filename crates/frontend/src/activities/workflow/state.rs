@@ -40,11 +40,11 @@ pub(crate) enum AgentPendingCommand {
 pub(crate) struct AgentDraftKey(String);
 
 impl AgentDraftKey {
-    pub(crate) fn new(workflow_id: &str) -> Self {
+    pub(super) fn new(workflow_id: &str) -> Self {
         Self(workflow_id.to_owned())
     }
 
-    pub(crate) fn clear_if_unchanged(
+    pub(super) fn clear_if_unchanged(
         &self,
         drafts: &mut BTreeMap<AgentDraftKey, String>,
         submitted: &str,
@@ -84,7 +84,7 @@ struct WorkflowLifecycleSignals {
 }
 
 impl WorkflowController {
-    pub(crate) fn use_controller() -> Self {
+    pub(super) fn use_controller() -> Self {
         let initial = use_hook(Self::fresh_document);
         let initial_spec = initial.workflow().clone();
         use_hook(|| Self {
@@ -108,11 +108,11 @@ impl WorkflowController {
         })
     }
 
-    pub(crate) fn spec(&self) -> WorkflowSpec {
+    pub(super) fn spec(&self) -> WorkflowSpec {
         self.document.draft.read().to_owned()
     }
 
-    pub(crate) fn snapshot(&self) -> WorkflowRunSnapshot {
+    pub(super) fn snapshot(&self) -> WorkflowRunSnapshot {
         let runs = self.visible_run().into_iter().collect::<Vec<_>>();
         Self::project_run(&self.document.draft.read(), &runs)
     }
@@ -128,7 +128,7 @@ impl WorkflowController {
         snapshot.set_result_stale(!draft.accepts_output_from(run.workflow()));
         snapshot
     }
-    pub(super) fn visible_run(&self) -> Option<WorkflowRun> {
+    fn visible_run(&self) -> Option<WorkflowRun> {
         let runs = self.workflow_runs();
         let selected = self.document.selected_run.read();
         selected
@@ -140,7 +140,7 @@ impl WorkflowController {
             .or_else(|| runs.last())
             .cloned()
     }
-    pub(crate) fn workflow_runs(&self) -> Vec<WorkflowRun> {
+    pub(super) fn workflow_runs(&self) -> Vec<WorkflowRun> {
         let id = self.document.draft.read().id().to_owned();
         let mut runs = self
             .document
@@ -153,7 +153,7 @@ impl WorkflowController {
         runs.sort_by_key(|run| run.snapshot().started_ms());
         runs
     }
-    pub(crate) fn select_run(mut self, id: String) {
+    pub(super) fn select_run(mut self, id: String) {
         if self
             .workflow_runs()
             .iter()
@@ -162,7 +162,7 @@ impl WorkflowController {
             self.document.selected_run.set(Some(id));
         }
     }
-    pub(crate) fn executed_query(&self) -> Option<WorkflowSpec> {
+    pub(super) fn executed_query(&self) -> Option<WorkflowSpec> {
         self.visible_run().map(|run| run.workflow().clone())
     }
     pub(super) fn observe_run(mut self, run: WorkflowRun) {
@@ -183,47 +183,47 @@ impl WorkflowController {
         QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
         Ok(run)
     }
-    pub(crate) fn editor_status(&self) -> Option<WorkflowEditorStatus> {
+    pub(super) fn editor_status(&self) -> Option<WorkflowEditorStatus> {
         self.loaded()
             .then(|| WorkflowEditorStatus::new(self.spec(), self.snapshot()))
     }
 
-    pub(crate) fn validation(&self) -> WorkflowValidationReport {
+    pub(super) fn validation(&self) -> WorkflowValidationReport {
         self.document.draft.read().validate()
     }
 
-    pub(crate) fn loaded(&self) -> bool {
+    pub(super) fn loaded(&self) -> bool {
         *self.lifecycle.loaded.read()
     }
 
-    pub(crate) fn load_error(&self) -> Option<String> {
+    pub(super) fn load_error(&self) -> Option<String> {
         self.lifecycle.load_error.read().to_owned()
     }
 
-    pub(crate) fn command(&self) -> Option<WorkflowPendingCommand> {
+    pub(super) fn command(&self) -> Option<WorkflowPendingCommand> {
         *self.lifecycle.command.read()
     }
 
-    pub(crate) fn agent_state(&self) -> WorkflowAgentState {
+    pub(super) fn agent_state(&self) -> WorkflowAgentState {
         self.assistant.snapshot(self.loaded())
     }
-    pub(crate) fn agent_loaded(&self) -> bool {
+    pub(super) fn agent_loaded(&self) -> bool {
         self.assistant.loaded()
     }
-    pub(crate) fn agent_command(&self) -> Option<AgentPendingCommand> {
+    pub(super) fn agent_command(&self) -> Option<AgentPendingCommand> {
         self.agent_state()
             .session()
             .phase()
             .active()
             .then_some(AgentPendingCommand::Sending)
     }
-    pub(crate) fn agent_error(&self) -> Option<String> {
+    pub(super) fn agent_error(&self) -> Option<String> {
         self.agent_state().session().error().map(str::to_owned)
     }
-    pub(crate) const fn agent_drafts(self) -> Signal<BTreeMap<AgentDraftKey, String>> {
+    pub(super) const fn agent_drafts(self) -> Signal<BTreeMap<AgentDraftKey, String>> {
         self.agent_drafts
     }
-    pub(crate) fn workflows(&self) -> Vec<WorkflowSummary> {
+    pub(super) fn workflows(&self) -> Vec<WorkflowSummary> {
         let mut workflows = self.lifecycle.workflows.read().clone();
         for run in self.document.runs.read().iter() {
             if !workflows
@@ -239,7 +239,7 @@ impl WorkflowController {
         workflows
     }
 
-    pub(crate) fn workflow_selection_reason(&self) -> Option<String> {
+    pub(super) fn workflow_selection_reason(&self) -> Option<String> {
         if !self.loaded() || !self.agent_loaded() {
             return Some("Loading workflows…".to_owned());
         }
@@ -258,7 +258,7 @@ impl WorkflowController {
         None
     }
 
-    pub(crate) fn create_from_dataset(
+    pub(super) fn create_from_dataset(
         mut self,
         source: spiral_robotics_common::datasets::DatasetSummary,
     ) {
@@ -274,7 +274,7 @@ impl WorkflowController {
         ));
     }
 
-    pub(crate) fn set_sql(mut self, sql: String) {
+    pub(super) fn set_sql(mut self, sql: String) {
         self.document.draft.write().set_sql(sql);
     }
 
@@ -308,23 +308,23 @@ impl WorkflowController {
         Ok(plan)
     }
 
-    pub(crate) fn set_name(mut self, name: String) {
+    pub(super) fn set_name(mut self, name: String) {
         self.document.draft.write().set_name(name);
     }
 
-    pub(crate) fn dirty(&self) -> bool {
+    fn dirty(&self) -> bool {
         *self.document.draft.read() != *self.document.baseline.read().workflow()
     }
 
-    pub(crate) fn revision_conflict(&self) -> bool {
+    pub(super) fn revision_conflict(&self) -> bool {
         *self.document.conflict.read()
     }
 
-    pub(crate) fn active_panel(&self) -> Option<PanelId> {
+    pub(super) fn active_panel(&self) -> Option<PanelId> {
         self.active_panel.read().clone()
     }
 
-    pub(crate) fn run_disabled_reason(&self) -> Option<String> {
+    pub(super) fn run_disabled_reason(&self) -> Option<String> {
         if let Some(error) = self.load_error() {
             return Some(format!("Could not load the saved Workflow: {error}"));
         }
@@ -357,7 +357,7 @@ impl WorkflowController {
             .map(|issue| issue.message().to_owned())
     }
 
-    pub(crate) fn save_disabled_reason(&self) -> Option<String> {
+    pub(super) fn save_disabled_reason(&self) -> Option<String> {
         if !self.loaded() || !self.agent_loaded() {
             return Some("Loading workflow…".into());
         }
@@ -379,22 +379,22 @@ impl WorkflowController {
         None
     }
 
-    pub(crate) fn activate_panel(mut self, id: PanelId) {
+    pub(super) fn activate_panel(mut self, id: PanelId) {
         self.active_panel.set(Some(id));
     }
 
-    pub(crate) fn receipt_panel(&self, receipt: &WorkflowAgentArtifactReceipt) -> Option<PanelId> {
+    pub(super) fn receipt_panel(&self, receipt: &WorkflowAgentArtifactReceipt) -> Option<PanelId> {
         (receipt.revision() == self.spec().revision()).then(|| PanelId::from(CANVAS_PANEL_ID))
     }
 
-    pub(crate) fn open_agent_receipt(mut self, receipt: WorkflowAgentArtifactReceipt) {
+    pub(super) fn open_agent_receipt(mut self, receipt: WorkflowAgentArtifactReceipt) {
         let Some(panel) = self.receipt_panel(&receipt) else {
             return;
         };
         self.active_panel.set(Some(panel));
     }
 
-    pub(crate) fn reload_current(mut self) {
+    pub(super) fn reload_current(mut self) {
         self.lifecycle.load_error.set(None);
         let id = self.spec().id().to_owned();
         let known = self.workflows().iter().any(|workflow| workflow.id() == id);
@@ -407,7 +407,7 @@ impl WorkflowController {
         }
     }
 
-    pub(crate) fn unsaved_changes(&self) -> bool {
+    pub(super) fn unsaved_changes(&self) -> bool {
         self.dirty()
             || self.assistant.conversation() != *self.document.baseline.read().conversation()
     }
@@ -448,7 +448,7 @@ impl WorkflowController {
             .replace_authored(expected, workflow)?;
         Ok(())
     }
-    pub(crate) fn save(mut self, studio: StudioProjectState) {
+    pub(super) fn save(mut self, studio: StudioProjectState) {
         if self.save_disabled_reason().is_some() {
             return;
         }
@@ -491,14 +491,14 @@ impl WorkflowController {
             self.lifecycle.command.set(None);
         });
     }
-    pub(crate) fn discard(self, _studio: StudioProjectState) {
+    pub(super) fn discard(self, _studio: StudioProjectState) {
         if self.command().is_some() {
             return;
         }
         let baseline = self.document.baseline.peek().clone();
         self.install(baseline);
     }
-    pub(crate) fn run(mut self, studio: StudioProjectState) {
+    pub(super) fn run(mut self, studio: StudioProjectState) {
         if let Some(reason) = self.run_disabled_reason() {
             studio.report_warning_from(MessageSource::Workflow, reason);
             return;
@@ -519,7 +519,7 @@ impl WorkflowController {
             QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
         });
     }
-    pub(crate) fn select_workflow(self, workflow_id: Option<String>, _studio: StudioProjectState) {
+    pub(super) fn select_workflow(self, workflow_id: Option<String>, _studio: StudioProjectState) {
         if self.workflow_selection_reason().is_none() {
             self.open_document(workflow_id);
         }
@@ -562,7 +562,7 @@ impl WorkflowController {
             self.lifecycle.command.set(None);
         });
     }
-    pub(crate) fn send_agent(mut self, text: String, _studio: StudioProjectState) {
+    pub(super) fn send_agent(mut self, text: String, _studio: StudioProjectState) {
         if !self.agent_state().readiness().configured()
             || self.command().is_some()
             || self.agent_command().is_some()
@@ -577,10 +577,10 @@ impl WorkflowController {
         AgentDraftKey::new(self.spec().id())
             .clear_if_unchanged(&mut self.agent_drafts.write(), &text);
     }
-    pub(crate) fn cancel_agent(self, _studio: StudioProjectState) {
+    pub(super) fn cancel_agent(self, _studio: StudioProjectState) {
         self.assistant.cancel();
     }
-    pub(crate) fn retry_agent(self, studio: StudioProjectState) {
+    pub(super) fn retry_agent(self, studio: StudioProjectState) {
         if let Some(message) =
             self.agent_state()
                 .session()
@@ -620,7 +620,7 @@ impl WorkflowController {
             self.lifecycle.command.set(None);
         });
     }
-    pub(crate) fn use_polling(self, is_active: ReadSignal<bool>) {
+    pub(super) fn use_polling(self, is_active: ReadSignal<bool>) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         use_effect(move || {
             if sessions.studio_available()

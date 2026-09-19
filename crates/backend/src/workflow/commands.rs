@@ -14,15 +14,15 @@ pub(crate) struct WorkflowCommands {
     state: ProjectContext,
 }
 impl WorkflowCommands {
-    pub(crate) async fn list(&self) -> Result<Vec<WorkflowSummary>, BackendCommandError> {
+    pub(super) async fn list(&self) -> Result<Vec<WorkflowSummary>, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.workflow().list().await.map_err(Into::into)
     }
-    pub(crate) async fn load(&self, id: &str) -> Result<WorkflowDocument, BackendCommandError> {
+    pub(super) async fn load(&self, id: &str) -> Result<WorkflowDocument, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.workflow().load(id).await.map_err(Into::into)
     }
-    pub(crate) async fn save(
+    pub(super) async fn save(
         &self,
         document: WorkflowDocument,
     ) -> Result<WorkflowDocument, BackendCommandError> {
@@ -32,22 +32,22 @@ impl WorkflowCommands {
             })
             .await
     }
-    pub(crate) async fn plan(
+    pub(super) async fn plan(
         &self,
         workflow: WorkflowSpec,
     ) -> Result<WorkflowPlan, BackendCommandError> {
         let _activity = self.state.admit()?;
         Ok(self.state.workflow().plan(&workflow).await)
     }
-    pub(crate) fn runs(&self) -> Result<Vec<WorkflowRun>, BackendCommandError> {
+    pub(super) fn runs(&self) -> Result<Vec<WorkflowRun>, BackendCommandError> {
         let _activity = self.state.admit()?;
         Ok(self.state.workflow().runs())
     }
-    pub(crate) fn run(&self, id: &str) -> Result<WorkflowRun, BackendCommandError> {
+    pub(super) fn run(&self, id: &str) -> Result<WorkflowRun, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.workflow().run(id).map_err(Into::into)
     }
-    pub(crate) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, BackendCommandError> {
+    pub(super) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, BackendCommandError> {
         let _activity = self.state.admit()?;
         let lease = self.state.catalog_lease();
         let _reservation = lease
@@ -59,7 +59,7 @@ impl WorkflowCommands {
             })?;
         self.state.workflow().start(workflow).map_err(Into::into)
     }
-    pub(crate) async fn capture_comparison(
+    pub(super) async fn capture_comparison(
         &self,
         request: spiral_robotics_common::workflow::comparison_inputs::ComparisonInputRequest,
     ) -> Result<
@@ -78,7 +78,7 @@ impl WorkflowCommands {
             })
             .await
     }
-    pub(crate) async fn query_comparison(
+    pub(super) async fn query_comparison(
         &self,
         id: String,
         request: (String, usize),
@@ -95,12 +95,12 @@ impl WorkflowCommands {
             })
             .await
     }
-    pub(crate) fn release_comparison(&self, id: &str) -> Result<bool, BackendCommandError> {
+    pub(super) fn release_comparison(&self, id: &str) -> Result<bool, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.workflow().comparisons().release(id);
         Ok(true)
     }
-    pub(crate) async fn capabilities(
+    pub(super) async fn capabilities(
         &self,
     ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, BackendCommandError> {
         let _activity = self.state.admit()?;
@@ -110,7 +110,7 @@ impl WorkflowCommands {
             .map_err(OperationError::External)
             .map_err(Into::into)
     }
-    pub(crate) async fn cameras(
+    pub(super) async fn cameras(
         &self,
         selection: DatasetSelection,
     ) -> Result<serde_json::Value, BackendCommandError> {
@@ -129,7 +129,7 @@ impl WorkflowCommands {
             .map_err(OperationError::External)?;
         Ok(serde_json::json!({"dataset": inspection, "cameras": cameras}))
     }
-    pub(crate) fn model_status(&self) -> Result<WorkflowAgentReadiness, BackendCommandError> {
+    pub(super) fn model_status(&self) -> Result<WorkflowAgentReadiness, BackendCommandError> {
         let _activity = self.state.admit()?;
         Ok(match ProviderConfig::from_env() {
             Ok(Some(_)) => WorkflowAgentReadiness::ready("Ready to help author this workflow."),
@@ -139,7 +139,7 @@ impl WorkflowCommands {
             Err(error) => WorkflowAgentReadiness::error(error),
         })
     }
-    pub(crate) fn complete(
+    pub(super) fn complete(
         &self,
         request: ModelRequest,
     ) -> Result<ModelStream, BackendCommandError> {

@@ -145,7 +145,7 @@ impl DatabaseError {
         )
     }
 
-    pub(super) fn from_io(error: std::io::Error) -> Self {
+    fn from_io(error: std::io::Error) -> Self {
         Self::new(DatabaseErrorKind::Unavailable, error.to_string())
     }
 

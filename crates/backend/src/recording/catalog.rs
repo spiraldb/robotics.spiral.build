@@ -14,7 +14,7 @@ pub(crate) struct EpisodeActivity {
 }
 
 impl EpisodeActivity {
-    pub(crate) fn new(recording: Option<String>, replaying: Option<String>) -> Self {
+    pub(super) fn new(recording: Option<String>, replaying: Option<String>) -> Self {
         Self {
             recording,
             replaying,
@@ -28,7 +28,7 @@ pub(crate) struct DeleteEpisodeCommand {
 }
 
 impl DeleteEpisodeCommand {
-    pub(crate) fn new(episode: impl Into<String>) -> Self {
+    pub(super) fn new(episode: impl Into<String>) -> Self {
         Self {
             episode: episode.into(),
         }
@@ -58,11 +58,11 @@ pub(crate) struct EpisodeCatalogActions<'a, P: ?Sized> {
 }
 
 impl<'a, P: EpisodeCatalogPort + ?Sized> EpisodeCatalogActions<'a, P> {
-    pub(crate) fn new(port: &'a P) -> Self {
+    pub(super) fn new(port: &'a P) -> Self {
         Self { port }
     }
 
-    pub(crate) async fn delete(&self, command: DeleteEpisodeCommand) -> Result<(), OperationError> {
+    pub(super) async fn delete(&self, command: DeleteEpisodeCommand) -> Result<(), OperationError> {
         let episode = command.validated()?.episode;
         let activity = self.port.activity();
         if activity.recording.as_deref() == Some(&episode) {

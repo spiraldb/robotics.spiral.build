@@ -70,7 +70,7 @@ impl RobotFleet for [RobotSummary] {
 }
 
 #[component]
-pub(crate) fn RolloutWorkbench(
+pub(super) fn RolloutWorkbench(
     project: StudioProjectState,
     telemetry: HardwareViewState,
     controller: super::state::RolloutController,
@@ -440,7 +440,7 @@ impl RolloutCameraSummary {
 }
 
 #[component]
-pub(crate) fn InferencePanel(controller: super::state::RolloutController) -> Element {
+pub(super) fn InferencePanel(controller: super::state::RolloutController) -> Element {
     let rollout = controller.snapshot().read().to_owned();
     let metrics = &rollout.metrics();
     let latency = metrics.last_latency_ms().rollout_metric();

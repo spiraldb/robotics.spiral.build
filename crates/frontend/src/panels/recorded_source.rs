@@ -12,7 +12,7 @@ pub(crate) enum LoadState<T> {
 }
 
 impl<T> LoadState<T> {
-    pub(crate) fn renderable(&self) -> Option<&T> {
+    fn renderable(&self) -> Option<&T> {
         match self {
             Self::Loading { previous } | Self::Failed { previous, .. } => previous.as_ref(),
             Self::Ready(value) => Some(value),
@@ -27,11 +27,11 @@ impl<T> LoadState<T> {
         }
     }
 
-    pub(crate) fn is_loading(&self) -> bool {
+    pub(super) fn is_loading(&self) -> bool {
         matches!(self, Self::Loading { .. })
     }
 
-    pub(crate) fn map<U>(self, mut transform: impl FnMut(T) -> U) -> LoadState<U> {
+    fn map<U>(self, mut transform: impl FnMut(T) -> U) -> LoadState<U> {
         match self {
             Self::Loading { previous } => LoadState::Loading {
                 previous: previous.map(&mut transform),
@@ -83,7 +83,7 @@ impl<T> RecordedSource<T> {
         self.state.renderable()
     }
 
-    pub(crate) fn map<U>(self, transform: impl FnMut(T) -> U) -> RecordedSource<U> {
+    pub(super) fn map<U>(self, transform: impl FnMut(T) -> U) -> RecordedSource<U> {
         RecordedSource {
             episode: self.episode,
             seconds: self.seconds,

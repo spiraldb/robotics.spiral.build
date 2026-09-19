@@ -20,12 +20,12 @@ pub(crate) struct CalibrationCodec;
 
 impl CalibrationCodec {
     /// Decode a strict calibration document and apply all domain invariants.
-    pub(crate) fn decode(value: serde_json::Value) -> serde_json::Result<Calibration> {
+    pub(super) fn decode(value: serde_json::Value) -> serde_json::Result<Calibration> {
         Calibration::try_from(serde_json::from_value::<CalibrationWire>(value)?)
     }
 
     /// Encode a validated calibration document for a robot file.
-    pub(crate) fn encode(calibration: &Calibration) -> serde_json::Result<serde_json::Value> {
+    pub(super) fn encode(calibration: &Calibration) -> serde_json::Result<serde_json::Value> {
         calibration.validate().map_err(Self::json_error)?;
         let format = calibration.format();
         serde_json::to_value(CalibrationWire {

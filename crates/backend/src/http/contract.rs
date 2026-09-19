@@ -22,7 +22,7 @@ pub(crate) struct ApiRoutes {
     paths: Map<String, Value>,
 }
 impl ApiRoutes {
-    pub(crate) fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut settings = SchemaSettings::draft2020_12();
         settings.definitions_path = "/components/schemas".into();
         Self {
@@ -66,7 +66,7 @@ impl ApiRoutes {
         );
         self.router = std::mem::take(&mut self.router).route(path, endpoint.router);
     }
-    pub(crate) fn into_router(mut self, project: ProjectContext) -> Router {
+    pub(super) fn into_router(mut self, project: ProjectContext) -> Router {
         let router = std::mem::take(&mut self.router);
         let document = self.into_document();
         router
@@ -85,7 +85,7 @@ impl ApiRoutes {
             ))
             .with_state(project)
     }
-    pub(crate) fn into_document(mut self) -> Value {
+    pub(super) fn into_document(mut self) -> Value {
         json!({
             "openapi": "3.1.0",
             "info": { "title": "Spiral Robotics HTTP API", "version": "2.0.0",

@@ -12,21 +12,18 @@ pub(crate) struct CalibrationUpdate<'a> {
 }
 
 impl<'a> CalibrationUpdate<'a> {
-    pub(crate) fn new(
-        motors: &'a BTreeMap<String, MotorSpec>,
-        calibration: &'a Calibration,
-    ) -> Self {
+    fn new(motors: &'a BTreeMap<String, MotorSpec>, calibration: &'a Calibration) -> Self {
         Self {
             motors,
             calibration,
         }
     }
 
-    pub(crate) fn motors(&self) -> &BTreeMap<String, MotorSpec> {
+    pub(super) fn motors(&self) -> &BTreeMap<String, MotorSpec> {
         self.motors
     }
 
-    pub(crate) fn calibration(&self) -> &Calibration {
+    pub(super) fn calibration(&self) -> &Calibration {
         self.calibration
     }
 }
@@ -66,7 +63,7 @@ pub(crate) struct FinishCalibrationOutput {
 }
 
 impl FinishCalibrationOutput {
-    pub(crate) fn live_warning(&self) -> Option<&str> {
+    pub(super) fn live_warning(&self) -> Option<&str> {
         self.live_warning.as_deref()
     }
 }
@@ -85,7 +82,7 @@ where
     R: RobotCalibrationStore + ?Sized,
     C: CalibrationControlPort + ?Sized,
 {
-    pub(crate) const fn new(store: &'a R, control: &'a C) -> Self {
+    pub(super) const fn new(store: &'a R, control: &'a C) -> Self {
         Self { store, control }
     }
 
@@ -95,7 +92,7 @@ where
     /// keeps the sweep alive so the operator does not lose collected motion. Once
     /// persistence succeeds, later adapter failures become warnings because the
     /// next connection can load the already-correct SpiralDB row.
-    pub(crate) async fn finish(
+    pub(super) async fn finish(
         &self,
         robot: &str,
     ) -> Result<FinishCalibrationOutput, OperationError> {

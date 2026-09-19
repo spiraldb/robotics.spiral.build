@@ -159,7 +159,7 @@ impl SpiralSql {
         )
     }
 
-    pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
+    fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
         spiral_robotics_common::sql::ReadOnlyQuery::new(sql, mode)
             .authorize()
             .map_err(|error| error.to_string())
@@ -168,7 +168,7 @@ impl SpiralSql {
     /// Escape a value for the SQL string-literal grammar. Bound parameters are not
     /// uniformly implemented by the Spiral drivers currently supported here, so
     /// generated statements isolate this compatibility fallback in one function.
-    pub fn string_literal(value: &str) -> String {
+    pub(crate) fn string_literal(value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
     }
 }
@@ -436,15 +436,6 @@ impl ProjectConnection {
         )
         .run_async(self)
         .await
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn run_query(
-        &mut self,
-        sql: &str,
-        max_rows: usize,
-    ) -> Result<SpiralQuerySnapshot, String> {
-        self.query_rows(sql, max_rows).await
     }
 }
 

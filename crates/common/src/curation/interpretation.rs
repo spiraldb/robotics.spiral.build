@@ -124,12 +124,6 @@ impl RuleProposal {
     pub fn notes(&self) -> &[String] {
         &self.notes
     }
-    pub fn progress(&self) -> Option<&super::progress::ProgressSelection> {
-        self.progress.as_ref()
-    }
-    pub fn set_progress(&mut self, progress: super::progress::ProgressSelection) {
-        self.progress = Some(progress);
-    }
     pub fn set_intent(&mut self, intent: RuleIntent) {
         if intent == RuleIntent::ProductiveChunks && self.progress.is_none() {
             self.progress = Some(super::progress::ProgressSelection::new(String::new()));
@@ -267,9 +261,6 @@ pub struct QuantityCandidate {
     context: String,
 }
 impl QuantityCandidate {
-    pub fn text(&self) -> &str {
-        &self.text
-    }
     pub const fn value(&self) -> f64 {
         self.value
     }
@@ -401,7 +392,7 @@ mod tests {
         ] {
             let candidates = QuantityCandidate::extract(&format!("under {literal}"));
             assert_eq!(candidates.len(), 1, "{literal}");
-            assert_eq!(candidates[0].text(), literal);
+            assert_eq!(candidates[0].text, literal);
             assert_eq!(candidates[0].duration_seconds(), Some(seconds));
         }
         for literal in ["20", "20 messages", "20samples", "20meters"] {
@@ -416,15 +407,15 @@ mod tests {
         let candidates = QuantityCandidate::extract(prompt);
         assert_eq!(candidates.len(), 4);
         for candidate in &candidates {
-            assert_eq!(&prompt[candidate.span.clone()], candidate.text());
-            assert!(candidate.context.contains(candidate.text()));
+            assert_eq!(&prompt[candidate.span.clone()], candidate.text.as_str());
+            assert!(candidate.context.contains(candidate.text.as_str()));
         }
         assert_eq!(candidates[0].duration_seconds(), None);
         assert_eq!(candidates[1].duration_seconds(), Some(20.0));
         assert_eq!(candidates[2].duration_seconds(), Some(30.0));
         assert_eq!(candidates[3].value(), 4000.0);
         let punctuated = QuantityCandidate::extract("4000, then 20s");
-        assert_eq!(punctuated[0].text(), "4000");
+        assert_eq!(punctuated[0].text, "4000");
         assert_eq!(punctuated[0].span, 0..4);
         let repeated = QuantityCandidate::extract("camera 20: under 20s");
         assert_ne!(repeated[0].span, repeated[1].span);

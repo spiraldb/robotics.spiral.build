@@ -48,7 +48,7 @@ impl StudioStore {
         }
     }
 
-    pub fn open_default() -> Result<Self, String> {
+    pub(super) fn open_default() -> Result<Self, String> {
         let path = match std::env::var_os("SPIRAL_ROBOTICS_STUDIO_DB") {
             Some(path) => PathBuf::from(path),
             // Resolve against the source repository, independent of the launch
@@ -79,7 +79,7 @@ impl StudioStore {
         }
     }
 
-    pub async fn initialize(&self) -> Result<(), String> {
+    pub(super) async fn initialize(&self) -> Result<(), String> {
         self.connection().await.map(|_| ())
     }
 

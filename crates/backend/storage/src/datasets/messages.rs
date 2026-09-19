@@ -13,7 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 
 impl StorageManager {
     /// Refuse reads whose topic/schema revision no longer matches the dataset.
-    pub(super) async fn require_topic_revision(&self, request: &MessageRead) -> Result<(), String> {
+    async fn require_topic_revision(&self, request: &MessageRead) -> Result<(), String> {
         let catalog = self.project_store().dataset_catalog();
         let before = catalog.inspect(request.topic().dataset().clone()).await?;
         Self::revision_known(&before, request)

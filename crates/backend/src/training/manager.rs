@@ -207,7 +207,7 @@ impl TrainingManager {
     }
 
     /// Load a candidate without launching jobs or touching shared hardware.
-    pub(crate) async fn prepare_from_storage(&self) -> Result<(), String> {
+    async fn prepare_from_storage(&self) -> Result<(), String> {
         // Install the prepared history under the same mutation gate used by
         // training commands. Activation starts only after the session is published.
         let _mutation = self.inner.runtime.mutation.lock().await;
@@ -232,7 +232,7 @@ impl TrainingManager {
         Ok(())
     }
 
-    pub(crate) fn resume_prepared_runs(&self, activity: ProjectActivity) {
+    fn resume_prepared_runs(&self, activity: ProjectActivity) {
         let snapshot = self.snapshot();
         for run in snapshot.runs().iter().filter(|run| run.phase().active()) {
             let run = run.clone();
@@ -259,11 +259,11 @@ impl TrainingManager {
         self.inner.snapshot.recover_lock().clone()
     }
 
-    pub(crate) fn catalog(&self) -> TrainingSnapshot {
+    pub(super) fn catalog(&self) -> TrainingSnapshot {
         self.inner.snapshot.recover_lock().catalog()
     }
 
-    pub(crate) fn run(&self, id: &str) -> Result<TrainingRun, OperationError> {
+    pub(super) fn run(&self, id: &str) -> Result<TrainingRun, OperationError> {
         self.inner
             .snapshot
             .recover_lock()
@@ -311,7 +311,7 @@ impl TrainingManager {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) async fn stop(&self, run_id: &str) -> Result<(), String> {
+    pub(super) async fn stop(&self, run_id: &str) -> Result<(), String> {
         let _activity = self
             .admit_project_activity()
             .map_err(|error| error.to_string())?;

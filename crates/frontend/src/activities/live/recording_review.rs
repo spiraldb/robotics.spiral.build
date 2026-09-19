@@ -46,7 +46,7 @@ pub(crate) struct TimelineOptionalArmChannels {
 }
 
 impl TimelineOptionalArmChannels {
-    pub(crate) const fn new(
+    const fn new(
         velocity: Option<BTreeMap<String, Option<f64>>>,
         effort: Option<BTreeMap<String, Option<f64>>>,
         action: Option<BTreeMap<String, Option<f64>>>,
@@ -75,7 +75,7 @@ impl TimelineArmSample {
         }
     }
 
-    pub(crate) fn with_optional_channels(mut self, channels: TimelineOptionalArmChannels) -> Self {
+    fn with_optional_channels(mut self, channels: TimelineOptionalArmChannels) -> Self {
         self.velocity = channels.velocity;
         self.effort = channels.effort;
         self.action = channels.action;
@@ -105,7 +105,7 @@ pub(crate) struct TimelineSample {
 }
 
 impl TimelineSample {
-    pub(crate) const fn new(frame: u64, seconds: f64) -> Self {
+    const fn new(frame: u64, seconds: f64) -> Self {
         Self {
             frame,
             seconds,
@@ -114,7 +114,7 @@ impl TimelineSample {
         }
     }
 
-    pub(crate) fn with_measurements(
+    fn with_measurements(
         mut self,
         follow_error_degrees: Option<f64>,
         arms: Vec<TimelineArmSample>,
@@ -125,7 +125,7 @@ impl TimelineSample {
     }
 
     #[cfg(test)]
-    pub(crate) const fn frame(&self) -> u64 {
+    const fn frame(&self) -> u64 {
         self.frame
     }
 
@@ -172,11 +172,11 @@ impl EpisodePreview {
     }
 
     #[cfg(test)]
-    pub(crate) const fn sample(&self) -> &TimelineSample {
+    const fn sample(&self) -> &TimelineSample {
         &self.sample
     }
 
-    pub(crate) fn signal_lanes(&self) -> &Arc<[TimelineSignalLane; 6]> {
+    pub(super) fn signal_lanes(&self) -> &Arc<[TimelineSignalLane; 6]> {
         &self.signal_lanes
     }
 
@@ -192,7 +192,7 @@ pub(crate) struct EpisodeData {
 }
 
 impl EpisodeData {
-    pub(crate) fn try_new(snapshot: EpisodeInspectionSnapshot) -> Result<Self, String> {
+    fn try_new(snapshot: EpisodeInspectionSnapshot) -> Result<Self, String> {
         snapshot.validate()?;
         let signal_lanes = Arc::new(snapshot.signal_lanes(TRACE_BUCKETS));
         Ok(Self {
@@ -201,12 +201,12 @@ impl EpisodeData {
         })
     }
 
-    pub(crate) fn preview_at(&self, seconds: f64) -> Result<EpisodePreview, String> {
+    fn preview_at(&self, seconds: f64) -> Result<EpisodePreview, String> {
         let sample = self.snapshot.sample_at(seconds)?;
         Ok(EpisodePreview::from_inspection(self, sample))
     }
 
-    pub(crate) async fn load(episode: &str) -> Result<Arc<Self>, String> {
+    async fn load(episode: &str) -> Result<Arc<Self>, String> {
         let request = RecordingClient::current().inspect_episode(episode.to_owned());
         EpisodeDataDeadline::run(
             "The episode data",
@@ -238,14 +238,14 @@ impl EpisodeInspectionCache {
             .cloned()
     }
 
-    pub(crate) fn insert(&mut self, inspection: Arc<EpisodeData>) {
+    fn insert(&mut self, inspection: Arc<EpisodeData>) {
         self.entries
             .retain(|entry| entry.snapshot.episode().id() != inspection.snapshot.episode().id());
         self.entries.push_front(inspection);
         self.entries.truncate(MAX_CACHED_EPISODES);
     }
 
-    pub(crate) fn invalidate(&mut self, episode: &str) {
+    pub(super) fn invalidate(&mut self, episode: &str) {
         self.entries
             .retain(|entry| entry.snapshot.episode().id() != episode);
     }
@@ -258,7 +258,7 @@ pub(crate) struct EpisodePreviewRequest {
 }
 
 impl EpisodePreviewRequest {
-    pub(crate) fn new(episode: String, expected_frames: Option<u64>, seconds: f64) -> Self {
+    pub(super) fn new(episode: String, expected_frames: Option<u64>, seconds: f64) -> Self {
         Self {
             episode,
             expected_frames,
@@ -275,7 +275,7 @@ pub(crate) struct EpisodePreviewSignals {
 }
 
 impl EpisodePreviewSignals {
-    pub(crate) fn use_signals() -> Self {
+    pub(super) fn use_signals() -> Self {
         use_hook(|| Self {
             state: Signal::new(None),
             revision: Signal::new(0),
@@ -283,7 +283,7 @@ impl EpisodePreviewSignals {
         })
     }
 
-    pub(crate) const fn new(
+    pub(super) const fn new(
         state: Signal<Option<RecordedSource<EpisodePreview>>>,
         revision: Signal<u64>,
         cache: Signal<EpisodeInspectionCache>,
@@ -295,7 +295,7 @@ impl EpisodePreviewSignals {
         }
     }
 
-    pub(crate) const fn into_signals(
+    pub(super) const fn into_signals(
         self,
     ) -> (
         Signal<Option<RecordedSource<EpisodePreview>>>,
@@ -307,7 +307,7 @@ impl EpisodePreviewSignals {
 }
 
 impl EpisodePreviewSignals {
-    pub(crate) fn request(self, request: EpisodePreviewRequest) {
+    pub(super) fn request(self, request: EpisodePreviewRequest) {
         let studio = StudioProjectState::current();
         let EpisodePreviewRequest {
             episode,

@@ -27,7 +27,7 @@ pub(crate) struct RobotConfigUpdate {
     calibration: Value,
 }
 impl RobotConfigUpdate {
-    pub(crate) fn new(motors: Value, calibration: Value) -> Self {
+    pub(super) fn new(motors: Value, calibration: Value) -> Self {
         Self {
             motors,
             calibration,
@@ -93,7 +93,7 @@ impl Default for RobotConfig {
 
 impl RobotConfig {
     /// Construct a document from an in-memory JSON value.
-    pub(crate) fn from_value(value: Value) -> Result<Self, ConfigError> {
+    pub(super) fn from_value(value: Value) -> Result<Self, ConfigError> {
         let Value::Object(mut root) = value else {
             return Err(ConfigError::RootMustBeObject);
         };
@@ -107,23 +107,23 @@ impl RobotConfig {
     }
 
     /// Borrow the complete root object, including fields unknown to this crate.
-    pub(crate) fn root(&self) -> &Map<String, Value> {
+    pub(super) fn root(&self) -> &Map<String, Value> {
         &self.root
     }
 
     /// Borrow the existing top-level `calibration` value, if present.
-    pub(crate) fn calibration(&self) -> Option<&Value> {
+    pub(super) fn calibration(&self) -> Option<&Value> {
         self.root.get("calibration")
     }
 
     /// Borrow the existing top-level `motors` value, if present.
-    pub(crate) fn motors(&self) -> Option<&Value> {
+    fn motors(&self) -> Option<&Value> {
         self.root.get("motors")
     }
 
     /// Decode domain motor specifications while keeping raw unknown fields in
     /// this document for the next read-modify-write.
-    pub(crate) fn motor_specs(
+    pub(super) fn motor_specs(
         &self,
     ) -> Result<Option<std::collections::BTreeMap<String, MotorSpec>>, ConfigError> {
         let Some(value) = self.motors().filter(|value| !value.is_null()) else {
@@ -189,7 +189,7 @@ impl RobotConfig {
     ///
     /// Fields unknown to this build survive for existing motors. Removed motors
     /// are removed, and new motors receive only the explicit domain fields.
-    pub(crate) fn encode_motor_specs(
+    pub(super) fn encode_motor_specs(
         &self,
         specs: &std::collections::BTreeMap<String, MotorSpec>,
     ) -> Result<Value, ConfigError> {
@@ -232,7 +232,7 @@ impl RobotConfig {
     }
 
     /// Replace measured calibration and motor fields, preserving the rest of the document.
-    pub(crate) fn merged(&self, update: RobotConfigUpdate) -> Result<Self, ConfigError> {
+    pub(super) fn merged(&self, update: RobotConfigUpdate) -> Result<Self, ConfigError> {
         let mut root = self.root.clone();
         root.insert("motors".to_owned(), update.motors);
         root.insert("calibration".to_owned(), update.calibration);
@@ -241,7 +241,7 @@ impl RobotConfig {
 
     /// Serialize the complete document as deterministic pretty JSON ending in
     /// exactly one newline.
-    pub(crate) fn to_pretty_json(&self) -> Result<String, ConfigError> {
+    pub(super) fn to_pretty_json(&self) -> Result<String, ConfigError> {
         let canonical = Value::Object(self.root.clone()).canonicalized();
         let mut json =
             serde_json::to_string_pretty(&canonical).map_err(|source| ConfigError::Json {

@@ -16,17 +16,17 @@ pub(crate) struct WorkflowClient {
     project: ProjectClient,
 }
 impl WorkflowClient {
-    pub(crate) fn current() -> Self {
+    pub(super) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) async fn list(&self) -> Result<Vec<WorkflowSummary>, CommandError> {
+    pub(super) async fn list(&self) -> Result<Vec<WorkflowSummary>, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/workflows"))
             .await
     }
-    pub(crate) async fn load(&self, id: &str) -> Result<WorkflowDocument, CommandError> {
+    pub(super) async fn load(&self, id: &str) -> Result<WorkflowDocument, CommandError> {
         self.project
             .request(HttpRequest::new(
                 "GET",
@@ -34,7 +34,7 @@ impl WorkflowClient {
             ))
             .await
     }
-    pub(crate) async fn save(
+    pub(super) async fn save(
         &self,
         document: &WorkflowDocument,
     ) -> Result<WorkflowDocument, CommandError> {
@@ -42,17 +42,17 @@ impl WorkflowClient {
             .request(HttpRequest::new("POST", "/api/workflows/save").json(document))
             .await
     }
-    pub(crate) async fn plan(&self, workflow: &WorkflowSpec) -> Result<WorkflowPlan, CommandError> {
+    pub(super) async fn plan(&self, workflow: &WorkflowSpec) -> Result<WorkflowPlan, CommandError> {
         self.project
             .request(HttpRequest::new("POST", "/api/workflows/plan").json(workflow))
             .await
     }
-    pub(crate) async fn runs(&self) -> Result<Vec<WorkflowRun>, CommandError> {
+    pub(super) async fn runs(&self) -> Result<Vec<WorkflowRun>, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/workflow-runs"))
             .await
     }
-    pub(crate) async fn run(&self, id: &str) -> Result<WorkflowRun, CommandError> {
+    pub(super) async fn run(&self, id: &str) -> Result<WorkflowRun, CommandError> {
         self.project
             .request(HttpRequest::new(
                 "GET",
@@ -60,19 +60,19 @@ impl WorkflowClient {
             ))
             .await
     }
-    pub(crate) async fn start(&self, workflow: &WorkflowSpec) -> Result<WorkflowRun, CommandError> {
+    pub(super) async fn start(&self, workflow: &WorkflowSpec) -> Result<WorkflowRun, CommandError> {
         self.project
             .request(HttpRequest::new("POST", "/api/workflow-runs").json(workflow))
             .await
     }
-    pub(crate) async fn capabilities(
+    pub(super) async fn capabilities(
         &self,
     ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/models/capabilities"))
             .await
     }
-    pub(crate) async fn model_status(&self) -> Result<WorkflowAgentReadiness, CommandError> {
+    pub(super) async fn model_status(&self) -> Result<WorkflowAgentReadiness, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/models/status"))
             .await
@@ -82,7 +82,7 @@ impl WorkflowClient {
             .request(HttpRequest::new("GET", "/api/relations"))
             .await
     }
-    pub(crate) async fn complete(
+    pub(super) async fn complete(
         &self,
         request: ModelRequest,
         mut on_text: impl FnMut(&str),

@@ -40,7 +40,7 @@ pub(crate) enum StudioRoute {
 }
 
 impl StudioRoute {
-    pub(crate) const fn activity(&self) -> Activity {
+    pub(super) const fn activity(&self) -> Activity {
         match self {
             Self::Live {} => Activity::Live,
             Self::Data {} => Activity::Data,
@@ -52,11 +52,11 @@ impl StudioRoute {
         }
     }
 
-    pub(crate) fn label(&self) -> &'static str {
+    pub(super) fn label(&self) -> &'static str {
         self.activity().label()
     }
 
-    pub(crate) const fn for_activity(activity: Activity) -> Self {
+    pub(super) const fn for_activity(activity: Activity) -> Self {
         match activity {
             Activity::Live => Self::Live {},
             Activity::Data => Self::Data {},
@@ -83,7 +83,7 @@ impl StudioRoute {
 }
 
 #[component]
-pub(crate) fn StudioRouter() -> Element {
+pub(super) fn StudioRouter() -> Element {
     rsx! { Router::<StudioRoute> {} }
 }
 

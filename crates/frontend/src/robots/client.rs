@@ -19,7 +19,7 @@ impl RobotClient {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) fn telemetry_snapshot(
+    pub(super) fn telemetry_snapshot(
         &self,
     ) -> impl Future<Output = Result<spiral_robotics_common::robots::TelemetryFrame, CommandError>> + use<>
     {
@@ -27,12 +27,12 @@ impl RobotClient {
             .request(HttpRequest::new("GET", "/api/robots/telemetry"))
     }
 
-    pub(crate) fn robots(
+    pub(super) fn robots(
         &self,
     ) -> impl Future<Output = Result<Vec<RobotSummary>, CommandError>> + use<> {
         self.project.request(HttpRequest::new("GET", "/api/robots"))
     }
-    pub(crate) fn hardware_status(
+    pub(super) fn hardware_status(
         &self,
     ) -> impl Future<Output = Result<spiral_robotics_common::robots::HardwareStatus, CommandError>> + use<>
     {
