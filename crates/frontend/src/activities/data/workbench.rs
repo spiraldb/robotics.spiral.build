@@ -1,8 +1,8 @@
 //! Query editor and relation summaries for the Data route.
 use crate::activities::data::query_result::DEFAULT_QUERY_ROWS;
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, Field, Select};
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
 
 #[component]
@@ -47,13 +47,11 @@ pub(super) fn QueryPanel(
                 }
             }
             div { class: "flex shrink-0 items-end gap-2 px-2 py-2",
-                label { class: "w-24",
-                    span { class: "label", "Max rows" }
-                    select {
-                        class: "field",
+                Field { label: "Max rows", class: "w-24",
+                    Select {
                         value: "{controller.max_rows()}",
-                        onchange: move |event| {
-                            let rows = event.value().parse().unwrap_or(DEFAULT_QUERY_ROWS);
+                        onchange: move |value: String| {
+                            let rows = value.parse().unwrap_or(DEFAULT_QUERY_ROWS);
                             controller.set_max_rows(rows);
                         },
                         for option in QUERY_ROW_OPTIONS {
@@ -66,16 +64,16 @@ pub(super) fn QueryPanel(
                     span { class: "block whitespace-nowrap", "⌘/Ctrl Enter" }
                 }
                 if query_running {
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Cancel,
-                        variant: ActionVariant::Outline,
+                        variant: ButtonVariant::Outline,
                         onclick: move |_| controller.cancel_query(),
                         "Cancel query"
                     }
                 } else {
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Start,
-                        variant: ActionVariant::Solid,
+                        variant: ButtonVariant::Solid,
                         disabled: !can_query || controller.sql().trim().is_empty(),
                         onclick: move |_| run_query(),
                         "Run query"

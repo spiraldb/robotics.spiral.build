@@ -7,8 +7,7 @@
 
 use super::cells::ResultColumn;
 use super::*;
-use crate::components::interaction::Toggle;
-use crate::components::side_sheet::{SheetHeading, SheetPosition, SideSheet};
+use spiral_robotics_ui::{SheetHeading, SheetPosition, SideSheet, Toggle};
 
 const STAGGERED_ROWS: usize = 24;
 
@@ -119,7 +118,7 @@ pub(super) fn QueryResultTable(result: SpiralQuerySnapshot) -> Element {
                                     "data-selected": selected_row == Some(index),
                                     "aria-selected": selected_row == Some(index),
                                     td { class: "query-row-number",
-                                        Action { purpose: ActionPurpose::Select, variant: ActionVariant::Link,
+                                        Button { purpose: ActionPurpose::Select, variant: ButtonVariant::Link,
                                             class: "query-row-action",
                                             aria_label: "Inspect row {index + 1}", aria_pressed: selected_row == Some(index),
                                             id: "{prefix}-row-{index}",
@@ -132,7 +131,7 @@ pub(super) fn QueryResultTable(result: SpiralQuerySnapshot) -> Element {
                                         { let value = row.get(column.column().name());
                                           if column.is_image() {
                                             rsx! { td { class: "query-media-cell",
-                                                Action { purpose: ActionPurpose::Select, variant: ActionVariant::Quiet,
+                                                Button { purpose: ActionPurpose::Select, variant: ButtonVariant::Quiet,
                                                     class: "query-result-image-action", aria_label: "Inspect {column.column().humanized_name()} in row {index + 1}",
                                                     id: "{prefix}-image-{index}-{column_index}",
                                                     onclick: { let trigger = format!("{prefix}-image-{index}-{column_index}"); let inspector_id = inspector_id.clone(); move |_| {

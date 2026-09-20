@@ -14,8 +14,8 @@ use crate::components::document_bar::{
     DocumentTitle, SwitcherCopy, SwitcherGate,
 };
 use crate::components::icons::{PlayIcon, SpinnerIcon, WorkflowIcon};
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::shell::state::StudioProjectState;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, Select};
 
 const SWITCHER_ID: &str = "workflow-switcher";
 const TITLE_ID: &str = "workflow-document-title";
@@ -105,18 +105,18 @@ fn WorkflowDatasetCreation(controller: WorkflowController, oncreated: EventHandl
                 div { class: "workflow-dataset-creation",
                     label { r#for: "workflow-dataset", "From dataset" }
                     div {
-                        select {
+                        Select {
                             id: "workflow-dataset", value: "{selected}",
                             disabled: items.is_empty(),
-                            onchange: move |event| selected.set(event.value()),
+                            onchange: move |value| selected.set(value),
                             option { value: "", disabled: true, if items.is_empty() { "No datasets available" } else { "Choose a dataset" } }
                             for source in items {
                                 option { value: "{source.resource_id()}", "{source.selection().label()}" }
                             }
                         }
-                        Action {
+                        Button {
                             purpose: ActionPurpose::Create,
-                            variant: ActionVariant::Outline,
+                            variant: ButtonVariant::Outline,
                             disabled: source.is_none() || controller.workflow_selection_reason().is_some(),
                             onclick: move |_| {
                                 if let Some(source) = source.clone() {
@@ -152,23 +152,23 @@ fn WorkflowDocumentActions(controller: WorkflowController, state: DocumentState)
         div { class: "document-actions",
             DocumentStateChip { state }
             if controller.revision_conflict() {
-                Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
+                Button { purpose: ActionPurpose::Sync, variant: ButtonVariant::Outline,
                     onclick: move |_| controller.reload_current(), "Reload current" }
             } else if dirty {
-                Action { purpose: ActionPurpose::Discard, variant: ActionVariant::Link,
+                Button { purpose: ActionPurpose::Discard, variant: ButtonVariant::Link,
                     class: "document-discard-action",
                     disabled: command.is_some() || controller.agent_state().session().phase().active(),
                     title: "Return to the saved SQL and conversation",
                     onclick: move |_| controller.discard(studio), "Discard" }
             }
-            Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline,
+            Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Outline,
                 disabled: save_reason.is_some(),
                 aria_busy: command == Some(WorkflowPendingCommand::Saving),
                 title: save_reason.unwrap_or_else(|| "Save SQL and conversation".into()),
                 onclick: move |_| controller.save(studio),
                 if command == Some(WorkflowPendingCommand::Saving) { "Saving…" } else { "Save" }
             }
-            Action { purpose: ActionPurpose::Start, variant: ActionVariant::Solid,
+            Button { purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
                 class: "document-run-action",
                 disabled: run_reason.is_some(),
                 aria_busy: running,

@@ -1,7 +1,7 @@
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CalibrationJointProgress, RobotSummary};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 use spiral_robotics_viewport as arm;
 
 use crate::robots::{HardwareCommands, HardwareViewState};
@@ -32,9 +32,9 @@ pub(super) fn CalibrationSection(
             section {
                 div { class: "device-section-head",
                     h3 { class: "label mb-0 flex-1", "Calibration" }
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Start,
-                        variant: ActionVariant::Outline,
+                        variant: ButtonVariant::Outline,
                         disabled: !connected || command().is_some(),
                         aria_busy: command() == Some("start"),
                         title: calibration_title,
@@ -71,9 +71,9 @@ pub(super) fn CalibrationSection(
         section {
             div { class: "flex items-center gap-1",
                 h3 { class: "label mb-0 flex-1", "Calibrating" }
-                Action {
+                Button {
                     purpose: ActionPurpose::Apply,
-                    variant: ActionVariant::Solid,
+                    variant: ButtonVariant::Solid,
                     disabled: !progress.ready() || command().is_some(),
                     aria_busy: command() == Some("finish"),
                     title: if progress.ready() { "" } else { "Every joint still needs to move" },
@@ -97,7 +97,7 @@ pub(super) fn CalibrationSection(
                     },
                     if command() == Some("finish") { "Saving…" } else { "Save" }
                 }
-                Action {
+                Button {
                     purpose: ActionPurpose::Cancel,
                     disabled: command().is_some(),
                     aria_busy: command() == Some("cancel"),

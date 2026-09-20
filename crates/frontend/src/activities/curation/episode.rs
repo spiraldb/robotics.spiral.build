@@ -12,10 +12,12 @@ use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryColumn};
 use super::sheet::{EPISODE_HEADING_ID, FactValueText, RuleTone, SheetTile};
 use crate::activities::data::DatasetClient;
 use crate::components::icons::SpinnerIcon;
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
-use crate::components::side_sheet::{SheetHeading, SheetPosition, SideSheet};
 use crate::format::{
     ByteCountPresentation, ClockPresentation, GroupedCountPresentation, UtcTimestampPresentation,
+};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonVariant, Fact, FactLayout, FactList, SheetHeading, SheetPosition,
+    SideSheet,
 };
 
 #[component]
@@ -51,20 +53,19 @@ pub(super) fn EpisodeSheet(
                         p { class: "curation-episode-path", "{uri}" }
                     }
                 }
-                dl { class: "curation-stat-grid",
-                    div { class: "curation-stat", dt { "Recorded" } dd { "{episode.message_start_time().filter(|start| *start > 0).map_or_else(|| \"—\".into(), UtcTimestampPresentation::utc_label)}" } }
-                    div { class: "curation-stat", dt { "Duration" } dd { "{episode.duration_seconds().map_or_else(|| \"—\".into(), ClockPresentation::clock_label)}" } }
-                    div { class: "curation-stat", dt { "Messages" } dd { "{episode.message_count().map_or_else(|| \"—\".into(), GroupedCountPresentation::grouped_label)}" } }
-                    div { class: "curation-stat", dt { "Channels" } dd { "{episode.channel_count().map_or_else(|| \"—\".into(), GroupedCountPresentation::grouped_label)}" } }
-                    div { class: "curation-stat", dt { "File" } dd { "{episode.source_bytes().map_or_else(|| \"—\".into(), ByteCountPresentation::byte_label)}" } }
+                FactList { layout: FactLayout::Tiles, mono: true,
+                    Fact { label: "Recorded", "{episode.message_start_time().filter(|start| *start > 0).map_or_else(|| \"—\".into(), UtcTimestampPresentation::utc_label)}" }
+                    Fact { label: "Duration", "{episode.duration_seconds().map_or_else(|| \"—\".into(), ClockPresentation::clock_label)}" }
+                    Fact { label: "Messages", "{episode.message_count().map_or_else(|| \"—\".into(), GroupedCountPresentation::grouped_label)}" }
+                    Fact { label: "Channels", "{episode.channel_count().map_or_else(|| \"—\".into(), GroupedCountPresentation::grouped_label)}" }
+                    Fact { label: "File", "{episode.source_bytes().map_or_else(|| \"—\".into(), ByteCountPresentation::byte_label)}" }
                 }
                 if !judged.facts().is_empty() {
                     section { class: "curation-evidence",
                         h5 { class: "curation-evidence-title", "Measurements" }
-                        dl { class: "curation-kv",
+                        FactList { mono: true, class: "curation-kv",
                             for fact in judged.facts() {
-                                dt { "{fact.label()}" }
-                                dd { title: "{FactValueText::new(verdict.fact(fact.key()), fact.kind()).full()}",
+                                Fact { label: "{fact.label()}", title: "{FactValueText::new(verdict.fact(fact.key()), fact.kind()).full()}",
                                     "{FactValueText::new(verdict.fact(fact.key()), fact.kind())}" }
                             }
                         }
@@ -283,7 +284,7 @@ fn FrameEvidence(
                 },
                 Some(Err(error)) => rsx! {
                     p { class: "curation-section-note is-alert", role: "alert", "{error}" }
-                    Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline, onclick: move |_| frames.restart(), "Try again" }
+                    Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, onclick: move |_| frames.restart(), "Try again" }
                 },
                 None => rsx! {
                     p { class: "curation-section-note curation-frames-loading", role: "status",

@@ -9,7 +9,7 @@ use spiral_robotics_common::workflow::{
 use super::highlight::Tokens;
 use super::state::WorkflowController;
 use crate::components::icons::ConversationIcon;
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 
 #[component]
 pub(super) fn AssistantConversation(
@@ -51,8 +51,8 @@ pub(super) fn AssistantConversation(
                                                 if let Some(receipt) = tool.receipt() {
                                                     if controller.receipt_panel(receipt).is_some() {
                                                         {let target = receipt.to_owned();
-                                                        rsx! { Action {
-                                                            purpose: ActionPurpose::Navigate, variant: ActionVariant::Link,
+                                                        rsx! { Button {
+                                                            purpose: ActionPurpose::Navigate, variant: ButtonVariant::Link,
                                                             class: "workflow-agent-receipt-action",
                                                             onclick: move |_| controller.open_agent_receipt(target.clone()),
                                                             "{receipt.label()}"

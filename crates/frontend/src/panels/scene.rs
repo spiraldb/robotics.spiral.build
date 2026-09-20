@@ -16,11 +16,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
 use spiral_robotics_common::robots::{MotorCondition, RobotSummary};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 use spiral_robotics_viewport::{
     ArmPose, Command, Condition, Frame as BenchFrame, FrameError, Interaction, Joint, Target,
     Viewport as Bench,
@@ -444,7 +444,7 @@ pub(crate) fn Viewport(
                 // second of which was pushed off the first by a hard-coded 64px
                 // that only held while "Home" was exactly that wide.
                 div { class: "viewport-controls",
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Toggle,
                         class: "viewport-action",
                         aria_pressed: show_grid(),
@@ -452,7 +452,7 @@ pub(crate) fn Viewport(
                         title: "Show or hide the scale grid",
                         "Grid"
                     }
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Apply,
                         class: "viewport-action",
                         onclick: {
@@ -841,9 +841,9 @@ fn Legend(
         ul { class: "viewport-legend",
             for (index, arm) in arms.into_iter().enumerate() {
                 li { key: "{arm.id()}",
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Select,
-                        variant: ActionVariant::Row,
+                        variant: ButtonVariant::Row,
                         class: "viewport-legend-row",
                         aria_pressed: selection.read().as_ref().is_some_and(|selection| selection.matches_robot(arm.id())),
                         title: "Select {arm.id()}; press F to frame it",
@@ -866,7 +866,7 @@ fn Legend(
 fn ViewCube(on_command: EventHandler<Command>) -> Element {
     rsx! {
         div { class: "view-cube", role: "group", "aria-label": "Camera orientation",
-            Action {
+            Button {
                 purpose: ActionPurpose::Apply,
                 title: "Top view", aria_label: "Top view",
                 onclick: move |_| on_command.call(Command::Top),
@@ -877,13 +877,13 @@ fn ViewCube(on_command: EventHandler<Command>) -> Element {
             // operator to press the key that starts a recording on live
             // hardware.
             div { class: "view-cube-row",
-                Action {
+                Button {
                     purpose: ActionPurpose::Apply,
                     title: "Front view", aria_label: "Front view",
                     onclick: move |_| on_command.call(Command::Front),
                     "Front"
                 }
-                Action {
+                Button {
                     purpose: ActionPurpose::Apply,
                     title: "Right side view", aria_label: "Right side view",
                     onclick: move |_| on_command.call(Command::Right),

@@ -56,6 +56,8 @@
      dark mat so letterboxing still reads as image rather than empty UI. */
   --tone-viewport: #f5f5f3;
   --tone-camera: #1f1f1f;
+  /* Text set on the camera mat: status and errors inside a recorded camera. */
+  --tone-camera-ink: rgb(255 255 255 / 0.72);
 
   /* Stage identity: what a workflow stage does to the data. Identity, not
      health — the same kind keeps the same hue on every graph, and a 6px mark
@@ -203,7 +205,7 @@
   justify-content: center;
   text-align: center;
   /*
-    The layered `min-h-14` above never took: `.ui-action--compact` is unlayered
+    The layered `min-h-14` above never took: `.ui-button--compact` is unlayered
     and set a 24px floor, so the items collapsed to the 32px their own contents
     happened to occupy and the five activities stacked into a 160px block with
     four pixels between an icon and the label under it. Fifty-six is the size
@@ -396,16 +398,8 @@
     @apply -mx-3 -mt-2 mb-2;
   }
 
-  .capture-dataset-field {
-    @apply flex min-w-0 items-center gap-2 text-[10px] text-ink-soft;
-  }
-
-  .capture-dataset-field > span {
-    @apply w-16 shrink-0;
-  }
-
-  .capture-dataset-field .field {
-    @apply min-w-0 flex-1 font-mono text-[11px];
+  .capture-dataset-field .ui-input {
+    @apply font-mono;
   }
 
   .capture-destination > p {
@@ -726,10 +720,6 @@
     @apply text-[10px] leading-4 text-ink-soft;
   }
 
-  .training-inline-copy .technical-details {
-    @apply mt-0.5 text-[10px] text-ink-soft;
-  }
-
   .training-inline-state-caution {
     background: var(--tone-caution-soft);
     color: var(--tone-caution);
@@ -791,19 +781,6 @@
     @apply mt-2 grid gap-1 border-t border-line pt-2;
   }
 
-  .training-source-meta > div {
-    @apply flex min-w-0 items-start gap-1 text-[10px];
-  }
-
-  .training-source-meta dt {
-    @apply shrink-0 text-ink-faint;
-  }
-
-  .training-source-meta dd {
-    @apply min-w-0 font-mono leading-4 text-ink;
-    overflow-wrap: anywhere;
-  }
-
   .training-runtime-summary {
     @apply mb-2 flex min-w-0 items-start gap-2 border-b border-line pb-2;
   }
@@ -850,7 +827,6 @@
     grid-template-columns: minmax(0, 1fr) 6.5rem;
   }
 
-  .training-field,
   .rollout-field {
     @apply flex min-w-0 flex-col gap-1 text-[10px] text-ink-soft;
   }
@@ -859,31 +835,13 @@
     @apply w-full;
   }
 
-  .training-field input,
-  .training-field select,
   .training-query-section textarea {
     @apply min-h-7 w-full rounded border border-line bg-surface px-2 text-[11px] text-ink outline-none transition-colors placeholder:text-ink-faint disabled:cursor-not-allowed disabled:bg-sunken disabled:text-ink-faint;
   }
 
-  .training-field input:focus,
-  .training-field select:focus,
-  .training-query-section textarea:focus,
-  .rollout-field input:focus,
-  .rollout-field select:focus {
+  .training-query-section textarea:focus {
     border-color: var(--tone-accent);
     box-shadow: 0 0 0 1px var(--tone-accent);
-  }
-
-  .training-query-section > summary {
-    @apply min-h-7 cursor-pointer py-1 text-[11px] font-semibold outline-none;
-  }
-
-  .training-query-section > summary:focus-visible {
-    color: var(--tone-accent);
-  }
-
-  .training-query-section > summary small {
-    @apply float-right ml-2 max-w-[60%] truncate font-normal text-[10px] text-ink-faint;
   }
 
   .training-query-body {
@@ -1005,18 +963,6 @@
     @apply grid shrink-0 grid-cols-3 divide-x divide-line;
   }
 
-  .training-run-facts > div {
-    @apply min-w-20 px-3 first:pl-0 last:pr-0;
-  }
-
-  .training-run-facts dt {
-    @apply text-[10px] text-ink-faint;
-  }
-
-  .training-run-facts dd {
-    @apply mt-0.5 font-mono text-[11px] font-medium tabular-nums;
-  }
-
   .training-run-message {
     @apply shrink-0 border-b border-line px-3 py-1.5 text-[10px] leading-4 text-ink-soft;
     background: var(--tone-sunken);
@@ -1059,20 +1005,6 @@
 
   .training-run-logs {
     @apply shrink-0 border-t border-line bg-sunken text-[10px];
-  }
-
-  .training-run-logs summary {
-    @apply min-h-7 cursor-pointer px-3 py-1.5 font-medium text-ink-soft outline-none focus-visible:text-accent;
-  }
-
-  .training-run-logs pre {
-    @apply max-h-40 overflow-auto border-t border-line bg-surface px-3 py-2 font-mono text-[10px] leading-4 text-ink-soft;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .training-run-logs code {
-    font: inherit;
   }
 
   .training-chart-empty {
@@ -1190,25 +1122,16 @@
     @apply grid min-h-0 flex-1 content-start grid-cols-2 overflow-y-auto px-3 py-2;
   }
 
-  .training-input-facts > div {
+  .training-input-facts > .ui-fact {
     @apply min-w-0 border-b border-line py-2 last:border-b-0;
   }
 
-  .training-input-facts > div:nth-last-child(2) {
+  .training-input-facts > .ui-fact:nth-last-child(2) {
     border-bottom: 0;
   }
 
   .training-input-wide {
     @apply col-span-2;
-  }
-
-  .training-input-facts dt {
-    @apply text-[10px] text-ink-faint;
-  }
-
-  .training-input-facts dd {
-    @apply mt-0.5 min-w-0 font-mono text-[11px] leading-4 text-ink;
-    overflow-wrap: anywhere;
   }
 
   .training-resource-grid {
@@ -1219,16 +1142,8 @@
     @apply grid shrink-0 grid-cols-5 border-b border-line;
   }
 
-  .training-phase-timings > div {
+  .training-phase-timings > .ui-fact {
     @apply min-w-0 border-r border-line px-3 py-1.5 last:border-r-0;
-  }
-
-  .training-phase-timings dt {
-    @apply truncate text-[10px] text-ink-faint;
-  }
-
-  .training-phase-timings dd {
-    @apply mt-0.5 truncate font-mono text-[11px] font-medium tabular-nums text-ink;
   }
 
   .training-resource-lane {
@@ -1284,7 +1199,7 @@
       @apply items-start;
     }
 
-    .training-run-facts > div {
+    .training-run-facts > .ui-fact {
       @apply min-w-16 px-2;
     }
 
@@ -1334,7 +1249,7 @@
       @apply w-full;
     }
 
-    .training-run-facts > div {
+    .training-run-facts > .ui-fact {
       @apply flex-1;
     }
 
@@ -1408,7 +1323,7 @@
   }
 
   .document-name-input {
-    @apply h-6 w-72 max-w-full rounded border border-line bg-surface px-1.5 text-[12px] font-semibold text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
+    @apply w-72 max-w-full font-semibold;
   }
 
   .document-state {
@@ -1536,8 +1451,8 @@
     @apply flex gap-1;
   }
 
-  .workflow-dataset-creation select {
-    @apply h-6 min-w-0 flex-1 rounded border border-line bg-surface px-1.5 text-[12px] text-ink outline-none focus-visible:border-accent;
+  .workflow-dataset-creation .ui-select {
+    @apply min-w-0 flex-1;
   }
 
   .document-switcher-rename {
@@ -1545,35 +1460,8 @@
   }
 
   /* Shared empty and pending states inside any workflow tile. */
-  .panel-empty {
-    @apply flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 py-6 text-center;
-  }
-
-  .panel-empty > .ui-icon {
-    @apply mb-1 size-5 text-ink-faint;
-  }
-
-  .panel-empty strong {
-    @apply text-[12px] font-semibold text-ink;
-  }
-
-  .panel-empty p {
-    @apply max-w-[46ch] text-[11px] leading-4 text-ink-faint;
-  }
-
-  .panel-empty .ui-action {
-    @apply mt-2;
-  }
-
-  /* Before a workflow exists the Assistant does the teaching; the other
-     panes only say what will appear in them. */
-  .panel-empty.is-quiet p {
-    @apply max-w-[40ch] text-ink-faint;
-  }
-
   .inline-error {
-    @apply shrink-0 border-b border-line bg-danger-soft px-3 py-1.5 text-[11px] leading-4 text-danger;
-    overflow-wrap: anywhere;
+    @apply shrink-0 border-b border-line;
   }
 
   /* Graph canvas ---------------------------------------------------------- */
@@ -1718,7 +1606,7 @@
     @apply flex items-start gap-2;
   }
 
-  .workflow-inspector-heading > .ui-action {
+  .workflow-inspector-heading > .ui-button {
     @apply -mr-1.5 -mt-1 ml-auto shrink-0;
   }
 
@@ -1819,17 +1707,6 @@
     @apply mt-3 border-t border-line pt-2 text-[11px];
   }
 
-  .workflow-inspector-disclosure > summary {
-    @apply cursor-pointer select-none py-1 text-ink-soft hover:text-ink;
-  }
-
-  .workflow-inspector-disclosure > summary:focus-visible {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: -2px;
-    border-radius: 4px;
-  }
-
-  .workflow-inspector-disclosure pre,
   .workflow-native-operator pre {
     @apply mt-1 max-h-72 overflow-auto rounded bg-sunken px-2 py-1.5 font-mono text-[10px] leading-4 text-ink-soft;
     white-space: pre-wrap;
@@ -1897,7 +1774,7 @@
   }
 
   .run-select {
-    @apply h-6 max-w-56 rounded border border-line bg-surface px-1.5 text-[11px] text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
+    @apply max-w-56;
   }
 
   .run-count {
@@ -1921,32 +1798,8 @@
     @apply ml-auto min-w-0 text-[11px];
   }
 
-  .executed-sql > summary {
-    @apply inline-flex min-h-6 cursor-pointer select-none items-center gap-1 rounded px-1.5 text-ink-soft hover:bg-hover hover:text-ink;
-    list-style: none;
-  }
-
-  .executed-sql > summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .executed-sql > summary:focus-visible {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: 1px;
-  }
-
-  .executed-sql > summary .ui-icon {
-    @apply size-3;
-  }
-
   .executed-sql[open] {
     flex-basis: 100%;
-  }
-
-  .executed-sql pre {
-    @apply mt-1 max-h-40 overflow-auto rounded border border-line bg-sunken px-2.5 py-2 font-mono text-[10px] leading-4 text-ink;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
   }
 
   .results-stale {
@@ -1961,46 +1814,6 @@
      sheet): a 320px docked inspector beside a table or grid, at most 45% of
      its tile. A sticky heading carries the position and the step / close
      controls; Escape closes, ↑ and ↓ step. */
-  .side-sheet {
-    @apply flex w-80 max-w-[45%] shrink-0 flex-col overflow-y-auto border-l border-line bg-surface;
-    animation: side-sheet-enter 180ms var(--ease-out-expo) both;
-  }
-
-  @keyframes side-sheet-enter {
-    from {
-      opacity: 0;
-      translate: 6px 0;
-    }
-  }
-
-  .side-sheet-heading {
-    @apply sticky top-0 z-[1] flex min-h-9 shrink-0 items-center justify-between gap-2 border-b border-line bg-surface pl-3 pr-1.5;
-  }
-
-  .side-sheet-heading h3 {
-    @apply m-0 min-w-0 truncate text-[12px] font-semibold tabular-nums;
-  }
-
-  .side-sheet-heading h3:focus-visible {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: 3px;
-    border-radius: 4px;
-  }
-
-  .side-sheet-count {
-    @apply font-normal text-ink-faint;
-  }
-
-  .side-sheet-nav {
-    @apply flex shrink-0 items-center gap-px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .side-sheet {
-      animation: none;
-    }
-  }
-
   .workflow-result-body {
     @apply flex min-h-0 flex-1 flex-col overflow-hidden;
   }
@@ -2086,7 +1899,7 @@
     @apply mt-3 flex flex-wrap gap-1.5;
   }
 
-  .workflow-assistant-examples .ui-action {
+  .workflow-assistant-examples .ui-button {
     @apply rounded border border-line px-2 text-[11px] text-ink-soft hover:border-line-strong hover:text-ink;
   }
 
@@ -2296,7 +2109,7 @@
     @apply pointer-events-none absolute bottom-2 right-3 z-[3] flex;
   }
 
-  .workflow-assistant-jump .ui-action {
+  .workflow-assistant-jump .ui-button {
     @apply pointer-events-auto rounded-full border border-line bg-surface text-ink-soft hover:text-ink;
     box-shadow: 0 2px 6px rgb(0 0 0 / 0.08);
     animation: workflow-settle 160ms var(--ease-out-expo) both;
@@ -2390,26 +2203,6 @@
     overflow-wrap: anywhere;
   }
 
-  .workflow-facts {
-    @apply grid gap-y-1 text-[11px];
-    grid-template-columns: minmax(4.5rem, 7rem) minmax(0, 1fr);
-  }
-
-  .workflow-facts > div {
-    @apply contents;
-  }
-
-  .workflow-facts dt {
-    @apply pr-3 pt-px text-[10px] leading-4 text-ink-faint;
-    overflow-wrap: anywhere;
-  }
-
-  /* Lists wrap at their commas; a lone identifier breaks only as a last resort. */
-  .workflow-facts dd {
-    @apply min-w-0 leading-4 text-ink;
-    overflow-wrap: break-word;
-  }
-
   .workflow-facts dd .workflow-code {
     @apply text-[10px];
     white-space: pre-wrap;
@@ -2478,7 +2271,7 @@
     .document-switcher,
     .workflow-stage-card,
     .workflow-stage-popover,
-    .workflow-assistant-jump .ui-action,
+    .workflow-assistant-jump .ui-button,
     .run-phase-dot,
     .workflow-activity-dot,
     .workflow-tool-step-dot {
@@ -2527,11 +2320,6 @@
   .rollout-state-ready {
     background: var(--tone-good-soft);
     color: var(--tone-good);
-  }
-
-  .rollout-field input,
-  .rollout-field select {
-    @apply min-h-7 w-full rounded border border-line bg-surface px-2 text-[11px] text-ink outline-none transition-colors disabled:cursor-not-allowed disabled:bg-sunken disabled:text-ink-faint;
   }
 
   .rollout-field-grid {
@@ -2665,26 +2453,6 @@
     @apply grid shrink-0 grid-cols-3 border-b border-line;
   }
 
-  .rollout-metric {
-    @apply flex min-h-12 min-w-0 items-center gap-2 border-r border-line px-3 last:border-r-0;
-  }
-
-  .rollout-metric dt {
-    @apply min-w-0 flex-1 truncate text-[10px] text-ink-faint;
-  }
-
-  .rollout-metric dd {
-    @apply flex shrink-0 items-baseline gap-1 font-mono tabular-nums;
-  }
-
-  .rollout-metric dd span {
-    @apply text-[12px] font-medium;
-  }
-
-  .rollout-metric dd small {
-    @apply text-[10px] text-ink-faint;
-  }
-
   .rollout-inference-empty {
     @apply relative flex min-h-32 flex-1 flex-col items-center justify-center px-4 text-center;
   }
@@ -2744,8 +2512,7 @@
   tab-size: 2;
 }
 
-.query-input:focus,
-.settings-field .field:focus {
+.query-input:focus {
   border-color: var(--tone-accent);
   outline: 2px solid rgb(8 104 184 / 0.15);
   outline-offset: 1px;
@@ -3145,7 +2912,7 @@
   background: var(--tone-sunken);
 }
 
-.settings-nav .ui-action {
+.settings-nav .ui-button {
   display: block;
   width: 100%;
   min-height: 1.75rem;
@@ -3176,7 +2943,6 @@
 }
 
 .settings-field {
-  display: block;
   margin-bottom: 0.75rem;
 }
 
@@ -3347,11 +3113,7 @@
       scroll-behavior: auto !important;
     }
 
-    .training-field input,
-    .training-field select,
     .training-query-section textarea,
-    .rollout-field input,
-    .rollout-field select,
     .joint-row {
       transition: none;
     }
@@ -3656,7 +3418,7 @@
   /* The faces spell their view out. Abbreviating them to `F` and `R` put a key
      cap reading `R` beside one reading `F` — and `F` really is a key, while `R`
      starts a recording on live hardware. */
-  .view-cube .ui-action {
+  .view-cube .ui-button {
     @apply min-h-5;
   }
 
@@ -3675,40 +3437,12 @@
   .axis-y { color: #49815f; }
   .axis-z { color: #5178a6; }
 
-  .technical-details {
-    @apply mt-0.5 text-[10px] text-ink-faint;
-  }
-
-  .technical-details summary {
-    @apply w-fit cursor-pointer rounded px-0.5 hover:bg-hover hover:text-ink;
-  }
-
-  .technical-details code {
-    @apply mt-0.5 block max-h-24 overflow-auto rounded bg-sunken p-1 font-mono text-[10px] leading-snug text-ink-soft;
-    overflow-wrap: anywhere;
-  }
-
-  .field {
-    @apply min-h-6 w-full rounded border border-line bg-surface px-1.5 py-0 text-[12px] text-ink
-      focus:border-accent disabled:cursor-not-allowed disabled:text-ink-faint;
-  }
-
   .label {
     @apply mb-0.5 block text-[10px] font-medium text-ink-faint;
   }
 
   /* One neutral tag. A state worth colouring says so with a dot beside it
      rather than by turning the whole tag red. */
-  .chip {
-    @apply inline-flex items-center gap-1 rounded px-1 py-0 text-[11px] text-ink-soft;
-    background-color: var(--tone-hover);
-  }
-
-  .chip-caution {
-    @apply text-caution;
-    background-color: var(--tone-caution-soft);
-  }
-
   /* A slider appears only while Manual mode can really command the arm. The
      browser default differs per platform, so the active control owns its track
      and thumb rather than sharing them with read-only telemetry. */
@@ -3838,16 +3572,12 @@
     @apply mb-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] leading-tight text-danger;
   }
 
-  .device-setup-alarm .technical-details code {
-    @apply bg-surface text-ink-soft;
-  }
-
   /* The port and the button that opens it, on one line. */
   .device-port-row {
     @apply flex items-center gap-1;
   }
 
-  .device-port-row .field {
+  .device-port-row .ui-select {
     @apply min-w-0 flex-1;
   }
 
@@ -3998,8 +3728,8 @@
   grid-auto-flow: column;
   grid-auto-columns: max-content;
 }
-.workflow-view-switch .ui-action--segment,
-.curation-sheet-filter .ui-action--segment {
+.workflow-view-switch .ui-button--segment,
+.curation-sheet-filter .ui-button--segment {
   min-height: 22px;
   padding-inline: 9px;
   font-size: 11px;
@@ -4012,9 +3742,7 @@
 .comparison-pair { display:flex; min-width:0; flex:1; align-items:center; gap:8px; }
 .comparison-side { display:flex; min-width:0; align-items:center; gap:6px; color:var(--tone-ink-soft); font-size:11px; }
 .comparison-side-key { flex-shrink:0; font-weight:600; color:var(--tone-ink); font-variant-numeric:tabular-nums; }
-.comparison-select { height:24px; min-width:0; max-width:24rem; padding:0 6px; border:1px solid var(--tone-line); border-radius:4px; background:var(--tone-surface); color:var(--tone-ink); font:inherit; font-size:12px; text-overflow:ellipsis; }
-.comparison-select:hover:not(:disabled) { border-color:var(--tone-line-strong); }
-.comparison-select:disabled { color:var(--tone-ink-faint); }
+.comparison-select { max-width:24rem; }
 .comparison-pair-against { flex-shrink:0; font-size:11px; color:var(--tone-ink-faint); }
 .episode-comparison button:not(:disabled), .episode-comparison summary { cursor:pointer; }
 .episode-comparison button:disabled { opacity:.5; cursor:default; }
@@ -4091,7 +3819,6 @@
 .comparison-failed-list { display:flex; flex-wrap:wrap; gap:4px 6px; margin-top:8px; padding:0; list-style:none; }
 .comparison-failed-list li { padding:1px 6px; border-radius:4px; background:var(--tone-sunken); color:var(--tone-ink-soft); font-size:11px; }
 .comparison-failed-errors { margin-top:10px; font-size:10px; color:var(--tone-ink-faint); }
-.comparison-failed-errors summary { cursor:pointer; }
 .comparison-failed-errors p { margin-top:6px; padding:6px 8px; border-radius:4px; background:var(--tone-sunken); font-family:var(--font-mono); font-size:10px; line-height:1.6; color:var(--tone-ink-soft); overflow-wrap:anywhere; }
 .comparison-metric-card.is-pending { background:transparent; border-style:dashed; }
 .comparison-coverage-note { margin-top:12px; color:var(--tone-ink-soft); max-width:90ch; font-size:11px; line-height:1.6; }
@@ -4124,6 +3851,56 @@
 .comparison-evidence-pagination { display:flex; justify-content:space-between; gap:12px; padding-top:10px; color:var(--tone-ink-soft); font-size:10px; }
 .comparison-evidence-pagination > div { display:flex; gap:16px; }
 .comparison-bin-filter { display:flex; align-items:center; gap:12px; padding:8px 0; color:var(--tone-ink-soft); font-size:11px; }
+/* Data: shared ledger tables, quiet text actions, and the import form.
+   Unlayered like the activity rail, so they win over the layered Data block
+   above. Panel composition lives with that block. */
+.data-ledger tbody tr:hover { background: var(--tone-hover); }
+.data-text-action { color: var(--tone-accent); font-size: 12px; min-height: 24px; text-underline-offset: 3px; }
+.data-text-action:hover { text-decoration: underline; }
+.data-text-action:disabled { color: var(--tone-ink-faint); opacity: 0.65; text-decoration: none; cursor: default; }
+.data-ledger { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+.data-ledger th { position: sticky; top: 0; z-index: 1; padding: 9px 16px; background: var(--tone-sunken); color: var(--tone-ink-soft); font-size: 11px; font-weight: 500; text-align: left; border-bottom: 1px solid var(--tone-line); white-space: nowrap; }
+.data-ledger td { padding: 6px 16px; border-bottom: 1px solid var(--tone-line); vertical-align: middle; }
+.data-ledger th:first-child, .data-ledger td:first-child { padding-left: 20px; text-align: left; }
+.data-ledger th:last-child, .data-ledger td:last-child { padding-right: 20px; }
+
+.data-ledger th.text-right { text-align: right; }
+
+.data-import-action { padding: 6px 10px; border: 1px solid var(--tone-line); border-radius: 4px; font-size: 12px; background: var(--tone-surface); white-space: nowrap; }
+.data-import-action:disabled { opacity: .5; cursor: default; }
+.data-import-pane { overflow: auto; padding: 28px; max-width: 620px; width: 100%; }
+.data-import-pane h2 { font-size: 16px; font-weight: 600; }
+.data-import-pane p { font-size: 12px; color: var(--tone-ink-soft); line-height: 1.6; margin-top: 10px; overflow-wrap: anywhere; }
+.data-import-pane fieldset { display: flex; flex-direction: column; gap: 16px; margin: 24px 0; }
+.data-import-pane footer { display: flex; gap: 16px; margin-top: 20px; }
+.data-import-review { border-top: 1px solid var(--tone-line); padding-top: 16px; font-size: 12px; }
+.data-import-review code { overflow-wrap: anywhere; }
+
+/* Recorded camera frames keep the dark camera mat inside light panel chrome.
+   Loading, decoding and failure are told on that same mat, so a camera never
+   flashes from paper to black when its first frame arrives. */
+.episode-camera-panel { display: flex; flex: 1; min-height: 0; flex-direction: column; position: relative; }
+.episode-camera-image { flex: 1; min-height: 0; position: relative; background: var(--tone-camera); }
+.episode-camera-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
+.episode-camera-message { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; padding: 16px; text-align: center; font-size: 11px; background: var(--tone-camera); color: var(--tone-camera-ink); overflow: auto; }
+.episode-camera-message .data-text-action { color: var(--tone-accent-ink); text-decoration: underline; }
+
+/* Catalog rows on the shared tree: an episode row is a small grid (ordinal,
+   name, duration, then a second line) and a table row leads from its group's
+   indent. The tree's own row rules are unlayered, so these are too. */
+.data-episode .ui-tree-label { display: grid; grid-template-columns: 2.25rem minmax(0, 1fr) auto; align-items: baseline; column-gap: 8px; padding-block: 4px; color: var(--tone-ink); font-weight: 400; }
+.data-episode .ui-tree-label[aria-pressed="true"] .data-episode-ordinal { color: var(--tone-accent); }
+.data-table-row { width: 100%; min-height: 28px; gap: 8px; padding-left: 20px; padding-right: 12px; font-weight: 400; }
+.data-table-row small { margin-left: auto; flex-shrink: 0; font-size: 10px; color: var(--tone-ink-faint); }
+
+/* Inference metrics read label-left, value-right in one 48px row; the kit's
+   strip stacks a fact, so the row form is restated here at the same layer. */
+.rollout-metric-strip > .rollout-metric { min-height: 3rem; flex-direction: row; align-items: center; gap: 8px; }
+.rollout-metric dt { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rollout-metric dd { display: flex; flex-shrink: 0; align-items: baseline; gap: 4px; }
+.rollout-metric dd span { font-size: 12px; font-weight: 500; }
+.rollout-metric dd small { font-size: 10px; color: var(--tone-ink-faint); }
+
 /* Data activity ---------------------------------------------------------
    Datasets and episodes in a rail; one open episode across cameras, plots,
    messages, and a timeline that shares a single clock. Geometry lives in a
@@ -4161,7 +3938,7 @@
   }
 
   .data-rail-search {
-    @apply h-6 min-w-0 flex-1 text-[11px];
+    @apply min-w-0 flex-1;
   }
 
   .data-rail-scroll {
@@ -4181,34 +3958,8 @@
     @apply text-danger;
   }
 
-  .data-dataset-list,
-  .data-episode-list,
   .data-table-list {
     @apply m-0 list-none p-0;
-  }
-
-  .data-dataset-row {
-    @apply flex min-h-8 items-center gap-0.5 pr-2;
-  }
-
-  .data-dataset[data-selected="true"] > .data-dataset-row {
-    @apply bg-selected;
-  }
-
-  .data-dataset-expand {
-    @apply ml-1 shrink-0;
-  }
-
-  .data-dataset-name {
-    @apply flex min-h-8 min-w-0 flex-1 items-center gap-1.5 text-left text-[12px] font-medium;
-  }
-
-  .data-dataset-name .ui-icon {
-    @apply shrink-0 text-ink-faint;
-  }
-
-  .data-dataset[data-selected="true"] .data-dataset-name {
-    @apply text-accent;
   }
 
   .data-dataset-count,
@@ -4216,27 +3967,8 @@
     @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
-  .data-episode-row {
-    @apply grid w-full items-baseline gap-x-2 py-1 pr-2 text-left text-[12px];
-    grid-template-columns: 2.25rem minmax(0, 1fr) auto;
-    padding-left: 0.5rem;
-  }
-
-  .data-episode-row:hover {
-    background: var(--tone-hover);
-  }
-
-  .data-episode-row[aria-pressed="true"] {
-    @apply bg-selected;
-    box-shadow: inset 2px 0 0 var(--tone-accent);
-  }
-
   .data-episode-ordinal {
     @apply text-right font-mono text-[10px] tabular-nums text-ink-faint;
-  }
-
-  .data-episode-row[aria-pressed="true"] .data-episode-ordinal {
-    @apply text-accent;
   }
 
   .data-episode-head {
@@ -4267,14 +3999,6 @@
     @apply mt-3 border-t border-line pt-1;
   }
 
-  .data-rail-tables > summary {
-    @apply flex min-h-7 cursor-pointer items-center gap-2 px-3 text-[11px] text-ink-soft;
-  }
-
-  .data-rail-tables > summary:hover {
-    background: var(--tone-hover);
-  }
-
   .data-rail-tables-count {
     @apply font-mono text-[10px] tabular-nums text-ink-faint;
   }
@@ -4289,19 +4013,6 @@
 
   .data-rail-tables-group .data-table-row {
     padding-left: 2rem;
-  }
-
-  .data-table-row {
-    @apply flex min-h-7 w-full items-center gap-2 px-3 text-left text-[12px];
-    padding-left: 1.25rem;
-  }
-
-  .data-table-row:hover {
-    background: var(--tone-hover);
-  }
-
-  .data-table-row small {
-    @apply ml-auto shrink-0 text-[10px] text-ink-faint;
   }
 
   /* Welcome and dataset overview ---------------------------------------- */
@@ -4403,8 +4114,8 @@
     @apply text-[11px] text-ink-faint;
   }
 
-  .data-transport-speed select {
-    @apply h-6 rounded border border-line bg-surface px-1 text-[11px] tabular-nums;
+  .data-transport-speed-select {
+    @apply tabular-nums;
   }
 
   .data-transport-loop {
@@ -4451,7 +4162,7 @@
   }
 
   .data-stream-filter {
-    @apply h-6 w-full text-[11px];
+    @apply w-full;
   }
 
   .data-timeline-scale {
@@ -4709,11 +4420,11 @@
     @apply flex items-center gap-2;
   }
 
-  .data-plots-quick .ui-action {
+  .data-plots-quick .ui-button {
     @apply min-w-0 justify-start;
   }
 
-  .data-plots-quick .ui-action span {
+  .data-plots-quick .ui-button span {
     @apply overflow-hidden text-ellipsis whitespace-nowrap;
   }
 
@@ -4943,24 +4654,6 @@
 
   .curation-source-facts {
     @apply font-mono text-[10px] text-ink-soft tabular-nums;
-  }
-
-  .curation-select,
-  .curation-input {
-    @apply h-6 min-w-0 rounded border border-line bg-surface px-1.5 text-[12px] text-ink outline-none;
-    @apply placeholder:text-ink-faint focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15;
-  }
-
-  .curation-select {
-    @apply cursor-pointer;
-  }
-
-  .curation-input {
-    @apply w-full;
-  }
-
-  .curation-mono {
-    @apply font-mono text-[11px] tabular-nums;
   }
 
   .curation-inline-form {
@@ -5226,23 +4919,6 @@
     overflow-wrap: anywhere;
   }
 
-  .curation-stat-grid {
-    @apply m-0 grid gap-2;
-    grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
-  }
-
-  .curation-stat {
-    @apply flex flex-col gap-0.5;
-  }
-
-  .curation-stat dt {
-    @apply text-[10px] text-ink-faint;
-  }
-
-  .curation-stat dd {
-    @apply m-0 font-mono text-[12px] text-ink tabular-nums;
-  }
-
   .curation-evidence {
     @apply flex min-w-0 flex-col gap-1.5;
   }
@@ -5253,17 +4929,8 @@
 
   /* The measurement's name is never the thing that gives way: a long text
      value truncates at the right, the key stays whole. */
-  .curation-kv {
-    @apply m-0 grid gap-x-3 gap-y-1 text-[11px];
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .curation-kv dt {
-    @apply whitespace-nowrap text-ink-soft;
-  }
-
   .curation-kv dd {
-    @apply m-0 min-w-0 truncate text-right font-mono text-ink tabular-nums;
+    @apply truncate text-right;
   }
 
   .curation-verdict-list {
@@ -5359,7 +5026,7 @@
   transition: width 260ms var(--ease-out-expo);
 }
 
-.curation-inline-form .ui-action {
+.curation-inline-form .ui-button {
   flex-shrink: 0;
   white-space: nowrap;
 }
@@ -5370,7 +5037,6 @@
 .curation-proposal select { @apply w-full; }
 
 .curation-output-note { @apply border-b border-line px-4 py-2 text-xs text-ink-soft; overflow-wrap: anywhere; }
-.curation-output-note summary { cursor: pointer; }
 .curation-output-note p { @apply mt-2; }
 
 /* Recipe steps: each row mirrors its pipeline card (kind mark, "n · Kind"),
@@ -5393,7 +5059,7 @@
 .curation-step[data-dragging="true"] .curation-step-tools { opacity: 1; }
 .curation-step-body { display: flex; flex-direction: column; gap: 4px; padding-left: 26px; }
 .curation-sentence { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.curation-transform-summary.ui-action { display: flex; min-width: 0; justify-content: flex-start; gap: 6px; margin-inline: -6px; padding: 2px 6px 2px 4px; text-align: left; white-space: normal; }
+.curation-transform-summary.ui-button { display: flex; min-width: 0; justify-content: flex-start; gap: 6px; margin-inline: -6px; padding: 2px 6px 2px 4px; text-align: left; white-space: normal; }
 .curation-transform-summary .ui-icon { flex-shrink: 0; width: 0.75rem; height: 0.75rem; color: var(--tone-ink-faint); }
 .curation-transform-copy { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
 .curation-transform-name { font-size: 12px; font-weight: 500; line-height: 16px; color: var(--tone-ink); overflow-wrap: anywhere; }
@@ -5406,8 +5072,8 @@
 .curation-composer-input { display: block; width: 100%; min-height: 3.25rem; resize: none; border: 0; background: transparent; padding: 6px 8px; font: inherit; font-size: 12px; line-height: 16px; color: var(--tone-ink); outline: none; }
 .curation-composer-input::placeholder { color: var(--tone-ink-faint); }
 .curation-composer-actions { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-top: 1px solid var(--tone-line); }
-.curation-composer-actions .ui-action--solid { margin-left: auto; padding-inline: 10px; }
-.curation-step-picker { height: 24px; max-width: 11rem; font-size: 11px; color: var(--tone-ink-soft); }
+.curation-composer-actions .ui-button--solid { margin-left: auto; padding-inline: 10px; }
+.curation-step-picker { max-width: 11rem; color: var(--tone-ink-soft); }
 
 /* Pipeline ---------------------------------------------------------------
    The recipe as a strip of stage cards on the Workflow canvas: the same
@@ -5493,11 +5159,6 @@
 .curation-source-section[data-selected="true"] { outline: 1px solid var(--tone-accent); outline-offset: -1px; }
 
 #curation-ordered-rules { position: relative; }
-.curation-reorder-handle { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; color: var(--tone-ink-faint); background: transparent; cursor: grab; touch-action: none; user-select: none; }
-.curation-reorder-handle:hover, .curation-reorder-handle[aria-pressed="true"] { background: var(--tone-hover); color: var(--tone-ink); }
-.curation-reorder-handle[aria-pressed="true"] { cursor: grabbing; }
-.curation-reorder-handle:focus-visible { outline: 2px solid var(--tone-accent); outline-offset: 1px; }
-.curation-rule-insertion { display: none; position: absolute; left: 12px; right: 12px; height: 2px; z-index: 4; pointer-events: none; background: var(--tone-accent); }
 
 .curation-stage-preview { @apply min-w-0; }
 .curation-preview-status { @apply flex items-center gap-2 py-4 text-[11px] text-ink-soft; }

@@ -1,7 +1,6 @@
 //! One place to add the next step: describe it in words and let the backend
 //! interpret it, or pick a kind and fill in the row that appears.
 use super::{client::CurationClient, pipeline::PipelineSelection, state::CurationController};
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::{
     facts::TopicRef,
@@ -10,6 +9,9 @@ use spiral_robotics_common::curation::{
         ConditionOp, ConditionValue, CurationRule, CurationTransform, RuleCondition,
         TransformOperation,
     },
+};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonVariant, Field, Select, TextInput, TextInputKind,
 };
 
 #[component]
@@ -67,13 +69,13 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
                     oninput: move |event| { prompt.set(event.value()); proposal.set(None); error.set(None); } }
                 div { class: "curation-composer-actions",
                     label { r#for: "curation-step-kind", class: "sr-only", "Add a step by kind" }
-                    select { key: "picker-{picks}", id: "curation-step-kind", class: "curation-select curation-step-picker", value: "",
+                    Select { key: "picker-{picks}", id: "curation-step-kind", class: "curation-step-picker", value: "",
                         title: "Add a step of a chosen kind and fill it in",
                         onchange: {
                             let cameras = camera_topics.clone();
-                            move |event| {
+                            move |value: String| {
                                 error.set(None);
-                                match add_by_kind(controller, &event.value(), cameras.first()) {
+                                match add_by_kind(controller, &value, cameras.first()) {
                                     Ok(Some(draft)) => proposal.set(Some(draft)),
                                     Ok(None) => proposal.set(None),
                                     Err(message) => error.set(Some(message)),
@@ -94,7 +96,7 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
                             option { value: "trim_time", "Trim time" }
                         }
                     }
-                    Action { purpose: ActionPurpose::Create, variant: ActionVariant::Solid, disabled: !can_add,
+                    Button { purpose: ActionPurpose::Create, variant: ButtonVariant::Solid, disabled: !can_add,
                         aria_busy: pending(), title: "Interpret the description as a step",
                         onclick: interpret,
                         if pending() { "Adding…" } else { "Add" }
@@ -106,7 +108,7 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
                 ProposalEditor { proposal: draft.clone(), cameras: camera_topics.clone(), on_change: move |next| proposal.set(Some(next)) }
                 for note in draft.notes() { p { class: "curation-section-note", "{note}" } }
                 for problem in draft.problems() { p { class: "curation-rule-invalid", "{problem}" } }
-                Action { purpose: ActionPurpose::Create, variant: ActionVariant::Solid, disabled: pending() || !draft.problems().is_empty(),
+                Button { purpose: ActionPurpose::Create, variant: ButtonVariant::Solid, disabled: pending() || !draft.problems().is_empty(),
                     onclick: move |_| {
                         if pending() { return; }
                         match controller.add_proposal(&draft) {
@@ -187,36 +189,36 @@ fn ProposalEditor(
     });
     rsx! {
         div { class: "curation-proposal", "aria-label": "Interpreted step",
-            label { "Operation"
-                select { class: "curation-select", value: proposal.intent().key(),
-                    onchange: { let proposal = proposal.clone(); move |event| { let mut next = proposal.clone(); next.set_intent(RuleIntent::from_key(&event.value())); on_change.call(next); } },
+            Field { label: "Operation",
+                Select { value: proposal.intent().key(),
+                    onchange: { let proposal = proposal.clone(); move |value: String| { let mut next = proposal.clone(); next.set_intent(RuleIntent::from_key(&value)); on_change.call(next); } },
                     for intent in RuleIntent::ALL { option { value: intent.key(), selected: intent == proposal.intent(), "{intent.label()}" } }
                 }
             }
             if matches!(proposal.intent(), RuleIntent::CameraLuminance) {
-                label { "Camera"
-                    select { class: "curation-select", value: proposal.camera().unwrap_or_default(),
-                        onchange: { let proposal = proposal.clone(); move |event| { let mut next = proposal.clone(); next.set_camera(Some(event.value())); on_change.call(next); } },
+                Field { label: "Camera",
+                    Select { value: proposal.camera().unwrap_or_default(),
+                        onchange: { let proposal = proposal.clone(); move |value: String| { let mut next = proposal.clone(); next.set_camera(Some(value)); on_change.call(next); } },
                         option { value: "", "Choose camera" }
                         for camera in cameras { option { value: "{camera}", selected: proposal.camera() == Some(camera.as_str()), "{camera}" } }
                     }
                 }
             }
             if !matches!(proposal.intent(), RuleIntent::ProductiveChunks) {
-            label { "Exclude episodes when"
-                select { class: "curation-select", value: proposal.comparison().map(ConditionOp::key).unwrap_or_default(),
-                    onchange: { let proposal = proposal.clone(); move |event| { let mut next = proposal.clone(); next.set_comparison(ConditionOp::from_key(&event.value())); on_change.call(next); } },
+            Field { label: "Exclude episodes when",
+                Select { value: proposal.comparison().map(ConditionOp::key).unwrap_or_default(),
+                    onchange: { let proposal = proposal.clone(); move |value: String| { let mut next = proposal.clone(); next.set_comparison(ConditionOp::from_key(&value)); on_change.call(next); } },
                     option { value: "", "Choose comparison" }
                     for op in [ConditionOp::Below, ConditionOp::AtMost, ConditionOp::Above, ConditionOp::AtLeast] {
                         option { value: op.key(), selected: proposal.comparison() == Some(op), "{op.label()}" }
                     }
                 }
             }
-            label {
-                if proposal.intent() == RuleIntent::Duration { "Threshold (seconds)" } else { "Threshold" }
-                input { class: "curation-input", inputmode: "decimal", value: "{number}", placeholder: "Enter threshold",
-                    oninput: { let proposal = proposal.clone(); move |event| {
-                        let raw = event.value(); number.set(raw.clone()); let mut next = proposal.clone(); next.set_value(raw.parse::<f64>().ok());
+            Field {
+                label: if proposal.intent() == RuleIntent::Duration { "Threshold (seconds)" } else { "Threshold" },
+                TextInput { kind: TextInputKind::Decimal, value: "{number}", placeholder: "Enter threshold",
+                    oninput: { let proposal = proposal.clone(); move |raw: String| {
+                        number.set(raw.clone()); let mut next = proposal.clone(); next.set_value(raw.parse::<f64>().ok());
                         if next.intent() == RuleIntent::Duration { next.set_unit(Some("seconds".into())); }
                         on_change.call(next);
                     } }

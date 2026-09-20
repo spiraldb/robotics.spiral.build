@@ -18,16 +18,15 @@ use super::pipeline::{
 };
 use super::state::{CurationController, SheetFilter, SheetOrder};
 use crate::components::document_bar::ExecutedSql;
-use crate::components::icons::{
-    ArrowDownIcon, ArrowUpIcon, CurationIcon, ResultNodeIcon, SpinnerIcon,
-};
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionVariant, BrowserFocus, ModeAction, ModeGroup,
-};
+use crate::components::icons::{CurationIcon, ResultNodeIcon, SpinnerIcon};
 use crate::components::run_phase::RunPhasePresentation;
-use crate::components::side_sheet::SheetPosition;
 use crate::format::ClockPresentation;
 use crate::shell::state::StudioProjectState;
+use spiral_robotics_ui::SheetPosition;
+use spiral_robotics_ui::{
+    ActionPurpose, ArrowDownIcon, ArrowUpIcon, BrowserFocus, Button, ButtonVariant, Chip, ChipTone,
+    Disclosure, EmptyState, ModeButton, ModeGroup, NoticeTone, Select,
+};
 
 /// Focus lands here when a tile opens its evidence.
 pub(super) const EPISODE_HEADING_ID: &str = "curation-episode-heading";
@@ -191,9 +190,9 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                     }
                     if runs.len() > 1 {
                         label { r#for: "curation-result-run", class: "sr-only", "Run" }
-                        select { id: "curation-result-run", class: "run-select",
+                        Select { id: "curation-result-run", class: "run-select",
                             value: snapshot.run_id().unwrap_or_default(),
-                            onchange: move |event| controller.select_run(event.value()),
+                            onchange: move |value| controller.select_run(value),
                             for (index, run) in runs.iter().enumerate() {
                                 option { key: "{run.snapshot().run_id().unwrap_or_default()}",
                                     value: run.snapshot().run_id().unwrap_or_default(),
@@ -207,7 +206,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                     if let Some(outcome) = run_outcome.as_ref().filter(|_| current_run) {
                         span { class: "run-duration", title: "Spiral judging time", "{ElapsedText(outcome.elapsed_ms())}" }
                         if outcome.totals().truncated() {
-                            span { class: "chip chip-caution", title: "The sheet lists the first {outcome.totals().listed()} episodes; the counts cover every episode.", "Sheet truncated" }
+                            Chip { tone: ChipTone::Caution, title: "The sheet lists the first {outcome.totals().listed()} episodes; the counts cover every episode.", "Sheet truncated" }
                         }
                     }
                     if phase.active() {
@@ -225,8 +224,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                 }
             }
             if let Some(relation) = snapshot.output_relation() {
-                details { class: "curation-output-note",
-                    summary { "Saved selection and derived outputs" }
+                Disclosure { class: "curation-output-note", summary: rsx! { "Saved selection and derived outputs" },
                     p { "Episode selection: " code { "{relation}" } " · filter by kept" }
                     for derived in snapshot.derived_relations() { p { "Derived output: " code { "{derived}" } } }
                     p { "The exact recipe is stored with every verdict. Source recordings remain unchanged." }
@@ -248,7 +246,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                                                 (SheetFilter::Kept, outcome.totals().kept()),
                                                 (SheetFilter::Excluded, outcome.totals().excluded()),
                                             ] {
-                                                ModeAction { purpose: ActionPurpose::Select, checked: filter == option,
+                                                ModeButton { purpose: ActionPurpose::Select, checked: filter == option,
                                                     onclick: move |_| controller.set_filter(option),
                                                     "{option.label()} " strong { "{count}" } }
                                             }
@@ -263,12 +261,11 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                                 }
                             }
                             if !controller.loaded() && controller.load_error().is_none() {
-                                div { class: "panel-empty", role: "status", SpinnerIcon {} strong { "Loading curation…" } }
+                                EmptyState { icon: rsx! { SpinnerIcon {} }, title: "Loading curation…" }
                             } else if let Some(error) = controller.load_error() {
-                                div { class: "panel-empty", role: "alert",
-                                    strong { "Could not load the saved curation" }
+                                EmptyState { tone: NoticeTone::Danger, title: "Could not load the saved curation",
                                     p { "{error}" }
-                                    Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline, onclick: move |_| controller.reload_current(), "Try again" }
+                                    Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, onclick: move |_| controller.reload_current(), "Try again" }
                                 }
                             } else if let Some(judged) = judged.as_ref().filter(|_| outcome.is_some()) {
                                 if roster.len() == 0 && selection != PipelineSelection::Source {
@@ -283,30 +280,24 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                             } else if phase.active() || preview == EligibilityState::Pending {
                                 SheetSkeleton {}
                             } else if let EligibilityState::Failed(error) = &preview {
-                                div { class: "panel-empty", role: "alert",
-                                    strong { "Could not read episode metadata" }
+                                EmptyState { tone: NoticeTone::Danger, title: "Could not read episode metadata",
                                     p { class: "curation-error-detail", "{error}" }
-                                    Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline,
+                                    Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
                                         onclick: move |_| metadata.restart(), "Try again" }
                                 }
                             } else if phase == RunPhase::Failed {
-                                div { class: "panel-empty", role: "alert",
-                                    strong { "Run failed" }
+                                EmptyState { tone: NoticeTone::Danger, title: "Run failed",
                                     p { class: "curation-error-detail", "{snapshot.error().unwrap_or(\"Spiral did not say why.\")}" }
                                     if controller.run_disabled_reason().is_none() {
-                                        Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline, onclick: move |_| controller.run(studio), "Run again" }
+                                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, onclick: move |_| controller.run(studio), "Run again" }
                                     }
                                 }
                             } else if spec.source().is_none() {
-                                div { class: "panel-empty",
-                                    CurationIcon {}
-                                    strong { "Name a dataset" }
+                                EmptyState { icon: rsx! { CurationIcon {} }, title: "Name a dataset",
                                     p { "Every one of its episodes becomes a tile here, kept or excluded, with the rule that decided." }
                                 }
                             } else {
-                                div { class: "panel-empty",
-                                    ResultNodeIcon {}
-                                    strong { "Nothing judged yet" }
+                                EmptyState { icon: rsx! { ResultNodeIcon {} }, title: "Nothing judged yet",
                                     p { "Run the recipe to lay the episodes out." }
                                 }
                             }
@@ -383,17 +374,17 @@ fn OutputDetail(
                 Key::ArrowDown => { event.prevent_default(); on_step.call(1); }
                 _ => {}
             },
-            header { class: "side-sheet-heading",
+            header { class: "ui-side-sheet-heading",
                 h3 {
                     "Episode {tile.ordinal()}"
-                    span { class: "side-sheet-count", " · {position.index() + 1} of {position.count()} kept" }
+                    span { class: "ui-side-sheet-count", " · {position.index() + 1} of {position.count()} kept" }
                 }
-                div { class: "side-sheet-nav", role: "group", "aria-label": "Step between kept episodes",
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
+                div { class: "ui-side-sheet-nav", role: "group", "aria-label": "Step between kept episodes",
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
                         aria_label: "Previous episode", title: "Previous episode · ↑",
                         disabled: position.stepped(-1).is_none(),
                         onclick: move |_| on_step.call(-1), ArrowUpIcon {} }
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
                         aria_label: "Next episode", title: "Next episode · ↓",
                         disabled: position.stepped(1).is_none(),
                         onclick: move |_| on_step.call(1), ArrowDownIcon {} }
@@ -562,20 +553,20 @@ fn TransformStagePreview(
                                     _ => {}
                                 }
                             },
-                            Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
+                            Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
                                 aria_label: "Previous episode", title: "Previous episode · ↑",
                                 disabled: position.stepped(-1).is_none(),
                                 onclick: { let step = step.clone(); move |_| step(-1) }, ArrowUpIcon {} }
-                            Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
+                            Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
                                 aria_label: "Next episode", title: "Next episode · ↓",
                                 disabled: position.stepped(1).is_none(),
                                 onclick: { let step = step.clone(); move |_| step(1) }, ArrowDownIcon {} }
                         }
                         label { r#for: "curation-preview-episode", class: "sr-only", "Episode" }
-                        select { id: "curation-preview-episode", class: "run-select curation-episode-select",
+                        Select { id: "curation-preview-episode", class: "run-select curation-episode-select",
                             title: selected.clone().unwrap_or_default(),
                             value: selected.clone().unwrap_or_default(),
-                            onchange: move |event| controller.select_episode(Some(event.value())),
+                            onchange: move |value| controller.select_episode(Some(value)),
                             for tile in &roster.tiles {
                                 option { key: "{tile.verdict().episode().id()}", value: tile.verdict().episode().id(),
                                     selected: selected.as_deref() == Some(tile.verdict().episode().id()),
@@ -591,7 +582,7 @@ fn TransformStagePreview(
             } else if let EligibilityState::Failed(error) = &preview {
                 div { class: "curation-preview-status", role: "alert",
                     p { "Could not read eligible episodes: {error}" }
-                    Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline,
+                    Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
                         onclick: move |_| on_retry.call(()), "Try again" }
                 }
             } else if eligible == 0 {
@@ -631,14 +622,14 @@ fn SheetLens(
     rsx! {
         span { class: "curation-lens",
             label { r#for: "curation-lens", class: "curation-lens-word", "Tiles" }
-            select { id: "curation-lens", class: "run-select", title: "The measurement every tile prints",
+            Select { id: "curation-lens", class: "run-select", title: "The measurement every tile prints",
                 value: lens.as_ref().map(|fact| fact.key().to_owned()).unwrap_or_default(),
-                onchange: move |event| controller.set_lens(event.value()),
+                onchange: move |value| controller.set_lens(value),
                 for fact in judged.facts() {
                     option { value: "{fact.key()}", selected: lens.as_ref().is_some_and(|lens| lens.key() == fact.key()), "{fact.label()}" }
                 }
             }
-            Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Quiet, class: "curation-order",
+            Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Quiet, class: "curation-order",
                 title: "Order the sheet by this measurement",
                 onclick: move |_| controller.cycle_order(),
                 "{order.label()}"
@@ -755,7 +746,7 @@ fn TileGrid(
 ) -> Element {
     if roster.len() == 0 {
         return rsx! {
-            div { class: "panel-empty is-quiet",
+            EmptyState {
                 p { match filter {
                     SheetFilter::Kept => "No episode was kept.",
                     SheetFilter::Excluded => "No episode was excluded.",
@@ -989,9 +980,9 @@ fn EpisodeTile(
             "data-selected": look.selected,
             "data-highlight": look.highlight.attribute(),
             style: "--tile: {position.min(48)}; --tile-tone: {tone}; --fill: {look.fill * 100.0:.1}%",
-            Action {
+            Button {
                 purpose: ActionPurpose::Select,
-                variant: ActionVariant::Quiet,
+                variant: ButtonVariant::Quiet,
                 class: "curation-tile-face",
                 id: SheetTile::element_id(tile.ordinal),
                 aria_pressed: look.selected,

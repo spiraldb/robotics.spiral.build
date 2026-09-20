@@ -4,10 +4,12 @@
 //! activity keeps its own action row, because what Save and Run may do
 //! differs; the identity chrome does not.
 
-use super::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus, ChevronIcon};
 use crate::activities::workflow::highlight::SqlHighlight;
 use crate::components::icons::{CheckIcon, SqlIcon};
 use dioxus::prelude::*;
+use spiral_robotics_ui::{
+    ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Disclosure, TextInput,
+};
 
 /// Whether what is on screen matches what Studio has stored.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,10 +69,10 @@ pub(crate) fn DocumentTitle(
     on_toggle: EventHandler<()>,
 ) -> Element {
     rsx! {
-        Action {
+        Button {
             id: "{id}",
             purpose: ActionPurpose::Select,
-            variant: ActionVariant::Quiet,
+            variant: ButtonVariant::Quiet,
             class: "document-title",
             aria_haspopup: "listbox",
             aria_expanded: expanded,
@@ -118,24 +120,24 @@ pub(crate) fn DocumentRenameForm(
                     }
                 }
             },
-            input {
+            TextInput {
                 class: "document-name-input",
-                "aria-label": "{label}",
+                aria_label: "{label}",
+                autofocus: true,
                 value: "{name}",
                 disabled,
-                oninput: move |event| name.set(event.value()),
-                onmounted: move |event| async move { let _ = event.set_focus(true).await; },
+                oninput: move |value| name.set(value),
             }
-            Action {
+            Button {
                 purpose: ActionPurpose::Apply,
-                variant: ActionVariant::Outline,
+                variant: ButtonVariant::Outline,
                 r#type: "submit",
                 disabled: disabled || name().trim().is_empty(),
                 "Apply"
             }
-            Action {
+            Button {
                 purpose: ActionPurpose::Cancel,
-                variant: ActionVariant::Link,
+                variant: ButtonVariant::Link,
                 onclick: {
                     let restore_focus = restore_focus.clone();
                     move |_| {
@@ -266,11 +268,11 @@ pub(crate) fn DocumentSwitcher(props: DocumentSwitcherProps) -> Element {
                 ul { class: "document-switcher-list", role: "listbox", "aria-label": "{props.copy.dialog_label}",
                     for (index, item) in props.entries.iter().enumerate() {
                         li { key: "{item.id}", role: "none",
-                            Action {
+                            Button {
                                 id: "{switcher_id}-option-{index}",
                                 role: "option",
                                 purpose: ActionPurpose::Select,
-                                variant: ActionVariant::Row,
+                                variant: ButtonVariant::Row,
                                 class: "document-switcher-option",
                                 aria_selected: item.id == props.current.id,
                                 disabled,
@@ -292,10 +294,10 @@ pub(crate) fn DocumentSwitcher(props: DocumentSwitcherProps) -> Element {
                 }
             }
             div { class: "document-switcher-actions",
-                Action {
+                Button {
                     id: "{switcher_id}-new",
                     purpose: ActionPurpose::Create,
-                    variant: ActionVariant::Outline,
+                    variant: ButtonVariant::Outline,
                     disabled,
                     onclick: {
                         let close = close.clone();
@@ -307,9 +309,9 @@ pub(crate) fn DocumentSwitcher(props: DocumentSwitcherProps) -> Element {
                     "{props.copy.create}"
                 }
                 {props.children}
-                Action {
+                Button {
                     purpose: ActionPurpose::Apply,
-                    variant: ActionVariant::Link,
+                    variant: ButtonVariant::Link,
                     class: "document-switcher-rename",
                     disabled: props.gate.rename_disabled,
                     onclick: move |_| props.on_rename.call(()),
@@ -324,8 +326,7 @@ pub(crate) fn DocumentSwitcher(props: DocumentSwitcherProps) -> Element {
 #[component]
 pub(crate) fn ExecutedSql(sql: String) -> Element {
     rsx! {
-        details { class: "executed-sql",
-            summary { SqlIcon {} "Executed SQL" }
+        Disclosure { class: "executed-sql", summary: rsx! { SqlIcon {} "Executed SQL" },
             pre { SqlHighlight { sql } }
         }
     }

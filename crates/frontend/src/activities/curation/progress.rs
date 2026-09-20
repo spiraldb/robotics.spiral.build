@@ -1,6 +1,7 @@
 //! Fixed automatic progress selection and synchronized episode evidence.
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::progress::ProgressSelection;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 
 #[component]
 pub(super) fn ProgressStatus(selection: ProgressSelection) -> Element {
@@ -132,7 +133,7 @@ pub(super) fn ProgressEvidence(
                 let (start, end) = interval.span();
                 review.play_interval(start - 0.5, end + 0.5);
             } }
-            if failed { button { class: "curation-input", onclick: move |_| evidence.restart(), "Retry this episode" } }
+            if failed { Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, onclick: move |_| evidence.restart(), "Retry this episode" } }
         }
     }
 }

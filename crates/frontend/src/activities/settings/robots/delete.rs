@@ -1,10 +1,10 @@
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
-    ConfirmationResponse, InlineConfirmation,
-};
 use crate::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::RobotSummary;
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
+    ConfirmationResponse, InlineConfirmation,
+};
 
 use crate::robots::{HardwareCommands, HardwareViewState};
 use crate::shell::state::StudioProjectState;
@@ -38,10 +38,10 @@ pub(super) fn DeleteRobotAction(
     // was not.
     if !confirming() {
         return rsx! {
-            Action {
+            Button {
                 id: "delete-robot-{robot.id()}",
                 purpose: ActionPurpose::Delete,
-                variant: ActionVariant::Link,
+                variant: ButtonVariant::Link,
                 class: "device-delete", title: "Delete {robot.id()}",
                 onclick: move |_| confirming.set(true), "Delete"
             }

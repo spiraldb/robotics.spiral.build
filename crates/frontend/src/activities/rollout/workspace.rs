@@ -1,13 +1,16 @@
 //! Checkpoint selection and follower rollout controls.
 
 use crate::activities::rollout::RolloutClient;
-use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CameraStatus, RobotSummary};
 use spiral_robotics_common::rollout::{
     MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig, RolloutPhase, RolloutSnapshot,
 };
 use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonSize, ButtonVariant, Fact, FactLayout, FactList, Field, Select,
+    TextInput, TextInputKind,
+};
 
 use crate::format::LossPresentation;
 use crate::robots::HardwareViewState;
@@ -160,13 +163,11 @@ pub(super) fn RolloutWorkbench(
     rsx! {
         div { class: "rollout-workbench studio-workbench-scroll",
             section { class: "rollout-section",
-                label { class: "rollout-field",
-                    span { "Checkpoint" }
-                    select {
+                Field { label: "Checkpoint",
+                    Select {
                         value: selected_key.clone().unwrap_or_default(),
                         disabled: checkpoints.is_empty() || active,
-                        onchange: move |event| {
-                            let value = event.value();
+                        onchange: move |value: String| {
                             controller.select_checkpoint((!value.is_empty()).then_some(value));
                         },
                         if checkpoints.is_empty() {
@@ -233,20 +234,19 @@ pub(super) fn RolloutWorkbench(
                         span { "Control rate" }
                         strong { "{control_rate:.1} Hz" }
                     }
-                    label { class: "rollout-field rollout-duration-field",
-                        span { "Duration" }
+                    Field { label: "Duration", class: "rollout-duration-field",
                         div { class: "rollout-duration-control",
-                            input {
-                                r#type: "number",
+                            TextInput {
+                                kind: TextInputKind::Number,
                                 min: "1",
                                 max: "{MAX_ROLLOUT_DURATION_SECONDS}",
                                 step: "1",
                                 value: "{duration_draft}",
                                 disabled: active || pending.is_some(),
                                 title: "Policy control time; loading and warm-up are excluded",
-                                "aria-describedby": "rollout-duration-help",
-                                "aria-invalid": if duration_valid { "false" } else { "true" },
-                                oninput: move |event| controller.set_duration_draft(event.value()),
+                                aria_describedby: "rollout-duration-help",
+                                aria_invalid: if duration_valid { "false" } else { "true" },
+                                oninput: move |value| controller.set_duration_draft(value),
                             }
                             small {
                                 id: "rollout-duration-help",
@@ -281,7 +281,7 @@ pub(super) fn RolloutWorkbench(
                             small { "{load_issue.clone().unwrap_or_else(|| rollout.runtime_detail())}" }
                         }
                         if load_error.is_some() {
-                            Action {
+                            Button {
                                 purpose: ActionPurpose::Retry,
                                 onclick: move |_| controller.retry(),
                                 "Retry rollout status"
@@ -293,10 +293,10 @@ pub(super) fn RolloutWorkbench(
                     }
                 }
                 div { class: "rollout-actions",
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Start,
-                        variant: ActionVariant::Solid,
-                        size: ActionSize::Prominent,
+                        variant: ButtonVariant::Solid,
+                        size: ButtonSize::Prominent,
                         class: "rollout-run-action",
                         disabled: pending.is_some() || active || blocker.is_some(),
                         aria_busy: pending == Some(PendingRolloutAction::Start),
@@ -340,10 +340,10 @@ pub(super) fn RolloutWorkbench(
                             "Run policy"
                         }
                     }
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Stop,
-                        variant: ActionVariant::Outline,
-                        size: ActionSize::Prominent,
+                        variant: ButtonVariant::Outline,
+                        size: ButtonSize::Prominent,
                         class: "rollout-stop-action",
                         disabled: pending.is_some() || !active || stopping,
                         aria_busy: pending == Some(PendingRolloutAction::Stop) || stopping,
@@ -448,7 +448,7 @@ pub(super) fn InferencePanel(controller: super::state::RolloutController) -> Ele
     let misses = metrics.missed_deadlines().to_string();
     rsx! {
         section { class: "rollout-inference",
-            div { class: "rollout-metric-strip",
+            FactList { layout: FactLayout::Strip, mono: true, class: "rollout-metric-strip",
                 InferenceMetric { label: "Latency", value: latency, unit: "ms" }
                 InferenceMetric { label: "Model", value: model, unit: "ms" }
                 InferenceMetric { label: "Misses", value: misses, unit: "" }
@@ -473,9 +473,9 @@ pub(super) fn InferencePanel(controller: super::state::RolloutController) -> Ele
 #[component]
 fn InferenceMetric(label: &'static str, value: String, unit: &'static str) -> Element {
     rsx! {
-        dl { class: "rollout-metric",
-            dt { "{label}" }
-            dd { span { "{value}" } if !unit.is_empty() { small { "{unit}" } } }
+        Fact { label, class: "rollout-metric",
+            span { "{value}" }
+            if !unit.is_empty() { small { "{unit}" } }
         }
     }
 }

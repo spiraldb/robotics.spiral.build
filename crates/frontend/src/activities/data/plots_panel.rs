@@ -10,13 +10,13 @@ use super::{
 };
 use crate::components::charts::{CharmingChart, ChartPresentation};
 use crate::components::icons::SignalStreamIcon;
-use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
 use crate::components::time_series::{
     TimelineSignalLane, TimelineSignalLanes, TimelineSignalPoint, TraceChartLayout,
 };
 use crate::format::{GroupedCountPresentation, PreciseClockPresentation};
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::MessageWindow;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 use std::rc::Rc;
 
 const LANE_HEIGHT: f64 = 96.0;
@@ -101,7 +101,7 @@ fn PlotsEmpty(catalog: StreamCatalog, mut choices: StreamChoices) -> Element {
                 ul { class: "data-plots-quick", "aria-label": "Plot a stream",
                     for stream in candidates {
                         li { key: "{stream.key()}",
-                            Action { purpose: ActionPurpose::Select, variant: ActionVariant::Outline, size: ActionSize::Compact,
+                            Button { purpose: ActionPurpose::Select, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
                                 onclick: { let stream = stream.clone(); move |_| choices.set_stream_plotted(&stream, true) },
                                 SignalStreamIcon {}
                                 span { "{stream.label()}" }
@@ -204,7 +204,7 @@ fn StreamPlot(
                     }
                     if pending { span { class: "data-plot-loading", role: "status", "Loading…" } }
                 }
-                Action { purpose: ActionPurpose::Remove, variant: ActionVariant::Link, size: ActionSize::Compact,
+                Button { purpose: ActionPurpose::Remove, variant: ButtonVariant::Link, size: ButtonSize::Compact,
                     title: "Stop plotting this stream", onclick: move |_| choices.set_stream_plotted(&hide_stream, false), "Hide" }
             }
             match &*data.read() {
@@ -215,7 +215,7 @@ fn StreamPlot(
                 Some(Err(error)) => rsx! {
                     div { class: "data-plot-error", role: "alert",
                         p { "{error}" }
-                        Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline, size: ActionSize::Compact, onclick: move |_| data.restart(), "Retry" }
+                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, size: ButtonSize::Compact, onclick: move |_| data.restart(), "Retry" }
                     }
                 },
                 None => rsx! { div { class: "data-plot-skeleton", style: "height: {skeleton_height}px", "aria-hidden": "true" } },

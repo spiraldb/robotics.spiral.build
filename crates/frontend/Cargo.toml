@@ -19,6 +19,7 @@ wasm-bindgen-futures = "0.4"
 wasm-streams = "0.4.2"
 charming = { version = "0.6.0", default-features = false, features = ["wasm"] }
 spiral-robotics-common.workspace = true
+spiral-robotics-ui.workspace = true
 spiral-robotics-viewport.workspace = true
 dioxus = { workspace = true, features = [
     "asset",

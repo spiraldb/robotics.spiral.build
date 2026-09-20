@@ -9,6 +9,7 @@ members = [
     "crates/backend",
     "crates/frontend/viewport",
     "crates/frontend",
+    "crates/ui",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ spiral-robotics-inference = { path = "crates/backend/inference", default-feature
 spiral-robotics-hardware = { path = "crates/backend/hardware" }
 spiral-robotics-storage = { path = "crates/backend/storage" }
 spiral-robotics-training = { path = "crates/backend/training" }
+spiral-robotics-ui = { path = "crates/ui" }
 spiral-robotics-viewport = { path = "crates/frontend/viewport" }
 clap = { version = "4.5", features = ["derive"] }
 dioxus = { version = "0.7.10", default-features = false }

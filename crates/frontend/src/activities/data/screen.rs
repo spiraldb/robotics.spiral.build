@@ -14,13 +14,13 @@ use super::{
     state::QueryController,
     timeline_panel::{TimelinePanel, TimelineSubject},
 };
-use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
 use crate::shell::frame::WorkspaceFrame;
 use dioxus::prelude::*;
 use dioxus_workbench::{
     DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelPlacement, PanelWorkspace, SplitAxis,
 };
 use spiral_robotics_common::datasets::{DatasetSelection, ProjectResource};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 use std::collections::BTreeSet;
 use wasm_bindgen::JsCast as _;
 
@@ -729,7 +729,7 @@ fn WelcomePanel(on_import: EventHandler<()>) -> Element {
         div { class: "data-welcome",
             h2 { "Open your data" }
             p { "A dataset is a collection of MCAP recordings; each file is one episode. Choose a dataset on the left to see its episodes, or import recordings to create a new one." }
-            Action { purpose: ActionPurpose::Import, variant: ActionVariant::Outline, size: ActionSize::Standard,
+            Button { purpose: ActionPurpose::Import, variant: ButtonVariant::Outline, size: ButtonSize::Standard,
                 onclick: move |_| on_import.call(()), "Import MCAP recordings" }
         }
     }

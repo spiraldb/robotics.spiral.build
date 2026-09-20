@@ -22,7 +22,10 @@ use super::highlight::{ExpressionHighlight, SqlHighlight};
 use crate::components::icons::{
     DataIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon, ResultNodeIcon,
 };
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant, CloseIcon};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonVariant, CloseIcon, Disclosure, EmptyState, Fact, FactList,
+    NoticeTone,
+};
 
 const STAGE_WIDTH: f64 = 224.0;
 const STAGE_HEIGHT: f64 = 92.0;
@@ -39,8 +42,7 @@ pub(super) fn WorkflowPlanDisplay(
             match WorkflowGraph::from_plan(report.logical()) {
                 Ok(graph) => rsx! { WorkflowPlanGraph { graph, active } },
                 Err(error) => rsx! {
-                    div { class: "panel-empty", role: "alert",
-                        strong { "The graph needs native expression metadata" }
+                    EmptyState { tone: NoticeTone::Danger, title: "The graph needs native expression metadata",
                         p { "{error}" }
                     }
                 },
@@ -447,7 +449,7 @@ fn StageDetails(
                     h3 { "{stage.content.title}" }
                     small { "{kind.label()} · {footer}" }
                 }
-                Action { purpose: ActionPurpose::Close, variant: ActionVariant::Icon,
+                Button { purpose: ActionPurpose::Close, variant: ButtonVariant::Icon,
                     aria_label: "Close stage details", title: "Close · Esc",
                     onclick: move |_| on_close.call(()), CloseIcon {} }
             }
@@ -464,11 +466,10 @@ fn StageDetails(
                 }
             }
             if !facts.is_empty() {
-                dl { class: "workflow-facts",
+                FactList { class: "workflow-facts",
                     for (index, fact) in facts.iter().enumerate() {
-                        div { key: "{index}",
-                            dt { "{fact.label}" }
-                            dd { StageText { text: fact.value.clone(), kind: fact.kind } }
+                        Fact { key: "{index}", label: "{fact.label}",
+                            StageText { text: fact.value.clone(), kind: fact.kind }
                         }
                     }
                 }
@@ -493,10 +494,10 @@ fn StageDetails(
                 }
                 StageColumns { output: output.clone(), added: added.clone() }
             }
-            details { class: "workflow-inspector-disclosure workflow-inspector-native",
-                summary {
+            Disclosure { class: "workflow-inspector-disclosure workflow-inspector-native",
+                summary: rsx! {
                     if stage.operators.len() == 1 { "Native operator" } else { "Native operators · {stage.operators.len()}" }
-                }
+                },
                 for node in &stage.operators {
                     PlanOperatorDetails { key: "{node.id()}", node: node.clone() }
                 }
@@ -520,7 +521,7 @@ fn EdgeDetails(details: WorkflowEdgeDetails, root: String, on_close: EventHandle
                     h3 { "{details.source.content.title} → {details.target_title}" }
                     small { "Connection" }
                 }
-                Action { purpose: ActionPurpose::Close, variant: ActionVariant::Icon,
+                Button { purpose: ActionPurpose::Close, variant: ButtonVariant::Icon,
                     aria_label: "Close connection details", title: "Close · Esc",
                     onclick: move |_| on_close.call(()), CloseIcon {} }
             }
@@ -532,11 +533,11 @@ fn EdgeDetails(details: WorkflowEdgeDetails, root: String, on_close: EventHandle
                     StageColumns { output: output.clone(), added: Vec::new() }
                 },
                 StageOutput::Expression { expression, dtype } => rsx! {
-                    dl { class: "workflow-facts",
+                    FactList { class: "workflow-facts",
                         if let Some(dtype) = dtype {
-                            div { dt { "Type" } dd { ExpressionHighlight { text: dtype.clone() } } }
+                            Fact { label: "Type", ExpressionHighlight { text: dtype.clone() } }
                         }
-                        div { dt { "Call" } dd { SqlHighlight { sql: expression.clone() } } }
+                        Fact { label: "Call", SqlHighlight { sql: expression.clone() } }
                     }
                 },
             }
@@ -709,13 +710,11 @@ fn PlanOperatorDetails(node: DiagnosticNode) -> Element {
             h5 { "Properties" }
             pre { "{serde_json::to_string_pretty(node.properties()).unwrap_or_default()}" }
             if let Some(details) = node.details() { h5 { "Operator details" } pre { "{details}" } }
-            details { class: "workflow-inspector-disclosure",
-                summary { "Full output metadata" }
+            Disclosure { class: "workflow-inspector-disclosure", summary: rsx! { "Full output metadata" },
                 pre { "{serde_json::to_string_pretty(node.output()).unwrap_or_default()}" }
             }
             if let Some(execution) = node.execution() {
-                details { class: "workflow-inspector-disclosure",
-                    summary { "Execution identity" }
+                Disclosure { class: "workflow-inspector-disclosure", summary: rsx! { "Execution identity" },
                     pre { "{serde_json::to_string_pretty(execution).unwrap_or_default()}" }
                 }
             }

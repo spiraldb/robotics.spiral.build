@@ -5,12 +5,13 @@ use super::{
     episode_list::{ListedEpisode, OpenedEpisode, SharedSourcePrefix},
 };
 use crate::components::icons::DataIcon;
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionSize, ActionVariant, ChevronIcon, RefreshIcon,
-};
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonSize, ButtonVariant, Disclosure, RefreshIcon, TextInput,
+    TextInputKind, Tree, TreeBranch, TreeItem,
+};
 use std::collections::BTreeMap;
 
 type ResourceCatalog = ReadSignal<Option<Result<Vec<ProjectResource>, String>>>;
@@ -110,11 +111,11 @@ pub(super) fn CatalogRail(
     rsx! {
         section { class: "data-rail", "aria-label": "Datasets",
             header { class: "data-rail-head",
-                input { class: "field data-rail-search", r#type: "search", placeholder: "Filter datasets and episodes",
-                    "aria-label": "Filter datasets and episodes", value: filter(), oninput: move |event| filter.set(event.value()) }
-                Action { purpose: ActionPurpose::Refresh, variant: ActionVariant::Icon, aria_label: "Refresh catalog", title: "Refresh catalog",
+                TextInput { class: "data-rail-search", kind: TextInputKind::Search, placeholder: "Filter datasets and episodes",
+                    aria_label: "Filter datasets and episodes", value: filter(), oninput: move |value| filter.set(value) }
+                Button { purpose: ActionPurpose::Refresh, variant: ButtonVariant::Icon, aria_label: "Refresh catalog", title: "Refresh catalog",
                     onclick: move |_| super::relations::CatalogRefresh::request(), RefreshIcon {} }
-                Action { purpose: ActionPurpose::Import, variant: ActionVariant::Outline, size: ActionSize::Compact,
+                Button { purpose: ActionPurpose::Import, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
                     title: "Import MCAP recordings as a new dataset", onclick: move |_| actions.on_import.call(()), "Import" }
             }
             div { class: "data-rail-scroll",
@@ -139,7 +140,7 @@ pub(super) fn CatalogRail(
                                     p { "Import MCAP recordings to create the first one." }
                                 }
                             }
-                            ul { class: "data-dataset-list",
+                            Tree { label: "Datasets", class: "data-dataset-list",
                                 for resource in datasets.iter() {
                                     DatasetBranch {
                                         key: "{resource.resource_id()}",
@@ -182,24 +183,20 @@ fn DatasetBranch(
     // A search opens every dataset so its matches show; the operator's own
     // expansion choice returns when the field clears.
     let open = expanded() || !filter.is_empty();
+    let branch = TreeBranch::new(name.clone(), open, move |next| expanded.set(next));
     rsx! {
-        li { class: "data-dataset", "data-selected": selected,
-            div { class: "data-dataset-row",
-                Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Icon, class: "data-dataset-expand",
-                    aria_expanded: open, aria_label: if open { format!("Collapse {name}") } else { format!("Expand {name}") },
-                    onclick: move |_| expanded.toggle(), ChevronIcon { open } }
-                button { r#type: "button", class: "data-dataset-name", aria_pressed: selected, title: "{name}",
-                    onclick: move |_| { actions.on_select_dataset.call(select.clone()); expanded.set(true); },
-                    DataIcon {}
-                    span { class: "truncate", "{name}" }
-                }
+        TreeItem { class: "data-dataset", branch, selected,
+            onselect: move |_| { actions.on_select_dataset.call(select.clone()); expanded.set(true); },
+            label: rsx! {
+                DataIcon {}
+                span { class: "truncate", title: "{name}", "{name}" }
+            },
+            trailing: rsx! {
                 span { class: "data-dataset-count", title: "Episodes",
                     if let Some(members) = members { "{members}" }
                 }
-            }
-            if open {
-                DatasetEpisodes { key: "{resource.resource_id()}", dataset: resource.selection().clone(), selected_episode_id, filter, on_open: actions.on_open_episode }
-            }
+            },
+            DatasetEpisodes { key: "{resource.resource_id()}", dataset: resource.selection().clone(), selected_episode_id, filter, on_open: actions.on_open_episode }
         }
     }
 }
@@ -259,28 +256,28 @@ fn DatasetEpisodes(
         .collect::<Vec<_>>();
     let unmatched = searching && rows.is_empty() && !episodes.is_empty();
     rsx! {
-        ul { class: "data-episode-list", "aria-label": "Episodes of {dataset.label()}",
+        Fragment {
             for episode in rows {
                 {
-                    let label = episode.record().source_label(prefix);
+                    let source = episode.record().source_label(prefix);
                     let selected = selected_episode_id.as_deref() == Some(episode.record().id());
                     let open_dataset = dataset.clone();
-                    let open_label = label.clone();
+                    let open_source = source.clone();
                     let open_episode = episode.clone();
                     rsx! {
-                        li { key: "{episode.record().id()}",
-                            button { r#type: "button", class: "data-episode-row", aria_pressed: selected,
-                                title: "{episode.record().facts_label()}\n{episode.record().source_uri().unwrap_or_default()}",
-                                onclick: move |_| on_open.call(OpenedEpisode::new(open_dataset.clone(), open_episode.clone(), open_label.clone())),
+                        TreeItem { key: "{episode.record().id()}", class: "data-episode", selected,
+                            title: "{episode.record().facts_label()}\n{episode.record().source_uri().unwrap_or_default()}",
+                            onselect: move |_| on_open.call(OpenedEpisode::new(open_dataset.clone(), open_episode.clone(), open_source.clone())),
+                            label: rsx! {
                                 span { class: "data-episode-ordinal", "{episode.title()}" }
-                                span { class: "data-episode-head", "{label.head()}" }
+                                span { class: "data-episode-head", "{source.head()}" }
                                 span { class: "data-episode-duration", "{episode.record().duration_label()}" }
                                 span { class: "data-episode-sub",
-                                    if let Some(tail) = label.tail() { span { class: "data-episode-tail", "{tail}" } }
+                                    if let Some(tail) = source.tail() { span { class: "data-episode-tail", "{tail}" } }
                                     span { "{episode.record().recorded_date_label()}" }
                                     span { "{episode.record().message_count_label()} msgs" }
                                 }
-                            }
+                            },
                         }
                     }
                 }
@@ -290,7 +287,7 @@ fn DatasetEpisodes(
             } else if let Some(Err(error)) = &*page.read() {
                 li { class: "data-rail-note", role: "alert",
                     p { "{error}" }
-                    Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Link, size: ActionSize::Compact, onclick: move |_| page.restart(), "Retry" }
+                    Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Link, size: ButtonSize::Compact, onclick: move |_| page.restart(), "Retry" }
                 }
             } else if episodes.is_empty() {
                 li { class: "data-rail-note", "No episodes in this dataset." }
@@ -298,7 +295,7 @@ fn DatasetEpisodes(
                 li { class: "data-rail-note", "No episodes match." }
             } else if has_more() && !searching {
                 li { class: "data-rail-more",
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Link, size: ActionSize::Compact,
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Link, size: ButtonSize::Compact,
                         onclick: move |_| offset.set(offset() + EPISODE_PAGE_SIZE), "Load {EPISODE_PAGE_SIZE} more" }
                 }
             }
@@ -341,14 +338,14 @@ fn TableBranches(
     }
     let total = top_level.len() + groups.values().map(Vec::len).sum::<usize>();
     rsx! {
-        details { class: "data-rail-tables", open: !filter.is_empty(),
-            summary { "Tables & views" span { class: "data-rail-tables-count", "{total}" } }
+        Disclosure { class: "data-rail-tables", open: !filter.is_empty(),
+            summary: rsx! { "Tables & views" span { class: "data-rail-tables-count", "{total}" } },
             ul { class: "data-table-list",
                 for resource in top_level { TableRow { key: "{resource.resource_id()}", resource, on_open } }
             }
             for (dataset, relations) in groups {
-                details { key: "{dataset}", class: "data-rail-tables data-rail-tables-group", open: !filter.is_empty(),
-                    summary { "Relations of {dataset}" span { class: "data-rail-tables-count", "{relations.len()}" } }
+                Disclosure { key: "{dataset}", class: "data-rail-tables data-rail-tables-group", open: !filter.is_empty(),
+                    summary: rsx! { "Relations of {dataset}" span { class: "data-rail-tables-count", "{relations.len()}" } },
                     ul { class: "data-table-list",
                         for resource in relations { TableRow { key: "{resource.resource_id()}", resource, on_open } }
                     }
@@ -374,7 +371,7 @@ fn TableRow(resource: ProjectResource, on_open: EventHandler<ProjectResource>) -
     let open = resource.clone();
     rsx! {
         li {
-            button { r#type: "button", class: "data-table-row", title: "{label} · {kind} · open in SQL",
+            Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Row, class: "data-table-row", title: "{label} · {kind} · open in SQL",
                 onclick: move |_| on_open.call(open.clone()),
                 span { class: "truncate", "{shown}" }
                 small { "{kind}" }

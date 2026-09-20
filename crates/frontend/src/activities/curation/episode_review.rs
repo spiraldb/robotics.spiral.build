@@ -2,12 +2,12 @@
 use crate::activities::data::{
     DatasetClient, EpisodeCamera, EpisodeTransport, OpenedEpisode, StreamCatalog,
 };
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::components::timeline::{
     NumericTrackRow, Timeline, TimelineAction, TimelineContent, TimelineEvent, TimelineInteraction,
     TimelineInterval, TimelineTrack,
 };
 use dioxus::prelude::*;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 
 #[component]
 pub(super) fn EpisodeReview(
@@ -63,7 +63,7 @@ pub(super) fn EpisodeReview(
                 Some(Err(error)) => rsx! {
                     div { class: "episode-review-status", role: "alert",
                         p { "Could not read recorded cameras: {error}" }
-                        Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline,
+                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
                             onclick: move |_| cameras.restart(), "Retry cameras" }
                     }
                 },

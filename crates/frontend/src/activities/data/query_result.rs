@@ -1,10 +1,11 @@
 //! Query execution snapshots and the shared result viewer.
 
-use crate::components::interaction::{
-    Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant, BrowserFocus, CloseIcon,
-};
 use dioxus::prelude::*;
 use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
+use spiral_robotics_ui::{
+    ActionPurpose, BrowserFocus, Button, ButtonAuxiliaryHandlers, ButtonVariant, Chip, ChipTone,
+    CloseIcon, Disclosure,
+};
 
 mod cells;
 mod table;
@@ -105,10 +106,10 @@ pub(super) fn QueryResultView(controller: super::state::QueryController) -> Elem
                     for tab in tabs.iter() {
                         div {
                             class: if active_id == Some(tab.id) { "query-result-tab-item query-result-tab-item-active ui-hover-action-host" } else { "query-result-tab-item ui-hover-action-host" },
-                            Action {
+                            Button {
                                 id: "{prefix}-tab-{tab.id}",
                                 purpose: ActionPurpose::Select,
-                                variant: ActionVariant::Tab,
+                                variant: ButtonVariant::Tab,
                                 class: if active_id == Some(tab.id) { "query-result-tab query-result-tab-active" } else { "query-result-tab" },
                                 role: "tab",
                                 tabindex: if active_id == Some(tab.id) { "0" } else { "-1" },
@@ -118,7 +119,7 @@ pub(super) fn QueryResultView(controller: super::state::QueryController) -> Elem
                                     let id = tab.id;
                                     move |_| controller.select_query(id)
                                 },
-                                auxiliary_handlers: ActionAuxiliaryHandlers::keydown({
+                                auxiliary_handlers: ButtonAuxiliaryHandlers::keydown({
                                     let ids = tab_ids.clone();
                                     let prefix = prefix.clone();
                                     let id = tab.id;
@@ -145,9 +146,9 @@ pub(super) fn QueryResultView(controller: super::state::QueryController) -> Elem
                                 span { class: tab.presentation().state().tab_state_class(), "aria-hidden": "true" }
                                 span { class: "query-result-tab-label", "{tab.title}" }
                             }
-                            Action {
+                            Button {
                                 purpose: ActionPurpose::Close,
-                                variant: ActionVariant::Icon,
+                                variant: ButtonVariant::Icon,
                                 class: "query-result-tab-close ui-hover-action",
                                 aria_label: "Close {tab.title}",
                                 title: "Close {tab.title}",
@@ -184,11 +185,10 @@ pub(super) fn QueryResultView(controller: super::state::QueryController) -> Elem
                                 strong { "{result.rows().len()} rows" }
                                 span { "{result.elapsed_ms()} ms" }
                             }
-                            if result.truncated() { span { class: "chip chip-caution", "Truncated" } }
+                            if result.truncated() { Chip { tone: ChipTone::Caution, "Truncated" } }
                         }
                         span { class: "query-result-limit", "Limit · {tab.presentation().max_rows()} rows" }
-                        details {
-                            summary { "SQL" }
+                        Disclosure { summary: rsx! { "SQL" },
                             code { "{tab.presentation().sql()}" }
                         }
                     }

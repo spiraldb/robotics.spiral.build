@@ -67,6 +67,14 @@ Keep `--debug-symbols false` on browser builds: DX enables WASM debug symbols by
 default, and the bundled Binaryen currently fails when processing that DWARF.
 The Cargo profile's `debug = 0` does not disable DX's separate bundling option.
 
+Interface primitives (buttons, fields, facts, disclosures, trees, reordering,
+notices) live in `crates/ui` as `spiral-robotics-ui`, with their stylesheet; the
+frontend composes them and owns layout. Their unit tests run natively:
+
+```console
+cargo test -p spiral-robotics-ui
+```
+
 Frontend unit tests run as WASM in a browser using `wasm-bindgen-test`, including
 the real browser timers and DOM APIs. In the Nix shell, run:
 

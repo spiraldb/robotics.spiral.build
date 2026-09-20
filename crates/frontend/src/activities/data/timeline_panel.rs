@@ -10,11 +10,13 @@ use super::{
 };
 use crate::components::{
     icons::{CameraStreamIcon, SignalStreamIcon},
-    interaction::{Action, ActionPurpose, ActionVariant, ChevronIcon},
     timeline::{DensityTrack, Timeline, TimelineContent, TimelineScrubber},
 };
 use crate::format::{GroupedCountPresentation, PreciseClockPresentation};
 use dioxus::prelude::*;
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonVariant, ChevronIcon, TextInput, TextInputKind,
+};
 use std::collections::BTreeSet;
 
 /// What the Timeline is about: the open episode and its discovered streams.
@@ -85,9 +87,9 @@ fn StreamTimeline(transport: EpisodeTransport, subject: TimelineSubject) -> Elem
         strong { "{subject.episode.listed().title()}" }
         span { class: "truncate", title: "{subject.episode.record().facts_label()}\n{subject.episode.record().source_uri().unwrap_or_default()}", "{subject.episode.label().head()}" }
     };
-    let corner = rsx! { input { class: "field data-stream-filter", r#type: "search",
+    let corner = rsx! { TextInput { class: "data-stream-filter", kind: TextInputKind::Search,
     placeholder: "Filter {total} streams", "aria-label": "Filter streams",
-    value: filter(), oninput: move |event| filter.set(event.value()) } };
+    value: filter(), oninput: move |value| filter.set(value) } };
     let rows = rsx! {
         match subject.streams {
             EpisodeStreams::Loading => rsx! { div { class: "data-timeline-none", role: "status", "Finding recorded streams…" } },
@@ -136,7 +138,7 @@ fn QuietStreamsRow(count: usize, open: bool, on_toggle: EventHandler<()>) -> Ele
     rsx! {
         div { class: "data-stream data-stream-fold",
             div { class: "data-stream-name",
-                Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Icon, class: "data-stream-expand",
+                Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Icon, class: "data-stream-expand",
                     aria_expanded: open, aria_label: "{verb} the {count} {noun} with nothing to plot",
                     onclick: move |_| on_toggle.call(()), ChevronIcon { open } }
                 span { class: "data-stream-expand-space" }
@@ -184,7 +186,7 @@ fn StreamRow(
         div { class: "data-stream", "data-selected": selected, "data-kind": if kind == StreamKind::Video { "video" } else { "data" },
             div { class: "data-stream-name",
                 if kind == StreamKind::Data {
-                    Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Icon, class: "data-stream-expand",
+                    Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Icon, class: "data-stream-expand",
                         aria_expanded: expanded, aria_label: if expanded { "Hide fields" } else { "Show fields" },
                         onclick: move |_| on_expand.call(!expanded), ChevronIcon { open: expanded } }
                 } else {

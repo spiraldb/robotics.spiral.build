@@ -11,8 +11,8 @@ use crate::components::document_bar::{
     DocumentTitle, SwitcherCopy, SwitcherGate,
 };
 use crate::components::icons::{CurationIcon, PlayIcon, SpinnerIcon};
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::shell::state::StudioProjectState;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 
 const SWITCHER_ID: &str = "curation-switcher";
 const TITLE_ID: &str = "curation-document-title";
@@ -90,23 +90,23 @@ fn CurationDocumentActions(controller: CurationController, state: DocumentState)
         div { class: "document-actions",
             DocumentStateChip { state }
             if controller.revision_conflict() {
-                Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
+                Button { purpose: ActionPurpose::Sync, variant: ButtonVariant::Outline,
                     onclick: move |_| controller.reload_current(), "Reload current" }
             } else if dirty {
-                Action { purpose: ActionPurpose::Discard, variant: ActionVariant::Link,
+                Button { purpose: ActionPurpose::Discard, variant: ButtonVariant::Link,
                     class: "document-discard-action",
                     disabled: command.is_some(),
                     title: "Return to the saved recipe",
                     onclick: move |_| controller.discard(), "Discard" }
             }
-            Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline,
+            Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Outline,
                 disabled: save_reason.is_some(),
                 aria_busy: command == Some(CurationPendingCommand::Saving),
                 title: save_reason.unwrap_or_else(|| "Save the recipe".into()),
                 onclick: move |_| controller.save(studio),
                 if command == Some(CurationPendingCommand::Saving) { "Saving…" } else { "Save" }
             }
-            Action { purpose: ActionPurpose::Start, variant: ActionVariant::Solid,
+            Button { purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
                 class: "document-run-action",
                 disabled: run_reason.is_some(),
                 aria_busy: running,

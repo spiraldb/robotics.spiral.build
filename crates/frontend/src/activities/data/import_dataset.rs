@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
     HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
 };
+use spiral_robotics_ui::{Field, Notice, NoticeTone, TextInput};
 
 #[derive(Clone, Copy, PartialEq)]
 struct ImportDraft {
@@ -53,11 +54,11 @@ pub(super) fn ImportDataset(on_done: EventHandler<String>) -> Element {
             button { class: "data-import-action", onclick: move |_| { receipt.set(None); inspection.set(None); draft.name.set(String::new()); on_done.call(result.dataset.clone()); }, "Open dataset" }
         } else {
             fieldset { disabled: busy(),
-                label { span { "Dataset name" } input { class: "field", value: (draft.name)(), placeholder: "bench-recordings", oninput: move |event| { draft.name.set(event.value()); inspection.set(None); } } }
-                label { span { "Hugging Face repository" } input { class: "field", value: (draft.repository)(), placeholder: "owner/repository", oninput: move |event| { draft.repository.set(event.value()); inspection.set(None); } } }
-                label { span { "Revision" } input { class: "field", value: (draft.revision)(), oninput: move |event| { draft.revision.set(event.value()); inspection.set(None); } } }
+                Field { label: "Dataset name", TextInput { value: (draft.name)(), placeholder: "bench-recordings", oninput: move |value| { draft.name.set(value); inspection.set(None); } } }
+                Field { label: "Hugging Face repository", TextInput { value: (draft.repository)(), placeholder: "owner/repository", oninput: move |value| { draft.repository.set(value); inspection.set(None); } } }
+                Field { label: "Revision", TextInput { value: (draft.revision)(), oninput: move |value| { draft.revision.set(value); inspection.set(None); } } }
             }
-            if let Some(error) = problem() { p { class: "data-import-error", role: "alert", "{error}" } }
+            if let Some(error) = problem() { Notice { tone: NoticeTone::Danger, class: "data-import-error", "{error}" } }
             if let Some(detail) = inspection() {
                 div { class: "data-import-review",
                     strong { "{detail.files().len()} MCAP files · {detail.total_bytes()} bytes" }

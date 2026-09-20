@@ -3,11 +3,11 @@
 use crate::components::time_series::{TimelineSignalLane, TimelineSignalLanes};
 use std::sync::Arc;
 
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionSize, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
+use dioxus::prelude::*;
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
     ConfirmationResponse, InlineConfirmation, Toggle,
 };
-use dioxus::prelude::*;
 
 use crate::activities::live::timeline_subject::{TimelineSubject, TimelineTarget};
 use crate::components::charts::CharmingChart;
@@ -379,10 +379,10 @@ pub(super) fn LiveTimelinePanel(
     let sync_target = target;
     let toolbar = rsx! {
         if let Some(episode) = capture_episode.clone() {
-            Action { purpose: ActionPurpose::Stop, variant: ActionVariant::Solid, size: ActionSize::Standard,
+            Button { purpose: ActionPurpose::Stop, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
                 class: "take-action take-action-live",
                 onclick: { let episode = capture_episode.clone(); move |_| on_action.call(TimelineAction::Capture { episode: episode.clone(), action: TimelineCaptureAction::Stop }) }, "Stop" }
-            Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Outline,
+            Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Outline,
                 onclick: move |_| on_action.call(TimelineAction::Capture { episode: Some(episode.clone()), action: if capture_paused { TimelineCaptureAction::Resume } else { TimelineCaptureAction::Pause } }),
                 if capture_paused { "Resume recording" } else { "Pause recording" } }
             if confirm_discard() {
@@ -396,11 +396,11 @@ pub(super) fn LiveTimelinePanel(
                     dismissal: ConfirmationDismissal::new("discard-take"),
                 }
             } else {
-                Action { id: "discard-take", purpose: ActionPurpose::Discard, variant: ActionVariant::Link,
+                Button { id: "discard-take", purpose: ActionPurpose::Discard, variant: ButtonVariant::Link,
                     aria_label: "Discard this take without saving", onclick: move |_| confirm_discard.set(true), "Discard" }
             }
         } else {
-            Action { purpose: ActionPurpose::Start, variant: ActionVariant::Solid, size: ActionSize::Standard,
+            Button { purpose: ActionPurpose::Start, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
                 class: "take-action", disabled: capabilities.record.is_err(), title: "{record_title}",
                 aria_label: if capabilities.record.is_ok() { "Record".to_owned() } else { format!("Record — {record_title}") },
                 onclick: move |_| on_action.call(TimelineAction::Capture { episode: None, action: TimelineCaptureAction::Start }), "Record" }
@@ -409,7 +409,7 @@ pub(super) fn LiveTimelinePanel(
             checked: state.sync_robot, disabled: capabilities.robot_sync.is_err(),
             onchange: move |enabled| if let Some(target) = sync_target.clone() { on_action.call(TimelineAction::SetRobotSync { target, enabled }); } }
         if recording.is_some() {
-            Action { purpose: ActionPurpose::Sync, variant: ActionVariant::Outline,
+            Button { purpose: ActionPurpose::Sync, variant: ButtonVariant::Outline,
                 class: if follow_live { "text-accent" } else { "" }, aria_pressed: follow_live,
                 title: if follow_live { "Stop following the newest recorded sample" } else { "Return the playhead to the newest recorded sample" },
                 onclick: move |_| on_action.call(TimelineAction::SetFollowLive(!follow_live)),
@@ -454,9 +454,9 @@ pub(super) fn LiveTimelinePanel(
                         title: "Signals for {failed_episode} are unavailable. {reason}",
                         "Signals for {failed_episode} are unavailable. {reason}"
                     }
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Retry,
-                        variant: ActionVariant::Outline,
+                        variant: ButtonVariant::Outline,
                         onclick: {
                             let episode = failed_episode.to_owned();
                             move |_| on_action.call(TimelineAction::ReloadRecorded {

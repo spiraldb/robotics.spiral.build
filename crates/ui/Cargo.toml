@@ -1,0 +1,27 @@
+[package]
+name = "spiral-robotics-ui"
+version.workspace = true
+edition.workspace = true
+description = "Spiral Robotics interface primitives: actions, fields, facts, disclosures, trees, reordering, and notices in one design language"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["lib"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys = "0.3"
+wasm-bindgen = "=0.2.126"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "DomRect",
+    "Element",
+    "HtmlElement",
+    "MediaQueryList",
+    "Node",
+    "NodeList",
+    "PointerEvent",
+    "Window",
+] }

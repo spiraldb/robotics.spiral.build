@@ -20,10 +20,13 @@
 //! FINISH: unreviewed and undocumented is unfinished; this build ends with the
 //! finish review, the verdict, and DESIGN.md.
 
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant, ModeAction, ModeGroup};
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_common::workflow::{WorkflowAgentPhase, WorkflowRunPhase};
+use spiral_robotics_ui::{
+    ActionPurpose, ArrowDownIcon, Button, ButtonVariant, Chip, ChipTone, EmptyState, ModeButton,
+    ModeGroup, Notice, NoticeTone, Select,
+};
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
@@ -32,8 +35,7 @@ use crate::activities::workflow::state::{
 };
 use crate::components::document_bar::ExecutedSql;
 use crate::components::icons::{
-    ArrowDownIcon, ConversationIcon, ResultNodeIcon, SendIcon, SpinnerIcon, SqlIcon, StopIcon,
-    WorkflowIcon,
+    ConversationIcon, ResultNodeIcon, SendIcon, SpinnerIcon, SqlIcon, StopIcon, WorkflowIcon,
 };
 use crate::components::run_phase::RunPhasePresentation;
 use crate::shell::state::StudioProjectState;
@@ -115,9 +117,9 @@ pub(super) fn WorkflowViewSwitch(comparing: Signal<bool>) -> Element {
     let mut comparing = comparing;
     rsx! {
         ModeGroup { label: "Workflow view".to_owned(), class: "workflow-view-switch".to_owned(),
-            ModeAction { purpose: ActionPurpose::Select, checked: !comparing(),
+            ModeButton { purpose: ActionPurpose::Select, checked: !comparing(),
                 onclick: move |_| comparing.set(false), "Build" }
-            ModeAction { purpose: ActionPurpose::Select, checked: comparing(),
+            ModeButton { purpose: ActionPurpose::Select, checked: comparing(),
                 onclick: move |_| comparing.set(true), "Compare" }
         }
     }
@@ -269,9 +271,9 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         p { "Describe the rows you need. The Assistant inspects the data, writes and runs the SQL, and refines until the rows answer." }
                         if configured {
                             div { class: "workflow-assistant-examples",
-                                Action {
+                                Button {
                                     purpose: ActionPurpose::Select,
-                                    variant: ActionVariant::Row,
+                                    variant: ButtonVariant::Row,
                                     onclick: {
                                         let draft_key = starter_relations_key.clone();
                                         move |_| {
@@ -280,9 +282,9 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                                     },
                                     "Remove episodes with dim top-camera footage"
                                 }
-                                Action {
+                                Button {
                                     purpose: ActionPurpose::Select,
-                                    variant: ActionVariant::Row,
+                                    variant: ButtonVariant::Row,
                                     onclick: {
                                         let draft_key = starter_siglip_key.clone();
                                         move |_| {
@@ -305,9 +307,9 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         strong { "Assistant needs attention" }
                         p { "{error}" }
                         if state.history_available() && !active && configured {
-                            Action {
+                            Button {
                                 purpose: ActionPurpose::Retry,
-                                variant: ActionVariant::Outline,
+                                variant: ButtonVariant::Outline,
                                 disabled: command.is_some(),
                                 onclick: move |_| controller.retry_agent(studio),
                                 "Retry last turn"
@@ -319,10 +321,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
             }
             if show_latest_action() {
                 div { class: "workflow-assistant-jump",
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Navigate,
-                        variant: ActionVariant::Icon,
-                        class: "ui-action--square",
+                        variant: ButtonVariant::Icon,
+                        class: "ui-button--square",
                         aria_label: "Jump to latest",
                         title: "Jump to latest",
                         onclick: move |_| {
@@ -380,10 +382,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                         },
                     }
                     if active {
-                        Action {
+                        Button {
                             purpose: ActionPurpose::Stop,
-                            variant: ActionVariant::Outline,
-                            class: "ui-action--square workflow-composer-send",
+                            variant: ButtonVariant::Outline,
+                            class: "ui-button--square workflow-composer-send",
                             disabled: command == Some(AgentPendingCommand::Cancelling),
                             aria_busy: command == Some(AgentPendingCommand::Cancelling),
                             aria_label: if command == Some(AgentPendingCommand::Cancelling) { "Stopping the Assistant turn" } else { "Stop the Assistant turn" },
@@ -392,10 +394,10 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                             if command == Some(AgentPendingCommand::Cancelling) { SpinnerIcon {} } else { StopIcon {} }
                         }
                     } else {
-                        Action {
+                        Button {
                             purpose: ActionPurpose::Start,
-                            variant: ActionVariant::Solid,
-                            class: "ui-action--square workflow-composer-send",
+                            variant: ButtonVariant::Solid,
+                            class: "ui-button--square workflow-composer-send",
                             disabled: !can_send,
                             aria_busy: command == Some(AgentPendingCommand::Sending),
                             aria_label: "Send to the Workflow Assistant",
@@ -496,28 +498,22 @@ fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     rsx! {
         section { class: "workflow-canvas", "aria-label": "Workflow graph",
             if let Some(error) = controller.load_error() {
-                div { class: "inline-error", role: "alert", "{error}" }
+                Notice { tone: NoticeTone::Danger, class: "inline-error", "{error}" }
             } else if !controller.loaded() {
-                div { class: "panel-empty", role: "status",
-                    SpinnerIcon {}
-                    strong { "Loading workflow…" }
-                }
+                EmptyState { icon: rsx! { SpinnerIcon {} }, title: "Loading workflow…" }
             } else if spec.sql().trim().is_empty() {
-                div { class: "panel-empty is-quiet",
+                EmptyState {
                     p { "Stages appear here once the workflow has SQL." }
                 }
             } else {
                 match current {
                     None => rsx! {
-                        div { class: "panel-empty", role: "status",
-                            SpinnerIcon {}
-                            strong { "Planning SQL…" }
-                        }
+                        EmptyState { icon: rsx! { SpinnerIcon {} }, title: "Planning SQL…" }
                     },
-                    Some(Err(error)) => rsx! { div { class: "inline-error", role: "alert", "{error}" } },
+                    Some(Err(error)) => rsx! { Notice { tone: NoticeTone::Danger, class: "inline-error", "{error}" } },
                     Some(Ok(Some(plan))) => rsx! {
                         if let Some(error) = plan.error() {
-                            div { class: "inline-error", role: "alert", "{error}" }
+                            Notice { tone: NoticeTone::Danger, class: "inline-error", "{error}" }
                         }
                         if let Some(report) = plan.report() {
                             super::plan_display::WorkflowPlanDisplay {
@@ -642,9 +638,9 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                     }
                     if runs.len() > 1 {
                         label { r#for: "workflow-result-run", class: "sr-only", "Run" }
-                        select { id: "workflow-result-run", class: "run-select",
+                        Select { id: "workflow-result-run", class: "run-select",
                             value: snapshot.run_id().unwrap_or_default(),
-                            onchange: move |event| controller.select_run(event.value()),
+                            onchange: move |value| controller.select_run(value),
                             for (index, run) in runs.iter().enumerate() {
                                 option { key: "{run.snapshot().run_id().unwrap_or_default()}",
                                     value: run.snapshot().run_id().unwrap_or_default(),
@@ -666,7 +662,7 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                             "{RunDuration(result.elapsed_ms()).display()}"
                         }
                         if result.truncated() {
-                            span { class: "chip chip-caution", title: "Spiral returned more rows than this preview keeps. Use SQL to count or narrow the total.", "Truncated" }
+                            Chip { tone: ChipTone::Caution, title: "Spiral returned more rows than this preview keeps. Use SQL to count or narrow the total.", "Truncated" }
                         }
                     }
                     if snapshot.phase().active() {
@@ -682,18 +678,15 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                 }
             }
             if snapshot.result().is_some() && snapshot.error().is_some() {
-                div { class: "inline-error", role: "alert", "{snapshot.error().clone().unwrap_or_default()}" }
+                Notice { tone: NoticeTone::Danger, class: "inline-error", "{snapshot.error().clone().unwrap_or_default()}" }
             }
             div { key: "{snapshot.run_id().unwrap_or_default()}", class: "workflow-result-body",
                 if !controller.loaded() && controller.load_error().is_none() {
-                    div { class: "panel-empty", role: "status",
-                        SpinnerIcon {}
-                        strong { "Loading workflow…" }
-                    }
+                    EmptyState { icon: rsx! { SpinnerIcon {} }, title: "Loading workflow…" }
                 } else if let Some(model) = result_model.or(transient_model) {
                     {model.render()}
                 } else {
-                    div { class: "panel-empty is-quiet",
+                    EmptyState {
                         p { "{empty_copy}" }
                     }
                 }

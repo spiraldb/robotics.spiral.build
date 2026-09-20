@@ -6,10 +6,10 @@ use super::{
     query_result::{QueryExecutionPresentation, QueryState},
 };
 use crate::components::icons::{CameraStreamIcon, SignalStreamIcon};
-use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
 use crate::format::PreciseClockPresentation;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{MessageCursor, MessageWindow};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 
 const MESSAGE_PAGE_ROWS: usize = 100;
 
@@ -76,11 +76,11 @@ fn MessageReader(stream: RecordedStream, transport: EpisodeTransport) -> Element
                     "from {range.seconds_of(anchor_ns()).precise_clock_label()}"
                     if cursor().is_some() { " · continued" }
                 }
-                Action { purpose: ActionPurpose::Refresh, variant: ActionVariant::Outline, size: ActionSize::Compact,
+                Button { purpose: ActionPurpose::Refresh, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
                     disabled: pending, title: "Read the next {MESSAGE_PAGE_ROWS} messages at or after the playhead",
                     onclick: move |_| { anchor_ns.set(at_playhead.absolute_ns()); cursor.set(None); },
                     "From playhead" }
-                Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Outline, size: ActionSize::Compact,
+                Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
                     disabled: pending || !has_next, title: "Continue after the last row shown",
                     onclick: move |_| cursor.set(next.clone()),
                     "Next {MESSAGE_PAGE_ROWS}" }
@@ -92,7 +92,7 @@ fn MessageReader(stream: RecordedStream, transport: EpisodeTransport) -> Element
                 Some(Err(error)) if !pending => rsx! {
                     div { class: "data-messages-error", role: "alert",
                         p { "{error}" }
-                        Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Outline, size: ActionSize::Compact, onclick: move |_| page.restart(), "Retry" }
+                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, size: ButtonSize::Compact, onclick: move |_| page.restart(), "Retry" }
                     }
                 },
                 _ => rsx! {

@@ -5,11 +5,11 @@
 //! as one sentence or one named operation.
 
 use dioxus::prelude::*;
-use spiral_robotics_common::curation::CurationStep;
 use spiral_robotics_common::curation::facts::{BuiltinFact, FactCatalog, FactKind, TopicRef};
 use spiral_robotics_common::curation::rules::{
     ConditionOp, ConditionValue, CurationRule, CurationTransform, RuleCondition, TransformOperation,
 };
+use spiral_robotics_common::curation::{CurationStep, StepDirection};
 use spiral_robotics_common::datasets::DatasetSelection;
 
 use super::pipeline::{PipelineSelection, StageKind, StageMark};
@@ -17,10 +17,11 @@ use super::sheet::RuleTone;
 use super::state::CurationController;
 use crate::activities::data::DatasetClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionVariant, ChevronIcon, CloseIcon, Toggle,
-};
 use crate::format::{GroupedCountPresentation, LongDurationPresentation};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonVariant, ChevronIcon, CloseIcon, Reorder, ReorderHandle,
+    ReorderList, ReorderMove, Select, TextInput, TextInputKind, Toggle,
+};
 
 const CAMERA_TOPICS_ID: &str = "curation-camera-topics";
 
@@ -63,14 +64,31 @@ fn OrderedRules(controller: CurationController) -> Element {
         .judged_spec()
         .is_some_and(|judged| spec.accepts_output_from(&judged));
     let steps = spec.steps();
-    let reorder = super::reorder::RuleReorder::use_binding(controller);
+    let order = steps
+        .iter()
+        .map(|step| step.id().to_owned())
+        .collect::<Vec<_>>();
+    let commit_move = use_callback(move |moved: ReorderMove| {
+        controller.edit(move |spec| {
+            let Some(start) = spec.steps().iter().position(|step| step.id() == moved.id()) else {
+                return;
+            };
+            let destination = moved.to().min(spec.steps().len().saturating_sub(1));
+            let direction = if destination < start {
+                StepDirection::Earlier
+            } else {
+                StepDirection::Later
+            };
+            for _ in 0..start.abs_diff(destination) {
+                spec.move_step(moved.id(), direction);
+            }
+        });
+    });
+    let reorder = Reorder::use_binding("curation-ordered-rules", order, commit_move);
     let selection = controller.pipeline_selection();
     let hovered = controller.hovered_rule();
     rsx! {
-        section { class: "curation-section curation-steps", id: "curation-ordered-rules", "aria-label": "Recipe steps",
-            div { class: "curation-rule-insertion", style: reorder.marker_style(), "aria-hidden": "true" }
-            p { id: "curation-reorder-help", class: "sr-only", "Drag to reorder. Or press Space, then arrow keys to move, Space to drop, and Escape to cancel." }
-            div { class: "sr-only", "aria-live": "polite", "{reorder.announcement()}" }
+        ReorderList { reorder, label: "Recipe steps", class: "curation-section curation-steps",
             div { class: "curation-section-title", span { "Steps" } span { "{steps.len()}" } }
             if steps.is_empty() {
                 p { class: "curation-section-note", "Add a filter to exclude whole episodes, or a transform to change their training data." }
@@ -100,7 +118,7 @@ fn OrderedRules(controller: CurationController) -> Element {
                     let enter_id = id.clone();
                     let remove_id = id.clone();
                     rsx! {
-                        article { key: "{id}", class: "curation-step", id: "curation-rule-{id}",
+                        article { key: "{id}", class: "curation-step", id: reorder.item_id(&id),
                             style: reorder.style(&id),
                             "data-dragging": reorder.picked(&id),
                             "data-selected": selection == PipelineSelection::Step(id.clone()),
@@ -117,20 +135,8 @@ fn OrderedRules(controller: CurationController) -> Element {
                                     span { class: "curation-step-count", title: if is_filter { "Episodes this filter excluded in the visible run" } else { "Episodes this transform reached in the visible run" }, "{count}" }
                                 }
                                 div { class: "curation-step-tools",
-                                    button { r#type: "button", class: "curation-reorder-handle", id: "curation-rule-handle-{id}",
-                                        "aria-label": "Reorder step {index + 1}", "aria-describedby": "curation-reorder-help", "aria-pressed": reorder.picked(&id),
-                                        onpointerdown: { let id = id.clone(); move |event| reorder.pointer_down(&id, event) },
-                                        onpointermove: move |event| reorder.pointer_move(event),
-                                        onpointerup: move |event| reorder.pointer_up(event),
-                                        onpointercancel: move |event| reorder.pointer_cancel(event),
-                                        onlostpointercapture: move |event| reorder.pointer_cancel(event),
-                                        onkeydown: { let id = id.clone(); move |event| reorder.keyboard(&id, event) },
-                                        title: "Drag to reorder · Space then arrow keys",
-                                        svg { width: "16", height: "16", view_box: "0 0 16 16", fill: "currentColor", "aria-hidden": "true",
-                                            for (x, y) in [(5,3),(11,3),(5,8),(11,8),(5,13),(11,13)] { circle { cx: "{x}", cy: "{y}", r: "1.2" } }
-                                        }
-                                    }
-                                    Action { purpose: ActionPurpose::Remove, variant: ActionVariant::Icon,
+                                    ReorderHandle { reorder, id: id.clone(), label: "Reorder step {index + 1}" }
+                                    Button { purpose: ActionPurpose::Remove, variant: ButtonVariant::Icon,
                                         aria_label: "Remove step {index + 1}", title: "Remove step",
                                         onclick: move |event: Event<MouseData>| {
                                             event.stop_propagation();
@@ -210,10 +216,10 @@ fn SourceSection(controller: CurationController) -> Element {
             match response.as_ref() {
                 Some(Ok(items)) => rsx! {
                     label { r#for: "curation-source", class: "sr-only", "Dataset" }
-                    select {
-                        id: "curation-source", class: "curation-select w-full",
+                    Select {
+                        id: "curation-source", class: "w-full",
                         value: current.clone().unwrap_or_default(),
-                        onchange: move |event| choose(event.value()),
+                        onchange: choose,
                         option { value: "", disabled: true, selected: current.is_none(),
                             if items.is_empty() { "No datasets available" } else { "Choose a dataset" } }
                         // A saved recipe may name a dataset the catalog no longer lists.
@@ -228,14 +234,14 @@ fn SourceSection(controller: CurationController) -> Element {
                 Some(Err(error)) => rsx! {
                     form { class: "curation-inline-form",
                         onsubmit: move |event| { event.prevent_default(); let name = typed().trim().to_owned(); if !name.is_empty() { choose(name); } },
-                        input { class: "curation-input", "aria-label": "Dataset name", placeholder: "dataset_name",
-                            value: "{typed}", oninput: move |event| typed.set(event.value()),
-                            onkeydown: move |event| if event.key() == Key::Enter {
+                        TextInput { aria_label: "Dataset name", placeholder: "dataset_name",
+                            value: "{typed}", oninput: move |value| typed.set(value),
+                            onkeydown: move |event: KeyboardEvent| if event.key() == Key::Enter {
                                 event.prevent_default();
                                 let name = typed().trim().to_owned();
                                 if !name.is_empty() { choose(name); }
                             } }
-                        Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline, r#type: "submit",
+                        Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Outline, r#type: "submit",
                             disabled: typed().trim().is_empty() || current.as_deref() == Some(typed().trim()), "Use" }
                     }
                     p { class: "curation-source-caution", role: "status", title: "{error}",
@@ -321,7 +327,7 @@ fn ConditionEditor(
         .entry(condition.fact())
         .map_or(FactKind::Number, |entry| entry.kind());
     let mut text = use_signal(|| condition.value().display());
-    let mut fact_change = {
+    let fact_change = {
         let condition = condition.clone();
         let catalog = catalog.clone();
         move |fact: String| {
@@ -350,7 +356,7 @@ fn ConditionEditor(
             }
         }
     };
-    let mut value_change = {
+    let value_change = {
         let condition = condition.clone();
         move |raw: String| {
             text.set(raw.clone());
@@ -360,9 +366,9 @@ fn ConditionEditor(
         }
     };
     rsx! {
-        select { class: "curation-select curation-condition-fact", "aria-label": "Fact",
+        Select { class: "curation-condition-fact", aria_label: "Fact",
             value: "{condition.fact()}",
-            onchange: move |event| fact_change(event.value()),
+            onchange: fact_change,
             optgroup { label: "Every episode",
                 for entry in catalog.entries().iter().filter(|entry| entry.builtin()) {
                     option { value: "{entry.key()}", selected: entry.key() == condition.fact(), "{entry.label()}" }
@@ -382,21 +388,21 @@ fn ConditionEditor(
         // The comparison and its value stay together, so a narrow column
         // breaks the sentence before "is below 10", never inside it.
         span { class: "curation-condition-test",
-            select { class: "curation-select curation-condition-op", "aria-label": "Comparison",
+            Select { class: "curation-condition-op", aria_label: "Comparison",
                 value: "{condition.op().key()}",
-                onchange: move |event| op_change(event.value()),
+                onchange: op_change,
                 for op in ConditionOp::for_kind(kind) {
                     option { value: "{op.key()}", selected: *op == condition.op(), "{op.label()}" }
                 }
             }
             if condition.op().needs_value() {
-                input {
-                    class: if kind == FactKind::Number { "curation-input curation-condition-value curation-mono" } else { "curation-input curation-condition-value" },
-                    "aria-label": "Value",
-                    inputmode: if kind == FactKind::Number { "decimal" } else { "text" },
+                TextInput {
+                    class: "curation-condition-value",
+                    kind: if kind == FactKind::Number { TextInputKind::Decimal } else { TextInputKind::Text },
+                    aria_label: "Value",
                     placeholder: if kind == FactKind::Number { "0" } else { "text" },
                     value: "{text}",
-                    oninput: move |event| value_change(event.value()),
+                    oninput: value_change,
                 }
             }
         }
@@ -445,8 +451,8 @@ fn TransformEditor(
     };
     rsx! {
         div { class: "curation-step-body curation-transform", "data-expanded": expanded(),
-            Action {
-                purpose: ActionPurpose::Toggle, variant: ActionVariant::Quiet, class: "curation-transform-summary",
+            Button {
+                purpose: ActionPurpose::Toggle, variant: ButtonVariant::Quiet, class: "curation-transform-summary",
                 aria_expanded: expanded(), title: if expanded() { "Hide the settings" } else { "Show the settings" },
                 onclick: move |_| expanded.toggle(),
                 ChevronIcon { open: expanded() }
@@ -460,14 +466,13 @@ fn TransformEditor(
                     if !progress_transform {
                         div { class: "curation-field-grid",
                             label { r#for: "{transform.id()}-label", "Name" }
-                            input {
+                            TextInput {
                                 id: "{transform.id()}-label",
-                                class: "curation-input curation-transform-label",
+                                class: "curation-transform-label",
                                 placeholder: "{summary}",
                                 value: "{transform.label()}",
-                                oninput: move |event| {
+                                oninput: move |label| {
                                     let id = label_id.clone();
-                                    let label = event.value();
                                     controller.edit(move |spec| if let Some(transform) = spec.transform_mut(&id) { transform.set_label(label); });
                                 },
                             }
@@ -480,14 +485,14 @@ fn TransformEditor(
                             },
                             TransformOperation::CameraColorProfile { topic, profile } => rsx! {
                                 label { r#for: "{transform.id()}-topic", "Camera" }
-                                input { id: "{transform.id()}-topic", class: "curation-input", list: CAMERA_TOPICS_ID, placeholder: "/top-camera",
+                                TextInput { id: "{transform.id()}-topic", list: CAMERA_TOPICS_ID, placeholder: "/top-camera",
                                     value: "{topic.topic()}",
                                     oninput: { let set_operation = set_operation.clone(); let profile = profile.clone();
-                                        move |event| set_operation(TransformOperation::CameraColorProfile { topic: TopicRef::new(event.value()), profile: profile.clone() }) } }
+                                        move |value| set_operation(TransformOperation::CameraColorProfile { topic: TopicRef::new(value), profile: profile.clone() }) } }
                                 label { r#for: "{transform.id()}-profile", "Profile" }
-                                select { id: "{transform.id()}-profile", class: "curation-select", value: "{profile}",
+                                Select { id: "{transform.id()}-profile", value: "{profile}",
                                     onchange: { let set_operation = set_operation.clone(); let topic = topic.clone();
-                                        move |event| set_operation(TransformOperation::CameraColorProfile { topic: topic.clone(), profile: event.value() }) },
+                                        move |value| set_operation(TransformOperation::CameraColorProfile { topic: topic.clone(), profile: value }) },
                                     for option in TransformOperation::COLOR_PROFILES {
                                         option { value: "{option}", selected: option == profile, "{option}" }
                                     }
@@ -495,34 +500,34 @@ fn TransformEditor(
                             },
                             TransformOperation::ResizeCamera { topic, width, height } => rsx! {
                                 label { r#for: "{transform.id()}-topic", "Camera" }
-                                input { id: "{transform.id()}-topic", class: "curation-input", list: CAMERA_TOPICS_ID, placeholder: "/top-camera",
+                                TextInput { id: "{transform.id()}-topic", list: CAMERA_TOPICS_ID, placeholder: "/top-camera",
                                     value: "{topic.topic()}",
                                     oninput: { let set_operation = set_operation.clone();
-                                        move |event| set_operation(TransformOperation::ResizeCamera { topic: TopicRef::new(event.value()), width, height }) } }
+                                        move |value| set_operation(TransformOperation::ResizeCamera { topic: TopicRef::new(value), width, height }) } }
                                 label { r#for: "{transform.id()}-size", "Size" }
                                 div { class: "curation-inline-form",
-                                    input { id: "{transform.id()}-size", class: "curation-input curation-mono curation-dimension", "aria-label": "Width", inputmode: "numeric",
+                                    TextInput { id: "{transform.id()}-size", class: "curation-dimension", kind: TextInputKind::Integer, aria_label: "Width",
                                         value: "{width}",
                                         oninput: { let set_operation = set_operation.clone(); let topic = topic.clone();
-                                            move |event| if let Ok(width) = event.value().trim().parse::<u32>() { set_operation(TransformOperation::ResizeCamera { topic: topic.clone(), width, height }) } } }
+                                            move |value: String| if let Ok(width) = value.trim().parse::<u32>() { set_operation(TransformOperation::ResizeCamera { topic: topic.clone(), width, height }) } } }
                                     span { class: "curation-rule-word", "×" }
-                                    input { class: "curation-input curation-mono curation-dimension", "aria-label": "Height", inputmode: "numeric",
+                                    TextInput { class: "curation-dimension", kind: TextInputKind::Integer, aria_label: "Height",
                                         value: "{height}",
                                         oninput: { let set_operation = set_operation.clone(); let topic = topic.clone();
-                                            move |event| if let Ok(height) = event.value().trim().parse::<u32>() { set_operation(TransformOperation::ResizeCamera { topic: topic.clone(), width, height }) } } }
+                                            move |value: String| if let Ok(height) = value.trim().parse::<u32>() { set_operation(TransformOperation::ResizeCamera { topic: topic.clone(), width, height }) } } }
                                 }
                             },
                             TransformOperation::TrimTime { start_seconds, end_seconds } => rsx! {
                                 label { r#for: "{transform.id()}-start", "From (s)" }
-                                input { id: "{transform.id()}-start", class: "curation-input curation-mono", inputmode: "decimal",
+                                TextInput { id: "{transform.id()}-start", kind: TextInputKind::Decimal,
                                     value: "{start_seconds}",
                                     oninput: { let set_operation = set_operation.clone();
-                                        move |event| if let Ok(start) = event.value().trim().parse::<f64>() { set_operation(TransformOperation::TrimTime { start_seconds: start, end_seconds }) } } }
+                                        move |value: String| if let Ok(start) = value.trim().parse::<f64>() { set_operation(TransformOperation::TrimTime { start_seconds: start, end_seconds }) } } }
                                 label { r#for: "{transform.id()}-end", "To (s)" }
-                                input { id: "{transform.id()}-end", class: "curation-input curation-mono", inputmode: "decimal", placeholder: "end of episode",
+                                TextInput { id: "{transform.id()}-end", kind: TextInputKind::Decimal, placeholder: "end of episode",
                                     value: end_seconds.map(|end| end.to_string()).unwrap_or_default(),
                                     oninput: { let set_operation = set_operation.clone();
-                                        move |event| { let raw = event.value(); let end = raw.trim(); if end.is_empty() { set_operation(TransformOperation::TrimTime { start_seconds, end_seconds: None }) } else if let Ok(end) = end.parse::<f64>() { set_operation(TransformOperation::TrimTime { start_seconds, end_seconds: Some(end) }) } } } }
+                                        move |raw: String| { let end = raw.trim(); if end.is_empty() { set_operation(TransformOperation::TrimTime { start_seconds, end_seconds: None }) } else if let Ok(end) = end.parse::<f64>() { set_operation(TransformOperation::TrimTime { start_seconds, end_seconds: Some(end) }) } } } }
                             },
                         }
                     }

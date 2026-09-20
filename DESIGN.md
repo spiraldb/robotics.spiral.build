@@ -521,8 +521,8 @@ is consequential, not merely because the interface has room for another badge.
 
 **The One-Spelling Rule.** Reusable interface colours are role-named
 `--tone-*` properties in `crates/frontend/tailwind.css`, including
-semantic training-series roles. The panel crate maps its `--rp-*` roles to
-those tokens. Renderer-owned arm and signal colours remain centralized with
+semantic training-series roles. `spiral-robotics-ui` reads them through its
+`--ui-*` roles and the panel crate through `--wb-*`; neither restates a colour. Renderer-owned arm and signal colours remain centralized with
 the code that paints them; components do not restate their literals.
 
 **The Blue-Comes-Last Rule.** Identity tints dealt from the category washes
@@ -1088,12 +1088,12 @@ islands.
 
 ### Actions
 
-Every interactive action is an `Action`, `ActionLink`, `FileAction`,
-`ModeAction`, or `Toggle` from `spiral-robotics-ui`. Product code declares the
+Every interactive control is a `Button`, `LinkButton`, `FileButton`,
+`ModeButton`, or `Toggle` from `spiral-robotics-ui`. Product code declares the
 verb first; visual presentation never changes the verb.
 
 - **Shape:** Compact rectangle, 4px radius, 24px target, and 6px horizontal
-  padding. Prominent transport actions use 32px. `ui-action--square` makes
+  padding. Prominent transport actions use 32px. `ui-button--square` makes
   any variant a 24px square with no padding while keeping its fill; it exists
   for the Assistant's filled send and outline stop. `ui-icon--spin` turns the
   shared spinner glyph once every 900ms and is the only self-moving icon.
@@ -1145,6 +1145,7 @@ verb first; visual presentation never changes the verb.
 
 ### Chips
 
+- **Component:** `Chip` with a `ChipTone`; product code never restyles a span.
 - **Style:** 11px, 4px radius, compact horizontal padding, graphite ink, and a
   tonal wash.
 - **State:** Blue for active, ochre for caution, red for fault or torque danger,
@@ -1189,8 +1190,8 @@ This is the signature component system.
 ### Side Sheet
 
 The docked inspector shared by Data's row inspector and Curation's episode
-evidence (`.side-sheet`, `components/side_sheet.rs`). One component, two
-callers; the callers own only the body.
+evidence (`SideSheet` in `spiral-robotics-ui`). One component, two callers;
+the callers own only the body.
 
 - **Geometry:** 320px wide, at most 45% of its tile, `shrink-0`, a left
   hairline, paper surface, its own vertical scroll. It sits at the right edge
@@ -1768,9 +1769,14 @@ and Dataset names with Studio state; format-1 backups require the old applicatio
 
 ### Inputs / Fields
 
+- **Components:** `TextInput` (a `TextInputKind` picks the keyboard: text,
+  search, password, number, decimal, integer) and `Select`, wrapped by `Field`
+  when a label names them. `Field` stacks the label by default and puts it
+  beside the control as `FieldLayout::Inline` for one-line settings.
 - **Style:** 24px minimum height, paper fill, graphite ink, 4px radius, one-pixel
-  hairline, and 6px horizontal padding.
-- **Focus:** Border and focus ring shift to role blue.
+  hairline, and 6px horizontal padding. Labels are 11px soft ink; numeric kinds
+  set their value in mono with tabular figures.
+- **Focus:** Border shifts to role blue with a 15% halo.
 - **Paired action:** A picker and the action that completes it share one row
   when space allows.
 - **Joint position:** Writable slider only in Hold/Manual. Release keeps normal
@@ -1790,6 +1796,27 @@ accepted recorded-source update is an explicit canvas redraw dependency.
 Transient notices float over the shell, carry their own 4–14 second expiry, and
 keep Dismiss. Failures use alert semantics and a longer reading floor. A notice
 never inserts a persistent banner above the workspace.
+
+Inside a panel, `Notice` is one line of status with a `NoticeTone`; danger is
+the only tone announced as an alert. `EmptyState` is what a panel says when it
+has nothing to show: an optional glyph, one 12px title, and a sentence or two;
+without a title it is a quiet aside.
+
+### Facts, Disclosures, Trees, and Reordering
+
+- **Facts:** `FactList` with `Fact` children is every label-and-value pair. The
+  10px faint label and the value are drawn once; `FactLayout` chooses columns,
+  wrapping tiles, or a divided strip, and `mono` marks values that are data.
+- **Disclosure:** `Disclosure` replaces every hand-styled `details`: the shared
+  chevron turns when it opens, and a `pre` or `code` behind it reads as a
+  recessed mono block.
+- **Tree:** `Tree` and `TreeItem` are the nested list the catalog rail draws.
+  ↑ ↓ Home End move between visible rows, → and ← open and close a
+  `TreeBranch` or step to its parent. A row is one surface: hover and
+  selection wash it edge to edge, and nothing inside it draws its own box.
+- **Reorder:** `Reorder` binds a vertical list to one gesture; `ReorderList`
+  carries the insertion marker and live announcement, `ReorderHandle` is the
+  grip. Only dropping commits, as one `ReorderMove` the caller applies.
 
 ### Named Rules
 
@@ -1900,9 +1927,6 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
 - **Don't** add fixed one-off panel arrangements in the Studio; take a generic
   mechanic upstream to [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench)
   and register domain content in the Studio.
-- **Don't** name product components or local CSS classes after native
-  presentation such as `Button`; name the action's domain intent or the layout
-  responsibility.
 - **Don't** turn every tool into primary navigation. Live, Data, Workflow,
   Curation, Training, and Rollout are activities; panel tabs are spatial
   grouping inside them.

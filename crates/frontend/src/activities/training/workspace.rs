@@ -3,10 +3,6 @@
 use crate::activities::dataset_catalog::DatasetCatalogFeedback;
 use std::collections::BTreeSet;
 
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionSize, ActionVariant, ConfirmationCopy, ConfirmationDismissal,
-    ConfirmationResponse, DeleteIcon, InlineConfirmation,
-};
 use charming::Chart;
 use charming::component::{Axis, DataZoom, DataZoomType, FilterMode, Grid};
 use charming::datatype::{CompositeValue, DataFrame, DataPoint};
@@ -20,6 +16,11 @@ use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, 
 use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::training::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
+};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
+    ConfirmationResponse, DeleteIcon, Disclosure, Fact, FactLayout, FactList, Field,
+    InlineConfirmation, Select, TextInput, TextInputKind,
 };
 
 use crate::components::charts::{
@@ -272,8 +273,7 @@ fn TrainingRunControl(
                         strong { "Training is not ready" }
                         span { "{readiness_summary}" }
                         p { "{readiness_recovery}" }
-                        details { class: "technical-details",
-                            summary { "Technical details" }
+                        Disclosure { summary: rsx! { "Technical details" },
                             code { "{readiness.summary()}" }
                         }
                     }
@@ -305,10 +305,10 @@ fn TrainingRunControl(
                         p { "{message}" }
                         }
                     }
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Stop,
-                        variant: ActionVariant::Outline,
-                        size: ActionSize::Standard,
+                        variant: ButtonVariant::Outline,
+                        size: ButtonSize::Standard,
                         class: "training-stop-action",
                         title: "Finish the current step, save a checkpoint, and stop",
                         disabled: run.phase() == TrainingRunPhase::Stopping || stopping.is_some(),
@@ -326,21 +326,19 @@ fn TrainingRunControl(
                 header { class: "training-form-heading",
                     h3 { "Training data" }
                 }
-                label { class: "training-field training-field-wide",
-                    span { "Dataset" }
-                    select {
+                Field { label: "Dataset", class: "training-field-wide",
+                    Select {
                         value: dataset_id.clone(),
                         disabled: active_run.is_some(),
-                        "aria-label": "Training dataset",
-                        onchange: move |event| selected_dataset.set(event.value()),
+                        onchange: move |value| selected_dataset.set(value),
                         for id in dataset_ids.iter() {
                             option { value: "{id}", "{id}" }
                         }
                     }
                 }
                 DatasetCatalogFeedback { data }
-                dl { class: "training-source-meta",
-                    div { dt { "Cameras" } dd { "{camera_summary}" } }
+                FactList { mono: true, class: "training-source-meta",
+                    Fact { label: "Cameras", "{camera_summary}" }
                 }
             }
 
@@ -364,13 +362,11 @@ fn TrainingRunControl(
                         }
                     }
                 }
-                label { class: "training-field training-field-wide",
-                    span { "Device" }
-                    select {
+                Field { label: "Device", class: "training-field-wide",
+                    Select {
                         value: config.device().to_owned(),
                         disabled: active_run.is_some() || readiness.runtime().is_none(),
-                        onchange: move |event| {
-                            let value = event.value();
+                        onchange: move |value: String| {
                             controller.edit_config(move |config| config.set_device(value));
                         },
                         for (value, label) in runtime_devices {
@@ -385,23 +381,21 @@ fn TrainingRunControl(
                     h3 { "Run" }
                 }
                 div { class: "training-form-grid training-primary-grid",
-                    label { class: "training-field",
-                        span { "Run name" }
-                        input {
+                    Field { label: "Run name",
+                        TextInput {
                             value: config.run_name().to_owned(),
                             disabled: active_run.is_some(),
-                            oninput: move |event| {
-                                controller.set_run_name(event.value());
+                            oninput: move |value| {
+                                controller.set_run_name(value);
                             },
                         }
                     }
-                    label { class: "training-field",
-                        span { "Steps" }
-                        input {
-                            r#type: "number", min: "1", step: "100",
+                    Field { label: "Steps",
+                        TextInput {
+                            kind: TextInputKind::Number, min: "1", step: "100",
                             value: "{config.steps()}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                            oninput: move |value: String| if let Ok(value) = value.parse() {
                                 controller.edit_config(move |config| config.set_steps(value));
                             },
                         }
@@ -409,62 +403,56 @@ fn TrainingRunControl(
                 }
             }
 
-            details { class: "training-query-section",
-                summary { "Advanced settings" }
+            Disclosure { class: "training-query-section", summary: rsx! { "Advanced settings" },
                 div { class: "training-query-body",
                     div { class: "training-form-grid",
-                    label { class: "training-field",
-                        span { "Batch" }
-                        input {
-                            r#type: "number", min: "1",
+                    Field { label: "Batch",
+                        TextInput {
+                            kind: TextInputKind::Number, min: "1",
                             value: "{config.batch_size()}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                            oninput: move |value: String| if let Ok(value) = value.parse() {
                                 controller.edit_config(move |config| config.set_batch_size(value));
                             },
                         }
                     }
-                    label { class: "training-field",
-                        span { "Validation holdout (%)" }
-                        input {
-                            r#type: "number", min: "0", max: "50", step: "1",
+                    Field { label: "Validation holdout (%)",
+                        TextInput {
+                            kind: TextInputKind::Number, min: "0", max: "50", step: "1",
                             title: "Whole episodes reserved for validation and excluded from optimizer updates",
                             value: "{validation_percent}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse::<f64>() {
+                            oninput: move |value: String| if let Ok(value) = value.parse::<f64>() {
                                 controller.edit_config(move |config| config.set_validation_split(value / 100.0));
                             },
                         }
                     }
-                    label { class: "training-field",
-                        span { "Action horizon" }
-                        input {
-                            r#type: "number", min: "1", max: "256",
+                    Field { label: "Action horizon",
+                        TextInput {
+                            kind: TextInputKind::Number, min: "1", max: "256",
                             value: "{config.chunk_size()}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                            oninput: move |value: String| if let Ok(value) = value.parse() {
                                 controller.edit_config(move |config| config.set_chunk_size(value));
                             },
                         }
                     }
-                    label { class: "training-field",
-                        span { "Learning rate" }
-                        input {
-                            r#type: "number", min: "0", step: "0.00001",
+                    Field { label: "Learning rate",
+                        TextInput {
+                            kind: TextInputKind::Number, min: "0", step: "0.00001",
                             value: "{config.learning_rate()}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                            oninput: move |value: String| if let Ok(value) = value.parse() {
                                 controller.edit_config(move |config| config.set_learning_rate(value));
                             },
                         }
                     }
-                    label { class: "training-field",
-                        span { "Checkpoint interval" }
-                        input {
-                            r#type: "number", min: "1", step: "100",
+                    Field { label: "Checkpoint interval",
+                        TextInput {
+                            kind: TextInputKind::Number, min: "1", step: "100",
                             value: "{config.checkpoint_every()}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                            oninput: move |value: String| if let Ok(value) = value.parse() {
                                 controller.edit_config(move |config| config.set_checkpoint_every(value));
                             },
                         }
@@ -482,38 +470,33 @@ fn TrainingRunControl(
                         },
                     }
                     div { class: "training-column-row",
-                        label { class: "training-field",
-                            span { "State column" }
-                            input {
+                        Field { label: "State column",
+                            TextInput {
                                 value: config.state_column().to_owned(),
                                 disabled: active_run.is_some(),
-                                oninput: move |event| {
-                                    let value = event.value();
+                                oninput: move |value: String| {
                                     controller.edit_config(move |config| config.set_state_column(value));
                                 },
                             }
                         }
-                        label { class: "training-field",
-                            span { "Action column" }
-                            input {
+                        Field { label: "Action column",
+                            TextInput {
                                 value: config.action_column().to_owned(),
                                 disabled: active_run.is_some(),
-                                oninput: move |event| {
-                                    let value = event.value();
+                                oninput: move |value: String| {
                                     controller.edit_config(move |config| config.set_action_column(value));
                                 },
                             }
                         }
                     }
                     div { class: "training-column-row",
-                        label { class: "training-field training-field-wide",
-                            span { "Camera streams" }
-                            input {
+                        Field { label: "Camera streams", class: "training-field-wide",
+                            TextInput {
                                 value: config.act().camera_streams().join(", "),
                                 placeholder: "All available",
                                 disabled: active_run.is_some(),
-                                oninput: move |event| {
-                                    let streams = event.value()
+                                oninput: move |value: String| {
+                                    let streams = value
                                         .split(',')
                                         .map(str::trim)
                                         .filter(|stream| !stream.is_empty())
@@ -523,24 +506,22 @@ fn TrainingRunControl(
                                 },
                             }
                         }
-                        label { class: "training-field",
-                            span { "Image width (0 = source)" }
-                            input {
-                                r#type: "number", min: "0", max: "1024", step: "1",
+                        Field { label: "Image width (0 = source)",
+                            TextInput {
+                                kind: TextInputKind::Number, min: "0", max: "1024", step: "1",
                                 value: "{config.act().image_width()}",
                                 disabled: active_run.is_some(),
-                                oninput: move |event| if let Ok(value) = event.value().parse() {
+                                oninput: move |value: String| if let Ok(value) = value.parse() {
                                     controller.edit_config(move |config| config.act_mut().set_image_width(value));
                                 },
                             }
                         }
-                        label { class: "training-field",
-                            span { "Image height (0 = source)" }
-                            input {
-                                r#type: "number", min: "0", max: "1024", step: "1",
+                        Field { label: "Image height (0 = source)",
+                            TextInput {
+                                kind: TextInputKind::Number, min: "0", max: "1024", step: "1",
                                 value: "{config.act().image_height()}",
                                 disabled: active_run.is_some(),
-                                oninput: move |event| if let Ok(value) = event.value().parse() {
+                                oninput: move |value: String| if let Ok(value) = value.parse() {
                                     controller.edit_config(move |config| config.act_mut().set_image_height(value));
                                 },
                             }
@@ -550,10 +531,10 @@ fn TrainingRunControl(
             }
             }
 
-            Action {
+            Button {
                 purpose: ActionPurpose::Start,
-                variant: ActionVariant::Solid,
-                size: ActionSize::Prominent,
+                variant: ButtonVariant::Solid,
+                size: ButtonSize::Prominent,
                 class: "training-start-action",
                 disabled: !can_start,
                 aria_busy: starting,
@@ -620,9 +601,9 @@ fn TrainingHistoryRow(
     rsx! {
         article {
             class: "training-history-entry",
-            Action {
+            Button {
                 purpose: ActionPurpose::Select,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: "training-history-row",
                 aria_pressed: selected,
                 title: "Open {run.config().run_name()}",
@@ -635,10 +616,10 @@ fn TrainingHistoryRow(
                 span { class: run.phase().presentation_class(), "{run.phase().label()}" }
                 span { class: "training-history-step", "{run.current_step()} / {run.config().steps()}" }
             }
-            Action {
+            Button {
                 id: "delete-run-{run.id()}",
                 purpose: ActionPurpose::Delete,
-                variant: ActionVariant::Icon,
+                variant: ButtonVariant::Icon,
                 class: "training-history-delete",
                 disabled: delete_disabled,
                 title: "{delete_title}",
@@ -717,10 +698,10 @@ fn TrainingRunDetail(run: TrainingRun, details_loaded: bool) -> Element {
                     }
                     p { "Dataset · {run.config().dataset_id()} · {run.config().policy().label()} · {run.config().device()}" }
                 }
-                dl { class: "training-run-facts",
-                    div { dt { "Step" } dd { "{run.current_step()} / {run.config().steps()}" } }
-                    div { dt { "Progress" } dd { "{progress.clamp(0.0, 100.0):.1}%" } }
-                    div { dt { "Checkpoints" } dd { "{run.checkpoints().len()}" } }
+                FactList { layout: FactLayout::Strip, mono: true, class: "training-run-facts",
+                    Fact { label: "Step", "{run.current_step()} / {run.config().steps()}" }
+                    Fact { label: "Progress", "{progress.clamp(0.0, 100.0):.1}%" }
+                    Fact { label: "Checkpoints", "{run.checkpoints().len()}" }
                 }
             }
             if let Some(message) = message {
@@ -753,8 +734,7 @@ fn TrainingRunDetail(run: TrainingRun, details_loaded: bool) -> Element {
                 }
             }
             if !logs.is_empty() {
-                details { class: "training-run-logs",
-                    summary { "Log · {logs.len()} lines" }
+                Disclosure { class: "training-run-logs", summary: rsx! { "Log · {logs.len()} lines" },
                     pre {
                         for line in logs.iter().rev().take(20).rev() {
                             code { "{line}\n" }
@@ -935,16 +915,13 @@ fn TrainingInputs(run: TrainingRun) -> Element {
     };
     rsx! {
         section { class: "training-inputs",
-            dl { class: "training-input-facts",
-                div { class: "training-input-wide",
-                    dt { "Cameras" }
-                    dd { "{cameras}" }
-                }
-                div { dt { "Batch" } dd { "{run.config().batch_size()} samples" } }
-                div { dt { "Validation" } dd { "{validation}" } }
-                div { dt { "Action horizon" } dd { "{run.config().chunk_size()} steps" } }
-                div { dt { "Image size" } dd { "{image_size}" } }
-                div { dt { "Checkpoint interval" } dd { "{run.config().checkpoint_every()} steps" } }
+            FactList { layout: FactLayout::Tiles, mono: true, class: "training-input-facts",
+                Fact { label: "Cameras", class: "training-input-wide", "{cameras}" }
+                Fact { label: "Batch", "{run.config().batch_size()} samples" }
+                Fact { label: "Validation", "{validation}" }
+                Fact { label: "Action horizon", "{run.config().chunk_size()} steps" }
+                Fact { label: "Image size", "{image_size}" }
+                Fact { label: "Checkpoint interval", "{run.config().checkpoint_every()} steps" }
             }
         }
     }
@@ -1001,27 +978,12 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
 
     rsx! {
         section { class: "training-resources",
-            dl { class: "training-phase-timings", "aria-label": "Latest optimizer step timing",
-                div { title: "Spiral query, frame decode, normalization, and batch assembly. Prefetch overlaps this work with the preceding optimizer step.",
-                    dt { "Load" }
-                    dd { "{loader_ms}" }
-                }
-                div { title: "Studio time to materialize the batch as an Arrow IPC stream.",
-                    dt { "Arrow encode" }
-                    dd { "{arrow_encode_ms}" }
-                }
-                div { title: "HTTP request and response time outside the remote runtime handler, dominated by request-body upload for remote runtimes.",
-                    dt { "Upload" }
-                    dd { "{upload_ms}" }
-                }
-                div { title: "Runtime tensor conversion and host-to-device transfer.",
-                    dt { "Device copy" }
-                    dd { "{device_copy_ms}" }
-                }
-                div { title: "Runtime forward pass, backward pass, gradient clipping, and optimizer step.",
-                    dt { "Model" }
-                    dd { "{model_ms}" }
-                }
+            FactList { layout: FactLayout::Strip, mono: true, class: "training-phase-timings", aria_label: "Latest optimizer step timing",
+                Fact { label: "Load", title: "Spiral query, frame decode, normalization, and batch assembly. Prefetch overlaps this work with the preceding optimizer step.", "{loader_ms}" }
+                Fact { label: "Arrow encode", title: "Studio time to materialize the batch as an Arrow IPC stream.", "{arrow_encode_ms}" }
+                Fact { label: "Upload", title: "HTTP request and response time outside the remote runtime handler, dominated by request-body upload for remote runtimes.", "{upload_ms}" }
+                Fact { label: "Device copy", title: "Runtime tensor conversion and host-to-device transfer.", "{device_copy_ms}" }
+                Fact { label: "Model", title: "Runtime forward pass, backward pass, gradient clipping, and optimizer step.", "{model_ms}" }
             }
             div { class: "training-resource-grid",
                 ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("training-rate"), "Training rate", throughput).with_chart(throughput_chart, chart_group.clone()).with_presentation("resource-throughput", "Samples completed per second.") }

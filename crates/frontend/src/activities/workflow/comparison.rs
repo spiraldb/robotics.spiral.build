@@ -15,12 +15,12 @@ mod timing;
 use self::plan::{DashboardMetric, ObservationUnit};
 use super::state::WorkflowController;
 use crate::components::icons::{SpinnerIcon, WorkflowIcon};
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
 use agent::{ComparisonAgent, ComparisonResult};
 use dashboard::{ComparisonCard, ComparisonDashboard};
 use dioxus::prelude::*;
 use report::MetricNumber;
 use selection::{ComparisonEvidence, WorkflowSide};
+use spiral_robotics_ui::{ActionPurpose, BrowserFocus, Button, ButtonVariant, Disclosure, Select};
 
 #[derive(Clone, PartialEq)]
 struct EvidenceRequest {
@@ -59,11 +59,11 @@ pub(super) fn WorkflowComparison(
                 div { class: "comparison-pair", role: "group", "aria-label": "Workflows to compare",
                     label { class: "comparison-side",
                         span { class: "comparison-side-key", "A" }
-                        select {
+                        Select {
                             class: "comparison-select",
-                            "aria-label": "Workflow A", value: left(), disabled: busy,
-                            onchange: move |event| {
-                                chosen_left.set(Some(event.value()));
+                            aria_label: "Workflow A", value: left(), disabled: busy,
+                            onchange: move |value| {
+                                chosen_left.set(Some(value));
                                 dashboard.set(ComparisonDashboard::default());
                                 evidence_request.set(None);
                                 inspected.set(None);
@@ -77,11 +77,11 @@ pub(super) fn WorkflowComparison(
                     span { class: "comparison-pair-against", "against" }
                     label { class: "comparison-side",
                         span { class: "comparison-side-key", "B" }
-                        select {
+                        Select {
                             class: "comparison-select",
-                            "aria-label": "Workflow B", value: right(), disabled: busy,
-                            onchange: move |event| {
-                                right.set(event.value());
+                            aria_label: "Workflow B", value: right(), disabled: busy,
+                            onchange: move |value| {
+                                right.set(value);
                                 dashboard.set(ComparisonDashboard::default());
                                 evidence_request.set(None);
                                 inspected.set(None);
@@ -94,8 +94,8 @@ pub(super) fn WorkflowComparison(
                     }
                 }
                 div { class: "document-actions",
-                    Action {
-                        purpose: ActionPurpose::Start, variant: ActionVariant::Solid,
+                    Button {
+                        purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
                         class: "comparison-primary document-run-action",
                         disabled: busy || !valid_left, aria_busy: busy,
                         title: if !valid_left { "Choose a saved workflow for A" } else { "Run both workflows and measure their episodes" },
@@ -267,8 +267,7 @@ fn MetricCard(card: ComparisonCard, on_inspect: EventHandler<EvidenceRequest>) -
             }
             footer {
                 span { "Measured: A {left_count}/{left_population} · B {right_count}/{right_population}" }
-                details {
-                    summary { "Measurement details" }
+                Disclosure { summary: rsx! { "Measurement details" },
                     p { "{metric.source()}" }
                     p { "Bars show the share of measured {card.result().plan().unit().label()} on a shared scale. Missing values are excluded from means." }
                 }
@@ -299,8 +298,7 @@ fn UnavailableMeasurements(failures: Vec<(DashboardMetric, String)>) -> Element 
                     li { key: "failed-{metric.column()}", "{metric.label()}" }
                 }
             }
-            details { class: "comparison-failed-errors",
-                summary { if errors.len() == 1 { "Error" } else { "Errors · {errors.len()}" } }
+            Disclosure { class: "comparison-failed-errors", summary: rsx! { if errors.len() == 1 { "Error" } else { "Errors · {errors.len()}" } },
                 for (index, error) in errors.iter().enumerate() {
                     p { key: "{index}", "{error}" }
                 }

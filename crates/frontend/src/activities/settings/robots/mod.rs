@@ -7,12 +7,13 @@
 //! assignments, and calibration. Live consumes that configuration without
 //! mixing setup work into the operating surface.
 
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionVariant, ChevronIcon, FileAction, FileInput, UnassignIcon,
-};
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{
     CameraBinding, PortSettings, RobotSummary, SerialPortSummary,
+};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonVariant, ChevronIcon, Disclosure, FileButton, FileInput, Select,
+    TextInput, UnassignIcon,
 };
 
 use crate::panels::scene::ScenePalette;
@@ -126,9 +127,9 @@ fn RobotEntry(
         li { class: "device-entry",
             div {
                 class: "device-entry-row",
-                Action {
+                Button {
                     purpose: ActionPurpose::Toggle,
-                    variant: ActionVariant::Icon,
+                    variant: ButtonVariant::Icon,
                     class: "device-chevron",
                     aria_expanded: open(),
                     aria_label: if open() { "Hide setup for {robot.id()}" } else { "Show setup for {robot.id()}" },
@@ -136,9 +137,9 @@ fn RobotEntry(
                     onclick: move |_| open.toggle(),
                     ChevronIcon { open: open() }
                 }
-                Action {
+                Button {
                     purpose: ActionPurpose::Select,
-                    variant: ActionVariant::Row,
+                    variant: ButtonVariant::Row,
                     class: "device-main",
                     aria_pressed: focused,
                     title: "Show {robot.id()} in the joints panel",
@@ -221,9 +222,9 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
 
     if !open() {
         return rsx! {
-            Action {
+            Button {
                 purpose: ActionPurpose::Create,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: "device-list-action",
                 onclick: move |_| open.set(true),
                 "+ Add an arm"
@@ -233,17 +234,16 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
 
     rsx! {
         div { class: "flex w-full flex-col gap-1 py-1",
-            input {
-                class: "field",
-                "aria-label": "New arm name",
+            TextInput {
+                aria_label: "New arm name",
                 placeholder: "left_follower",
                 autofocus: true,
                 disabled: create_robot.pending(),
                 value: "{id}",
-                oninput: move |event| id.set(event.value()),
+                oninput: move |value| id.set(value),
                 // Naming an arm and pressing Enter is the whole interaction;
                 // reaching for the mouse to finish it would be a step too many.
-                onkeydown: move |event| {
+                onkeydown: move |event: KeyboardEvent| {
                     match event.key() {
                         Key::Enter => create(),
                         Key::Escape => open.set(false),
@@ -251,25 +251,25 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
                     }
                 },
             }
-            select {
-                class: "field",
-                "aria-label": "New arm type",
+            Select {
+                aria_label: "New arm type",
+                value: robot_type(),
                 disabled: create_robot.pending(),
-                onchange: move |event| robot_type.set(event.value()),
+                onchange: move |value| robot_type.set(value),
                 for (value, label) in ROBOT_TYPES {
                     option { key: "{value}", value: "{value}", selected: robot_type() == value, "{label}" }
                 }
             }
             div { class: "flex gap-1",
-                Action {
+                Button {
                     purpose: ActionPurpose::Create,
-                    variant: ActionVariant::Solid,
+                    variant: ButtonVariant::Solid,
                     disabled: create_robot.pending(),
                     aria_busy: create_robot.pending(),
                     onclick: move |_| create(),
                     if create_robot.pending() { "Adding…" } else { "Add" }
                 }
-                Action {
+                Button {
                     purpose: ActionPurpose::Cancel,
                     disabled: create_robot.pending(),
                     onclick: move |_| {
@@ -316,9 +316,9 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
     });
 
     rsx! {
-        FileAction {
+        FileButton {
             purpose: ActionPurpose::Import,
-            variant: ActionVariant::Row,
+            variant: ButtonVariant::Row,
             class: "device-list-action",
             title: "Import a unified Spiral Robotics JSON configuration",
             disabled: import_robot.pending(),
@@ -354,8 +354,7 @@ fn RobotSetup(
             if let Some(problem) = &robot.problem() {
                 div { class: "device-setup-alarm",
                     p { "This arm's configuration needs attention before it can connect." }
-                    details { class: "technical-details",
-                        summary { "Technical details" }
+                    Disclosure { summary: rsx! { "Technical details" },
                         code { "{problem}" }
                     }
                 }
@@ -366,8 +365,7 @@ fn RobotSetup(
                     rsx! {
                         div { class: "device-setup-alarm",
                             p { "{message}" }
-                            details { class: "technical-details",
-                                summary { "Technical details" }
+                            Disclosure { summary: rsx! { "Technical details" },
                                 code { "{error}" }
                             }
                         }
@@ -485,9 +483,9 @@ fn ConnectionAction(
     };
 
     rsx! {
-        Action {
+        Button {
             purpose: if connected { ActionPurpose::Disconnect } else { ActionPurpose::Connect },
-            variant: if connected { ActionVariant::Outline } else { ActionVariant::Solid },
+            variant: if connected { ButtonVariant::Outline } else { ButtonVariant::Solid },
             disabled: blocked || change_connection.pending(),
             aria_busy: change_connection.pending(),
             title: "{reason}",
@@ -568,18 +566,18 @@ fn PortSection(
         section { class: "device-section-content",
             div { class: "device-section-head",
                 h3 { class: "label mb-0", "Motor bus" }
-                Action {
+                Button {
                     purpose: ActionPurpose::Refresh,
-                    variant: ActionVariant::Link,
+                    variant: ButtonVariant::Link,
                     class: "ml-auto",
                     disabled: scanning,
                     aria_busy: scanning,
                     onclick: move |_| on_rescan.call(()),
                     if scanning { "Scanning…" } else { "Rescan" }
                 }
-                Action {
+                Button {
                     purpose: ActionPurpose::Start,
-                    variant: ActionVariant::Link,
+                    variant: ButtonVariant::Link,
                     disabled: locked || scanning || start_identify.pending(),
                     aria_busy: start_identify.pending(),
                     // Names the action the button performs. Borrowing the port
@@ -595,14 +593,13 @@ fn PortSection(
             // own label is the only place the connection state needs saying
             // inside the setup.
             div { class: "device-port-row",
-                select {
-                    class: "field",
-                    "aria-label": "Serial port",
+                Select {
+                    aria_label: "Serial port",
+                    value: current.to_owned(),
                     disabled: locked,
                     onchange: {
                         let robot = robot.clone();
-                        move |event: Event<FormData>| {
-                            let value = event.value();
+                        move |value: String| {
                             if !value.is_empty() {
                                 HardwareCommands::new(project, telemetry).assign_port(PortAssignment::new(robot.clone(), value, baud));
                             }
@@ -760,15 +757,15 @@ fn IdentifyPort(
                     ", then continue. Leave every other device connected."
                 }
                 div { class: "flex gap-1",
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Apply,
-                        variant: ActionVariant::Solid,
+                        variant: ButtonVariant::Solid,
                         disabled: identify_port.pending(),
                         aria_busy: identify_port.pending(),
                         onclick: move |_| { identify_port.call(before.clone()); },
                         if identify_port.pending() { "Checking…" } else { "I unplugged it" }
                     }
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Cancel,
                         disabled: identify_port.pending(),
                         onclick: move |_| step.set(IdentifyStep::Idle),
@@ -780,9 +777,9 @@ fn IdentifyPort(
         IdentifyStep::Finished(message) => rsx! {
             div { class: "mt-1 flex items-start gap-1.5 rounded border border-line bg-sunken p-1.5 text-[11px]",
                 span { class: "flex-1", "{message}" }
-                Action {
+                Button {
                     purpose: ActionPurpose::Close,
-                    variant: ActionVariant::Link,
+                    variant: ButtonVariant::Link,
                     onclick: move |_| step.set(IdentifyStep::Idle),
                     "Done"
                 }
@@ -838,9 +835,9 @@ fn CameraSection(
         section { class: "device-section-content",
             div { class: "device-section-head",
                 h3 { class: "label mb-0 flex-1", "Cameras" }
-                Action {
+                Button {
                     purpose: ActionPurpose::Refresh,
-                    variant: ActionVariant::Link,
+                    variant: ButtonVariant::Link,
                     disabled: scan_cameras.pending(),
                     aria_busy: scan_cameras.pending(),
                     title: "Look for cameras that have been plugged in or moved",
@@ -858,9 +855,9 @@ fn CameraSection(
                         span { class: "min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint",
                             "{binding.id()}"
                         }
-                        Action {
+                        Button {
                             purpose: ActionPurpose::Remove,
-                            variant: ActionVariant::Icon,
+                            variant: ButtonVariant::Icon,
                             class: "device-camera-remove ui-hover-action",
                             disabled: save_cameras.pending(),
                             aria_busy: save_cameras.pending(),
@@ -888,11 +885,11 @@ fn CameraSection(
             if available.is_empty() {
                 p { class: "text-[11px] text-ink-faint", "No cameras detected. Plug one in and rescan." }
             } else {
-                select {
-                    class: "field",
-                    "aria-label": "Camera device",
+                Select {
+                    aria_label: "Camera device",
+                    value: device(),
                     disabled: save_cameras.pending(),
-                    onchange: move |event| device.set(event.value()),
+                    onchange: move |value| device.set(value),
                     option { value: "", selected: device().is_empty(), "Add a camera…" }
                     for camera in available.clone() {
                         option {
@@ -921,17 +918,16 @@ fn CameraSection(
                         alt: "Live preview from {camera.name()}",
                     }
                     div { class: "flex items-center gap-1 p-1",
-                        input {
-                            class: "field",
-                            "aria-label": "Camera role",
+                        TextInput {
+                            aria_label: "Camera role",
                             placeholder: "role, such as wrist",
                             disabled: save_cameras.pending(),
                             value: "{role}",
-                            oninput: move |event| role.set(event.value()),
+                            oninput: move |value| role.set(value),
                         }
-                        Action {
+                        Button {
                             purpose: ActionPurpose::Assign,
-                            variant: ActionVariant::Solid,
+                            variant: ButtonVariant::Solid,
                             class: "shrink-0",
                             disabled: save_cameras.pending(),
                             aria_busy: save_cameras.pending(),

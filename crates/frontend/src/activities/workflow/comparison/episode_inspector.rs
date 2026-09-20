@@ -1,8 +1,8 @@
 //! Reuse the dataset's synchronized inspector for a comparison evidence row.
 use crate::activities::data::{OpenedEpisode, screen::DataPanels};
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 
 #[component]
 pub(super) fn ComparisonEpisodeInspector(
@@ -12,7 +12,7 @@ pub(super) fn ComparisonEpisodeInspector(
 ) -> Element {
     let episode = ComparisonEpisodeRow(row).open(dataset);
     rsx! {
-        Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Link,
+        Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Link,
             onclick: move |_| on_back.call(()), "Back to comparison" }
         match episode {
             Ok(episode) => rsx! {

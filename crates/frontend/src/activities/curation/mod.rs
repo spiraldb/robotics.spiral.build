@@ -13,6 +13,5 @@ mod episode_review;
 mod pipeline;
 mod progress;
 mod recipe;
-mod reorder;
 mod rule_composer;
 mod sheet;

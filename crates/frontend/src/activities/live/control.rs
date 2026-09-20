@@ -5,13 +5,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::components::interaction::{
-    Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant,
-};
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{
     JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonAuxiliaryHandlers, ButtonVariant};
 use spiral_robotics_viewport::{self as arm, ArmPose};
 
 use crate::robots::Selection;
@@ -711,12 +709,12 @@ fn JointRow(joint: JointTelemetry, state: JointRowState, actions: JointRowAction
             // choosing it.
             onpointerenter: move |_| actions.on_point.call(true),
             onpointerleave: move |_| actions.on_point.call(false),
-            Action {
+            Button {
                 purpose: ActionPurpose::Select,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: "joint-label",
                 title: "Select {label}",
-                auxiliary_handlers: ActionAuxiliaryHandlers::default().with_focus(
+                auxiliary_handlers: ButtonAuxiliaryHandlers::default().with_focus(
                     move |_| actions.on_point.call(true),
                     move |_| actions.on_point.call(false),
                 ),

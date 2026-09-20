@@ -5,28 +5,28 @@
 
 use dioxus::prelude::*;
 
-use super::icons::{ArrowDownIcon, ArrowUpIcon};
-use super::interaction::{Action, ActionPurpose, ActionVariant, CloseIcon};
+use crate::controls::{ActionPurpose, Button, ButtonVariant};
+use crate::foundation::{ArrowDownIcon, ArrowUpIcon, CloseIcon};
 
 /// Where the inspected item sits among its siblings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SheetPosition {
+pub struct SheetPosition {
     index: usize,
     count: usize,
 }
 
 impl SheetPosition {
-    pub(crate) const fn new(index: usize, count: usize) -> Self {
+    pub const fn new(index: usize, count: usize) -> Self {
         Self { index, count }
     }
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         self.index
     }
-    pub(crate) const fn count(self) -> usize {
+    pub const fn count(self) -> usize {
         self.count
     }
     /// The neighbouring position, when there is one.
-    pub(crate) fn stepped(self, delta: isize) -> Option<Self> {
+    pub fn stepped(self, delta: isize) -> Option<Self> {
         let index = self.index.checked_add_signed(delta)?;
         (index < self.count).then_some(Self {
             index,
@@ -39,7 +39,7 @@ impl SheetPosition {
 /// sheet opens), its text, the faint detail after it, and the noun the step
 /// controls name.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SheetHeading {
+pub struct SheetHeading {
     id: String,
     title: String,
     detail: Option<String>,
@@ -47,7 +47,7 @@ pub(crate) struct SheetHeading {
 }
 
 impl SheetHeading {
-    pub(crate) fn new(id: impl Into<String>, title: impl Into<String>, noun: &'static str) -> Self {
+    pub fn new(id: impl Into<String>, title: impl Into<String>, noun: &'static str) -> Self {
         Self {
             id: id.into(),
             title: title.into(),
@@ -55,14 +55,14 @@ impl SheetHeading {
             noun,
         }
     }
-    pub(crate) fn with_detail(mut self, detail: impl Into<String>) -> Self {
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub(crate) struct SideSheetProps {
+pub struct SideSheetProps {
     heading: SheetHeading,
     position: SheetPosition,
     on_step: EventHandler<isize>,
@@ -71,7 +71,7 @@ pub(crate) struct SideSheetProps {
 }
 
 #[component]
-pub(crate) fn SideSheet(props: SideSheetProps) -> Element {
+pub fn SideSheet(props: SideSheetProps) -> Element {
     let SideSheetProps {
         heading,
         position,
@@ -81,7 +81,7 @@ pub(crate) fn SideSheet(props: SideSheetProps) -> Element {
     } = props;
     let noun = heading.noun;
     rsx! {
-        aside { class: "side-sheet", "aria-label": "{heading.title} details",
+        aside { class: "ui-side-sheet", "aria-label": "{heading.title} details",
             onkeydown: move |event: KeyboardEvent| {
                 match event.key() {
                     Key::Escape => {
@@ -99,28 +99,41 @@ pub(crate) fn SideSheet(props: SideSheetProps) -> Element {
                     _ => {}
                 }
             },
-            header { class: "side-sheet-heading",
+            header { class: "ui-side-sheet-heading",
                 h3 { id: "{heading.id}", tabindex: "-1",
                     "{heading.title}"
                     if let Some(detail) = heading.detail.as_ref() {
-                        span { class: "side-sheet-count", " {detail}" }
+                        span { class: "ui-side-sheet-count", " {detail}" }
                     }
                 }
-                div { class: "side-sheet-nav", role: "group", "aria-label": "Step between {noun}s",
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
+                div { class: "ui-side-sheet-nav", role: "group", "aria-label": "Step between {noun}s",
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
                         aria_label: "Previous {noun}", title: "Previous {noun} · ↑",
                         disabled: position.stepped(-1).is_none(),
                         onclick: move |_| on_step.call(-1), ArrowUpIcon {} }
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon,
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
                         aria_label: "Next {noun}", title: "Next {noun} · ↓",
                         disabled: position.stepped(1).is_none(),
                         onclick: move |_| on_step.call(1), ArrowDownIcon {} }
-                    Action { purpose: ActionPurpose::Close, variant: ActionVariant::Icon,
+                    Button { purpose: ActionPurpose::Close, variant: ButtonVariant::Icon,
                         aria_label: "Close {noun} details", title: "Close · Esc",
                         onclick: move |_| on_close.call(()), CloseIcon {} }
                 }
             }
             {children}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SheetPosition;
+
+    #[test]
+    fn stepping_stops_at_either_end() {
+        let first = SheetPosition::new(0, 3);
+        assert_eq!(first.stepped(-1), None);
+        assert_eq!(first.stepped(1), Some(SheetPosition::new(1, 3)));
+        assert_eq!(SheetPosition::new(2, 3).stepped(1), None);
     }
 }

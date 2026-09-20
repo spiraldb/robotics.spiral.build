@@ -3,12 +3,13 @@
 use crate::activities::dataset_catalog::DatasetCatalogFeedback;
 use std::collections::BTreeSet;
 
-use crate::components::interaction::{
-    Action, ActionPurpose, ActionVariant, BlockingConfirmation, ConfirmationCopy,
-    ConfirmationDismissal, ConfirmationResponse, ModeAction, ModeGroup,
-};
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::ModeSelection;
+use spiral_robotics_ui::{
+    ActionPurpose, BlockingConfirmation, Button, ButtonVariant, ConfirmationCopy,
+    ConfirmationDismissal, ConfirmationResponse, Field, FieldLayout, ModeButton, ModeGroup,
+    TextInput,
+};
 
 use crate::activities::dataset_catalog::DatasetChoices;
 use crate::activities::live::actions::LiveAction;
@@ -77,17 +78,15 @@ fn CaptureSection(datasets: DatasetChoices, recording: Option<RecordingProgress>
                     span { "Recording {recording.episode()}" }
                 }
             }
-            label { class: "capture-dataset-field",
-                span { "Dataset" }
-                input {
-                    class: "field",
+            Field { label: "Dataset", layout: FieldLayout::Inline, class: "capture-dataset-field",
+                TextInput {
                     list: "live-dataset-options",
                     value: selected_dataset.read().to_owned(),
                     disabled: recording.is_some(),
                     maxlength: "96",
                     pattern: "[A-Za-z0-9_.-]+",
                     placeholder: "pick-place-v1",
-                    oninput: move |event| selected_dataset.set(event.value()),
+                    oninput: move |value| selected_dataset.set(value),
                 }
             }
             datalist { id: "live-dataset-options",
@@ -144,10 +143,10 @@ fn RobotRoster(
                             crate::panels::scene::ScenePalette::robot_index(&robot),
                         );
                     rsx! {
-                        Action {
+                        Button {
                             key: "{robot.id()}",
                             purpose: ActionPurpose::Select,
-                            variant: ActionVariant::Row,
+                            variant: ButtonVariant::Row,
                             class: "live-robot-row",
                             role: "tab",
                             aria_pressed: selected,
@@ -202,7 +201,7 @@ fn ControlSection(
                 if teleop { span { "Leader → follower" } }
             }
             ModeGroup { class: "control-segmented", label: "Motor control mode",
-                ModeAction {
+                ModeButton {
                     purpose: ActionPurpose::Hold,
                     checked: holding && !teleop,
                     class: "control-segment",
@@ -217,7 +216,7 @@ fn ControlSection(
                     },
                     "Hold"
                 }
-                ModeAction {
+                ModeButton {
                     id: "motor-mode-release",
                     purpose: ActionPurpose::Release,
                     checked: !holding && !teleop,
@@ -227,7 +226,7 @@ fn ControlSection(
                     onclick: move |_| if holding || teleop { confirm_release.set(true) },
                     "Release"
                 }
-                ModeAction {
+                ModeButton {
                     purpose: ActionPurpose::Teleoperate,
                     checked: teleop,
                     class: "control-segment",

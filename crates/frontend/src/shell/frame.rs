@@ -2,10 +2,10 @@
 
 use crate::activities::curation::state::CurationEditorStatus;
 use crate::activities::workflow::state::WorkflowEditorStatus;
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
 use dioxus::prelude::*;
 use spiral_robotics_common::status::BackendReadinessState;
 use spiral_robotics_common::workflow::WorkflowRunPhase;
+use spiral_robotics_ui::{ActionPurpose, BrowserFocus, Button, ButtonVariant};
 
 use crate::components::icons::{
     CurationIcon, DataIcon, NotificationIcon, RobotPanelIcon, RolloutIcon, SettingsIcon,
@@ -18,64 +18,64 @@ use crate::shell::activity::Activity;
 pub(super) fn ActivityRail(activity: Activity, on_activity: EventHandler<Activity>) -> Element {
     rsx! {
         nav { class: "studio-activity-rail", "aria-label": "Application",
-            Action {
+            Button {
                 purpose: ActionPurpose::Navigate,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: if activity == Activity::Live { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
                 aria_pressed: activity == Activity::Live,
                 onclick: move |_| on_activity.call(Activity::Live),
                 RobotPanelIcon {}
                 span { "Live" }
             }
-            Action {
+            Button {
                 purpose: ActionPurpose::Navigate,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: if activity == Activity::Data { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
                 aria_pressed: activity == Activity::Data,
                 onclick: move |_| on_activity.call(Activity::Data),
                 DataIcon {}
                 span { "Data" }
             }
-            Action {
+            Button {
                 purpose: ActionPurpose::Navigate,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: if activity == Activity::Workflow { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
                 aria_pressed: activity == Activity::Workflow,
                 onclick: move |_| on_activity.call(Activity::Workflow),
                 WorkflowIcon {}
                 span { "Workflow" }
             }
-            Action {
+            Button {
                 purpose: ActionPurpose::Navigate,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: if activity == Activity::Curation { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
                 aria_pressed: activity == Activity::Curation,
                 onclick: move |_| on_activity.call(Activity::Curation),
                 CurationIcon {}
                 span { "Curation" }
             }
-            Action {
+            Button {
                 purpose: ActionPurpose::Navigate,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: if activity == Activity::Training { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
                 aria_pressed: activity == Activity::Training,
                 onclick: move |_| on_activity.call(Activity::Training),
                 TrainingIcon {}
                 span { "Training" }
             }
-            Action {
+            Button {
                 purpose: ActionPurpose::Navigate,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: if activity == Activity::Rollout { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
                 aria_pressed: activity == Activity::Rollout,
                 onclick: move |_| on_activity.call(Activity::Rollout),
                 RolloutIcon {}
                 span { "Rollout" }
             }
-            Action {
+            Button {
                 id: "settings-rail-trigger",
                 purpose: ActionPurpose::Navigate,
-                variant: ActionVariant::Row,
+                variant: ButtonVariant::Row,
                 class: if activity == Activity::Settings { "activity-rail-item activity-rail-item-active activity-rail-settings" } else { "activity-rail-item activity-rail-settings" },
                 aria_pressed: activity == Activity::Settings,
                 aria_label: "Settings",
@@ -114,7 +114,7 @@ pub(crate) fn WorkspaceFrame(
                     if let Some(error) = hardware.setup().error() {
                         div { class: "flex items-center gap-2 px-3 py-2 text-xs text-danger", role: "alert",
                             span { "Robot setup unavailable: {error}" }
-                            Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Link, onclick: move |_| hardware.setup().retry(), "Retry robot setup" }
+                            Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Link, onclick: move |_| hardware.setup().retry(), "Retry robot setup" }
                         }
                     } else if !hardware.setup().loaded() {
                         div { class: "px-3 py-2 text-xs text-ink-faint", role: "status", "Loading robot setup…" }
@@ -281,18 +281,18 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
                         span { "{message_count} in this session" }
                     }
                     if message_count > 0 {
-                        Action {
+                        Button {
                             purpose: ActionPurpose::Remove,
-                            variant: ActionVariant::Link,
+                            variant: ButtonVariant::Link,
                             class: "notification-center-action",
                             onclick: move |_| studio.notifications().write().clear(),
                             "Clear all"
                         }
                     }
-                    Action {
+                    Button {
                         id: "notification-center-close",
                         purpose: ActionPurpose::Close,
-                        variant: ActionVariant::Link,
+                        variant: ButtonVariant::Link,
                         class: "notification-center-action",
                         onclick: move |_| studio.notifications().write().close(),
                         "Close"
@@ -317,9 +317,9 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
                                 }
                                 p { "{message.text()}" }
                                 div { class: "notification-item-actions",
-                                    Action {
+                                    Button {
                                         purpose: ActionPurpose::Remove,
-                                        variant: ActionVariant::Link,
+                                        variant: ButtonVariant::Link,
                                         class: "notification-center-action",
                                         onclick: move |_| studio.notifications().write().dismiss(message_id),
                                         "Dismiss"
@@ -461,10 +461,10 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
 fn NotificationTrigger(unread: usize, open: bool) -> Element {
     let studio = crate::shell::state::StudioProjectState::current();
     rsx! {
-        Action {
+        Button {
             id: "notification-center-trigger",
             purpose: ActionPurpose::Toggle,
-            variant: ActionVariant::Icon,
+            variant: ButtonVariant::Icon,
             class: "status-bar-notifications",
             aria_label: if unread == 0 { "Open notifications" } else { "Open notifications, {unread} unread" },
             aria_expanded: open,

@@ -1,11 +1,9 @@
 use super::playback::{PLAYBACK_SPEEDS, ViewWindow};
 use super::{KeyboardFocus, SeekPhase, TimelineAction, TimelineInteraction};
-use crate::components::{
-    icons::*,
-    interaction::{Action, ActionPurpose, ActionVariant, Toggle},
-};
+use crate::components::icons::*;
 use crate::format::PreciseClockPresentation;
 use dioxus::{html::geometry::WheelDelta, prelude::*};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, Select, Toggle};
 
 /// Slots supply activity-specific content without replacing timeline controls.
 #[derive(Clone, PartialEq)]
@@ -123,10 +121,10 @@ fn TransportBar(interaction: TimelineInteraction, identity: Element, toolbar: El
                     ("Jump to start", "Jump to start · Home", 0.0, rsx! { SkipToStartIcon {} }),
                     ("Step back", "Back 0.1 s · ← (Shift 1 s, Alt 10 ms)", seconds - 0.1, rsx! { StepBackIcon {} }),
                 ] {
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon, disabled: !state.can_seek(), title: state.seek_reason().unwrap_or(title), aria_label: label,
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon, disabled: !state.can_seek(), title: state.seek_reason().unwrap_or(title), aria_label: label,
                         onclick: { let step = step.clone(); move |_| step.emit(TimelineAction::Seek { seconds: time, phase: SeekPhase::Commit }) }, {icon} }
                 }
-                Action { purpose: ActionPurpose::Toggle, variant: ActionVariant::Icon, class: "data-transport-play", disabled: !state.can_play(),
+                Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Icon, class: "data-transport-play", disabled: !state.can_play(),
                     title: state.play_reason().unwrap_or(if playing { "Pause · Space" } else { "Play · Space" }),
                     aria_label: if playing { "Pause" } else { "Play" }, aria_pressed: playing,
                     onclick: move |_| play.emit(TimelineAction::SetPlaying(!playing)),
@@ -135,7 +133,7 @@ fn TransportBar(interaction: TimelineInteraction, identity: Element, toolbar: El
                     ("Step forward", "Forward 0.1 s · → (Shift 1 s, Alt 10 ms)", seconds + 0.1, rsx! { StepForwardIcon {} }),
                     ("Jump to end", "Jump to end · End", duration, rsx! { SkipToEndIcon {} }),
                 ] {
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon, disabled: !state.can_seek(), title: state.seek_reason().unwrap_or(title), aria_label: label,
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon, disabled: !state.can_seek(), title: state.seek_reason().unwrap_or(title), aria_label: label,
                         onclick: { let step = step.clone(); move |_| step.emit(TimelineAction::Seek { seconds: time, phase: SeekPhase::Commit }) }, {icon} }
                 }
             }
@@ -146,8 +144,8 @@ fn TransportBar(interaction: TimelineInteraction, identity: Element, toolbar: El
             if state.playback_options() {
                 label { class: "data-transport-speed", title: "Playback speed",
                     span { class: "sr-only", "Speed" }
-                    select { value: "{clock.speed()}", disabled: duration <= 0.0, "aria-label": "Playback speed",
-                        onchange: move |event| if let Ok(value) = event.value().parse::<f64>() { speed.emit(TimelineAction::SetSpeed(value)); },
+                    Select { value: "{clock.speed()}", disabled: duration <= 0.0, aria_label: "Playback speed", class: "data-transport-speed-select",
+                        onchange: move |value: String| if let Ok(value) = value.parse::<f64>() { speed.emit(TimelineAction::SetSpeed(value)); },
                         for option in PLAYBACK_SPEEDS { option { value: "{option}", selected: option == clock.speed(), "{option}×" } }
                     }
                 }
@@ -161,7 +159,7 @@ fn TransportBar(interaction: TimelineInteraction, identity: Element, toolbar: El
                     ("Zoom in", "Zoom in · +", state.zoom(0.5), rsx! { ZoomInIcon {} }, false),
                     ("Fit episode", "Fit the whole episode · 0", TimelineAction::SetWindow(ViewWindow::full(duration)), rsx! { FitTimeIcon {} }, fitted),
                 ] {
-                    Action { purpose: ActionPurpose::Navigate, variant: ActionVariant::Icon, disabled: duration <= 0.0 || disabled, title, aria_label: label,
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon, disabled: duration <= 0.0 || disabled, title, aria_label: label,
                         onclick: { let zoom = zoom.clone(); move |_| zoom.emit(action.clone()) }, {icon} }
                 }
             }

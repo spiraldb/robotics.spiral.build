@@ -7,8 +7,8 @@ use crate::client::CommandError;
 
 use super::data::DatasetClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use crate::shell::project::ProjectSessionSignals;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 
 #[derive(Clone, Debug, Default)]
 enum DatasetCatalogState {
@@ -126,9 +126,9 @@ pub(super) fn DatasetCatalogFeedback(data: DatasetChoices) -> Element {
                 div { class: "break-words", "{error}" }
                 div { class: "mt-1", "{error.recovery_guidance()}" }
                 if error.retryable() {
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Retry,
-                        variant: ActionVariant::Outline,
+                        variant: ButtonVariant::Outline,
                         class: "mt-1",
                         disabled: !available,
                         aria_label: "Retry loading datasets",

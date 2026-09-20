@@ -1,13 +1,14 @@
 //! Settings screen for robots, SpiralDB, training, and video.
 
 use crate::activities::settings::SettingsClient;
-use crate::components::interaction::{
-    Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, BrowserFocus,
-    ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput, Toggle,
-};
 use dioxus::dioxus_core::CapturedError;
 use dioxus::prelude::*;
 use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
+use spiral_robotics_ui::{
+    ActionPurpose, BlockingConfirmation, BrowserFocus, Button, ButtonVariant, ConfirmationCopy,
+    ConfirmationDismissal, ConfirmationResponse, Field, FileButton, FileInput, LinkButton,
+    TextInput, TextInputKind, Toggle,
+};
 
 use crate::activities::settings::robots::RobotPanel;
 use crate::robots::{HardwareViewState, RobotSelection};
@@ -312,7 +313,7 @@ fn SettingsPanel(
                     } else if section() != SettingsSection::Spiral && !preferences_loaded {
                         div { class: "settings-loading", role: "status",
                             if let Some(error) = load_error.as_ref() { span { "{error}" } } else { span { "Loading runtime preferences…" } }
-                            Action { purpose: ActionPurpose::Retry, variant: ActionVariant::Link, onclick: move |_| settings.refresh(), "Retry preferences" }
+                            Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Link, onclick: move |_| settings.refresh(), "Retry preferences" }
                         }
                     } else if !settings_loaded {
                         div { class: "settings-loading", "Loading data settings…" }
@@ -397,9 +398,9 @@ fn SettingsPanel(
                                         p { class: "settings-help", role: "status", "The token will be removed when you save settings." }
                                     }
                                 }
-                                Action {
+                                Button {
                                     purpose: ActionPurpose::Apply,
-                                    variant: ActionVariant::Outline,
+                                    variant: ButtonVariant::Outline,
                                     disabled: saving() || testing() || import_project.pending() || current().spiral().project_id().trim().is_empty(),
                                     aria_busy: testing(),
                                     onclick: move |_| save(Some(SettingsSection::Spiral)),
@@ -414,9 +415,9 @@ fn SettingsPanel(
                                         "The file contains all Studio-managed data: robots, datasets, episodes, streams, video, preferences, training runs and metrics, checkpoints, and rollouts. Import replaces this project’s managed data and locally saved Studio state."
                                     }
                                     div { class: "settings-transfer-actions",
-                                        FileAction {
+                                        FileButton {
                                             purpose: ActionPurpose::Import,
-                                            variant: ActionVariant::Outline,
+                                            variant: ButtonVariant::Outline,
                                             title: if project_transfer_ready { "Replace this project’s data and local Studio state" } else { "Save the Spiral destination before transferring a project" },
                                             disabled: saving() || import_project.pending() || !project_transfer_ready,
                                             aria_busy: import_project.pending(),
@@ -431,11 +432,11 @@ fn SettingsPanel(
                                             "Import project"
                                         }
                                         if import_project.pending() || !project_transfer_ready {
-                                            Action { purpose: ActionPurpose::Export, variant: ActionVariant::Outline, title: if project_transfer_ready { "Project transfer is in progress" } else { "Save the Spiral destination before transferring a project" }, disabled: true, "Export project" }
+                                            Button { purpose: ActionPurpose::Export, variant: ButtonVariant::Outline, title: if project_transfer_ready { "Project transfer is in progress" } else { "Save the Spiral destination before transferring a project" }, disabled: true, "Export project" }
                                         } else {
-                                            ActionLink {
+                                            LinkButton {
                                                 purpose: ActionPurpose::Export,
-                                                variant: ActionVariant::Outline,
+                                                variant: ButtonVariant::Outline,
                                                 href: crate::client::project::ProjectClient::current().scoped_url("/api/project/export"),
                                                 download: "spiral-robotics-project.spiral-project",
                                                 title: "Export project data and local Studio state",
@@ -465,7 +466,7 @@ fn SettingsPanel(
                                 p { class: "settings-help",
                                     "Studio uses Arrow IPC over HTTP. The selected endpoint applies to new training and rollout sessions; an active session keeps its current connection."
                                 }
-                                Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Outline, disabled: saving() || testing() || import_project.pending(), aria_busy: testing(), onclick: move |_| save(Some(SettingsSection::Training)), if testing() { "Connecting…" } else { "Save and connect" } }
+                                Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Outline, disabled: saving() || testing() || import_project.pending(), aria_busy: testing(), onclick: move |_| save(Some(SettingsSection::Training)), if testing() { "Connecting…" } else { "Save and connect" } }
                             },
                             SettingsSection::Video => rsx! {
                                 ProviderHeading { title: "Video", description: "Include assigned cameras in new episodes." }
@@ -492,7 +493,7 @@ fn SettingsPanel(
                         span { "{error}" }
                         span { "{error.recovery_guidance()}" }
                     }
-                    Action {
+                    Button {
                         purpose: ActionPurpose::Close,
                         aria_label: "Dismiss settings error",
                         onclick: move |_| save_error.set(None),
@@ -508,8 +509,8 @@ fn SettingsPanel(
                         "Applies to this Studio."
                     }
                     div {
-                        Action { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); client_secret.set(String::new()); huggingface_token.set(String::new()); clear_huggingface_token.set(false); save_error.set(None); test_result.set(None); }, "Discard changes" }
-                        Action { purpose: ActionPurpose::Apply, variant: ActionVariant::Solid, disabled: saving() || import_project.pending() || current().spiral().project_id().trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
+                        Button { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); client_secret.set(String::new()); huggingface_token.set(String::new()); clear_huggingface_token.set(false); save_error.set(None); test_result.set(None); }, "Discard changes" }
+                        Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Solid, disabled: saving() || import_project.pending() || current().spiral().project_id().trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
                     }
                 }
             }
@@ -551,9 +552,9 @@ impl ImportWarningsPresentation for [String] {
 #[component]
 fn SettingsSectionAction(label: &'static str, active: bool, onclick: EventHandler<()>) -> Element {
     rsx! {
-        Action {
+        Button {
             purpose: ActionPurpose::Navigate,
-            variant: ActionVariant::Row,
+            variant: ButtonVariant::Row,
             aria_current: active.then(|| "page".to_owned()),
             onclick: move |_| onclick.call(()),
             "{label}"
@@ -608,10 +609,14 @@ fn SettingsField(label: &'static str, value: String, behavior: SettingsInputBeha
         secret,
         oninput,
     } = behavior;
+    let kind = if secret {
+        TextInputKind::Password
+    } else {
+        TextInputKind::Text
+    };
     rsx! {
-        label { class: "settings-field",
-            span { class: "label", "{label}" }
-            input { class: "field", r#type: if secret { "password" } else { "text" }, value, placeholder, disabled, oninput: move |event| oninput.call(event.value()) }
+        Field { label, class: "settings-field",
+            TextInput { kind, value, placeholder, disabled, oninput }
         }
     }
 }

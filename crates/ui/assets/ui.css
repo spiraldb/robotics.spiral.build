@@ -1,0 +1,1104 @@
+:root {
+  --ui-ink: var(--tone-ink, #37352f);
+  --ui-ink-soft: var(--tone-ink-soft, #65645f);
+  --ui-ink-faint: var(--tone-ink-faint, #71706c);
+  --ui-surface: var(--tone-surface, #ffffff);
+  --ui-sunken: var(--tone-sunken, #f7f7f5);
+  --ui-hover: var(--tone-hover, rgb(55 53 47 / 0.06));
+  /* One step past hover, for the moment a control is held down and for the
+     hover of something already selected. Without it a pressed toggle lightened
+     on hover instead of darkening, which reads as the selection letting go. */
+  --ui-pressed: var(--tone-pressed, rgb(55 53 47 / 0.11));
+  --ui-line: var(--tone-line, #e8e8e6);
+  --ui-accent: var(--tone-accent, #0868b8);
+  --ui-accent-ink: var(--tone-accent-ink, #ffffff);
+  /* Text set on the camera mat: status and errors inside a recorded camera. */
+  --ui-camera-ink: rgb(255 255 255 / 0.72);
+  --ui-selected: var(--tone-selected, rgb(8 104 184 / 0.1));
+  --ui-selected-strong: rgb(8 104 184 / 0.16);
+  --ui-line-strong: var(--tone-line-strong, #cfcfcb);
+  --ui-danger: var(--tone-danger, #be423d);
+  --ui-danger-soft: var(--tone-danger-soft, rgb(190 66 61 / 0.1));
+  --ui-caution: var(--tone-caution, #7d6a41);
+  --ui-caution-soft: var(--tone-caution-soft, #fbf3db);
+  --ui-good: var(--tone-good, #3a7654);
+  --ui-good-soft: var(--tone-good-soft, rgb(58 118 84 / 0.1));
+  /* The halo a focused field wears beside its accent border: the ring at
+     15%, so a form of six fields does not become six blue boxes. */
+  --ui-focus-halo: rgb(8 104 184 / 0.15);
+  --ui-font-mono: var(--font-mono, ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace);
+  /* Entrances and settle-ins; the host's one easing when it names one. */
+  --ui-ease-out: var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+  --ui-backdrop: rgb(55 53 47 / 0.32);
+  --ui-dialog-shadow: 0 18px 48px rgb(55 53 47 / 0.24);
+  --ui-radius: 4px;
+  --ui-target-compact: 24px;
+  --ui-target-standard: 28px;
+  --ui-target-prominent: 32px;
+}
+
+.ui-icon {
+  width: 0.875rem;
+  height: 0.875rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ui-icon--chevron-open {
+  transform: rotate(90deg);
+}
+
+.ui-button {
+  display: inline-flex;
+  min-width: 0;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius);
+  padding-inline: 6px;
+  color: var(--ui-ink);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 100ms ease-out, background-color 100ms ease-out,
+    border-color 100ms ease-out, opacity 100ms ease-out;
+}
+
+/* `:where()` costs no specificity, so an unselected control keeps the plain
+   hover while a selected one is free to answer the pointer in its own colour
+   further down. Without the exclusion the neutral wash landed on top of every
+   selected state and hovering the current mode greyed it out. */
+.ui-button:where(:not([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"], [aria-current="page"])):hover:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--ui-ink);
+  background: var(--ui-hover);
+}
+
+/* A control that is being pressed says so. One tonal step is the whole
+   gesture — no scale, no shadow, nothing that moves a neighbour. */
+.ui-button:active:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--ui-pressed);
+}
+
+/* Only for the actions that wrap a real control — the file picker hides its
+   input inside the label, so the label has to carry that input's focus. A bare
+   button never matches, which is what stopped a ring appearing on a button
+   merely because something inside it was focused. */
+.ui-button:focus-visible,
+.ui-button:has(input):focus-within {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 1px;
+}
+
+/* Faded to 0.44 a disabled control was unreadable, and this interface puts the
+   reason a control is unavailable in the control's own label. Dimmed enough to
+   read as unavailable, legible enough to still be read. */
+.ui-button:disabled,
+.ui-button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/*
+  A filled action that cannot be taken stops being filled. Faded, "Run policy"
+  and "Run training" stayed the largest and most saturated thing on their
+  panel — a pale blue block that still looked like the way forward while the
+  sentence underneath explained it was not. Emptied out, the panel's primary
+  action is visibly waiting, and the reason beside it is what the eye lands on.
+*/
+.ui-button--solid:disabled,
+.ui-button--solid[aria-disabled="true"] {
+  border-color: var(--ui-line);
+  color: var(--ui-ink-faint);
+  background: var(--ui-sunken);
+  opacity: 1;
+}
+
+.ui-button[aria-busy="true"] {
+  cursor: wait;
+}
+
+.ui-button--compact { min-height: var(--ui-target-compact); }
+.ui-button--standard { min-height: var(--ui-target-standard); }
+.ui-button--prominent { min-height: var(--ui-target-prominent); }
+
+.ui-button--outline {
+  border-color: var(--ui-line);
+}
+
+.ui-button--outline,
+.ui-button--solid {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.ui-button--solid {
+  color: var(--ui-accent-ink);
+  background: var(--ui-accent);
+}
+
+.ui-button--solid:hover:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--ui-accent-ink);
+  background: color-mix(in srgb, var(--ui-accent) 92%, black);
+}
+
+.ui-button--link {
+  padding-inline: 0;
+  color: var(--ui-ink-soft);
+}
+
+.ui-button--link:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: transparent;
+}
+
+.ui-button--icon {
+  width: var(--ui-target-compact);
+  min-width: var(--ui-target-compact);
+  padding: 0;
+  color: var(--ui-ink-soft);
+}
+
+.ui-button--row {
+  justify-content: flex-start;
+  text-align: start;
+}
+
+.ui-button--tab {
+  border-radius: 0;
+  justify-content: flex-start;
+  color: var(--ui-ink-soft);
+  text-align: start;
+}
+
+.ui-button--segment {
+  min-height: 32px;
+  border-radius: 0;
+  color: var(--ui-ink-soft);
+  background: var(--ui-surface);
+}
+
+/*
+  Selection is a wash and a weight. It is never a ring.
+
+  One rule used to draw a one-pixel accent box around anything reporting
+  itself as pressed, selected, checked, current, or merely open, and because
+  almost everything in a workbench is one of those, the workspace became a
+  field of small blue rectangles: the arm switcher, the grid toggle, the scene
+  legend, every panel tab, and every disclosure that happened to be expanded.
+  A tinted cell among untinted neighbours already reads as the chosen one, and
+  giving the ring back to focus is what lets a keyboard be seen at all.
+*/
+.ui-button:where(:not(.ui-button--solid)):is(
+  [aria-pressed="true"],
+  [aria-selected="true"],
+  [aria-checked="true"],
+  [aria-current="page"]
+) {
+  color: var(--ui-accent);
+  background: var(--ui-selected);
+  font-weight: 500;
+}
+
+.ui-button:where(:not(.ui-button--solid)):is(
+  [aria-pressed="true"],
+  [aria-selected="true"],
+  [aria-checked="true"],
+  [aria-current="page"]
+):hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--ui-selected-strong);
+}
+
+/*
+  A tab is the exception, because the strip it sits in is already telling the
+  story: the active tab's own row lifts to paper while the bar behind it stays
+  recessed, and a two-pixel accent edge caps it. The label's job is only to
+  stop being secondary — tinting it as well put a blue lozenge inside a white
+  tab inside a grey bar, three treatments for one fact.
+*/
+.ui-button--tab:is([aria-selected="true"], [aria-current="page"]) {
+  color: var(--ui-ink);
+  background: transparent;
+  font-weight: 500;
+}
+
+.ui-button--tab:is([aria-selected="true"], [aria-current="page"]):hover:not(:disabled) {
+  background: transparent;
+}
+
+/* Open is not selected. A disclosure that is showing its contents has a
+   chevron that already turned; colouring it as well claimed the operator had
+   chosen it over its neighbours. */
+.ui-button[aria-expanded="true"]:not([aria-selected="true"]):not([aria-pressed="true"]) {
+  color: var(--ui-ink);
+  background: var(--ui-hover);
+}
+
+/*
+  The mode group is three cells on white, so the selected one needs a wash and
+  not a fill. Every one of these used to paint itself solid alarm red when
+  chosen — including Release, which is the state where the motors are *off* —
+  and a colour that is on in all three positions has stopped saying anything.
+  Blue is the current mode; red below is reserved for the one fact in this
+  group worth a colour.
+*/
+.ui-button--segment[aria-checked="true"] {
+  border-color: transparent;
+  color: var(--ui-accent);
+  background: var(--ui-selected);
+  font-weight: 500;
+}
+
+.ui-button:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+) {
+  color: var(--ui-danger);
+}
+
+/* A filled danger button is a commitment: the confirmation that actually
+   deletes the episode or drops the torque. The mode group no longer borrows
+   it — choosing a mode is not the same gesture as confirming one. */
+.ui-button--solid:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+) {
+  border-color: transparent;
+  color: var(--ui-accent-ink);
+  background: var(--ui-danger);
+}
+
+/* Torque is live: the arm is holding itself against gravity and will move on
+   command. That is the one condition in the mode group worth a colour, and the
+   wash carries it at the same size and position as the other two cells, so the
+   control does not resize when the bench becomes dangerous. */
+.ui-button--segment:is([data-action="hold"], [data-action="teleoperate"])[aria-checked="true"] {
+  border-color: transparent;
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-button--segment:is([data-action="hold"], [data-action="teleoperate"])[aria-checked="true"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-danger) 16%, transparent);
+}
+
+/* Selected, this is the resting state — the motors are off and nothing is
+   about to happen. The red belongs to the press that gets you here, which is
+   the unchecked cell above, not to sitting in it. */
+.ui-button--segment[data-action="release"][aria-checked="true"] {
+  color: var(--ui-accent);
+}
+
+.ui-hover-action {
+  transition: color 100ms ease-out, background-color 100ms ease-out,
+    opacity 100ms ease-out;
+}
+
+.ui-hover-action-host:not(:hover):not(:focus-within) .ui-hover-action {
+  opacity: 0;
+}
+
+.ui-hover-action:focus {
+  opacity: 1;
+}
+
+.ui-button:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+):hover:not(:disabled) {
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-button--solid:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+):hover:not(:disabled) {
+  color: var(--ui-accent-ink);
+  background: color-mix(in srgb, var(--ui-danger) 92%, black);
+}
+
+.ui-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ui-mode-group {
+  display: grid;
+  overflow: hidden;
+  gap: 1px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-line);
+}
+
+.ui-toggle {
+  display: inline-flex;
+  min-height: var(--ui-target-compact);
+  cursor: pointer;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-ink);
+  font-size: 11px;
+}
+
+.ui-toggle[aria-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--ui-ink-faint);
+}
+
+.ui-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--ui-accent);
+}
+
+.ui-toggle:focus-within {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.ui-inline-confirmation {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  border-top: 1px solid var(--ui-line);
+  padding-block: 6px;
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-inline-confirmation p {
+  min-width: min(100%, 16rem);
+  flex: 1 1 18rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ui-confirmation-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.ui-dialog-backdrop {
+  position: fixed;
+  z-index: 98;
+  inset: 0;
+  background: var(--ui-backdrop);
+}
+
+.ui-dialog-surface {
+  border-radius: 6px;
+  color: var(--ui-ink);
+  background: var(--ui-surface);
+  box-shadow: var(--ui-dialog-shadow);
+}
+
+.ui-blocking-confirmation {
+  position: fixed;
+  z-index: 99;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  width: min(28rem, calc(100vw - 2rem));
+  max-height: min(34rem, calc(100dvh - 2rem));
+  transform: translate(-50%, -50%);
+  flex-direction: column;
+  overflow: auto;
+}
+
+.ui-blocking-confirmation header {
+  padding: 12px 14px 8px;
+}
+
+.ui-blocking-confirmation h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ui-confirmation-copy {
+  padding: 0 14px 12px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ui-confirmation-copy p {
+  margin: 0;
+}
+
+.ui-confirmation-consequence {
+  margin-top: 8px !important;
+  padding: 7px 8px;
+  border-radius: var(--ui-radius);
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-blocking-confirmation footer {
+  padding: 8px 14px;
+  border-top: 1px solid var(--ui-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-button {
+    transition: none;
+  }
+}
+
+/* A square action keeps whatever fill its variant gave it; only the box
+   changes. The send control inside the Assistant composer is a filled 24px
+   square, which the quiet Icon variant cannot be. */
+.ui-button--square {
+  width: var(--ui-target-compact);
+  min-width: var(--ui-target-compact);
+  padding: 0;
+}
+
+/* Work in progress spins; nothing else here moves on its own. */
+.ui-icon--spin {
+  animation: ui-icon-spin 900ms linear infinite;
+}
+
+@keyframes ui-icon-spin {
+  to {
+    rotate: 1turn;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-icon--spin {
+    animation: none;
+  }
+}
+
+/* Visually hidden, still read aloud: keyboard help and live announcements. */
+.ui-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.ui-icon--grip {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* Fields ------------------------------------------------------------------
+   A field is a label and its control as one hit target. Stacked, the label
+   sits above; inline, it holds a fixed column so a run of one-line settings
+   aligns its controls. */
+.ui-field {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  color: var(--ui-ink-soft);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.ui-field--stacked {
+  flex-direction: column;
+}
+
+.ui-field--stacked > :is(.ui-input, .ui-select) {
+  width: 100%;
+}
+
+.ui-field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.ui-field--inline > .ui-field-label {
+  flex: 0 0 4rem;
+}
+
+.ui-field--inline > :is(.ui-input, .ui-select) {
+  flex: 1 1 auto;
+}
+
+.ui-field-label {
+  display: block;
+  min-width: 0;
+}
+
+/* One box for text entry and choice: 24px, paper on a hairline, 4px radius,
+   6px inside. Focus is the accent border with its soft halo. */
+.ui-input,
+.ui-select {
+  box-sizing: border-box;
+  min-height: var(--ui-target-compact);
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  padding: 0 6px;
+  color: var(--ui-ink);
+  background: var(--ui-surface);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  outline: none;
+  transition: border-color 100ms ease-out, box-shadow 100ms ease-out;
+}
+
+.ui-select {
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+.ui-input::placeholder {
+  color: var(--ui-ink-faint);
+}
+
+.ui-input:hover:not(:disabled),
+.ui-select:hover:not(:disabled) {
+  border-color: var(--ui-line-strong);
+}
+
+.ui-input:focus-visible,
+.ui-select:focus-visible {
+  border-color: var(--ui-accent);
+  box-shadow: 0 0 0 2px var(--ui-focus-halo);
+}
+
+.ui-input:disabled,
+.ui-select:disabled {
+  cursor: not-allowed;
+  color: var(--ui-ink-faint);
+  background: var(--ui-sunken);
+}
+
+.ui-input[aria-invalid="true"] {
+  border-color: var(--ui-danger);
+}
+
+/* Numbers are data: mono and tabular, so a column of thresholds lines up. */
+.ui-input--numeric {
+  font-family: var(--ui-font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Facts -------------------------------------------------------------------
+   A 10px faint label and the value it names. Layout is the only thing that
+   changes between a stat strip and an inspector. */
+.ui-facts {
+  display: grid;
+  margin: 0;
+  color: var(--ui-ink);
+  font-size: 11px;
+}
+
+.ui-facts dt {
+  color: var(--ui-ink-faint);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.ui-facts dd {
+  min-width: 0;
+  margin: 0;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.ui-facts--mono dd {
+  font-family: var(--ui-font-mono);
+}
+
+.ui-facts--columns {
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 4px;
+}
+
+.ui-facts--columns > .ui-fact {
+  display: contents;
+}
+
+.ui-facts--columns dt {
+  white-space: nowrap;
+}
+
+.ui-facts--tiles {
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  gap: 8px;
+}
+
+.ui-facts--strip {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+}
+
+.ui-facts--tiles > .ui-fact,
+.ui-facts--strip > .ui-fact {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ui-facts--strip > .ui-fact {
+  padding-inline: 12px;
+  border-right: 1px solid var(--ui-line);
+}
+
+.ui-facts--strip > .ui-fact:first-child {
+  padding-left: 0;
+}
+
+.ui-facts--strip > .ui-fact:last-child {
+  padding-right: 0;
+  border-right: 0;
+}
+
+/* Disclosure --------------------------------------------------------------
+   The native marker is replaced by the shared chevron, which turns when the
+   details open. Technical detail behind it reads as a recessed mono block. */
+.ui-disclosure {
+  min-width: 0;
+  color: var(--ui-ink-soft);
+  font-size: 11px;
+}
+
+.ui-disclosure-summary {
+  display: inline-flex;
+  min-height: var(--ui-target-compact);
+  align-items: center;
+  gap: 4px;
+  margin-inline-start: -4px;
+  border-radius: var(--ui-radius);
+  padding-inline: 4px 6px;
+  color: var(--ui-ink-soft);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.ui-disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ui-disclosure-summary:hover {
+  color: var(--ui-ink);
+  background: var(--ui-hover);
+}
+
+.ui-disclosure-summary:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 1px;
+}
+
+.ui-disclosure-summary > .ui-icon {
+  flex-shrink: 0;
+  transition: transform 100ms ease-out;
+}
+
+.ui-disclosure[open] > .ui-disclosure-summary > .ui-icon {
+  transform: rotate(90deg);
+}
+
+.ui-disclosure-title {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.ui-disclosure > :is(pre, code) {
+  display: block;
+  max-height: 18rem;
+  margin: 4px 0 0;
+  overflow: auto;
+  border-radius: var(--ui-radius);
+  padding: 6px 8px;
+  color: var(--ui-ink-soft);
+  background: var(--ui-sunken);
+  font-family: var(--ui-font-mono);
+  font-size: 10px;
+  line-height: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Chip --------------------------------------------------------------------
+   One word of state on a tonal wash; per the Exceptional-Status Rule it is
+   rendered only while its condition matters. */
+.ui-chip {
+  display: inline-flex;
+  min-height: 18px;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--ui-radius);
+  padding: 0 4px;
+  color: var(--ui-ink-soft);
+  background: var(--ui-hover);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.ui-chip--accent {
+  color: var(--ui-accent);
+  background: var(--ui-selected);
+}
+
+.ui-chip--caution {
+  color: var(--ui-caution);
+  background: var(--ui-caution-soft);
+}
+
+.ui-chip--danger {
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-chip--good {
+  color: var(--ui-good);
+  background: var(--ui-good-soft);
+}
+
+/* Notices and empty states ------------------------------------------------ */
+.ui-notice {
+  flex-shrink: 0;
+  min-width: 0;
+  padding: 6px 12px;
+  color: var(--ui-ink-soft);
+  font-size: 11px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.ui-notice--caution {
+  color: var(--ui-caution);
+  background: var(--ui-caution-soft);
+}
+
+.ui-notice--danger {
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+/* A panel with nothing to show says so in its centre: a glyph, one 12px
+   title, and a sentence or two at most 46 characters wide. */
+.ui-empty {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px;
+  text-align: center;
+}
+
+.ui-empty > .ui-icon {
+  width: 20px;
+  height: 20px;
+  margin-bottom: 4px;
+  color: var(--ui-ink-faint);
+}
+
+.ui-empty > strong {
+  color: var(--ui-ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ui-empty p {
+  max-width: 46ch;
+  margin: 0;
+  color: var(--ui-ink-faint);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.ui-empty--quiet p {
+  max-width: 40ch;
+}
+
+.ui-empty > .ui-button {
+  margin-top: 8px;
+}
+
+/* Side sheet --------------------------------------------------------------
+   The docked inspector: 320px, at most 45% of its tile, a left hairline,
+   its own scroll, entering from 6px right. */
+.ui-side-sheet {
+  display: flex;
+  width: 20rem;
+  max-width: 45%;
+  flex: 0 0 auto;
+  flex-direction: column;
+  overflow-y: auto;
+  border-left: 1px solid var(--ui-line);
+  background: var(--ui-surface);
+  animation: ui-side-sheet-enter 180ms var(--ui-ease-out) both;
+}
+
+@keyframes ui-side-sheet-enter {
+  from {
+    opacity: 0;
+    translate: 6px 0;
+  }
+}
+
+.ui-side-sheet-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  min-height: 36px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--ui-line);
+  padding: 0 6px 0 12px;
+  background: var(--ui-surface);
+}
+
+.ui-side-sheet-heading h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-side-sheet-heading h3:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 3px;
+  border-radius: var(--ui-radius);
+}
+
+.ui-side-sheet-count {
+  color: var(--ui-ink-faint);
+  font-weight: 400;
+}
+
+.ui-side-sheet-nav {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 1px;
+}
+
+/* Tree --------------------------------------------------------------------
+   Rows the keyboard walks. One row is one surface: hover and selection wash
+   it edge to edge, and the chevron and label inside draw no boxes of their
+   own. A branch row leads with its chevron; a root leaf keeps that column
+   empty so labels align, and nested rows start under their parent's name. */
+.ui-tree,
+.ui-tree-group {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ui-tree-item {
+  min-width: 0;
+}
+
+.ui-tree-row {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  padding-right: 8px;
+  transition: background-color 100ms ease-out;
+}
+
+.ui-tree-row:hover {
+  background: var(--ui-hover);
+}
+
+.ui-tree-item[data-selected="true"] > .ui-tree-row {
+  background: var(--ui-selected);
+}
+
+.ui-tree-item[data-selected="true"] > .ui-tree-row:hover {
+  background: var(--ui-selected-strong);
+}
+
+.ui-tree-expander,
+.ui-tree-indent {
+  flex: 0 0 var(--ui-target-compact);
+  margin-left: 4px;
+}
+
+.ui-tree-expander {
+  display: inline-flex;
+  height: var(--ui-target-compact);
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  color: var(--ui-ink-faint);
+  background: transparent;
+  cursor: pointer;
+}
+
+.ui-tree-expander:hover {
+  color: var(--ui-ink);
+}
+
+.ui-tree-label {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  padding: 0 6px;
+  color: var(--ui-ink);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: start;
+  cursor: pointer;
+}
+
+.ui-tree-label[aria-pressed="true"] {
+  color: var(--ui-accent);
+}
+
+.ui-tree-label .ui-icon {
+  flex-shrink: 0;
+  color: var(--ui-ink-faint);
+}
+
+/* The ring sits inside the row so a focused row never overflows the rail. */
+.ui-tree-label:focus-visible,
+.ui-tree-expander:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: -2px;
+  border-radius: var(--ui-radius);
+}
+
+.ui-tree-group .ui-tree-indent {
+  display: none;
+}
+
+.ui-tree-group > .ui-tree-item > .ui-tree-row {
+  padding-left: 28px;
+}
+
+.ui-tree-group .ui-tree-group > .ui-tree-item > .ui-tree-row {
+  padding-left: 52px;
+}
+
+/* Reorder -----------------------------------------------------------------
+   The list holds the insertion line; the handle is the only thing that
+   grabs. Items move by the inline transform the gesture writes. */
+.ui-reorder-list {
+  position: relative;
+}
+
+.ui-reorder-marker {
+  position: absolute;
+  z-index: 4;
+  right: 12px;
+  left: 12px;
+  display: none;
+  height: 2px;
+  background: var(--ui-accent);
+  pointer-events: none;
+}
+
+.ui-reorder-handle {
+  display: inline-flex;
+  width: var(--ui-target-compact);
+  height: var(--ui-target-compact);
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--ui-radius);
+  padding: 0;
+  color: var(--ui-ink-faint);
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.ui-reorder-handle:hover,
+.ui-reorder-handle[aria-pressed="true"] {
+  color: var(--ui-ink);
+  background: var(--ui-hover);
+}
+
+.ui-reorder-handle[aria-pressed="true"] {
+  cursor: grabbing;
+}
+
+.ui-reorder-handle:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-input,
+  .ui-select,
+  .ui-tree-row,
+  .ui-disclosure-summary > .ui-icon {
+    transition: none;
+  }
+
+  .ui-side-sheet {
+    animation: none;
+  }
+}

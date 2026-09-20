@@ -7,8 +7,8 @@ pub(crate) mod project;
 pub(crate) mod routes;
 pub(crate) mod state;
 
-use crate::components::interaction::UiStyles;
 use dioxus::prelude::*;
+use spiral_robotics_ui::UiStyles;
 
 use self::routes::StudioRouter;
 
