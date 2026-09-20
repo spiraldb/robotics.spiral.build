@@ -51,7 +51,6 @@ impl MessageSeverity {
 pub(crate) enum MessageSource {
     Studio,
     Live,
-    Data,
     Workflow,
     Curation,
     Training,
@@ -64,7 +63,6 @@ impl MessageSource {
         match self {
             Self::Studio => "Studio",
             Self::Live => "Live",
-            Self::Data => "Data",
             Self::Workflow => "Workflow",
             Self::Curation => "Curation",
             Self::Training => "Training",

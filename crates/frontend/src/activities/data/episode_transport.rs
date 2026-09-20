@@ -169,10 +169,6 @@ impl EpisodeTransport {
     pub(super) fn seconds(&self) -> f64 {
         self.clock.read().seconds()
     }
-    /// The playhead as an absolute log time, for latest-message lookups.
-    pub(super) fn absolute_ns(&self) -> u64 {
-        self.range().ns_at(self.seconds())
-    }
     pub(super) fn seek(&mut self, seconds: f64) {
         self.clock.write().seek(seconds);
     }

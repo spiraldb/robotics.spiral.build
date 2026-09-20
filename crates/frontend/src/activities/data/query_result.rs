@@ -2,15 +2,11 @@
 
 use dioxus::prelude::*;
 use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
-use spiral_robotics_ui::{
-    ActionPurpose, BrowserFocus, Button, ButtonAuxiliaryHandlers, ButtonVariant, Chip, ChipTone,
-    CloseIcon, Disclosure,
-};
+use spiral_robotics_ui::{ActionPurpose, BrowserFocus, Button, ButtonVariant};
 
 mod cells;
 mod table;
 
-pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
 const VARIABLE_TENSOR_EXTENSION_NAME: &str = "arrow.variable_shape_tensor";
 const ENCODED_MEDIA_EXTENSION_NAME: &str = "spql.media.EncodedMedia";
@@ -18,26 +14,12 @@ const ENCODED_MEDIA_EXTENSION_NAME: &str = "spql.media.EncodedMedia";
 /// A complete, renderable snapshot of the Query tool.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct QueryExecutionPresentation {
-    sql: String,
-    max_rows: usize,
     state: QueryState,
 }
 
 impl QueryExecutionPresentation {
-    pub(in crate::activities) fn new(sql: String, max_rows: usize, state: QueryState) -> Self {
-        Self {
-            sql,
-            max_rows,
-            state,
-        }
-    }
-
-    pub(super) fn sql(&self) -> &str {
-        &self.sql
-    }
-
-    const fn max_rows(&self) -> usize {
-        self.max_rows
+    pub(in crate::activities) const fn new(state: QueryState) -> Self {
+        Self { state }
     }
 
     const fn state(&self) -> &QueryState {
@@ -49,199 +31,12 @@ impl QueryExecutionPresentation {
     }
 }
 
-/// One immutable query execution. Editing the SQL draft or running another
-/// statement never mutates an earlier tab.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct QueryTab {
-    id: u64,
-    title: String,
-    model: QueryExecutionPresentation,
-}
-
-impl QueryTab {
-    pub(super) fn new(id: u64, title: String, model: QueryExecutionPresentation) -> Self {
-        Self { id, title, model }
-    }
-
-    pub(super) const fn id(&self) -> u64 {
-        self.id
-    }
-
-    pub(super) const fn presentation(&self) -> &QueryExecutionPresentation {
-        &self.model
-    }
-
-    pub(super) fn replace_presentation(&mut self, model: QueryExecutionPresentation) {
-        self.model = model;
-    }
-
-    pub(super) fn mark_cancelled(&mut self) {
-        self.model.state = QueryState::Failed("Cancelled by operator.".to_owned());
-    }
-}
-
 /// Query execution state carried to the visualization region.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum QueryState {
     Running,
     Ready(SpiralQuerySnapshot),
     Failed(String),
-}
-
-#[component]
-pub(super) fn QueryResultView(controller: super::state::QueryController) -> Element {
-    let prefix = use_hook(|| format!("query-{}", dioxus::dioxus_core::current_scope_id().0));
-    let tabs = controller.query_tabs();
-    let active_id = controller.active_query();
-    let active = active_id
-        .and_then(|id| tabs.iter().find(|tab| tab.id == id))
-        .or_else(|| tabs.last())
-        .cloned();
-    let tab_ids = tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
-
-    rsx! {
-        section { class: "flex h-full min-h-0 flex-col bg-surface", "aria-label": "Query results",
-            if !tabs.is_empty() {
-                div { class: "query-result-tabs", role: "tablist", "aria-label": "Query results",
-                    for tab in tabs.iter() {
-                        div {
-                            class: if active_id == Some(tab.id) { "query-result-tab-item query-result-tab-item-active ui-hover-action-host" } else { "query-result-tab-item ui-hover-action-host" },
-                            Button {
-                                id: "{prefix}-tab-{tab.id}",
-                                purpose: ActionPurpose::Select,
-                                variant: ButtonVariant::Tab,
-                                class: if active_id == Some(tab.id) { "query-result-tab query-result-tab-active" } else { "query-result-tab" },
-                                role: "tab",
-                                tabindex: if active_id == Some(tab.id) { "0" } else { "-1" },
-                                aria_selected: active_id == Some(tab.id),
-                                aria_controls: "{prefix}-panel-{tab.id}",
-                                onclick: {
-                                    let id = tab.id;
-                                    move |_| controller.select_query(id)
-                                },
-                                auxiliary_handlers: ButtonAuxiliaryHandlers::keydown({
-                                    let ids = tab_ids.clone();
-                                    let prefix = prefix.clone();
-                                    let id = tab.id;
-                                    move |event: KeyboardEvent| {
-                                        let target = match event.key() {
-                                            Key::ArrowLeft => ids.neighbor(id, false),
-                                            Key::ArrowRight => ids.neighbor(id, true),
-                                            Key::Home => ids.first().copied(),
-                                            Key::End => ids.last().copied(),
-                                            Key::Delete => {
-                                                let target = ids.neighbor_after_close(id);
-                                                controller.close_query(id);
-                                                target
-                                            }
-                                            _ => return,
-                                        };
-                                        event.prevent_default();
-                                        if let Some(target) = target {
-                                            controller.select_query(target);
-                                            target.focus_after_render(&prefix);
-                                        }
-                                    }
-                                }),
-                                span { class: tab.presentation().state().tab_state_class(), "aria-hidden": "true" }
-                                span { class: "query-result-tab-label", "{tab.title}" }
-                            }
-                            Button {
-                                purpose: ActionPurpose::Close,
-                                variant: ButtonVariant::Icon,
-                                class: "query-result-tab-close ui-hover-action",
-                                aria_label: "Close {tab.title}",
-                                title: "Close {tab.title}",
-                                onclick: {
-                                    let ids = tab_ids.clone();
-                                    let prefix = prefix.clone();
-                                    let id = tab.id;
-                                    move |_| {
-                                        let target = ids.neighbor_after_close(id);
-                                        controller.close_query(id);
-                                        if let Some(target) = target {
-                                            controller.select_query(target);
-                                            target.focus_after_render(&prefix);
-                                        }
-                                    }
-                                },
-                                CloseIcon {}
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(tab) = active {
-                div {
-                    key: "{tab.id}",
-                    id: "{prefix}-panel-{tab.id}",
-                    class: "query-result-panel",
-                    role: "tabpanel",
-                    tabindex: "0",
-                    "aria-labelledby": "{prefix}-tab-{tab.id}",
-                    header { class: "query-result-meta",
-                        if let QueryState::Ready(result) = tab.presentation().state() {
-                            span { class: "query-result-count", role: "status",
-                                strong { "{result.rows().len()} rows" }
-                                span { "{result.elapsed_ms()} ms" }
-                            }
-                            if result.truncated() { Chip { tone: ChipTone::Caution, "Truncated" } }
-                        }
-                        span { class: "query-result-limit", "Limit · {tab.presentation().max_rows()} rows" }
-                        Disclosure { summary: rsx! { "SQL" },
-                            code { "{tab.presentation().sql()}" }
-                        }
-                    }
-                    {tab.presentation().render()}
-                }
-            } else {
-                div { class: "flex flex-1 items-center justify-center p-6 text-center",
-                    div {
-                        strong { class: "block text-[12px] font-medium text-ink", "No query results" }
-                        p { class: "mt-1 max-w-[52ch] text-[11px] text-ink-faint",
-                            "Run a read-only query to inspect data."
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-trait QueryTabNavigation {
-    fn neighbor(&self, current: u64, forward: bool) -> Option<u64>;
-    fn neighbor_after_close(&self, current: u64) -> Option<u64>;
-}
-
-impl QueryTabNavigation for [u64] {
-    fn neighbor(&self, current: u64, forward: bool) -> Option<u64> {
-        let index = self.iter().position(|id| *id == current)?;
-        let offset = if forward {
-            (index + 1) % self.len()
-        } else {
-            (index + self.len() - 1) % self.len()
-        };
-        self.get(offset).copied()
-    }
-
-    fn neighbor_after_close(&self, current: u64) -> Option<u64> {
-        let index = self.iter().position(|id| *id == current)?;
-        index
-            .checked_sub(1)
-            .and_then(|index| self.get(index))
-            .or_else(|| self.get(index + 1))
-            .copied()
-    }
-}
-
-trait QueryTabPresentation {
-    fn focus_after_render(self, prefix: &str);
-}
-
-impl QueryTabPresentation for u64 {
-    fn focus_after_render(self, prefix: &str) {
-        BrowserFocus::after_render(format!("{prefix}-tab-{self}"));
-    }
 }
 
 #[component]
@@ -294,16 +89,6 @@ fn QueryResultSkeleton() -> Element {
                     }
                 }
             }
-        }
-    }
-}
-
-impl QueryState {
-    fn tab_state_class(&self) -> &'static str {
-        match self {
-            Self::Running => "query-tab-state query-tab-running",
-            Self::Ready(_) => "query-tab-state query-tab-ready",
-            Self::Failed(_) => "query-tab-state query-tab-failed",
         }
     }
 }
@@ -464,14 +249,5 @@ mod tests {
             Some(&serde_json::json!(true)).presentation_class(),
             "query-value-boolean"
         );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn result_tab_keyboard_navigation_wraps_and_close_prefers_the_left_neighbor() {
-        let ids = [3, 7, 9];
-        assert_eq!(ids.neighbor(3, false), Some(9));
-        assert_eq!(ids.neighbor(9, true), Some(3));
-        assert_eq!(ids.neighbor_after_close(7), Some(3));
-        assert_eq!(ids.neighbor_after_close(3), Some(7));
     }
 }

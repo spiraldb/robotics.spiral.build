@@ -192,10 +192,8 @@ never becomes the motor-control runtime.
     control, health, and camera status.
   - **Data** owns datasets and their episodes. A rail lists each dataset's
     MCAP files as chronological episodes; opening one shows its recorded
-    cameras, plots of chosen numeric fields, and raw messages on one shared
-    Timeline that lists every stream with its message density. Guarded
-    read-only SQL sits beside them, and tables and views
-    open there. Import opens as a peer tab.
+    cameras and plots of chosen numeric fields on one shared Timeline that
+    lists every stream with its message density. Import opens as a peer tab.
   - **Workflow** owns relation discovery and a persisted, revision-safe
     Table → Query → optional Model/backfill → final Query → Result editor over existing qualified
     Spiral relations. The backend runs bounded read-only SQL and one executable

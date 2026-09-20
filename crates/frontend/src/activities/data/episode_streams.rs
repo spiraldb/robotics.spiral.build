@@ -329,7 +329,6 @@ pub(super) struct StreamChoices {
     plots: Signal<PlotSelection>,
     schemas: Signal<BTreeMap<String, StreamSchema>>,
     coverage: Signal<BTreeMap<String, CoverageState>>,
-    selected: Signal<Option<String>>,
     cameras: Signal<BTreeSet<String>>,
 }
 
@@ -341,7 +340,6 @@ impl StreamChoices {
             plots: Signal::new(PlotSelection::default()),
             schemas: Signal::new(BTreeMap::new()),
             coverage: Signal::new(BTreeMap::new()),
-            selected: Signal::new(None),
             cameras: Signal::new(BTreeSet::new()),
         })
     }
@@ -353,7 +351,6 @@ impl StreamChoices {
         self.plots.set(PlotSelection::default());
         self.schemas.set(BTreeMap::new());
         self.coverage.set(BTreeMap::new());
-        self.selected.set(None);
         self.cameras.set(
             catalog
                 .videos()
@@ -612,13 +609,6 @@ impl StreamChoices {
                 coverage.insert(key, state);
             }
         });
-    }
-
-    pub(super) fn selected(&self) -> Option<String> {
-        self.selected.read().clone()
-    }
-    pub(super) fn select(&mut self, key: Option<String>) {
-        self.selected.set(key);
     }
 
     pub(super) fn camera_open(&self, key: &str) -> bool {

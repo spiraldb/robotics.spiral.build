@@ -594,24 +594,19 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
             });
     let executed = controller.executed_query().unwrap_or_else(|| spec.clone());
     let sql = executed.execution_sql().unwrap_or_else(|error| error);
-    let max_rows = 100;
-    let result_model = snapshot.result().cloned().map(|result| {
-        QueryExecutionPresentation::new(sql.clone(), max_rows, QueryState::Ready(result))
-    });
+    let result_model = snapshot
+        .result()
+        .cloned()
+        .map(|result| QueryExecutionPresentation::new(QueryState::Ready(result)));
     let transient_model = if result_model.is_none() {
         match snapshot.phase() {
-            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => Some(
-                QueryExecutionPresentation::new(sql.clone(), max_rows, QueryState::Running),
-            ),
-            WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted => {
-                snapshot.error().map(str::to_owned).map(|error| {
-                    QueryExecutionPresentation::new(
-                        sql.clone(),
-                        max_rows,
-                        QueryState::Failed(error),
-                    )
-                })
+            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => {
+                Some(QueryExecutionPresentation::new(QueryState::Running))
             }
+            WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted => snapshot
+                .error()
+                .map(str::to_owned)
+                .map(|error| QueryExecutionPresentation::new(QueryState::Failed(error))),
             _ => None,
         }
     } else {

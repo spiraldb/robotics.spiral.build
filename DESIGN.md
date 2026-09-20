@@ -381,8 +381,8 @@ put reads as a bench tool.
   two-thirds visualization, with Timeline in the lower 42% and each camera
   visible in its own row of the named camera column. Rollout narrows the
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
-- Data defaults to a 21% Datasets rail beside an episode workspace: Plots,
-  Messages, and SQL as tabs in the primary tile, one panel per recorded
+- Data defaults to a 21% Datasets rail beside an episode workspace: Plots in
+  the primary tile, one panel per recorded
   camera in a right-hand column, and a full-width Timeline across the lower
   40%. The Timeline lists every recorded stream with its message density and
   is where streams are shown, plotted, and selected. Import opens as a peer
@@ -632,17 +632,16 @@ switcher. There is no selected-arm toolbar beneath it. Setup is global Settings
 
 Data follows the operator's own model of their recordings: a dataset is a
 folder of MCAP files and each file is one episode. The Datasets rail lists
-datasets, expands each into its chronological episodes (labelled by the part
-of the source path that differs between files), and folds ordinary tables
-and views into a quiet Tables & views section that opens
-SQL. Selecting a dataset shows its Overview; opening an episode replaces it
-with Plots and Messages tabs, one panel per recorded camera, and the Timeline.
+datasets and expands each into its chronological episodes (labelled by the part
+of the source path that differs between files). Selecting a dataset shows its
+Overview; opening an episode replaces it with Plots, one panel per recorded
+camera, and the Timeline.
 The canonical first-open Data layout is:
 
 ```text
 ┌── 21% ──┬────────── 49% ──────────┬──── 51% ────┐
 │ Datasets│ Overview · Plots         │ top  │ left │
-│ rail    │ Messages · SQL           ├──────┴──────┤
+│ rail    │                          ├──────┴──────┤
 │         │                         │ right       │
 │         ├─────────────────────────┴─────────────┤
 │         │ Timeline — transport, ruler, one row  │
@@ -668,8 +667,8 @@ over an automatic selection still waiting for a schema response.
 
 The Timeline is the navigation hub of an episode: ticking a stream shows it
 (a camera opens its panel; a data stream draws every numeric field in Plots),
-expanding a data stream exposes its fields for one-by-one selection, and
-clicking a stream name selects it for Messages. Cameras lead the list, then
+and expanding a data stream exposes its fields for one-by-one selection.
+Cameras lead the list, then
 streams with numeric fields; streams with at most one message or no numeric
 fields wait behind one "N streams with nothing to plot" row (a count rule
 and a type rule, never a name rule). Rows are 24px. Density draws in
@@ -686,17 +685,13 @@ episode by the part of its source path that differs between files; an
 identifier-shaped name gives way to the recorded time of day, and a
 recording whose clock started at the Unix epoch says "no wall clock" rather
 than a day in 1970. Camera panels read "Camera ·" plus what tells a camera
-from the episode's others. Messages lead with a `time` column on the episode
-clock, then the payload, and keep MCAP bookkeeping (`log_time`,
-`publish_time`, `channel_id`, `chunk_start_offset`, `sample_ordinal`) at the
-end; result headers spell column names as the query did. Plot readouts
-round to the lane's range and keep the exact value in the tooltip; a lane
-without values folds into the footer, and before the first sample the
-readouts hold it as cameras hold their first frame. The Overview owns the
+from the episode's others. Plot readouts round to the lane's range and keep
+the exact value in the tooltip; a lane without values receives a compact
+note, and before the first sample the readouts hold it as cameras hold their
+first frame. The shared Timeline owns playback time, so plots and cameras do
+not repeat sample/frame time or age. The Overview owns the
 whole upper row until an episode opens, and its streams ledger prints "all"
-for a stream present in every episode and the deviation in caution. Under
-the datasets, Tables & views keeps project-level relations at the top and
-folds each dataset's own signals and cohorts under its name.
+for a stream present in every episode and the deviation in caution.
 
 Curation is a contact sheet under a pipeline strip. Under the same 36px
 document bar Workflow uses (glyph · name ▾ · … · state chip Discard Save
@@ -1698,18 +1693,16 @@ ambient browser selection—decides whether execution may begin.
 - **Failure:** Actionable unavailable/permission text appears in the frame; a
   green dot never masks a blank image.
 
-### Data, Episodes, and Query
+### Data and Episodes
 
 - **Datasets rail:** Datasets lead; each expands into chronological episode
   rows of `#n`, the distinguishing directory of the source file, duration,
   date, and message count, fifty at a time with an explicit Load more. The
   selected dataset shows its episode count; the open episode is role blue.
-  Tables and views sit in a collapsed Tables & views
-  section; opening one loads `SELECT * … LIMIT 100` into SQL and runs it.
 - **Overview:** Selecting a dataset shows its name, chips for episode count,
   total recorded time, total bytes, and date span from one aggregate query,
   and its declared streams with schema names and counts. Episodes open from
-  the Datasets rail; SQL remains available in its own tab.
+  the Datasets rail.
 - **Timeline:** A 36px transport row holds the episode identity, jump/step/
   play controls, a millisecond clock beside the duration, speed, Loop, a
   buffering note, and zoom. Below it a sticky ruler with round-interval ticks
@@ -1727,14 +1720,8 @@ ambient browser selection—decides whether execution may begin.
   and says so. The empty state offers one-click plots of the busiest streams.
 - **Cameras:** Each video stream is its own camera panel in the right-hand
   column, mounted only while open; the frame keeps the dark mat and the
-  recorded frame time. Closing a panel unticks the stream; the Timeline
-  reopens it.
-- **Messages:** The selected stream's messages from the playhead forward in
-  the shared result table, one hundred at a time, with From playhead and
-  Next 100 actions.
-- **SQL:** The read-only editor above its bounded results, as one tab beside
-  Plots and Messages; it retains its draft and result tabs across the
-  session.
+  recorded image without a redundant timing footer. Closing a panel unticks
+  the stream; the Timeline reopens it.
 - **Import:** A peer native tab contains a restrained form leading from source
   fields to inspection, a resolved-revision review, import, and a success
   receipt. Finishing selects the new dataset in the rail.

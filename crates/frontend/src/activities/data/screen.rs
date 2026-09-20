@@ -1,5 +1,5 @@
 //! Data: datasets and their episodes in a rail; one open episode across
-//! cameras, plots, and messages on one timeline; read-only SQL beside them.
+//! cameras and plots on one timeline.
 use super::{
     DatasetClient,
     catalog_rail::{CatalogRail, RailActions, RailSelection},
@@ -8,10 +8,7 @@ use super::{
     episode_playback::EpisodeCamera,
     episode_streams::{EpisodeStreams, RecordedStream, StreamCatalog, StreamChoices},
     episode_transport::{EpisodeTimeRange, EpisodeTransport, KeyboardFocus},
-    messages_panel::MessagesPanel,
     plots_panel::PlotsPanel,
-    sql_panel::SqlPanel,
-    state::QueryController,
     timeline_panel::{TimelinePanel, TimelineSubject},
 };
 use crate::shell::frame::WorkspaceFrame;
@@ -19,12 +16,12 @@ use dioxus::prelude::*;
 use dioxus_workbench::{
     DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelPlacement, PanelWorkspace, SplitAxis,
 };
-use spiral_robotics_common::datasets::{DatasetSelection, ProjectResource};
+use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 use std::collections::BTreeSet;
 use wasm_bindgen::JsCast as _;
 
-const LAYOUT_SCOPE: &str = "spiral_robotics.panel-layout.v13.data";
+const LAYOUT_SCOPE: &str = "spiral_robotics.panel-layout.v14.data";
 const IMPORT_PANEL: &str = "data-import";
 /// The split between the primary tile and the camera column.
 const EDITORS_SPLIT: &str = "data-editors";
@@ -318,9 +315,9 @@ impl DataLayout {
 
     fn initial(camera_ids: &[PanelId], browsing: bool) -> PanelLayout {
         let primary_ids = if browsing {
-            vec!["overview", "plots", "messages", "sql", IMPORT_PANEL]
+            vec!["overview", "plots", IMPORT_PANEL]
         } else {
-            vec!["plots", "messages"]
+            vec!["plots"]
         };
         let primary = LayoutNode::tile("primary", primary_ids.into_iter().map(PanelId::new));
         let editors = match Self::camera_grid(camera_ids, 0) {
@@ -354,7 +351,6 @@ pub(in crate::activities) fn DataPanels(
     #[props(default)] initial_episode: Option<OpenedEpisode>,
 ) -> Element {
     let browsing = initial_episode.is_none();
-    let studio = crate::shell::state::StudioProjectState::current();
     let sessions = crate::shell::project::ProjectSessionSignals::current();
     let available = use_memo(move || sessions.catalog_available());
     let catalog = crate::client::queries::QueryPolicy::on_demand(
@@ -422,8 +418,6 @@ pub(in crate::activities) fn DataPanels(
         }
     });
     let mut choices = StreamChoices::use_choices();
-    let controller = QueryController::use_controller(String::new());
-
     let inspection = use_resource(move || {
         let dataset = selection.dataset.read().clone();
         async move {
@@ -514,11 +508,6 @@ pub(in crate::activities) fn DataPanels(
         selection.episode.set(Some(opened));
         selection.activate("plots");
     });
-    let open_table = move |resource: ProjectResource| {
-        controller.set_sql(resource.table_sql());
-        controller.run_query(studio, *available.peek());
-        selection.activate("sql");
-    };
     let start_import = move |(): ()| {
         let mut selection = selection;
         selection.importing.set(true);
@@ -555,18 +544,8 @@ pub(in crate::activities) fn DataPanels(
             choices.reset(&StreamCatalog::default());
         }
     };
-    // Naming a stream in the Timeline is a request to read it.
-    use_effect(move || {
-        if choices.selected().is_some() {
-            selection.activate("messages");
-        }
-    });
-    let rail_actions = RailActions::new(
-        EventHandler::new(select_dataset),
-        open_episode,
-        EventHandler::new(open_table),
-    )
-    .with_import(EventHandler::new(start_import));
+    let rail_actions = RailActions::new(EventHandler::new(select_dataset), open_episode)
+        .with_import(EventHandler::new(start_import));
     let rail_selection = RailSelection::new(
         dataset.clone(),
         episode
@@ -576,34 +555,42 @@ pub(in crate::activities) fn DataPanels(
     );
 
     // The primary tile keeps a stable tab order; content follows the selection.
-    let mut panels =
-        vec![
-        Panel::new("catalog", "Datasets", "catalog", rsx! {
-            CatalogRail { resources, selection: rail_selection, actions: rail_actions }
-        })
+    let mut panels = vec![
+        Panel::new(
+            "catalog",
+            "Datasets",
+            "catalog",
+            rsx! {
+                CatalogRail { resources, selection: rail_selection, actions: rail_actions }
+            },
+        )
         .with_class("data-catalog-panel"),
-        Panel::new("overview", "Overview", "primary", rsx! {
-            match &dataset {
-                Some(dataset) => rsx! {
-                    DatasetOverview {
-                        dataset: dataset.clone(),
-                        inspection: dataset_inspection.clone(),
-                    }
-                },
-                None => rsx! { WelcomePanel { on_import: start_import } },
-            }
-        })
+        Panel::new(
+            "overview",
+            "Overview",
+            "primary",
+            rsx! {
+                match &dataset {
+                    Some(dataset) => rsx! {
+                        DatasetOverview {
+                            dataset: dataset.clone(),
+                            inspection: dataset_inspection.clone(),
+                        }
+                    },
+                    None => rsx! { WelcomePanel { on_import: start_import } },
+                }
+            },
+        )
         .with_class("data-primary-panel"),
-        Panel::new("plots", "Plots", "primary", rsx! {
-            PlotsPanel { streams: streams.clone(), transport: transport.clone(), choices }
-        })
+        Panel::new(
+            "plots",
+            "Plots",
+            "primary",
+            rsx! {
+                PlotsPanel { streams: streams.clone(), transport: transport.clone(), choices }
+            },
+        )
         .with_class("data-primary-panel"),
-        Panel::new("messages", "Messages", "primary", rsx! {
-            MessagesPanel { streams: streams.clone(), transport: transport.clone(), choices }
-        })
-        .with_class("data-primary-panel"),
-        Panel::new("sql", "SQL", "primary", rsx! { SqlPanel { studio, controller } })
-            .with_class("data-primary-panel"),
     ];
     if (selection.importing)() {
         panels.push(
@@ -675,7 +662,7 @@ pub(in crate::activities) fn DataPanels(
     );
 
     if !browsing {
-        panels.retain(|panel| !matches!(panel.id.as_str(), "catalog" | "overview" | "sql"));
+        panels.retain(|panel| !matches!(panel.id.as_str(), "catalog" | "overview"));
     }
     let initial_layout = DataLayout::initial(&camera_ids, browsing);
     let placements = panels
@@ -941,13 +928,6 @@ mod tests {
             "primary"
         );
         assert_eq!(
-            layout
-                .tile_for_panel(&PanelId::new("sql"))
-                .unwrap()
-                .as_str(),
-            "primary"
-        );
-        assert_eq!(
             layout.tile_for_panel(&cameras[0]).unwrap().as_str(),
             "cameras"
         );
@@ -978,10 +958,10 @@ mod tests {
         let cameras = [PanelId::new("camera:/top#a")];
         let layout = DataLayout::initial(&cameras, false);
         assert!(layout.valid());
-        for panel in ["plots", "messages", "timeline", "camera:/top#a"] {
+        for panel in ["plots", "timeline", "camera:/top#a"] {
             assert!(layout.tile_for_panel(&PanelId::new(panel)).is_some());
         }
-        for panel in ["catalog", "overview", "sql", IMPORT_PANEL] {
+        for panel in ["catalog", "overview", IMPORT_PANEL] {
             assert!(layout.tile_for_panel(&PanelId::new(panel)).is_none());
         }
     }

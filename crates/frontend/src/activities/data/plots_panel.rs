@@ -13,7 +13,7 @@ use crate::components::icons::SignalStreamIcon;
 use crate::components::time_series::{
     TimelineSignalLane, TimelineSignalLanes, TimelineSignalPoint, TraceChartLayout,
 };
-use crate::format::{GroupedCountPresentation, PreciseClockPresentation};
+use crate::format::GroupedCountPresentation;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::MessageWindow;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
@@ -349,7 +349,6 @@ fn PlotLanes(
         .buffer
         .values(&plotted.fields, at_ns)
         .unwrap_or_default();
-    let sample = plotted.buffer.sample_time(at_ns).ok().flatten();
     let height = lanes.len() as f64 * (LANE_HEIGHT + LANE_GAP);
     let hover_x = hover().map(|moment| view.percent(moment) / 100.0);
     let mut seek = transport.clone();
@@ -417,21 +416,8 @@ fn PlotLanes(
                 }
             }
         }
-        div { class: "data-plot-foot",
-            match sample {
-                Some(sample) if held_first.is_some() => rsx! {
-                    span { "first sample {range.seconds_of(sample).precise_clock_label()}" }
-                },
-                Some(sample) => rsx! {
-                    span { "sample {range.seconds_of(sample).precise_clock_label()}" }
-                    span { "age {(at - range.seconds_of(sample)).max(0.0):.3} s" }
-                    if hover().is_some() { span { class: "data-plot-foot-note", "at cursor" } }
-                },
-                None => rsx! { span { "No message at this time" } },
-            }
-            if !empty.is_empty() {
-                span { class: "data-plot-foot-note", title: "These fields have no value in this episode", "no values: {empty}" }
-            }
+        if !empty.is_empty() {
+            div { class: "data-plot-empty-note", title: "These fields have no value in this episode", "no values: {empty}" }
         }
     }
 }

@@ -53,7 +53,7 @@ pub(super) fn EpisodeReview(
                                     h5 { title: camera.label(), "{camera.label().trim_start_matches('/')}" }
                                     EpisodeCamera {
                                         request: camera.read().clone(), timeline: transport.range(),
-                                        transport: transport.clone(), show_frame_timing: false,
+                                        transport: transport.clone(),
                                     }
                                 }
                             }

@@ -4,7 +4,6 @@ use super::{
     episode_transport::{EpisodeTimeRange, EpisodeTransport, FeedState},
     message_buffer::MessageBuffer,
 };
-use crate::format::PreciseClockPresentation;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{MessageRead, MessageWindow};
 use std::{
@@ -28,7 +27,6 @@ pub(in crate::activities) fn EpisodeCamera(
     request: MessageRead,
     timeline: EpisodeTimeRange,
     transport: EpisodeTransport,
-    #[props(default = true)] show_frame_timing: bool,
 ) -> Element {
     let media = transport.media();
     let load_request = request.clone();
@@ -77,7 +75,7 @@ pub(in crate::activities) fn EpisodeCamera(
         div { class: "episode-camera-panel",
             if pending { p { class: "episode-camera-message", role: "status", "Loading recorded camera…" } }
             else { match &*video.read() {
-                Some(Ok(camera)) => rsx! { CameraFrames { camera: camera.clone(), transport, show_frame_timing, topic: format!("{} · {}", request.topic().topic(), request.revision().variant()) } },
+                Some(Ok(camera)) => rsx! { CameraFrames { camera: camera.clone(), transport, topic: format!("{} · {}", request.topic().topic(), request.revision().variant()) } },
                 Some(Err(error)) => rsx! { div { class: "episode-camera-message", role: "alert",
                     p { "{error}" }
                     button { class: "data-text-action", onclick: move |_| video.restart(), "Retry camera" }
@@ -100,12 +98,7 @@ const QUIET_RESTART_PACKETS: usize = 15;
 const UNCOVERED_RETRIES: u8 = 8;
 
 #[component]
-fn CameraFrames(
-    camera: Rc<LoadedCamera>,
-    transport: EpisodeTransport,
-    topic: String,
-    show_frame_timing: bool,
-) -> Element {
+fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: String) -> Element {
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);
     let mut failure = use_signal(|| None::<String>);
     let mut covered = use_signal(|| false);
@@ -196,8 +189,11 @@ fn CameraFrames(
         });
     });
     let seconds = transport.seconds();
-    let held_first = camera.encoded.first_frame_after(seconds);
-    let sample = held_first.or_else(|| camera.encoded.frame_seconds(seconds));
+    let frame_available = camera
+        .encoded
+        .first_frame_after(seconds)
+        .or_else(|| camera.encoded.frame_seconds(seconds))
+        .is_some();
     let uncovered = !covered();
     let retry_playback = fresh_playback.clone();
     rsx! {
@@ -216,18 +212,9 @@ fn CameraFrames(
             } }
             else if uncovered {
                 p { class: "episode-camera-message", role: "status",
-                    if sample.is_some() { "Decoding recorded camera…" } else { "No frame at this time" }
+                    if frame_available { "Decoding recorded camera…" } else { "No frame at this time" }
                 }
             }
-        }
-        if show_frame_timing {
-        div { class: "episode-camera-time",
-            match (sample.filter(|_| !uncovered), held_first) {
-                (Some(first), Some(_)) => rsx! { {format!("First frame {}", first.precise_clock_label())} },
-                (Some(sample), None) => rsx! { {format!("Frame {} · age {:.3} s", sample.precise_clock_label(), (seconds - sample).max(0.0))} },
-                (None, _) => rsx! { "Recorded camera" },
-            }
-        }
         }
     }
 }

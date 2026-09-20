@@ -129,8 +129,7 @@ fn StreamRows(
 }
 
 /// One row standing in for the streams with nothing to plot, so the hub
-/// leads with cameras and measurements. They stay one click away, still
-/// selectable for Messages.
+/// leads with cameras and measurements. They stay one click away.
 #[component]
 fn QuietStreamsRow(count: usize, open: bool, on_toggle: EventHandler<()>) -> Element {
     let noun = if count == 1 { "stream" } else { "streams" };
@@ -160,7 +159,6 @@ fn StreamRow(
 ) -> Element {
     let key = stream.key().to_owned();
     let kind = stream.kind();
-    let selected = choices.selected().as_deref() == Some(stream.key());
     let schema = choices.schema(&key);
     let no_numeric_fields =
         matches!(&schema, Some(StreamSchema::Ready(root)) if root.plottable_leaves().is_empty());
@@ -181,9 +179,8 @@ fn StreamRow(
         .unwrap_or_else(|| "—".into());
     let schemas = stream.schemas().join(", ");
     let toggle_stream = stream.clone();
-    let select_key = key.clone();
     rsx! {
-        div { class: "data-stream", "data-selected": selected, "data-kind": if kind == StreamKind::Video { "video" } else { "data" },
+        div { class: "data-stream", "data-kind": if kind == StreamKind::Video { "video" } else { "data" },
             div { class: "data-stream-name",
                 if kind == StreamKind::Data {
                     Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Icon, class: "data-stream-expand",
@@ -200,9 +197,7 @@ fn StreamRow(
                 span { class: "data-stream-kind", "aria-hidden": "true",
                     if kind == StreamKind::Video { CameraStreamIcon {} } else { SignalStreamIcon {} }
                 }
-                button { r#type: "button", class: "data-stream-label", aria_pressed: selected,
-                    title: "{stream.name()} · {schemas}",
-                    onclick: move |_| choices.select(if selected { None } else { Some(select_key.clone()) }),
+                span { class: "data-stream-label", title: "{stream.name()} · {schemas}",
                     span { class: "truncate", "{stream.label()}" }
                 }
                 span { class: "data-stream-count", title: "Messages in this episode", "{count}" }

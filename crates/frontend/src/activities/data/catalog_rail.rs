@@ -9,10 +9,9 @@ use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonSize, ButtonVariant, Disclosure, RefreshIcon, TextInput,
-    TextInputKind, Tree, TreeBranch, TreeItem,
+    ActionPurpose, Button, ButtonSize, ButtonVariant, RefreshIcon, TextInput, TextInputKind, Tree,
+    TreeBranch, TreeItem,
 };
-use std::collections::BTreeMap;
 
 type ResourceCatalog = ReadSignal<Option<Result<Vec<ProjectResource>, String>>>;
 const EPISODE_PAGE_SIZE: usize = 50;
@@ -55,7 +54,6 @@ impl EpisodePage {
 pub(super) struct RailActions {
     on_select_dataset: EventHandler<DatasetSelection>,
     on_open_episode: EventHandler<OpenedEpisode>,
-    on_open_table: EventHandler<ProjectResource>,
     on_import: EventHandler<()>,
 }
 
@@ -63,12 +61,10 @@ impl RailActions {
     pub(super) fn new(
         on_select_dataset: EventHandler<DatasetSelection>,
         on_open_episode: EventHandler<OpenedEpisode>,
-        on_open_table: EventHandler<ProjectResource>,
     ) -> Self {
         Self {
             on_select_dataset,
             on_open_episode,
-            on_open_table,
             on_import: EventHandler::new(|_| {}),
         }
     }
@@ -128,11 +124,6 @@ pub(super) fn CatalogRail(
                         // searches its own episodes, so a match in a collapsed dataset
                         // is found and the operator's expansion choices survive.
                         let datasets = entries.iter().filter(|resource| resource.kind() == "dataset").cloned().collect::<Vec<_>>();
-                        let others = entries
-                            .iter()
-                            .filter(|resource| resource.kind() != "dataset")
-                            .cloned()
-                            .collect::<Vec<_>>();
                         rsx! {
                             if datasets.is_empty() {
                                 div { class: "data-rail-note",
@@ -153,7 +144,6 @@ pub(super) fn CatalogRail(
                                     }
                                 }
                             }
-                            TableBranches { resources: others, filter: needle, on_open: actions.on_open_table }
                         }
                     }
                 }
@@ -298,83 +288,6 @@ fn DatasetEpisodes(
                     Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Link, size: ButtonSize::Compact,
                         onclick: move |_| offset.set(offset() + EPISODE_PAGE_SIZE), "Load {EPISODE_PAGE_SIZE} more" }
                 }
-            }
-        }
-    }
-}
-
-#[component]
-fn TableBranches(
-    resources: Vec<ProjectResource>,
-    filter: String,
-    on_open: EventHandler<ProjectResource>,
-) -> Element {
-    let matching = resources
-        .into_iter()
-        .filter(|resource| {
-            filter.is_empty()
-                || resource
-                    .selection()
-                    .label()
-                    .to_lowercase()
-                    .contains(&filter)
-        })
-        .collect::<Vec<_>>();
-    if matching.is_empty() {
-        return rsx! {};
-    }
-    // Relations Spiral scopes under a dataset (its topic signals and cohorts)
-    // fold under that dataset's name; only project-level tables and views
-    // stay at the top, so the list reads as a handful, not a wall.
-    let (scoped, top_level): (Vec<_>, Vec<_>) = matching
-        .into_iter()
-        .partition(|resource| resource.selection().path().len() > 1);
-    let mut groups = BTreeMap::<String, Vec<ProjectResource>>::new();
-    for resource in scoped {
-        groups
-            .entry(resource.selection().path()[0].clone())
-            .or_default()
-            .push(resource);
-    }
-    let total = top_level.len() + groups.values().map(Vec::len).sum::<usize>();
-    rsx! {
-        Disclosure { class: "data-rail-tables", open: !filter.is_empty(),
-            summary: rsx! { "Tables & views" span { class: "data-rail-tables-count", "{total}" } },
-            ul { class: "data-table-list",
-                for resource in top_level { TableRow { key: "{resource.resource_id()}", resource, on_open } }
-            }
-            for (dataset, relations) in groups {
-                Disclosure { key: "{dataset}", class: "data-rail-tables data-rail-tables-group", open: !filter.is_empty(),
-                    summary: rsx! { "Relations of {dataset}" span { class: "data-rail-tables-count", "{relations.len()}" } },
-                    ul { class: "data-table-list",
-                        for resource in relations { TableRow { key: "{resource.resource_id()}", resource, on_open } }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn TableRow(resource: ProjectResource, on_open: EventHandler<ProjectResource>) -> Element {
-    let label = resource.selection().label();
-    // Inside a dataset's group the dataset is already named; the row shows
-    // the relation's own name and keeps the full name for SQL in its tooltip.
-    let shown = resource
-        .selection()
-        .path()
-        .last()
-        .filter(|_| resource.selection().path().len() > 1)
-        .cloned()
-        .unwrap_or_else(|| label.clone());
-    let kind = resource.kind().to_owned();
-    let open = resource.clone();
-    rsx! {
-        li {
-            Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Row, class: "data-table-row", title: "{label} · {kind} · open in SQL",
-                onclick: move |_| on_open.call(open.clone()),
-                span { class: "truncate", "{shown}" }
-                small { "{kind}" }
             }
         }
     }
