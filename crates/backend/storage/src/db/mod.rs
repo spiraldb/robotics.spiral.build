@@ -11,9 +11,7 @@ mod project_store;
 mod schema;
 mod sql;
 
-pub(crate) use arrow_rows::{
-    ArrowColumns, ListColumnBuilder, OptionalFloatListColumn, StringListColumn, UnsignedListColumn,
-};
+pub(crate) use arrow_rows::ArrowColumns;
 pub use database::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
     DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,

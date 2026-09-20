@@ -3,7 +3,6 @@
 use crate::components::interaction::{
     Action, ActionAuxiliaryHandlers, ActionPurpose, ActionVariant, BrowserFocus, CloseIcon,
 };
-use crate::components::side_sheet::SheetPosition;
 use dioxus::prelude::*;
 use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
 
@@ -369,65 +368,6 @@ impl QueryColumnPresentation for QueryColumn {
     }
 }
 
-struct QueryCellContext<'a> {
-    column: &'a QueryColumn,
-    row: &'a serde_json::Map<String, serde_json::Value>,
-    row_index: usize,
-    row_count: usize,
-}
-
-impl<'a> QueryCellContext<'a> {
-    const fn new(
-        column: &'a QueryColumn,
-        row: &'a serde_json::Map<String, serde_json::Value>,
-        position: SheetPosition,
-    ) -> Self {
-        Self {
-            column,
-            row,
-            row_index: position.index(),
-            row_count: position.count(),
-        }
-    }
-
-    fn image_alt(&self) -> String {
-        let prefix = self
-            .column
-            .name()
-            .strip_suffix("_preview")
-            .or_else(|| self.column.name().strip_suffix("_image"));
-        let mut context = Vec::new();
-        for (label, field) in [
-            ("episode", "episode_id"),
-            ("stream", "stream_id"),
-            ("frame", "frame_index"),
-        ] {
-            let specific = prefix.map(|prefix| format!("{prefix}_{field}"));
-            let value = specific
-                .as_deref()
-                .and_then(|field| self.row.get(field))
-                .or_else(|| self.row.get(field))
-                .map(QueryJsonValue::cell_value)
-                .filter(|value| value != "null");
-            if let Some(value) = value {
-                context.push(format!("{label} {value}"));
-            }
-        }
-        let context = if context.is_empty() {
-            String::new()
-        } else {
-            format!(" for {}", context.join(", "))
-        };
-        format!(
-            "{}{}; result {} of {}",
-            self.column.humanized_name(),
-            context,
-            self.row_index + 1,
-            self.row_count
-        )
-    }
-}
-
 trait QueryJsonValue {
     fn cell_value(&self) -> String;
 }
@@ -507,23 +447,6 @@ mod tests {
         assert_eq!(image.presentation_kind(), "Image");
         assert_eq!(tensor.presentation_kind(), "Image");
         assert_eq!(plain.presentation_kind(), "Utf8");
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn inline_image_alt_uses_camera_specific_identity_and_row_position() {
-        let column = query_column("wrist_preview", Some(IMAGE_EXTENSION_NAME));
-        let row = serde_json::Map::from_iter([
-            ("episode_id".to_owned(), serde_json::json!("take-12")),
-            (
-                "wrist_stream_id".to_owned(),
-                serde_json::json!("follower/wrist"),
-            ),
-            ("wrist_frame_index".to_owned(), serde_json::json!(42)),
-        ]);
-        assert_eq!(
-            QueryCellContext::new(&column, &row, SheetPosition::new(2, 18)).image_alt(),
-            "Wrist for episode take-12, stream follower/wrist, frame 42; result 3 of 18"
-        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

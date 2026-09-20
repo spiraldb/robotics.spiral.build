@@ -10,8 +10,6 @@
 use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, ChevronIcon, FileAction, FileInput, UnassignIcon,
 };
-use crate::robots::IdentifiedSerialPort;
-use crate::robots::document::RobotDraft;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{
     CameraBinding, PortSettings, RobotSummary, SerialPortSummary,
@@ -24,8 +22,12 @@ use crate::shell::state::StudioProjectState;
 
 mod calibration;
 mod delete;
+mod discovery;
+mod document;
 use calibration::CalibrationSection;
 use delete::DeleteRobotAction;
+use discovery::IdentifiedSerialPort;
+use document::RobotDraft;
 
 /// Robot types offered when creating an instance.
 const ROBOT_TYPES: [(&str, &str); 2] = [

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use spiral_robotics_common::project::ProjectSessionInfo;
 use spiral_robotics_common::settings::{
-    DataSettings, SpiralSettings, TrainingRuntimeSettings, VideoSettings,
+    DataSettings, SpiralConnectionUpdate, SpiralSettings, TrainingRuntimeSettings, VideoSettings,
 };
 use spiral_robotics_hardware::{
     HardwareHandle, HardwareState, ModeSelection as HardwareModeSelection,
@@ -257,6 +257,54 @@ enum ProjectPreparation {
 }
 
 impl ProjectSession {
+    fn resolve_connection_update(
+        update: SpiralConnectionUpdate,
+        previous: &SpiralConnectionSettings,
+    ) -> Result<SpiralConnectionSettings, OperationError> {
+        let (endpoint, spfs, project, client, secret, clear, huggingface_token) =
+            update.into_parts();
+        let huggingface_token =
+            huggingface_token.or_else(|| previous.huggingface_token().map(str::to_owned));
+        let endpoint =
+            crate::data::settings::HttpEndpoint::parse(&endpoint, "Spiral endpoint")?.into_string();
+        let spfs =
+            crate::data::settings::HttpEndpoint::parse(&spfs, "SpFS endpoint")?.into_string();
+        let client = client.trim();
+        let credentials = if clear || client.is_empty() {
+            if client.is_empty() && !secret.trim().is_empty() && !clear {
+                return Err(OperationError::invalid_input(
+                    "Spiral client secret requires a client ID",
+                ));
+            }
+            None
+        } else if !secret.trim().is_empty() {
+            Some(SpiralCredentials::new(
+                client.to_owned(),
+                secret.trim().to_owned(),
+            ))
+        } else {
+            Some(
+                previous
+                    .credentials()
+                    .filter(|credentials| credentials.client_id() == client)
+                    .cloned()
+                    .ok_or_else(|| {
+                        OperationError::invalid_input(
+                            "Enter the client secret when changing the Spiral client ID",
+                        )
+                    })?,
+            )
+        };
+        SpiralConnectionSettings::new(endpoint, spfs)
+            .and_then(|settings| settings.with_project(project.trim()))
+            .map(|settings| {
+                settings
+                    .with_credentials(credentials)
+                    .with_huggingface_token(huggingface_token)
+            })
+            .map_err(OperationError::InvalidInput)
+    }
+
     pub(crate) fn info(&self) -> &ProjectSessionInfo {
         &self.info
     }
@@ -525,11 +573,14 @@ impl ProjectCoordinator {
     pub(crate) async fn update_connection(
         &self,
         origin: &ProjectSession,
-        update: crate::data::settings::ProjectConnectionUpdate,
+        update: SpiralConnectionUpdate,
     ) -> Result<(), OperationError> {
         let _serialization = self.transition.lock().await;
         self.resolve(origin.info().id())?;
-        let connection = update.resolve(&origin.storage().connection_settings())?;
+        let connection = ProjectSession::resolve_connection_update(
+            update,
+            &origin.storage().connection_settings(),
+        )?;
         let transition = self.begin_change(origin, "Checking the project connection")?;
         self.require_idle(origin, ProjectChangeKind::Destination)
             .await?;
@@ -559,8 +610,7 @@ impl ProjectCoordinator {
         let _serialization = self.transition.lock().await;
         self.resolve(origin.info().id())?;
         let previous = origin.storage().connection_settings();
-        let connection =
-            crate::data::settings::ProjectConnectionUpdate::from(&command).resolve(&previous)?;
+        let connection = ProjectSession::resolve_connection_update((&command).into(), &previous)?;
         let preferences = spiral_robotics_storage::StoredStudioPreferences::from_settings(
             command.training_endpoint(),
             command.video_enabled(),
@@ -811,6 +861,75 @@ pub(crate) mod tests {
             self.projects.publish(candidate.clone(), transition);
             candidate
         }
+    }
+
+    #[test]
+    fn huggingface_settings_preserve_replace_and_remove_the_private_token() {
+        let previous = SpiralConnectionSettings::new(
+            "https://api.spiraldb.dev".into(),
+            "https://spfs.spiraldb.dev".into(),
+        )
+        .unwrap()
+        .with_project("project")
+        .unwrap()
+        .with_huggingface_token(Some("hf_saved".into()));
+        for (change, expected) in [
+            (None, Some("hf_saved")),
+            (Some(" hf_replacement ".to_owned()), Some("hf_replacement")),
+            (Some(String::new()), None),
+        ] {
+            let update = SpiralConnectionUpdate::new(
+                previous.endpoint(),
+                previous.spfs_endpoint(),
+                "project",
+            )
+            .with_huggingface_token(change);
+            let decoded: SpiralConnectionUpdate =
+                serde_json::from_str(&serde_json::to_string(&update).unwrap()).unwrap();
+            let resolved = ProjectSession::resolve_connection_update(decoded, &previous).unwrap();
+            assert_eq!(resolved.huggingface_token(), expected);
+        }
+    }
+
+    #[test]
+    fn connection_repairs_preserve_credentials_unless_the_edit_explicitly_replaces_them() {
+        let previous = SpiralConnectionSettings::new(
+            "https://api.spiraldb.dev".into(),
+            "https://spfs.spiraldb.dev".into(),
+        )
+        .unwrap()
+        .with_project("old")
+        .unwrap()
+        .with_credentials(Some(SpiralCredentials::new(
+            "client".into(),
+            "saved-secret".into(),
+        )));
+        let update = SpiralConnectionUpdate::new(
+            "https://api.spiraldb.dev",
+            "https://spfs.spiraldb.dev",
+            "new",
+        )
+        .with_client_credentials("client", "");
+        let repaired =
+            ProjectSession::resolve_connection_update(update.clone(), &previous).unwrap();
+        assert_eq!(repaired.project_id(), Some("new"));
+        assert!(repaired.credentials() == previous.credentials());
+        assert!(
+            ProjectSession::resolve_connection_update(
+                update.clone().with_client_credentials("different", ""),
+                &previous,
+            )
+            .is_err()
+        );
+        assert!(
+            ProjectSession::resolve_connection_update(
+                update.with_clear_client_secret(true),
+                &previous,
+            )
+            .unwrap()
+            .credentials()
+            .is_none()
+        );
     }
 
     #[tokio::test]

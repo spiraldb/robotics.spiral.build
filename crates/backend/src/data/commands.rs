@@ -160,7 +160,7 @@ impl DataCommands {
                 commands
                     .state
                     .projects()
-                    .update_connection(commands.state.project(), change.into())
+                    .update_connection(commands.state.project(), change)
                     .await?;
                 commands.spawn_auto_connect_saved_robots();
                 Ok(())

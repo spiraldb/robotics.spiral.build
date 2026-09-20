@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use crate::db::{SCHEMA_VERSION, column as db};
-use arrow_array::builder::{Float64Builder, Int64Builder, ListBuilder};
+use arrow_array::builder::{
+    Float64Builder, Int64Builder, ListBuilder, StringBuilder, UInt64Builder,
+};
 use arrow_array::{
     ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array,
     UInt64Array,
@@ -20,9 +22,6 @@ use super::capture::{
     JointMotorLimits, Sample,
 };
 use super::video::VideoSize;
-use crate::db::{
-    ListColumnBuilder as _, OptionalFloatListColumn, StringListColumn, UnsignedListColumn,
-};
 
 /// Per-joint condition channels, in the order their columns are written.
 const CONDITION_COLUMNS: [&str; 10] = [
@@ -627,14 +626,14 @@ impl JointSampleRows for [JointSampleRow] {
         let mut effort = ListBuilder::new(Float64Builder::new());
 
         for row in rows {
-            state_position.append_nullable_values(Some(&row.state.position));
-            action_position.append_nullable_values(row.action_position.as_deref());
+            state_position.append_optional_list(Some(&row.state.position));
+            action_position.append_optional_list(row.action_position.as_deref());
             for value in &row.state.raw_position {
                 raw_position.values().append_value(*value);
             }
             raw_position.append(true);
-            velocity.append_nullable_values(row.state.velocity.as_deref());
-            effort.append_nullable_values(row.state.effort.as_deref());
+            velocity.append_optional_list(row.state.velocity.as_deref());
+            effort.append_optional_list(row.state.effort.as_deref());
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -675,21 +674,95 @@ impl JointSampleRows for [JointSampleRow] {
     }
 }
 
-trait NullableFloatListBuilder {
-    fn append_nullable_values(&mut self, values: Option<&[Option<f64>]>);
+/// The one list layout storage writes for a bounded collection of strings.
+struct StringListColumn;
+
+impl StringListColumn {
+    fn data_type() -> DataType {
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)))
+    }
+
+    fn builder() -> ListBuilder<StringBuilder> {
+        ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
+            "item",
+            DataType::Utf8,
+            false,
+        )))
+    }
 }
 
-impl NullableFloatListBuilder for ListBuilder<Float64Builder> {
-    fn append_nullable_values(&mut self, values: Option<&[Option<f64>]>) {
+/// The one list layout storage writes for a per-item measurement that may be
+/// missing for an individual item but present for its neighbours.
+struct OptionalFloatListColumn;
+
+impl OptionalFloatListColumn {
+    fn data_type() -> DataType {
+        DataType::List(Arc::new(Field::new("item", DataType::Float64, true)))
+    }
+
+    fn builder() -> ListBuilder<Float64Builder> {
+        ListBuilder::new(Float64Builder::new())
+    }
+}
+
+/// The one list layout storage writes for a bounded collection of counts.
+struct UnsignedListColumn;
+
+impl UnsignedListColumn {
+    fn data_type() -> DataType {
+        DataType::List(Arc::new(Field::new("item", DataType::UInt64, false)))
+    }
+
+    fn builder() -> ListBuilder<UInt64Builder> {
+        ListBuilder::new(UInt64Builder::new()).with_field(Arc::new(Field::new(
+            "item",
+            DataType::UInt64,
+            false,
+        )))
+    }
+}
+
+/// Append one whole list cell, or a null cell, in one call. `None` and
+/// `Some(&[])` are deliberately different: a null cell means the collection was
+/// never recorded, an empty cell means it was recorded and held nothing.
+trait ListColumnBuilder<T> {
+    fn append_optional_list(&mut self, values: Option<&[T]>);
+}
+
+impl ListColumnBuilder<Option<f64>> for ListBuilder<Float64Builder> {
+    fn append_optional_list(&mut self, values: Option<&[Option<f64>]>) {
         let Some(values) = values else {
             self.append(false);
             return;
         };
         for value in values {
-            match value {
-                Some(value) => self.values().append_value(*value),
-                None => self.values().append_null(),
-            }
+            self.values().append_option(*value);
+        }
+        self.append(true);
+    }
+}
+
+impl ListColumnBuilder<u64> for ListBuilder<UInt64Builder> {
+    fn append_optional_list(&mut self, values: Option<&[u64]>) {
+        let Some(values) = values else {
+            self.append(false);
+            return;
+        };
+        for value in values {
+            self.values().append_value(*value);
+        }
+        self.append(true);
+    }
+}
+
+impl ListColumnBuilder<String> for ListBuilder<StringBuilder> {
+    fn append_optional_list(&mut self, values: Option<&[String]>) {
+        let Some(values) = values else {
+            self.append(false);
+            return;
+        };
+        for value in values {
+            self.values().append_value(value);
         }
         self.append(true);
     }

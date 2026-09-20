@@ -1260,8 +1260,6 @@ pub use requests::RobotGoal;
 
 pub mod document;
 
-pub mod strict_json;
-
 /// Current native hardware observations, independent of saved robot configuration.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -3,12 +3,12 @@ use serde_json::{Map, Value, json};
 use spiral_robotics_common::robots::document::{RobotDocument, RobotDocumentSave, So101};
 use spiral_robotics_common::robots::{CameraBinding, CameraStatus, PortSettings, RobotSummary};
 
-pub(crate) struct RobotDraft {
+pub(super) struct RobotDraft {
     document: Map<String, Value>,
     baseline: Option<RobotDocument>,
 }
 impl RobotDraft {
-    pub(crate) fn new(id: &str, robot_type: &str) -> Self {
+    pub(super) fn new(id: &str, robot_type: &str) -> Self {
         let motors: Map<String, Value> = So101::motors()
             .into_iter()
             .map(|(name, id)| {
@@ -29,7 +29,7 @@ impl RobotDraft {
             baseline: None,
         }
     }
-    pub(crate) fn import(bytes: &[u8]) -> Result<Self, String> {
+    pub(super) fn import(bytes: &[u8]) -> Result<Self, String> {
         let document: RobotDocument =
             serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
         Ok(Self {
@@ -37,7 +37,7 @@ impl RobotDraft {
             baseline: None,
         })
     }
-    pub(crate) fn from_robot(robot: &RobotSummary) -> Result<Self, String> {
+    pub(super) fn from_robot(robot: &RobotSummary) -> Result<Self, String> {
         let baseline = robot
             .document()
             .ok_or("Robot configuration is not loaded")?;
@@ -46,7 +46,7 @@ impl RobotDraft {
             baseline: Some(baseline.clone()),
         })
     }
-    pub(crate) fn with_port(mut self, port: PortSettings) -> Self {
+    pub(super) fn with_port(mut self, port: PortSettings) -> Self {
         let object = &mut self.document;
         let mut fields = object
             .get("port")
@@ -58,7 +58,7 @@ impl RobotDraft {
         object.insert("port".into(), Value::Object(fields));
         self
     }
-    pub(crate) fn with_cameras(
+    pub(super) fn with_cameras(
         mut self,
         bindings: &[CameraBinding],
         discovered: &[CameraStatus],
@@ -93,7 +93,7 @@ impl RobotDraft {
         object.insert("cameras".into(), Value::Object(cameras));
         Ok(self)
     }
-    pub(crate) fn save(self) -> Result<RobotDocumentSave, String> {
+    pub(super) fn save(self) -> Result<RobotDocumentSave, String> {
         let document = RobotDocument::from_object(self.document);
         document.validate()?;
         Ok(RobotDocumentSave::new(document, self.baseline))

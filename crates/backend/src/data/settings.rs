@@ -5,10 +5,10 @@ use url::Url;
 
 use crate::OperationError;
 
-struct HttpEndpoint(String);
+pub(crate) struct HttpEndpoint(String);
 
 impl HttpEndpoint {
-    fn parse(endpoint: &str, label: &str) -> Result<Self, OperationError> {
+    pub(crate) fn parse(endpoint: &str, label: &str) -> Result<Self, OperationError> {
         let parsed = Url::parse(endpoint.trim()).map_err(|error| {
             OperationError::invalid_input(format!(
                 "{label} must be an http:// or https:// URL: {error}"
@@ -32,7 +32,7 @@ impl HttpEndpoint {
         Ok(Self(parsed.as_str().trim_end_matches('/').to_owned()))
     }
 
-    fn into_string(self) -> String {
+    pub(crate) fn into_string(self) -> String {
         self.0
     }
 }
@@ -190,76 +190,19 @@ impl UpdateDataSettingsCommand {
     }
 }
 
-/// A connection edit can repair access without reading or overwriting preferences.
-pub(crate) struct ProjectConnectionUpdate(spiral_robotics_common::settings::SpiralConnectionUpdate);
-impl From<spiral_robotics_common::settings::SpiralConnectionUpdate> for ProjectConnectionUpdate {
-    fn from(update: spiral_robotics_common::settings::SpiralConnectionUpdate) -> Self {
-        Self(update)
-    }
-}
-impl ProjectConnectionUpdate {
-    pub(crate) fn resolve(
-        self,
-        previous: &spiral_robotics_storage::SpiralConnectionSettings,
-    ) -> Result<spiral_robotics_storage::SpiralConnectionSettings, OperationError> {
-        let (endpoint, spfs, project, client, secret, clear, huggingface_token) =
-            self.0.into_parts();
-        let huggingface_token =
-            huggingface_token.or_else(|| previous.huggingface_token().map(str::to_owned));
-        let endpoint = HttpEndpoint::parse(&endpoint, "Spiral endpoint")?.into_string();
-        let spfs = HttpEndpoint::parse(&spfs, "SpFS endpoint")?.into_string();
-        let client = client.trim();
-        let credentials = if clear || client.is_empty() {
-            if client.is_empty() && !secret.trim().is_empty() && !clear {
-                return Err(OperationError::invalid_input(
-                    "Spiral client secret requires a client ID",
-                ));
-            }
-            None
-        } else if !secret.trim().is_empty() {
-            Some(spiral_robotics_storage::SpiralCredentials::new(
-                client.to_owned(),
-                secret.trim().to_owned(),
-            ))
-        } else {
-            Some(
-                previous
-                    .credentials()
-                    .filter(|credentials| credentials.client_id() == client)
-                    .cloned()
-                    .ok_or_else(|| {
-                        OperationError::invalid_input(
-                            "Enter the client secret when changing the Spiral client ID",
-                        )
-                    })?,
-            )
-        };
-        spiral_robotics_storage::SpiralConnectionSettings::new(endpoint, spfs)
-            .and_then(|settings| settings.with_project(project.trim()))
-            .map(|settings| {
-                settings
-                    .with_credentials(credentials)
-                    .with_huggingface_token(huggingface_token)
-            })
-            .map_err(OperationError::InvalidInput)
-    }
-}
-
-impl From<&UpdateDataSettingsCommand> for ProjectConnectionUpdate {
+impl From<&UpdateDataSettingsCommand> for spiral_robotics_common::settings::SpiralConnectionUpdate {
     fn from(command: &UpdateDataSettingsCommand) -> Self {
-        Self(
-            spiral_robotics_common::settings::SpiralConnectionUpdate::new(
-                command.spiral_endpoint(),
-                command.spiral_spfs_endpoint(),
-                command.project_id(),
-            )
-            .with_client_credentials(
-                command.client_id(),
-                command.client_secret().unwrap_or_default(),
-            )
-            .with_clear_client_secret(command.client_secret() == Some(""))
-            .with_huggingface_token(command.credentials.huggingface_token.clone()),
+        spiral_robotics_common::settings::SpiralConnectionUpdate::new(
+            command.spiral_endpoint(),
+            command.spiral_spfs_endpoint(),
+            command.project_id(),
         )
+        .with_client_credentials(
+            command.client_id(),
+            command.client_secret().unwrap_or_default(),
+        )
+        .with_clear_client_secret(command.client_secret() == Some(""))
+        .with_huggingface_token(command.credentials.huggingface_token.clone())
     }
 }
 
@@ -288,86 +231,23 @@ mod tests {
     }
 
     #[test]
-    fn huggingface_settings_preserve_replace_and_remove_the_private_token() {
+    fn settings_convert_to_connection_updates_without_exposing_secrets() {
         use spiral_robotics_common::settings::SpiralConnectionUpdate;
-        let previous = spiral_robotics_storage::SpiralConnectionSettings::new(
-            "https://api.spiraldb.dev".into(),
-            "https://spfs.spiraldb.dev".into(),
-        )
-        .unwrap()
-        .with_project("project")
-        .unwrap()
-        .with_huggingface_token(Some("hf_saved".into()));
-        for (change, expected) in [
-            (None, Some("hf_saved")),
-            (Some(" hf_replacement ".to_owned()), Some("hf_replacement")),
-            (Some(String::new()), None),
-        ] {
-            let update = SpiralConnectionUpdate::new(
-                previous.endpoint(),
-                previous.spfs_endpoint(),
-                "project",
-            )
-            .with_huggingface_token(change.clone());
-            let decoded: SpiralConnectionUpdate =
-                serde_json::from_str(&serde_json::to_string(&update).unwrap()).unwrap();
-            let resolved = ProjectConnectionUpdate::from(decoded)
-                .resolve(&previous)
-                .unwrap();
-            assert_eq!(resolved.huggingface_token(), expected);
+
+        for token in [None, Some("hf_replacement".to_owned()), Some(String::new())] {
             let command = settings()
-                .with_huggingface_token(change)
+                .with_huggingface_token(token.clone())
                 .validated()
                 .unwrap();
             assert!(!format!("{command:?}").contains("hf_replacement"));
-            assert_eq!(
-                ProjectConnectionUpdate::from(&command)
-                    .resolve(&previous)
-                    .unwrap()
-                    .huggingface_token(),
-                expected
-            );
+            let (_, _, project, client, secret, clear, converted_token) =
+                SpiralConnectionUpdate::from(&command).into_parts();
+            assert_eq!(project, "project");
+            assert!(client.is_empty());
+            assert!(secret.is_empty());
+            assert!(!clear);
+            assert_eq!(converted_token, token);
         }
-    }
-
-    #[test]
-    fn connection_repairs_preserve_credentials_unless_the_edit_explicitly_replaces_them() {
-        use spiral_robotics_common::settings::SpiralConnectionUpdate;
-        use spiral_robotics_storage::{SpiralConnectionSettings, SpiralCredentials};
-        let previous = SpiralConnectionSettings::new(
-            "https://api.spiraldb.dev".into(),
-            "https://spfs.spiraldb.dev".into(),
-        )
-        .unwrap()
-        .with_project("old")
-        .unwrap()
-        .with_credentials(Some(SpiralCredentials::new(
-            "client".into(),
-            "saved-secret".into(),
-        )));
-        let update = SpiralConnectionUpdate::new(
-            "https://api.spiraldb.dev",
-            "https://spfs.spiraldb.dev",
-            "new",
-        )
-        .with_client_credentials("client", "");
-        let repaired = ProjectConnectionUpdate::from(update.clone())
-            .resolve(&previous)
-            .unwrap();
-        assert_eq!(repaired.project_id(), Some("new"));
-        assert!(repaired.credentials() == previous.credentials());
-        assert!(
-            ProjectConnectionUpdate::from(update.clone().with_client_credentials("different", ""))
-                .resolve(&previous)
-                .is_err()
-        );
-        assert!(
-            ProjectConnectionUpdate::from(update.with_clear_client_secret(true))
-                .resolve(&previous)
-                .unwrap()
-                .credentials()
-                .is_none()
-        );
     }
 
     #[test]

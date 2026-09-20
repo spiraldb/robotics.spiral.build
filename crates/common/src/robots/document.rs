@@ -1,6 +1,8 @@
 //! Complete robot configuration documents and compare-and-save requests.
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
+use std::fmt;
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -132,12 +134,110 @@ impl So101 {
 
 impl<'de> Deserialize<'de> for RobotDocument {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match super::strict_json::StrictValue::deserialize(deserializer)?.into_value() {
+        match StrictValue::deserialize(deserializer)?.into_value() {
             Value::Object(object) => Ok(Self(object)),
             _ => Err(serde::de::Error::custom(
                 "Robot configuration must be an object",
             )),
         }
+    }
+}
+
+/// A JSON value decoder that refuses duplicate keys recursively.
+struct StrictValue(Value);
+impl StrictValue {
+    fn into_value(self) -> Value {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for StrictValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StrictValueVisitor;
+
+        impl<'de> Visitor<'de> for StrictValueVisitor {
+            type Value = StrictValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON value without duplicate object keys")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Bool(value)))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Number(value.into())))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Number(value.into())))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Number::from_f64(value)
+                    .map(Value::Number)
+                    .map(StrictValue)
+                    .ok_or_else(|| E::custom("JSON numbers must be finite"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::String(value.to_owned())))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::String(value)))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Null))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Null))
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                StrictValue::deserialize(deserializer)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(StrictValue(value)) = sequence.next_element()? {
+                    values.push(value);
+                }
+                Ok(StrictValue(Value::Array(values)))
+            }
+
+            fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut values = Map::new();
+                while let Some((key, StrictValue(value))) =
+                    object.next_entry::<String, StrictValue>()?
+                {
+                    if values.insert(key.clone(), value).is_some() {
+                        return Err(de::Error::custom(format!("duplicate object key {key:?}")));
+                    }
+                }
+                Ok(StrictValue(Value::Object(values)))
+            }
+        }
+
+        deserializer.deserialize_any(StrictValueVisitor)
     }
 }
 

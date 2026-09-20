@@ -25,7 +25,7 @@ use spiral_robotics_common::relations::{
     CatalogRelation as ApiCatalogRelation, EpisodeQueryRequest, QueryColumn, RelationCatalog,
     SpiralQuerySnapshot,
 };
-use spiral_robotics_common::sql::QualifiedRelation;
+use spiral_robotics_common::sql::UnquotedSqlIdentifier;
 
 use super::database::{DatabaseSession, RecordBatchStream, RelationKind, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
@@ -310,6 +310,26 @@ impl<'a> ProjectQueries<'a> {
             )
         });
         Ok(RelationCatalog::new(relations, skipped == 0).with_limitation(limitation))
+    }
+}
+
+/// A validated unquoted Spiral relation path within the selected project.
+struct QualifiedRelation;
+
+impl TryFrom<&str> for QualifiedRelation {
+    type Error = &'static str;
+
+    fn try_from(relation: &str) -> Result<Self, Self::Error> {
+        if relation.trim() != relation || relation.contains('\0') {
+            return Err("Spiral relation names cannot contain surrounding whitespace or NUL bytes");
+        }
+        if relation
+            .split('.')
+            .any(|segment| UnquotedSqlIdentifier::try_from(segment).is_err())
+        {
+            return Err("Spiral relations must contain safe identifiers separated by dots");
+        }
+        Ok(Self)
     }
 }
 

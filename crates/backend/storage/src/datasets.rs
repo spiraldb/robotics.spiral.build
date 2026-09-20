@@ -3,10 +3,8 @@
 mod catalog_tests;
 mod coverage;
 mod messages;
-mod playback;
-mod topics;
-pub(crate) use playback::CameraPackets;
 mod sources;
+mod topics;
 pub(crate) use sources::{McapDatasetDefinition, McapFile, McapSourceBlob, McapSources};
 
 use crate::{

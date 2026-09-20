@@ -1,18 +1,18 @@
 //! Browser-owned unplug-and-compare setup guidance.
-pub(crate) struct IdentifiedSerialPort {
+pub(super) struct IdentifiedSerialPort {
     port: Option<String>,
     message: String,
 }
 
 impl IdentifiedSerialPort {
-    pub(crate) fn port(&self) -> Option<&str> {
+    pub(super) fn port(&self) -> Option<&str> {
         self.port.as_deref()
     }
-    pub(crate) fn message(&self) -> &str {
+    pub(super) fn message(&self) -> &str {
         &self.message
     }
 
-    pub(crate) fn between(before: Vec<String>, after: Vec<String>) -> Self {
+    pub(super) fn between(before: Vec<String>, after: Vec<String>) -> Self {
         let mut removed = before
             .into_iter()
             .filter(|port| !after.contains(port))

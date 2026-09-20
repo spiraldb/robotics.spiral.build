@@ -3,7 +3,7 @@ use crate::workflow::provider::ProviderConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use spiral_robotics_common::curation::{
-    interpretation::{InterpretationRequest, QuantityCandidate, RuleIntent, RuleProposal},
+    interpretation::{InterpretationRequest, RuleIntent, RuleProposal},
     rules::ConditionOp,
 };
 use std::{collections::BTreeMap, time::Duration};
@@ -177,9 +177,168 @@ struct ChoiceAnswer {
     probabilities: BTreeMap<String, f64>,
 }
 
+/// Exact quantities with source evidence; semantic binding selects, never invents, one.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+struct QuantityCandidate {
+    text: String,
+    value: f64,
+    duration_scale: Option<f64>,
+    span: std::ops::Range<usize>,
+    context: String,
+}
+impl QuantityCandidate {
+    const fn value(&self) -> f64 {
+        self.value
+    }
+    /// Normalize only an explicit unit attached to this exact numeric literal.
+    fn duration_seconds(&self) -> Option<f64> {
+        self.duration_scale.map(|scale| self.value * scale)
+    }
+    fn duration_suffix(suffix: &str) -> Option<(f64, usize)> {
+        let trimmed = suffix.trim_start();
+        let letters = trimmed.bytes().take_while(u8::is_ascii_alphabetic).count();
+        let scale = match trimmed[..letters].to_ascii_lowercase().as_str() {
+            "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+            "ms" | "msec" | "msecs" | "millisecond" | "milliseconds" => 0.001,
+            "min" | "mins" | "minute" | "minutes" => 60.0,
+            _ => return None,
+        };
+        Some((scale, suffix.len() - trimmed.len() + letters))
+    }
+    fn local_context(text: &str, span: &std::ops::Range<usize>) -> String {
+        let start = text[..span.start]
+            .char_indices()
+            .rev()
+            .nth(48)
+            .map_or(0, |(index, _)| index);
+        let end = text[span.end..]
+            .char_indices()
+            .nth(48)
+            .map_or(text.len(), |(index, _)| span.end + index);
+        text[start..end].to_owned()
+    }
+    fn extract(text: &str) -> Vec<Self> {
+        // Keep exponent and grouped-thousands notation together. A malformed
+        // literal is unresolved rather than silently split into other numbers.
+        let bytes = text.as_bytes();
+        let mut cursor = 0;
+        let mut candidates = Vec::new();
+        while cursor < bytes.len() && candidates.len() < 32 {
+            if !bytes[cursor].is_ascii_digit() && !matches!(bytes[cursor], b'.' | b'-' | b'+') {
+                cursor += 1;
+                continue;
+            }
+            let start = cursor;
+            cursor += 1;
+            while cursor < bytes.len()
+                && (bytes[cursor].is_ascii_digit()
+                    || matches!(bytes[cursor], b'.' | b'-' | b'+' | b'e' | b'E' | b','))
+            {
+                cursor += 1;
+            }
+            let token = text[start..cursor].trim_end_matches(',');
+            let normalized = token.replace(',', "");
+            let valid_groups = !token.contains(',')
+                || token.split(',').enumerate().all(|(index, group)| {
+                    let digits = group.trim_start_matches(['-', '+']);
+                    (if index == 0 {
+                        (1..=3).contains(&digits.len())
+                    } else {
+                        digits.len() == 3
+                    }) && digits.bytes().all(|byte| byte.is_ascii_digit())
+                });
+            if valid_groups
+                && let Ok(value) = normalized.parse::<f64>()
+                && value.is_finite()
+            {
+                let mut end = start + token.len();
+                let duration_scale = Self::duration_suffix(&text[end..]).map(|(scale, length)| {
+                    end += length;
+                    cursor = end;
+                    scale
+                });
+                candidates.push(Self {
+                    text: if duration_scale.is_some() {
+                        text[start..end].to_owned()
+                    } else {
+                        token.to_owned()
+                    },
+                    value,
+                    duration_scale,
+                    span: start..end,
+                    context: Self::local_context(text, &(start..end)),
+                });
+            }
+        }
+        candidates
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn numeric_candidates_preserve_negative_and_fractional_values() {
+        let candidates = QuantityCandidate::extract("remove under 2.5 seconds, not 30; -1");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(QuantityCandidate::value)
+                .collect::<Vec<_>>(),
+            [2.5, 30.0, -1.0]
+        );
+    }
+    #[test]
+    fn scientific_and_grouped_numbers_are_not_split_into_wrong_thresholds() {
+        let values =
+            QuantityCandidate::extract("1e3 messages or 2,500 messages; -0.5 EV, malformed 2,50")
+                .iter()
+                .map(QuantityCandidate::value)
+                .collect::<Vec<_>>();
+        assert_eq!(values, [1000.0, 2500.0, -0.5]);
+    }
+    #[test]
+    fn duration_candidates_preserve_compact_and_spaced_units() {
+        for (literal, seconds) in [
+            ("20s", 20.0),
+            ("20 seconds", 20.0),
+            ("500ms", 0.5),
+            ("500 milliseconds", 0.5),
+            ("2min", 120.0),
+            ("1.5 minutes", 90.0),
+            ("2e1s", 20.0),
+        ] {
+            let candidates = QuantityCandidate::extract(&format!("under {literal}"));
+            assert_eq!(candidates.len(), 1, "{literal}");
+            assert_eq!(candidates[0].text, literal);
+            assert_eq!(candidates[0].duration_seconds(), Some(seconds));
+        }
+        for literal in ["20", "20 messages", "20samples", "20meters"] {
+            let candidates = QuantityCandidate::extract(literal);
+            assert_eq!(candidates.len(), 1, "{literal}");
+            assert_eq!(candidates[0].duration_seconds(), None, "{literal}");
+        }
+    }
+    #[test]
+    fn quantity_evidence_preserves_spans_context_and_distinct_occurrences() {
+        let prompt = "相机 2: exclude below 20s, not 30s; messages over 4,000";
+        let candidates = QuantityCandidate::extract(prompt);
+        assert_eq!(candidates.len(), 4);
+        for candidate in &candidates {
+            assert_eq!(&prompt[candidate.span.clone()], candidate.text.as_str());
+            assert!(candidate.context.contains(candidate.text.as_str()));
+        }
+        assert_eq!(candidates[0].duration_seconds(), None);
+        assert_eq!(candidates[1].duration_seconds(), Some(20.0));
+        assert_eq!(candidates[2].duration_seconds(), Some(30.0));
+        assert_eq!(candidates[3].value(), 4000.0);
+        let punctuated = QuantityCandidate::extract("4000, then 20s");
+        assert_eq!(punctuated[0].text, "4000");
+        assert_eq!(punctuated[0].span, 0..4);
+        let repeated = QuantityCandidate::extract("camera 20: under 20s");
+        assert_ne!(repeated[0].span, repeated[1].span);
+    }
+
     #[tokio::test]
     #[ignore = "bounded 16-case live evaluation; requires configured OpenRouter credential"]
     async fn live_representative_quantity_binding() {
