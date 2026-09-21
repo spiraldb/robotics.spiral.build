@@ -16,6 +16,93 @@ pub use robot::{DatasetRobot, JointBinding, JointSelector};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RobotDiscoveryContext {
+    episode: EpisodeSelection,
+    topics: Vec<DatasetTopic>,
+}
+impl RobotDiscoveryContext {
+    pub fn new(episode: EpisodeSelection, topics: Vec<DatasetTopic>) -> Self {
+        Self { episode, topics }
+    }
+    pub fn episode(&self) -> &EpisodeSelection {
+        &self.episode
+    }
+    pub fn topics(&self) -> &[DatasetTopic] {
+        &self.topics
+    }
+}
+
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RobotDescriptionRequest {
+    url: String,
+}
+impl RobotDescriptionRequest {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
+    }
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RobotStreamInspectionRequest {
+    episode: EpisodeSelection,
+    topic: String,
+    schema: String,
+}
+impl RobotStreamInspectionRequest {
+    pub fn new(
+        episode: EpisodeSelection,
+        topic: impl Into<String>,
+        schema: impl Into<String>,
+    ) -> Self {
+        Self {
+            episode,
+            topic: topic.into(),
+            schema: schema.into(),
+        }
+    }
+    pub fn episode(&self) -> &EpisodeSelection {
+        &self.episode
+    }
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RobotDiscoveryResult {
+    episode: EpisodeSelection,
+    robot: Option<DatasetRobot>,
+}
+impl RobotDiscoveryResult {
+    pub fn new(episode: EpisodeSelection, robot: Option<DatasetRobot>) -> Self {
+        Self { episode, robot }
+    }
+    pub fn episode(&self) -> &EpisodeSelection {
+        &self.episode
+    }
+    pub fn robot(&self) -> Option<&DatasetRobot> {
+        self.robot.as_ref()
+    }
+    pub fn into_parts(self) -> (EpisodeSelection, Option<DatasetRobot>) {
+        (self.episode, self.robot)
+    }
+}
+
 /// Data-plane relation counts and warnings from restoring a project bundle.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

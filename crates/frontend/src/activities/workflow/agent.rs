@@ -1,6 +1,7 @@
 //! Browser-owned authoring loop. Tools edit the same draft as the canvas.
 mod tools;
 use super::{WorkflowClient, state::WorkflowController};
+use crate::client::model::ModelClient;
 use dioxus::dioxus_core::Task;
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -44,8 +45,8 @@ impl WorkflowAssistant {
         self.readiness.read().is_some()
     }
     pub(super) async fn connect(mut self) {
-        let readiness = WorkflowClient::current()
-            .model_status()
+        let readiness = ModelClient::current()
+            .status()
             .await
             .unwrap_or_else(|error| WorkflowAgentReadiness::error(error.to_string()));
         self.readiness.set(Some(readiness));
@@ -167,8 +168,9 @@ impl WorkflowAssistant {
     }
     async fn run(self, controller: WorkflowController, turn: &str) -> Result<(), String> {
         let mut context = tools::ToolContext::new(controller.spec());
-        let client = WorkflowClient::current();
-        let capabilities = match client.capabilities().await {
+        let workflow_client = WorkflowClient::current();
+        let model_client = ModelClient::current();
+        let capabilities = match workflow_client.capabilities().await {
             Ok(catalog) => {
                 serde_json::json!({"functions": catalog.rows(), "complete": !catalog.truncated()})
             }
@@ -214,7 +216,7 @@ impl WorkflowAssistant {
                 messages.push(ProviderMessage::text("system", feedback));
             }
             messages.append(&mut context.evidence);
-            let response = client
+            let response = model_client
                 .complete(
                     ModelRequest::new(
                         messages,

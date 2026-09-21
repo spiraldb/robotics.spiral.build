@@ -108,8 +108,22 @@ impl WorkflowCommands {
             .ok_or_else(|| {
                 OperationError::InvalidInput("Assistant provider is not configured.".into())
             })?;
+        let config = request
+            .model()
+            .map_or(config.clone(), |model| config.for_model(model));
         let provider = OpenAiProvider::new(config).map_err(OperationError::External)?;
         Ok(ModelStream::new(provider, request))
+    }
+    pub(super) async fn decide(
+        &self,
+        request: spiral_robotics_common::workflow::document::DecisionRequest,
+    ) -> Result<spiral_robotics_common::workflow::document::DecisionResponse, BackendCommandError>
+    {
+        let _activity = self.state.admit()?;
+        OpenAiProvider::decide(request)
+            .await
+            .map_err(OperationError::External)
+            .map_err(Into::into)
     }
 }
 impl From<ProjectContext> for WorkflowCommands {

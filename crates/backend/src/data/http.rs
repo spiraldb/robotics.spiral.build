@@ -20,6 +20,19 @@ impl DatasetQueryEndpoints {
         routes.get("/data-catalog", Self::project_resources);
         routes.post("/datasets/inspect", Self::inspect_dataset);
         routes.post("/datasets/robot", Self::dataset_robot);
+        routes.post(
+            "/datasets/robot-discovery/context",
+            Self::robot_discovery_context,
+        );
+        routes.post(
+            "/datasets/robot-discovery/read-description",
+            Self::read_robot_description,
+        );
+        routes.post(
+            "/datasets/robot-discovery/inspect-stream",
+            Self::inspect_robot_stream,
+        );
+        routes.post("/datasets/robot-discovery/save", Self::save_robot_discovery);
         routes.post("/datasets/episode-messages", Self::episode_messages);
         routes.post("/datasets/episode-topics", Self::episode_topics);
         routes.post("/datasets/episode-coverage", Self::episode_coverage);
@@ -45,6 +58,30 @@ impl DatasetQueryEndpoints {
         ApiJson(selection): ApiJson<DatasetSelection>,
     ) -> Result<Json<Option<spiral_robotics_common::datasets::DatasetRobot>>, HttpFailure> {
         Ok(Json(commands.dataset_robot(selection).await?))
+    }
+    async fn robot_discovery_context(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(selection): ApiJson<DatasetSelection>,
+    ) -> Result<Json<spiral_robotics_common::datasets::RobotDiscoveryContext>, HttpFailure> {
+        Ok(Json(commands.robot_discovery_context(selection).await?))
+    }
+    async fn read_robot_description(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(request): ApiJson<spiral_robotics_common::datasets::RobotDescriptionRequest>,
+    ) -> Result<Json<String>, HttpFailure> {
+        Ok(Json(commands.read_robot_description(request).await?))
+    }
+    async fn inspect_robot_stream(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(request): ApiJson<spiral_robotics_common::datasets::RobotStreamInspectionRequest>,
+    ) -> Result<Json<serde_json::Value>, HttpFailure> {
+        Ok(Json(commands.inspect_robot_stream(request).await?))
+    }
+    async fn save_robot_discovery(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(result): ApiJson<spiral_robotics_common::datasets::RobotDiscoveryResult>,
+    ) -> Result<Json<()>, HttpFailure> {
+        Ok(Json(commands.save_robot_discovery(result).await?))
     }
     async fn datasets(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

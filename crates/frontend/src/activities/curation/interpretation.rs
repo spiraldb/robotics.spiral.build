@@ -1,57 +1,33 @@
-//! Bounded semantic binding through OpenRouter's Decisions API.
-use crate::workflow::provider::ProviderConfig;
-use serde::{Deserialize, Serialize};
+//! Browser-owned semantic binding over the backend's credentialed Decisions transport.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_tests;
+
+use crate::client::model::ModelClient;
 use serde_json::{Value, json};
 use spiral_robotics_common::curation::{
     interpretation::{InterpretationRequest, RuleIntent, RuleProposal},
     rules::ConditionOp,
 };
-use std::{collections::BTreeMap, time::Duration};
+use spiral_robotics_common::workflow::document::{DecisionRequest, DecisionResponse};
+use std::collections::BTreeMap;
 
 pub(super) struct RuleInterpreter;
 impl RuleInterpreter {
-    pub(super) async fn interpret(request: InterpretationRequest) -> Result<RuleProposal, String> {
+    pub(super) async fn interpret(
+        model: ModelClient,
+        request: InterpretationRequest,
+    ) -> Result<RuleProposal, String> {
         request.validate()?;
         let quantities = QuantityCandidate::extract(request.prompt());
-        let answers = Self::decide(&request, &quantities).await?;
-        Ok(Self::bind(&request, &quantities, answers))
-    }
-    async fn decide(
-        request: &InterpretationRequest,
-        quantities: &[QuantityCandidate],
-    ) -> Result<DecisionResponse, String> {
-        let questions = Self::questions(request, quantities);
-        let config = ProviderConfig::from_env()?
-            .ok_or("Configure the Assistant's OpenRouter credential to interpret a rule.")?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|_| "Could not create the rule interpretation client.")?;
-        let response = config.decisions_request(&client)?.json(&json!({
-            "model": "typesafe/jev-1.13", "state": {"request": request.prompt(), "quantities": quantities}, "questions": questions
-        })).send().await.map_err(|_| "Rule interpretation could not reach OpenRouter. Try again or use the manual builder.")?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "OpenRouter rule interpretation returned HTTP {}. Try again or use the manual builder.",
-                response.status().as_u16()
-            ));
-        }
-        if response
-            .content_length()
-            .is_some_and(|size| size > 128 * 1024)
-        {
-            return Err("The interpretation response exceeded its size limit.".into());
-        }
-        let bytes = response
-            .bytes()
+        let answers = model
+            .decide(&DecisionRequest::new(
+                "typesafe/jev-1.13",
+                json!({"request": request.prompt(), "quantities": quantities}),
+                Self::questions(&request, &quantities),
+            ))
             .await
-            .map_err(|_| "Could not read the interpretation response.")?;
-        if bytes.len() > 128 * 1024 {
-            return Err("The interpretation response exceeded its size limit.".into());
-        }
-        let answers: DecisionResponse = serde_json::from_slice(&bytes)
-            .map_err(|_| "OpenRouter returned an invalid Decisions response.")?;
-        Ok(answers)
+            .map_err(|error| error.to_string())?;
+        Ok(Self::bind(&request, &quantities, answers))
     }
     fn choice(instructions: &str, criteria: BTreeMap<String, String>) -> Value {
         let mut criteria = criteria;
@@ -150,33 +126,6 @@ impl RuleInterpreter {
         proposal
     }
 }
-#[derive(Debug, Deserialize, Serialize)]
-struct DecisionResponse {
-    answers: BTreeMap<String, ChoiceAnswer>,
-}
-impl DecisionResponse {
-    fn choice(&self, question: &str) -> Option<&str> {
-        let answer = self.answers.get(question)?;
-        // This conservative floor is a product review policy, not a probability
-        // of correctness. Retain the distribution for diagnostics/evaluation.
-        tracing::debug!(question, choice = %answer.choice, confidence = ?answer.confidence, probabilities = ?answer.probabilities, "Rule interpretation decision");
-        (answer.kind == "choice"
-            && answer.confidence.is_some_and(|confidence| {
-                confidence.is_finite() && (0.5..=1.0).contains(&confidence)
-            }))
-        .then_some(answer.choice.as_str())
-    }
-}
-#[derive(Debug, Deserialize, Serialize)]
-struct ChoiceAnswer {
-    #[serde(rename = "type")]
-    kind: String,
-    choice: String,
-    confidence: Option<f64>,
-    #[serde(default)]
-    probabilities: BTreeMap<String, f64>,
-}
-
 /// Exact quantities with source evidence; semantic binding selects, never invents, one.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 struct QuantityCandidate {
@@ -274,9 +223,10 @@ impl QuantityCandidate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test as test;
     #[test]
     fn numeric_candidates_preserve_negative_and_fractional_values() {
         let candidates = QuantityCandidate::extract("remove under 2.5 seconds, not 30; -1");
@@ -339,125 +289,6 @@ mod tests {
         assert_ne!(repeated[0].span, repeated[1].span);
     }
 
-    #[tokio::test]
-    #[ignore = "bounded 16-case live evaluation; requires configured OpenRouter credential"]
-    async fn live_representative_quantity_binding() {
-        let cases = [
-            (
-                "remove duration shorter than 20s",
-                Some((RuleIntent::Duration, ConditionOp::Below, 20.0)),
-            ),
-            (
-                "Exclude recordings lasting less than 20 seconds",
-                Some((RuleIntent::Duration, ConditionOp::Below, 20.0)),
-            ),
-            (
-                "Drop episodes under 500ms",
-                Some((RuleIntent::Duration, ConditionOp::Below, 0.5)),
-            ),
-            (
-                "Remove episodes longer than 2min",
-                Some((RuleIntent::Duration, ConditionOp::Above, 120.0)),
-            ),
-            (
-                "remove episode whose messages larger than 4000",
-                Some((RuleIntent::MessageCount, ConditionOp::Above, 4000.0)),
-            ),
-            (
-                "Remove episodes with more than 4,000 messages",
-                Some((RuleIntent::MessageCount, ConditionOp::Above, 4000.0)),
-            ),
-            (
-                "Keep episodes lasting at least 20s",
-                Some((RuleIntent::Duration, ConditionOp::Below, 20.0)),
-            ),
-            (
-                "Keep episodes with fewer than 4000 messages",
-                Some((RuleIntent::MessageCount, ConditionOp::AtLeast, 4000.0)),
-            ),
-            (
-                "For camera 2, remove episodes shorter than 20s",
-                Some((RuleIntent::Duration, ConditionOp::Below, 20.0)),
-            ),
-            (
-                "Starting inspection at frame 10, remove episodes shorter than 20 seconds",
-                Some((RuleIntent::Duration, ConditionOp::Below, 20.0)),
-            ),
-            (
-                "remove duration shorter than 20s, not 30s",
-                Some((RuleIntent::Duration, ConditionOp::Below, 20.0)),
-            ),
-            ("remove episodes shorter than 20", None),
-            ("Remove short episodes", None),
-            (
-                "Remove episodes shorter than 20s and more than 4000 messages",
-                None,
-            ),
-            (
-                "Remove episodes shorter than 20s or 30s, I have not decided",
-                None,
-            ),
-            ("Do not remove any episodes", None),
-        ];
-        let mut failures = Vec::new();
-        for (prompt, expected) in cases {
-            let request = InterpretationRequest::new(prompt.into(), Vec::new());
-            let quantities = QuantityCandidate::extract(prompt);
-            let response = match RuleInterpreter::decide(&request, &quantities).await {
-                Ok(response) => response,
-                Err(error) => {
-                    eprintln!("{}", json!({"prompt":prompt, "transport_error":error}));
-                    failures.push(prompt);
-                    continue;
-                }
-            };
-            let diagnostic = serde_json::to_value(&response).unwrap();
-            let proposal = RuleInterpreter::bind(&request, &quantities, response);
-            let matches = match expected {
-                Some((intent, comparison, value)) => {
-                    proposal.intent() == intent
-                        && proposal.comparison() == Some(comparison)
-                        && proposal.value() == Some(value)
-                        && proposal.problems().is_empty()
-                }
-                None => !proposal.problems().is_empty(),
-            };
-            eprintln!(
-                "{}",
-                json!({"prompt":prompt, "passed":matches, "answers":diagnostic, "proposal":proposal})
-            );
-            if !matches {
-                failures.push(prompt);
-            }
-        }
-        assert!(
-            failures.is_empty(),
-            "Failed representative prompts: {failures:?}"
-        );
-    }
-    #[tokio::test]
-    #[ignore = "one live interpretation of the reported transformation prompt; no video inference"]
-    async fn live_automatic_progress_has_no_user_cutoff() {
-        let proposal = RuleInterpreter::interpret(InterpretationRequest::new(
-            "remove low progress training episode parts".into(),
-            Vec::new(),
-        ))
-        .await
-        .unwrap();
-        assert_eq!(proposal.intent(), RuleIntent::ProductiveChunks);
-        assert_eq!(proposal.value(), None);
-        assert!(proposal.problems().is_empty());
-        let mut spec =
-            spiral_robotics_common::curation::CurationSpec::new("review-test", "Review test")
-                .with_source(
-                    spiral_robotics_common::datasets::DatasetSelection::new(vec![
-                        "dataset_warp_sim_bottles_sample".into(),
-                    ])
-                    .unwrap(),
-                );
-        proposal.apply(&mut spec, "automatic").unwrap();
-        assert_eq!(spec.transforms().len(), 1);
-    }
     #[test]
     fn semantic_quantity_answers_cannot_configure_progress_policy() {
         let request = InterpretationRequest::new(

@@ -26,6 +26,7 @@ impl WorkflowEndpoints {
         routes.post("/datasets/cameras", Self::cameras);
         routes.get("/models/status", Self::model_status);
         routes.post("/models/complete", Self::complete);
+        routes.post("/models/decide", Self::decide);
     }
     async fn list(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,
@@ -88,5 +89,12 @@ impl WorkflowEndpoints {
         ApiJson(request): ApiJson<ModelRequest>,
     ) -> Result<ModelStream, HttpFailure> {
         Ok(commands.complete(request)?)
+    }
+    async fn decide(
+        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        ApiJson(request): ApiJson<spiral_robotics_common::workflow::document::DecisionRequest>,
+    ) -> Result<Json<spiral_robotics_common::workflow::document::DecisionResponse>, HttpFailure>
+    {
+        Ok(Json(commands.decide(request).await?))
     }
 }

@@ -10,7 +10,6 @@ pub(crate) struct CurationEndpoints;
 impl CurationEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.get("/curations", Self::list);
-        routes.post("/curations/interpret", Self::interpret);
         routes.post("/curations/preview", Self::preview);
         routes.post("/curations/progress-score", Self::score_episode);
         routes.get("/curations/{id}", Self::load);
@@ -31,15 +30,6 @@ impl CurationEndpoints {
         ApiJson(curation): ApiJson<CurationSpec>,
     ) -> Result<Json<spiral_robotics_common::curation::run::CurationOutcome>, HttpFailure> {
         Ok(Json(commands.preview(curation).await?))
-    }
-    async fn interpret(
-        ScopedProject(commands): ScopedProject<CurationCommands>,
-        ApiJson(request): ApiJson<
-            spiral_robotics_common::curation::interpretation::InterpretationRequest,
-        >,
-    ) -> Result<Json<spiral_robotics_common::curation::interpretation::RuleProposal>, HttpFailure>
-    {
-        Ok(Json(commands.interpret(request).await?))
     }
     async fn list(
         ScopedProject(commands): ScopedProject<CurationCommands>,

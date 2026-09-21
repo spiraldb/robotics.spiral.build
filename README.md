@@ -51,6 +51,15 @@ JavaScript, WASM, and assets alongside `/api`; it does not compile or render the
 frontend. `--fullstack` tells DX to build and watch both processes, without enabling
 Dioxus SSR or hydration. The frontend and backend each own their executable;
 DX builds them together using the `@client` and `@server` package selections.
+
+Agent orchestration belongs to the frontend: Workflow authoring, imported robot
+discovery, and Curation rule interpretation own their prompts, model responses,
+and tool selection in the browser. The backend keeps provider credentials and
+forwards model requests. Network and data tools still run on the backend,
+including robot-description and mesh fetching, recorded-stream inspection, and
+validated persistence. Browser orchestration ends when its owning task is
+disposed; this does not undo completed data operations.
+
 Build a distributable server and browser bundle from the workspace root with:
 
 ```console

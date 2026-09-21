@@ -6,9 +6,8 @@ use crate::client::{
 };
 use spiral_robotics_common::relations::RelationCatalog;
 use spiral_robotics_common::workflow::{
-    WorkflowAgentReadiness, WorkflowSpec, WorkflowSummary,
-    conversation::ProviderMessage,
-    document::{ModelEvent, ModelRequest, WorkflowDocument, WorkflowPlan, WorkflowRun},
+    WorkflowSpec, WorkflowSummary,
+    document::{WorkflowDocument, WorkflowPlan, WorkflowRun},
 };
 
 #[derive(Clone)]
@@ -72,41 +71,9 @@ impl WorkflowClient {
             .request(HttpRequest::new("GET", "/api/models/capabilities"))
             .await
     }
-    pub(super) async fn model_status(&self) -> Result<WorkflowAgentReadiness, CommandError> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/models/status"))
-            .await
-    }
     pub(super) async fn relations(&self) -> Result<RelationCatalog, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/relations"))
             .await
-    }
-    pub(super) async fn complete(
-        &self,
-        request: ModelRequest,
-        mut on_text: impl FnMut(&str),
-    ) -> Result<ProviderMessage, String> {
-        self.project.require_current()?;
-        let mut completed = None;
-        let mut error = None;
-        HttpRequest::new("POST", "/api/models/complete")
-            .json(&request)
-            .for_session(self.project.session_id().to_owned())
-            .stream_json::<ModelEvent>(|event| {
-                self.project.require_current()?;
-                match event {
-                    ModelEvent::Text(text) => on_text(&text),
-                    ModelEvent::Complete(message) => completed = Some(message),
-                    ModelEvent::Error(message) => error = Some(message),
-                }
-                Ok(())
-            })
-            .await?;
-        self.project.require_current()?;
-        if let Some(error) = error {
-            return Err(error);
-        }
-        completed.ok_or_else(|| "The model connection ended before completing its response.".into())
     }
 }

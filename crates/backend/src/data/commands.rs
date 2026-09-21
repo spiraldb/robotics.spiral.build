@@ -48,6 +48,72 @@ impl DataCommands {
             })
             .await?
     }
+    pub(super) async fn robot_discovery_context(
+        &self,
+        selection: DatasetSelection,
+    ) -> Result<spiral_robotics_common::datasets::RobotDiscoveryContext, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .read(async move {
+                let _activity = commands.state.admit()?;
+                commands.require_catalog_ready()?;
+                super::robot_visualization::RobotVisualization::context(
+                    commands.state.storage(),
+                    selection,
+                )
+                .await
+                .map_err(|message| crate::OperationError::External(message).into())
+            })
+            .await?
+    }
+    pub(super) async fn read_robot_description(
+        &self,
+        request: spiral_robotics_common::datasets::RobotDescriptionRequest,
+    ) -> Result<String, BackendCommandError> {
+        let _activity = self.state.admit()?;
+        super::robot_visualization::RobotVisualization::read_description(request)
+            .await
+            .map_err(|message| crate::OperationError::External(message).into())
+    }
+    pub(super) async fn inspect_robot_stream(
+        &self,
+        request: spiral_robotics_common::datasets::RobotStreamInspectionRequest,
+    ) -> Result<serde_json::Value, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .read(async move {
+                let _activity = commands.state.admit()?;
+                commands.require_catalog_ready()?;
+                super::robot_visualization::RobotVisualization::inspect_stream(
+                    commands.state.storage(),
+                    request,
+                )
+                .await
+                .map_err(|message| crate::OperationError::External(message).into())
+            })
+            .await?
+    }
+    pub(super) async fn save_robot_discovery(
+        &self,
+        result: spiral_robotics_common::datasets::RobotDiscoveryResult,
+    ) -> Result<(), BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .execute(async move {
+                let _activity = commands.state.admit()?;
+                commands.require_catalog_ready()?;
+                super::robot_visualization::RobotVisualization::save(
+                    commands.state.storage(),
+                    result,
+                )
+                .await
+                .map_err(|message| crate::OperationError::External(message).into())
+            })
+            .await?
+    }
     pub(super) async fn project_resources(
         &self,
     ) -> Result<Vec<ProjectResource>, BackendCommandError> {
@@ -425,26 +491,11 @@ impl DataCommands {
                 )
             })?;
         self.require_import_idle("a dataset")?;
-        let summary = self
-            .state
+        self.state
             .storage()
-            .import_huggingface_dataset(inspection.clone())
+            .import_huggingface_dataset(inspection)
             .await
-            .map_err(BackendCommandError::from)?;
-        match super::robot_visualization::RobotVisualization::analyze_import(
-            self.state.storage(),
-            &inspection,
-        )
-        .await
-        {
-            Ok(()) => Ok(summary),
-            Err(error) => {
-                tracing::warn!(%error, "Imported dataset robot analysis failed");
-                let mut warnings = summary.warnings().to_vec();
-                warnings.push("Episodes imported, but the 3D view could not be prepared.".into());
-                Ok(summary.with_warnings(warnings))
-            }
-        }
+            .map_err(BackendCommandError::from)
     }
 
     pub(super) async fn export_project(&self) -> Result<Vec<u8>, BackendCommandError> {

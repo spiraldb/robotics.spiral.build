@@ -5,10 +5,14 @@ use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, Proj
 use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest, SpiralQuerySnapshot};
 use std::future::Future;
 
+#[derive(Clone)]
 pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
+    pub(super) fn model_client(&self) -> crate::client::model::ModelClient {
+        crate::client::model::ModelClient::new(self.project.clone())
+    }
     pub(super) fn robot(
         &self,
         selection: &DatasetSelection,
@@ -41,6 +45,50 @@ impl DatasetClient {
     > + use<> {
         self.project
             .request(HttpRequest::new("POST", "/api/datasets/hugging-face/import").json(&source))
+    }
+
+    pub(super) async fn robot_discovery_context(
+        &self,
+        selection: &DatasetSelection,
+    ) -> Result<spiral_robotics_common::datasets::RobotDiscoveryContext, CommandError> {
+        self.project
+            .request(
+                HttpRequest::new("POST", "/api/datasets/robot-discovery/context").json(selection),
+            )
+            .await
+    }
+
+    pub(super) async fn read_robot_description(
+        &self,
+        request: &spiral_robotics_common::datasets::RobotDescriptionRequest,
+    ) -> Result<String, CommandError> {
+        self.project
+            .request(
+                HttpRequest::new("POST", "/api/datasets/robot-discovery/read-description")
+                    .json(request),
+            )
+            .await
+    }
+
+    pub(super) async fn inspect_robot_stream(
+        &self,
+        request: &spiral_robotics_common::datasets::RobotStreamInspectionRequest,
+    ) -> Result<serde_json::Value, CommandError> {
+        self.project
+            .request(
+                HttpRequest::new("POST", "/api/datasets/robot-discovery/inspect-stream")
+                    .json(request),
+            )
+            .await
+    }
+
+    pub(super) async fn save_robot_discovery(
+        &self,
+        result: &spiral_robotics_common::datasets::RobotDiscoveryResult,
+    ) -> Result<(), CommandError> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/robot-discovery/save").json(result))
+            .await
     }
 
     pub(super) fn project_resources(

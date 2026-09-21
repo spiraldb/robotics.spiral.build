@@ -6,6 +6,7 @@ pub(crate) mod workspace;
 
 mod client;
 pub(crate) use client::CurationClient;
+mod interpretation;
 
 mod document_bar;
 mod episode;

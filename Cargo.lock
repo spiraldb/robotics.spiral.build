@@ -1530,9 +1530,9 @@ dependencies = [
 
 [[package]]
 name = "dioxus-flow"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "955fd934a84cfef83bd34f5ed5e304e6e632213030d397ae7d3db07e96a2bb17"
+checksum = "ed7b58a152578a5b1caf660f2fcc2d0989cfa7fa2f1224a9b4c829b87bc5aba3"
 dependencies = [
  "dioxus",
  "futures-timer",
@@ -5294,6 +5294,7 @@ dependencies = [
  "gloo-timers",
  "js-sys",
  "pulldown-cmark",
+ "schemars 1.2.2",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

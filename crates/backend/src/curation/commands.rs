@@ -32,16 +32,6 @@ impl CurationCommands {
             .await
             .map_err(Into::into)
     }
-    pub(super) async fn interpret(
-        &self,
-        request: spiral_robotics_common::curation::interpretation::InterpretationRequest,
-    ) -> Result<spiral_robotics_common::curation::interpretation::RuleProposal, BackendCommandError>
-    {
-        let _activity = self.state.admit()?;
-        super::interpretation::RuleInterpreter::interpret(request)
-            .await
-            .map_err(|message| crate::OperationError::InvalidInput(message).into())
-    }
     pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, BackendCommandError> {
         let _activity = self.state.admit()?;
         self.state.curation().list().await.map_err(Into::into)

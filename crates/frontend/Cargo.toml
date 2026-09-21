@@ -18,7 +18,7 @@ base64.workspace = true
 wasm-bindgen-futures = "0.4"
 wasm-streams = "0.4.2"
 charming = { version = "0.6.0", default-features = false, features = ["wasm"] }
-spiral-robotics-common.workspace = true
+spiral-robotics-common = { workspace = true, features = ["http-schema"] }
 spiral-robotics-ui.workspace = true
 spiral-robotics-viewport.workspace = true
 dioxus = { workspace = true, features = [
@@ -37,6 +37,7 @@ dioxus-flow.workspace = true
 dioxus-workbench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars = "1.2"
 serde_urlencoded = "0.7"
 serde-wasm-bindgen = "0.6"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

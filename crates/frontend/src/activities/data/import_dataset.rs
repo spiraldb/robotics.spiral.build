@@ -74,8 +74,20 @@ pub(super) fn ImportDataset(on_done: EventHandler<String>) -> Element {
                         let source = HuggingFaceDatasetSource::new(detail.dataset_id(), detail.repository()).with_revision(detail.resolved_revision());
                         busy.set(true); problem.set(None);
                         spawn(async move {
-                            match DatasetClient::current().import_dataset(source).await {
-                                Ok(summary) => { receipt.set(Some(ImportReceipt::from(summary))); super::relations::CatalogRefresh::request(); },
+                            let client = DatasetClient::current();
+                            match client.import_dataset(source).await {
+                                Ok(summary) => {
+                                    let summary = match super::robot_discovery::RobotDiscoveryAgent::new(client).discover(&detail).await {
+                                        Ok(()) => summary,
+                                        Err(_) => {
+                                            let mut warnings = summary.warnings().to_vec();
+                                            warnings.push("Episodes imported, but the 3D view could not be prepared.".into());
+                                            summary.with_warnings(warnings)
+                                        }
+                                    };
+                                    receipt.set(Some(ImportReceipt::from(summary)));
+                                    super::relations::CatalogRefresh::request();
+                                },
                                 Err(error) => {
                                     let message = error.to_string();
                                     let uncertain = error.code() == spiral_robotics_common::command_failure::CommandFailureCode::Transport || message.contains("uncertain");

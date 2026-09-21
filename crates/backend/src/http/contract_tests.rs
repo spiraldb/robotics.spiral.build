@@ -92,7 +92,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 78);
+    assert_eq!(count, 79);
     for retired in [
         "/robots/setup",
         "/serial-ports/identify",

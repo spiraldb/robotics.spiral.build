@@ -12,6 +12,7 @@ use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spiral_robotics_common::workflow::conversation::{ProviderMessage, ProviderToolCall};
+use spiral_robotics_common::workflow::document::{DecisionRequest, DecisionResponse};
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-terra";
@@ -29,13 +30,12 @@ pub(crate) struct ProviderConfig {
 }
 
 impl ProviderConfig {
-    pub(crate) fn for_terra(mut self) -> Self {
-        self.model = if self.base_url.host_str() == Some("openrouter.ai") {
-            "openai/gpt-5.6-terra"
+    pub(crate) fn for_model(mut self, model: &str) -> Self {
+        self.model = if self.base_url.host_str() == Some("openrouter.ai") && !model.contains('/') {
+            format!("openai/{model}")
         } else {
-            "gpt-5.6-terra"
-        }
-        .into();
+            model.to_owned()
+        };
         self
     }
     /// Jev's Decisions API is separate from Chat Completions. Reuse the
@@ -376,16 +376,47 @@ impl OpenAiProvider {
         Ok(Self { config, client })
     }
 
-    pub(crate) async fn call_tools(
-        &self,
-        messages: &[ProviderMessage],
-        tools: &[Value],
-    ) -> Result<ProviderResponse, String> {
-        self.complete(
-            ProviderCompletion::new(messages, tools, CancellationToken::new()),
-            |_| {},
-        )
-        .await
+    pub(crate) async fn decide(request: DecisionRequest) -> Result<DecisionResponse, String> {
+        let config = ProviderConfig::from_env()?
+            .ok_or("Configure the Assistant's OpenRouter credential to interpret a rule.")?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|_| "Could not create the rule interpretation client.")?;
+        let response = config
+            .decisions_request(&client)?
+            .json(&serde_json::json!({
+                "model": request.model(),
+                "state": request.state(),
+                "questions": request.questions(),
+            }))
+            .send()
+            .await
+            .map_err(|_| {
+                "Rule interpretation could not reach OpenRouter. Try again or use the manual builder."
+                    .to_owned()
+            })?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "OpenRouter rule interpretation returned HTTP {}. Try again or use the manual builder.",
+                response.status().as_u16()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size > 128 * 1024)
+        {
+            return Err("The interpretation response exceeded its size limit.".into());
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| "Could not read the interpretation response.")?;
+        if bytes.len() > 128 * 1024 {
+            return Err("The interpretation response exceeded its size limit.".into());
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| "OpenRouter returned an invalid Decisions response.".into())
     }
 
     async fn complete<F>(

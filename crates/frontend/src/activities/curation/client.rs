@@ -27,14 +27,6 @@ impl CurationClient {
             .request(HttpRequest::new("POST", "/api/curations/progress-score").json(request))
             .await
     }
-    pub(super) async fn interpret(
-        &self,
-        request: &spiral_robotics_common::curation::interpretation::InterpretationRequest,
-    ) -> Result<spiral_robotics_common::curation::interpretation::RuleProposal, CommandError> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/curations/interpret").json(request))
-            .await
-    }
     pub(super) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
