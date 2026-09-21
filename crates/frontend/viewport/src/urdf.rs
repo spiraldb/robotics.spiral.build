@@ -1,10 +1,8 @@
 //! Reading a robot description and posing it.
 //!
 //! The studio draws whatever this module parses, so the picture of the robot
-//! comes from a description file rather than from code. Only the file shipped
-//! today is SO-101 specific: everything here works on any URDF built from
-//! primitive geometry, and teaching the studio a second arm means adding a
-//! second file, not a second renderer.
+//! comes from the application's supplied description. The parser supports
+//! primitive and mesh geometry without a built-in robot model.
 //!
 //! Only the subset a viewer needs is understood — the kinematic tree, link
 //! visuals, and joint limits. Inertias, collision volumes, transmissions, and
@@ -23,9 +21,6 @@ use std::fmt;
 use glam::{Mat4, Quat, Vec3};
 use roxmltree::{Document, Node};
 
-/// The SO-ARM101 description the studio ships with.
-pub(crate) const SO101_URDF: &str = include_str!("../assets/so101.urdf");
-
 /// A rigid transform, as written in a URDF `<origin>` element.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Pose {
@@ -42,11 +37,6 @@ impl Pose {
     /// The equivalent homogeneous matrix.
     pub(crate) fn matrix(&self) -> Mat4 {
         Mat4::from_rotation_translation(self.rotation, self.translation)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn translation(&self) -> Vec3 {
-        self.translation
     }
 }
 
@@ -71,8 +61,11 @@ pub(crate) enum Geometry {
     Sphere {
         radius: f32,
     },
-    /// Kept so a mesh-based description still parses; nothing draws it.
-    Mesh,
+    /// An asset resolved by the model owner before rendering.
+    Mesh {
+        filename: String,
+        scale: Vec3,
+    },
 }
 
 /// One drawable shape on a link.
@@ -127,8 +120,7 @@ pub(crate) enum JointKind {
     Continuous,
     /// Slides along its axis.
     Prismatic,
-    /// Does not move. Also covers `floating` and `planar`, which a viewer
-    /// driven by named joint positions has no way to place.
+    /// Does not move.
     Fixed,
 }
 
@@ -194,11 +186,6 @@ impl Joint {
         self.child
     }
 
-    #[cfg(test)]
-    pub(crate) fn origin(&self) -> Pose {
-        self.origin
-    }
-
     pub(crate) fn limit(&self) -> Option<(f32, f32)> {
         self.limit
     }
@@ -214,17 +201,17 @@ pub(crate) struct Urdf {
     root: usize,
     /// Joint indices leaving each link, so posing the tree is one walk down.
     children: Vec<Vec<usize>>,
+    mimics: BTreeMap<String, Mimic>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Mimic {
+    joint: String,
+    multiplier: f32,
+    offset: f32,
 }
 
 impl Urdf {
-    /// The validated description shipped with the crate.
-    ///
-    /// Its validity is a crate invariant covered by tests, not a runtime choice
-    /// callers need to handle.
-    pub(crate) fn so101() -> Self {
-        Self::parse(SO101_URDF).expect("the viewport's bundled SO-101 description must be valid")
-    }
-
     /// Parse a URDF document.
     pub(crate) fn parse(text: &str) -> Result<Self, UrdfError> {
         UrdfParser::parse(text)
@@ -243,15 +230,6 @@ impl Urdf {
         self.joints.iter().find(|joint| joint.name == name)
     }
 
-    /// The joint connecting two links, named rather than indexed.
-    #[cfg(test)]
-    pub(crate) fn joint_between(&self, parent: &str, child: &str) -> Option<&Joint> {
-        let (parent, child) = (self.link_index(parent)?, self.link_index(child)?);
-        self.joints
-            .iter()
-            .find(|joint| joint.parent == parent && joint.child == child)
-    }
-
     /// Every joint a caller can supply a position for.
     #[cfg(test)]
     fn movable_joints(&self) -> impl Iterator<Item = &Joint> {
@@ -267,6 +245,30 @@ impl Urdf {
     /// mismeasured angle should bend the drawing no further than the hardware
     /// could bend.
     pub(crate) fn pose(&self, positions: &BTreeMap<String, f32>) -> Vec<Mat4> {
+        self.pose_with_limits(positions, true)
+    }
+
+    pub(crate) fn independent_joints(&self) -> impl Iterator<Item = &str> {
+        self.joints
+            .iter()
+            .filter(|joint| joint.kind.is_movable() && !self.mimics.contains_key(&joint.name))
+            .map(|joint| joint.name.as_str())
+    }
+
+    pub(crate) fn recorded_pose(&self, positions: &BTreeMap<String, f32>) -> Vec<Mat4> {
+        self.pose_with_limits(positions, false)
+    }
+
+    fn pose_with_limits(&self, positions: &BTreeMap<String, f32>, clamp: bool) -> Vec<Mat4> {
+        let mut positions = positions.clone();
+        // The parser proves mimic references acyclic. Resolve even chains whose
+        // declaration order differs from their dependency order.
+        for _ in 0..self.mimics.len() {
+            for (name, mimic) in &self.mimics {
+                let source = positions.get(&mimic.joint).copied().unwrap_or(0.0);
+                positions.insert(name.clone(), source * mimic.multiplier + mimic.offset);
+            }
+        }
         let mut world = vec![Mat4::IDENTITY; self.links.len()];
         let mut stack = vec![self.root];
         while let Some(link) = stack.pop() {
@@ -277,8 +279,13 @@ impl Urdf {
                     .copied()
                     .filter(|value| value.is_finite())
                     .unwrap_or(0.0);
-                world[joint.child] =
-                    world[link] * joint.origin.matrix() * joint.motion(joint.clamp(position));
+                world[joint.child] = world[link]
+                    * joint.origin.matrix()
+                    * joint.motion(if clamp {
+                        joint.clamp(position)
+                    } else {
+                        position
+                    });
                 stack.push(joint.child);
             }
         }
@@ -290,8 +297,10 @@ impl Urdf {
     /// `transforms` comes from [`Urdf::pose`]; a shorter slice simply yields
     /// fewer visuals rather than panicking, so a stale pose cannot crash a
     /// renderer mid-frame.
-    #[cfg(test)]
-    fn visuals<'a>(&'a self, transforms: &'a [Mat4]) -> impl Iterator<Item = (&'a Visual, Mat4)> {
+    pub(crate) fn visuals<'a>(
+        &'a self,
+        transforms: &'a [Mat4],
+    ) -> impl Iterator<Item = (&'a Visual, Mat4)> {
         self.links
             .iter()
             .zip(transforms)
@@ -440,11 +449,14 @@ impl UrdfParser {
         let mut joints = Vec::new();
         for node in Self::children(robot, "joint") {
             let name = Self::required(node, "name")?.to_owned();
+            if joints.iter().any(|joint: &Joint| joint.name == name) {
+                return Err(UrdfError::Xml(format!("Duplicate joint {name}")));
+            }
             let kind = match Self::required(node, "type")? {
                 "revolute" => JointKind::Revolute,
                 "continuous" => JointKind::Continuous,
                 "prismatic" => JointKind::Prismatic,
-                "fixed" | "floating" | "planar" => JointKind::Fixed,
+                "fixed" => JointKind::Fixed,
                 other => {
                     return Err(UrdfError::UnknownJointType {
                         joint: name,
@@ -457,7 +469,9 @@ impl UrdfParser {
             // A zero axis would make `Mat4::from_axis_angle` produce garbage, and a
             // description that omits the axis means the URDF default of +X.
             let axis = match Self::children(node, "axis").next() {
-                Some(node) => Self::vec3(node, "xyz")?.normalize_or(Vec3::X),
+                Some(node) => Self::vec3(node, "xyz")?
+                    .try_normalize()
+                    .ok_or_else(|| UrdfError::Xml(format!("Joint {name} has a zero axis")))?,
                 None => Vec3::X,
             };
             // Missing endpoints collapse this viewer-only joint to rest. Hardware
@@ -469,6 +483,9 @@ impl UrdfParser {
                 })
                 .transpose()?
                 .map(|(lower, upper)| (lower.unwrap_or(0.0), upper.unwrap_or(0.0)));
+            if limit.is_some_and(|(lower, upper)| lower > upper) {
+                return Err(UrdfError::Xml(format!("Reversed joint limits for {name}")));
+            }
 
             joints.push(Joint {
                 name,
@@ -482,7 +499,34 @@ impl UrdfParser {
         }
 
         let name = robot.attribute("name").unwrap_or("robot").to_owned();
-        Urdf::assemble(name, links, joints)
+        let mut description = Urdf::assemble(name, links, joints)?;
+        for node in Self::children(robot, "joint") {
+            if let Some(mimic) = Self::children(node, "mimic").next() {
+                description.mimics.insert(
+                    Self::required(node, "name")?.into(),
+                    Mimic {
+                        joint: Self::required(mimic, "joint")?.into(),
+                        multiplier: Self::number(mimic, "multiplier")?.unwrap_or(1.0),
+                        offset: Self::number(mimic, "offset")?.unwrap_or(0.0),
+                    },
+                );
+            }
+        }
+        for name in description.mimics.keys() {
+            let mut visited = std::collections::BTreeSet::new();
+            let mut current = name;
+            while let Some(mimic) = description.mimics.get(current) {
+                if !visited.insert(current)
+                    || description.joint(&mimic.joint).is_none()
+                    || !mimic.multiplier.is_finite()
+                    || !mimic.offset.is_finite()
+                {
+                    return Err(UrdfError::Xml(format!("Invalid mimic relation for {name}")));
+                }
+                current = &mimic.joint;
+            }
+        }
+        Ok(description)
     }
 
     /// Turn a flat list of links and joints into a tree, or say why it is not one.
@@ -530,13 +574,14 @@ impl UrdfParser {
                 "sphere" => Ok(Geometry::Sphere {
                     radius: Self::number(shape, "radius")?.unwrap_or(0.0),
                 }),
-                "mesh" => {
-                    Self::required(shape, "filename")?;
-                    if shape.attribute("scale").is_some() {
-                        Self::vec3(shape, "scale")?;
-                    }
-                    Ok(Geometry::Mesh)
-                }
+                "mesh" => Ok(Geometry::Mesh {
+                    filename: Self::required(shape, "filename")?.to_owned(),
+                    scale: if shape.attribute("scale").is_some() {
+                        Self::vec3(shape, "scale")?
+                    } else {
+                        Vec3::ONE
+                    },
+                }),
                 _ => continue,
             };
         }
@@ -627,18 +672,20 @@ impl UrdfParser {
             return Ok(None);
         };
         text.trim()
-            .parse()
-            .map(Some)
-            .map_err(|_| UrdfError::BadNumbers {
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| UrdfError::BadNumbers {
                 element: node.tag_name().name().to_owned(),
                 value: text.to_owned(),
             })
+            .map(Some)
     }
 
     /// Split a whitespace-separated list of numbers, or nothing if any is unreadable.
     fn numbers(text: &str) -> Option<Vec<f32>> {
         text.split_whitespace()
-            .map(|part| part.parse().ok())
+            .map(|part| part.parse::<f32>().ok().filter(|value| value.is_finite()))
             .collect()
     }
 }
@@ -704,6 +751,7 @@ impl Urdf {
             joints,
             root,
             children,
+            mimics: BTreeMap::new(),
         })
     }
 }
@@ -713,7 +761,6 @@ const DEFAULT_COLOR: [f32; 4] = [0.7, 0.72, 0.75, 1.0];
 
 #[cfg(test)]
 mod tests {
-    use crate::SO101_JOINTS;
 
     use super::*;
 
@@ -913,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mesh_parses_even_though_nothing_draws_it() {
+    fn mesh_references_preserve_filename_and_scale() {
         let urdf = Urdf::parse(
             r#"<robot name="r"><link name="a"><visual>
                  <geometry><mesh filename="arm.stl" scale="0.001 0.001 0.001"/></geometry>
@@ -921,7 +968,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(urdf.links[0].visuals[0].geometry, Geometry::Mesh);
+        assert!(matches!(
+            urdf.links[0].visuals[0].geometry,
+            Geometry::Mesh { .. }
+        ));
     }
 
     #[test]
@@ -1011,53 +1061,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(urdf.joint("j").unwrap().axis, Vec3::X);
-    }
-
-    #[test]
-    fn the_shipped_so101_description_is_the_arm_the_studio_drives() {
-        let urdf = Urdf::parse(SO101_URDF).unwrap();
-
-        // Every motor the studio knows about has to be a joint here, by name,
-        // or a measured angle would have nothing to move.
-        for joint in SO101_JOINTS {
-            let found = urdf
-                .joint(joint.name())
-                .unwrap_or_else(|| panic!("{} is missing from the description", joint.name()));
-            assert!(found.kind.is_movable(), "{} should move", joint.name());
-            assert!(
-                found.limit.is_some(),
-                "{} should state its limits",
-                joint.name()
-            );
-        }
-        assert_eq!(urdf.movable_joints().count(), SO101_JOINTS.len());
-        assert_eq!(urdf.links[urdf.root()].name, "base_link");
-
-        // Nothing references a mesh, so the description draws with no assets.
-        for link in &urdf.links {
-            for visual in &link.visuals {
-                assert!(
-                    !matches!(visual.geometry, Geometry::Mesh),
-                    "{} should not need a mesh file",
-                    link.name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_shipped_arm_reaches_the_length_it_is_built_from() {
-        let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let transforms = urdf.pose(&BTreeMap::new());
-        let tip = urdf.link_index("gripper_link").unwrap();
-
-        // Straight up at mechanical zero: base plate, shoulder, upper arm,
-        // forearm, and the 30 mm to the roll axis.
-        let expected = 0.018 + 0.037 + 0.117 + 0.135 + 0.030;
-        let placed = transforms[tip].transform_point3(Vec3::ZERO);
-        assert!(
-            close(placed, Vec3::new(0.0, 0.0, expected)),
-            "gripper sits at {placed:?}"
-        );
     }
 }

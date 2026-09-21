@@ -19,6 +19,7 @@ impl DatasetQueryEndpoints {
         routes.get("/datasets", Self::datasets);
         routes.get("/data-catalog", Self::project_resources);
         routes.post("/datasets/inspect", Self::inspect_dataset);
+        routes.post("/datasets/robot", Self::dataset_robot);
         routes.post("/datasets/episode-messages", Self::episode_messages);
         routes.post("/datasets/episode-topics", Self::episode_topics);
         routes.post("/datasets/episode-coverage", Self::episode_coverage);
@@ -38,6 +39,12 @@ impl DatasetQueryEndpoints {
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
     ) -> Result<Json<Vec<ProjectResource>>, HttpFailure> {
         Ok(Json(commands.project_resources().await?))
+    }
+    async fn dataset_robot(
+        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        ApiJson(selection): ApiJson<DatasetSelection>,
+    ) -> Result<Json<Option<spiral_robotics_common::datasets::DatasetRobot>>, HttpFailure> {
+        Ok(Json(commands.dataset_robot(selection).await?))
     }
     async fn datasets(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

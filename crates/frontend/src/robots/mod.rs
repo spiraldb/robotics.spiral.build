@@ -4,6 +4,7 @@ mod commands;
 mod selection;
 mod setup;
 mod state;
+pub(crate) mod visualization;
 pub(crate) use client::RobotClient;
 pub(crate) use commands::HardwareCommands;
 pub(crate) use selection::{RobotSelection, Selection};

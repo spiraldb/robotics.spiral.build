@@ -329,6 +329,19 @@ impl MessageBuffer {
         }
         Ok(None)
     }
+    pub(super) fn json_at(&self, absolute: u64) -> Result<Option<serde_json::Value>, String> {
+        let Some((batch, row)) = self.at(absolute)? else {
+            return Ok(None);
+        };
+        let mut writer = arrow_json::ArrayWriter::new(Vec::new());
+        writer
+            .write(&batch.slice(row, 1))
+            .map_err(|error| error.to_string())?;
+        writer.finish().map_err(|error| error.to_string())?;
+        let mut rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&writer.into_inner()).map_err(|error| error.to_string())?;
+        Ok(rows.pop())
+    }
     pub(super) fn values(
         &self,
         fields: &[MessageField],
@@ -481,6 +494,12 @@ mod tests {
             next: None,
         };
         assert!(buffer.at(origin - 1).unwrap().is_none());
+        assert!(buffer.json_at(origin - 1).unwrap().is_none());
+        assert_eq!(
+            buffer.json_at(origin + 1).unwrap().unwrap()["field_0"],
+            22.0
+        );
+        assert!(buffer.json_at(origin).unwrap().unwrap()["field_2"][1].is_null());
         let values = buffer.values(&fields, origin + 1).unwrap();
         assert_eq!(values["counter"], u64::MAX.to_string());
         assert_eq!(values["temperature"], "22.0");

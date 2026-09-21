@@ -1,6 +1,7 @@
 //! Native SQLite snapshots contain one project's records and no backend secrets.
 use super::{
-    StudioProject, curations, robots, rollout_runs, studio_settings, training_runs, workflows,
+    StudioProject, curations, dataset_robots, robots, rollout_runs, studio_settings, training_runs,
+    workflows,
 };
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -14,7 +15,8 @@ pub(crate) struct StudioSnapshot {
 }
 
 impl StudioSnapshot {
-    const TABLES: [&str; 6] = [
+    const TABLES: [&str; 7] = [
+        "dataset_robots",
         "robots",
         "workflows",
         "curations",
@@ -191,6 +193,17 @@ impl StudioSnapshot {
     }
 
     async fn validate_documents(&self) -> Result<(), String> {
+        for row in dataset_robots::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            let robot: Option<spiral_robotics_common::datasets::DatasetRobot> =
+                serde_json::from_value(row.document).map_err(|error| error.to_string())?;
+            if let Some(robot) = robot {
+                robot.validate()?;
+            }
+        }
         for row in robots::Entity::find()
             .all(&self.database)
             .await
@@ -268,6 +281,17 @@ impl StudioSnapshot {
                     format!("DELETE FROM {table} WHERE project = ?"),
                     [project.key().into()],
                 ))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        for mut row in dataset_robots::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            row.project = project.key().to_owned();
+            row.into_active_model()
+                .insert(&transaction)
                 .await
                 .map_err(|error| error.to_string())?;
         }

@@ -35,6 +35,49 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn dataset_models_follow_dataset_revision_and_project() {
+    let store = StudioStore::in_memory();
+    let project = store.project(&Fixture::connection("models"));
+    let identity = ("dataset-id", "revision-1");
+    assert_eq!(project.dataset_robot(identity).await.unwrap(), None);
+    project.save_dataset_robot(identity, None).await.unwrap();
+    assert_eq!(project.dataset_robot(identity).await.unwrap(), None);
+    assert_eq!(
+        project
+            .dataset_robot((identity.0, "revision-2"))
+            .await
+            .unwrap(),
+        None
+    );
+    let robot = serde_json::from_value(serde_json::json!({
+        "urdf":"<robot name=\"fixture\"><link name=\"base\"/></robot>",
+        "bindings":[], "meshes":{"arm.stl":"Zml4dHVyZQ=="}
+    }))
+    .unwrap();
+    project
+        .save_dataset_robot(identity, Some(&robot))
+        .await
+        .unwrap();
+    assert_eq!(
+        project.dataset_robot(identity).await.unwrap(),
+        Some(robot.clone())
+    );
+    let other = store.project(&Fixture::connection("other"));
+    assert_eq!(other.dataset_robot(identity).await.unwrap(), None);
+    let archive = StudioSnapshot::capture(&project).await.unwrap();
+    StudioSnapshot::open(&archive.bytes().unwrap(), &other)
+        .await
+        .unwrap()
+        .stage(&other)
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+    assert_eq!(other.dataset_robot(identity).await.unwrap(), Some(robot));
+}
+
+#[tokio::test]
 async fn local_state_survives_reopening_and_credentials_do_not_change_project_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("Studio state #1.sqlite3");
@@ -226,7 +269,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 3);
+    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 4);
     // A conflict halfway through the actual initial migration must undo both
     // earlier CREATE TABLE statements and the migration journal itself.
     let directory = tempfile::tempdir().unwrap();

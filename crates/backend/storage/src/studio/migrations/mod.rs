@@ -9,11 +9,33 @@ impl MigratorTrait for Migrator {
             Box::new(InitialStudioSchema),
             Box::new(RemoveLegacyRegistry),
             Box::new(CreateCurations),
+            Box::new(CreateDatasetRobots),
         ]
     }
 }
 
 struct InitialStudioSchema;
+struct CreateDatasetRobots;
+impl MigrationName for CreateDatasetRobots {
+    fn name(&self) -> &str {
+        "m20260921_000004_dataset_robots"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for CreateDatasetRobots {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260921_000004_dataset_robots.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Restore a backup to downgrade Studio".into(),
+        ))
+    }
+}
 
 impl MigrationName for InitialStudioSchema {
     fn name(&self) -> &str {

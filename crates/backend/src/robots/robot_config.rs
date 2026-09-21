@@ -305,6 +305,7 @@ mod tests {
             "port": {"path": "/dev/old", "baud": 1_000_000},
             "cameras": {"wrist": {"index": 2}},
             "extension": {"nested": [1, 2, 3]},
+            "visualization": {"urdf":"<robot name=\"test\"/>", "joints":{}},
             "calibration": {"old": true}
         }))
         .expect("valid config");
@@ -321,6 +322,10 @@ mod tests {
         assert_eq!(merged.root()["port"]["path"], "/dev/old");
         assert_eq!(merged.root()["cameras"]["wrist"]["index"], 2);
         assert_eq!(merged.root()["extension"]["nested"], json!([1, 2, 3]));
+        assert_eq!(
+            merged.root()["visualization"],
+            config.root()["visualization"]
+        );
         assert_eq!(merged.root()["motors"][0]["id"], 1);
         assert_eq!(
             merged.root()["calibration"]["joints"][0]["name"],

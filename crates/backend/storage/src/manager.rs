@@ -28,6 +28,19 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
+    pub async fn dataset_robot(
+        &self,
+        identity: (&str, &str),
+    ) -> Result<Option<spiral_robotics_common::datasets::DatasetRobot>, String> {
+        self.studio.dataset_robot(identity).await
+    }
+    pub async fn save_dataset_robot(
+        &self,
+        identity: (&str, &str),
+        robot: Option<&spiral_robotics_common::datasets::DatasetRobot>,
+    ) -> Result<(), String> {
+        self.studio.save_dataset_robot(identity, robot).await
+    }
     pub fn new(project_store: Arc<ProjectStore>, studio: crate::StudioProject) -> Self {
         Self {
             project_store,

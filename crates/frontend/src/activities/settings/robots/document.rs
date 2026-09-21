@@ -108,6 +108,7 @@ mod tests {
         let created = RobotDraft::new(" arm ", "so101_follower").save().unwrap();
         assert_eq!(created.document().id().unwrap(), "arm");
         assert!(created.expected().is_none());
+        assert!(created.document().visualization().unwrap().is_none());
         assert_eq!(
             created.document().object()["motors"]
                 .as_object()
@@ -128,7 +129,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn port_edits_preserve_calibration_extensions_and_the_rendered_baseline() {
-        let original = RobotDocument::from_object(json!({"robot_id":"arm", "port":{"path":"/dev/old", "baud_rate":1000000, "vendor_flag":true}, "calibration":{"extension":42}}).as_object().unwrap().clone());
+        let original = RobotDocument::from_object(json!({"robot_id":"arm", "port":{"path":"/dev/old", "baud_rate":1000000, "vendor_flag":true}, "calibration":{"extension":42}, "visualization":{"urdf":"<robot name=\"custom\"/>","joints":{}}}).as_object().unwrap().clone());
         let robot =
             RobotSummary::new("arm", None, Default::default()).with_document(original.clone());
         let save = RobotDraft::from_robot(&robot)
@@ -142,6 +143,10 @@ mod tests {
         assert_eq!(
             save.document().object()["calibration"],
             original.object()["calibration"]
+        );
+        assert_eq!(
+            save.document().object()["visualization"],
+            original.object()["visualization"]
         );
         assert_eq!(original.object()["port"]["path"], "/dev/old");
     }

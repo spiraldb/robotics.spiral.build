@@ -248,6 +248,7 @@ resources. These return distinct `RecordingDatasetSummary` and `DatasetSummary` 
 | GET | `/data-catalog` | — | ProjectResource[] (actual namespace paths and resource kinds) |
 | GET | `/datasets` | — | DatasetSummary[] |
 | POST | `/datasets/inspect` | DatasetSelection | DatasetInspection |
+| POST | `/datasets/robot` | DatasetSelection | Saved DatasetRobot or `null`; read-only, with no model analysis |
 | POST | `/datasets/episode-topics` | EpisodeSelection (dataset, episode_id) | DatasetTopic[] (topics with messages in the exact recording, with schema revisions and counts) |
 | POST | `/datasets/episode-messages` | MessageRead (topic, revision, optional window) | `application/vnd.apache.arrow.stream` pages; see [episode playback](episode-playback.md) |
 | POST | `/datasets/topic-coverage` | TopicCoverageRequest (MessageRead with a plain window, `buckets` 8–2048) | TopicCoverage (message total, first/last log time as strings, one count per bucket) |

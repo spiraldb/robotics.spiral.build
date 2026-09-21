@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::recording::{RecordingProgress, ReplayProgress};
 
+pub mod visualization;
+
 /// One robot instance: exactly one arm, stored in SpiralDB.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

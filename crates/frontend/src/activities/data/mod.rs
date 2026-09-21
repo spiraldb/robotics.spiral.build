@@ -15,6 +15,7 @@ mod import_dataset;
 mod message_buffer;
 mod plots_panel;
 mod relations;
+mod robot_stage;
 mod timeline_panel;
 pub(crate) use client::DatasetClient;
 

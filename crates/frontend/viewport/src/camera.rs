@@ -21,6 +21,7 @@ pub(crate) struct Camera {
     /// Distance from the target, metres.
     distance: f32,
     target: Vec3,
+    scale: f32,
 }
 
 impl Default for Camera {
@@ -32,6 +33,7 @@ impl Default for Camera {
             pitch: 0.32,
             distance: 0.78,
             target: Vec3::new(0.03, 0.0, 0.17),
+            scale: 1.0,
         }
     }
 }
@@ -43,6 +45,14 @@ const MIN_DISTANCE: f32 = 0.18;
 const MAX_DISTANCE: f32 = 3.0;
 
 impl Camera {
+    pub(crate) fn framed_on(target: Vec3, distance: f32) -> Self {
+        Self {
+            target,
+            distance,
+            scale: distance / 0.78,
+            ..Self::default()
+        }
+    }
     /// Return this camera with a different viewing direction.
     pub(crate) fn oriented(mut self, yaw: f32, pitch: f32) -> Self {
         self.yaw = yaw;
@@ -51,6 +61,7 @@ impl Camera {
     }
 
     /// Return this camera framed on `target` from `distance` metres away.
+    #[cfg(test)]
     pub(crate) fn focused_on(mut self, target: Vec3, distance: f32) -> Self {
         self.target = target;
         self.distance = distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
@@ -65,7 +76,8 @@ impl Camera {
 
     /// Move closer or further away. `factor` above one pulls back.
     pub(crate) fn zoom(&mut self, factor: f32) {
-        self.distance = (self.distance * factor).clamp(MIN_DISTANCE, MAX_DISTANCE);
+        self.distance =
+            (self.distance * factor).clamp(MIN_DISTANCE * self.scale, MAX_DISTANCE * self.scale);
     }
 
     /// Slide the target across the screen, in metres of world space.
@@ -106,7 +118,12 @@ impl Camera {
         // Right handed, with the depth range OpenGL and WebGL expect. Near and
         // far bracket a tabletop scene: close enough to push the camera almost
         // into a joint, far enough to pull back off the bench.
-        let projection = opengl::perspective(FIELD_OF_VIEW, aspect_ratio.max(0.01), 0.02, 20.0);
+        let projection = opengl::perspective(
+            FIELD_OF_VIEW,
+            aspect_ratio.max(0.01),
+            0.02 * self.scale,
+            20.0 * self.scale,
+        );
         projection * look_at_mat4(self.eye(), self.target, Vec3::Z)
     }
 }

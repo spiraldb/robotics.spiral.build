@@ -14,7 +14,7 @@ use glam::{Mat4, Vec3};
 use crate::urdf::Geometry;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    HtmlCanvasElement, WebGl2RenderingContext as Gl, WebGlProgram, WebGlShader,
+    HtmlCanvasElement, WebGl2RenderingContext as Gl, WebGlBuffer, WebGlProgram, WebGlShader,
     WebGlUniformLocation, WebGlVertexArrayObject,
 };
 
@@ -37,10 +37,8 @@ uniform mat4 model;
 uniform mat4 view_projection;
 out vec3 world_normal;
 void main() {
-    // Every shape is scaled along its own axes and its normals are axis
-    // aligned, so rotating and renormalizing is the whole normal transform —
-    // no inverse transpose is needed to keep the lighting honest.
-    world_normal = normalize(mat3(model) * normal);
+    // Imported meshes may use nonuniform scale.
+    world_normal = normalize(transpose(inverse(mat3(model))) * normal);
     gl_Position = view_projection * model * vec4(position, 1.0);
 }
 "#;
@@ -64,8 +62,17 @@ void main() {
 
 /// A vertex array holding interleaved positions and normals.
 struct GpuMesh {
+    context: Gl,
     array: WebGlVertexArrayObject,
+    buffer: WebGlBuffer,
     vertices: i32,
+}
+
+impl Drop for GpuMesh {
+    fn drop(&mut self) {
+        self.context.delete_vertex_array(Some(&self.array));
+        self.context.delete_buffer(Some(&self.buffer));
+    }
 }
 
 struct Uniforms {
@@ -80,6 +87,7 @@ pub(crate) struct Renderer {
     pipeline: WebGlPipeline,
     primitives: PrimitiveMeshes,
     bench: BenchMeshes,
+    meshes: std::collections::BTreeMap<String, GpuMesh>,
 }
 
 struct WebGlPipeline {
@@ -88,6 +96,12 @@ struct WebGlPipeline {
     uniforms: Uniforms,
     /// Framebuffer size in device pixels, so a resize is noticed on the next draw.
     framebuffer_size: (u32, u32),
+}
+
+impl Drop for WebGlPipeline {
+    fn drop(&mut self) {
+        self.context.delete_program(Some(&self.program));
+    }
 }
 
 struct PrimitiveMeshes {
@@ -119,6 +133,26 @@ impl<'a> RenderFrame<'a> {
 }
 
 impl Renderer {
+    pub(crate) fn load_meshes(
+        &mut self,
+        meshes: &std::collections::BTreeMap<String, Vec<f32>>,
+    ) -> Result<(), String> {
+        self.meshes = meshes
+            .iter()
+            .map(|(name, values)| {
+                Ok((
+                    name.clone(),
+                    GpuMesh::upload(
+                        &self.pipeline,
+                        &MeshVertices {
+                            values: values.clone(),
+                        },
+                    )?,
+                ))
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(())
+    }
     /// Set up WebGL on `canvas`, or say why the browser could not.
     pub(crate) fn new(canvas: &HtmlCanvasElement) -> Result<Self, String> {
         let pipeline = WebGlPipeline::new(canvas)?;
@@ -129,6 +163,7 @@ impl Renderer {
             pipeline,
             primitives,
             bench,
+            meshes: std::collections::BTreeMap::new(),
         })
     }
 
@@ -182,9 +217,10 @@ impl Renderer {
                     Vec3::new(*radius, *radius, *length),
                 ),
                 Geometry::Sphere { radius } => (&self.primitives.sphere, Vec3::splat(*radius)),
-                // Nothing in this build loads mesh files; skipping keeps a
-                // description that references one drawable rather than blank.
-                Geometry::Mesh => continue,
+                Geometry::Mesh { filename, scale } => match self.meshes.get(filename) {
+                    Some(mesh) => (mesh, *scale),
+                    None => continue,
+                },
             };
             gl.uniform1f(
                 self.pipeline.uniforms.shaded.as_ref(),
@@ -378,7 +414,9 @@ impl GpuMesh {
 
         gl.bind_vertex_array(None);
         Ok(Self {
+            context: gl.clone(),
             array,
+            buffer,
             vertices: (vertices.values.len() / 6) as i32,
         })
     }

@@ -4,6 +4,7 @@ mod catalog;
 mod coverage;
 mod h264;
 mod messages;
+mod robot;
 pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
     EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
@@ -11,6 +12,7 @@ pub use catalog::{
 pub use coverage::{EpisodeCoverageRequest, StreamCoverage, TopicCoverage, TopicCoverageRequest};
 pub use h264::H264AccessUnit;
 pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision};
+pub use robot::{DatasetRobot, JointBinding, JointSelector};
 
 use serde::{Deserialize, Serialize};
 

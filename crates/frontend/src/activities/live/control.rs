@@ -5,12 +5,13 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use crate::robots::visualization::ConfiguredModel;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{
     JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonAuxiliaryHandlers, ButtonVariant};
-use spiral_robotics_viewport::{self as arm, ArmPose};
+use spiral_robotics_viewport as arm;
 
 use crate::robots::Selection;
 use crate::robots::{HardwareViewState, RobotSelection};
@@ -59,7 +60,7 @@ pub(super) fn JointPanel(
 
             ToolReadout {
                 telemetry: telemetry.clone(),
-                calibrated: robot.calibrated(),
+                robot: robot.clone(),
             }
 
             ConditionReadout {
@@ -85,12 +86,29 @@ pub(super) fn JointPanel(
 
 /// Where the arm is holding its gripper, solved from the robot description.
 #[component]
-fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
-    let angles = telemetry
+fn ToolReadout(telemetry: Option<RobotTelemetry>, robot: RobotSummary) -> Element {
+    let configured = use_memo(use_reactive(&robot, |robot| {
+        robot
+            .document()?
+            .visualization()
+            .ok()?
+            .and_then(|configuration| ConfiguredModel::new(configuration).ok())
+    }));
+    let pose = telemetry
         .as_ref()
-        .filter(|_| calibrated)
-        .map(|robot| robot.joints().measured_angles());
-    let tip = angles.as_ref().and_then(ArmPose::tool_position);
+        .filter(|_| robot.calibrated())
+        .and_then(|telemetry| {
+            let configured = configured.read();
+            let configured = configured.as_ref()?;
+            let positions = configured.measured_positions(telemetry.joints());
+            let tip = configured
+                .configuration
+                .as_ref()?
+                .tool_link()
+                .and_then(|link| configured.model.tool_position(link, &positions));
+            Some((tip, configured.model.joint_fraction("gripper", &positions)))
+        });
+    let tip = pose.and_then(|(tip, _)| tip);
     let tracking_error = telemetry.as_ref().and_then(|robot| {
         robot
             .joints()
@@ -122,7 +140,7 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             // out of alignment with each other.
             Readout {
                 label: "Gripper open",
-                value: angles.map(|angles| format!("{:.0}", angles.gripper_opening() * 100.0)),
+                value: pose.and_then(|(_, opening)| opening).map(|opening| format!("{:.0}", opening * 100.0)),
                 details: ReadoutDetails::new("%"),
             }
             // One name for one number, in every mode. This is the same quantity
@@ -415,26 +433,6 @@ fn Readout(label: String, value: Option<String>, details: ReadoutDetails) -> Ele
                 if known { span { class: "readout-unit", "{unit}" } }
             }
         }
-    }
-}
-
-/// Collect an arm's calibrated joint angles out of its telemetry.
-pub(crate) trait MeasuredJointTelemetry {
-    fn measured_angles(&self) -> ArmPose;
-}
-
-impl MeasuredJointTelemetry for [JointTelemetry] {
-    fn measured_angles(&self) -> ArmPose {
-        let degrees = self
-            .iter()
-            .filter_map(|joint| Some((joint.name().to_owned(), joint.degrees()?)))
-            .collect::<BTreeMap<_, _>>();
-        let gripper = self
-            .iter()
-            .find(|joint| joint.name() == "gripper")
-            .and_then(|joint| joint.normalized())
-            .unwrap_or(0.0);
-        ArmPose::from_degrees(&degrees, gripper)
     }
 }
 

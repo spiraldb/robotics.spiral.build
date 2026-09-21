@@ -16,7 +16,8 @@ use spiral_robotics_common::workflow::conversation::{ProviderMessage, ProviderTo
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-terra";
 const MAX_LOCAL_ENV_BYTES: u64 = 64 * 1024;
-const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+// Includes SSE framing for every token, not just the generated document.
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STREAM_TOOL_CALLS: usize = 24;
 const MAX_ATTEMPTS: usize = 3;
 
@@ -28,6 +29,15 @@ pub(crate) struct ProviderConfig {
 }
 
 impl ProviderConfig {
+    pub(crate) fn for_terra(mut self) -> Self {
+        self.model = if self.base_url.host_str() == Some("openrouter.ai") {
+            "openai/gpt-5.6-terra"
+        } else {
+            "gpt-5.6-terra"
+        }
+        .into();
+        self
+    }
     /// Jev's Decisions API is separate from Chat Completions. Reuse the
     /// private credential loader without exposing credentials to callers.
     pub(crate) fn decisions_request(
@@ -267,10 +277,10 @@ pub(crate) struct ProviderResponse {
 }
 
 impl ProviderResponse {
-    fn content(&self) -> &str {
+    pub(crate) fn content(&self) -> &str {
         &self.content
     }
-    fn tool_calls(&self) -> &[ProviderToolCall] {
+    pub(crate) fn tool_calls(&self) -> &[ProviderToolCall] {
         &self.tool_calls
     }
 }
@@ -357,13 +367,25 @@ impl<'a> ProviderCompletion<'a> {
 }
 
 impl OpenAiProvider {
-    pub(super) fn new(config: ProviderConfig) -> Result<Self, String> {
+    pub(crate) fn new(config: ProviderConfig) -> Result<Self, String> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(90))
             .build()
             .map_err(|error| format!("could not configure the LLM client: {error}"))?;
         Ok(Self { config, client })
+    }
+
+    pub(crate) async fn call_tools(
+        &self,
+        messages: &[ProviderMessage],
+        tools: &[Value],
+    ) -> Result<ProviderResponse, String> {
+        self.complete(
+            ProviderCompletion::new(messages, tools, CancellationToken::new()),
+            |_| {},
+        )
+        .await
     }
 
     async fn complete<F>(
@@ -453,7 +475,7 @@ impl ProviderResponse {
                 received = received.saturating_add(chunk.len());
                 if received > MAX_RESPONSE_BYTES {
                     return Err(
-                        "The LLM provider response exceeded the 2 MiB safety limit.".to_owned()
+                        "The LLM provider response exceeded the 8 MiB safety limit.".to_owned()
                     );
                 }
                 Ok(chunk)
@@ -1084,6 +1106,6 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("2 MiB safety limit"));
+        assert!(error.contains("8 MiB safety limit"));
     }
 }

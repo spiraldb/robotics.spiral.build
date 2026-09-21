@@ -19,10 +19,11 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
+use spiral_robotics_common::datasets::DatasetRobot;
 use spiral_robotics_common::robots::{MotorCondition, RobotSummary};
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 use spiral_robotics_viewport::{
-    ArmPose, Command, Condition, Frame as BenchFrame, FrameError, Interaction, Joint, Target,
+    Command, Condition, Frame as BenchFrame, FrameError, Interaction, Joint, Target,
     Viewport as Bench,
 };
 use wasm_bindgen::JsCast;
@@ -32,8 +33,9 @@ use crate::activities::live::recording_review::{
     EpisodePreview, TimelineArmSample, TimelineSample,
 };
 use crate::panels::recorded_source::{LoadState, RecordedSource};
-use crate::robots::Selection;
 use crate::robots::{HardwareViewState, RobotSelection};
+use crate::robots::{Selection, visualization::ConfiguredModel};
+use spiral_robotics_common::robots::visualization::{RobotVisualization, TelemetryCoordinate};
 
 /// The colours arms are told apart by, as WebGL values and as CSS.
 ///
@@ -92,6 +94,10 @@ struct Hover {
 pub(crate) enum SceneSource {
     Live,
     Recorded(RecordedSource<TimelineSample>),
+    Dataset {
+        robot: Rc<DatasetRobot>,
+        positions: Option<BTreeMap<String, f32>>,
+    },
 }
 
 impl SceneSource {
@@ -113,7 +119,7 @@ impl SceneSource {
 
     fn sample(&self) -> Option<&TimelineSample> {
         match self {
-            Self::Live => None,
+            Self::Live | Self::Dataset { .. } => None,
             Self::Recorded(source) => source.renderable(),
         }
     }
@@ -122,6 +128,9 @@ impl SceneSource {
         match self {
             Self::Live => None,
             Self::Recorded(source) => Some((source.state().is_loading(), source.state().reason())),
+            Self::Dataset { positions, .. } => positions
+                .is_none()
+                .then_some((false, Some("No joint pose at this time."))),
         }
     }
 }
@@ -139,7 +148,7 @@ impl ViewportPresentation {
 
 #[component]
 pub(crate) fn Viewport(
-    telemetry: HardwareViewState,
+    telemetry: Option<HardwareViewState>,
     robot_selection: RobotSelection,
     source: SceneSource,
     presentation: ViewportPresentation,
@@ -159,25 +168,77 @@ pub(crate) fn Viewport(
     // control, so a scene that only needs the arms can still shed it.
     let mut show_grid = use_signal(|| true);
     let panel = dioxus_workbench::PanelContext::current();
+    let activity = crate::shell::activity::WorkspaceActivity::current();
+
+    let dataset_robot = match &source {
+        SceneSource::Dataset { robot, .. } => Some(robot.clone()),
+        _ => None,
+    };
+    let models = use_memo(use_reactive(&dataset_robot, move |dataset_robot| {
+        if let Some(robot) = dataset_robot {
+            return ConfiguredModel::parse(robot.urdf(), robot.meshes()).map(|model| {
+                BTreeMap::from([(
+                    "recorded".into(),
+                    ConfiguredModel {
+                        model,
+                        configuration: None,
+                    },
+                )])
+            });
+        }
+        telemetry
+            .map(|telemetry| {
+                telemetry
+                    .snapshot()
+                    .read()
+                    .robots()
+                    .iter()
+                    .filter_map(|robot| {
+                        let document = robot.document()?;
+                        match document.visualization() {
+                            Ok(None) => None,
+                            Ok(Some(configuration)) => Some(
+                                ConfiguredModel::new(configuration)
+                                    .map(|model| (robot.id().to_owned(), model)),
+                            ),
+                            Err(error) => Some(Err(error)),
+                        }
+                    })
+                    .collect::<Result<BTreeMap<_, _>, String>>()
+            })
+            .unwrap_or_else(|| Ok(BTreeMap::new()))
+    }));
 
     let draw_bench = bench.clone();
     use_effect(use_reactive(
         (&source, &visible_robot),
         move |(draw_source, visible_robot)| {
             let geometry = panel.geometry();
-            if !geometry.visible() || !telemetry.is_active() {
+            if !geometry.visible()
+                || !telemetry.map_or_else(|| activity.is_active(), HardwareViewState::is_active)
+            {
                 return;
             }
             let _ = view_revision();
             let grid = show_grid();
             let hovered = hover();
             let conditions = if draw_source.is_live() {
-                telemetry.motor_conditions()
+                telemetry
+                    .map(|telemetry| telemetry.motor_conditions())
+                    .unwrap_or_default()
             } else {
                 BTreeMap::new()
             };
+            let models = models.read();
+            let models = match models.as_ref() {
+                Ok(models) => models,
+                Err(error) => {
+                    trouble.set(Some(error.clone()));
+                    return;
+                }
+            };
             let frame = match (SceneBuildRequest {
-                robots: &SceneRobot::capture(telemetry),
+                robots: &telemetry.map(SceneRobot::capture).unwrap_or_default(),
                 selection: robot_selection,
                 grid,
                 source: &draw_source,
@@ -185,7 +246,7 @@ pub(crate) fn Viewport(
                 visible_robot: visible_robot.as_deref(),
                 conditions: &conditions,
             })
-            .build()
+            .build(models)
             {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -212,7 +273,10 @@ pub(crate) fn Viewport(
                 return;
             };
             let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
-            bench.draw(&frame, ratio);
+            if let Err(error) = bench.draw(&frame, ratio) {
+                trouble.set(Some(error.to_string()));
+                return;
+            }
             condition_marks.set(if draw_source.is_live() {
                 bench.marks_for(&conditions)
             } else {
@@ -225,9 +289,8 @@ pub(crate) fn Viewport(
     ));
 
     let arms = telemetry
-        .snapshot()
-        .read()
-        .robots()
+        .map(|telemetry| telemetry.snapshot().read().robots().to_vec())
+        .unwrap_or_default()
         .iter()
         .filter(|robot| {
             visible_robot
@@ -375,7 +438,7 @@ pub(crate) fn Viewport(
                         }
                         Key::Character(value) if value == "0" => Some(Command::Home),
                         Key::Character(value) if value.eq_ignore_ascii_case("f") => {
-                            let robot = robot_selection.framed_robot(visible_robot.as_deref(), telemetry.snapshot().read().robots());
+                            let robot = telemetry.and_then(|telemetry| robot_selection.framed_robot(visible_robot.as_deref(), telemetry.snapshot().read().robots()));
                             if let Ok(mut slot) = bench.try_borrow_mut()
                                 && let Some(bench) = slot.as_mut()
                                 && bench.frame_robot(robot.as_deref())
@@ -496,7 +559,7 @@ pub(crate) fn Viewport(
 /// the operator is going next anyway — and which stays reachable without a
 /// pointer at all.
 #[component]
-fn HoverNote(telemetry: HardwareViewState, hover: Hover, episode_preview: bool) -> Element {
+fn HoverNote(telemetry: Option<HardwareViewState>, hover: Hover, episode_preview: bool) -> Element {
     let (title, detail) = hover.entity.describe(telemetry, episode_preview);
     rsx! {
         div {
@@ -515,7 +578,7 @@ fn HoverNote(telemetry: HardwareViewState, hover: Hover, episode_preview: bool) 
 trait TargetPresentation {
     fn describe(
         &self,
-        telemetry: HardwareViewState,
+        telemetry: Option<HardwareViewState>,
         episode_preview: bool,
     ) -> (String, Option<String>);
 }
@@ -523,7 +586,7 @@ trait TargetPresentation {
 impl TargetPresentation for Target {
     fn describe(
         &self,
-        telemetry: HardwareViewState,
+        telemetry: Option<HardwareViewState>,
         episode_preview: bool,
     ) -> (String, Option<String>) {
         match self {
@@ -532,7 +595,7 @@ impl TargetPresentation for Target {
             Target::Joint { robot, joint } => {
                 let label = Joint::named(joint)
                     .map_or_else(|| joint.clone(), |joint| joint.label().to_owned());
-                let telemetry = telemetry.robot_telemetry(robot);
+                let telemetry = telemetry.and_then(|telemetry| telemetry.robot_telemetry(robot));
                 let detail = (!episode_preview)
                     .then(|| {
                         telemetry.as_ref().and_then(|telemetry| {
@@ -605,13 +668,13 @@ struct SceneBuildRequest<'a> {
 }
 
 impl SceneBuildRequest<'_> {
-    fn build(&self) -> Result<BenchFrame, FrameError> {
+    fn build(&self, models: &BTreeMap<String, ConfiguredModel>) -> Result<BenchFrame, FrameError> {
         let selected = self.selection.selected().read().to_owned();
         // Hovering a joint row in the inspector lights the motor on the bench, the
         // same way hovering the motor lights the row: one object, seen twice.
         let pointed = self.selection.pointed().read().to_owned();
         let mut frame = BenchFrame::new(self.grid);
-        self.add_arms(&mut frame)?;
+        self.add_arms(&mut frame, models)?;
 
         if let Some(selected) = selected.as_ref().map(Target::from) {
             frame.set_interaction(selected, Interaction::Selected);
@@ -634,34 +697,54 @@ impl SceneBuildRequest<'_> {
         Ok(frame)
     }
 
-    fn add_arms(&self, frame: &mut BenchFrame) -> Result<(), FrameError> {
+    fn add_arms(
+        &self,
+        frame: &mut BenchFrame,
+        models: &BTreeMap<String, ConfiguredModel>,
+    ) -> Result<(), FrameError> {
+        if let SceneSource::Dataset { positions, .. } = self.source {
+            if let Some(positions) = positions {
+                frame.add_arm(
+                    "recorded",
+                    spiral_robotics_viewport::ArmPresentation::new(
+                        models["recorded"].model.clone(),
+                        positions.clone(),
+                    ),
+                )?;
+            }
+            return Ok(());
+        }
         for robot in self.robots.iter().filter(|robot| {
             self.visible_robot
                 .is_none_or(|visible| robot.configuration.id() == visible)
         }) {
             let arm = &robot.configuration;
-            let recorded_angles = self
+            let Some(model) = models.get(arm.id()) else {
+                continue;
+            };
+            let configuration = model
+                .configuration
+                .as_ref()
+                .expect("project robot configuration");
+            let recorded = self
                 .source
                 .sample()
                 .and_then(|sample| sample.arms().iter().find(|sample| sample.arm() == arm.id()))
-                .and_then(RecordedRobotPose::recorded_angles);
+                .and_then(|sample| sample.recorded_positions(configuration));
             let telemetry = self
                 .source
                 .is_live()
-                .then(|| robot.telemetry.clone().filter(|_| arm.calibrated()))
-                .flatten();
-            let angles = recorded_angles.or_else(|| {
-                telemetry.as_ref().map(|robot| {
-                    use crate::activities::live::control::MeasuredJointTelemetry;
-                    robot.joints().measured_angles()
-                })
+                .then_some(robot.telemetry.as_ref())
+                .flatten()
+                .filter(|_| arm.calibrated());
+            let tracked = recorded.is_some() || telemetry.is_some();
+            let positions = recorded.unwrap_or_else(|| {
+                model.measured_positions(telemetry.map(|robot| robot.joints()).unwrap_or_default())
             });
             frame.add_arm(
-                arm.id().to_owned(),
-                spiral_robotics_viewport::ArmPresentation::new(
-                    ACCENTS[robot.accent % ACCENTS.len()].0,
-                    angles,
-                ),
+                arm.id(),
+                spiral_robotics_viewport::ArmPresentation::new(model.model.clone(), positions)
+                    .with_appearance(ACCENTS[robot.accent % ACCENTS.len()].0, tracked),
             )?;
             for camera in arm.cameras() {
                 camera.add_to(frame, arm.id())?;
@@ -759,26 +842,32 @@ impl HoverRequest<'_> {
     }
 }
 
-/// Render the current-calibration degrees projected by the backend.
+/// Project recorded telemetry through the same configured coordinates as live data.
 trait RecordedRobotPose {
-    fn recorded_angles(&self) -> Option<ArmPose>;
+    fn recorded_positions(
+        &self,
+        configuration: &RobotVisualization,
+    ) -> Option<BTreeMap<String, f32>>;
 }
-
 impl RecordedRobotPose for TimelineArmSample {
-    fn recorded_angles(&self) -> Option<ArmPose> {
-        let degrees = self
-            .degrees()
-            .iter()
-            .filter_map(|(joint, degrees)| Some((joint.clone(), (*degrees)?)))
-            .collect::<BTreeMap<_, _>>();
-        let gripper = self
-            .normalized()
-            .get("gripper")
+    fn recorded_positions(
+        &self,
+        configuration: &RobotVisualization,
+    ) -> Option<BTreeMap<String, f32>> {
+        let mut observed = false;
+        let positions = configuration.positions(|name, input| {
+            let value = match input {
+                TelemetryCoordinate::Degrees => self.degrees(),
+                TelemetryCoordinate::Normalized => self.normalized(),
+            }
+            .get(name)
             .copied()
             .flatten()
             .filter(|value| value.is_finite());
-        (!degrees.is_empty() || gripper.is_some())
-            .then(|| ArmPose::from_degrees(&degrees, gripper.unwrap_or_default()))
+            observed |= value.is_some();
+            value
+        });
+        observed.then_some(positions)
     }
 }
 
@@ -982,22 +1071,32 @@ mod tests {
     fn recorded_pose_uses_backend_projected_degrees() {
         let sample = TimelineArmSample::new(
             "follower",
-            BTreeMap::from([("shoulder_pan".to_owned(), Some(1.0))]),
-            BTreeMap::from([("shoulder_pan".to_owned(), Some(90.0))]),
+            BTreeMap::from([("hinge".to_owned(), Some(1.0))]),
+            BTreeMap::from([("hinge".to_owned(), Some(90.0))]),
         );
 
-        let pose = sample.recorded_angles().expect("episode_preview pose");
-        assert_eq!(pose.degrees(Joint::ShoulderPan), Some(90.0));
+        let configuration = serde_json::from_value(
+            serde_json::json!({"urdf":"", "joints":{"hinge":{"input":"degrees", "scale":std::f64::consts::PI / 180.0, "offset":0.0, "rest":0.0}}}),
+        )
+        .unwrap();
+        let pose = sample
+            .recorded_positions(&configuration)
+            .expect("episode_preview pose");
+        assert!((pose["hinge"] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn recorded_pose_does_not_guess_without_projected_degrees() {
         let sample = TimelineArmSample::new(
             "follower",
-            BTreeMap::from([("shoulder_pan".to_owned(), None)]),
-            BTreeMap::from([("shoulder_pan".to_owned(), None)]),
+            BTreeMap::from([("hinge".to_owned(), None)]),
+            BTreeMap::from([("hinge".to_owned(), None)]),
         );
-        assert!(sample.recorded_angles().is_none());
+        let configuration = serde_json::from_value(
+            serde_json::json!({"urdf":"", "joints":{"hinge":{"input":"degrees", "scale":std::f64::consts::PI / 180.0, "offset":0.0, "rest":0.0}}}),
+        )
+        .unwrap();
+        assert!(sample.recorded_positions(&configuration).is_none());
     }
 }
 
@@ -1009,5 +1108,91 @@ mod source_tests {
         assert!(
             matches!(SceneSource::recorded("take-1", None), SceneSource::Recorded(source) if matches!(source.state(), LoadState::Loading { previous: None }))
         );
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod dataset_tests {
+    use super::*;
+    use spiral_robotics_viewport::Frame;
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn imported_robot_renders_and_moves_with_its_named_joint() {
+        let document = web_sys::window().unwrap().document().unwrap();
+        let element = document.create_element("canvas").unwrap();
+        element
+            .set_attribute("style", "width:256px;height:256px")
+            .unwrap();
+        document.body().unwrap().append_child(&element).unwrap();
+        let canvas: web_sys::HtmlCanvasElement = element.clone().dyn_into().unwrap();
+        let gl: web_sys::WebGl2RenderingContext = canvas
+            .get_context("webgl2")
+            .unwrap()
+            .unwrap()
+            .dyn_into()
+            .unwrap();
+        let urdf = r#"<robot name="test"><link name="base"/><link name="arm"><visual><origin xyz="0.25 0 0.1"/><geometry><box size="0.5 0.07 0.07"/></geometry><material name="test"><color rgba="0.8 0.1 0.1 1"/></material></visual></link><joint name="recorded_hinge" type="continuous"><parent link="base"/><child link="arm"/><axis xyz="0 0 1"/></joint></robot>"#;
+        let robot =
+            serde_json::from_value(serde_json::json!({"urdf":urdf,"bindings":[],"meshes":{}}))
+                .unwrap();
+        let source = SceneSource::Dataset {
+            robot: Rc::new(robot),
+            positions: None,
+        };
+        assert!(!source.is_live());
+        assert_eq!(
+            source.recorded_status(),
+            Some((false, Some("No joint pose at this time.")))
+        );
+        let model = match &source {
+            SceneSource::Dataset { robot, .. } => {
+                ConfiguredModel::parse(robot.urdf(), robot.meshes()).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        let mut viewport = Bench::new(canvas).unwrap();
+        let mut pictures = Vec::new();
+        for (angle, home) in [(0.0, false), (1.0, false), (0.0, true)] {
+            if home {
+                viewport.command(Command::ZoomIn);
+                viewport.command(Command::Home);
+            }
+            let mut frame = Frame::new(true);
+            frame
+                .add_arm(
+                    "fixture",
+                    spiral_robotics_viewport::ArmPresentation::new(
+                        model.clone(),
+                        BTreeMap::from([("recorded_hinge".into(), angle)]),
+                    ),
+                )
+                .unwrap();
+            assert!(viewport.draw(&frame, 1.0).unwrap());
+            let mut pixels = vec![0; 256 * 256 * 4];
+            gl.read_pixels_with_opt_u8_array(
+                0,
+                0,
+                256,
+                256,
+                web_sys::WebGl2RenderingContext::RGBA,
+                web_sys::WebGl2RenderingContext::UNSIGNED_BYTE,
+                Some(&mut pixels),
+            )
+            .unwrap();
+            assert_eq!(gl.get_error(), web_sys::WebGl2RenderingContext::NO_ERROR);
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[0] > 120 && pixel[1] < 100)
+            );
+            pictures.push(pixels);
+        }
+        assert_ne!(pictures[0], pictures[1]);
+        assert_eq!(pictures[0], pictures[2]);
+        element.remove();
     }
 }

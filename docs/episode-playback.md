@@ -59,6 +59,22 @@ before conversion to seconds.
 
 ## Plots and playback
 
+Opening an episode selects the dockable **3D Stage**, using the same viewport
+and clock as Studio's other panels. During Hugging Face import, GPT-5.6 Terra
+reads the pinned repository and recorded samples, converts a supplied robot
+description to URDF when necessary, and resolves its joint bindings. The URDF,
+meshes and bindings are saved per project and dataset revision; absent models
+stay empty. Import failures leave the episodes available with a summary warning.
+Opening an episode only reads that saved result. Existing imports were amended
+once; Studio capture is outside this feature. Joint playback uses the existing
+message buffer's time lookup, with recorded units and mimic relations preserved.
+
+Studio robots carry their own `visualization` in the project's robot document:
+URDF, mesh assets, joint telemetry coordinates, and an optional tool link. Live
+and Studio-recorded poses use that configuration. The existing leader and follower
+definitions were written to the database once; no SO-ARM101 definition is kept
+in the repository or automatically inserted into new robot configurations.
+
 Selecting fields loads a complete bounded time window, following every page.
 Changing the window or selection replaces that read. Playback uses the loaded
 samples and does not fetch on each clock tick. Current values select the latest

@@ -29,6 +29,25 @@ pub(crate) struct DataCommands {
 
 /// Settings values admitted together by the data command facade.
 impl DataCommands {
+    pub(super) async fn dataset_robot(
+        &self,
+        selection: DatasetSelection,
+    ) -> Result<Option<spiral_robotics_common::datasets::DatasetRobot>, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .read(async move {
+                let _activity = commands.state.admit()?;
+                commands.require_catalog_ready()?;
+                let storage = commands.state.storage();
+                let inspection = storage.inspect_dataset(selection).await?;
+                let dataset = inspection.dataset();
+                Ok(storage
+                    .dataset_robot((dataset.resource_id(), dataset.version_id()))
+                    .await?)
+            })
+            .await?
+    }
     pub(super) async fn project_resources(
         &self,
     ) -> Result<Vec<ProjectResource>, BackendCommandError> {
@@ -406,11 +425,26 @@ impl DataCommands {
                 )
             })?;
         self.require_import_idle("a dataset")?;
-        self.state
+        let summary = self
+            .state
             .storage()
-            .import_huggingface_dataset(inspection)
+            .import_huggingface_dataset(inspection.clone())
             .await
-            .map_err(BackendCommandError::from)
+            .map_err(BackendCommandError::from)?;
+        match super::robot_visualization::RobotVisualization::analyze_import(
+            self.state.storage(),
+            &inspection,
+        )
+        .await
+        {
+            Ok(()) => Ok(summary),
+            Err(error) => {
+                tracing::warn!(%error, "Imported dataset robot analysis failed");
+                let mut warnings = summary.warnings().to_vec();
+                warnings.push("Episodes imported, but the 3D view could not be prepared.".into());
+                Ok(summary.with_warnings(warnings))
+            }
+        }
     }
 
     pub(super) async fn export_project(&self) -> Result<Vec<u8>, BackendCommandError> {

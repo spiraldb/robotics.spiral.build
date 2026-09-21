@@ -18,6 +18,8 @@ mod transfer;
 #[allow(unreachable_pub)]
 pub(crate) mod workflows;
 pub(crate) use transfer::StudioSnapshot;
+#[allow(unreachable_pub)]
+mod dataset_robots;
 mod robot_documents;
 pub use robot_documents::RobotDocumentWrite;
 

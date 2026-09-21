@@ -13,11 +13,12 @@ use std::fmt;
 use crate::urdf::Geometry;
 use web_sys::HtmlCanvasElement;
 
+use crate::RobotModel;
 use crate::camera::Camera;
 use crate::gesture::{Command, Drag, DragUpdate};
 use crate::render::{RenderFrame, Renderer};
 use crate::robot::{Frame, RobotScene, Target};
-use crate::urdf::Urdf;
+use std::rc::Rc;
 
 /// Why a canvas could not become a viewport.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,8 +40,9 @@ impl std::error::Error for ViewportError {}
 pub struct Viewport {
     canvas: HtmlCanvasElement,
     renderer: Renderer,
-    model: Urdf,
+    models: Vec<(String, Rc<RobotModel>)>,
     camera: Camera,
+    home: Camera,
     scene: RobotScene,
     drag: Option<Drag>,
 }
@@ -49,14 +51,14 @@ impl Viewport {
     /// Bind to a canvas, compiling the shader program.
     pub fn new(canvas: HtmlCanvasElement) -> Result<Self, ViewportError> {
         let renderer = Renderer::new(&canvas).map_err(ViewportError::Rendering)?;
-        let model = crate::urdf::Urdf::so101();
-        let scene = RobotScene::compose(&model, &Frame::default());
+
         Ok(Self {
             canvas,
             renderer,
-            model,
+            models: Vec::new(),
             camera: Camera::default(),
-            scene,
+            home: Camera::default(),
+            scene: RobotScene::default(),
             drag: None,
         })
     }
@@ -65,17 +67,50 @@ impl Viewport {
     ///
     /// Picking and anchors subsequently read this exact composed scene, so an
     /// overlay can never be calculated from a separately rebuilt pose.
-    pub fn draw(&mut self, frame: &Frame, pixel_ratio: f64) -> bool {
-        self.scene = RobotScene::compose(&self.model, frame);
+    pub fn draw(&mut self, frame: &Frame, pixel_ratio: f64) -> Result<bool, ViewportError> {
+        let models = frame
+            .models()
+            .map(|(id, model)| (id.to_owned(), model.clone()))
+            .collect::<Vec<_>>();
+        if models.len() != self.models.len()
+            || models
+                .iter()
+                .zip(&self.models)
+                .any(|((id, model), (old_id, old))| id != old_id || !Rc::ptr_eq(model, old))
+        {
+            self.renderer
+                .load_meshes(
+                    &models
+                        .iter()
+                        .flat_map(|(id, model)| {
+                            model
+                                .meshes
+                                .iter()
+                                .map(move |(name, values)| (format!("{id}/{name}"), values.clone()))
+                        })
+                        .collect(),
+                )
+                .map_err(ViewportError::Rendering)?;
+            if let Some((_, model)) = models.first() {
+                let (target, distance) = model.framing();
+                self.home = Camera::framed_on(
+                    target,
+                    distance + models.len().saturating_sub(1) as f32 * crate::robot::BENCH_SPACING,
+                );
+                self.camera = self.home;
+            }
+            self.models = models;
+        }
+        self.scene = RobotScene::compose(frame);
         if let Some(aspect_ratio) = self.renderer.resize(&self.canvas, pixel_ratio) {
             self.renderer.draw(RenderFrame::new(
                 &self.camera,
                 aspect_ratio,
                 self.scene.scene(),
             ));
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -114,21 +149,27 @@ impl Viewport {
 
     /// Apply one discrete navigation command.
     pub fn command(&mut self, command: Command) {
-        command.apply(&mut self.camera);
+        if command == Command::Home {
+            self.camera = self.home;
+        } else {
+            command.apply(&mut self.camera);
+        }
     }
 
     /// Frame one arm in the current scene, or restore home when no arm is named.
     pub fn frame_robot(&mut self, robot: Option<&str>) -> bool {
         let Some(robot) = robot else {
-            self.camera = Camera::default();
+            self.camera = self.home;
             return true;
         };
         let Some(base) = self.scene.robot_origin(robot) else {
             return false;
         };
-        self.camera = self
-            .camera
-            .focused_on(base + Vec3::new(0.03, 0.0, 0.17), 0.68);
+        let Some((_, model)) = self.models.iter().find(|(id, _)| id == robot) else {
+            return false;
+        };
+        let (target, distance) = model.framing();
+        self.camera = Camera::framed_on(base + target, distance);
         true
     }
 

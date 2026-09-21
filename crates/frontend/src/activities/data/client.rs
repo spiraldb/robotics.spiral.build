@@ -9,6 +9,15 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
+    pub(super) fn robot(
+        &self,
+        selection: &DatasetSelection,
+    ) -> impl Future<
+        Output = Result<Option<spiral_robotics_common::datasets::DatasetRobot>, CommandError>,
+    > + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/robot").json(selection))
+    }
     pub(super) fn inspect_import(
         &self,
         source: spiral_robotics_common::datasets::HuggingFaceDatasetSource,

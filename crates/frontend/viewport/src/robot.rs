@@ -1,8 +1,7 @@
 //! Arms, joints, and cameras, turned into a scene.
 //!
 //! This is the only module here that knows what any of those words mean, and it
-//! owns both the neutral presentation pose and renderer-facing robot
-//! description. What comes back is a [`Scene`] the layers below can draw
+//! receives each robot's model and joint coordinates. What comes back is a [`Scene`] the layers below can draw
 //! without learning any of it, plus the table that says which [`EntityKey`] was
 //! which thing.
 //!
@@ -12,34 +11,15 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::arm::{ArmPose, Joint};
+use crate::RobotModel;
 use crate::scene::{Condition, Entity, EntityKey, EntityShape, Interaction, Scene};
 use crate::urdf::{Geometry, Urdf};
 use glam::{EulerRot, Mat4, Quat, Vec3};
+use std::rc::Rc;
 
 /// How far apart two arms stand on the bench, in metres.
 pub(crate) const BENCH_SPACING: f32 = 0.34;
 
-/// The link angles that make a centered calibration recognizable on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct RestPose {
-    lift_deg: f64,
-    elbow_deg: f64,
-    wrist_flex_deg: f64,
-}
-
-const SO101_REST_POSE: RestPose = RestPose {
-    lift_deg: 30.0,
-    elbow_deg: 60.0,
-    wrist_flex_deg: 30.0,
-};
-
-/// Place a description's joints from measured SO-101 angles.
-///
-/// The description's own zero is the mechanical one — every joint centered,
-/// arm straight up — while a calibration's zero is the middle of whatever
-/// travel the operator happened to sweep. This presentation mapping bridges
-/// those coordinate systems without making the domain depend on the renderer.
 /// One addressable physical thing on the bench.
 ///
 /// The studio maps these onto its own selection type. They are stated here
@@ -146,27 +126,11 @@ const FRUSTUM_DEPTH: f32 = 0.28;
 #[derive(Clone, Debug)]
 struct ArmPlacement {
     id: String,
-    accent: [f32; 4],
-    pose: PoseState,
+    presentation: ArmPresentation,
     cameras: Vec<CameraPlacement>,
 }
 
 impl ArmPlacement {
-    /// Start an offline arm at rest.
-    fn new(id: impl Into<String>, accent: [f32; 4]) -> Self {
-        Self {
-            id: id.into(),
-            accent,
-            pose: PoseState::default(),
-            cameras: Vec::new(),
-        }
-    }
-
-    fn with_live_pose(mut self, angles: ArmPose) -> Self {
-        self.pose = PoseState { live: true, angles };
-        self
-    }
-
     /// Where this arm stands, centred with the others on the origin.
     fn base_transform(index: usize, count: usize) -> Mat4 {
         debug_assert!(count > 0 && index < count);
@@ -178,7 +142,7 @@ impl ArmPlacement {
     }
 
     fn display_color(&self, color: [f32; 4]) -> [f32; 4] {
-        if self.pose.live {
+        if self.presentation.tracked {
             color
         } else {
             const OFFLINE_TINT: [f32; 3] = [0.82, 0.82, 0.80];
@@ -193,22 +157,28 @@ impl ArmPlacement {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct PoseState {
-    live: bool,
-    angles: ArmPose,
-}
-
-/// The appearance and optional live pose of one arm in a [`Frame`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A robot's supplied model, pose, and appearance for one draw.
+#[derive(Clone, Debug)]
 pub struct ArmPresentation {
-    accent: [f32; 4],
-    pose: Option<ArmPose>,
+    model: Rc<RobotModel>,
+    positions: BTreeMap<String, f32>,
+    accent: Option<[f32; 4]>,
+    tracked: bool,
 }
 
 impl ArmPresentation {
-    pub fn new(accent: [f32; 4], pose: Option<ArmPose>) -> Self {
-        Self { accent, pose }
+    pub fn new(model: Rc<RobotModel>, positions: BTreeMap<String, f32>) -> Self {
+        Self {
+            model,
+            positions,
+            accent: None,
+            tracked: true,
+        }
+    }
+    pub fn with_appearance(mut self, accent: [f32; 4], tracked: bool) -> Self {
+        self.accent = Some(accent);
+        self.tracked = tracked;
+        self
     }
 }
 
@@ -269,6 +239,12 @@ pub struct Frame {
 }
 
 impl Frame {
+    pub(crate) fn models(&self) -> impl Iterator<Item = (&str, &Rc<RobotModel>)> {
+        self.placements
+            .iter()
+            .map(|arm| (arm.id.as_str(), &arm.presentation.model))
+    }
+
     pub fn new(grid_enabled: bool) -> Self {
         Self {
             grid_enabled,
@@ -276,8 +252,7 @@ impl Frame {
         }
     }
 
-    /// Add one arm. `None` means the arm has no usable live pose and should be
-    /// shown at the muted presentation rest pose.
+    /// Add one robot with its configured model and joint coordinates.
     pub fn add_arm(
         &mut self,
         id: impl Into<String>,
@@ -293,16 +268,17 @@ impl Frame {
         if !presentation
             .accent
             .into_iter()
+            .flatten()
             .all(|component| component.is_finite() && (0.0..=1.0).contains(&component))
         {
             return Err(FrameError::InvalidAccent(id));
         }
 
-        let placement = match presentation.pose {
-            Some(pose) => ArmPlacement::new(id, presentation.accent).with_live_pose(pose),
-            None => ArmPlacement::new(id, presentation.accent),
-        };
-        self.placements.push(placement);
+        self.placements.push(ArmPlacement {
+            id,
+            presentation,
+            cameras: Vec::new(),
+        });
         Ok(self)
     }
 
@@ -328,7 +304,12 @@ impl Frame {
             });
         }
         if let Some(frame) = mount.attachment.frame.as_deref()
-            && Urdf::so101().link_index(frame).is_none()
+            && placement
+                .presentation
+                .model
+                .description
+                .link_index(frame)
+                .is_none()
         {
             return Err(FrameError::UnknownCameraFrame {
                 robot: robot.to_owned(),
@@ -406,7 +387,12 @@ impl Frame {
         };
         match target {
             Target::Robot { .. } => true,
-            Target::Joint { joint, .. } => Joint::named(joint).is_some(),
+            Target::Joint { joint, .. } => placement
+                .presentation
+                .model
+                .description
+                .joint(joint)
+                .is_some(),
             Target::Camera { role, .. } => {
                 placement.cameras.iter().any(|camera| camera.role == *role)
             }
@@ -545,7 +531,7 @@ impl RobotScene {
 }
 
 impl RobotScene {
-    pub(crate) fn compose(urdf: &Urdf, frame: &Frame) -> Self {
+    pub(crate) fn compose(frame: &Frame) -> Self {
         let mut entity_catalog = EntityCatalog::default();
         let mut scene = Scene::new(frame.grid_enabled);
         let mut robot_origins = BTreeMap::new();
@@ -557,8 +543,8 @@ impl RobotScene {
                 placement.id.clone(),
                 base_transform.transform_point3(Vec3::ZERO),
             );
-            let joint_positions = urdf.so101_joint_positions(&placement.pose.angles);
-            let link_transforms = urdf.pose(&joint_positions);
+            let urdf = &placement.presentation.model.description;
+            let link_transforms = urdf.recorded_pose(&placement.presentation.positions);
 
             for (link_index, link) in urdf.links().iter().enumerate() {
                 let target = match urdf.controlling_joint(link_index) {
@@ -575,13 +561,19 @@ impl RobotScene {
 
                 for visual in link.visuals() {
                     let color = match visual.material() {
-                        Some("accent") => placement.accent,
+                        Some("accent") => placement.presentation.accent.unwrap_or(visual.color()),
                         _ => visual.color(),
                     };
                     scene.push(Entity::new(
                         key,
                         EntityShape::solid(
-                            visual.geometry().clone(),
+                            match visual.geometry() {
+                                Geometry::Mesh { filename, scale } => Geometry::Mesh {
+                                    filename: format!("{}/{}", placement.id, filename),
+                                    scale: *scale,
+                                },
+                                geometry => geometry.clone(),
+                            },
                             base_transform * link_transforms[link_index] * visual.origin().matrix(),
                             placement.display_color(color),
                         ),
@@ -617,7 +609,12 @@ impl RobotScene {
                         base_transform
                             * camera_transform
                             * Mat4::from_translation(Vec3::new(0.0, 0.0, FRUSTUM_DEPTH * 0.5)),
-                        placement.display_color(placement.accent),
+                        placement.display_color(
+                            placement
+                                .presentation
+                                .accent
+                                .unwrap_or([0.29, 0.56, 0.85, 1.0]),
+                        ),
                     ),
                     state,
                 ));
@@ -662,42 +659,6 @@ impl EntityCatalog {
 }
 
 impl Urdf {
-    /// Place this description's joints from measured SO-101 angles.
-    fn so101_joint_positions(&self, angles: &ArmPose) -> BTreeMap<String, f32> {
-        let rest_pose = SO101_REST_POSE;
-        let maximum_gripper_position = self
-            .joint("gripper")
-            .and_then(|joint| joint.limit())
-            .map_or(0.0, |(_, upper)| upper);
-
-        [
-            ("shoulder_pan", angles.pan_degrees().to_radians() as f32),
-            (
-                "shoulder_lift",
-                (rest_pose.lift_deg + angles.lift_degrees()).to_radians() as f32,
-            ),
-            (
-                "elbow_flex",
-                (rest_pose.elbow_deg + angles.elbow_degrees()).to_radians() as f32,
-            ),
-            (
-                "wrist_flex",
-                (rest_pose.wrist_flex_deg + angles.wrist_flex_degrees()).to_radians() as f32,
-            ),
-            (
-                "wrist_roll",
-                angles.wrist_roll_degrees().to_radians() as f32,
-            ),
-            (
-                "gripper",
-                angles.gripper_opening().clamp(0.0, 1.0) as f32 * maximum_gripper_position,
-            ),
-        ]
-        .into_iter()
-        .map(|(joint_name, position)| (joint_name.to_owned(), position))
-        .collect()
-    }
-
     /// The nearest movable joint above `link_index`, which moves that link.
     fn controlling_joint(&self, mut link_index: usize) -> Option<String> {
         while link_index != self.root() {
@@ -712,26 +673,20 @@ impl Urdf {
         }
         None
     }
-
-    /// Where the gripper tip sits, in millimetres from the arm's base.
-    pub(crate) fn so101_tool_position(&self, angles: &ArmPose) -> Option<Vec3> {
-        let tool_link_index = self.link_index("tool_link")?;
-        let link_transforms = self.pose(&self.so101_joint_positions(angles));
-        Some(
-            link_transforms
-                .get(tool_link_index)?
-                .transform_point3(Vec3::ZERO)
-                * 1000.0,
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::SO101_JOINTS;
-
     use super::*;
-    use crate::urdf::SO101_URDF;
+
+    struct Fixture;
+    impl Fixture {
+        fn presentation() -> ArmPresentation {
+            let model = RobotModel::parse(r#"<robot name="test"><link name="base"/><link name="tip"><visual><geometry><box size="0.2 0.1 0.1"/></geometry></visual></link><joint name="hinge" type="continuous"><parent link="base"/><child link="tip"/></joint></robot>"#, &BTreeMap::new()).unwrap();
+            ArmPresentation::new(Rc::new(model), BTreeMap::from([("hinge".into(), 0.0)]))
+                .with_appearance([0.2, 0.3, 0.4, 1.0], false)
+        }
+    }
 
     #[test]
     fn every_shell_of_one_joint_shares_its_key() {
@@ -748,6 +703,49 @@ mod tests {
         assert_eq!(first, again, "picking any shell selects the one joint");
         assert_ne!(first, other);
         assert_eq!(entity_catalog.entities.len(), 2);
+    }
+
+    #[test]
+    fn each_robot_uses_its_own_model_for_joints_mounts_and_tool_position() {
+        let model = Rc::new(RobotModel::parse(r#"<robot name="slider"><link name="base"/><link name="tip"><visual><geometry><sphere radius="0.02"/></geometry></visual></link><joint name="slide" type="prismatic"><parent link="base"/><child link="tip"/><axis xyz="1 0 0"/></joint></robot>"#, &BTreeMap::new()).unwrap());
+        let positions = BTreeMap::from([("slide".into(), 0.1)]);
+        assert_eq!(
+            model.tool_position("tip", &positions),
+            Some([100.0, 0.0, 0.0])
+        );
+        let mut frame = Frame::new(false);
+        frame
+            .add_arm("slider", ArmPresentation::new(model, positions))
+            .unwrap();
+        frame.add_arm("arm", Fixture::presentation()).unwrap();
+        frame
+            .mount_camera(
+                "slider",
+                CameraMount::new(
+                    "wrist",
+                    CameraAttachment::new(Some("tip"), [0.0; 3], [0.0; 3]),
+                    60.0,
+                ),
+            )
+            .unwrap();
+        let scene = RobotScene::compose(&frame);
+        for (robot, joint) in [("slider", "slide"), ("arm", "hinge")] {
+            assert!(
+                scene
+                    .key(&Target::Joint {
+                        robot: robot.into(),
+                        joint: joint.into()
+                    })
+                    .is_some()
+            );
+        }
+        assert!(
+            RobotScene::compose(&Frame::default())
+                .scene()
+                .entities()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
@@ -768,17 +766,13 @@ mod tests {
     fn frame_rejects_malformed_stable_configuration() {
         let mut frame = Frame::new(true);
         assert_eq!(
-            frame
-                .add_arm("", ArmPresentation::new([0.2, 0.3, 0.4, 1.0], None))
-                .unwrap_err(),
+            frame.add_arm("", Fixture::presentation()).unwrap_err(),
             FrameError::EmptyRobotId
         );
-        frame
-            .add_arm("follower", ArmPresentation::new([0.2, 0.3, 0.4, 1.0], None))
-            .unwrap();
+        frame.add_arm("follower", Fixture::presentation()).unwrap();
         assert_eq!(
             frame
-                .add_arm("follower", ArmPresentation::new([0.2, 0.3, 0.4, 1.0], None),)
+                .add_arm("follower", Fixture::presentation(),)
                 .unwrap_err(),
             FrameError::DuplicateRobot("follower".to_owned())
         );
@@ -820,15 +814,13 @@ mod tests {
     #[test]
     fn frame_only_records_appearance_for_targets_it_contains() {
         let mut frame = Frame::new(false);
-        frame
-            .add_arm("follower", ArmPresentation::new([0.2, 0.3, 0.4, 1.0], None))
-            .unwrap();
+        frame.add_arm("follower", Fixture::presentation()).unwrap();
         let robot = Target::Robot {
             robot: "follower".to_owned(),
         };
         let elbow = Target::Joint {
             robot: "follower".to_owned(),
-            joint: "elbow_flex".to_owned(),
+            joint: "hinge".to_owned(),
         };
         let unknown = Target::Joint {
             robot: "follower".to_owned(),
@@ -849,13 +841,8 @@ mod tests {
     #[test]
     fn every_composed_shape_resolves_to_a_semantic_target() {
         let mut frame = Frame::new(false);
-        frame
-            .add_arm(
-                "follower",
-                ArmPresentation::new([0.2, 0.3, 0.4, 1.0], Some(ArmPose::default())),
-            )
-            .unwrap();
-        let scene = RobotScene::compose(&Urdf::so101(), &frame);
+        frame.add_arm("follower", Fixture::presentation()).unwrap();
+        let scene = RobotScene::compose(&frame);
 
         assert!(scene.scene().entities().next().is_some());
         for entity in scene.scene().entities() {
@@ -866,117 +853,5 @@ mod tests {
             assert!(scene.scene().anchor_point(entity.key()).is_some());
         }
         assert_eq!(scene.robot_origin("follower"), Some(Vec3::ZERO));
-    }
-
-    /// Where each pivot of the shipped description lands for `angles`.
-    fn pivots(angles: &ArmPose) -> BTreeMap<&'static str, Vec3> {
-        let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let transforms = urdf.pose(&urdf.so101_joint_positions(angles));
-        [
-            "upper_arm_link",
-            "forearm_link",
-            "wrist_link",
-            "gripper_link",
-        ]
-        .into_iter()
-        .map(|name| {
-            let index = urdf.link_index(name).unwrap();
-            (name, transforms[index].transform_point3(Vec3::ZERO))
-        })
-        .collect()
-    }
-
-    #[test]
-    fn a_centered_arm_rests_in_a_reaching_pose() {
-        let at = pivots(&ArmPose::default());
-
-        assert!((at["wrist_link"].z - at["forearm_link"].z).abs() < 1e-6);
-        assert!(at["forearm_link"].x > at["upper_arm_link"].x);
-        assert!(at["gripper_link"].x > at["wrist_link"].x);
-        assert!(at["gripper_link"].z < at["wrist_link"].z);
-    }
-
-    #[test]
-    fn lifting_the_shoulder_raises_the_tool() {
-        let lowered = pivots(&ArmPose::default().with_lift_degrees(20.0));
-        let raised = pivots(&ArmPose::default().with_lift_degrees(-20.0));
-
-        assert!(raised["forearm_link"].z > lowered["forearm_link"].z);
-    }
-
-    #[test]
-    fn panning_swings_the_arm_about_the_vertical_axis() {
-        let ahead = pivots(&ArmPose::default());
-        let turned = pivots(&ArmPose::default().with_pan_degrees(90.0));
-
-        assert!(turned["gripper_link"].x.abs() < 1e-6);
-        assert!((turned["gripper_link"].y - ahead["gripper_link"].x).abs() < 1e-6);
-        assert!((turned["gripper_link"].z - ahead["gripper_link"].z).abs() < 1e-6);
-    }
-
-    #[test]
-    fn link_lengths_come_from_the_description_for_every_pose() {
-        let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let reference = pivots(&ArmPose::default());
-        let bent = pivots(
-            &ArmPose::default()
-                .with_pan_degrees(45.0)
-                .with_lift_degrees(-35.0)
-                .with_elbow_degrees(80.0)
-                .with_wrist_flex_degrees(-70.0)
-                .with_wrist_roll_degrees(10.0)
-                .with_gripper_normalized(0.5),
-        );
-
-        for (child, parent) in [
-            ("forearm_link", "upper_arm_link"),
-            ("wrist_link", "forearm_link"),
-            ("gripper_link", "wrist_link"),
-        ] {
-            let stated = urdf
-                .joint_between(parent, child)
-                .unwrap()
-                .origin()
-                .translation()
-                .length();
-            for placed in [&reference, &bent] {
-                assert!(
-                    ((placed[child] - placed[parent]).length() - stated).abs() < 1e-6,
-                    "{parent} to {child} should stay {stated} m apart"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_gripper_fraction_opens_the_described_jaw() {
-        let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let (_, open) = urdf.joint("gripper").unwrap().limit().unwrap();
-        let jaw = |gripper_opening: f64| {
-            urdf.so101_joint_positions(
-                &ArmPose::default().with_gripper_normalized(1.0 - 2.0 * gripper_opening),
-            )["gripper"]
-        };
-
-        assert_eq!(jaw(0.0), 0.0);
-        assert_eq!(jaw(1.0), open);
-        assert!((jaw(0.5) - open / 2.0).abs() < 1e-6);
-        assert_eq!(jaw(4.0), open);
-        assert_eq!(jaw(-1.0), 0.0);
-    }
-
-    #[test]
-    fn every_motor_places_a_joint_of_the_description() {
-        let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let positions = urdf.so101_joint_positions(&ArmPose::default());
-
-        for joint in SO101_JOINTS {
-            assert!(
-                positions.contains_key(joint.name()),
-                "{} places nothing",
-                joint.name()
-            );
-        }
-        assert_eq!(positions.len(), SO101_JOINTS.len());
     }
 }

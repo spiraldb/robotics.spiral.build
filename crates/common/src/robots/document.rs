@@ -15,6 +15,15 @@ impl RobotDocument {
     pub fn object(&self) -> &Map<String, Value> {
         &self.0
     }
+    pub fn visualization(
+        &self,
+    ) -> Result<Option<super::visualization::RobotVisualization>, String> {
+        self.0
+            .get("visualization")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()).map_err(|error| error.to_string()))
+            .transpose()
+    }
     pub fn id(&self) -> Result<&str, String> {
         let id = self
             .0
@@ -33,6 +42,7 @@ impl RobotDocument {
     }
     pub fn validate(&self) -> Result<(), String> {
         self.id()?;
+        self.visualization()?;
         if self
             .0
             .get("schema_version")

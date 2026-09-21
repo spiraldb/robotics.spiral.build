@@ -21,7 +21,7 @@ use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 use std::collections::BTreeSet;
 use wasm_bindgen::JsCast as _;
 
-const LAYOUT_SCOPE: &str = "spiral_robotics.panel-layout.v14.data";
+const LAYOUT_SCOPE: &str = "spiral_robotics.panel-layout.v15.data";
 const IMPORT_PANEL: &str = "data-import";
 /// The split between the primary tile and the camera column.
 const EDITORS_SPLIT: &str = "data-editors";
@@ -55,7 +55,7 @@ impl DataSelection {
             }),
             episode: use_signal(|| initial_episode.clone()),
             importing: use_signal(|| false),
-            active_panel: use_signal(|| initial_episode.map(|_| PanelId::new("plots"))),
+            active_panel: use_signal(|| initial_episode.map(|_| PanelId::new("stage"))),
         }
     }
     fn activate(mut self, panel: &str) {
@@ -315,9 +315,9 @@ impl DataLayout {
 
     fn initial(camera_ids: &[PanelId], browsing: bool) -> PanelLayout {
         let primary_ids = if browsing {
-            vec!["overview", "plots", IMPORT_PANEL]
+            vec!["overview", "stage", "plots", IMPORT_PANEL]
         } else {
-            vec!["plots"]
+            vec!["stage", "plots"]
         };
         let primary = LayoutNode::tile("primary", primary_ids.into_iter().map(PanelId::new));
         let editors = match Self::camera_grid(camera_ids, 0) {
@@ -506,7 +506,7 @@ pub(in crate::activities) fn DataPanels(
         let mut selection = selection;
         selection.dataset.set(Some(opened.dataset().clone()));
         selection.episode.set(Some(opened));
-        selection.activate("plots");
+        selection.activate("stage");
     });
     let start_import = move |(): ()| {
         let mut selection = selection;
@@ -556,6 +556,9 @@ pub(in crate::activities) fn DataPanels(
 
     // The primary tile keeps a stable tab order; content follows the selection.
     let mut panels = vec![
+        Panel::new("stage", "3D Stage", "primary", rsx! {
+            super::robot_stage::RobotStage { episode: episode.clone(), streams: streams.clone(), transport: transport.clone() }
+        }).with_class("data-primary-panel"),
         Panel::new(
             "catalog",
             "Datasets",
@@ -691,7 +694,7 @@ pub(in crate::activities) fn DataPanels(
                 layout: layout.layout,
                 on_layout_change: move |actual| layout.observe(&actual, &canonical),
                 active_panel: (selection.active_panel)(),
-                layout_scope: Some(if browsing { LAYOUT_SCOPE } else { "spiral_robotics.panel-layout.v1.comparison-episode" }.to_owned()),
+                layout_scope: Some(if browsing { LAYOUT_SCOPE } else { "spiral_robotics.panel-layout.v2.comparison-episode" }.to_owned()),
                 on_panel_activate: move |id: PanelId| { let mut selection = selection; selection.active_panel.set(Some(id)); },
                 on_panel_close: move |id: PanelId| {
                     if id.as_str() == IMPORT_PANEL {
@@ -845,7 +848,14 @@ mod tests {
         }
         assert!(!DataLayout::same_arrangement(&original.root, &resized.root));
         let mut docked = original.clone();
-        docked.dock_panel(&PanelId::new("plots"), &"timeline".into(), DockZone::Center);
+        docked.dock_panel(&PanelId::new("stage"), &"timeline".into(), DockZone::Center);
+        assert_eq!(
+            docked
+                .tile_for_panel(&PanelId::new("stage"))
+                .unwrap()
+                .as_str(),
+            "timeline"
+        );
         assert!(!DataLayout::same_arrangement(&original.root, &docked.root));
     }
 
@@ -958,7 +968,7 @@ mod tests {
         let cameras = [PanelId::new("camera:/top#a")];
         let layout = DataLayout::initial(&cameras, false);
         assert!(layout.valid());
-        for panel in ["plots", "timeline", "camera:/top#a"] {
+        for panel in ["stage", "plots", "timeline", "camera:/top#a"] {
             assert!(layout.tile_for_panel(&PanelId::new(panel)).is_some());
         }
         for panel in ["catalog", "overview", IMPORT_PANEL] {

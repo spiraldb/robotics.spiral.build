@@ -76,13 +76,16 @@ pub(crate) struct RobotSelection {
     pointed: Signal<Option<Selection>>,
 }
 impl RobotSelection {
+    pub(crate) fn use_empty() -> Self {
+        use_hook(|| Self {
+            selected: Signal::new(None),
+            pointed: Signal::new(None),
+        })
+    }
     pub(crate) fn use_selection(
         snapshot: impl Readable<Target = RobotSetupSnapshot> + Copy + 'static,
     ) -> Self {
-        let selection = use_hook(|| Self {
-            selected: Signal::new(None),
-            pointed: Signal::new(None),
-        });
+        let selection = Self::use_empty();
         let mut selected = selection.selected;
         use_effect(move || {
             let next = snapshot

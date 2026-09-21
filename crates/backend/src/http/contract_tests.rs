@@ -92,7 +92,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 74);
+    assert_eq!(count, 78);
     for retired in [
         "/robots/setup",
         "/serial-ports/identify",
@@ -112,6 +112,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
     assert!(contract["paths"]["/curations/save"]["post"].is_object());
     assert!(contract["paths"]["/curation-runs/{id}"]["get"].is_object());
     assert!(contract["paths"]["/queries/episode"]["post"].is_object());
+    assert!(contract["paths"]["/datasets/robot"]["post"].is_object());
     assert!(contract["paths"].get("/project/setup").is_none());
     fixture.shutdown().await;
 }
