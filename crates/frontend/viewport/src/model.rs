@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 pub struct RobotModel {
     pub(crate) description: Urdf,
     pub(crate) meshes: BTreeMap<String, Vec<f32>>,
+    pub(crate) grid_height: f32,
 }
 
 impl RobotModel {
@@ -73,10 +74,13 @@ impl RobotModel {
         {
             return Err("Robot description has no visual geometry".into());
         }
-        Ok(Self {
+        let mut model = Self {
             description,
             meshes,
-        })
+            grid_height: 0.0,
+        };
+        model.grid_height = model.bounds(&BTreeMap::new()).0.z;
+        Ok(model)
     }
 
     pub fn mesh_files(urdf: &str) -> Result<Vec<String>, String> {
@@ -112,27 +116,23 @@ impl RobotModel {
         self.description.independent_joints()
     }
 
-    pub(crate) fn framing(&self) -> (Vec3, f32) {
-        let transforms = self.description.pose(&BTreeMap::new());
-        let mut minimum = Vec3::ZERO;
-        let mut maximum = Vec3::ZERO;
+    pub(crate) fn bounds(&self, positions: &BTreeMap<String, f32>) -> (Vec3, Vec3) {
+        let transforms = self.description.recorded_pose(positions);
+        let mut minimum = Vec3::splat(f32::INFINITY);
+        let mut maximum = Vec3::splat(f32::NEG_INFINITY);
         for (visual, transform) in self.description.visuals(&transforms) {
             let extent = match visual.geometry() {
                 Geometry::Box { size } => *size * 0.5,
                 Geometry::Sphere { radius } => Vec3::splat(*radius),
                 Geometry::Cylinder { radius, length } => Vec3::new(*radius, *radius, *length * 0.5),
                 Geometry::Mesh { filename, scale } => {
-                    self.meshes.get(filename).map_or(Vec3::ZERO, |vertices| {
-                        vertices
-                            .as_chunks::<6>()
-                            .0
-                            .iter()
-                            .fold(Vec3::ZERO, |extent, vertex| {
-                                extent.max(
-                                    (Vec3::new(vertex[0], vertex[1], vertex[2]) * *scale).abs(),
-                                )
-                            })
-                    })
+                    for vertex in self.meshes[filename].as_chunks::<6>().0 {
+                        let point = transform
+                            .transform_point3(Vec3::new(vertex[0], vertex[1], vertex[2]) * *scale);
+                        minimum = minimum.min(point);
+                        maximum = maximum.max(point);
+                    }
+                    continue;
                 }
             };
             for x in [-1.0, 1.0] {
@@ -145,10 +145,7 @@ impl RobotModel {
                 }
             }
         }
-        (
-            (minimum + maximum) * 0.5,
-            (maximum - minimum).length().max(0.1) * 1.8,
-        )
+        (minimum, maximum)
     }
 }
 
@@ -203,12 +200,15 @@ mod tests {
 
     #[test]
     fn supplied_meshes_are_required_and_resolve_scaled_geometry() {
-        let urdf = r#"<robot name="mesh"><link name="base"><visual><geometry><mesh filename="arm.stl" scale="2 2 2"/></geometry></visual></link></robot>"#;
+        let urdf = r#"<robot name="mesh"><link name="base"><visual><origin xyz="5 0 1"/><geometry><mesh filename="arm.stl" scale="-2 2 2"/></geometry></visual></link></robot>"#;
         let stl = b"solid arm\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid arm\n";
         assert!(RobotModel::parse(urdf, &BTreeMap::new()).is_err());
         let model =
             RobotModel::parse(urdf, &BTreeMap::from([("arm.stl".into(), stl.to_vec())])).unwrap();
         assert_eq!(model.meshes["arm.stl"].len(), 18);
-        assert!(model.framing().1 > 3.0);
+        assert_eq!(
+            model.bounds(&BTreeMap::new()),
+            (Vec3::new(3.0, 0.0, 1.0), Vec3::new(5.0, 2.0, 1.0))
+        );
     }
 }

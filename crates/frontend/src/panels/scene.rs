@@ -481,7 +481,9 @@ pub(crate) fn Viewport(
                 if let Some(hovered) = hover() {
                     HoverNote { telemetry, hover: hovered, episode_preview: recorded_active }
                 }
-                Legend { selection, arms, on_select }
+                if telemetry.is_some() {
+                    Legend { selection, arms, on_select }
+                }
                 if let Some(sample) = source.sample() {
                     div {
                         class: "pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-sm border border-line bg-surface px-2 py-1 font-mono text-[10px] tabular-nums text-ink-soft",
@@ -529,7 +531,7 @@ pub(crate) fn Viewport(
                                 }
                             }
                         },
-                        title: "Restore the default camera (0)",
+                        title: "Frame all robots (0)",
                         "Home"
                     }
                 }
@@ -1115,7 +1117,6 @@ mod source_tests {
 mod dataset_tests {
     use super::*;
     use spiral_robotics_viewport::Frame;
-    use wasm_bindgen::JsCast as _;
     use wasm_bindgen_test::wasm_bindgen_test;
 
     #[wasm_bindgen_test]
@@ -1155,10 +1156,6 @@ mod dataset_tests {
         let mut viewport = Bench::new(canvas).unwrap();
         let mut pictures = Vec::new();
         for (angle, home) in [(0.0, false), (1.0, false), (0.0, true)] {
-            if home {
-                viewport.command(Command::ZoomIn);
-                viewport.command(Command::Home);
-            }
             let mut frame = Frame::new(true);
             frame
                 .add_arm(
@@ -1170,6 +1167,11 @@ mod dataset_tests {
                 )
                 .unwrap();
             assert!(viewport.draw(&frame, 1.0).unwrap());
+            if home {
+                viewport.command(Command::ZoomIn);
+                viewport.command(Command::Home);
+                assert!(viewport.draw(&frame, 1.0).unwrap());
+            }
             let mut pixels = vec![0; 256 * 256 * 4];
             gl.read_pixels_with_opt_u8_array(
                 0,

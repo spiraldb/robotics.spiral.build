@@ -42,7 +42,7 @@ pub struct Viewport {
     renderer: Renderer,
     models: Vec<(String, Rc<RobotModel>)>,
     camera: Camera,
-    home: Camera,
+    frame: Frame,
     scene: RobotScene,
     drag: Option<Drag>,
 }
@@ -57,7 +57,7 @@ impl Viewport {
             renderer,
             models: Vec::new(),
             camera: Camera::default(),
-            home: Camera::default(),
+            frame: Frame::default(),
             scene: RobotScene::default(),
             drag: None,
         })
@@ -68,6 +68,7 @@ impl Viewport {
     /// Picking and anchors subsequently read this exact composed scene, so an
     /// overlay can never be calculated from a separately rebuilt pose.
     pub fn draw(&mut self, frame: &Frame, pixel_ratio: f64) -> Result<bool, ViewportError> {
+        self.frame = frame.clone();
         let models = frame
             .models()
             .map(|(id, model)| (id.to_owned(), model.clone()))
@@ -91,14 +92,7 @@ impl Viewport {
                         .collect(),
                 )
                 .map_err(ViewportError::Rendering)?;
-            if let Some((_, model)) = models.first() {
-                let (target, distance) = model.framing();
-                self.home = Camera::framed_on(
-                    target,
-                    distance + models.len().saturating_sub(1) as f32 * crate::robot::BENCH_SPACING,
-                );
-                self.camera = self.home;
-            }
+            self.frame_robot(None);
             self.models = models;
         }
         self.scene = RobotScene::compose(frame);
@@ -150,26 +144,19 @@ impl Viewport {
     /// Apply one discrete navigation command.
     pub fn command(&mut self, command: Command) {
         if command == Command::Home {
-            self.camera = self.home;
+            self.frame_robot(None);
         } else {
             command.apply(&mut self.camera);
         }
     }
 
-    /// Frame one arm in the current scene, or restore home when no arm is named.
+    /// Frame one arm in its current pose, or all arms when no arm is named.
     pub fn frame_robot(&mut self, robot: Option<&str>) -> bool {
-        let Some(robot) = robot else {
-            self.camera = self.home;
-            return true;
-        };
-        let Some(base) = self.scene.robot_origin(robot) else {
+        let Some((target, distance)) = self.frame.framing(robot) else {
             return false;
         };
-        let Some((_, model)) = self.models.iter().find(|(id, _)| id == robot) else {
-            return false;
-        };
-        let (target, distance) = model.framing();
-        self.camera = Camera::framed_on(base + target, distance);
+        let aspect = self.canvas.client_width().max(1) as f32 / self.height();
+        self.camera = Camera::framed_on(target, distance / aspect.min(1.0));
         true
     }
 

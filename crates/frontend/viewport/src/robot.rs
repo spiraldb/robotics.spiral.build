@@ -239,6 +239,26 @@ pub struct Frame {
 }
 
 impl Frame {
+    pub(crate) fn framing(&self, robot: Option<&str>) -> Option<(Vec3, f32)> {
+        let mut minimum = Vec3::splat(f32::INFINITY);
+        let mut maximum = Vec3::splat(f32::NEG_INFINITY);
+        for (index, arm) in self.placements.iter().enumerate() {
+            if robot.is_some_and(|robot| robot != arm.id) {
+                continue;
+            }
+            let base = ArmPlacement::base_transform(index, self.placements.len());
+            let (lower, upper) = arm.presentation.model.bounds(&arm.presentation.positions);
+            minimum = minimum.min(base.transform_point3(lower));
+            maximum = maximum.max(base.transform_point3(upper));
+        }
+        minimum.is_finite().then(|| {
+            (
+                (minimum + maximum) * 0.5,
+                (maximum - minimum).length().max(0.1) * 1.2,
+            )
+        })
+    }
+
     pub(crate) fn models(&self) -> impl Iterator<Item = (&str, &Rc<RobotModel>)> {
         self.placements
             .iter()
@@ -505,7 +525,6 @@ pub(crate) struct RobotScene {
     scene: Scene,
     /// Indexed by [`EntityKey`], so a pick is one lookup.
     entities: Vec<Target>,
-    robot_origins: BTreeMap<String, Vec3>,
 }
 
 impl RobotScene {
@@ -524,25 +543,24 @@ impl RobotScene {
             .position(|candidate| candidate == target)
             .map(EntityKey::from_index)
     }
-
-    pub(crate) fn robot_origin(&self, robot: &str) -> Option<Vec3> {
-        self.robot_origins.get(robot).copied()
-    }
 }
 
 impl RobotScene {
     pub(crate) fn compose(frame: &Frame) -> Self {
         let mut entity_catalog = EntityCatalog::default();
-        let mut scene = Scene::new(frame.grid_enabled);
-        let mut robot_origins = BTreeMap::new();
+        // The grid is a stable visual reference at the model's resting base;
+        // recorded world coordinates and inter-arm transforms stay untouched.
+        let grid_height = frame
+            .placements
+            .iter()
+            .map(|arm| arm.presentation.model.grid_height)
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        let mut scene = Scene::new(frame.grid_enabled, grid_height);
 
         for (placement_index, placement) in frame.placements.iter().enumerate() {
             let base_transform =
                 ArmPlacement::base_transform(placement_index, frame.placements.len());
-            robot_origins.insert(
-                placement.id.clone(),
-                base_transform.transform_point3(Vec3::ZERO),
-            );
             let urdf = &placement.presentation.model.description;
             let link_transforms = urdf.recorded_pose(&placement.presentation.positions);
 
@@ -624,7 +642,6 @@ impl RobotScene {
         Self {
             scene,
             entities: entity_catalog.entities,
-            robot_origins,
         }
     }
 }
@@ -686,6 +703,33 @@ mod tests {
             ArmPresentation::new(Rc::new(model), BTreeMap::from([("hinge".into(), 0.0)]))
                 .with_appearance([0.2, 0.3, 0.4, 1.0], false)
         }
+    }
+
+    #[test]
+    fn elevated_robot_frames_the_current_pose_and_keeps_a_stable_grid() {
+        let model = Rc::new(RobotModel::parse(r#"<robot name="elevated"><link name="world"/><link name="arm"><visual><geometry><box size="0.2 0.2 0.2"/></geometry></visual></link><joint name="slide" type="prismatic"><parent link="world"/><child link="arm"/><origin xyz="2 0 3"/><axis xyz="1 0 0"/></joint></robot>"#, &BTreeMap::new()).unwrap());
+        for position in [0.0, 4.0] {
+            let mut frame = Frame::new(true);
+            frame
+                .add_arm(
+                    "robot",
+                    ArmPresentation::new(
+                        model.clone(),
+                        BTreeMap::from([("slide".into(), position)]),
+                    ),
+                )
+                .unwrap();
+            let (target, distance) = frame.framing(None).unwrap();
+            assert!((target - Vec3::new(2.0 + position, 0.0, 3.0)).length() < 1e-5);
+            assert!(
+                distance < 0.5,
+                "empty space down to the world origin is excluded"
+            );
+            assert_eq!(frame.framing(Some("robot")), Some((target, distance)));
+            assert!(frame.framing(Some("missing")).is_none());
+            assert!((RobotScene::compose(&frame).scene().grid_height() - 2.9).abs() < 1e-5);
+        }
+        assert!(Frame::default().framing(None).is_none());
     }
 
     #[test]
@@ -852,6 +896,5 @@ mod tests {
             assert_eq!(scene.key(target), Some(entity.key()));
             assert!(scene.scene().anchor_point(entity.key()).is_some());
         }
-        assert_eq!(scene.robot_origin("follower"), Some(Vec3::ZERO));
     }
 }

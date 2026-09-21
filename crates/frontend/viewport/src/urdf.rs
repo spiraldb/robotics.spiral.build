@@ -143,22 +143,11 @@ pub(crate) struct Joint {
     /// Placement of the child's frame in the parent's, before any motion.
     origin: Pose,
     axis: Vec3,
-    /// Viewer travel limits in radians or metres, when the description states them.
-    /// These are drawing bounds, never hardware command limits.
+    /// Design travel limits in radians or metres, when the description states them.
     limit: Option<(f32, f32)>,
 }
 
 impl Joint {
-    /// Clamp `position` to this joint's limits, if it has any.
-    fn clamp(&self, position: f32) -> f32 {
-        match self.limit {
-            Some((lower, upper)) if self.kind != JointKind::Continuous => {
-                position.clamp(lower, upper)
-            }
-            _ => position,
-        }
-    }
-
     /// The transform this joint contributes at `position`.
     fn motion(&self, position: f32) -> Mat4 {
         match self.kind {
@@ -236,18 +225,6 @@ impl Urdf {
         self.joints.iter().filter(|joint| joint.kind.is_movable())
     }
 
-    /// Place every link, given the joint positions to pose it at.
-    ///
-    /// The result is indexed like [`Urdf::links`]. Joints missing from
-    /// `positions` stay at zero, so a description with more joints than the
-    /// caller knows about still poses — the unknown ones simply do not move.
-    /// Positions outside a joint's stated viewer limits are clamped, because a
-    /// mismeasured angle should bend the drawing no further than the hardware
-    /// could bend.
-    pub(crate) fn pose(&self, positions: &BTreeMap<String, f32>) -> Vec<Mat4> {
-        self.pose_with_limits(positions, true)
-    }
-
     pub(crate) fn independent_joints(&self) -> impl Iterator<Item = &str> {
         self.joints
             .iter()
@@ -255,11 +232,9 @@ impl Urdf {
             .map(|joint| joint.name.as_str())
     }
 
+    /// Place links at the measured positions without clamping to design limits.
+    /// Missing joints stay at zero; results are indexed like [`Urdf::links`].
     pub(crate) fn recorded_pose(&self, positions: &BTreeMap<String, f32>) -> Vec<Mat4> {
-        self.pose_with_limits(positions, false)
-    }
-
-    fn pose_with_limits(&self, positions: &BTreeMap<String, f32>, clamp: bool) -> Vec<Mat4> {
         let mut positions = positions.clone();
         // The parser proves mimic references acyclic. Resolve even chains whose
         // declaration order differs from their dependency order.
@@ -279,13 +254,7 @@ impl Urdf {
                     .copied()
                     .filter(|value| value.is_finite())
                     .unwrap_or(0.0);
-                world[joint.child] = world[link]
-                    * joint.origin.matrix()
-                    * joint.motion(if clamp {
-                        joint.clamp(position)
-                    } else {
-                        position
-                    });
+                world[joint.child] = world[link] * joint.origin.matrix() * joint.motion(position);
                 stack.push(joint.child);
             }
         }
@@ -294,7 +263,7 @@ impl Urdf {
 
     /// Every visual in the description, paired with its world transform.
     ///
-    /// `transforms` comes from [`Urdf::pose`]; a shorter slice simply yields
+    /// `transforms` comes from [`Urdf::recorded_pose`]; a shorter slice simply yields
     /// fewer visuals rather than panicking, so a stale pose cannot crash a
     /// renderer mid-frame.
     pub(crate) fn visuals<'a>(
@@ -838,7 +807,7 @@ mod tests {
         let arm = urdf.link_index("arm").unwrap();
 
         // At rest the child sits exactly where its origin puts it.
-        let rest = urdf.pose(&BTreeMap::new());
+        let rest = urdf.recorded_pose(&BTreeMap::new());
         assert!(close(
             rest[urdf.root()].transform_point3(Vec3::ZERO),
             Vec3::ZERO
@@ -849,7 +818,7 @@ mod tests {
         ));
 
         // A quarter turn about +Y takes the child's +Z onto +X.
-        let turned = urdf.pose(&BTreeMap::from([(
+        let turned = urdf.recorded_pose(&BTreeMap::from([(
             "hinge".to_owned(),
             std::f32::consts::FRAC_PI_2,
         )]));
@@ -860,13 +829,13 @@ mod tests {
     }
 
     #[test]
-    fn positions_are_clamped_to_the_joint_limits() {
+    fn recorded_positions_are_not_clamped_to_the_joint_limits() {
         let urdf = Urdf::parse(HINGE).unwrap();
         let arm = urdf.link_index("arm").unwrap();
 
-        let past = urdf.pose(&BTreeMap::from([("hinge".to_owned(), 9.0)]));
-        let at = urdf.pose(&BTreeMap::from([("hinge".to_owned(), 2.0)]));
-        assert!(close(
+        let past = urdf.recorded_pose(&BTreeMap::from([("hinge".to_owned(), 9.0)]));
+        let at = urdf.recorded_pose(&BTreeMap::from([("hinge".to_owned(), 2.0)]));
+        assert!(!close(
             past[arm].transform_point3(Vec3::Z),
             at[arm].transform_point3(Vec3::Z)
         ));
@@ -876,20 +845,20 @@ mod tests {
     fn unknown_and_unusable_positions_leave_a_joint_at_rest() {
         let urdf = Urdf::parse(HINGE).unwrap();
         let arm = urdf.link_index("arm").unwrap();
-        let rest = urdf.pose(&BTreeMap::new())[arm];
+        let rest = urdf.recorded_pose(&BTreeMap::new())[arm];
 
         for positions in [
             BTreeMap::from([("some_other_joint".to_owned(), 1.0)]),
             BTreeMap::from([("hinge".to_owned(), f32::NAN)]),
         ] {
-            assert_eq!(urdf.pose(&positions)[arm], rest);
+            assert_eq!(urdf.recorded_pose(&positions)[arm], rest);
         }
     }
 
     #[test]
     fn visuals_come_back_in_world_space() {
         let urdf = Urdf::parse(HINGE).unwrap();
-        let transforms = urdf.pose(&BTreeMap::new());
+        let transforms = urdf.recorded_pose(&BTreeMap::new());
         let placed = urdf.visuals(&transforms).collect::<Vec<_>>();
 
         assert_eq!(placed.len(), 2);

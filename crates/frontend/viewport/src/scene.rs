@@ -158,13 +158,15 @@ impl EntityShape {
 pub(crate) struct Scene {
     entities: Vec<Entity>,
     grid_enabled: bool,
+    grid_height: f32,
 }
 
 impl Scene {
-    pub(crate) fn new(grid_enabled: bool) -> Self {
+    pub(crate) fn new(grid_enabled: bool, grid_height: f32) -> Self {
         Self {
             entities: Vec::new(),
             grid_enabled,
+            grid_height,
         }
     }
 
@@ -178,6 +180,10 @@ impl Scene {
 
     pub(crate) fn grid_enabled(&self) -> bool {
         self.grid_enabled
+    }
+
+    pub(crate) fn grid_height(&self) -> f32 {
+        self.grid_height
     }
 
     /// Where a key's label belongs, in world space.

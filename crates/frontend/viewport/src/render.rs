@@ -197,7 +197,8 @@ impl Renderer {
             gl.uniform_matrix4fv_with_f32_array(
                 self.pipeline.uniforms.model.as_ref(),
                 false,
-                &Mat4::IDENTITY.to_cols_array(),
+                &Mat4::from_translation(Vec3::new(0.0, 0.0, frame.scene.grid_height()))
+                    .to_cols_array(),
             );
             let draw_lines = |mesh: &GpuMesh, color: &[f32; 4]| {
                 gl.uniform4fv_with_f32_array(self.pipeline.uniforms.color.as_ref(), color);

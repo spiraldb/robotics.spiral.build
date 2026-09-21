@@ -21,7 +21,7 @@ use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 use std::collections::BTreeSet;
 use wasm_bindgen::JsCast as _;
 
-const LAYOUT_SCOPE: &str = "spiral_robotics.panel-layout.v15.data";
+const LAYOUT_SCOPE: &str = "spiral_robotics.panel-layout.v16.data";
 const IMPORT_PANEL: &str = "data-import";
 /// The split between the primary tile and the camera column.
 const EDITORS_SPLIT: &str = "data-editors";
@@ -55,7 +55,7 @@ impl DataSelection {
             }),
             episode: use_signal(|| initial_episode.clone()),
             importing: use_signal(|| false),
-            active_panel: use_signal(|| initial_episode.map(|_| PanelId::new("stage"))),
+            active_panel: use_signal(|| initial_episode.map(|_| PanelId::new("plots"))),
         }
     }
     fn activate(mut self, panel: &str) {
@@ -126,6 +126,8 @@ impl DataLayout {
         }
         let grid = Self::editors(&canonical.root).map(|(_, cameras)| cameras.clone());
         let mut next = current.clone();
+        // The stage follows the episode alongside its camera tiles.
+        next.close_panel(&PanelId::new("stage"));
         match (Self::editors_mut(&mut next.root), grid) {
             (Some(editors), Some(grid)) => {
                 if let LayoutNode::Split { second, .. } = editors {
@@ -147,7 +149,7 @@ impl DataLayout {
                 *primary = LayoutNode::split(
                     EDITORS_SPLIT,
                     SplitAxis::Horizontal,
-                    0.49,
+                    0.46,
                     primary_tile,
                     grid,
                 );
@@ -280,52 +282,61 @@ impl DataLayout {
         cameras
     }
 
-    /// Two cameras per row; an odd final camera fills the remaining row.
-    fn camera_grid(camera_ids: &[PanelId], offset: usize) -> Option<LayoutNode> {
-        let first = camera_ids.first()?;
-        let tile = |id: &PanelId, index: usize| {
-            let home = if index == 0 {
-                "cameras".to_owned()
-            } else {
-                format!("cameras-{}", index + 1)
-            };
-            LayoutNode::tile(home, [id.clone()])
-        };
-        let row = match camera_ids.get(1) {
+    /// Two review panels per row, with the stage below the first camera pair.
+    fn review_grid(tiles: &[LayoutNode], offset: usize) -> LayoutNode {
+        let first = tiles[0].clone();
+        let row = match tiles.get(1) {
             Some(second) => LayoutNode::split(
                 format!("camera-columns-{offset}"),
                 SplitAxis::Horizontal,
                 0.5,
-                tile(first, offset),
-                tile(second, offset + 1),
+                first,
+                second.clone(),
             ),
-            None => tile(first, offset),
+            None => first,
         };
-        if camera_ids.len() <= 2 {
-            return Some(row);
+        if tiles.len() <= 2 {
+            return row;
         }
-        Some(LayoutNode::split(
+        LayoutNode::split(
             format!("camera-grid-rows-{offset}"),
             SplitAxis::Vertical,
-            1.0 / camera_ids.len().div_ceil(2) as f64,
+            1.0 / tiles.len().div_ceil(2) as f64,
             row,
-            Self::camera_grid(&camera_ids[2..], offset + 2).unwrap(),
-        ))
+            Self::review_grid(&tiles[2..], offset + 2),
+        )
     }
 
     fn initial(camera_ids: &[PanelId], browsing: bool) -> PanelLayout {
         let primary_ids = if browsing {
-            vec!["overview", "stage", "plots", IMPORT_PANEL]
+            vec!["overview", "plots", IMPORT_PANEL]
         } else {
-            vec!["stage", "plots"]
+            vec!["plots"]
         };
         let primary = LayoutNode::tile("primary", primary_ids.into_iter().map(PanelId::new));
-        let editors = match Self::camera_grid(camera_ids, 0) {
-            Some(cameras) => {
-                LayoutNode::split(EDITORS_SPLIT, SplitAxis::Horizontal, 0.49, primary, cameras)
-            }
-            None => primary,
-        };
+        let mut review_tiles = camera_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let home = if index == 0 {
+                    "cameras".to_owned()
+                } else {
+                    format!("cameras-{}", index + 1)
+                };
+                LayoutNode::tile(home, [id.clone()])
+            })
+            .collect::<Vec<_>>();
+        review_tiles.insert(
+            camera_ids.len().min(2),
+            LayoutNode::tile("stage", ["stage"]),
+        );
+        let editors = LayoutNode::split(
+            EDITORS_SPLIT,
+            SplitAxis::Horizontal,
+            0.46,
+            primary,
+            Self::review_grid(&review_tiles, 0),
+        );
         let visualization = LayoutNode::split(
             "data-rows",
             SplitAxis::Vertical,
@@ -506,7 +517,7 @@ pub(in crate::activities) fn DataPanels(
         let mut selection = selection;
         selection.dataset.set(Some(opened.dataset().clone()));
         selection.episode.set(Some(opened));
-        selection.activate("stage");
+        selection.activate("plots");
     });
     let start_import = move |(): ()| {
         let mut selection = selection;
@@ -556,7 +567,7 @@ pub(in crate::activities) fn DataPanels(
 
     // The primary tile keeps a stable tab order; content follows the selection.
     let mut panels = vec![
-        Panel::new("stage", "3D Stage", "primary", rsx! {
+        Panel::new("stage", "3D Stage", "stage", rsx! {
             super::robot_stage::RobotStage { episode: episode.clone(), streams: streams.clone(), transport: transport.clone() }
         }).with_class("data-primary-panel"),
         Panel::new(
@@ -627,9 +638,8 @@ pub(in crate::activities) fn DataPanels(
             );
         }
     }
-    // Until an episode is open there is nothing for a camera column to hold,
-    // so the Overview keeps the whole upper row; the placeholder appears with
-    // the episode and gives way to its cameras as they are found.
+    // The camera placeholder appears with the episode and gives way to its
+    // recorded cameras as they are found, alongside the stage.
     if camera_ids.is_empty() && episode.is_some() {
         camera_ids.push(PanelId::new("camera-empty"));
         panels.push(
@@ -758,7 +768,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn data_default_layout_uses_two_plus_one_cameras_and_shared_lower_timeline() {
+    fn data_default_layout_pairs_cameras_and_stage_above_shared_timeline() {
         let cameras = [
             PanelId::new("top"),
             PanelId::new("left"),
@@ -794,7 +804,7 @@ mod tests {
         let LayoutNode::Split { ratio, second, .. } = first.as_ref() else {
             panic!("plots and cameras")
         };
-        assert_eq!(*ratio, 0.49);
+        assert_eq!(*ratio, 0.46);
         let LayoutNode::Split {
             axis,
             ratio,
@@ -815,6 +825,12 @@ mod tests {
                 ..
             }
         ));
+        let LayoutNode::Split { first, second, .. } = second.as_ref() else {
+            panic!("stage and third camera")
+        };
+        assert!(
+            matches!(first.as_ref(), LayoutNode::Tile(tile) if tile.panels == [PanelId::new("stage")])
+        );
         assert!(
             matches!(second.as_ref(), LayoutNode::Tile(tile) if tile.panels == [cameras[2].clone()])
         );
@@ -884,7 +900,7 @@ mod tests {
         assert!(next.tile(&"cameras-3".into()).is_none());
         // The same cameras again change nothing.
         assert!(DataLayout::with_cameras_of(&next, &canonical).is_none());
-        // Closing the episode removes the camera column and keeps the ratio.
+        // Closing the episode removes cameras, retaining the stage and ratio.
         let browsing = DataLayout::initial(&[], true);
         let closed = DataLayout::with_cameras_of(&next, &browsing).unwrap();
         assert!(closed.valid());
