@@ -25,13 +25,32 @@ const PLOT_MARGIN_LEFT: f64 = 56.0;
 const PLOT_MARGIN_RIGHT: f64 = 10.0;
 const QUICK_PLOT_STREAMS: usize = 8;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PlotCursor {
+    inspected_seconds: Option<f64>,
+}
+
+impl PlotCursor {
+    fn inspect(&mut self, seconds: f64) {
+        self.inspected_seconds = Some(seconds);
+    }
+
+    fn finish_inspecting(&mut self) {
+        self.inspected_seconds = None;
+    }
+
+    const fn inspected_seconds(self) -> Option<f64> {
+        self.inspected_seconds
+    }
+}
+
 #[component]
 pub(super) fn PlotsPanel(
     streams: Option<EpisodeStreams>,
     transport: EpisodeTransport,
     choices: StreamChoices,
 ) -> Element {
-    let hover = use_signal(|| None::<f64>);
+    let hover = use_signal(PlotCursor::default);
     let Some(streams) = streams else {
         return rsx! {
             div { class: "data-plots-empty",
@@ -137,7 +156,7 @@ fn StreamPlot(
     fields: Vec<MessageField>,
     transport: EpisodeTransport,
     mut choices: StreamChoices,
-    hover: Signal<Option<f64>>,
+    hover: Signal<PlotCursor>,
 ) -> Element {
     let mut load_span = use_signal(|| LoadSpan::Episode);
     let range = transport.range();
@@ -300,7 +319,7 @@ fn PlotLanes(
     stream_key: String,
     transport: EpisodeTransport,
     mut choices: StreamChoices,
-    mut hover: Signal<Option<f64>>,
+    mut hover: Signal<PlotCursor>,
 ) -> Element {
     let view = transport.view();
     let range = transport.range();
@@ -337,7 +356,8 @@ fn PlotLanes(
         |(lanes, layout)| lanes.as_slice().chart_with(&layout),
     ));
     let id = use_hook(|| format!("data-plot-{}", dioxus::dioxus_core::current_scope_id().0));
-    let at = hover().unwrap_or(seconds);
+    let inspected_seconds = hover().inspected_seconds();
+    let at = inspected_seconds.unwrap_or(seconds);
     // Before the first sample the readouts hold that sample, as the cameras
     // hold their first frame, instead of a column of dashes.
     let held_first = plotted
@@ -350,7 +370,7 @@ fn PlotLanes(
         .values(&plotted.fields, at_ns)
         .unwrap_or_default();
     let height = lanes.len() as f64 * (LANE_HEIGHT + LANE_GAP);
-    let hover_x = hover().map(|moment| view.percent(moment) / 100.0);
+    let hover_x = inspected_seconds.map(|moment| view.percent(moment) / 100.0);
     let mut seek = transport.clone();
     let mut surface = use_signal(|| None::<web_sys::Element>);
     rsx! {
@@ -398,7 +418,15 @@ fn PlotLanes(
                             surface.set(Some(element.clone()));
                         }
                     },
-                    oninput: move |event| if let Ok(value) = event.value().parse::<f64>() { seek.seek(value); },
+                    oninput: move |event| if let Ok(value) = event.value().parse::<f64>() {
+                        seek.seek(value);
+                        // The native range maps its thumb to a slightly inset
+                        // track. Retire the pointer preview after seeking so a
+                        // click cannot leave that earlier time beside the
+                        // committed playhead.
+                        hover.write().finish_inspecting();
+                    },
+                    onpointerup: move |_| hover.write().finish_inspecting(),
                     onmousemove: move |event| {
                         let Some(element) = surface() else { return };
                         let width = f64::from(element.client_width());
@@ -406,9 +434,9 @@ fn PlotLanes(
                             return;
                         }
                         let x = event.data().element_coordinates().x;
-                        hover.set(Some(view.seconds_at(x / width)));
+                        hover.write().inspect(view.seconds_at(x / width));
                     },
-                    onmouseleave: move |_| hover.set(None),
+                    onmouseleave: move |_| hover.write().finish_inspecting(),
                 }
                 div { class: "data-plot-playhead", "aria-hidden": "true" }
                 if let Some(x) = hover_x {
@@ -467,5 +495,15 @@ mod tests {
         assert_eq!("position[3]".trace_short_name("position[]"), "[3]");
         assert_eq!("temperature".trace_short_name("temperature"), "temperature");
         assert_eq!("other".trace_short_name("position[]"), "other");
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn committing_a_seek_retires_the_hover_cursor() {
+        let mut cursor = PlotCursor::default();
+        cursor.inspect(11.0);
+        assert_eq!(cursor.inspected_seconds(), Some(11.0));
+
+        cursor.finish_inspecting();
+        assert_eq!(cursor.inspected_seconds(), None);
     }
 }

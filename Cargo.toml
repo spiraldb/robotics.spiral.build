@@ -35,7 +35,7 @@ spiral-robotics-viewport = { path = "crates/frontend/viewport" }
 clap = { version = "4.5", features = ["derive"] }
 dioxus = { version = "0.7.10", default-features = false }
 dioxus-flow = "0.1.2"
-dioxus-workbench = { git = "https://github.com/XiangpengHao/dioxus-workbench", rev = "69cb3a26d7d5f3d0400a989f7e9295a91b965254" }
+dioxus-workbench = { git = "https://github.com/XiangpengHao/dioxus-workbench", rev = "2209d1ba6632bd7c97abd034ff0bd30cc8c1d1e3" }
 glam = { version = "0.33", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 nokhwa = { version = "0.10.11", default-features = false, features = ["decoding", "input-native", "serialize"] }
