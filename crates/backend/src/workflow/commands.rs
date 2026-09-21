@@ -1,12 +1,11 @@
 //! Resource capabilities; authoring and the agent loop belong to the caller.
-use super::provider::{ModelStream, OpenAiProvider, ProviderConfig};
 use crate::data::catalog_lease::CatalogLeaseOwner;
 use crate::project_session::context::ProjectContext;
 use crate::{BackendCommandError, OperationError};
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::workflow::{
-    WorkflowAgentReadiness, WorkflowSpec, WorkflowSummary,
-    document::{ModelRequest, WorkflowDocument, WorkflowPlan, WorkflowRun},
+    WorkflowSpec, WorkflowSummary,
+    document::{WorkflowDocument, WorkflowPlan, WorkflowRun},
 };
 
 #[derive(Clone)]
@@ -87,43 +86,6 @@ impl WorkflowCommands {
             .await
             .map_err(OperationError::External)?;
         Ok(serde_json::json!({"dataset": inspection, "cameras": cameras}))
-    }
-    pub(super) fn model_status(&self) -> Result<WorkflowAgentReadiness, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        Ok(match ProviderConfig::from_env() {
-            Ok(Some(_)) => WorkflowAgentReadiness::ready("Ready to help author this workflow."),
-            Ok(None) => WorkflowAgentReadiness::error(
-                "Configure LLM_API_KEY on the backend to enable the assistant.",
-            ),
-            Err(error) => WorkflowAgentReadiness::error(error),
-        })
-    }
-    pub(super) fn complete(
-        &self,
-        request: ModelRequest,
-    ) -> Result<ModelStream, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        let config = ProviderConfig::from_env()
-            .map_err(OperationError::External)?
-            .ok_or_else(|| {
-                OperationError::InvalidInput("Assistant provider is not configured.".into())
-            })?;
-        let config = request
-            .model()
-            .map_or(config.clone(), |model| config.for_model(model));
-        let provider = OpenAiProvider::new(config).map_err(OperationError::External)?;
-        Ok(ModelStream::new(provider, request))
-    }
-    pub(super) async fn decide(
-        &self,
-        request: spiral_robotics_common::workflow::document::DecisionRequest,
-    ) -> Result<spiral_robotics_common::workflow::document::DecisionResponse, BackendCommandError>
-    {
-        let _activity = self.state.admit()?;
-        OpenAiProvider::decide(request)
-            .await
-            .map_err(OperationError::External)
-            .map_err(Into::into)
     }
 }
 impl From<ProjectContext> for WorkflowCommands {

@@ -92,7 +92,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 79);
+    assert_eq!(count, 75);
     for retired in [
         "/robots/setup",
         "/serial-ports/identify",
@@ -100,6 +100,10 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
         "/training",
         "/rollout",
         "/rollout/stop",
+        "/models/status",
+        "/models/complete",
+        "/models/decide",
+        "/datasets/robot-discovery/read-description",
     ] {
         assert!(contract["paths"].get(retired).is_none(), "{retired}");
     }
@@ -114,6 +118,17 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
     assert!(contract["paths"]["/queries/episode"]["post"].is_object());
     assert!(contract["paths"]["/datasets/robot"]["post"].is_object());
     assert!(contract["paths"].get("/project/setup").is_none());
+    for path in ["/credentials", "/proxy"] {
+        for operation in contract["paths"][path].as_object().unwrap().values() {
+            assert!(
+                operation["parameters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|parameter| parameter["name"] != "X-Project-Session")
+            );
+        }
+    }
     fixture.shutdown().await;
 }
 

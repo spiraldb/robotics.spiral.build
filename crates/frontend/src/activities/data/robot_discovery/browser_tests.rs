@@ -22,15 +22,22 @@ export function installRobotDiscoveryFetch() {
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const path = new URL(request.url).pathname;
+        if (path === '/api/credentials') return Response.json({llm:{base_url:'https://provider.test/v1',api_key:'test-key',default_model:'openai/gpt-5.6-terra'},spiral:null,hugging_face:{token:'hf-test'}});
+        let metadata = null;
+        if (path === '/api/proxy') {
+            metadata = {url:new URL(request.url).searchParams.get('url'),method:request.method,authorization:request.headers.get('authorization')};
+            if (metadata.url.includes('huggingface.co/')) {
+                robotRequests.push({path:'/api/proxy',session:request.headers.get('X-Project-Session'),metadata,body:null});
+                return new Response('<robot name="demo"><link name="base"/></robot>', {headers:{'Content-Type':'text/plain'}});
+            }
+        }
         const body = await request.clone().json();
-        robotRequests.push({path, session: request.headers.get('X-Project-Session'), body});
+        const recordedPath = path === '/api/proxy' ? metadata.url : path;
+        robotRequests.push({path:recordedPath, transport:path, session: request.headers.get('X-Project-Session'), metadata, body});
         if (path === '/api/datasets/robot-discovery/context') return Response.json({
             episode:{dataset:{path:['dataset_demo']},episode_id:'episode-1'},
             topics:[{name:'/joints',schemas:['sensor_msgs/JointState'],members:1,samples:3,revision:null}]
         });
-        if (path === '/api/datasets/robot-discovery/read-description') {
-            return Response.json('<robot name="demo"><link name="base"/></robot>');
-        }
         if (path === '/api/datasets/robot-discovery/inspect-stream') {
             return Response.json({schema:[{name:'position'}],samples:[{value:{position:[0.25]}}]});
         }
@@ -42,7 +49,7 @@ export function installRobotDiscoveryFetch() {
             );
             return Response.json(null);
         }
-        if (path !== '/api/models/complete') throw new Error('Unexpected request ' + path);
+        if (path !== '/api/proxy') throw new Error('Unexpected request ' + path);
         completionCount += 1;
         const calls = [
             ['read-description','read_description',{url:'https://huggingface.co/datasets/acme/demo/resolve/pinned-sha/README.md'}],
@@ -52,8 +59,9 @@ export function installRobotDiscoveryFetch() {
         ];
         const [id, name, args] = calls[completionCount - 1];
         const message = {role:'assistant',content:'Inspecting the imported robot.',tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]};
-        const payload = new TextEncoder().encode(JSON.stringify({event:'complete',data:message})+'\n');
-        return new Response(new ReadableStream({start(controller) { controller.enqueue(payload); controller.close(); }}), {headers:{'Content-Type':'application/x-ndjson'}});
+        const tool_calls = message.tool_calls.map((call,index) => ({...call,index}));
+        const payload = new TextEncoder().encode('data: '+JSON.stringify({choices:[{delta:{content:message.content,tool_calls},finish_reason:'tool_calls'}]})+'\n\ndata: [DONE]\n\n');
+        return new Response(new ReadableStream({start(controller) { controller.enqueue(payload); controller.close(); }}), {headers:{'Content-Type':'text/event-stream'}});
     };
 }
 export function restoreRobotDiscoveryFetch() { globalThis.fetch = previousFetch; }
@@ -136,14 +144,27 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
     harness.finish(&mut dom).await;
 
     let requests = fetch.requests();
+    assert!(requests.iter().all(|request| {
+        if request["transport"] == "/api/proxy" || request["path"] == "/api/proxy" {
+            request["session"].is_null()
+        } else {
+            request["session"] == "robot-session"
+        }
+    }));
+    let description = requests
+        .iter()
+        .find(|request| request["path"] == "/api/proxy")
+        .unwrap();
+    assert_eq!(description["metadata"]["method"], "GET");
     assert!(
-        requests
-            .iter()
-            .all(|request| request["session"] == "robot-session")
+        description["metadata"]["url"]
+            .as_str()
+            .unwrap()
+            .contains("pinned-sha")
     );
     let model_requests = requests
         .iter()
-        .filter(|request| request["path"] == "/api/models/complete")
+        .filter(|request| request["path"] == "https://provider.test/v1/chat/completions")
         .collect::<Vec<_>>();
     assert_eq!(model_requests.len(), 4);
     assert_eq!(model_requests[0]["body"]["model"], "gpt-5.6-terra");

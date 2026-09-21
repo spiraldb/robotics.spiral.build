@@ -88,7 +88,7 @@ impl ApiRoutes {
     pub(super) fn into_document(mut self) -> Value {
         json!({
             "openapi": "3.1.0",
-            "info": { "title": "Spiral Robotics HTTP API", "version": "2.0.0",
+            "info": { "title": "Spiral Robotics HTTP API", "version": "3.0.0",
                 "description": "Backend-owned commands and frontend-initiated snapshots. X-Project-Session is an identity guard, not authentication. Reads are never cached. Commands are never automatically retried. See docs/http-api.md for operation lifetimes and polling." },
             "servers": [{ "url": "/api" }],
             "paths": self.paths,
@@ -120,7 +120,7 @@ macro_rules! register_methods {
         }
     };
 }
-register_methods!(get => GET, post => POST, put => PUT, patch => PATCH, delete => DELETE);
+register_methods!(get => GET, post => POST, put => PUT, patch => PATCH, delete => DELETE, head => HEAD, options => OPTIONS);
 
 /// Explicit descriptions only for native media responses (MJPEG, downloads, byte ranges).
 pub(crate) struct MediaEndpoint {
@@ -164,6 +164,12 @@ impl OperationSchema {
     pub(crate) fn upload(&mut self, content_type: &str) {
         self.body = Some(
             json!({"required": true, "content": {content_type: {"schema": {"type": "string", "format": "binary"}}}}),
+        );
+    }
+    pub(crate) fn proxy(&mut self) {
+        self.parameters.push(json!({"name":"url", "in":"query", "required":true, "schema":{"type":"string", "format":"uri"}}));
+        self.body = Some(
+            json!({"required":false, "content":{"*/*":{"schema":{"type":"string", "format":"binary"}}}}),
         );
     }
 }

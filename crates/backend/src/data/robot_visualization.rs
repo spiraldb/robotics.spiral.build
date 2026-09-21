@@ -3,8 +3,8 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use spiral_robotics_common::{
     datasets::{
-        DatasetRobot, DatasetSelection, DatasetTopic, EpisodeSelection, RobotDescriptionRequest,
-        RobotDiscoveryContext, RobotDiscoveryResult, RobotStreamInspectionRequest,
+        DatasetRobot, DatasetSelection, DatasetTopic, EpisodeSelection, RobotDiscoveryContext,
+        RobotDiscoveryResult, RobotStreamInspectionRequest,
     },
     relations::EpisodeQueryRequest,
 };
@@ -66,12 +66,6 @@ impl<'a> RobotVisualization<'a> {
         let episode = EpisodeSelection::new(selection, id.into());
         let topics = storage.episode_topics(episode.clone()).await?;
         Ok(RobotDiscoveryContext::new(episode, topics))
-    }
-
-    pub(super) async fn read_description(
-        request: RobotDescriptionRequest,
-    ) -> Result<String, String> {
-        Self::read_text(&Self::client()?, request.url()).await
     }
 
     pub(super) async fn inspect_stream(
@@ -214,14 +208,6 @@ impl<'a> RobotVisualization<'a> {
                 .collect(),
         );
         Ok(robot)
-    }
-
-    async fn read_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
-        let bytes = Self::read_bytes(client, url).await?;
-        if bytes.len() > 512 * 1024 {
-            return Err("Description file exceeds 512 KiB".into());
-        }
-        String::from_utf8(bytes).map_err(|_| "Source is not a text description".into())
     }
 
     async fn read_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {

@@ -10,6 +10,7 @@ impl StudioApi {
     pub(super) fn routes() -> ApiRoutes {
         let mut routes = ApiRoutes::new();
         crate::project_session::http::ProjectEndpoints::register(&mut routes);
+        crate::transport::http::TransportEndpoints::register(&mut routes);
         crate::recording::http::RecordingEndpoints::register(&mut routes);
         crate::training::http::TrainingEndpoints::register(&mut routes);
         crate::workflow::http::WorkflowEndpoints::register(&mut routes);

@@ -90,6 +90,9 @@ impl ProjectContext {
     pub(crate) fn projects(&self) -> &Arc<crate::project_session::ProjectCoordinator> {
         &self.projects
     }
+    pub(crate) fn backend_state(&self) -> &Arc<spiral_robotics_storage::BackendStateStore> {
+        self.projects.backend_state()
+    }
     pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
         self.project.workspace()
     }

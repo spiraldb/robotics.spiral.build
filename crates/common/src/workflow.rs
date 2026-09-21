@@ -250,23 +250,6 @@ impl crate::runs::RunObservation for WorkflowRunSnapshot {
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WorkflowAgentReadiness {
-    Unconfigured { detail: String },
-    Ready { detail: String },
-    Error { detail: String },
-}
-
-impl Default for WorkflowAgentReadiness {
-    fn default() -> Self {
-        Self::Unconfigured {
-            detail: "Workflow Assistant is not configured.".to_owned(),
-        }
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowAgentRole {
@@ -545,24 +528,6 @@ impl WorkflowSummary {
     }
 }
 
-/// Reserved bounded diagnostic shape for later decode/model phases.
-impl WorkflowAgentReadiness {
-    pub fn ready(detail: impl Into<String>) -> Self {
-        Self::Ready {
-            detail: detail.into(),
-        }
-    }
-
-    pub fn error(detail: impl Into<String>) -> Self {
-        Self::Error {
-            detail: detail.into(),
-        }
-    }
-
-    pub const fn configured(&self) -> bool {
-        matches!(self, Self::Ready { .. })
-    }
-}
 impl WorkflowAgentArtifactReceipt {
     pub fn authored(label: impl Into<String>, revision: u64) -> Self {
         Self {

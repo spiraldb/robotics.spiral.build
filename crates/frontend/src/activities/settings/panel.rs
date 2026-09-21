@@ -385,7 +385,7 @@ fn SettingsPanel(
                                     ).with_secret().with_disabled_when(saving() || import_project.pending()),
                                 }
                                 p { class: "settings-help",
-                                    "Used by Spiral to download models and datasets from Hugging Face. Stored privately on this backend; the saved token is never returned to the browser."
+                                    "Used by Spiral and Studio's in-memory HTTP clients to download models and datasets from Hugging Face."
                                 }
                                 if current().spiral().huggingface_token_configured() {
                                     Toggle {

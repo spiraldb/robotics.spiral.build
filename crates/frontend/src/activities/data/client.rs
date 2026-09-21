@@ -58,16 +58,23 @@ impl DatasetClient {
             .await
     }
 
-    pub(super) async fn read_robot_description(
-        &self,
-        request: &spiral_robotics_common::datasets::RobotDescriptionRequest,
-    ) -> Result<String, CommandError> {
-        self.project
-            .request(
-                HttpRequest::new("POST", "/api/datasets/robot-discovery/read-description")
-                    .json(request),
-            )
-            .await
+    pub(super) async fn read_robot_description(&self, url: &str) -> Result<String, CommandError> {
+        self.project.require_current()?;
+        let credentials = crate::client::proxy::ProxyClient::credentials().await?;
+        self.project.require_current()?;
+        let mut request = crate::client::proxy::ProxyClient::request("GET", url).header(
+            "accept",
+            "text/plain, application/json, application/xml, text/xml",
+        );
+        if url.starts_with("https://huggingface.co/") {
+            if let Some(credentials) = credentials.hugging_face() {
+                request =
+                    request.header("authorization", format!("Bearer {}", credentials.token()));
+            }
+        }
+        let response =
+            crate::client::proxy::ProxyClient::text(request.timeout(30_000), 512 * 1024).await;
+        self.project.accept_response(response)
     }
 
     pub(super) async fn inspect_robot_stream(

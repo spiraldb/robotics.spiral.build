@@ -123,7 +123,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let mut drafts = controller.agent_drafts();
     let command = controller.agent_command();
     let active = state.session().phase().active();
-    let configured = state.readiness().configured();
+    let configured = state.configured();
     let draft_key = AgentDraftKey::new(state.session().workflow_id());
     let draft = drafts.read().get(&draft_key).cloned().unwrap_or_default();
     let catalog_available =

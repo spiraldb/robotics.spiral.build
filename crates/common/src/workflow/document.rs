@@ -1,9 +1,7 @@
 //! Saved authoring documents and stateless model requests.
 use super::WorkflowSpec;
-use super::conversation::{ProviderMessage, WorkflowConversation};
+use super::conversation::WorkflowConversation;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeMap;
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -82,93 +80,6 @@ impl WorkflowSqlPlan {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelRequest {
-    messages: Vec<ProviderMessage>,
-    tools: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-}
-impl ModelRequest {
-    pub fn new(messages: Vec<ProviderMessage>, tools: Vec<Value>) -> Self {
-        Self {
-            messages,
-            tools,
-            model: None,
-        }
-    }
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
-        self
-    }
-    pub fn messages(&self) -> &[ProviderMessage] {
-        &self.messages
-    }
-    pub fn tools(&self) -> &[Value] {
-        &self.tools
-    }
-    pub fn model(&self) -> Option<&str> {
-        self.model.as_deref()
-    }
-}
-
-/// Provider-neutral request for OpenRouter's structured Decisions transport.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DecisionRequest {
-    model: String,
-    state: Value,
-    questions: Value,
-}
-impl DecisionRequest {
-    pub fn new(model: impl Into<String>, state: Value, questions: Value) -> Self {
-        Self {
-            model: model.into(),
-            state,
-            questions,
-        }
-    }
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-    pub fn state(&self) -> &Value {
-        &self.state
-    }
-    pub fn questions(&self) -> &Value {
-        &self.questions
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DecisionResponse {
-    answers: BTreeMap<String, DecisionChoiceAnswer>,
-}
-impl DecisionResponse {
-    pub fn choice(&self, question: &str) -> Option<&str> {
-        let answer = self.answers.get(question)?;
-        (answer.kind == "choice"
-            && answer.confidence.is_some_and(|confidence| {
-                confidence.is_finite() && (0.5..=1.0).contains(&confidence)
-            }))
-        .then_some(answer.choice.as_str())
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DecisionChoiceAnswer {
-    #[serde(rename = "type")]
-    kind: String,
-    choice: String,
-    confidence: Option<f64>,
-    #[serde(default)]
-    probabilities: BTreeMap<String, f64>,
-}
-
 pub use super::plan::WorkflowPlan;
 
 /// Encoding version and payload of one workflow or conversation.
@@ -188,15 +99,6 @@ impl WorkflowJson {
     pub fn payload(&self) -> &str {
         &self.payload
     }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "event", content = "data", rename_all = "snake_case")]
-pub enum ModelEvent {
-    Text(String),
-    Complete(ProviderMessage),
-    Error(String),
 }
 
 /// The exact submitted SQL travels with its execution observations.

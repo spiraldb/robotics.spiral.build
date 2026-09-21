@@ -464,6 +464,9 @@ impl ProjectCoordinator {
     pub(crate) fn active(&self) -> Arc<ProjectSession> {
         self.active.borrow().clone()
     }
+    pub(crate) fn backend_state(&self) -> &Arc<BackendStateStore> {
+        &self.backend_state
+    }
     #[cfg(test)]
     fn subscribe(&self) -> watch::Receiver<Arc<ProjectSession>> {
         self.active.subscribe()

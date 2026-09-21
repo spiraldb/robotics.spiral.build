@@ -17,8 +17,10 @@ export function installInterpretationFetch() {
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const path = new URL(request.url).pathname;
-        requests.push({path, session: request.headers.get('X-Project-Session'), body: await request.json()});
-        if (path !== '/api/models/decide') throw new Error('Unexpected request ' + path);
+        if (path === '/api/credentials') return Response.json({llm:{base_url:'https://openrouter.ai/api/v1',api_key:'test-key',default_model:'openai/gpt-5.6-terra'},spiral:null,hugging_face:null});
+        if (path !== '/api/proxy') throw new Error('Unexpected request ' + path);
+        const metadata = {url:new URL(request.url).searchParams.get('url'),method:request.method,authorization:request.headers.get('authorization')};
+        requests.push({path, session: request.headers.get('X-Project-Session'), metadata, body: await request.json()});
         const choice = value => ({type:'choice', choice:value, confidence:0.99});
         return Response.json({answers:{operation:choice('duration'), comparison:choice('below'), quantity:choice('q0')}, usage:{tokens:17}});
     };
@@ -103,7 +105,12 @@ async fn browser_builds_decisions_and_binds_the_selected_quantity() {
     assert!(proposal.problems().is_empty());
     let requests = fetch.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0]["session"], "interpretation-session");
+    assert!(requests[0]["session"].is_null());
+    assert_eq!(requests[0]["path"], "/api/proxy");
+    assert_eq!(
+        requests[0]["metadata"]["url"],
+        "https://openrouter.ai/api/alpha/decisions"
+    );
     let body = &requests[0]["body"];
     assert_eq!(body["model"], "typesafe/jev-1.13");
     assert_eq!(body["state"]["request"], prompt);

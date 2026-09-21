@@ -93,7 +93,8 @@ pub struct SpiralSettings {
     /// Public half of the client-credentials pair used by the backend.
     #[serde(default)]
     client_id: String,
-    /// The secret is write-only and never crosses back to the browser.
+    /// The settings form never reads the saved value; runtime clients receive it
+    /// through the Studio-wide credentials endpoint.
     #[serde(default)]
     client_secret_configured: bool,
     #[serde(default)]

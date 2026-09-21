@@ -555,7 +555,7 @@ impl WorkflowController {
         });
     }
     pub(super) fn send_agent(mut self, text: String, _studio: StudioProjectState) {
-        if !self.agent_state().readiness().configured()
+        if !self.agent_state().configured()
             || self.command().is_some()
             || self.agent_command().is_some()
         {

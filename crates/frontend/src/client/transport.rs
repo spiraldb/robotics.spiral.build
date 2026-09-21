@@ -75,10 +75,13 @@ pub(crate) struct HttpRequest {
     url: Result<String, CommandError>,
     session: Option<String>,
     body: Result<Option<RequestBody>, CommandError>,
+    headers: Vec<(String, String)>,
+    timeout_ms: Option<u32>,
 }
 
 enum RequestBody {
     Json(String),
+    Raw(Vec<u8>),
     Upload(dioxus::html::FileData),
 }
 
@@ -89,7 +92,24 @@ impl HttpRequest {
             url: Ok(url.into()),
             session: None,
             body: Ok(None),
+            headers: Vec::new(),
+            timeout_ms: None,
         }
+    }
+
+    pub(crate) fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    pub(crate) fn raw(mut self, body: Vec<u8>) -> Self {
+        self.body = Ok(Some(RequestBody::Raw(body)));
+        self
+    }
+
+    pub(crate) fn timeout(mut self, milliseconds: u32) -> Self {
+        self.timeout_ms = Some(milliseconds);
+        self
     }
 
     pub(crate) fn for_session(mut self, session: String) -> Self {
@@ -144,61 +164,27 @@ impl HttpRequest {
         response.binary().await.map_err(CommandError::transport)
     }
 
-    /// Decode complete NDJSON records; byte buffering preserves split UTF-8 characters.
-    pub(crate) async fn stream_json<T: serde::de::DeserializeOwned>(
-        self,
-        mut on_event: impl FnMut(T) -> Result<(), CommandError>,
-    ) -> Result<(), CommandError> {
-        use futures_util::StreamExt as _;
-        let (response, _abort) = self.response("application/x-ndjson").await?;
-        if !(200..300).contains(&response.status()) {
-            let status = response.status();
-            return CommandError::decode_response(
-                status,
-                &response.text().await.map_err(CommandError::transport)?,
-            );
-        }
-        let body = response
-            .body()
-            .ok_or_else(|| CommandError::transport("Missing model response body"))?;
-        let mut stream = wasm_streams::ReadableStream::from_raw(body).into_stream();
-        let mut pending = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| {
-                CommandError::transport(format!("Model stream failed: {error:?}"))
-            })?;
-            pending.extend(js_sys::Uint8Array::new(&chunk).to_vec());
-            while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
-                let line = pending.drain(..=end).collect::<Vec<_>>();
-                on_event(serde_json::from_slice(&line).map_err(CommandError::transport)?)?;
-            }
-            if pending.len() > 2 * 1024 * 1024 {
-                return Err(CommandError::transport("Model event exceeds 2 MiB"));
-            }
-        }
-        if !pending.is_empty() {
-            return Err(CommandError::transport("Incomplete model event"));
-        }
-        Ok(())
-    }
-
-    async fn response(
+    pub(crate) async fn response(
         self,
         accept: &str,
     ) -> Result<(gloo_net::http::Response, RequestCancellation), CommandError> {
         use gloo_net::http::{Method, RequestBuilder};
-        let abort = RequestCancellation::new()?;
+        let abort = RequestCancellation::new(self.timeout_ms)?;
         let mut request = RequestBuilder::new(&self.url?)
             .method(self.method.parse::<Method>().expect("declared HTTP method"))
             .header("Accept", accept)
-            .abort_signal(Some(&abort.0.signal()));
+            .abort_signal(Some(&abort.controller.signal()));
         if let Some(session) = self.session {
             request = request.header("X-Project-Session", &session);
+        }
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
         }
         let request = match self.body? {
             Some(RequestBody::Json(body)) => request
                 .header("Content-Type", "application/json")
                 .body(body),
+            Some(RequestBody::Raw(body)) => request.body(js_sys::Uint8Array::from(body.as_slice())),
             Some(RequestBody::Upload(document)) => {
                 // Hand the browser its native File. It streams the upload without
                 // allocating another project-sized buffer in WebAssembly.
@@ -228,7 +214,7 @@ impl HttpRequest {
 }
 
 impl CommandError {
-    fn transport(error: impl std::fmt::Display) -> Self {
+    pub(crate) fn transport(error: impl std::fmt::Display) -> Self {
         Self::new(CommandFailureCode::Transport, error.to_string())
     }
 
@@ -251,20 +237,31 @@ impl CommandError {
     }
 }
 
-struct RequestCancellation(web_sys::AbortController);
+pub(crate) struct RequestCancellation {
+    controller: web_sys::AbortController,
+    _timeout: Option<gloo_timers::callback::Timeout>,
+}
 impl RequestCancellation {
-    fn new() -> Result<Self, CommandError> {
-        web_sys::AbortController::new().map(Self).map_err(|_| {
+    fn new(timeout_ms: Option<u32>) -> Result<Self, CommandError> {
+        let controller = web_sys::AbortController::new().map_err(|_| {
             CommandError::new(
                 CommandFailureCode::Transport,
                 "Could not initialize request cancellation.",
             )
+        })?;
+        let _timeout = timeout_ms.map(|milliseconds| {
+            let controller = controller.clone();
+            gloo_timers::callback::Timeout::new(milliseconds, move || controller.abort())
+        });
+        Ok(Self {
+            controller,
+            _timeout,
         })
     }
 }
 impl Drop for RequestCancellation {
     fn drop(&mut self) {
-        self.0.abort();
+        self.controller.abort();
     }
 }
 

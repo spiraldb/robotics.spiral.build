@@ -13,16 +13,20 @@ contract revision and client migration. This migration removes the former
 `/api/server-functions/*` endpoints and replaces `/api/session` with the combined
 `/api/project/status` read.
 
-Version 2.0.0 replaces the settings response field `spiral.namespace` with
-`spiral.table_prefix` and uses flat Studio table and import resource names.
+Version 3.0.0 replaces `/models/status`, `/models/complete`, `/models/decide`, and
+`/datasets/robot-discovery/read-description` with Studio-wide `/credentials` and
+`/proxy`. Provider requests and responses are handled by the frontend. The
+version 2 settings field `spiral.table_prefix` and flat Studio resource names
+remain in use.
 
 ## Request and response conventions
 
 1. Fetch `GET /api/project/status`. The response contains `session` and `readiness`.
 2. Capture `session.id`, an opaque activation identity. It differs from
    `session.project_id`, the persistent Spiral project ID.
-3. Send `X-Project-Session: <session.id>` on every JSON read or command except
-   project status and OpenAPI. Opening another project invalidates the old identity,
+3. Send `X-Project-Session: <session.id>` on project reads and commands. Studio-wide
+   `/credentials` and `/proxy`, project status, and OpenAPI do not require it.
+   Opening another project invalidates the old identity,
    even if a later activation returns to the same persistent project.
 4. Keep that identity with the request until its response is processed. A client
    must discard a response if its current project identity changed in the meantime.
@@ -65,6 +69,8 @@ query values, 422 for a mismatched JSON shape, 413 for oversized payloads, 415 f
 unsupported content types, and 405 for an unsupported method. The frontend
 classifies an unreachable backend or an invalid/non-JSON response as `transport`;
 it never exposes an upstream HTML error page as a product message.
+The transparent `/proxy` endpoint instead preserves the upstream HTTP status and
+response body; the frontend's provider client interprets that response.
 
 ## Reads, polling, and lifetimes
 
@@ -139,15 +145,43 @@ plus the native report metadata. Logical graphs remain available if physical
 lowering fails. Studio displays these with Dioxus Flow.
 `/models/capabilities` returns the installed native AI function catalog.
 Read executions by their run IDs. Workflow cancellation is not exposed.
-`/models/complete` accepts one
-`ModelRequest` and streams newline-delimited `ModelEvent` values (`text`, `complete`,
-`error`). The caller owns conversation history and tool execution; disconnecting
-cancels that model request.
+The frontend builds authenticated model requests using Studio-wide `/credentials`
+and sends them through `/proxy`. It parses provider streams, owns retry decisions,
+conversation history, and tool execution. Disconnecting cancels the proxied request.
 
 ## Endpoint inventory
 
 All paths below are relative to `/api`. Request and response names refer to the
 schemas served by `/api/openapi.json`. `—` means no request body.
+
+### External HTTP and credentials
+
+These endpoints are Studio-wide and work without `X-Project-Session` or a ready
+project. They do not select credentials or destinations based on a project.
+
+| Method | Path | Body or query | Response |
+| --- | --- | --- | --- |
+| GET | `/credentials` | — | StudioCredentials |
+| GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS | `/proxy?url=…` | Upstream method, headers, and raw body | Upstream HTTP status, relevant headers, and streamed body |
+
+`StudioCredentials` contains optional `llm` (`base_url`, `api_key`, `default_model`),
+`spiral` (`endpoint`, `spfs_endpoint`, `client_id`, `client_secret`), and
+`hugging_face` (`token`) entries. These are known configured Studio credentials,
+not arbitrary environment variables. The frontend uses them in memory and builds
+the upstream authorization headers.
+
+Percent-encode the upstream URL in the `url` query parameter. Use the upstream
+HTTP method, authorization and content headers, and original request body,
+including binary or multipart content. There is no JSON or metadata envelope.
+The relay removes Studio cookies, project-session and browser-origin headers,
+and manages HTTP framing and connection headers.
+
+The response can contain JSON, text, binary data, or a live SSE stream. Provider
+errors retain their upstream status and body; relay setup/transport failures use
+Studio's structured errors. Dropping the browser request cancels transport.
+Provider-specific request construction, stream parsing, error handling, and
+retries belong to frontend clients. Native dataset queries and persistence keep
+their existing project APIs.
 
 ### Project
 
@@ -282,9 +316,7 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
 | POST | `/workflow-runs` | WorkflowSpec | WorkflowRun |
 | GET | `/workflow-runs/{id}` | — | WorkflowRun |
 | POST | `/datasets/cameras` | DatasetSelection | Dataset and camera inspection |
-| GET | `/models/status` | — | WorkflowAgentReadiness |
 | GET | `/models/capabilities` | — | SpiralQuerySnapshot (native AI catalog) |
-| POST | `/models/complete` | ModelRequest | ModelEvent NDJSON stream |
 
 ### Curation
 
@@ -324,7 +356,7 @@ uses optimistic revisions.
 
 Existing media/download error responses can contain plain text; JSON commands,
 reads, and uploads consistently use the structured failure above. Camera/media
-streaming and backend provider SSE are separate from browser state polling.
+streaming and proxied provider SSE are separate from browser state polling.
 There is no browser event stream or `/api/events` endpoint.
 
 ## Maintaining the boundary
@@ -367,6 +399,7 @@ implement the wire protocol.
 Workflow Assistant execution uses the existing `/workflow-runs` endpoints. Runs retain
 exact submitted SQL and bounded previews. The browser agent can page those previews,
 attach selected native image previews to the next model request, and select a completed
-run for presentation. `/models/complete` accepts text or standard text/image content
-parts; transient image messages are not allowed in persisted conversation history.
+run for presentation. The frontend model client sends text or standard text/image
+content parts through `/proxy`; transient image messages are not allowed in persisted
+conversation history.
 Stopping the Assistant does not cancel an admitted native query.

@@ -1,14 +1,13 @@
-//! Browser-owned semantic binding over the backend's credentialed Decisions transport.
+//! Browser-owned Decisions request and semantic binding.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod browser_tests;
 
-use crate::client::model::ModelClient;
+use crate::client::model::{DecisionResponse, ModelClient};
 use serde_json::{Value, json};
 use spiral_robotics_common::curation::{
     interpretation::{InterpretationRequest, RuleIntent, RuleProposal},
     rules::ConditionOp,
 };
-use spiral_robotics_common::workflow::document::{DecisionRequest, DecisionResponse};
 use std::collections::BTreeMap;
 
 pub(super) struct RuleInterpreter;
@@ -20,11 +19,11 @@ impl RuleInterpreter {
         request.validate()?;
         let quantities = QuantityCandidate::extract(request.prompt());
         let answers = model
-            .decide(&DecisionRequest::new(
+            .decide(
                 "typesafe/jev-1.13",
                 json!({"request": request.prompt(), "quantities": quantities}),
                 Self::questions(&request, &quantities),
-            ))
+            )
             .await
             .map_err(|error| error.to_string())?;
         Ok(Self::bind(&request, &quantities, answers))

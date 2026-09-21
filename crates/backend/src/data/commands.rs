@@ -67,15 +67,6 @@ impl DataCommands {
             })
             .await?
     }
-    pub(super) async fn read_robot_description(
-        &self,
-        request: spiral_robotics_common::datasets::RobotDescriptionRequest,
-    ) -> Result<String, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        super::robot_visualization::RobotVisualization::read_description(request)
-            .await
-            .map_err(|message| crate::OperationError::External(message).into())
-    }
     pub(super) async fn inspect_robot_stream(
         &self,
         request: spiral_robotics_common::datasets::RobotStreamInspectionRequest,

@@ -54,11 +54,13 @@ DX builds them together using the `@client` and `@server` package selections.
 
 Agent orchestration belongs to the frontend: Workflow authoring, imported robot
 discovery, and Curation rule interpretation own their prompts, model responses,
-and tool selection in the browser. The backend keeps provider credentials and
-forwards model requests. Network and data tools still run on the backend,
-including robot-description and mesh fetching, recorded-stream inspection, and
-validated persistence. Browser orchestration ends when its owning task is
-disposed; this does not undo completed data operations.
+and tool selection in the browser. `GET /api/credentials` supplies Studio-wide
+configured credentials to the frontend, which constructs authorization headers
+and provider requests and interprets responses. `/api/proxy` relays external HTTP
+requests and streams their responses without provider or credential logic.
+Native data operations, robot validation, and persistence remain on the backend.
+Browser orchestration ends when its owning task is disposed; this does not undo
+completed data operations.
 
 Build a distributable server and browser bundle from the workspace root with:
 
@@ -100,7 +102,7 @@ alongside the backend without changing the workspace target. It uses the same
 browser implementation; only WASM registers its unit tests, and the native
 Studio server does not depend on the frontend.
 
-For a developer-local Workflow Assistant, put the backend-only credential in
+For a developer-local Workflow Assistant, put the provider credential in
 the repository root's ignored `.env.local` file. Studio reads this file
 automatically when a corresponding process value is absent, so it works
 without direnv or manually exporting secrets:
@@ -108,6 +110,10 @@ without direnv or manually exporting secrets:
 ```dotenv
 LLM_API_KEY=your-provider-key
 ```
+
+The frontend receives configured credentials through `/api/credentials` and uses
+them in memory. Credentials belong to Studio, independently of the selected
+project; keep them out of saved workflows, browser storage, and logs.
 
 The default is `openai/gpt-5.6-terra` through OpenRouter, with `medium` reasoning
 effort and fast mode requested using `service_tier: "priority"`. Priority

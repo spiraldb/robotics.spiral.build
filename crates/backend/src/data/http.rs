@@ -25,10 +25,6 @@ impl DatasetQueryEndpoints {
             Self::robot_discovery_context,
         );
         routes.post(
-            "/datasets/robot-discovery/read-description",
-            Self::read_robot_description,
-        );
-        routes.post(
             "/datasets/robot-discovery/inspect-stream",
             Self::inspect_robot_stream,
         );
@@ -64,12 +60,6 @@ impl DatasetQueryEndpoints {
         ApiJson(selection): ApiJson<DatasetSelection>,
     ) -> Result<Json<spiral_robotics_common::datasets::RobotDiscoveryContext>, HttpFailure> {
         Ok(Json(commands.robot_discovery_context(selection).await?))
-    }
-    async fn read_robot_description(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::datasets::RobotDescriptionRequest>,
-    ) -> Result<Json<String>, HttpFailure> {
-        Ok(Json(commands.read_robot_description(request).await?))
     }
     async fn inspect_robot_stream(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,

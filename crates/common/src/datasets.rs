@@ -36,21 +36,6 @@ impl RobotDiscoveryContext {
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RobotDescriptionRequest {
-    url: String,
-}
-impl RobotDescriptionRequest {
-    pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
-    }
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RobotStreamInspectionRequest {

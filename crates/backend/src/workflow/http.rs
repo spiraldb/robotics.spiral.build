@@ -1,5 +1,5 @@
 //! Documents, planning, runs, and model transport; no remote editor session.
-use super::{commands::WorkflowCommands, provider::ModelStream};
+use super::commands::WorkflowCommands;
 use crate::http::{
     contract::ApiRoutes,
     delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject},
@@ -8,8 +8,8 @@ use axum::Json;
 use spiral_robotics_common::{
     datasets::DatasetSelection,
     workflow::{
-        WorkflowAgentReadiness, WorkflowSpec, WorkflowSummary,
-        document::{ModelRequest, WorkflowDocument, WorkflowPlan, WorkflowRun},
+        WorkflowSpec, WorkflowSummary,
+        document::{WorkflowDocument, WorkflowPlan, WorkflowRun},
     },
 };
 pub(crate) struct WorkflowEndpoints;
@@ -24,9 +24,6 @@ impl WorkflowEndpoints {
         routes.get("/workflow-runs/{id}", Self::run);
         routes.get("/models/capabilities", Self::capabilities);
         routes.post("/datasets/cameras", Self::cameras);
-        routes.get("/models/status", Self::model_status);
-        routes.post("/models/complete", Self::complete);
-        routes.post("/models/decide", Self::decide);
     }
     async fn list(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,
@@ -78,23 +75,5 @@ impl WorkflowEndpoints {
         ApiJson(selection): ApiJson<DatasetSelection>,
     ) -> Result<Json<serde_json::Value>, HttpFailure> {
         Ok(Json(commands.cameras(selection).await?))
-    }
-    async fn model_status(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
-    ) -> Result<Json<WorkflowAgentReadiness>, HttpFailure> {
-        Ok(Json(commands.model_status()?))
-    }
-    async fn complete(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
-        ApiJson(request): ApiJson<ModelRequest>,
-    ) -> Result<ModelStream, HttpFailure> {
-        Ok(commands.complete(request)?)
-    }
-    async fn decide(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::workflow::document::DecisionRequest>,
-    ) -> Result<Json<spiral_robotics_common::workflow::document::DecisionResponse>, HttpFailure>
-    {
-        Ok(Json(commands.decide(request).await?))
     }
 }

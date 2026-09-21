@@ -3,15 +3,16 @@
 mod browser_tests;
 
 use super::DatasetClient;
+use crate::client::model::ModelRequest;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use spiral_robotics_common::{
     datasets::{
-        DatasetRobot, DatasetSelection, HuggingFaceDatasetInspection, RobotDescriptionRequest,
-        RobotDiscoveryResult, RobotStreamInspectionRequest,
+        DatasetRobot, DatasetSelection, HuggingFaceDatasetInspection, RobotDiscoveryResult,
+        RobotStreamInspectionRequest,
     },
-    workflow::{conversation::ProviderMessage, document::ModelRequest},
+    workflow::conversation::ProviderMessage,
 };
 
 #[derive(Deserialize, JsonSchema)]
@@ -113,7 +114,7 @@ impl RobotDiscoveryAgent {
             .and_then(Value::as_str)
             .ok_or("A source URL is required")?;
         self.data
-            .read_robot_description(&RobotDescriptionRequest::new(url))
+            .read_robot_description(url)
             .await
             .map(Value::String)
             .map_err(|error| error.to_string())

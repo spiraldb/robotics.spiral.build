@@ -15,9 +15,16 @@ export function installWorkflowFetch(nextMode) {
     calls = []; mode = nextMode; aborted = false; runs = [];
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
-        const url = new URL(request.url).pathname;
+        const path = new URL(request.url).pathname;
+        if (path === '/api/credentials') return Response.json({llm:{base_url:'https://provider.test/v1',api_key:'test-key',default_model:'openai/gpt-5.6-terra'},spiral:null,hugging_face:null});
+        let url = path;
+        let metadata = null;
+        if (path === '/api/proxy') {
+            metadata = {url:new URL(request.url).searchParams.get('url'),method:request.method};
+            url = metadata.url;
+        }
         const body = request.method === 'GET' ? null : await request.clone().json();
-        calls.push({url, body});
+        calls.push({url, body, transport:path, metadata, session:request.headers.get('X-Project-Session')});
         if (url === '/api/models/capabilities') return Response.json({columns:[],rows:[],truncated:false,elapsed_ms:0});
         if (url === '/api/workflows/plan') {
             const graph = {schema_version:1,root:0,nodes:[{id:0,operator:'Values',inputs:[],output:{},properties:{}}]};
@@ -43,14 +50,14 @@ export function installWorkflowFetch(nextMode) {
             }
             return Response.json(run);
         }
-        if (url !== '/api/models/complete') throw new Error('Unexpected request ' + url);
+        if (path !== '/api/proxy') throw new Error('Unexpected request ' + path);
         if (mode === 'pending') {
             await new Promise((resolve, reject) => {
                 releaseResponse = resolve;
                 request.signal.addEventListener('abort', () => { aborted = true; reject(new DOMException('Cancelled', 'AbortError')); });
             });
         }
-        const first = calls.filter(call => call.url === '/api/models/complete').length === 1;
+        const first = calls.filter(call => call.url.endsWith('/chat/completions')).length === 1;
         const graph = {name:'Authored in browser',sql:'SELECT 42 AS answer'};
         let message = first
             ? {role:'assistant',content:'I’ll build it.',tool_calls:[{id:'graph-call',type:'function',function:{name:'set_workflow',arguments:JSON.stringify({workflow:graph})}}]}
@@ -69,7 +76,7 @@ export function installWorkflowFetch(nextMode) {
                 ['show_results',{run_id:'run-2',kind:'result'}],
                 ['assess_evidence',{run_id:'run-2',verdict:'pass',reason:'Trying to continue anyway.'}],
                 ['show_results',{run_id:'run-2',kind:'diagnostic'}]);
-            const index = calls.filter(call => call.url === '/api/models/complete').length - 1;
+            const index = calls.filter(call => call.url.endsWith('/chat/completions')).length - 1;
             const step = steps[index];
             message = step ? {role:'assistant',content:'Evaluating evidence.',tool_calls:[{id:'step-'+index,type:'function',function:{name:step[0],arguments:JSON.stringify(step[1])}}]}
                 : {role:'assistant',content:'The result is 43. I inspected the frame; the displayed rows are a truncated preview.'};
@@ -77,7 +84,7 @@ export function installWorkflowFetch(nextMode) {
         }
         if (mode === 'missing-presentation') {
             const steps = [['run_workflow',{}], ['inspect_run',{run_id:'run-1'}]];
-            const index = calls.filter(call => call.url === '/api/models/complete').length - 1;
+            const index = calls.filter(call => call.url.endsWith('/chat/completions')).length - 1;
             const step = steps[index];
             message = step ? {role:'assistant',content:'Running.',tool_calls:[{id:'step-'+index,type:'function',function:{name:step[0],arguments:JSON.stringify(step[1])}}]}
                 : {role:'assistant',content:'Finished without presenting a result.'};
@@ -87,13 +94,15 @@ export function installWorkflowFetch(nextMode) {
                 ? {role:'assistant',content:'Recovering runs.',tool_calls:[{id:'recover',type:'function',function:{name:'inspect_run',arguments:JSON.stringify({run_id:''})}}]}
                 : {role:'assistant',content:'No admitted runs.'};
         }
-        const payload = new TextEncoder().encode(JSON.stringify({event:'text',data:message.content})+'\n'+JSON.stringify({event:'complete',data:message})+'\n');
-        // Deliberately split inside the UTF-8 apostrophe and across JSON records.
+        const finish = message.tool_calls?.length ? 'tool_calls' : 'stop';
+        const tool_calls = (message.tool_calls || []).map((call,index) => ({...call,index}));
+        const payload = new TextEncoder().encode('data: '+JSON.stringify({choices:[{delta:{content:message.content,tool_calls},finish_reason:finish}]})+'\n\ndata: [DONE]\n\n');
+        // Deliberately split inside UTF-8 and across SSE framing.
         const stream = new ReadableStream({start(controller) {
             for(let offset=0; offset<payload.length; offset+=7) controller.enqueue(payload.slice(offset,offset+7));
             controller.close();
         }});
-        return new Response(stream, {headers:{'Content-Type':'application/x-ndjson'}});
+        return new Response(stream, {headers:{'Content-Type':'text/event-stream'}});
     };
 }
 export function restoreWorkflowFetch() { globalThis.fetch = originalFetch; }
@@ -203,6 +212,17 @@ async fn browser_loop_plans_and_updates_the_local_draft_without_applying_or_savi
         "Ready to run."
     );
     let calls = fetch.calls();
+    assert!(
+        calls
+            .iter()
+            .filter(|call| call["url"] == "https://provider.test/v1/chat/completions")
+            .all(|call| {
+                call["transport"] == "/api/proxy"
+                    && call["session"].is_null()
+                    && call["metadata"]["method"] == "POST"
+                    && call["metadata"]["url"] == "https://provider.test/v1/chat/completions"
+            })
+    );
     assert_eq!(
         calls
             .iter()
@@ -210,9 +230,9 @@ async fn browser_loop_plans_and_updates_the_local_draft_without_applying_or_savi
             .collect::<Vec<_>>(),
         [
             "/api/models/capabilities",
-            "/api/models/complete",
+            "https://provider.test/v1/chat/completions",
             "/api/workflows/plan",
-            "/api/models/complete"
+            "https://provider.test/v1/chat/completions"
         ]
     );
     assert!(
@@ -241,7 +261,7 @@ async fn cancelling_a_browser_turn_aborts_fetch_and_keeps_valid_history() {
         if fetch
             .calls()
             .iter()
-            .any(|call| call["url"] == "/api/models/complete")
+            .any(|call| call["url"] == "https://provider.test/v1/chat/completions")
         {
             break;
         }
@@ -276,7 +296,7 @@ async fn a_user_edit_while_the_model_responds_prevents_a_stale_tool_from_overwri
         if fetch
             .calls()
             .iter()
-            .any(|call| call["url"] == "/api/models/complete")
+            .any(|call| call["url"] == "https://provider.test/v1/chat/completions")
         {
             break;
         }
@@ -385,7 +405,7 @@ async fn agent_recovers_from_execution_failure_inspects_images_and_presents_the_
     );
     let requests = calls
         .iter()
-        .filter(|call| call["url"] == "/api/models/complete")
+        .filter(|call| call["url"] == "https://provider.test/v1/chat/completions")
         .collect::<Vec<_>>();
     assert!(
         requests[3]["body"]["messages"]
@@ -526,7 +546,7 @@ async fn an_execution_turn_cannot_finish_with_only_a_narrative() {
         fetch
             .calls()
             .iter()
-            .filter(|call| call["url"] == "/api/models/complete")
+            .filter(|call| call["url"] == "https://provider.test/v1/chat/completions")
             .count(),
         4,
         "allow exactly one corrective model response, not an unbounded completion loop"

@@ -22,6 +22,7 @@ mod rollout;
 mod run_registry;
 mod sync;
 mod training;
+mod transport;
 mod workflow;
 
 pub(crate) use error::BackendCommandError;

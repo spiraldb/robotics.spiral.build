@@ -1,18 +1,17 @@
 //! Browser-owned authoring loop. Tools edit the same draft as the canvas.
 mod tools;
 use super::{WorkflowClient, state::WorkflowController};
-use crate::client::model::ModelClient;
+use crate::client::model::{ModelClient, ModelRequest};
 use dioxus::dioxus_core::Task;
 use dioxus::prelude::*;
 use serde_json::{Value, json};
 use spiral_robotics_common::workflow::{
-    WorkflowAgentMessage, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentReadiness,
-    WorkflowAgentRole, WorkflowAgentSession, WorkflowAgentToolPhase, WorkflowAgentToolSummary,
+    WorkflowAgentMessage, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole,
+    WorkflowAgentSession, WorkflowAgentToolPhase, WorkflowAgentToolSummary,
     conversation::{
         MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION, ProviderMessage, ProviderMessageHistory,
         WorkflowConversation,
     },
-    document::ModelRequest,
 };
 use tools::{ToolCompletion, WorkflowToolCatalog};
 const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
@@ -20,14 +19,14 @@ const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct WorkflowAssistant {
     conversation: Signal<WorkflowConversation>,
-    readiness: Signal<Option<WorkflowAgentReadiness>>,
+    configured: Signal<Option<bool>>,
     task: Signal<Option<Task>>,
 }
 impl WorkflowAssistant {
     pub(super) fn new(id: &str) -> Self {
         Self {
             conversation: Signal::new(WorkflowConversation::new(id)),
-            readiness: Signal::new(None),
+            configured: Signal::new(None),
             task: Signal::new(None),
         }
     }
@@ -36,20 +35,17 @@ impl WorkflowAssistant {
     }
     pub(super) fn snapshot(&self, history_available: bool) -> WorkflowAgentState {
         WorkflowAgentState {
-            readiness: self.readiness.read().clone().unwrap_or_default(),
+            configured: self.configured.read().unwrap_or(false),
             session: self.conversation.read().session().clone(),
             history_available,
         }
     }
     pub(super) fn loaded(&self) -> bool {
-        self.readiness.read().is_some()
+        self.configured.read().is_some()
     }
     pub(super) async fn connect(mut self) {
-        let readiness = ModelClient::current()
-            .status()
-            .await
-            .unwrap_or_else(|error| WorkflowAgentReadiness::error(error.to_string()));
-        self.readiness.set(Some(readiness));
+        let configured = ModelClient::current().configured().await.unwrap_or(false);
+        self.configured.set(Some(configured));
     }
     pub(super) fn install(mut self, mut conversation: WorkflowConversation) {
         self.cancel();
@@ -388,13 +384,13 @@ impl ToolOutput {
     }
 }
 pub(crate) struct WorkflowAgentState {
-    readiness: WorkflowAgentReadiness,
+    configured: bool,
     session: WorkflowAgentSession,
     history_available: bool,
 }
 impl WorkflowAgentState {
-    pub(super) fn readiness(&self) -> &WorkflowAgentReadiness {
-        &self.readiness
+    pub(super) fn configured(&self) -> bool {
+        self.configured
     }
     pub(super) fn session(&self) -> &WorkflowAgentSession {
         &self.session
