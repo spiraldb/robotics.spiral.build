@@ -33,39 +33,6 @@ impl SignalNamePresentation for str {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::components::time_series::TimelineSignalLanes;
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn joint_colours_are_stable_when_a_motor_is_missing() {
-        assert_eq!("shoulder_pan".signal_color(), SIGNAL_COLORS[0]);
-        assert_eq!("elbow_flex".signal_color(), SIGNAL_COLORS[2]);
-        assert_eq!("gripper".signal_color(), SIGNAL_COLORS[5]);
-        assert_eq!("extra_axis".signal_color(), "extra_axis".signal_color());
-    }
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn timeline_chart_uses_one_grid_per_canonical_lane() {
-        let chart = SignalStore::default()
-            .timeline_lanes()
-            .chart_with(&crate::components::time_series::TraceChartLayout::sparkline(12.0));
-        let option = serde_json::to_value(chart).expect("timeline chart should serialize");
-
-        assert_eq!(option["grid"].as_array().map(Vec::len), Some(6));
-        assert_eq!(option["xAxis"].as_array().map(Vec::len), Some(6));
-        assert_eq!(option["yAxis"].as_array().map(Vec::len), Some(6));
-        assert_eq!(option["animation"], false);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn canonical_lane_helper_always_returns_six_joint_slots() {
-        let lanes = SignalStore::default().timeline_lanes();
-        assert_eq!(lanes.len(), 6);
-        assert_eq!(lanes[0].id(), "shoulder_pan");
-        assert_eq!(lanes[5].id(), "gripper");
-    }
-}
-
 /// Convert the studio's existing take signal store into the timeline's fixed
 /// six-lane view model. Each lane overlays the arms that reported that joint.
 pub(crate) trait RecordingTimeline {
@@ -103,5 +70,38 @@ impl RecordingTimeline for SignalStore {
             )
             .with_series(series)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::time_series::TimelineSignalLanes;
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn joint_colours_are_stable_when_a_motor_is_missing() {
+        assert_eq!("shoulder_pan".signal_color(), SIGNAL_COLORS[0]);
+        assert_eq!("elbow_flex".signal_color(), SIGNAL_COLORS[2]);
+        assert_eq!("gripper".signal_color(), SIGNAL_COLORS[5]);
+        assert_eq!("extra_axis".signal_color(), "extra_axis".signal_color());
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn timeline_chart_uses_one_grid_per_canonical_lane() {
+        let chart = SignalStore::default()
+            .timeline_lanes()
+            .chart_with(&crate::components::time_series::TraceChartLayout::sparkline(12.0));
+        let option = serde_json::to_value(chart).expect("timeline chart should serialize");
+
+        assert_eq!(option["grid"].as_array().map(Vec::len), Some(6));
+        assert_eq!(option["xAxis"].as_array().map(Vec::len), Some(6));
+        assert_eq!(option["yAxis"].as_array().map(Vec::len), Some(6));
+        assert_eq!(option["animation"], false);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn canonical_lane_helper_always_returns_six_joint_slots() {
+        let lanes = SignalStore::default().timeline_lanes();
+        assert_eq!(lanes.len(), 6);
+        assert_eq!(lanes[0].id(), "shoulder_pan");
+        assert_eq!(lanes[5].id(), "gripper");
     }
 }

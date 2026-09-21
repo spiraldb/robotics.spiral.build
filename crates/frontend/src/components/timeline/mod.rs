@@ -15,6 +15,7 @@
 mod density;
 mod interaction;
 mod playback;
+#[allow(clippy::module_inception)]
 mod timeline;
 mod tracks;
 pub(crate) use density::DensityTrack;

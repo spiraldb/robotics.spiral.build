@@ -6,6 +6,12 @@
    backend code, and viewport math cannot add unrelated CSS utilities. */
 @source "./src/**/*.rs";
 
+/* Build (Workflow › Build) styles live in one file per owner. Each file adds
+   only classes carrying its own prefix; nothing here is edited for Build. */
+@import "./styles/build-canvas.css";
+@import "./styles/build-annotate.css";
+@import "./styles/build-explore.css";
+
 /*
   One palette, named by role rather than by hue.
 

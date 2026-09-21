@@ -9,6 +9,7 @@ mod client;
 mod dataset_overview;
 mod episode_list;
 mod episode_playback;
+mod episode_review;
 mod episode_streams;
 mod episode_transport;
 mod import_dataset;
@@ -24,4 +25,5 @@ pub(crate) use episode_transport::EpisodeTransport;
 
 pub(crate) use episode_list::OpenedEpisode;
 pub(in crate::activities) use episode_playback::EpisodeCamera;
+pub(in crate::activities) use episode_review::EpisodeReview;
 pub(crate) use episode_streams::StreamCatalog;

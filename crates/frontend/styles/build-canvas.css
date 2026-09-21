@@ -1,0 +1,3 @@
+/* Build › canvas styles. Prefix every class with `build-canvas-`. Use @layer components
+   like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
+   must be unlayered too. */

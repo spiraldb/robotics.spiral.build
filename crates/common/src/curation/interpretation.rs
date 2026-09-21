@@ -147,11 +147,8 @@ impl RuleProposal {
     }
     pub fn problems(&self) -> Vec<String> {
         let mut problems = Vec::new();
-        match self.intent {
-            RuleIntent::Unresolved => {
-                problems.push("Choose the operation this rule should perform.".into())
-            }
-            _ => {}
+        if self.intent == RuleIntent::Unresolved {
+            problems.push("Choose the operation this rule should perform.".into());
         }
         if !matches!(self.intent, RuleIntent::ProductiveChunks)
             && !matches!(

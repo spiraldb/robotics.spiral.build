@@ -192,17 +192,16 @@ impl CompiledCuration {
             columns.push(format!(
                 "sum(CASE WHEN {retained} THEN 1 ELSE 0 END) AS stage_{index}_incoming"
             ));
-            if let CurationStep::Transform(transform) = step {
-                if let Some(transform_index) =
+            if let CurationStep::Transform(transform) = step
+                && let Some(transform_index) =
                     self.transforms.iter().position(|id| id == transform.id())
-                {
-                    columns.push(format!("sum(CASE WHEN {retained} AND COALESCE(transform_{transform_index},false) THEN 1 ELSE 0 END) AS stage_{index}_affected"));
-                }
+            {
+                columns.push(format!("sum(CASE WHEN {retained} AND COALESCE(transform_{transform_index},false) THEN 1 ELSE 0 END) AS stage_{index}_affected"));
             }
-            if let CurationStep::Filter(rule) = step {
-                if let Some(rule_index) = self.rules.iter().position(|id| id == rule.id()) {
-                    retained = format!("{retained} AND NOT COALESCE(rule_{rule_index},false)");
-                }
+            if let CurationStep::Filter(rule) = step
+                && let Some(rule_index) = self.rules.iter().position(|id| id == rule.id())
+            {
+                retained = format!("{retained} AND NOT COALESCE(rule_{rule_index},false)");
             }
             columns.push(format!(
                 "sum(CASE WHEN {retained} THEN 1 ELSE 0 END) AS stage_{index}_retained"
@@ -423,7 +422,19 @@ impl CurationSql<'_> {
         let mut outputs = Vec::new();
         let time_ns = "spql.dt.duration_total(f.time, 'ns')";
         let time_predicate = self.time_predicate(time_ns, &format!("{time_ns} + 1"));
-        let progress_predicates = self.recipe.transforms().iter().enumerate().filter_map(|(index, transform)| matches!(transform.operation(), TransformOperation::SelectProgressChunks { .. }).then(|| format!("NOT EXISTS (SELECT 1 FROM {} c WHERE c.id = s.id AND NOT c.kept AND f.request_index >= c.start_frame AND f.request_index < c.end_frame)", Self::quoted_relation(&format!("{roster}_chunks_{index}"))))).collect::<Vec<_>>();
+        let progress_predicates = self
+            .recipe
+            .transforms()
+            .iter()
+            .enumerate()
+            .filter(|(_, transform)| {
+                matches!(
+                    transform.operation(),
+                    TransformOperation::SelectProgressChunks { .. }
+                )
+            })
+            .map(|(index, _)| format!("NOT EXISTS (SELECT 1 FROM {} c WHERE c.id = s.id AND NOT c.kept AND f.request_index >= c.start_frame AND f.request_index < c.end_frame)", Self::quoted_relation(&format!("{roster}_chunks_{index}"))))
+            .collect::<Vec<_>>();
         let selection = std::iter::once(time_predicate)
             .chain(progress_predicates)
             .collect::<Vec<_>>()

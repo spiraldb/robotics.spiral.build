@@ -88,10 +88,10 @@ impl CurationSpec {
             if step.id() == step_id {
                 return true;
             }
-            if let CurationStep::Filter(rule) = step {
-                if verdict.excluded_by().iter().any(|id| id == rule.id()) {
-                    return false;
-                }
+            if let CurationStep::Filter(rule) = step
+                && verdict.excluded_by().iter().any(|id| id == rule.id())
+            {
+                return false;
             }
         }
         false

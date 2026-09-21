@@ -34,26 +34,91 @@ impl ModelRequest {
     }
 }
 
+/// Answers to one Decisions request, keyed by question id. Three readers:
+/// `choice` for decisions code acts on (confidence-gated), `noul` for a
+/// calibrated yes probability, and `choice_distribution` for rankings and
+/// categorization that read every option's probability without a gate.
 #[derive(Deserialize)]
 pub(crate) struct DecisionResponse {
-    answers: BTreeMap<String, DecisionChoiceAnswer>,
+    answers: BTreeMap<String, DecisionAnswer>,
 }
 impl DecisionResponse {
+    /// A Choice answer the caller may act on: confidence at least 0.5.
     pub(crate) fn choice(&self, question: &str) -> Option<&str> {
         let answer = self.answers.get(question)?;
         (answer.kind == "choice"
             && answer
                 .confidence
                 .is_some_and(|value| value.is_finite() && (0.5..=1.0).contains(&value)))
-        .then_some(&answer.choice)
+        .then_some(answer.choice.as_deref()?)
+    }
+    /// A Noul answer: the probability, 0 to 1, that the question is true.
+    // Read by Build's explorations; the allow goes away when they land.
+    #[allow(dead_code)]
+    pub(crate) fn noul(&self, question: &str) -> Option<f64> {
+        let answer = self.answers.get(question)?;
+        (answer.kind == "noul")
+            .then_some(answer.noul?)
+            .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+    }
+    /// A Choice answer's whole distribution, ungated.
+    #[allow(dead_code)]
+    pub(crate) fn choice_distribution(&self, question: &str) -> Option<ChoiceDistribution<'_>> {
+        let answer = self.answers.get(question)?;
+        if answer.kind != "choice" || answer.probabilities.is_empty() {
+            return None;
+        }
+        if answer
+            .probabilities
+            .values()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            return None;
+        }
+        Some(ChoiceDistribution {
+            choice: answer.choice.as_deref()?,
+            probabilities: &answer.probabilities,
+            confidence: answer
+                .confidence
+                .filter(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+        })
+    }
+}
+/// The winning option, the probability of every option (they sum to 1), and
+/// how peaked the distribution is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ChoiceDistribution<'a> {
+    choice: &'a str,
+    probabilities: &'a BTreeMap<String, f64>,
+    confidence: Option<f64>,
+}
+#[allow(dead_code)]
+impl ChoiceDistribution<'_> {
+    pub(crate) fn choice(&self) -> &str {
+        self.choice
+    }
+    pub(crate) fn probability(&self, option: &str) -> f64 {
+        self.probabilities.get(option).copied().unwrap_or(0.0)
+    }
+    pub(crate) fn probabilities(&self) -> &BTreeMap<String, f64> {
+        self.probabilities
+    }
+    pub(crate) fn confidence(&self) -> Option<f64> {
+        self.confidence
     }
 }
 #[derive(Deserialize)]
-struct DecisionChoiceAnswer {
+struct DecisionAnswer {
     #[serde(rename = "type")]
     kind: String,
-    choice: String,
+    #[serde(default)]
+    choice: Option<String>,
+    #[serde(default)]
     confidence: Option<f64>,
+    #[serde(default)]
+    probabilities: BTreeMap<String, f64>,
+    #[serde(default)]
+    noul: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -329,5 +394,40 @@ impl ProviderStream {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod decision_reader_tests {
+    use super::*;
+
+    fn response(json: &str) -> DecisionResponse {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn choice_stays_gated_while_the_distribution_is_not() {
+        let response = response(
+            r#"{"answers":{"category":{"type":"choice","choice":"fold","confidence":0.2,"probabilities":{"fold":0.4,"grasp":0.35,"smooth":0.25}}},"usage":{"input_tokens":9}}"#,
+        );
+        assert_eq!(response.choice("category"), None);
+        let distribution = response.choice_distribution("category").unwrap();
+        assert_eq!(distribution.choice(), "fold");
+        assert_eq!(distribution.probability("grasp"), 0.35);
+        assert_eq!(distribution.probability("missing"), 0.0);
+        assert_eq!(distribution.confidence(), Some(0.2));
+    }
+
+    #[test]
+    fn noul_reads_only_finite_probabilities_of_its_own_type() {
+        let response = response(
+            r#"{"answers":{"r1":{"type":"noul","noul":0.83},"r2":{"type":"noul","noul":1.5},"r3":{"type":"choice","choice":"x","confidence":1.0}}}"#,
+        );
+        assert_eq!(response.noul("r1"), Some(0.83));
+        assert_eq!(response.noul("r2"), None);
+        assert_eq!(response.noul("r3"), None);
+        assert_eq!(response.choice("r1"), None);
+        assert_eq!(response.choice("r3"), Some("x"));
+        assert_eq!(response.choice_distribution("r3"), None);
     }
 }

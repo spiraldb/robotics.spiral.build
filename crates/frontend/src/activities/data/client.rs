@@ -66,11 +66,10 @@ impl DatasetClient {
             "accept",
             "text/plain, application/json, application/xml, text/xml",
         );
-        if url.starts_with("https://huggingface.co/") {
-            if let Some(credentials) = credentials.hugging_face() {
-                request =
-                    request.header("authorization", format!("Bearer {}", credentials.token()));
-            }
+        if url.starts_with("https://huggingface.co/")
+            && let Some(credentials) = credentials.hugging_face()
+        {
+            request = request.header("authorization", format!("Bearer {}", credentials.token()));
         }
         let response =
             crate::client::proxy::ProxyClient::text(request.timeout(30_000), 512 * 1024).await;

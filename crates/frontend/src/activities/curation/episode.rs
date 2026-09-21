@@ -183,8 +183,7 @@ impl SheetTile {
 
 #[component]
 fn TransformEpisodeEvidence(episode: crate::activities::data::OpenedEpisode) -> Element {
-    use super::episode_review::EpisodeReview;
-    use crate::activities::data::EpisodeTransport;
+    use crate::activities::data::{EpisodeReview, EpisodeTransport};
     let transport = EpisodeTransport::use_opened_episode(&episode);
     rsx! { EpisodeReview { episode, transport } }
 }

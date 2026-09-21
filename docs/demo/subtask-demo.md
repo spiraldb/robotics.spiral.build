@@ -32,7 +32,7 @@ Each measurement's **+** exposes only the child actions its output supports. Sea
 
 ### Annotation
 
-**Orchestration lives on the frontend, following the Workflow agent.** A Build measurement controller owns episode iteration, contact-sheet preparation, prompts, model and jev requests, result validation, and progress. It uses backend APIs for native frame sampling and persistence. The frontend reads Studio-wide credentials, constructs authenticated provider requests, and handles provider responses and retries. The backend relays HTTP through `/api/proxy`, preserving streaming and cancellation without interpreting model requests or selecting credentials. This measurement is a fixed pipeline with one annotation call per episode. Closing or reloading the browser stops its orchestration; already-persisted rows remain available.
+**Orchestration lives on the frontend, following the Workflow agent.** A Build measurement controller owns episode iteration, contact-sheet preparation, prompts, model and jev requests, result validation, and progress. Contact sheets are drawn in the browser from the Data view's episode decoder; there is no backend frame-sampling API. The backend stores one versioned Build document per graph and never interprets it. The frontend reads Studio-wide credentials, constructs authenticated provider requests, and handles provider responses and retries. The backend relays HTTP through `/api/proxy`, preserving streaming and cancellation without interpreting model requests or selecting credentials. This measurement is a fixed pipeline with one annotation call per episode. Closing or reloading the browser stops its orchestration; already-persisted rows remain available.
 
 **One annotation call per episode.** Start with one selected camera and **Gemini Flash** as the model candidate. Our proposed pipeline adapts [Macrodata's frame-packing and single-pass approach](https://macrodata.co/blog/annotating-robot-video-subtasks):
 
@@ -49,7 +49,7 @@ Macrodata found that separate calls per grid introduced artificial cuts, even wi
 
 | Existing component | Planned reuse |
 | --- | --- |
-| Dataset/episode selection and native Spiral video sampling | Read the selected recording and decode sampled frames; adapt the existing sampling helpers to time-based selection. |
+| Dataset/episode selection and the browser episode decoder | Open the selected recording, decode frames at 0.5-second timestamps in the browser, and draw contact sheets on a canvas. |
 | Browser-owned Workflow controller and shared `ModelClient` | Reuse the task lifecycle and frontend provider handling; the measurement owns its own progress and requests, independently of the chat conversation. `ModelClient::decide` already sends jev Decisions requests for Curation's rule interpreter; search and grouping reuse it. |
 | Curation's jev rule interpreter (`RuleInterpreter`) | Copy its state-plus-questions construction and code-side binding. Search and grouping build their own questions. The shared `DecisionResponse` needs Noul and probability readers; its existing `choice` reader enforces a 0.5 confidence gate that search and grouping do not use. |
 | Studio-wide `/api/credentials` and `/api/proxy` | Obtain configured credentials and relay external HTTP requests. Annotation prompts, authorization headers, and response parsing stay on the frontend. Add structured output and Gemini configuration; Gemini support in the provider client must be verified, not assumed. |
@@ -94,5 +94,7 @@ An episode can have many subtask rows. Search returns rows; the episode referenc
 | --- | --- |
 | `subtask_category` | `name`, `definition`, from the LLM pass |
 | `subtask_group` | `episode`, `start_time` (the subtask row key), `category`, `probability`, `confidence`, from jev |
+
+**Persistence.** The graph, its node configuration, the subtask rows, and the groupings are one versioned JSON document per Build graph, saved through `/api/build-documents` with the same revision-conflict rule as workflows. The backend stores the payload opaquely; the frontend owns its schema and encoding version. The frontend saves after every annotated episode, so a reload keeps finished rows.
 
 Similarity means the same described operation, as jev judges from the descriptions. The video grid lets the user compare differences in execution. Good boundaries and specific action descriptions are essential; matching text alone does not establish matching motion or success.

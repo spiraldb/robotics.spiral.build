@@ -1,7 +1,6 @@
 //! Recorded camera feeds and derived evidence on one caller-owned clock.
-use crate::activities::data::{
-    DatasetClient, EpisodeCamera, EpisodeTransport, OpenedEpisode, StreamCatalog,
-};
+//! Shared by Curation's evidence panels and Build's subtask views.
+use super::{DatasetClient, EpisodeCamera, EpisodeTransport, OpenedEpisode, StreamCatalog};
 use crate::components::timeline::{
     NumericTrackRow, Timeline, TimelineAction, TimelineContent, TimelineEvent, TimelineInteraction,
     TimelineInterval, TimelineTrack,
@@ -10,7 +9,7 @@ use dioxus::prelude::*;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
 
 #[component]
-pub(super) fn EpisodeReview(
+pub(in crate::activities) fn EpisodeReview(
     episode: OpenedEpisode,
     transport: EpisodeTransport,
     #[props(default)] tracks: Vec<TimelineTrack>,
