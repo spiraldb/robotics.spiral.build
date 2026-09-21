@@ -14,7 +14,7 @@
 //! STORY: ask, watch the query flow across the pipeline, see rows with images
 //! arrive, read each stage's plain-language role, inspect exact values.
 //! FIRST VIEWPORT: one document bar (title ▾ · state · Discard Save ▶Run);
-//! left 24% Assistant | SQL; right: Graph over Results (54% of the height).
+//! left 24% Assistant; right: Graph over Results (54% of the height).
 //! Stage details float over the graph only while a stage is selected.
 //! FORM: graph hero with a side console and a results shelf.
 //! FINISH: unreviewed and undocumented is unfinished; this build ends with the
@@ -24,37 +24,24 @@ use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_common::workflow::{WorkflowAgentPhase, WorkflowRunPhase};
 use spiral_robotics_ui::{
-    ActionPurpose, ArrowDownIcon, Button, ButtonVariant, Chip, ChipTone, EmptyState, ModeButton,
-    ModeGroup, Notice, NoticeTone, Select,
+    ActionPurpose, ArrowDownIcon, Button, ButtonVariant, Chip, ChipTone, EmptyState, Notice,
+    NoticeTone, Select,
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
-    ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, NODE_PANEL_ID,
-    RESULTS_PANEL_ID,
+    ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, RESULTS_PANEL_ID,
 };
-use crate::components::document_bar::ExecutedSql;
 use crate::components::icons::{
-    ConversationIcon, ResultNodeIcon, SendIcon, SpinnerIcon, SqlIcon, StopIcon, WorkflowIcon,
+    ConversationIcon, ResultNodeIcon, SendIcon, SpinnerIcon, StopIcon, WorkflowIcon,
 };
 use crate::components::run_phase::RunPhasePresentation;
 use crate::shell::state::StudioProjectState;
 
-use super::highlight::SqlHighlight;
-
-const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-investigation-v13";
+const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-agent-v14";
 
 #[component]
 fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
-    let mut comparing = use_signal(|| false);
-    let mut displayed_workflow = use_signal(String::new);
-    use_effect(move || {
-        let spec = controller.spec();
-        if *displayed_workflow.peek() != spec.id() && controller.loaded() {
-            comparing.set(false);
-            displayed_workflow.set(spec.id().to_owned());
-        }
-    });
     let panels = vec![
         Panel::new(
             RESULTS_PANEL_ID,
@@ -80,20 +67,12 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
         )
         .with_class("workflow-assistant-editor")
         .with_tab_icon(rsx! { ConversationIcon {} }),
-        Panel::new(
-            NODE_PANEL_ID,
-            "SQL",
-            "workflow-console",
-            rsx! { WorkflowSqlEditor { controller } },
-        )
-        .with_class("workflow-node-editor")
-        .with_tab_icon(rsx! { SqlIcon {} }),
     ];
 
     rsx! {
         div { class: "workflow-workspace",
-            if !comparing() { super::document_controls::WorkflowDocumentControls { controller, comparing } }
-            div { class: if comparing() { "workflow-panels workflow-mode-hidden" } else { "workflow-panels" },
+            super::document_controls::WorkflowDocumentControls { controller }
+            div { class: "workflow-panels",
                 PanelWorkspace {
                     panels,
                     initial_layout: WorkflowWorkspaceLayout::initial(),
@@ -102,25 +81,6 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
                     on_panel_activate: move |id: PanelId| controller.activate_panel(id),
                 }
             }
-            div { class: if comparing() { "workflow-comparison-container" } else { "workflow-comparison-container workflow-mode-hidden" },
-                super::comparison::WorkflowComparison { key: "{controller.spec().id()}", controller, comparing }
-            }
-        }
-    }
-}
-
-/// Build authors one workflow; Compare measures two against each other. The
-/// switch stands at the same place in both bars, so changing view never moves
-/// the header.
-#[component]
-pub(super) fn WorkflowViewSwitch(comparing: Signal<bool>) -> Element {
-    let mut comparing = comparing;
-    rsx! {
-        ModeGroup { label: "Workflow view".to_owned(), class: "workflow-view-switch".to_owned(),
-            ModeButton { purpose: ActionPurpose::Select, checked: !comparing(),
-                onclick: move |_| comparing.set(false), "Build" }
-            ModeButton { purpose: ActionPurpose::Select, checked: comparing(),
-                onclick: move |_| comparing.set(true), "Compare" }
         }
     }
 }
@@ -129,7 +89,7 @@ struct WorkflowWorkspaceLayout;
 
 impl WorkflowWorkspaceLayout {
     /// The graph owns the large central tile, results run along the bottom,
-    /// and the Assistant and SQL share a tall column at the left. Stage
+    /// and the Assistant occupies a tall column at the left. Stage
     /// details float over the graph on demand rather than holding a tile.
     /// Every tile stays dockable and resizable.
     fn initial() -> PanelLayout {
@@ -147,7 +107,7 @@ impl WorkflowWorkspaceLayout {
             "workflow-columns",
             SplitAxis::Horizontal,
             0.24,
-            LayoutNode::tile("workflow-console", [ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
+            LayoutNode::tile("workflow-console", [ASSISTANT_PANEL_ID]),
             evidence,
         ))
     }
@@ -419,42 +379,6 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
 }
 
 #[component]
-fn WorkflowSqlEditor(controller: super::state::WorkflowController) -> Element {
-    let spec = controller.spec();
-    let validation = controller.validation();
-    let issues = if spec.sql().trim().is_empty() {
-        Vec::new()
-    } else {
-        validation.errors().to_vec()
-    };
-    // The coloured copy sits under a transparent textarea with identical
-    // metrics; both grow with the text and scroll together in one surface.
-    rsx! {
-        section { class: "workflow-sql-editor", "aria-label": "SQL definition",
-            div { class: "workflow-sql-surface",
-                pre { class: "workflow-sql-highlight", "aria-hidden": "true",
-                    SqlHighlight { sql: spec.sql().to_owned() }
-                    "\n"
-                }
-                textarea {
-                    id: "workflow-sql", class: "workflow-sql-input", spellcheck: "false",
-                    "aria-label": "SQL definition",
-                    value: spec.sql(), placeholder: "SELECT …",
-                    oninput: move |event| controller.set_sql(event.value()),
-                }
-            }
-            if !issues.is_empty() {
-                div { class: "workflow-sql-issues", role: "alert",
-                    for issue in issues {
-                        p { "{issue.message()}" }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
 fn WorkflowCanvas(controller: super::state::WorkflowController) -> Element {
     let spec = controller.spec();
     let active = controller.snapshot().phase().active();
@@ -592,8 +516,6 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                     .iter()
                     .any(|tool| tool.name() == "run_workflow")
             });
-    let executed = controller.executed_query().unwrap_or_else(|| spec.clone());
-    let sql = executed.execution_sql().unwrap_or_else(|error| error);
     let result_model = snapshot
         .result()
         .cloned()
@@ -663,7 +585,6 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
                     if snapshot.phase().active() {
                         WorkflowRunElapsed { started_ms: snapshot.started_ms() }
                     }
-                    ExecutedSql { sql: sql.clone() }
                 }
             }
             if snapshot.result_stale() {

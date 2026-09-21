@@ -1,12 +1,11 @@
 //! One readable answer per user turn, with the complete activity retained on demand.
 
 use dioxus::prelude::*;
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, html};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html};
 use spiral_robotics_common::workflow::{
     WorkflowAgentMessage, WorkflowAgentMessagePhase, WorkflowAgentRole, WorkflowAgentToolPhase,
 };
 
-use super::highlight::Tokens;
 use super::state::WorkflowController;
 use crate::components::icons::ConversationIcon;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
@@ -213,7 +212,6 @@ impl From<&str> for AssistantMarkup {
     fn from(text: &str) -> Self {
         let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
         let mut rendered = String::new();
-        let mut sql_block: Option<String> = None;
         let mut events = Vec::new();
         for event in Parser::new_ext(text, options) {
             match event {
@@ -225,29 +223,6 @@ impl From<&str> for AssistantMarkup {
                     events.push(event);
                     events.push(Event::Html("</details>".into()));
                 }
-                // SQL fences are coloured by the same lexer as the editor. The
-                // text is escaped by the lexer and the result is still sanitized.
-                Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(language)))
-                    if Self::is_sql(&language) =>
-                {
-                    sql_block = Some(String::new());
-                }
-                Event::Text(text) if sql_block.is_some() => {
-                    if let Some(block) = sql_block.as_mut() {
-                        block.push_str(&text);
-                    }
-                }
-                Event::End(TagEnd::CodeBlock) if sql_block.is_some() => {
-                    if let Some(block) = sql_block.take() {
-                        events.push(Event::Html(
-                            format!(
-                                "<pre><code class=\"language-sql\">{}</code></pre>",
-                                Tokens::sql(block.trim_end_matches('\n')).html()
-                            )
-                            .into(),
-                        ));
-                    }
-                }
                 _ => events.push(event),
             }
         }
@@ -256,31 +231,9 @@ impl From<&str> for AssistantMarkup {
         Self(
             ammonia::Builder::default()
                 .add_tags(&["details", "summary"])
-                .add_allowed_classes(
-                    "span",
-                    &[
-                        "tok-keyword",
-                        "tok-function",
-                        "tok-field",
-                        "tok-literal",
-                        "tok-operator",
-                        "tok-punct",
-                        "tok-comment",
-                    ],
-                )
-                .add_allowed_classes("code", &["language-sql"])
                 .rm_tags(&["img"])
                 .clean(&rendered)
                 .to_string(),
-        )
-    }
-}
-
-impl AssistantMarkup {
-    fn is_sql(language: &str) -> bool {
-        matches!(
-            language.trim().to_ascii_lowercase().as_str(),
-            "sql" | "spql" | "postgresql" | "mysql"
         )
     }
 }
@@ -301,11 +254,11 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn sql_fences_are_coloured_and_still_sanitized() {
+    fn sql_fences_are_plain_and_still_sanitized() {
         let rendered =
             AssistantMarkup::from("```sql\nSELECT id FROM t WHERE x < 1 -- <script>\n```").0;
-        assert!(rendered.contains("<code class=\"language-sql\">"));
-        assert!(rendered.contains("<span class=\"tok-keyword\">SELECT</span>"));
+        assert!(rendered.contains("<code>SELECT id FROM t WHERE x &lt; 1"));
+        assert!(!rendered.contains("tok-keyword"));
         assert!(rendered.contains("&lt;script&gt;"));
         assert!(!rendered.contains("<script>"));
         let plain = AssistantMarkup::from("```python\nprint(1)\n```").0;

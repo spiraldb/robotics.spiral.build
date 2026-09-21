@@ -1,10 +1,9 @@
 //! The document bar's shared parts: a title that opens the switcher, the
 //! saved state beside it, the inline rename form, the switch/create/rename
-//! popover, and the executed-SQL disclosure every run strip carries. Each
+//! popover, and Curation's executed-SQL disclosure. Each
 //! activity keeps its own action row, because what Save and Run may do
 //! differs; the identity chrome does not.
 
-use crate::activities::workflow::highlight::SqlHighlight;
 use crate::components::icons::{CheckIcon, SqlIcon};
 use dioxus::prelude::*;
 use spiral_robotics_ui::{
@@ -327,7 +326,7 @@ pub(crate) fn DocumentSwitcher(props: DocumentSwitcherProps) -> Element {
 pub(crate) fn ExecutedSql(sql: String) -> Element {
     rsx! {
         Disclosure { class: "executed-sql", summary: rsx! { SqlIcon {} "Executed SQL" },
-            pre { SqlHighlight { sql } }
+            pre { code { "{sql}" } }
         }
     }
 }

@@ -18,7 +18,6 @@ use workflow_graph::{
     StageContent, StageKind, StageOutput, SummaryKind, WorkflowGraph, WorkflowStage,
 };
 
-use super::highlight::{ExpressionHighlight, SqlHighlight};
 use crate::components::icons::{
     DataIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon, ResultNodeIcon,
 };
@@ -355,11 +354,11 @@ fn StageKindGlyph(kind: StageKind) -> Element {
     }
 }
 
-/// A summary or fact value, coloured token by token when it is an expression.
+/// A summary or fact value. Expressions retain their exact native text.
 #[component]
 fn StageText(text: String, kind: SummaryKind) -> Element {
     match kind {
-        SummaryKind::Expression => rsx! { ExpressionHighlight { text } },
+        SummaryKind::Expression => rsx! { code { "{text}" } },
         SummaryKind::Prose => rsx! { PathText { text } },
     }
 }
@@ -461,7 +460,7 @@ fn StageDetails(
             if let Some(expression) = &stage.content.expression {
                 if stage.content.function.is_none() && !stage.reads_source() {
                     div { class: "workflow-inspector-rule",
-                        ExpressionHighlight { text: expression.clone() }
+                        code { "{expression}" }
                     }
                 }
             }
@@ -535,9 +534,9 @@ fn EdgeDetails(details: WorkflowEdgeDetails, root: String, on_close: EventHandle
                 StageOutput::Expression { expression, dtype } => rsx! {
                     FactList { class: "workflow-facts",
                         if let Some(dtype) = dtype {
-                            Fact { label: "Type", ExpressionHighlight { text: dtype.clone() } }
+                            Fact { label: "Type", code { "{dtype}" } }
                         }
-                        Fact { label: "Call", SqlHighlight { sql: expression.clone() } }
+                        Fact { label: "Call", code { "{expression}" } }
                     }
                 },
             }

@@ -46,16 +46,12 @@ struct DataSelection {
 }
 
 impl DataSelection {
-    fn use_selection(initial_episode: Option<OpenedEpisode>) -> Self {
+    fn use_selection() -> Self {
         Self {
-            dataset: use_signal(|| {
-                initial_episode
-                    .as_ref()
-                    .map(|episode| episode.dataset().clone())
-            }),
-            episode: use_signal(|| initial_episode.clone()),
+            dataset: use_signal(|| None),
+            episode: use_signal(|| None),
             importing: use_signal(|| false),
-            active_panel: use_signal(|| initial_episode.map(|_| PanelId::new("plots"))),
+            active_panel: use_signal(|| None),
         }
     }
     fn activate(mut self, panel: &str) {
@@ -307,12 +303,8 @@ impl DataLayout {
         )
     }
 
-    fn initial(camera_ids: &[PanelId], browsing: bool) -> PanelLayout {
-        let primary_ids = if browsing {
-            vec!["overview", "plots", IMPORT_PANEL]
-        } else {
-            vec!["plots"]
-        };
+    fn initial(camera_ids: &[PanelId]) -> PanelLayout {
+        let primary_ids = ["overview", "plots", IMPORT_PANEL];
         let primary = LayoutNode::tile("primary", primary_ids.into_iter().map(PanelId::new));
         let mut review_tiles = camera_ids
             .iter()
@@ -344,9 +336,6 @@ impl DataLayout {
             editors,
             LayoutNode::tile("timeline", ["timeline".to_owned()]),
         );
-        if !browsing {
-            return PanelLayout::new(visualization);
-        }
         PanelLayout::new(LayoutNode::split(
             "data-columns",
             SplitAxis::Horizontal,
@@ -358,10 +347,7 @@ impl DataLayout {
 }
 
 #[component]
-pub(in crate::activities) fn DataPanels(
-    #[props(default)] initial_episode: Option<OpenedEpisode>,
-) -> Element {
-    let browsing = initial_episode.is_none();
+fn DataPanels() -> Element {
     let sessions = crate::shell::project::ProjectSessionSignals::current();
     let available = use_memo(move || sessions.catalog_available());
     let catalog = crate::client::queries::QueryPolicy::on_demand(
@@ -377,18 +363,8 @@ pub(in crate::activities) fn DataPanels(
         },
     );
     let resources = catalog.value();
-    let selection = DataSelection::use_selection(initial_episode.clone());
-    let mut transport = EpisodeTransport::use_transport();
-    use_hook(|| {
-        if let Some(episode) = initial_episode {
-            transport.load(
-                episode
-                    .record()
-                    .time_range()
-                    .unwrap_or_else(|| EpisodeTimeRange::new(0, 0)),
-            );
-        }
-    });
+    let selection = DataSelection::use_selection();
+    let transport = EpisodeTransport::use_transport();
     // Space, the arrows and Home/End also work while focus rests on the page
     // itself, not only inside the workspace. A key pressed inside it is
     // handled there and never reaches this listener as a page key.
@@ -674,10 +650,7 @@ pub(in crate::activities) fn DataPanels(
         .with_class("timeline-editor data-timeline-panel"),
     );
 
-    if !browsing {
-        panels.retain(|panel| !matches!(panel.id.as_str(), "catalog" | "overview"));
-    }
-    let initial_layout = DataLayout::initial(&camera_ids, browsing);
+    let initial_layout = DataLayout::initial(&camera_ids);
     let placements = panels
         .iter()
         .map(|panel| {
@@ -704,7 +677,7 @@ pub(in crate::activities) fn DataPanels(
                 layout: layout.layout,
                 on_layout_change: move |actual| layout.observe(&actual, &canonical),
                 active_panel: (selection.active_panel)(),
-                layout_scope: Some(if browsing { LAYOUT_SCOPE } else { "spiral_robotics.panel-layout.v2.comparison-episode" }.to_owned()),
+                layout_scope: Some(LAYOUT_SCOPE.to_owned()),
                 on_panel_activate: move |id: PanelId| { let mut selection = selection; selection.active_panel.set(Some(id)); },
                 on_panel_close: move |id: PanelId| {
                     if id.as_str() == IMPORT_PANEL {
@@ -774,7 +747,7 @@ mod tests {
             PanelId::new("left"),
             PanelId::new("right"),
         ];
-        let layout = DataLayout::initial(&cameras, true);
+        let layout = DataLayout::initial(&cameras);
         let LayoutNode::Split {
             ratio,
             first,
@@ -838,21 +811,20 @@ mod tests {
             let ids = (0..count)
                 .map(|index| PanelId::new(format!("camera-{index}")))
                 .collect::<Vec<_>>();
-            assert!(DataLayout::initial(&ids, true).valid());
+            assert!(DataLayout::initial(&ids).valid());
         }
     }
 
     #[test]
     fn data_default_layout_distinguishes_user_geometry_from_tab_activation() {
-        let original = DataLayout::initial(&[PanelId::new("camera-empty")], true);
+        let original = DataLayout::initial(&[PanelId::new("camera-empty")]);
         let mut activated = original.clone();
         activated.activate(&PanelId::new("plots"));
         assert!(DataLayout::same_arrangement(
             &original.root,
             &activated.root
         ));
-        let mut discovered =
-            DataLayout::initial(&[PanelId::new("top"), PanelId::new("left")], true);
+        let mut discovered = DataLayout::initial(&[PanelId::new("top"), PanelId::new("left")]);
         DataLayout::restore_active(&activated.root, &mut discovered);
         assert_eq!(
             discovered.tile(&"primary".into()).unwrap().active,
@@ -886,11 +858,11 @@ mod tests {
             PanelId::new("camera:/top#d"),
             PanelId::new("camera:/gripper#e"),
         ];
-        let mut arranged = DataLayout::initial(&three, true);
+        let mut arranged = DataLayout::initial(&three);
         if let LayoutNode::Split { ratio, .. } = &mut arranged.root {
             *ratio = 0.3;
         }
-        let canonical = DataLayout::initial(&two, true);
+        let canonical = DataLayout::initial(&two);
         let next = DataLayout::with_cameras_of(&arranged, &canonical).unwrap();
         assert!(next.valid());
         assert!(matches!(&next.root, LayoutNode::Split { ratio, .. } if *ratio == 0.3));
@@ -901,7 +873,7 @@ mod tests {
         // The same cameras again change nothing.
         assert!(DataLayout::with_cameras_of(&next, &canonical).is_none());
         // Closing the episode removes cameras, retaining the stage and ratio.
-        let browsing = DataLayout::initial(&[], true);
+        let browsing = DataLayout::initial(&[]);
         let closed = DataLayout::with_cameras_of(&next, &browsing).unwrap();
         assert!(closed.valid());
         assert!(closed.tile(&"cameras".into()).is_none());
@@ -938,7 +910,7 @@ mod tests {
             PanelId::new("camera:/top#a"),
             PanelId::new("camera:/wrist#b"),
         ];
-        let layout = DataLayout::initial(&cameras, true);
+        let layout = DataLayout::initial(&cameras);
         assert_eq!(
             layout
                 .tile_for_panel(&PanelId::new("catalog"))
@@ -968,7 +940,7 @@ mod tests {
                 .as_str(),
             "timeline"
         );
-        let without = DataLayout::initial(&[PanelId::new("camera-empty")], true);
+        let without = DataLayout::initial(&[PanelId::new("camera-empty")]);
         assert_eq!(
             without
                 .tile_for_panel(&PanelId::new("camera-empty"))
@@ -977,18 +949,5 @@ mod tests {
             "cameras"
         );
         assert!(without.valid());
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn comparison_layout_keeps_episode_panels_without_dataset_navigation() {
-        let cameras = [PanelId::new("camera:/top#a")];
-        let layout = DataLayout::initial(&cameras, false);
-        assert!(layout.valid());
-        for panel in ["stage", "plots", "timeline", "camera:/top#a"] {
-            assert!(layout.tile_for_panel(&PanelId::new(panel)).is_some());
-        }
-        for panel in ["catalog", "overview", IMPORT_PANEL] {
-            assert!(layout.tile_for_panel(&PanelId::new(panel)).is_none());
-        }
     }
 }

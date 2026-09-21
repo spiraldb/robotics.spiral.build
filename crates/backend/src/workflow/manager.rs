@@ -59,23 +59,16 @@ struct WorkflowRuntime {
     storage: Arc<StorageManager>,
     runs: RunRegistry<WorkflowRun>,
     saves: tokio::sync::Mutex<()>,
-    comparisons: super::comparison_inputs::ComparisonInputs,
 }
 impl WorkflowManager {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
         Self {
             inner: Arc::new(WorkflowRuntime {
-                comparisons: super::comparison_inputs::ComparisonInputs::new(
-                    storage.workflow_store(),
-                ),
                 storage,
                 runs: RunRegistry::new(),
                 saves: tokio::sync::Mutex::new(()),
             }),
         }
-    }
-    pub(super) fn comparisons(&self) -> &super::comparison_inputs::ComparisonInputs {
-        &self.inner.comparisons
     }
     pub(crate) async fn list(&self) -> Result<Vec<WorkflowSummary>, OperationError> {
         self.inner

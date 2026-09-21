@@ -15,16 +15,13 @@ use crate::components::document_bar::{
 };
 use crate::components::icons::{PlayIcon, SpinnerIcon, WorkflowIcon};
 use crate::shell::state::StudioProjectState;
-use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, Select};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, ModeButton, ModeGroup, Select};
 
 const SWITCHER_ID: &str = "workflow-switcher";
 const TITLE_ID: &str = "workflow-document-title";
 
 #[component]
-pub(super) fn WorkflowDocumentControls(
-    controller: WorkflowController,
-    comparing: Signal<bool>,
-) -> Element {
+pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Element {
     let studio = StudioProjectState::current();
     let workflow = controller.spec();
     let reason = controller.workflow_selection_reason();
@@ -44,7 +41,16 @@ pub(super) fn WorkflowDocumentControls(
     rsx! {
         header { class: "document-bar",
             span { class: "document-glyph", "aria-hidden": "true", WorkflowIcon {} }
-            super::workspace::WorkflowViewSwitch { comparing }
+            ModeGroup { label: "Workflow view".to_owned(), class: "workflow-mode-switch".to_owned(),
+                ModeButton {
+                    purpose: ActionPurpose::Select,
+                    checked: false,
+                    disabled: true,
+                    title: "Build is planned",
+                    "Build"
+                }
+                ModeButton { purpose: ActionPurpose::Select, checked: true, "Agent" }
+            }
             div { class: "document-identity",
                 if renaming() {
                     DocumentRenameForm {

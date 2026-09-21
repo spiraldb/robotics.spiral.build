@@ -387,7 +387,7 @@ put reads as a bench tool.
   40%. The Timeline lists every recorded stream with its message density and
   is where streams are shown, plotted, and selected. Import opens as a peer
   tab in the primary tile.
-- Workflow puts the graph first: a 24% Assistant/SQL column at the left, then
+- Agent puts the graph first: a 24% Assistant column at the left, then
   the Graph over a Results shelf in the lower 54%. Stage details float over
   the graph beside the selected card rather than holding a tile. It has its
   own layout scope, and every tile stays a dockable workbench panel.
@@ -1229,22 +1229,21 @@ the callers own only the body.
 - **Setup:** Lives in Settings → Robots. Ports, camera assignment, calibration,
   import/export, and deletion do not compete with active motor control.
 
-### Workflow Workbench
+### Agent Workbench
 
 **Operate.** The graph is how an engineer understands what a workflow does,
 so it owns the center; Results prove it beneath, and the Assistant authors it
 from a tall column at the side.
 
 - **Composition:** One 36px bar, then a 24/76 horizontal split. The bar
-  opens with the workflow glyph and a 22px Build | Compare segmented control
-  that stands in the same place in both views, so switching never moves the
-  header; Build fills the rest of the bar with the document identity and
-  actions, Compare with the pair of workflows and the Compare action. The left
-  24% is a tall console tile holding Assistant and SQL as tabs. The right 76%
+  opens with the workflow glyph and a Build | Agent segmented control. Agent
+  is selected; Build is disabled and identified as planned until that surface
+  exists. The left 24% is a tall
+  Assistant tile. The right 76%
   divides 46/54 vertically: above, the Graph across the full width; below,
   Results across the full width. A pipeline is wider than it is tall, so the
   graph row is sized for two stacked sources and the results shelf keeps
-  about five rows of previews. The `workflow-investigation-v13` layout scope
+  about five rows of previews. The `workflow-agent-v14` layout scope
   applies this arrangement; every tile remains a dockable, resizable workbench
   panel with a leading tab icon. Tiles meet at the splitter's one-pixel rule,
   so two recessed tab bars read as one bar interrupted by a hairline rather
@@ -1253,7 +1252,7 @@ from a tall column at the side.
   Curation as the `document-bar` family (identity, glyph, title, name, state
   chip, actions, rename form, run action, switcher, and backdrop) and the
   `run-strip` family (phase, select, count, duration, elapsed, executed SQL).
-  After the glyph and the view switch, the name as a quiet 12px semibold
+  After the glyph and mode control, the name as a quiet 12px semibold
   button with a 12px chevron that turns when open sits at left. At right the
   keyed 11px state chip with a 6px dot (Saved · green dot, Unsaved changes ·
   ochre, Changed in another session · red) leads Discard, Save, and the
@@ -1326,23 +1325,12 @@ from a tall column at the side.
   sit behind one hairline disclosure; there is no whole-plan JSON, no
   overview, and no list of inputs, because the edges already draw them.
   Selecting a connection shows the columns or the value it carries.
-- **Syntax colour:** One lexer paints SQL (editor, Executed SQL, and fenced
-  code in the conversation) and the graph's rendered expressions (summaries,
-  facts, rules), with ligatures off. Keywords take the accent at medium
-  weight, functions the Model tint, literals the Media amber mixed 78% toward
-  ink, operators soft ink, punctuation faint ink, and comments italic faint
-  ink; fields stay in ink (medium weight inside stage summaries) so the
-  author's own names read strongest. Every kind also differs in weight or
-  style, and the text stays complete and copyable. The SQL editor is a
-  coloured copy under a transparent textarea with identical metrics: 12px
-  mono at 1.6, 12px/16px padding, a 2-space tab.
 - **Results:** One 32px run strip: phase with its 6px dot (green complete,
   pulsing accent while running or validating, red failed, ochre
   interrupted), the run selector only when more than one run exists, the row
   count as 12px semibold mono, Spiral's elapsed time in 11px faint mono, a
-  live accent elapsed while running, the Truncated chip when it applies, and
-  an Executed SQL disclosure at the right that expands inline across the
-  strip; a lone run is not numbered. An empty shelf is one faint 11px line
+  live accent elapsed while running, and the Truncated chip when it applies;
+  a lone run is not numbered. An empty shelf is one faint 11px line
   saying what will appear and what produces it, and never an icon, a title,
   or a second Run: the document bar's Run is the one way to produce rows,
   including when a saved conversation's rows are gone. While a run is
@@ -1378,17 +1366,6 @@ from a tall column at the side.
   with two example asks); Graph and Results each show one faint 11px line
   saying what will appear there, with no icon or title, so a new workflow is
   not three onboarding cards.
-- **Compare:** The same 36px bar carries the switch, then "A [workflow]
-  against B [workflow]" as two 24px selects with 11px keys, and the filled
-  Compare action at the right (Analyzing with a spinner while it runs). The
-  progress card reads at bench scale: a 12px semibold title with a pulsing
-  accent dot and a mono elapsed clock, one 11px line of detail, four hairline
-  steps in 11px with 16px marks, and a 2px measurement bar. Metric cards use
-  12px padding and 12px gaps, means at the 16px mono readout size, a 64px
-  histogram, and 10px footers; measurements that could not be calculated
-  share one dashed card that lists their names as chips and each distinct
-  error once behind a disclosure. Workflow A follows the workflow open in
-  Build, including one saved a moment ago, until the engineer picks another.
 - **Assistant column:** The thread and composer share the column, capped at a
   76ch measure when docked wide. Every message names its speaker in a 10px
   medium faint label: your requests sit right-aligned on the recess at up to
@@ -1409,10 +1386,8 @@ from a tall column at the side.
   hover lift, while the reader has scrolled away; it floats over the margin,
   never over words. The empty thread offers example asks as outlined 11px
   chips.
-- **SQL:** A full-bleed mono textarea; validation issues appear in a danger
-  strip beneath it. Run submits exactly this text without saving it.
 - **Ownership:** The draft drives the graph. The selected immutable run drives
-  Results and Executed SQL. Chat prose cannot override either. The browser's
+  Results. Chat prose cannot override either. The browser's
   existing state controller owns all document, proposal, and run transitions.
   Refer to `docs/workflow-authoring.md` for the current native SQL boundary.
 - **Motion:** Everything in Workflow moves on one easing, `--ease-out-expo`
@@ -1871,7 +1846,7 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
   Loading/device/fallback state, bounded progress, quarantine/warnings, and
   computed/reused materialization evidence explicit. Empty Results must
   distinguish no run from real empty rows.
-- **Do** keep Workflow graph-first: a 24% Assistant/SQL console, the Graph
+- **Do** keep Agent graph-first: a 24% Assistant console, the Graph
   across the full width with stage details as an on-demand sheet beside the
   selected card, and Results in the lower 54%, with stage cards fixed at
   224×92 and result previews at 88×50.

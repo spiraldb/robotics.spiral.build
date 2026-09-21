@@ -498,7 +498,11 @@ async fn an_execution_turn_cannot_finish_with_only_a_narrative() {
     let mut dom = VirtualDom::new_with_props(AgentHarness::render, harness.clone());
     dom.rebuild_in_place();
     dom.in_scope(ScopeId::ROOT, || {
-        harness.editor().set_sql("SELECT 43 AS answer".into())
+        let editor = harness.editor();
+        let expected = editor.spec();
+        editor
+            .replace_authored_query(&expected, expected.clone().with_sql("SELECT 43 AS answer"))
+            .unwrap();
     });
     harness.start(&dom);
     harness.finished(&mut dom).await;

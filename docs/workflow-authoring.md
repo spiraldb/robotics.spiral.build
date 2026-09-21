@@ -1,4 +1,4 @@
-# Workflow authoring
+# Agent workflows
 
 A workflow owns a SQL definition and one Assistant conversation. SQL is the only
 executable representation. Spiral owns decoding, inference, optimization, and
@@ -6,8 +6,8 @@ query execution; Studio owns authoring, plan display, run identity, and results.
 
 ## Documents and ownership
 
-The browser owns the current draft, saved baseline, and Assistant loop. Direct
-SQL edits and `set_workflow` change the same draft. Save atomically persists SQL,
+The browser owns the current draft, saved baseline, and Assistant loop.
+`set_workflow` changes the draft through the Assistant. Save atomically persists SQL,
 its native plan display snapshot, and conversation with optimistic revision
 checking. Run submits an immutable copy of the visible SQL, including an unsaved
 draft, without saving it. Editing
@@ -28,19 +28,21 @@ This cutover stores SQL literals; a separate bound-parameter editor is not imple
 
 ## Assistant investigation and plan inspection
 
-The four dockable panes are Graph, Results, Assistant, and SQL. Assistant and
-SQL share a tall 24% column at the left. The graph owns the upper tile of the
+Workflow opens in Agent mode. The adjacent Build mode is visibly unavailable
+until its dataset and measurement surface exists. The three dockable Agent
+panes are Graph, Results, and Assistant. Assistant owns a
+tall 24% column at the left. The graph owns the upper tile of the
 remaining width (46% of the height) and reads left to right; selecting a node
 or an edge floats its details in a sheet beside the card instead of a separate
 pane, so selection never resizes the canvas, including keyboard selection.
-Results run along the bottom 54%. SQL changes clear the inspection. The graph
+Results run along the bottom 54%. Assistant-authored SQL changes clear the inspection. The graph
 has no navigation toolbar; native panning, zooming, keyboard interaction,
 zoom/fit controls, and a minimap when the graph does not fit at readable zoom
 remain available. The workbench keeps all splits resizable
 and all panels dockable.
 One document bar owns the workflow name (which opens the switcher, creation, and
 rename popover), the saved/draft state, Save, Discard, and Run. Results owns the
-selected run, its phase, row count, elapsed time, and Executed SQL, and shows
+selected run, its phase, row count, and elapsed time, and shows
 skeleton rows while a run is admitted. Result cells are painted by inferred kind
 (images, categorical chips, measurement bars, UTC timestamps, mono identifiers);
 the inference is display-only and every tooltip and the row inspector keep the
@@ -55,7 +57,7 @@ The investigation loop is inspect → `set_workflow` → `run_workflow` → `ins
 → evaluate → revise → `show_results`. `set_workflow` plans candidates before changing
 the draft; errors leave it unchanged. `run_workflow` submits the visible SQL once
 through the same native runner as manual Run and returns an immutable run ID.
-`inspect_run` waits for that ID and returns paged preview rows, exact SQL, errors,
+`inspect_run` waits for that ID and returns paged preview rows, exact internal SQL, errors,
 and truncation. Without an ID it lists this workflow's admitted runs, including
 runs whose submission response was lost. It never reruns a query.
 
@@ -68,7 +70,7 @@ small SQL-selected evaluations, targeted counts, and representative frames befor
 processing the requested cohort. Preview limits bound display, not computation.
 
 `show_results` selects a successful run and restores its producing SQL, even after
-later evidence queries. Results has a run selector and an Executed SQL disclosure;
+later evidence queries. Results has a run selector;
 selecting an older result does not silently edit the draft. The plan follows the
 current draft. Stale agent proposals cannot overwrite intervening user edits.
 The final response should state the answer, evidence, assumptions, unknowns, and

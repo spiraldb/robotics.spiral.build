@@ -19,7 +19,6 @@ use spiral_robotics_common::workflow::document::{
 };
 
 pub(crate) const ASSISTANT_PANEL_ID: &str = "workflow-assistant";
-pub(crate) const NODE_PANEL_ID: &str = "workflow-node";
 pub(crate) const RESULTS_PANEL_ID: &str = "workflow-results";
 pub(crate) const CANVAS_PANEL_ID: &str = "workflow-canvas";
 
@@ -162,9 +161,6 @@ impl WorkflowController {
             self.document.selected_run.set(Some(id));
         }
     }
-    pub(super) fn executed_query(&self) -> Option<WorkflowSpec> {
-        self.visible_run().map(|run| run.workflow().clone())
-    }
     pub(super) fn observe_run(mut self, run: WorkflowRun) {
         self.document.runs.accept_runs(vec![run]);
     }
@@ -272,10 +268,6 @@ impl WorkflowController {
             "SELECT id AS episode_id, * FROM spql.mcap.episodes('{}')",
             source.selection().sql_name().replace('\'', "''")
         ));
-    }
-
-    pub(super) fn set_sql(mut self, sql: String) {
-        self.document.draft.write().set_sql(sql);
     }
 
     pub(super) fn plan_for(&self, workflow: &WorkflowSpec) -> Option<WorkflowPlan> {

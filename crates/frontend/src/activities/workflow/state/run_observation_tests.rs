@@ -83,7 +83,7 @@ async fn reopening_and_discard_reuse_saved_plans_without_a_backend_request() {
     let harness = RunObservationHarness::default();
     let mut dom = VirtualDom::new_with_props(RunObservationHarness::render, harness.clone());
     dom.rebuild_in_place();
-    let controller = harness.controller();
+    let mut controller = harness.controller();
     let workflow = WorkflowSpec::new("saved-plan", "Saved query").with_sql("SELECT 42");
     let graph = serde_json::json!({"schema_version":1,"root":0,"nodes":[
         {"id":0,"operator":"Values","inputs":[],"output":{},"properties":{}}
@@ -112,7 +112,7 @@ async fn reopening_and_discard_reuse_saved_plans_without_a_backend_request() {
         plan
     );
     dom.in_scope(ScopeId::ROOT, || {
-        controller.set_sql("SELECT 99".into());
+        controller.document.draft.write().set_sql("SELECT 99");
         controller.remember_plan(&workflow, plan.clone());
     });
     assert!(controller.plan_for(&controller.spec()).is_none());

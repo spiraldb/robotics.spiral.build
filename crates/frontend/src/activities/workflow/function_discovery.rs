@@ -1,4 +1,4 @@
-//! Shared native function discovery for authoring and comparison agents.
+//! Native function discovery for workflow authoring.
 use serde_json::{Value, json};
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
 #[derive(serde::Deserialize)]
@@ -118,9 +118,6 @@ impl NativeFunctionDiscovery {
     }
     pub(super) fn parameters() -> Value {
         json!({"type":"object","properties":{"kind":{"type":"string","enum":["scalar","aggregate","relation"]},"prefix":{"type":"string"},"signatures":{"type":"boolean"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10}},"required":["prefix"],"additionalProperties":false})
-    }
-    pub(super) fn definition() -> Value {
-        json!({"type":"function","function":{"name":"inspect_functions","description":Self::description(),"parameters":Self::parameters()}})
     }
     pub(super) async fn inspect(arguments: &str) -> Result<String, String> {
         let args: FunctionArguments =
