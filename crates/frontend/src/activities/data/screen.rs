@@ -348,8 +348,8 @@ impl DataLayout {
 
 #[component]
 fn DataPanels() -> Element {
-    let sessions = crate::shell::project::ProjectSessionSignals::current();
-    let available = use_memo(move || sessions.catalog_available());
+    let selection = crate::shell::project::ProjectSelection::current();
+    let available = use_memo(move || selection.catalog_available());
     let catalog = crate::client::queries::QueryPolicy::on_demand(
         crate::client::queries::QueryDomain::Catalog,
     )

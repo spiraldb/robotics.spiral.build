@@ -12,8 +12,7 @@ use spiral_robotics_storage::episodes::{
 
 use super::session::{OpenTake, TakeChange};
 use crate::OperationError;
-use crate::data::catalog_lease::CatalogLeaseOwner;
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 use crate::robotics::video::{
     CameraCaptureSpec, CameraRecording, VideoCapture, VideoCaptureRequest,
 };
@@ -85,15 +84,6 @@ impl<'a> TakeOperations<'a> {
                 "a take is already recording; stop it first",
             ));
         }
-        let catalog = self
-            .state
-            .catalog_lease()
-            .try_reserve(CatalogLeaseOwner::Recording)
-            .ok_or_else(|| {
-                OperationError::conflict(
-                    "the episode catalog is busy; wait for the import or query to be admitted",
-                )
-            })?;
         if self.state.workflow().is_active() {
             return Err(OperationError::conflict(
                 "Wait for the active Workflow run to finish before recording a new take.",
@@ -104,7 +94,7 @@ impl<'a> TakeOperations<'a> {
         self.set_mode(request.teleoperation()).await?;
         match self.open(&request, sample_hz).await {
             Ok((summary, capture)) => {
-                take.open(OpenTake::new(summary.id().to_owned(), capture, catalog));
+                take.open(OpenTake::new(summary.id().to_owned(), capture));
                 Ok(summary)
             }
             Err(error) => match self.set_mode(ModeSelection::Idle).await {
@@ -285,8 +275,8 @@ impl<'a> TakeOperations<'a> {
             .map_err(OperationError::from)
     }
 
-    /// Commit the take's episode and media, then keep its media for review
-    /// and release the catalog. Media stays reviewable when the commit fails.
+    /// Commit the take's episode and media, then keep its media for review.
+    /// Media stays reviewable when the commit fails.
     async fn close(&self, mut take: TakeChange<'_>) -> Result<(), OperationError> {
         let Some(episode) = take.episode().map(str::to_owned) else {
             return Ok(());

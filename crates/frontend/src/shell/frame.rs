@@ -3,7 +3,6 @@
 use crate::activities::curation::state::CurationEditorStatus;
 use crate::activities::workflow::state::WorkflowViewStatus;
 use dioxus::prelude::*;
-use spiral_robotics_common::status::BackendReadinessState;
 use spiral_robotics_common::workflow::WorkflowRunPhase;
 use spiral_robotics_ui::{ActionPurpose, BrowserFocus, Button, ButtonVariant};
 
@@ -133,7 +132,6 @@ pub(crate) fn WorkspaceFrame(
 fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) -> Element {
     let mode = route.activity();
     let studio = crate::shell::state::StudioProjectState::current();
-    let readiness = crate::shell::project::ProjectSessionSignals::current().readiness();
     let snapshot = match status {
         WorkspaceStatus::Hardware(hardware) => hardware.snapshot().read().clone(),
         _ => Default::default(),
@@ -158,34 +156,23 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
         WorkspaceStatus::Curation(snapshot) => snapshot.read().clone(),
         _ => None,
     };
-    let backend_connected = (studio.live())();
+    let backend_connected = crate::shell::project::ProjectSelection::current().live();
     let (service_label, service_style) = if !backend_connected {
         ("Reconnecting", "background: var(--tone-danger)")
+    } else if matches!(status, WorkspaceStatus::Hardware(hardware) if hardware.setup().error().is_some())
+    {
+        ("Robot setup unavailable", "background: var(--tone-caution)")
+    } else if matches!(status, WorkspaceStatus::Hardware(hardware) if !hardware.setup().available())
+    {
+        ("Loading robots…", "background: var(--tone-caution)")
+    } else if matches!(
+        mode,
+        Activity::Live | Activity::Rollout | Activity::Settings
+    ) && !connected
+    {
+        ("Reconnecting", "background: var(--tone-danger)")
     } else {
-        match readiness.state() {
-            BackendReadinessState::Bootstrapping => {
-                ("Loading project…", "background: var(--tone-caution)")
-            }
-            BackendReadinessState::Ready if matches!(status, WorkspaceStatus::Hardware(hardware) if hardware.setup().error().is_some()) => {
-                ("Robot setup unavailable", "background: var(--tone-caution)")
-            }
-            BackendReadinessState::Ready if matches!(status, WorkspaceStatus::Hardware(hardware) if !hardware.setup().available()) => {
-                ("Loading robots…", "background: var(--tone-caution)")
-            }
-            BackendReadinessState::Ready
-                if matches!(
-                    mode,
-                    Activity::Live | Activity::Rollout | Activity::Settings
-                ) && !connected =>
-            {
-                ("Reconnecting", "background: var(--tone-danger)")
-            }
-            BackendReadinessState::Ready => ("Connected", "background: var(--tone-good)"),
-            BackendReadinessState::Degraded if readiness.catalog_available() => {
-                ("Limited", "background: var(--tone-caution)")
-            }
-            BackendReadinessState::Degraded => ("Unavailable", "background: var(--tone-danger)"),
-        }
+        ("Connected", "background: var(--tone-good)")
     };
     let connected_arms = snapshot
         .robots()
@@ -232,17 +219,13 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
     let training_phase = training.phase.as_deref();
     let training_step = training.step.as_deref();
     let training_runs_label = format!("{} runs", training.runs);
-    let workflow_status = workflow
-        .filter(|_| backend_connected && readiness.studio_available())
-        .unwrap_or_else(|| {
-            WorkflowStatusContext {
-                state: None,
-                backend_connected,
-                readiness: readiness.state(),
-                catalog_available: readiness.studio_available(),
-            }
-            .project()
-        });
+    let workflow_status = workflow.filter(|_| backend_connected).unwrap_or_else(|| {
+        WorkflowStatusContext {
+            state: None,
+            backend_connected,
+        }
+        .project()
+    });
     let center = studio.notifications().read().to_owned();
     let now = (studio.clock_ms())();
     let unread = center.unread_count();
@@ -336,7 +319,6 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{readiness.detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
@@ -365,7 +347,6 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{readiness.detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
@@ -397,7 +378,6 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{readiness.detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
@@ -422,7 +402,6 @@ fn StatusBar(route: crate::shell::routes::StudioRoute, status: WorkspaceStatus) 
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        title: "{readiness.detail()}",
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
@@ -489,8 +468,6 @@ impl From<&WorkflowViewStatus> for WorkflowStatusProjection {
         WorkflowStatusContext {
             state: Some(state),
             backend_connected: true,
-            readiness: BackendReadinessState::Ready,
-            catalog_available: true,
         }
         .project()
     }
@@ -518,15 +495,11 @@ impl From<&spiral_robotics_common::training::TrainingSnapshot> for TrainingStatu
 struct WorkflowStatusContext<'a> {
     state: Option<&'a WorkflowViewStatus>,
     backend_connected: bool,
-    readiness: BackendReadinessState,
-    catalog_available: bool,
 }
 
 impl WorkflowStatusContext<'_> {
     fn project(&self) -> WorkflowStatusProjection {
-        if !self.backend_connected
-            || (self.readiness != BackendReadinessState::Bootstrapping && !self.catalog_available)
-        {
+        if !self.backend_connected {
             return WorkflowStatusProjection {
                 domain: "Workflow unavailable".to_owned(),
                 phase: "State unavailable".to_owned(),
@@ -534,10 +507,7 @@ impl WorkflowStatusContext<'_> {
             };
         }
 
-        let Some(state) = self
-            .state
-            .filter(|_| self.readiness != BackendReadinessState::Bootstrapping)
-        else {
+        let Some(state) = self.state else {
             return WorkflowStatusProjection {
                 domain: "Spiral relations".to_owned(),
                 phase: "Loading saved workflow…".to_owned(),
@@ -587,8 +557,6 @@ mod tests {
         let status = WorkflowStatusContext {
             state: Some(&state),
             backend_connected: true,
-            readiness: BackendReadinessState::Ready,
-            catalog_available: true,
         }
         .project();
 
@@ -602,8 +570,6 @@ mod tests {
         let loading = WorkflowStatusContext {
             state: None,
             backend_connected: true,
-            readiness: BackendReadinessState::Bootstrapping,
-            catalog_available: false,
         }
         .project();
         assert_eq!(loading.phase, "Loading saved workflow…");
@@ -617,8 +583,6 @@ mod tests {
         let unavailable = WorkflowStatusContext {
             state: Some(&state),
             backend_connected: false,
-            readiness: BackendReadinessState::Ready,
-            catalog_available: true,
         }
         .project();
         assert_eq!(unavailable.domain, "Workflow unavailable");

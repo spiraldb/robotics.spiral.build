@@ -1,7 +1,7 @@
 //! Project the current recording buffer for Live take review.
 
 use crate::OperationError;
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 use spiral_robotics_common::recording::{
     EpisodeArmScalarSamples, EpisodeInspectionArm, EpisodeInspectionSnapshot,
     EpisodeOptionalFrameMatrix,

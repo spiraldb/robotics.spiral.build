@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn unavailable_readiness_cancels_reads_and_recovers_through_the_same_owner() {
+    fn unavailable_input_cancels_reads_and_recovers_through_the_same_owner() {
         let harness = QueryHarness::default();
         let mut dom = VirtualDom::new_with_props(QueryHarness::render, harness.clone());
         dom.rebuild_in_place();

@@ -77,10 +77,6 @@ impl StorageManager {
         self.project_store.credentials()
     }
 
-    pub fn is_configured(&self) -> bool {
-        self.project_store.is_configured()
-    }
-
     pub fn table_prefix(&self) -> &str {
         self.project_store.table_prefix()
     }

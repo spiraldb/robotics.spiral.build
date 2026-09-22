@@ -3,7 +3,7 @@
 - Do things smartly, e.g., use native features instead of reinventing the wheel.
 - Don't prematurely optimize for scaling, e.g., setup a memory pool to limit allocation, setup a worker pool to limit concurrency, etc. If you really think it is necessary, ask user first.
 - Don't over design, don't add features didn't ask for, don't add fallbacks without asking, don't precautionary features. If not sure, ask user first. Go straight to implement the thing, and only the thing user asked for.
-- By default a feature should be implemented in frontend, treat backend as a thin layer to provide things that frontend cannot do. Don't forgot to run wasm tests in addition to native tests.
+- By default a feature should be implemented in frontend, treat backend as a mostly stateless layer to provide things that frontend cannot do. Don't forgot to run wasm tests in addition to native tests.
 
 ## Write code that requires minimal human attention 
 

@@ -196,13 +196,6 @@ impl RecordingSignals {
             offset: self.offset + self.times.len() as u64,
         }
     }
-    pub fn clear(&mut self) {
-        let generation = self.generation + 1;
-        *self = Self {
-            generation,
-            ..Self::default()
-        };
-    }
     pub fn window(&self, cursor: RecordingCursor) -> RecordingWindow {
         let start = if cursor.generation == self.generation
             && cursor.offset >= self.offset
@@ -510,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_gaps_and_new_project_generations_replace_the_old_chart() {
+    fn cursor_gaps_and_new_take_generations_replace_the_old_chart() {
         let mut backend = RecordingSignals::default();
         let mut frontend = RecordingSignals::default();
         backend.observe(&frame(Some("take"), 0.0, vec![]));
@@ -521,11 +514,7 @@ mod tests {
         frontend.apply_window(backend.window(frontend.cursor()));
         assert_eq!(frontend.times().first(), backend.times().first());
         assert_eq!(frontend.offset, backend.offset);
-        backend.clear();
-        frontend.apply_window(backend.window(frontend.cursor()));
-        assert!(frontend.times().is_empty());
-        assert!(!frontend.live);
-        backend.observe(&frame(Some("take"), 0.0, vec![]));
+        backend.observe(&frame(Some("next take"), 0.0, vec![]));
         frontend.apply_window(backend.window(frontend.cursor()));
         assert_eq!(frontend.times(), &[0.0]);
     }

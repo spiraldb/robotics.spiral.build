@@ -1,6 +1,6 @@
 //! Robot setup and hardware observations owned by a mounted hardware view.
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
+use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::{RecordingProgress, ReplayProgress};
 use spiral_robotics_common::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
@@ -12,24 +12,19 @@ pub(crate) struct HardwareViewState {
     last_telemetry_ms: Signal<f64>,
     clock_ms: Signal<f64>,
     connected: Memo<bool>,
-    studio_available: Memo<bool>,
     is_active: ReadSignal<bool>,
 }
 impl HardwareViewState {
-    pub(crate) fn use_state(
-        project: StudioProjectState,
-        is_active: ReadSignal<bool>,
-        sessions: ProjectSessionSignals,
-    ) -> Self {
-        let studio_available = use_memo(move || sessions.studio_available());
-        let setup = super::RobotSetupState::use_state(is_active, sessions);
+    pub(crate) fn use_state(project: StudioProjectState, is_active: ReadSignal<bool>) -> Self {
+        let setup = super::RobotSetupState::use_state(is_active);
+        let selection = crate::shell::project::ProjectSelection::current();
+        let connected = use_memo(move || selection.live());
         let telemetry = use_hook(|| Self {
             setup,
             telemetry: Signal::new(TelemetryFrame::default()),
             last_telemetry_ms: Signal::new(0.0),
             clock_ms: project.clock_ms(),
-            connected: project.live(),
-            studio_available,
+            connected,
             is_active,
         });
         telemetry.use_hardware_polling(is_active);
@@ -118,7 +113,6 @@ impl HardwareViewState {
         let age = self.telemetry_age_seconds();
         (self.is_active)()
             && (self.connected)()
-            && (self.studio_available)()
             && self.setup.available()
             && age.is_finite()
             && age < 2.5
@@ -152,16 +146,13 @@ mod tests {
         sequence: Signal<u64>,
         active: Signal<bool>,
         connected: Signal<bool>,
-        catalog: Signal<bool>,
     }
     impl TelemetryHarness {
         fn render(self) -> Element {
             let sequence = use_signal(|| 0);
             let active = use_signal(|| true);
             let connected = use_signal(|| true);
-            let catalog = use_signal(|| true);
             let connected_memo = use_memo(move || *connected.read());
-            let catalog_memo = use_memo(move || *catalog.read());
             let setup = super::super::RobotSetupState::use_ready_state();
             let telemetry = use_hook(|| HardwareViewState {
                 setup,
@@ -169,7 +160,6 @@ mod tests {
                 last_telemetry_ms: Signal::new(0.0),
                 clock_ms: Signal::new(js_sys::Date::now()),
                 connected: connected_memo,
-                studio_available: catalog_memo,
                 is_active: active.into(),
             });
             let request = use_resource(move || {
@@ -182,7 +172,6 @@ mod tests {
                 sequence,
                 active,
                 connected,
-                catalog,
             });
             rsx! {}
         }
@@ -222,13 +211,7 @@ mod tests {
         dom.in_runtime(|| inputs.connected.set(false));
         dom.render_immediate_to_vec();
         assert!(!inputs.telemetry.controls_available());
-        dom.in_runtime(|| {
-            inputs.connected.set(true);
-            inputs.catalog.set(false);
-        });
-        dom.render_immediate_to_vec();
-        assert!(!inputs.telemetry.controls_available());
-        dom.in_runtime(|| inputs.catalog.set(true));
+        dom.in_runtime(|| inputs.connected.set(true));
         dom.render_immediate_to_vec();
         assert!(inputs.telemetry.controls_available());
         drop(dom);

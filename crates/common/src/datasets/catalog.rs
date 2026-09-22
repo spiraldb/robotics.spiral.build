@@ -223,16 +223,6 @@ impl ProjectResource {
         (self.kind == "dataset")
             .then(|| DatasetSummary::new(self.selection.clone(), self.identity.clone()))
     }
-    pub fn table_sql(&self) -> String {
-        let name = self
-            .selection
-            .path()
-            .iter()
-            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(".");
-        format!("SELECT * FROM {name} LIMIT 100")
-    }
 }
 
 /// Encoded Annex B packets; nanoseconds travel as strings to preserve integer precision in JS.

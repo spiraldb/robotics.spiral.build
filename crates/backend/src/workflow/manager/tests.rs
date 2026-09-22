@@ -1,5 +1,4 @@
 use super::*;
-use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 use spiral_robotics_common::workflow::WorkflowRunPhase;
 use spiral_robotics_storage::ProjectStore;
 struct WorkflowFixture {
@@ -28,13 +27,8 @@ impl WorkflowFixture {
             planned_sql: None,
         }
     }
-    fn admission() -> CatalogLeaseReservation {
-        Arc::new(CatalogMutationLease::default())
-            .try_reserve(CatalogLeaseOwner::WorkflowStart)
-            .unwrap()
-    }
     async fn run(&self, workflow: WorkflowSpec) -> WorkflowRun {
-        self.manager.run(workflow, Self::admission()).await.unwrap()
+        self.manager.run(workflow).await.unwrap()
     }
 }
 #[test]
@@ -117,10 +111,7 @@ async fn invalid_sql_never_becomes_a_run_and_failed_sql_is_a_failed_run() {
     assert!(matches!(
         fixture
             .manager
-            .run(
-                WorkflowFixture::query().with_sql("DELETE FROM episodes"),
-                WorkflowFixture::admission()
-            )
+            .run(WorkflowFixture::query().with_sql("DELETE FROM episodes"))
             .await,
         Err(OperationError::InvalidInput(_))
     ));

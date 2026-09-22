@@ -4,6 +4,8 @@ use spiral_robotics_common::settings::DataSettings;
 use url::Url;
 
 use crate::OperationError;
+use crate::projects::OpenProject;
+use std::sync::Arc;
 
 pub(crate) struct HttpEndpoint(String);
 
@@ -62,10 +64,10 @@ impl std::fmt::Debug for ConnectionCredentialUpdate {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Saved settings, and the project the save switched to when it changed one.
 pub(crate) struct DataSettingsUpdate {
     settings: DataSettings,
-    session_replaced: bool,
+    switched_to: Option<Arc<OpenProject>>,
 }
 
 impl UpdateDataSettingsCommand {
@@ -133,15 +135,15 @@ impl UpdateDataSettingsCommand {
 }
 
 impl DataSettingsUpdate {
-    pub(crate) fn new(settings: DataSettings, session_replaced: bool) -> Self {
+    pub(crate) fn new(settings: DataSettings, switched_to: Option<Arc<OpenProject>>) -> Self {
         Self {
             settings,
-            session_replaced,
+            switched_to,
         }
     }
 
-    pub(super) fn into_parts(self) -> (DataSettings, bool) {
-        (self.settings, self.session_replaced)
+    pub(super) fn into_parts(self) -> (DataSettings, Option<Arc<OpenProject>>) {
+        (self.settings, self.switched_to)
     }
 }
 

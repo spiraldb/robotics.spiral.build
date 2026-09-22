@@ -1,7 +1,7 @@
 //! Serial discovery and identification from an unplugged motor bus.
 
 use crate::OperationError;
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 use spiral_robotics_common::robots::SerialPortSummary;
 use spiral_robotics_hardware::SerialPortCatalog;
 

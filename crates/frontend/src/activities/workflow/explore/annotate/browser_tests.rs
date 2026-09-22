@@ -22,17 +22,13 @@ use crate::activities::workflow::explore::poster::{
 use crate::activities::workflow::explore::review::{EpisodeNames, SubtaskContext};
 use crate::activities::workflow::explore::state::ExplorationController;
 use crate::client::documents::DocumentClient;
-use crate::client::{
-    completions::ModelClient,
-    project::{ProjectClient, ProjectSessionState},
-    queries::QueryRefresh,
-};
+use crate::client::{completions::ModelClient, project::ProjectClient, queries::QueryRefresh};
 use crate::components::document_session::StudioDocument as _;
 use dioxus::prelude::*;
 use serde_json::Value;
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::exploration::ExplorationDocument;
-use spiral_robotics_common::project::ProjectSessionInfo;
+use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
@@ -204,10 +200,10 @@ struct AnnotationHarness {
 impl AnnotationHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
-        let session = ProjectSessionInfo::new("annotate-session", "test-project");
-        let current = session.clone();
-        let state = use_signal(move || ProjectSessionState::Unavailable(Some(current)));
-        use_context_provider(|| ProjectClient::new(session, state.into(), refresh));
+        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
+        let current = project.clone();
+        let state = use_signal(move || Some(current));
+        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
         *self.controller.borrow_mut() = Some(ExplorationController::use_controller());
         *self.clients.borrow_mut() = Some((
             ModelClient::current(),
@@ -504,10 +500,10 @@ struct PosterHarness {
 impl PosterHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
-        let session = ProjectSessionInfo::new("poster-session", "test-project");
-        let current = session.clone();
-        let state = use_signal(move || ProjectSessionState::Unavailable(Some(current)));
-        use_context_provider(|| ProjectClient::new(session, state.into(), refresh));
+        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
+        let current = project.clone();
+        let state = use_signal(move || Some(current));
+        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
         // The controller provides the exploration's one poster cache.
         ExplorationController::use_controller();
         let rows = self.rows.borrow().clone();

@@ -22,7 +22,6 @@ use spiral_robotics_training::{
 use crate::OperationError;
 use crate::adapters::clock::SystemClock;
 use crate::clock::{Clock, StableIdSequence};
-use crate::project_admission::ProjectActivity;
 use crate::sync::MutexRecovery;
 use crate::training::service::StartTrainingAdmission as _;
 use spiral_robotics_storage::StorageManager;
@@ -76,7 +75,7 @@ impl TrainingManager {
     /// Load history once on the first Training or Rollout request, and resume
     /// monitoring the runs it left active. Remote jobs own execution, so a
     /// restarted Studio reattaches to them.
-    pub(crate) async fn ensure_loaded(&self, activity: ProjectActivity) -> Result<(), String> {
+    pub(crate) async fn ensure_loaded(&self) -> Result<(), String> {
         let history = &self.inner.history;
         history
             .loaded
@@ -94,7 +93,7 @@ impl TrainingManager {
                     .iter()
                     .filter(|run| run.phase().active())
                 {
-                    self.monitor(run.id(), run.config().clone(), activity.clone());
+                    self.monitor(run.id(), run.config().clone());
                 }
                 self.refresh_readiness().await;
                 Ok::<(), String>(())
@@ -139,12 +138,10 @@ impl TrainingManager {
         }
     }
 
-    /// Admit one run and launch its monitor. The project stays admitted, through
-    /// `activity`, until the monitor ends.
+    /// Admit one run and launch its monitor.
     pub(super) async fn start(
         &self,
         config: TrainingConfig,
-        activity: ProjectActivity,
     ) -> Result<TrainingRun, OperationError> {
         if let Some(reason) = config.policy().mcap_training_blocker() {
             return Err(OperationError::Conflict(reason.into()));
@@ -178,7 +175,7 @@ impl TrainingManager {
         })
         .await
         .map_err(OperationError::Conflict)?;
-        self.monitor(run.id(), config, activity);
+        self.monitor(run.id(), config);
         Ok(run)
     }
 
@@ -234,7 +231,7 @@ impl TrainingManager {
         self.inner.stops.recover_lock().clear();
     }
 
-    fn monitor(&self, run_id: &str, config: TrainingConfig, activity: ProjectActivity) {
+    fn monitor(&self, run_id: &str, config: TrainingConfig) {
         let stop = Arc::new(AtomicBool::new(false));
         {
             let mut stops = self.inner.stops.recover_lock();
@@ -250,10 +247,7 @@ impl TrainingManager {
             stop,
             stop_sent: false,
         };
-        tokio::spawn(async move {
-            let _activity = activity;
-            monitor.follow().await;
-        });
+        tokio::spawn(async move { monitor.follow().await });
     }
 
     /// Change the history in memory only; the next durable change writes it.

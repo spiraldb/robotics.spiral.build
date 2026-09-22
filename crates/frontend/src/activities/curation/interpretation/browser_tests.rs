@@ -1,11 +1,8 @@
 //! Exercise prompt construction, provider transport, and binding together in the browser.
 use super::*;
-use crate::client::{
-    project::{ProjectClient, ProjectSessionState},
-    queries::QueryRefresh,
-};
+use crate::client::{project::ProjectClient, queries::QueryRefresh};
 use dioxus::prelude::*;
-use spiral_robotics_common::project::ProjectSessionInfo;
+use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
@@ -20,7 +17,7 @@ export function installInterpretationFetch() {
         if (path === '/api/credentials') return Response.json({llm:{base_url:'https://openrouter.ai/api/v1',api_key:'test-key',default_model:'openai/gpt-5.6-terra'},spiral:null,hugging_face:null});
         if (path !== '/api/proxy') throw new Error('Unexpected request ' + path);
         const metadata = {url:new URL(request.url).searchParams.get('url'),method:request.method,authorization:request.headers.get('authorization')};
-        requests.push({path, session: request.headers.get('X-Project-Session'), metadata, body: await request.json()});
+        requests.push({path, project: request.headers.get('X-Spiral-Project'), metadata, body: await request.json()});
         const choice = value => ({type:'choice', choice:value, confidence:0.99});
         return Response.json({answers:{operation:choice('duration'), comparison:choice('below'), quantity:choice('q0')}, usage:{tokens:17}});
     };
@@ -58,10 +55,10 @@ struct InterpretationHarness {
 impl InterpretationHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
-        let session = ProjectSessionInfo::new("interpretation-session", "test-project");
-        let current = session.clone();
-        let state = use_signal(move || ProjectSessionState::Unavailable(Some(current)));
-        use_context_provider(|| ProjectClient::new(session, state.into(), refresh));
+        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
+        let current = project.clone();
+        let state = use_signal(move || Some(current));
+        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
         *self.model.borrow_mut() = Some(ModelClient::current());
         rsx! {}
     }
@@ -105,7 +102,7 @@ async fn browser_builds_decisions_and_binds_the_selected_quantity() {
     assert!(proposal.problems().is_empty());
     let requests = fetch.requests();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0]["session"].is_null());
+    assert!(requests[0]["project"].is_null());
     assert_eq!(requests[0]["path"], "/api/proxy");
     assert_eq!(
         requests[0]["metadata"]["url"],

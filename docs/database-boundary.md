@@ -267,18 +267,18 @@ cargo test -p spiral-robotics-storage dropped_transaction_waits_for_result_befor
 
 ## Startup and schema checks
 
-SQLite opens and migrates before the HTTP listener starts. Studio project
-readiness does not contact Spiral, including when no Spiral destination has been
-selected. Local feature reads use SQLite. Data-plane requests are admitted only
-with a configured destination and report connection failures at use time.
-Explicit project selection and Settings → SpiralDB → Test connection validate
-and provision the model-artifact relation only; Studio control tables are never
-created in Spiral. See the SQLite guide for persistence and project transfer.
+SQLite opens and migrates before the HTTP listener starts. Opening a project
+does not contact Spiral, including when no Spiral project has been chosen.
+Local feature reads use SQLite. Data-plane requests need a chosen project and
+report connection failures at use time. Saving another project and Settings →
+SpiralDB → Test connection validate and provision the model-artifact relation
+only; Studio control tables are never created in Spiral. See the SQLite guide for persistence and project transfer.
 
 Robot configuration is read by the project-scoped robot workspace when needed by
 the hardware views, robot commands, and saved-device auto-connect. The discarded startup
-validation read is gone; auto-connect still runs after project publication.
-Rollout history loads once per project session on the first Rollout snapshot or
+validation read is gone; auto-connect runs for the saved project at startup and
+for a project once a settings save switches to it.
+Rollout history loads once per open project on the first Rollout snapshot or
 start command. Concurrent callers share initialization, failed or cancelled reads
 leave it available for a later request, and a restored active snapshot becomes
 failed without resuming motion. The Rollout view owns loading/error feedback and
@@ -286,7 +286,7 @@ retains its last successful snapshot if polling fails. Its execution and
 persistence remain owned by the backend after navigating away. Stop does not wait
 for history I/O.
 
-The shell owns only project identity/readiness, connection status, its clock, and
+The shell owns only the selected project, backend liveness, its clock, and
 notifications. `/robots`, `/hardware/status`, and hardware telemetry are polled by the active
 Live, Rollout, or Settings view; each view retains its own last successful
 configuration, loading state, and errors until the project scope is disposed.
@@ -298,14 +298,14 @@ lists. Settings preferences are fetched only by the Settings view. Its connectio
 settings remain readable without database access; a connection-only update
 validates and switches the project without overwriting unread preferences.
 
-Backend runtime preferences are shared within one project lifetime and loaded
+Backend runtime preferences are shared by an open project and loaded
 once on first Settings, Training, Rollout start, or recording-video access.
 Concurrent readers share initialization; errors and cancellation leave it
 retryable. A preference write wins over an in-flight first read. Training workers
 reject uninitialized preferences instead of choosing a default endpoint.
 
 Training history, Workflow, Assistant history, and the full relation catalog also
-load on feature access rather than blocking project readiness.
+load on feature access rather than when a project opens.
 
 Managed-table verification and relation discovery read schemas concurrently on
 up to eight independent ADBC connections. The reads retain their parent project

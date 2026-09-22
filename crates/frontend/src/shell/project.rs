@@ -1,59 +1,87 @@
-//! The process-owned project read determines the lifetime of mounted UI state.
-use crate::client::CommandError;
-use crate::client::project::{ProjectClient, ProjectSessionState};
+//! The project this browser works on. The browser chooses it, not the
+//! backend: the saved connection supplies the first one, and this browser's
+//! settings saves change it. Every project resource, draft, and request is
+//! mounted under it.
+use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
+use crate::client::{CommandError, transport::HttpRequest};
 use dioxus::prelude::*;
-use spiral_robotics_common::project::{ProjectSessionInfo, ProjectStatus};
+use spiral_robotics_common::project::ProjectKey;
+use spiral_robotics_common::settings::SpiralSettings;
 
 #[derive(Clone, Copy)]
-pub(crate) struct ProjectSessionSignals {
-    state: Signal<ProjectSessionState>,
+pub(crate) struct ProjectSelection {
+    selected: Signal<Option<ProjectKey>>,
+    live: Signal<bool>,
     refresh: QueryRefresh,
 }
-impl ProjectSessionSignals {
+impl ProjectSelection {
     pub(super) fn use_provider() -> Self {
         let refresh = QueryRefresh::use_provider();
-        let state = use_signal(ProjectSessionState::default);
-        use_context_provider(|| Self { state, refresh })
+        let selected = use_signal(|| None);
+        let live = use_signal(|| false);
+        use_context_provider(|| Self {
+            selected,
+            live,
+            refresh,
+        })
     }
     pub(crate) fn current() -> Self {
         consume_context()
     }
-    pub(crate) fn mounted_session(self) -> Option<ProjectSessionInfo> {
-        self.state.read().session().cloned()
+    pub(crate) fn selected(self) -> Option<ProjectKey> {
+        self.selected.read().clone()
     }
-    pub(super) fn client(self, session: ProjectSessionInfo) -> ProjectClient {
-        ProjectClient::new(session, self.state.into(), self.refresh)
+    /// Whether the last read of the saved connection reached Studio.
+    pub(crate) fn live(self) -> bool {
+        *self.live.read()
     }
-    pub(super) fn readiness(self) -> spiral_robotics_common::status::BackendReadiness {
-        self.state.read().readiness()
-    }
-    pub(crate) fn connected(self) -> bool {
-        self.state.read().connected()
-    }
-    pub(crate) fn studio_available(self) -> bool {
-        self.state.read().studio_available()
-    }
+    /// Whether catalog features can run: Studio is reachable and a Spiral
+    /// project is chosen.
     pub(crate) fn catalog_available(self) -> bool {
-        self.state.read().catalog_available()
+        self.live()
+            && self
+                .selected
+                .read()
+                .as_ref()
+                .is_some_and(ProjectKey::is_chosen)
     }
-    fn accept(mut self, result: Result<ProjectStatus, CommandError>) {
-        let next = match result {
-            Ok(status) => ProjectSessionState::Ready(status),
-            Err(_) => ProjectSessionState::Unavailable(self.state.peek().session().cloned()),
+    pub(super) fn client(self, project: ProjectKey) -> ProjectClient {
+        ProjectClient::new(project, self.selected.into(), self.refresh)
+    }
+    /// Work on `project` from now on, once this browser has saved it.
+    pub(crate) fn select(mut self, project: ProjectKey) {
+        if self.selected.peek().as_ref() != Some(&project) {
+            self.selected.set(Some(project));
+        }
+    }
+    /// The saved connection proves Studio is reachable. It picks the project
+    /// only before one is chosen, or when its endpoint moved, because the
+    /// backend then refuses projects on the old endpoint.
+    fn accept(mut self, result: Result<SpiralSettings, CommandError>) {
+        let live = result.is_ok();
+        if *self.live.peek() != live {
+            self.live.set(live);
+        }
+        let Ok(saved) = result else {
+            return;
         };
-        if *self.state.peek() != next {
-            self.state.set(next);
+        if self
+            .selected
+            .peek()
+            .as_ref()
+            .is_none_or(|project| project.endpoint() != saved.endpoint())
+        {
+            self.select(saved.project());
         }
     }
     pub(super) fn use_polling(self) {
-        let status = QueryPolicy::new(QueryDomain::Project, 1_000).use_resource(|| {
-            crate::client::transport::HttpRequest::new("GET", "/api/project/status")
-                .send::<spiral_robotics_common::project::ProjectStatus>()
+        let saved = QueryPolicy::new(QueryDomain::Project, 1_000).use_resource(|| {
+            HttpRequest::new("GET", "/api/settings/connection").send::<SpiralSettings>()
         });
         use_effect(move || {
-            let result = status.read();
-            if status.finished()
+            let result = saved.read();
+            if saved.finished()
                 && let Some(result) = result.as_ref()
             {
                 self.accept(result.clone());
@@ -68,25 +96,24 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    use spiral_robotics_common::status::{BackendReadiness, BackendReadinessState};
-
     use super::*;
 
-    #[derive(Clone, Default)]
-    struct SessionHarness(Rc<RefCell<ObservedProjectState>>);
+    const ENDPOINT: &str = "https://api.spiraldb.dev";
 
-    impl PartialEq for SessionHarness {
+    #[derive(Clone, Default)]
+    struct SelectionHarness(Rc<RefCell<ObservedProjects>>);
+
+    impl PartialEq for SelectionHarness {
         fn eq(&self, other: &Self) -> bool {
             Rc::ptr_eq(&self.0, &other.0)
         }
     }
 
     #[derive(Default)]
-    struct ObservedProjectState {
-        sessions: Option<ProjectSessionSignals>,
+    struct ObservedProjects {
+        selection: Option<ProjectSelection>,
         mounts: Vec<ProjectMountProbe>,
         canceled: Rc<Cell<usize>>,
-        requests: Rc<Cell<usize>>,
     }
 
     struct ProjectMountProbe {
@@ -103,34 +130,35 @@ mod tests {
         }
     }
 
-    impl SessionHarness {
+    impl SelectionHarness {
         fn render(self) -> Element {
-            let sessions = ProjectSessionSignals::use_provider();
-            self.0.borrow_mut().sessions = Some(sessions);
-            let session = sessions.mounted_session();
+            let selection = ProjectSelection::use_provider();
+            self.0.borrow_mut().selection = Some(selection);
             rsx! {
-                if let Some(session) = session {
-                    ProjectProbe { key: "{session.id()}", session, harness: self }
+                if let Some(project) = selection.selected() {
+                    ProjectProbe {
+                        key: "{project.endpoint()} {project.project_id()}",
+                        project,
+                        harness: self,
+                    }
                 }
             }
         }
 
-        fn sessions(&self) -> ProjectSessionSignals {
-            self.0.borrow().sessions.unwrap()
+        fn selection(&self) -> ProjectSelection {
+            self.0.borrow().selection.unwrap()
         }
 
-        fn fetched(&self, id: &str, state: BackendReadinessState) {
-            self.sessions().accept(Ok(ProjectStatus::new(
-                ProjectSessionInfo::new(id, "same_project"),
-                BackendReadiness::new(
-                    state,
-                    state == BackendReadinessState::Ready,
-                    "Project readiness",
-                ),
+        fn saved(&self, endpoint: &str, project_id: &str) {
+            self.selection().accept(Ok(SpiralSettings::new(
+                endpoint,
+                "https://spfs.spiraldb.dev",
+                project_id,
             )));
         }
-        fn unavailable(&self) {
-            self.sessions().accept(Err(CommandError::new(
+
+        fn unreachable(&self) {
+            self.selection().accept(Err(CommandError::new(
                 spiral_robotics_common::command_failure::CommandFailureCode::Transport,
                 "connection lost",
             )));
@@ -138,22 +166,11 @@ mod tests {
     }
 
     #[component]
-    fn ProjectProbe(session: ProjectSessionInfo, harness: SessionHarness) -> Element {
-        let sessions = ProjectSessionSignals::current();
-        let client = use_context_provider(|| sessions.client(session));
+    fn ProjectProbe(project: ProjectKey, harness: SelectionHarness) -> Element {
+        let selection = ProjectSelection::current();
+        let client = use_context_provider(|| selection.client(project));
         let draft = use_signal(|| "initial draft".to_owned());
         let selected_run = use_signal(|| None);
-        let requests = use_hook(|| harness.0.borrow().requests.clone());
-        use_resource(move || {
-            let available = sessions.catalog_available();
-            let requests = requests.clone();
-            async move {
-                if !available {
-                    return std::future::pending().await;
-                }
-                requests.set(requests.get() + 1);
-            }
-        });
         use_hook(|| {
             harness.0.borrow_mut().mounts.push(ProjectMountProbe {
                 client,
@@ -165,42 +182,44 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn failed_status_read_preserves_drafts_and_restored_readiness_restarts_resources() {
-        let harness = SessionHarness::default();
-        let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
+    fn only_this_browser_or_a_moved_endpoint_changes_the_mounted_project() {
+        let harness = SelectionHarness::default();
+        let mut dom = VirtualDom::new_with_props(SelectionHarness::render, harness.clone());
         dom.rebuild_in_place();
-        dom.in_runtime(|| harness.fetched("first", BackendReadinessState::Ready));
+        dom.in_runtime(|| harness.saved(ENDPOINT, "first"));
         dom.render_immediate_to_vec();
+        assert!(dom.in_runtime(|| harness.selection().live()));
         let mut draft = harness.0.borrow().mounts[0].draft;
         dom.in_runtime(|| draft.set("unsaved".to_owned()));
         dom.render_immediate_to_vec();
-        assert_eq!(harness.0.borrow().requests.get(), 1);
-        dom.in_runtime(|| harness.fetched("first", BackendReadinessState::Ready));
+
+        dom.in_runtime(|| harness.unreachable());
         dom.render_immediate_to_vec();
-        assert_eq!(harness.0.borrow().requests.get(), 1);
-        dom.in_runtime(|| harness.unavailable());
+        assert!(!dom.in_runtime(|| harness.selection().live()));
+        dom.in_runtime(|| harness.saved(ENDPOINT, "first"));
         dom.render_immediate_to_vec();
-        assert!(!harness.sessions().catalog_available());
-        assert_eq!(&*draft.peek(), "unsaved");
-        dom.in_runtime(|| harness.fetched("first", BackendReadinessState::Ready));
+        // Another browser saving another project leaves this one alone.
+        dom.in_runtime(|| harness.saved(ENDPOINT, "chosen_elsewhere"));
         dom.render_immediate_to_vec();
         assert_eq!(harness.0.borrow().mounts.len(), 1);
-        assert_eq!(harness.0.borrow().requests.get(), 2);
         assert_eq!(&*draft.peek(), "unsaved");
-        dom.in_runtime(|| harness.fetched("first", BackendReadinessState::Bootstrapping));
+
+        dom.in_runtime(|| harness.saved("https://moved.spiraldb.dev", "first"));
         dom.render_immediate_to_vec();
-        assert!(!harness.sessions().catalog_available());
-        assert_eq!(harness.0.borrow().mounts.len(), 1);
+        let observed = harness.0.borrow();
+        assert_eq!(observed.mounts.len(), 2);
+        assert_eq!(
+            observed.mounts[1].client.project().endpoint(),
+            "https://moved.spiraldb.dev"
+        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn project_key_replaces_local_state_and_cancels_its_requests() {
-        let harness = SessionHarness::default();
-        let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
+    fn selecting_another_project_replaces_local_state_and_cancels_its_requests() {
+        let harness = SelectionHarness::default();
+        let mut dom = VirtualDom::new_with_props(SelectionHarness::render, harness.clone());
         dom.rebuild_in_place();
-        dom.in_runtime(|| {
-            harness.fetched("first", BackendReadinessState::Ready);
-        });
+        dom.in_runtime(|| harness.saved(ENDPOINT, "first"));
         dom.render_immediate_to_vec();
         let old_client = harness.0.borrow().mounts[0].client.clone();
         let mut old_draft = harness.0.borrow().mounts[0].draft;
@@ -221,8 +240,12 @@ mod tests {
             crate::client::transport::HttpRequest::new("POST", "/api/settings/training/test"),
         );
 
-        dom.in_runtime(|| harness.fetched("second", BackendReadinessState::Ready));
-        // Reject completion as soon as the status is fetched, even before
+        dom.in_runtime(|| {
+            harness
+                .selection()
+                .select(ProjectKey::new(ENDPOINT, "second"))
+        });
+        // Reject completion as soon as another project is selected, even before
         // Dioxus has committed disposal of the previous keyed subtree.
         assert!(old_client.accept_response(Ok(7)).is_err());
         assert_eq!(
@@ -241,27 +264,25 @@ mod tests {
         assert_eq!(*observed.mounts[1].selected_run.peek(), None);
         assert!(old_draft.try_read().is_err());
         assert_eq!(observed.canceled.get(), 1);
-        assert_eq!(old_client.session_id(), "first");
-        assert_eq!(observed.mounts[1].client.session_id(), "second");
+        assert_eq!(old_client.project().project_id(), "first");
+        assert_eq!(observed.mounts[1].client.project().project_id(), "second");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn media_links_capture_the_mount_and_preserve_existing_query_parameters() {
-        let harness = SessionHarness::default();
-        let mut dom = VirtualDom::new_with_props(SessionHarness::render, harness.clone());
+    fn media_links_name_the_mounted_project_and_preserve_existing_query_parameters() {
+        let harness = SelectionHarness::default();
+        let mut dom = VirtualDom::new_with_props(SelectionHarness::render, harness.clone());
         dom.rebuild_in_place();
-        dom.in_runtime(|| {
-            harness.fetched("session /one", BackendReadinessState::Ready);
-        });
+        dom.in_runtime(|| harness.saved(ENDPOINT, "project_one"));
         dom.render_immediate_to_vec();
         let client = harness.0.borrow().mounts[0].client.clone();
         assert_eq!(
             client.scoped_url("/api/project/export"),
-            "/api/project/export?session_id=session%20%2Fone"
+            "/api/project/export?endpoint=https%3A%2F%2Fapi.spiraldb.dev&project_id=project_one"
         );
         assert_eq!(
             client.scoped_url("/api/project/export?format=bundle"),
-            "/api/project/export?format=bundle&session_id=session%20%2Fone"
+            "/api/project/export?format=bundle&endpoint=https%3A%2F%2Fapi.spiraldb.dev&project_id=project_one"
         );
     }
 }

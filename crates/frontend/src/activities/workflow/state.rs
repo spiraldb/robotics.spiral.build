@@ -253,7 +253,7 @@ impl WorkflowController {
         if self.unsaved_changes() {
             return Some("Save or discard your changes before switching workflows.".to_owned());
         }
-        if !crate::shell::project::ProjectSessionSignals::current().studio_available() {
+        if !crate::shell::project::ProjectSelection::current().live() {
             return Some("Reconnect to Studio before switching workflows.".to_owned());
         }
         None
@@ -483,9 +483,9 @@ impl WorkflowController {
         }
     }
     pub(super) fn use_loading(self) {
-        let sessions = crate::shell::project::ProjectSessionSignals::current();
+        let selection = crate::shell::project::ProjectSelection::current();
         use_effect(move || {
-            if sessions.studio_available()
+            if selection.live()
                 && !self.loaded()
                 && self.command().is_none()
                 && self.load_error().is_none()

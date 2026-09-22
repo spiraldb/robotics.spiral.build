@@ -1,7 +1,7 @@
 //! Recording and replay application operations.
 use spiral_robotics_common::recording_signals::{RecordingCursor, RecordingWindow};
 
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 use crate::recording::catalog::{
     DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
 };
@@ -175,7 +175,7 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
     }
 }
 
-/// Project-bound operations; the context owns admission and backend task lifetime.
+/// Project-bound operations; the context owns backend task lifetime.
 #[derive(Clone)]
 pub(crate) struct RecordingCommands {
     state: ProjectContext,
@@ -186,7 +186,6 @@ impl RecordingCommands {
         &self,
         cursor: RecordingCursor,
     ) -> Result<RecordingWindow, BackendCommandError> {
-        let _activity = self.state.admit()?;
         Ok(self.state.hardware().recording_signals(cursor))
     }
 
@@ -197,8 +196,7 @@ impl RecordingCommands {
     ) -> Result<EpisodeInfo, BackendCommandError> {
         let (dataset_id, (leader, follower)) = request.into_parts();
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
+            .execute(move |state| async move {
                 state.preferences().load().await?;
                 state
                     .storage()
@@ -223,8 +221,7 @@ impl RecordingCommands {
         keep: bool,
     ) -> Result<EpisodeInfo, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
+            .execute(move |state| async move {
                 TakeOperations::new(&state)
                     .stop(keep)
                     .await
@@ -238,8 +235,7 @@ impl RecordingCommands {
         paused: bool,
     ) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
+            .execute(move |state| async move {
                 TakeOperations::new(&state)
                     .set_paused(paused)
                     .await
@@ -250,8 +246,7 @@ impl RecordingCommands {
 
     pub(super) async fn delete_episode(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
+            .execute(move |state| async move {
                 EpisodeCatalogActions::new(&EpisodeAdapter::new(&state))
                     .delete(DeleteEpisodeCommand::new(id))
                     .await
@@ -265,8 +260,7 @@ impl RecordingCommands {
         id: String,
     ) -> Result<EpisodeInspectionSnapshot, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
+            .execute(move |state| async move {
                 EpisodeQueries::new(&state)
                     .inspection(id)
                     .map_err(Into::into)
@@ -279,8 +273,6 @@ impl RecordingCommands {
         id: String,
         request: spiral_robotics_common::recording::RecordingCameraRequest,
     ) -> Result<spiral_robotics_common::datasets::EpisodeVideo, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        self.state.require_catalog_ready()?;
         spiral_robotics_storage::episodes::EpisodeId::try_from(id.as_str())
             .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
         self.state.recording_session().camera_preview(&id, request.stream())
@@ -297,8 +289,7 @@ impl RecordingCommands {
         seconds: f64,
     ) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
+            .execute(move |state| async move {
                 PhysicalSeekActions::new(&SeekAdapter { state: &state })
                     .seek(SeekEpisodeCommand::new(id, robot, seconds).with_source_arm(source_arm))
                     .await?;
@@ -312,17 +303,13 @@ impl RecordingCommands {
         command: StartReplayCommand,
     ) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
-                command.run(&state).await.map_err(Into::into)
-            })
+            .execute(move |state| async move { command.run(&state).await.map_err(Into::into) })
             .await
     }
 
     pub(super) async fn set_replay_paused(&self, paused: bool) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.require_catalog_ready()?;
+            .execute(move |state| async move {
                 state
                     .hardware()
                     .set_replay_paused(paused)
@@ -333,8 +320,8 @@ impl RecordingCommands {
     }
 }
 
-impl From<crate::project_session::context::ProjectContext> for RecordingCommands {
-    fn from(state: crate::project_session::context::ProjectContext) -> Self {
+impl From<crate::projects::context::ProjectContext> for RecordingCommands {
+    fn from(state: crate::projects::context::ProjectContext) -> Self {
         Self { state }
     }
 }

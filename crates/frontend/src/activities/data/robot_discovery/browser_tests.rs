@@ -1,15 +1,12 @@
 //! Exercise the browser loop, native tool transport, and validation repair together.
 use super::*;
-use crate::client::{
-    project::{ProjectClient, ProjectSessionState},
-    queries::QueryRefresh,
-};
+use crate::client::{project::ProjectClient, queries::QueryRefresh};
 use dioxus::prelude::*;
 use spiral_robotics_common::{
     datasets::{
         HuggingFaceDatasetFile, HuggingFaceInspectionContents, HuggingFaceInspectionSource,
     },
-    project::ProjectSessionInfo,
+    project::ProjectKey,
 };
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
@@ -27,13 +24,13 @@ export function installRobotDiscoveryFetch() {
         if (path === '/api/proxy') {
             metadata = {url:new URL(request.url).searchParams.get('url'),method:request.method,authorization:request.headers.get('authorization')};
             if (metadata.url.includes('huggingface.co/')) {
-                robotRequests.push({path:'/api/proxy',session:request.headers.get('X-Project-Session'),metadata,body:null});
+                robotRequests.push({path:'/api/proxy',project:request.headers.get('X-Spiral-Project'),metadata,body:null});
                 return new Response('<robot name="demo"><link name="base"/></robot>', {headers:{'Content-Type':'text/plain'}});
             }
         }
         const body = await request.clone().json();
         const recordedPath = path === '/api/proxy' ? metadata.url : path;
-        robotRequests.push({path:recordedPath, transport:path, session: request.headers.get('X-Project-Session'), metadata, body});
+        robotRequests.push({path:recordedPath, transport:path, project: request.headers.get('X-Spiral-Project'), metadata, body});
         if (path === '/api/datasets/robot-discovery/context') return Response.json({
             episode:{dataset:{path:['dataset_demo']},episode_id:'episode-1'},
             topics:[{name:'/joints',schemas:['sensor_msgs/JointState'],members:1,samples:3,revision:null}]
@@ -97,10 +94,10 @@ struct DiscoveryHarness {
 impl DiscoveryHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
-        let session = ProjectSessionInfo::new("robot-session", "test-project");
-        let current = session.clone();
-        let state = use_signal(move || ProjectSessionState::Unavailable(Some(current)));
-        use_context_provider(|| ProjectClient::new(session, state.into(), refresh));
+        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
+        let current = project.clone();
+        let state = use_signal(move || Some(current));
+        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
         *self.client.borrow_mut() = Some(DatasetClient::current());
         rsx! {}
     }
@@ -146,9 +143,9 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
     let requests = fetch.requests();
     assert!(requests.iter().all(|request| {
         if request["transport"] == "/api/proxy" || request["path"] == "/api/proxy" {
-            request["session"].is_null()
+            request["project"].is_null()
         } else {
-            request["session"] == "robot-session"
+            request["project"] == "test-project"
         }
     }));
     let description = requests

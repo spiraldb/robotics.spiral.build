@@ -2,7 +2,6 @@
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use crate::robots::RobotClient;
 use crate::robots::RobotSetupSnapshot;
-use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -19,19 +18,14 @@ pub(crate) struct RobotSetupLoad {
 }
 
 impl RobotSetupState {
-    pub(super) fn use_state(active: ReadSignal<bool>, sessions: ProjectSessionSignals) -> Self {
+    pub(super) fn use_state(active: ReadSignal<bool>) -> Self {
         let state = Self::use_empty_state();
         state.use_activity(active);
         // Camera panels cross the docking and editor layers without either
         // intermediate component consuming setup. Other consumers use props.
         use_context_provider(|| state);
-        let request = QueryPolicy::new(QueryDomain::RobotSetup, 2_000).use_when(
-            move || active() && sessions.connected(),
-            move || {
-                let available = sessions.studio_available();
-                async move { RobotSetupSnapshot::load(available).await }
-            },
-        );
+        let request = QueryPolicy::new(QueryDomain::RobotSetup, 2_000)
+            .use_when(move || *active.read(), RobotSetupSnapshot::load);
         state.use_response(request);
         state
     }
@@ -112,17 +106,10 @@ impl RobotSetupState {
 }
 
 impl RobotSetupSnapshot {
-    async fn load(catalog_available: bool) -> Result<Self, crate::client::CommandError> {
+    async fn load() -> Result<Self, crate::client::CommandError> {
         let client = RobotClient::current();
-        let robots = async {
-            if catalog_available {
-                client.robots().await
-            } else {
-                Ok(Vec::new())
-            }
-        };
         let (robots, status) =
-            futures_util::future::try_join(robots, client.hardware_status()).await?;
+            futures_util::future::try_join(client.robots(), client.hardware_status()).await?;
         let (mode, cameras, issues) = status.into_parts();
         Ok(Self::new(mode)
             .with_robots(robots)

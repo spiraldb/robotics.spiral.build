@@ -1,48 +1,39 @@
-//! Project lifetime identities shared by commands and fetched state.
+//! The project a request acts on, named by the browser.
 
 use serde::{Deserialize, Serialize};
 
-/// One activated project lifetime. Reopening the same project creates a new ID.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
+/// One Spiral project: the endpoint it lives on and its ID. Local Studio data
+/// is stored under the same pair. The browser chooses the project and names it
+/// on every project request; the backend keeps no "current" project. An empty
+/// ID names the endpoint before a project is chosen, which Studio-only
+/// features such as robot setup still accept.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProjectSessionInfo {
-    id: String,
+pub struct ProjectKey {
+    endpoint: String,
     project_id: String,
 }
 
-impl ProjectSessionInfo {
-    pub fn new(id: impl Into<String>, project_id: impl Into<String>) -> Self {
+impl ProjectKey {
+    pub const ENDPOINT_HEADER: &str = "X-Spiral-Endpoint";
+    pub const PROJECT_HEADER: &str = "X-Spiral-Project";
+
+    pub fn new(endpoint: impl Into<String>, project_id: impl Into<String>) -> Self {
         Self {
-            id: id.into(),
+            endpoint: endpoint.into(),
             project_id: project_id.into(),
         }
     }
 
-    pub fn id(&self) -> &str {
-        &self.id
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 
     pub fn project_id(&self) -> &str {
         &self.project_id
     }
-}
 
-/// Identity and readiness are fetched together from one captured project.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ProjectStatus {
-    session: ProjectSessionInfo,
-    readiness: crate::status::BackendReadiness,
-}
-
-impl ProjectStatus {
-    pub fn new(session: ProjectSessionInfo, readiness: crate::status::BackendReadiness) -> Self {
-        Self { session, readiness }
-    }
-    pub fn session(&self) -> &ProjectSessionInfo {
-        &self.session
-    }
-    pub fn readiness(&self) -> &crate::status::BackendReadiness {
-        &self.readiness
+    /// Whether a Spiral project is chosen, so catalog features can run.
+    pub fn is_chosen(&self) -> bool {
+        !self.project_id.trim().is_empty()
     }
 }

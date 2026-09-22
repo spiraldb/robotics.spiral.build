@@ -1,6 +1,5 @@
 //! Saved recipes and independent judged runs. No selected curation or editor draft.
 use super::sql::CurationSql;
-use crate::data::catalog_lease::CatalogLeaseReservation;
 use crate::{OperationError, clock::SystemTimeMillis};
 use spiral_robotics_common::curation::{
     CurationSpec, CurationSummary,
@@ -222,14 +221,12 @@ impl CurationManager {
     pub(super) async fn run(
         &self,
         mut curation: CurationSpec,
-        admission: CatalogLeaseReservation,
     ) -> Result<CurationRun, OperationError> {
         curation.set_source(curation.source().cloned());
         let compiled = CurationSql::new(&curation)
             .compile()
             .map_err(OperationError::InvalidInput)?;
         let _query = self.inner.queries.token();
-        drop(admission);
         let id = uuid::Uuid::new_v4().simple().to_string();
         let mut snapshot = CurationRunSnapshot::started(format!("curation-run-{id}"))
             .with_started_ms(SystemTime::now().unix_millis());

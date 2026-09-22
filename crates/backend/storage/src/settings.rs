@@ -55,8 +55,9 @@ impl<'a> StudioPreferencePersistence<'a> {
     }
 }
 
+/// The connection Studio saved last, read once at startup.
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
-struct BackendState {
+pub struct SavedConnection {
     #[serde(default)]
     project_id: String,
     #[serde(default)]
@@ -69,6 +70,35 @@ struct BackendState {
     client_secret: String,
     #[serde(default)]
     huggingface_token: Option<String>,
+}
+
+impl SavedConnection {
+    pub fn project_id(&self) -> Option<String> {
+        Self::non_empty(&self.project_id)
+    }
+
+    pub fn spiral_endpoint(&self) -> Option<String> {
+        Self::non_empty(&self.spiral_endpoint)
+    }
+
+    pub fn spiral_spfs_endpoint(&self) -> Option<String> {
+        Self::non_empty(&self.spiral_spfs_endpoint)
+    }
+
+    pub fn credentials(&self) -> Option<SpiralCredentials> {
+        let client_id = self.client_id.trim().to_owned();
+        (!client_id.is_empty() && !self.client_secret.is_empty())
+            .then(|| SpiralCredentials::new(client_id, self.client_secret.clone()))
+    }
+
+    pub fn huggingface_token(&self) -> Option<String> {
+        self.huggingface_token.clone()
+    }
+
+    fn non_empty(value: &str) -> Option<String> {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    }
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]
@@ -121,6 +151,12 @@ impl SpiralConnectionSettings {
     pub fn with_project(mut self, project_id: &str) -> Result<Self, String> {
         self.project_id = Some(Self::validated_project_id(project_id)?);
         Ok(self)
+    }
+
+    /// The same endpoint and credentials before a project is chosen.
+    pub fn without_project(mut self) -> Self {
+        self.project_id = None;
+        self
     }
 
     pub fn with_credentials(mut self, credentials: Option<SpiralCredentials>) -> Self {
@@ -229,7 +265,6 @@ impl ServiceEndpoint {
 pub struct BackendStateStore {
     studio: crate::StudioStore,
     legacy_path: PathBuf,
-    current: Mutex<BackendState>,
 }
 
 impl BackendStateStore {
@@ -251,7 +286,6 @@ impl BackendStateStore {
         Self {
             studio,
             legacy_path,
-            current: Mutex::new(BackendState::default()),
         }
     }
 
@@ -259,76 +293,40 @@ impl BackendStateStore {
         &self.studio
     }
 
-    pub async fn initialize(&self) -> Result<(), String> {
+    /// Open the database and read the saved connection, upgrading the legacy
+    /// JSON file into SQLite on first start.
+    pub async fn initialize(&self) -> Result<SavedConnection, String> {
         self.studio.initialize().await?;
-        let current = match self.studio.backend_settings().await? {
+        let saved = match self.studio.backend_settings().await? {
             Some(document) => {
                 serde_json::from_value(document).map_err(|error| error.to_string())?
             }
             None => {
-                let current: BackendState = if self.legacy_path.exists() {
+                let saved: SavedConnection = if self.legacy_path.exists() {
                     let bytes = fs::read(&self.legacy_path).map_err(|error| {
                         format!("reading {}: {error}", self.legacy_path.display())
                     })?;
                     serde_json::from_slice(&bytes)
                         .map_err(|error| format!("parsing legacy backend settings: {error}"))?
                 } else {
-                    BackendState::default()
+                    SavedConnection::default()
                 };
                 self.studio
                     .save_backend_settings(
-                        serde_json::to_value(&current).map_err(|error| error.to_string())?,
+                        serde_json::to_value(&saved).map_err(|error| error.to_string())?,
                     )
                     .await?;
-                current
+                saved
             }
         };
-        *self.current.lock_unpoisoned() = current;
-        Ok(())
-    }
-
-    pub fn project_id(&self) -> Option<String> {
-        let project_id = self.current.lock_unpoisoned().project_id.trim().to_owned();
-        (!project_id.is_empty()).then_some(project_id)
-    }
-
-    pub fn spiral_endpoint(&self) -> Option<String> {
-        let endpoint = self
-            .current
-            .lock_unpoisoned()
-            .spiral_endpoint
-            .trim()
-            .to_owned();
-        (!endpoint.is_empty()).then_some(endpoint)
-    }
-
-    pub fn spiral_spfs_endpoint(&self) -> Option<String> {
-        let endpoint = self
-            .current
-            .lock_unpoisoned()
-            .spiral_spfs_endpoint
-            .trim()
-            .to_owned();
-        (!endpoint.is_empty()).then_some(endpoint)
-    }
-
-    pub fn credentials(&self) -> Option<SpiralCredentials> {
-        let current = self.current.lock_unpoisoned();
-        let client_id = current.client_id.trim().to_owned();
-        let client_secret = current.client_secret.clone();
-        (!client_id.is_empty() && !client_secret.is_empty())
-            .then_some(SpiralCredentials::new(client_id, client_secret))
-    }
-
-    pub fn huggingface_token(&self) -> Option<String> {
-        self.current.lock_unpoisoned().huggingface_token.clone()
+        Ok(saved)
     }
 
     pub async fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
         let project_id = settings.project_id().ok_or_else(|| {
             "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
         })?;
-        let next = BackendState {
+        let next = SavedConnection {
             huggingface_token: settings.huggingface_token().map(str::to_owned),
             project_id: project_id.to_owned(),
             spiral_endpoint: settings.endpoint().to_owned(),
@@ -344,9 +342,7 @@ impl BackendStateStore {
         };
         self.studio
             .save_backend_settings(serde_json::to_value(&next).map_err(|error| error.to_string())?)
-            .await?;
-        *self.current.lock_unpoisoned() = next;
-        Ok(())
+            .await
     }
 }
 
@@ -475,10 +471,11 @@ mod tests {
             crate::StudioStore::at(path.with_extension("sqlite3")),
             path.clone(),
         );
-        assert_eq!(store.project_id(), None);
-        assert_eq!(store.spiral_endpoint(), None);
-        assert_eq!(store.spiral_spfs_endpoint(), None);
-        assert!(store.credentials().is_none());
+        let empty = store.initialize().await.unwrap();
+        assert_eq!(empty.project_id(), None);
+        assert_eq!(empty.spiral_endpoint(), None);
+        assert_eq!(empty.spiral_spfs_endpoint(), None);
+        assert!(empty.credentials().is_none());
 
         let credentials =
             SpiralCredentials::new("client-id".to_owned(), "client-secret".to_owned());
@@ -492,36 +489,24 @@ mod tests {
         .with_credentials(Some(credentials.clone()))
         .with_huggingface_token(Some("hf_private".into()));
         store.save_connection(&settings).await.unwrap();
-        assert_eq!(store.project_id().as_deref(), Some("project-123"));
-        assert_eq!(
-            store.spiral_endpoint().as_deref(),
-            Some("http://127.0.0.1:4279")
-        );
-        assert_eq!(
-            store.spiral_spfs_endpoint().as_deref(),
-            Some("http://127.0.0.1:4295")
-        );
-        let saved = store.credentials().expect("credentials are saved");
-        assert_eq!(saved.client_id(), credentials.client_id());
-        assert_eq!(saved.client_secret(), credentials.client_secret());
         let reopened = BackendStateStore::new(
             crate::StudioStore::at(path.with_extension("sqlite3")),
             path.clone(),
         );
-        reopened.initialize().await.unwrap();
-        assert_eq!(reopened.project_id().as_deref(), Some("project-123"));
+        let saved = reopened.initialize().await.unwrap();
+        assert_eq!(saved.project_id().as_deref(), Some("project-123"));
         assert_eq!(
-            reopened.spiral_endpoint().as_deref(),
+            saved.spiral_endpoint().as_deref(),
             Some("http://127.0.0.1:4279")
         );
         assert_eq!(
-            reopened.spiral_spfs_endpoint().as_deref(),
+            saved.spiral_spfs_endpoint().as_deref(),
             Some("http://127.0.0.1:4295")
         );
-        let saved = reopened.credentials().expect("credentials are reopened");
+        assert_eq!(saved.huggingface_token().as_deref(), Some("hf_private"));
+        let saved = saved.credentials().expect("credentials are reopened");
         assert_eq!(saved.client_id(), credentials.client_id());
         assert_eq!(saved.client_secret(), credentials.client_secret());
-        assert_eq!(reopened.huggingface_token().as_deref(), Some("hf_private"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -540,8 +525,14 @@ mod tests {
             .unwrap();
         let reopened =
             BackendStateStore::new(crate::StudioStore::at(path.with_extension("sqlite3")), path);
-        reopened.initialize().await.unwrap();
-        assert!(reopened.huggingface_token().is_none());
+        assert!(
+            reopened
+                .initialize()
+                .await
+                .unwrap()
+                .huggingface_token()
+                .is_none()
+        );
     }
 
     #[test]
@@ -561,10 +552,10 @@ mod tests {
 
         let store =
             BackendStateStore::new(crate::StudioStore::at(path.with_extension("sqlite3")), path);
-        store.initialize().await.unwrap();
-        assert_eq!(store.project_id().as_deref(), Some("legacy-project"));
-        assert_eq!(store.spiral_endpoint(), None);
-        assert_eq!(store.spiral_spfs_endpoint(), None);
+        let saved = store.initialize().await.unwrap();
+        assert_eq!(saved.project_id().as_deref(), Some("legacy-project"));
+        assert_eq!(saved.spiral_endpoint(), None);
+        assert_eq!(saved.spiral_spfs_endpoint(), None);
     }
 
     #[test]

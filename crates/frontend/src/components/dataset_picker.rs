@@ -15,7 +15,7 @@ use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, Select};
 use crate::activities::data::DatasetClient;
 use crate::client::CommandError;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
-use crate::shell::project::ProjectSessionSignals;
+use crate::shell::project::ProjectSelection;
 
 /// The project's datasets as one surface sees them.
 ///
@@ -38,8 +38,8 @@ impl DatasetCatalog {
             problem: Signal::new(None),
             reading: Signal::new(false),
         });
-        let sessions = ProjectSessionSignals::current();
-        let available = use_memo(move || sessions.catalog_available());
+        let selection = ProjectSelection::current();
+        let available = use_memo(move || selection.catalog_available());
         let request = QueryPolicy::on_demand(QueryDomain::Catalog).use_when(
             move || *available.read(),
             || DatasetClient::current().list_datasets(),
@@ -117,7 +117,7 @@ pub(crate) fn DatasetPicker(
                 .find(|row| row.resource_id() == resource_id),
         );
     };
-    let available = ProjectSessionSignals::current().catalog_available();
+    let available = ProjectSelection::current().catalog_available();
     rsx! {
         label { r#for: "{id}", class: "sr-only", "{label}" }
         Select {

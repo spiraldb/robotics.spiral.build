@@ -2,28 +2,18 @@
 
 use crate::http::contract::ApiRoutes;
 use crate::http::delivery::{HttpFailure, ScopedProject};
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::StudioContext;
 
 use axum::Json;
 use spiral_robotics_common::datasets::ProjectImportSummary;
-use spiral_robotics_common::project::ProjectStatus;
 
 pub(crate) struct ProjectEndpoints;
 
 impl ProjectEndpoints {
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.post("/project/import", Self::import_project);
-        routes.get("/project/status", Self::project_status);
     }
-    async fn project_status(
-        axum::extract::State(state): axum::extract::State<ProjectContext>,
-    ) -> Result<Json<ProjectStatus>, HttpFailure> {
-        let result = crate::project_session::queries::ProjectQueries::from(state).status();
-        Ok(Json(result))
-    }
-}
 
-impl ProjectEndpoints {
     async fn import_project(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
         upload: ProjectUpload,
@@ -31,13 +21,11 @@ impl ProjectEndpoints {
         let document = upload
             .read(crate::data::commands::MAX_PROJECT_IMPORT_BYTES)
             .await?;
-        // Resolve admission again after upload; a project may have changed while
-        // the browser was sending bytes. No import runs in the replacement project.
         Ok(Json(commands.import_project(document).await?))
     }
 }
 
-/// A bounded byte stream; the router resolves project scope before constructing it.
+/// A bounded byte stream; the router opens the project before constructing it.
 struct ProjectUpload(axum::extract::Request);
 impl ProjectUpload {
     async fn read(self, limit: usize) -> Result<Vec<u8>, HttpFailure> {
@@ -84,11 +72,11 @@ impl ProjectUpload {
     }
 }
 
-impl axum::extract::FromRequest<ProjectContext> for ProjectUpload {
+impl axum::extract::FromRequest<StudioContext> for ProjectUpload {
     type Rejection = HttpFailure;
     async fn from_request(
         request: axum::extract::Request,
-        _: &ProjectContext,
+        _: &StudioContext,
     ) -> Result<Self, Self::Rejection> {
         Ok(Self(request))
     }

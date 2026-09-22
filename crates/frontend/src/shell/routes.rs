@@ -11,9 +11,9 @@ use crate::activities::training::workspace::TrainingWorkspace;
 use crate::activities::workflow::workspace::WorkflowWorkspace;
 use crate::shell::activity::Activity;
 use crate::shell::frame::ActivityRail;
-use crate::shell::project::ProjectSessionSignals;
+use crate::shell::project::ProjectSelection;
 use crate::shell::state::StudioProjectState;
-use spiral_robotics_common::project::ProjectSessionInfo;
+use spiral_robotics_common::project::ProjectKey;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const ECHARTS_RUNTIME: &str = "https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js";
@@ -87,21 +87,21 @@ pub(super) fn StudioRouter() -> Element {
     rsx! { Router::<StudioRoute> {} }
 }
 
-/// Only project connection and configuration reads run above the view sessions.
+/// Only the saved connection is read above the project mount.
 #[component]
 fn StudioShell() -> Element {
-    let sessions = ProjectSessionSignals::use_provider();
-    sessions.use_polling();
-    let session = sessions.mounted_session();
+    let selection = ProjectSelection::use_provider();
+    selection.use_polling();
+    let project = selection.selected();
     rsx! {
         document::Stylesheet { href: TAILWIND }
-        if session.is_none() {
+        if project.is_none() {
             div { class: "studio-shell studio-shell-v2",
                 div { class: "editor-empty", role: "status", "Connecting to Studio…" }
             }
         }
-        for session in session {
-            ProjectStudioShell { key: "{session.id()}", session }
+        for project in project {
+            ProjectStudioShell { key: "{project.endpoint()} {project.project_id()}", project }
         }
     }
 }
@@ -109,22 +109,17 @@ fn StudioShell() -> Element {
 /// Every project resource, controller, selection, and draft is owned below this
 /// key. Dioxus drops this scope and its tasks before mounting another project.
 #[component]
-fn ProjectStudioShell(session: ProjectSessionInfo) -> Element {
-    let sessions = ProjectSessionSignals::current();
-    use_context_provider(|| sessions.client(session));
+fn ProjectStudioShell(project: ProjectKey) -> Element {
+    let chosen = project.is_chosen();
+    use_context_provider(|| ProjectSelection::current().client(project));
     let project = StudioProjectState::use_provider();
     project.use_polling();
     let route = use_route::<StudioRoute>();
     let selected_view = use_memo(use_reactive((&route,), |(route,)| route.activity()));
     let navigator = use_navigator();
-    let mut project_setup_prompted = use_signal(|| false);
+    // The mount is per project, so this asks once for a project to be chosen.
     use_effect(move || {
-        if sessions
-            .mounted_session()
-            .is_some_and(|session| session.project_id().trim().is_empty())
-            && !project_setup_prompted()
-        {
-            project_setup_prompted.set(true);
+        if !chosen {
             navigator.push(StudioRoute::Settings {});
         }
     });

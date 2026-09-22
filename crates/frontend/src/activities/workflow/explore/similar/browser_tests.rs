@@ -7,11 +7,11 @@ use crate::activities::workflow::explore::document::{
     DATASET_NODE_ID, ExplorationNodeKind, ExplorationPayload, SubtaskAnnotation, SubtaskRow,
 };
 use crate::client::completions::ModelClient;
-use crate::client::project::{ProjectClient, ProjectSessionState};
+use crate::client::project::ProjectClient;
 use crate::client::queries::QueryRefresh;
 use dioxus::prelude::*;
 use serde_json::Value;
-use spiral_robotics_common::project::ProjectSessionInfo;
+use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
@@ -96,10 +96,10 @@ struct SearchHarness {
 impl SearchHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
-        let session = ProjectSessionInfo::new("explore-session", "test-project");
-        let current = session.clone();
-        let state = use_signal(move || ProjectSessionState::Unavailable(Some(current)));
-        use_context_provider(|| ProjectClient::new(session, state.into(), refresh));
+        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
+        let current = project.clone();
+        let state = use_signal(move || Some(current));
+        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
         *self.model.borrow_mut() = Some(ModelClient::current());
         rsx! {}
     }

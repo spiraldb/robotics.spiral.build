@@ -6,7 +6,6 @@
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::OperationError;
-use crate::data::catalog_lease::CatalogLeaseReservation;
 use crate::robotics::video::{CameraRecording, VideoCapture};
 use crate::sync::MutexRecovery;
 
@@ -16,12 +15,11 @@ pub(crate) struct RecordingSession {
     review: std::sync::Mutex<Option<ReviewedTake>>,
 }
 
-/// A take the control loop is recording. It keeps the episode catalog
-/// reserved until its episode and media are committed.
+/// A take the control loop is recording, until its episode and media are
+/// committed.
 pub(crate) struct OpenTake {
     episode: String,
     capture: Option<VideoCapture>,
-    _catalog: CatalogLeaseReservation,
 }
 
 struct ReviewedTake {
@@ -36,21 +34,13 @@ pub(crate) struct TakeChange<'a> {
 }
 
 impl OpenTake {
-    pub(crate) fn new(
-        episode: String,
-        capture: Option<VideoCapture>,
-        catalog: CatalogLeaseReservation,
-    ) -> Self {
+    pub(crate) fn new(episode: String, capture: Option<VideoCapture>) -> Self {
         debug_assert!(
             capture
                 .as_ref()
                 .is_none_or(|capture| capture.episode_id() == episode)
         );
-        Self {
-            episode,
-            capture,
-            _catalog: catalog,
-        }
+        Self { episode, capture }
     }
 }
 
@@ -135,8 +125,7 @@ impl TakeChange<'_> {
         *self.open = Some(take);
     }
 
-    /// Close the open take for review: its media stays previewable, and its
-    /// catalog reservation ends.
+    /// Close the open take for review: its media stays previewable.
     pub(crate) fn close(mut self, cameras: Vec<CameraRecording>) {
         if let Some(take) = self.open.take() {
             *self.review.recover_lock() = Some(ReviewedTake {
@@ -152,40 +141,32 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 
-    fn take(lease: &Arc<CatalogMutationLease>, episode: &str) -> OpenTake {
-        OpenTake::new(
-            episode.to_owned(),
-            None,
-            lease.try_reserve(CatalogLeaseOwner::Recording).unwrap(),
-        )
+    fn take(episode: &str) -> OpenTake {
+        OpenTake::new(episode.to_owned(), None)
     }
 
     #[test]
-    fn an_open_take_holds_the_catalog_until_it_closes_for_review() {
-        let lease = Arc::new(CatalogMutationLease::default());
+    fn an_open_take_stays_active_until_it_closes_for_review() {
         let session = RecordingSession::default();
         let mut change = session.try_change().unwrap();
-        change.open(take(&lease, "take-one"));
+        change.open(take("take-one"));
         assert!(
             session.try_change().is_err(),
             "one operation holds the take"
         );
         drop(change);
-        assert!(session.active() && lease.is_held());
+        assert!(session.active());
         let change = session.try_change().unwrap();
         assert_eq!(change.episode(), Some("take-one"));
         change.close(Vec::new());
         assert!(!session.active());
-        assert!(!lease.is_held());
     }
 
     #[tokio::test]
     async fn a_cancelled_operation_leaves_the_take_open() {
-        let lease = Arc::new(CatalogMutationLease::default());
         let session = Arc::new(RecordingSession::default());
-        session.try_change().unwrap().open(take(&lease, "take-one"));
+        session.try_change().unwrap().open(take("take-one"));
         let (held, ready) = tokio::sync::oneshot::channel();
         let task = tokio::spawn({
             let session = session.clone();
@@ -200,14 +181,12 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(session.change().await.episode(), Some("take-one"));
-        assert!(lease.is_held());
     }
 
     #[test]
     fn completed_preview_belongs_to_the_take_and_is_replaced_on_next_open() {
-        let lease = Arc::new(CatalogMutationLease::default());
         let session = RecordingSession::default();
-        session.try_change().unwrap().open(take(&lease, "take-one"));
+        session.try_change().unwrap().open(take("take-one"));
         let camera = CameraRecording::from_annex_b(
             "wrist".into(),
             (32, 32, 30),
@@ -229,7 +208,7 @@ mod tests {
                 .len(),
             8
         );
-        session.try_change().unwrap().open(take(&lease, "take-two"));
+        session.try_change().unwrap().open(take("take-two"));
         assert!(session.camera_preview("take-one", "wrist").is_none());
     }
 }

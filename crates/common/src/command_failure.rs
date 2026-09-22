@@ -9,8 +9,6 @@ pub enum CommandFailureCode {
     InvalidInput,
     NotFound,
     Conflict,
-    ProjectTransition,
-    ProjectUnavailable,
     StaleProject,
     IncompatibleWorkflow,
     External,
@@ -24,9 +22,9 @@ impl CommandFailureCode {
         match self {
             Self::InvalidInput => 400,
             Self::NotFound => 404,
-            Self::Conflict | Self::ProjectTransition | Self::StaleProject => 409,
+            Self::Conflict | Self::StaleProject => 409,
             Self::IncompatibleWorkflow => 422,
-            Self::ProjectUnavailable | Self::Transport => 503,
+            Self::Transport => 503,
             Self::External => 502,
             Self::Internal => 500,
         }

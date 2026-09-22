@@ -1,10 +1,7 @@
 //! Exercise the real browser loop and fetch transport with a scripted provider.
 use super::*;
-use crate::client::{
-    project::{ProjectClient, ProjectSessionState},
-    queries::QueryRefresh,
-};
-use spiral_robotics_common::project::ProjectSessionInfo;
+use crate::client::{project::ProjectClient, queries::QueryRefresh};
+use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
@@ -24,7 +21,7 @@ export function installWorkflowFetch(nextMode) {
             url = metadata.url;
         }
         const body = request.method === 'GET' ? null : await request.clone().json();
-        calls.push({url, body, transport:path, metadata, session:request.headers.get('X-Project-Session')});
+        calls.push({url, body, transport:path, metadata, project:request.headers.get('X-Spiral-Project')});
         if (url === '/api/models/capabilities') return Response.json({columns:[],rows:[],truncated:false,elapsed_ms:0});
         if (url === '/api/workflows/plan') {
             const graph = {schema_version:1,root:0,nodes:[{id:0,operator:'Values',inputs:[],output:{},properties:{}}]};
@@ -129,10 +126,10 @@ struct AgentHarness(Rc<RefCell<Option<(WorkflowController, WorkflowAssistant)>>>
 impl AgentHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
-        let session = ProjectSessionInfo::new("test-session", "test-project");
-        let current = session.clone();
-        let state = use_signal(move || ProjectSessionState::Unavailable(Some(current)));
-        use_context_provider(|| ProjectClient::new(session, state.into(), refresh));
+        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
+        let current = project.clone();
+        let state = use_signal(move || Some(current));
+        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
         let controller = WorkflowController::use_controller();
         let assistant = use_hook(|| WorkflowAssistant::new(controller.spec().id()));
         *self.0.borrow_mut() = Some((controller, assistant));
@@ -209,7 +206,7 @@ async fn browser_loop_plans_and_updates_the_local_draft_without_applying_or_savi
             .filter(|call| call["url"] == "https://provider.test/v1/chat/completions")
             .all(|call| {
                 call["transport"] == "/api/proxy"
-                    && call["session"].is_null()
+                    && call["project"].is_null()
                     && call["metadata"]["method"] == "POST"
                     && call["metadata"]["url"] == "https://provider.test/v1/chat/completions"
             })

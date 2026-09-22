@@ -2,7 +2,7 @@ use crate::http::{
     contract::{ApiRoutes, OperationSchema, RequestSchema, ResponseSchema},
     delivery::HttpFailure,
 };
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::StudioContext;
 use axum::{
     Json,
     body::Body,
@@ -32,9 +32,9 @@ impl TransportEndpoints {
     }
 
     async fn credentials(
-        State(state): State<ProjectContext>,
+        State(state): State<StudioContext>,
     ) -> Result<Json<StudioCredentials>, HttpFailure> {
-        super::credentials::ConfiguredCredentials::load(state.backend_state())
+        super::credentials::ConfiguredCredentials::load(&state.projects().saved_connection())
             .map(Json)
             .map_err(|error| crate::OperationError::External(error).into())
     }
@@ -156,7 +156,8 @@ fn forbidden_request_header(name: &HeaderName) -> bool {
             | "upgrade"
             | "user-agent"
             | "via"
-            | "x-project-session"
+            | "x-spiral-endpoint"
+            | "x-spiral-project"
     ) || name.as_str().starts_with("sec-")
         || name.as_str().starts_with("x-forwarded-")
 }
@@ -408,7 +409,7 @@ mod tests {
             .uri("/api/proxy?url=https%3A%2F%2Fexample.com%2Fupload")
             .header("content-type", "application/octet-stream")
             .header("cookie", "studio=session")
-            .header("x-project-session", "project")
+            .header("x-spiral-project", "project")
             .body(Body::from(raw.clone()))
             .unwrap();
         let extracted = ProxyRequest::from_request(request, &()).await.unwrap();
@@ -418,7 +419,7 @@ mod tests {
             "application/octet-stream"
         );
         assert!(extracted.headers.get(header::COOKIE).is_none());
-        assert!(extracted.headers.get("x-project-session").is_none());
+        assert!(extracted.headers.get("x-spiral-project").is_none());
         assert_eq!(to_bytes(extracted.body, 1024).await.unwrap(), raw);
     }
 }

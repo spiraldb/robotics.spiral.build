@@ -13,7 +13,7 @@ use spiral_robotics_ui::{
 use crate::activities::settings::robots::RobotPanel;
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::notifications::MessageSource;
-use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
+use crate::shell::{project::ProjectSelection, state::StudioProjectState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
@@ -93,9 +93,10 @@ fn SettingsPanel(
     let initial_value = initial.clone().unwrap_or_default();
     let settings_loaded = initial.is_some();
     let preferences_loaded = settings.preferences_loaded();
-    let initial_section = if ProjectSessionSignals::current()
-        .mounted_session()
-        .is_none_or(|session| session.project_id().trim().is_empty())
+    let project_selection = ProjectSelection::current();
+    let initial_section = if project_selection
+        .selected()
+        .is_none_or(|project| !project.is_chosen())
     {
         SettingsSection::Spiral
     } else {
@@ -193,10 +194,6 @@ fn SettingsPanel(
         save_error.set(None);
         saving.set(true);
         let submitted = current();
-        let destination_changed = submitted.spiral() != base.peek().spiral()
-            || !client_secret.peek().is_empty()
-            || !huggingface_token.peek().trim().is_empty()
-            || clear_huggingface_token();
         let connection = SpiralConnectionUpdate::new(
             current().spiral().endpoint(),
             current().spiral().spfs_endpoint(),
@@ -222,21 +219,27 @@ fn SettingsPanel(
                         connection, training, video,
                     ))
                     .await
-                    .map(|_| ())
+                    .map(|settings| settings.spiral().project())
             } else {
                 SettingsClient::current()
                     .update_connection(connection)
                     .await
+                    .map(|saved| saved.project())
             };
             match result {
-                Ok(_) => {
+                Ok(saved_project) => {
                     saved.set(Some(submitted));
                     client_secret.set(String::new());
                     huggingface_token.set(String::new());
                     clear_huggingface_token.set(false);
                     on_saved();
+                    // Another project remounts the Studio under its key, so
+                    // only a save that stays on this project can test it here.
+                    let switched = crate::client::project::ProjectClient::current().project()
+                        != &saved_project;
+                    project_selection.select(saved_project);
                     if let Some(connection_test) =
-                        connection_test.filter(|_| !destination_changed && preferences_loaded)
+                        connection_test.filter(|_| !switched && preferences_loaded)
                     {
                         testing.set(true);
                         test_result.set(None);
@@ -627,8 +630,7 @@ pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Settings,
         is_active,
     );
-    let telemetry =
-        HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
+    let telemetry = HardwareViewState::use_state(project, is_active);
     let selection = RobotSelection::use_selection(telemetry.snapshot());
     rsx! {
         crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(telemetry),

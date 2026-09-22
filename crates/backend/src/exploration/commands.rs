@@ -1,6 +1,6 @@
 //! Resource capabilities for saved explorations.
 use crate::BackendCommandError;
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 use spiral_robotics_common::exploration::{ExplorationDocument, ExplorationSummary};
 
 #[derive(Clone)]
@@ -9,11 +9,9 @@ pub(crate) struct ExplorationCommands {
 }
 impl ExplorationCommands {
     pub(super) async fn list(&self) -> Result<Vec<ExplorationSummary>, BackendCommandError> {
-        let _activity = self.state.admit()?;
         self.state.explorations().list().await.map_err(Into::into)
     }
     pub(super) async fn load(&self, id: &str) -> Result<ExplorationDocument, BackendCommandError> {
-        let _activity = self.state.admit()?;
         self.state.explorations().load(id).await.map_err(Into::into)
     }
     /// A save outlives its HTTP caller: a browser that disconnects mid-write
@@ -23,7 +21,7 @@ impl ExplorationCommands {
         document: ExplorationDocument,
     ) -> Result<ExplorationDocument, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 state
                     .explorations()
                     .save(document)

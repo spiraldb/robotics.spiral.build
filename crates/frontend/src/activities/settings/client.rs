@@ -26,7 +26,8 @@ impl SettingsClient {
     pub(super) fn update_connection(
         &self,
         change: spiral_robotics_common::settings::SpiralConnectionUpdate,
-    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
+    ) -> impl Future<Output = Result<spiral_robotics_common::settings::SpiralSettings, CommandError>>
+    + use<> {
         self.project.mutate(
             &[Project, Settings, RobotSetup],
             HttpRequest::new("PUT", "/api/settings/connection").json(&change),

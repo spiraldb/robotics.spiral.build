@@ -17,21 +17,15 @@ impl CommandError {
 
     pub(crate) fn recovery_guidance(&self) -> &'static str {
         match self.code() {
-            CommandFailureCode::ProjectTransition => {
-                "Wait for the project change to finish, then retry."
-            }
             CommandFailureCode::IncompatibleWorkflow => {
                 "This Studio build cannot open the saved Workflow. Update Studio before retrying."
             }
             CommandFailureCode::StaleProject => {
-                "The project changed. Reload this view to continue."
+                "Studio's saved connection changed. Reload this view to continue."
             }
             CommandFailureCode::InvalidInput => "Check the supplied values and try again.",
             CommandFailureCode::NotFound => "Reload this view to check what is still available.",
             CommandFailureCode::Conflict => "Finish the conflicting operation, then retry.",
-            CommandFailureCode::ProjectUnavailable => {
-                "Reconnect the project in Settings, then retry."
-            }
             CommandFailureCode::External
             | CommandFailureCode::Transport
             | CommandFailureCode::Internal => {
@@ -43,7 +37,7 @@ impl CommandError {
     pub(super) fn stale_project() -> Self {
         Self::new(
             CommandFailureCode::StaleProject,
-            "The project changed before this request completed. Refresh the current project and try again.",
+            "Another project was selected before this request completed.",
         )
     }
 }
@@ -63,7 +57,7 @@ impl From<CommandError> for String {
 pub(crate) struct HttpRequest {
     method: &'static str,
     url: Result<String, CommandError>,
-    session: Option<String>,
+    project: Option<spiral_robotics_common::project::ProjectKey>,
     body: Result<Option<RequestBody>, CommandError>,
     headers: Vec<(String, String)>,
     timeout_ms: Option<u32>,
@@ -80,7 +74,7 @@ impl HttpRequest {
         Self {
             method,
             url: Ok(url.into()),
-            session: None,
+            project: None,
             body: Ok(None),
             headers: Vec::new(),
             timeout_ms: None,
@@ -102,8 +96,11 @@ impl HttpRequest {
         self
     }
 
-    pub(crate) fn for_session(mut self, session: String) -> Self {
-        self.session = Some(session);
+    pub(crate) fn for_project(
+        mut self,
+        project: spiral_robotics_common::project::ProjectKey,
+    ) -> Self {
+        self.project = Some(project);
         self
     }
 
@@ -164,8 +161,11 @@ impl HttpRequest {
             .method(self.method.parse::<Method>().expect("declared HTTP method"))
             .header("Accept", accept)
             .abort_signal(Some(&abort.controller.signal()));
-        if let Some(session) = self.session {
-            request = request.header("X-Project-Session", &session);
+        if let Some(project) = &self.project {
+            use spiral_robotics_common::project::ProjectKey;
+            request = request
+                .header(ProjectKey::ENDPOINT_HEADER, project.endpoint())
+                .header(ProjectKey::PROJECT_HEADER, project.project_id());
         }
         for (name, value) in &self.headers {
             request = request.header(name, value);

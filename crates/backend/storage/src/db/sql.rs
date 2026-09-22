@@ -483,12 +483,6 @@ impl QueryExecution {
 }
 
 impl RecordBatchStream {
-    /// Convert query output to a bounded browser preview.
-    pub async fn into_preview(self, max_rows: usize) -> Result<SpiralQuerySnapshot, String> {
-        QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES)
-            .collect(self)
-            .await
-    }
     /// A preview limit bounds the browser payload, not query execution. Drain
     /// the remaining batches to finish inference and surface late errors.
     pub async fn into_preview_drained(

@@ -8,15 +8,18 @@ use spiral_robotics_common::datasets::{
     ProjectImportSummary,
 };
 use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
-use spiral_robotics_common::settings::{ConnectionTest, DataSettings, SettingsUpdate};
+use spiral_robotics_common::settings::{
+    ConnectionTest, DataSettings, SettingsUpdate, SpiralSettings,
+};
 use spiral_robotics_hardware::{HardwareState, ModeSelection as HardwareModeSelection};
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
 use crate::BackendCommandError;
-use crate::data::catalog_lease::CatalogLeaseOwner;
 use crate::data::query::QueryCommand;
 use crate::data::settings::UpdateDataSettingsCommand;
-use crate::project_session::context::ProjectContext;
+use crate::projects::OpenProject;
+use crate::projects::context::ProjectContext;
+use std::sync::Arc;
 
 pub(crate) const MAX_PROJECT_IMPORT_BYTES: usize =
     spiral_robotics_storage::bundle::ProjectBundle::MAX_BYTES;
@@ -37,8 +40,6 @@ impl DataCommands {
         self.state
             .tasks()
             .read(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
                 let storage = commands.state.storage();
                 let inspection = storage.inspect_dataset(selection).await?;
                 let dataset = inspection.dataset();
@@ -56,8 +57,6 @@ impl DataCommands {
         self.state
             .tasks()
             .read(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
                 super::robot_visualization::RobotVisualization::context(
                     commands.state.storage(),
                     selection,
@@ -75,8 +74,6 @@ impl DataCommands {
         self.state
             .tasks()
             .read(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
                 super::robot_visualization::RobotVisualization::inspect_stream(
                     commands.state.storage(),
                     request,
@@ -94,8 +91,6 @@ impl DataCommands {
         self.state
             .tasks()
             .execute(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
                 super::robot_visualization::RobotVisualization::save(
                     commands.state.storage(),
                     result,
@@ -112,7 +107,6 @@ impl DataCommands {
         self.state
             .tasks()
             .read(async move {
-                let _activity = commands.state.admit()?;
                 commands
                     .state
                     .storage()
@@ -128,7 +122,6 @@ impl DataCommands {
         self.state
             .tasks()
             .read(async move {
-                let _activity = commands.state.admit()?;
                 commands
                     .state
                     .storage()
@@ -147,7 +140,6 @@ impl DataCommands {
         self.state
             .tasks()
             .read(async move {
-                let _activity = commands.state.admit()?;
                 commands
                     .state
                     .storage()
@@ -166,8 +158,6 @@ impl DataCommands {
         self.state
             .tasks()
             .read(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
                 commands
                     .state
                     .storage()
@@ -186,8 +176,6 @@ impl DataCommands {
         self.state
             .tasks()
             .read(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
                 commands
                     .state
                     .storage()
@@ -206,8 +194,6 @@ impl DataCommands {
         self.state
             .tasks()
             .execute(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
                 commands
                     .state
                     .storage()
@@ -218,28 +204,24 @@ impl DataCommands {
             .await?
     }
 
-    pub(super) fn connection_settings(
-        &self,
-    ) -> Result<spiral_robotics_common::settings::SpiralSettings, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        Ok(self.state.project().connection_settings())
-    }
-
     pub(super) async fn update_connection(
         &self,
         change: spiral_robotics_common::settings::SpiralConnectionUpdate,
-    ) -> Result<(), BackendCommandError> {
+    ) -> Result<SpiralSettings, BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
             .execute(async move {
-                commands
+                let origin = commands.state.project();
+                let project = commands
                     .state
                     .projects()
-                    .update_connection(commands.state.project(), change)
+                    .update_connection(origin, change)
                     .await?;
-                commands.spawn_auto_connect_saved_robots();
-                Ok(())
+                if !Arc::ptr_eq(&project, origin) {
+                    commands.spawn_auto_connect_saved_robots(project);
+                }
+                Ok(commands.state.projects().saved_settings())
             })
             .await?
     }
@@ -253,7 +235,6 @@ impl DataCommands {
     }
 
     async fn settings_in_project(&self) -> Result<DataSettings, BackendCommandError> {
-        let _activity = self.state.admit()?;
         self.state.project().settings().await.map_err(Into::into)
     }
 
@@ -293,9 +274,9 @@ impl DataCommands {
             .projects()
             .update_settings(self.state.project(), command)
             .await?;
-        let (settings, replaced) = result.into_parts();
-        if replaced {
-            self.spawn_auto_connect_saved_robots();
+        let (settings, switched_to) = result.into_parts();
+        if let Some(project) = switched_to {
+            self.spawn_auto_connect_saved_robots(project);
         }
         Ok(settings)
     }
@@ -309,16 +290,9 @@ impl DataCommands {
     }
 
     async fn test_spiral_in_project(&self) -> Result<ConnectionTest, BackendCommandError> {
-        match self.state.projects().recover(self.state.project()).await {
-            Ok(()) => {
-                self.spawn_auto_connect_saved_robots();
-                Ok(ConnectionTest::new(
-                    true,
-                    "Connected to SpiralDB and loaded the project".to_owned(),
-                ))
-            }
-            Err(error) => Err(error.into()),
-        }
+        Ok(ConnectionTest::from(
+            self.state.storage().test_spiral().await,
+        ))
     }
 
     pub(super) async fn test_training_runtime(
@@ -334,7 +308,6 @@ impl DataCommands {
     async fn test_training_runtime_in_project(
         &self,
     ) -> Result<ConnectionTest, BackendCommandError> {
-        let _activity = self.state.admit()?;
         self.state.preferences().load().await?;
         Ok(ConnectionTest::from(
             self.state.training().test_runtime().await,
@@ -350,17 +323,6 @@ impl DataCommands {
     }
 
     async fn relations_in_project(&self) -> Result<RelationCatalog, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        self.require_catalog_ready()?;
-        let _reservation = self
-            .state
-            .catalog_lease()
-            .try_reserve(CatalogLeaseOwner::StudioCatalogRead)
-            .ok_or_else(|| {
-                BackendCommandError::conflict(
-                    "Wait for the current recording or catalog change before loading Studio relations",
-                )
-            })?;
         self.state
             .storage()
             .relation_catalog()
@@ -389,8 +351,6 @@ impl DataCommands {
         self.state
             .tasks()
             .execute(async move {
-                let _activity = commands.state.admit()?;
-                commands.require_catalog_ready()?;
                 let command =
                     QueryCommand::new(request.statement(), request.max_rows()).validated()?;
                 let request = spiral_robotics_common::relations::EpisodeQueryRequest::new(
@@ -413,8 +373,6 @@ impl DataCommands {
         statement: String,
         max_rows: usize,
     ) -> Result<SpiralQuerySnapshot, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        self.require_catalog_ready()?;
         let command = QueryCommand::new(statement, max_rows).validated()?;
         self.state
             .storage()
@@ -442,7 +400,6 @@ impl DataCommands {
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetInspection, BackendCommandError> {
-        let _activity = self.state.admit()?;
         HuggingFaceDatasetInspection::discover(request)
             .await
             .map_err(BackendCommandError::from)
@@ -467,20 +424,9 @@ impl DataCommands {
         &self,
         request: HuggingFaceDatasetSource,
     ) -> Result<HuggingFaceDatasetImportSummary, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        self.require_catalog_ready()?;
         let inspection = HuggingFaceDatasetInspection::discover(request)
             .await
             .map_err(BackendCommandError::from)?;
-        let _reservation = self
-            .state
-            .catalog_lease()
-            .try_reserve(CatalogLeaseOwner::DatasetImport)
-            .ok_or_else(|| {
-                BackendCommandError::conflict(
-                    "Wait for the current recording or catalog change before importing a dataset",
-                )
-            })?;
         self.require_import_idle("a dataset")?;
         self.state
             .storage()
@@ -498,8 +444,6 @@ impl DataCommands {
     }
 
     async fn export_project_in_project(&self) -> Result<Vec<u8>, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        self.require_catalog_ready()?;
         self.state
             .storage()
             .export_project_bundle()
@@ -522,26 +466,18 @@ impl DataCommands {
         &self,
         document: Vec<u8>,
     ) -> Result<ProjectImportSummary, BackendCommandError> {
-        self.require_catalog_ready()?;
         if document.is_empty() {
             return Err(BackendCommandError::invalid(
                 "choose a .spiral-project file to import",
             ));
         }
-        let summary = self
+        let (summary, imported) = self
             .state
             .projects()
             .import(self.state.project(), &document)
             .await?;
-        self.spawn_auto_connect_saved_robots();
+        self.spawn_auto_connect_saved_robots(imported);
         Ok(summary)
-    }
-
-    fn require_catalog_ready(&self) -> Result<(), BackendCommandError> {
-        match self.state.bootstrap().catalog_unavailable() {
-            Some(error) => Err(error.into()),
-            None => Ok(()),
-        }
     }
 
     fn require_import_idle(&self, subject: &str) -> Result<(), BackendCommandError> {
@@ -561,29 +497,21 @@ impl DataCommands {
     fn import_activity_is_busy(&self, hardware: &HardwareState) -> bool {
         hardware.recording().is_some()
             || !matches!(hardware.mode(), HardwareModeSelection::Idle)
-            || self
-                .state
-                .training()
-                .snapshot()
-                .runs()
-                .iter()
-                .any(|run| run.phase().active())
-            || self.state.rollout().snapshot().phase().active()
-            || self.state.workflow().is_active()
+            || self.state.project().busy()
     }
 
-    fn spawn_auto_connect_saved_robots(&self) {
-        let reconnect_state = self.state.current();
+    fn spawn_auto_connect_saved_robots(&self, project: Arc<OpenProject>) {
+        let project = self.state.with_project(project);
         tokio::spawn(async move {
-            crate::robots::commands::DeviceCommands::from(reconnect_state)
+            crate::robots::commands::DeviceCommands::from(project)
                 .auto_connect_saved_robots()
                 .await
         });
     }
 }
 
-impl From<crate::project_session::context::ProjectContext> for DataCommands {
-    fn from(state: crate::project_session::context::ProjectContext) -> Self {
+impl From<crate::projects::context::ProjectContext> for DataCommands {
+    fn from(state: crate::projects::context::ProjectContext) -> Self {
         Self { state }
     }
 }

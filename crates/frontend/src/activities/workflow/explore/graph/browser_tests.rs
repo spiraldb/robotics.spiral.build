@@ -1,12 +1,9 @@
 //! Mount the Explore canvas in the browser against a scripted document API, and
 //! grow the graph the way the + on a node does.
 use super::*;
-use crate::client::{
-    project::{ProjectClient, ProjectSessionState},
-    queries::QueryRefresh,
-};
+use crate::client::{project::ProjectClient, queries::QueryRefresh};
 use serde_json::Value;
-use spiral_robotics_common::project::ProjectSessionInfo;
+use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
@@ -68,10 +65,10 @@ struct CanvasHarness(Rc<RefCell<Option<ExplorationController>>>);
 impl CanvasHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
-        let session = ProjectSessionInfo::new("exploration-session", "test-project");
-        let current = session.clone();
-        let state = use_signal(move || ProjectSessionState::Unavailable(Some(current)));
-        use_context_provider(|| ProjectClient::new(session, state.into(), refresh));
+        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
+        let current = project.clone();
+        let state = use_signal(move || Some(current));
+        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
         let controller = ExplorationController::use_controller();
         *self.0.borrow_mut() = Some(controller);
         rsx! { ExploreGraphCanvas { controller } }

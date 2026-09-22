@@ -21,13 +21,13 @@ pub(crate) struct RolloutController {
 impl RolloutController {
     pub(super) fn use_controller(is_active: ReadSignal<bool>) -> Self {
         let controller = Self::use_state();
-        let sessions = crate::shell::project::ProjectSessionSignals::current();
+        let selection = crate::shell::project::ProjectSelection::current();
         let request = crate::client::queries::QueryPolicy::new(
             crate::client::queries::QueryDomain::Rollout,
             500,
         )
         .use_when(
-            move || *is_active.read() && sessions.studio_available(),
+            move || *is_active.read() && selection.live(),
             move || {
                 let current = controller.snapshot.peek().clone();
                 async move {

@@ -18,7 +18,7 @@ use spiral_robotics_ui::{
 
 use crate::panels::scene::ScenePalette;
 use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection, Selection};
-use crate::shell::project::ProjectSessionSignals;
+use crate::shell::project::ProjectSelection;
 use crate::shell::state::StudioProjectState;
 
 mod calibration;
@@ -44,9 +44,9 @@ pub(super) fn RobotPanel(
 ) -> Element {
     let robots = telemetry.snapshot().read().robots().to_owned();
     let focused = selection.focused(&robots);
-    let sessions = ProjectSessionSignals::current();
+    let project_selection = ProjectSelection::current();
     let mut ports = use_resource(move || {
-        let available = sessions.studio_available();
+        let available = project_selection.live();
         async move {
             if !available {
                 return std::future::pending().await;

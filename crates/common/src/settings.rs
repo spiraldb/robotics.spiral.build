@@ -167,6 +167,11 @@ impl SpiralSettings {
         &self.project_id
     }
 
+    /// The project these settings save, as the browser names it on requests.
+    pub fn project(&self) -> crate::project::ProjectKey {
+        crate::project::ProjectKey::new(&self.endpoint, &self.project_id)
+    }
+
     pub fn client_id(&self) -> &str {
         &self.client_id
     }

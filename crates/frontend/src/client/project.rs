@@ -1,65 +1,31 @@
-//! Project session lifecycle and immutable request contexts for mounted views.
+//! Immutable request contexts for the project a mounted view works on.
 
 use std::future::Future;
 
 use super::queries::{QueryDomain, QueryRefresh};
 use dioxus::prelude::*;
-use spiral_robotics_common::project::ProjectSessionInfo;
+use spiral_robotics_common::project::ProjectKey;
 
-use super::http::UrlComponent;
 use super::transport::{CommandError, HttpRequest};
 use serde::de::DeserializeOwned;
 
-/// A failed read retains identity (and local drafts), but withdraws readiness.
-#[derive(Clone, Default, PartialEq)]
-pub(crate) enum ProjectSessionState {
-    #[default]
-    Loading,
-    Unavailable(Option<ProjectSessionInfo>),
-    Ready(spiral_robotics_common::project::ProjectStatus),
-}
-impl ProjectSessionState {
-    pub(crate) fn session(&self) -> Option<&ProjectSessionInfo> {
-        match self {
-            Self::Loading => None,
-            Self::Unavailable(session) => session.as_ref(),
-            Self::Ready(status) => Some(status.session()),
-        }
-    }
-    pub(crate) fn readiness(&self) -> spiral_robotics_common::status::BackendReadiness {
-        match self {
-            Self::Ready(status) => status.readiness().clone(),
-            _ => Default::default(),
-        }
-    }
-    pub(crate) fn connected(&self) -> bool {
-        matches!(self, Self::Ready(_))
-    }
-    pub(crate) fn studio_available(&self) -> bool {
-        matches!(self, Self::Ready(status) if status.readiness().studio_available())
-    }
-    pub(crate) fn catalog_available(&self) -> bool {
-        matches!(self, Self::Ready(status) if status.readiness().catalog_available())
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct ProjectClient {
-    session: ProjectSessionInfo,
-    state: ReadSignal<ProjectSessionState>,
+    project: ProjectKey,
+    selection: ReadSignal<Option<ProjectKey>>,
     owner: ScopeId,
     refresh: QueryRefresh,
 }
 
 impl ProjectClient {
     pub(crate) fn new(
-        session: ProjectSessionInfo,
-        state: ReadSignal<ProjectSessionState>,
+        project: ProjectKey,
+        selection: ReadSignal<Option<ProjectKey>>,
         refresh: QueryRefresh,
     ) -> Self {
         Self {
-            session,
-            state,
+            project,
+            selection,
             refresh,
             owner: dioxus::dioxus_core::current_scope_id(),
         }
@@ -81,7 +47,7 @@ impl ProjectClient {
     }
 
     /// Capture the mount before returning a future, then guard both transport
-    /// dispatch and response delivery against a later session announcement.
+    /// dispatch and response delivery against a later project selection.
     pub(crate) fn request<T: DeserializeOwned + 'static>(
         &self,
         request: HttpRequest,
@@ -89,10 +55,7 @@ impl ProjectClient {
         let client = self.clone();
         async move {
             client.require_current()?;
-            let response = request
-                .for_session(client.session_id().to_owned())
-                .send()
-                .await;
+            let response = request.for_project(client.project.clone()).send().await;
             client.accept_response(response)
         }
     }
@@ -103,10 +66,7 @@ impl ProjectClient {
         let client = self.clone();
         async move {
             client.require_current()?;
-            let response = request
-                .for_session(client.session_id().to_owned())
-                .bytes()
-                .await;
+            let response = request.for_project(client.project.clone()).bytes().await;
             client.accept_response(response)
         }
     }
@@ -126,23 +86,20 @@ impl ProjectClient {
         }
     }
 
-    pub(crate) fn session_id(&self) -> &str {
-        self.session.id()
+    pub(crate) fn project(&self) -> &ProjectKey {
+        &self.project
     }
 
     pub(crate) fn require_current(&self) -> Result<(), CommandError> {
-        if self
-            .state
-            .peek()
-            .session()
-            .is_some_and(|active| active.id() == self.session.id())
-        {
+        if self.selection.peek().as_ref() == Some(&self.project) {
             Ok(())
         } else {
             Err(CommandError::stale_project())
         }
     }
 
+    /// A stale project means the saved endpoint changed; rereading the saved
+    /// connection selects the project again.
     pub(crate) fn accept_response<T>(
         &self,
         response: Result<T, CommandError>,
@@ -157,11 +114,11 @@ impl ProjectClient {
         response
     }
 
+    /// Browser-native media (images, downloads) name the project in the URL.
     pub(crate) fn scoped_url(&self, path: &str) -> String {
         let separator = if path.contains('?') { '&' } else { '?' };
-        format!(
-            "{path}{separator}session_id={}",
-            self.session.id().url_component()
-        )
+        let project = serde_urlencoded::to_string(&self.project)
+            .expect("a project key encodes as a query string");
+        format!("{path}{separator}{project}")
     }
 }

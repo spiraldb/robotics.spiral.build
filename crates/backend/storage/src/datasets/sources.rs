@@ -581,8 +581,10 @@ mod tests {
         let legacy_path = std::path::PathBuf::from(
             std::env::var_os("SPIRAL_MCAP_TEST_CONFIG").expect("explicit test config"),
         );
-        let config = BackendStateStore::new(crate::StudioStore::in_memory(), legacy_path);
-        config.initialize().await.unwrap();
+        let config = BackendStateStore::new(crate::StudioStore::in_memory(), legacy_path)
+            .initialize()
+            .await
+            .unwrap();
         let settings = SpiralConnectionSettings::new(
             config.spiral_endpoint().unwrap(),
             config.spiral_spfs_endpoint().unwrap(),

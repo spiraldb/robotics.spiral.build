@@ -9,8 +9,8 @@ use spiral_robotics_training::{
 
 use crate::adapters::compute_runtime::HttpTrainingBackend;
 
-/// Resolve the selected endpoint for every probe and new session. Existing
-/// sessions retain their selected HTTP endpoint when Settings changes.
+/// Resolve the selected endpoint on every call. Running jobs are followed
+/// through it too, so the endpoint changes only between runs.
 pub(crate) struct ConfiguredHttpTrainingBackend {
     preferences: Arc<crate::data::preferences::RuntimePreferences>,
 }

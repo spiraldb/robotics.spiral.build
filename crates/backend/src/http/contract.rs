@@ -2,7 +2,7 @@
 //!
 //! This module knows HTTP framing, never feature request or response types.
 use super::delivery::{ApiJson, ApiPath, ApiQuery, HttpFailure, ScopedProject};
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::StudioContext;
 use axum::{
     Json, Router,
     extract::State,
@@ -14,10 +14,11 @@ use axum::{
 use schemars::{JsonSchema, SchemaGenerator, generate::SchemaSettings};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use spiral_robotics_common::project::ProjectKey;
 use std::future::Future;
 
 pub(crate) struct ApiRoutes {
-    router: Router<ProjectContext>,
+    router: Router<StudioContext>,
     schemas: SchemaGenerator,
     paths: Map<String, Value>,
 }
@@ -33,7 +34,7 @@ impl ApiRoutes {
     }
     fn register<H, T>(&mut self, route: Route, handler: H)
     where
-        H: Handler<T, ProjectContext> + DocumentedHandler<T>,
+        H: Handler<T, StudioContext> + DocumentedHandler<T>,
         T: 'static,
     {
         let mut operation = H::describe(&mut self.schemas);
@@ -66,7 +67,7 @@ impl ApiRoutes {
         );
         self.router = std::mem::take(&mut self.router).route(path, endpoint.router);
     }
-    pub(super) fn into_router(mut self, project: ProjectContext) -> Router {
+    pub(super) fn into_router(mut self, studio: StudioContext) -> Router {
         let router = std::mem::take(&mut self.router);
         let document = self.into_document();
         router
@@ -83,13 +84,13 @@ impl ApiRoutes {
                 header::CACHE_CONTROL,
                 axum::http::HeaderValue::from_static("no-store"),
             ))
-            .with_state(project)
+            .with_state(studio)
     }
     pub(super) fn into_document(mut self) -> Value {
         json!({
             "openapi": "3.1.0",
-            "info": { "title": "Spiral Robotics HTTP API", "version": "3.0.0",
-                "description": "Backend-owned commands and frontend-initiated snapshots. X-Project-Session is an identity guard, not authentication. Reads are never cached. Commands are never automatically retried. See docs/http-api.md for operation lifetimes and polling." },
+            "info": { "title": "Spiral Robotics HTTP API", "version": "4.0.0",
+                "description": "Backend-owned commands and frontend-initiated snapshots. X-Spiral-Endpoint and X-Spiral-Project name the project a request acts on; they are not authentication. Reads are never cached. Commands are never automatically retried. See docs/http-api.md for operation lifetimes and polling." },
             "servers": [{ "url": "/api" }],
             "paths": self.paths,
             "components": { "schemas": self.schemas.take_definitions(false) }
@@ -114,7 +115,7 @@ macro_rules! register_methods {
     ($($method:ident => $filter:ident),* $(,)?) => {
         impl ApiRoutes {
             $(pub(crate) fn $method<H, T>(&mut self, path: &'static str, handler: H)
-            where H: Handler<T, ProjectContext> + DocumentedHandler<T>, T: 'static {
+            where H: Handler<T, StudioContext> + DocumentedHandler<T>, T: 'static {
                 self.register(Route::new(stringify!($method), path, MethodFilter::$filter), handler);
             })*
         }
@@ -124,11 +125,11 @@ register_methods!(get => GET, post => POST, put => PUT, patch => PATCH, delete =
 
 /// Explicit descriptions only for native media responses (MJPEG, downloads, byte ranges).
 pub(crate) struct MediaEndpoint {
-    router: MethodRouter<ProjectContext>,
+    router: MethodRouter<StudioContext>,
     description: Value,
 }
 impl MediaEndpoint {
-    pub(crate) fn new(router: MethodRouter<ProjectContext>, description: Value) -> Self {
+    pub(crate) fn new(router: MethodRouter<StudioContext>, description: Value) -> Self {
         Self {
             router,
             description,
@@ -179,12 +180,15 @@ pub(crate) trait RequestSchema {
 }
 impl<Capability> RequestSchema for ScopedProject<Capability> {
     fn describe(operation: &mut OperationSchema, _: &mut SchemaGenerator) {
-        operation.parameters.push(json!({"name": "X-Project-Session", "in": "header", "required": true,
-            "description": "Opaque session.id from GET /project/status; rejected after project replacement.",
+        operation.parameters.push(json!({"name": ProjectKey::ENDPOINT_HEADER, "in": "header", "required": true,
+            "description": "Spiral endpoint of the project; must match the saved connection from GET /settings/connection.",
             "schema": {"type": "string", "minLength": 1}}));
+        operation.parameters.push(json!({"name": ProjectKey::PROJECT_HEADER, "in": "header", "required": false,
+            "description": "Spiral project ID. Omit it before a project is chosen; Studio-only features still work.",
+            "schema": {"type": "string"}}));
     }
 }
-impl RequestSchema for State<ProjectContext> {
+impl RequestSchema for State<StudioContext> {
     fn describe(_: &mut OperationSchema, _: &mut SchemaGenerator) {}
 }
 impl<T> RequestSchema for ApiPath<T> {

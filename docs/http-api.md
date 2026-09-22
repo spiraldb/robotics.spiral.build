@@ -2,7 +2,7 @@
 
 The backend owns the HTTP contract. The Dioxus frontend is an HTTP client with no
 backend crate dependency or server-function bindings. A Qt client, script, or test
-uses the same requests and receives the same policy and admission checks.
+uses the same requests and receives the same policy checks.
 
 `GET /api/openapi.json` provides the OpenAPI 3.1 document, including request,
 response, enum, and error schemas generated from the shared Serde message types.
@@ -10,8 +10,13 @@ It works before project storage is ready. Its paths are relative to `/api`.
 The document's version identifies the API contract; Rust symbol names and Dioxus
 builds do not determine endpoint URLs. Breaking wire changes require an explicit
 contract revision and client migration. This migration removes the former
-`/api/server-functions/*` endpoints and replaces `/api/session` with the combined
-`/api/project/status` read.
+`/api/server-functions/*` endpoints.
+
+Version 4.0.0 removes `/project/status`, the `X-Project-Session` header, and the
+`project_transition` and `project_unavailable` failure codes. The backend no
+longer has a current project: each request names its project with
+`X-Spiral-Endpoint` and `X-Spiral-Project`, and `GET /settings/connection` names
+the project a client starts on.
 
 Version 3.0.0 replaces `/models/status`, `/models/complete`, `/models/decide`, and
 `/datasets/robot-discovery/read-description` with Studio-wide `/credentials` and
@@ -21,17 +26,21 @@ remain in use.
 
 ## Request and response conventions
 
-1. Fetch `GET /api/project/status`. The response contains `session` and `readiness`.
-2. Capture `session.id`, an opaque activation identity. It differs from
-   `session.project_id`, the persistent Spiral project ID.
-3. Send `X-Project-Session: <session.id>` on project reads and commands. Studio-wide
-   `/credentials` and `/proxy`, project status, and OpenAPI do not require it.
-   Opening another project invalidates the old identity,
-   even if a later activation returns to the same persistent project.
-4. Keep that identity with the request until its response is processed. A client
-   must discard a response if its current project identity changed in the meantime.
+1. Fetch `GET /api/settings/connection`, the saved connection. Its `endpoint` and
+   `project_id` name the project Studio starts with.
+2. Send `X-Spiral-Endpoint: <endpoint>` and `X-Spiral-Project: <project_id>` on
+   project reads and commands. Omit the project header before a project is chosen;
+   Studio-only features such as robot setup still work. Studio-wide `/credentials`
+   and `/proxy`, `GET /settings/connection`, and OpenAPI need neither header.
+3. The backend keeps no current project. A request may name any project on the
+   saved endpoint, which the backend reaches with the saved credentials. A request
+   naming another endpoint fails with `stale_project`; read the saved connection
+   again.
+4. The client decides which project it works on. `PUT /settings` and
+   `PUT /settings/connection` validate and save a new project; later requests
+   name it. Work already running in another project keeps running there.
 
-The header is a project isolation guard, not an authentication credential. Existing
+The headers name a project; they are not an authentication credential. Existing
 listener and deployment access controls still apply.
 
 JSON bodies use `Content-Type: application/json`. Payloads are the documented
@@ -57,10 +66,8 @@ JSON endpoint failures have this shape:
 | `invalid_input` | 400 | Invalid parameters |
 | `not_found` | 404 | Missing resource or endpoint |
 | `conflict` | 409 | Operation conflicts with current activity |
-| `project_transition` | 409 | Project replacement is in progress |
-| `stale_project` | 409 | Request belongs to an old activation |
+| `stale_project` | 409 | Request names an endpoint Studio no longer uses |
 | `incompatible_workflow` | 422 | Stored Workflow is incompatible |
-| `project_unavailable` | 503 | Required project services are unavailable |
 | `external` | 502 | An upstream operation failed |
 | `internal` | 500 | Backend failure |
 
@@ -83,16 +90,14 @@ state ownership.
 
 Backend task ownership is explicit: an abandoned asynchronous read is cancelled,
 and bounded backend reads time out after eight seconds. The browser's shared
-polling deadline is ten seconds. An admitted command continues if its HTTP caller
+polling deadline is ten seconds. A command continues if its HTTP caller
 disappears. A timeout or dropped connection therefore does **not** prove that a
 command failed or was cancelled. Refresh state before deciding whether to issue
 another command; this API does not provide automatic mutation deduplication.
 
-Project scope is checked before JSON or upload bodies are consumed. Command
-owners acquire admission again before consequential work. Project replacement
-cannot redirect an old request into the new project. Uploading a project does
-not hold project admission for the entire network transfer: admission is checked
-again after the bounded upload completes.
+The named project is opened before JSON or upload bodies are consumed. A request
+keeps that project until its work completes; saving another project never
+redirects it.
 
 The hardware loop and safety remain backend-owned. Telemetry is a sampled display
 snapshot, not the robot control clock. Its `sequence` advances with hardware
@@ -106,13 +111,13 @@ bounded to approximately thirty minutes at 20 Hz.
 
 ## Examples
 
-Fetch identity, then telemetry (replace the placeholder with `session.id`):
+Read the saved connection, then telemetry for its project:
 
 ```sh
-curl http://127.0.0.1:8080/api/project/status
-curl -H 'X-Project-Session: <session.id>' \
+curl http://127.0.0.1:8080/api/settings/connection
+curl -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
   http://127.0.0.1:8080/api/robots/telemetry
-curl -H 'X-Project-Session: <session.id>' \
+curl -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
   'http://127.0.0.1:8080/api/recording/signals?generation=0&offset=0'
 ```
 
@@ -120,14 +125,14 @@ Submit a read-only SQL query with an explicit row bound:
 
 ```sh
 curl -X POST http://127.0.0.1:8080/api/queries \
-  -H 'X-Project-Session: <session.id>' \
+  -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
   -H 'Content-Type: application/json' \
   --data '{"statement":"SELECT 1 AS example","max_rows":10}'
 ```
 
 A recording start body is `{"dataset_id":"example"}`. A pause update is
 `{"paused":true}`. A recording stop body is `{"keep":true}`. All remain subject
-to backend readiness, hardware, and activity validation.
+to backend hardware and activity validation.
 
 Training polling accepts `?selected=<run-id>` to include bounded full history for
 one run. Omit it when only the run catalog and current metrics are needed.
@@ -156,8 +161,7 @@ schemas served by `/api/openapi.json`. `—` means no request body.
 
 ### External HTTP and credentials
 
-These endpoints are Studio-wide and work without `X-Project-Session` or a ready
-project. They do not select credentials or destinations based on a project.
+These endpoints are Studio-wide and work without the project headers. They do not select credentials or destinations based on a project.
 
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
@@ -173,7 +177,7 @@ the upstream authorization headers.
 Percent-encode the upstream URL in the `url` query parameter. Use the upstream
 HTTP method, authorization and content headers, and original request body,
 including binary or multipart content. There is no JSON or metadata envelope.
-The relay removes Studio cookies, project-session and browser-origin headers,
+The relay removes Studio cookies, project and browser-origin headers,
 and manages HTTP framing and connection headers.
 
 The response can contain JSON, text, binary data, or a live SSE stream. Provider
@@ -188,7 +192,6 @@ their existing project APIs.
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
 | POST | `/project/import` | Raw project bundle | ProjectImportSummary |
-| GET | `/project/status` | — | ProjectStatus |
 | GET | `/recording/signals` | RecordingCursor (query) | RecordingWindow |
 
 ### Training
@@ -258,8 +261,8 @@ the pair; the backend revalidates hardware admission before recording begins.
 
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
-| GET | `/settings/connection` | — | SpiralSettings |
-| PUT | `/settings/connection` | SpiralConnectionUpdate | `null` |
+| GET | `/settings/connection` | — | SpiralSettings (Studio-wide, no project headers) |
+| PUT | `/settings/connection` | SpiralConnectionUpdate | SpiralSettings |
 | GET | `/settings` | — | DataSettings |
 | PUT | `/settings` | SettingsUpdate | DataSettings |
 | POST | `/settings/spiral/test` | — | ConnectionTest |
@@ -353,7 +356,7 @@ bound, twice the payload limit so a document's JSON framing always fits.
   The backend enforces the 256 MiB limit against both the advertised length and
   actual streamed bytes. The browser sends its native File without making a
   project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
-- `GET /project/export?session_id=...`: version 3 project bundle download, a ZIP
+- `GET /project/export?endpoint=...&project_id=...`: version 3 project bundle download, a ZIP
   containing exactly `studio.sqlite3` (project-scoped control records, no backend
   credentials) and `spiral.data` (MCAP sources and checkpoint artifacts).
   Import accepts only this version and also bounds total uncompressed contents
@@ -376,13 +379,12 @@ There is no browser event stream or `/api/events` endpoint.
 Each backend feature owns its application operations and HTTP adapter together:
 `training/{commands,http}.rs`, `rollout/{commands,http}.rs`,
 `robots/{commands,http}.rs`, and the corresponding recording, data, workflow, and
-project-session modules. `http/routes.rs` only composes these features.
+project modules. `http/routes.rs` only composes these features.
 
 The dependency direction is delivery → application → project resources. Application
 operations take a transport-neutral `ProjectContext`; they never import Axum or
-HTTP state. The context retains one project identity and the backend task executor.
-`project_session/tasks.rs` owns cancellation versus command completion,
-`project_session/setup.rs` builds the setup projection, and
+HTTP state. The context retains the project a request named and the backend task
+executor. `projects/tasks.rs` owns cancellation versus command completion, and
 `recording/take.rs` opens, pauses, and closes a take, including one the control
 loop stops on its own.
 

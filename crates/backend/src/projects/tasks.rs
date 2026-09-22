@@ -1,8 +1,8 @@
-//! Backend task ownership for cancellable reads and admitted commands.
+//! Backend task ownership for cancellable reads and commands.
 
 use std::future::Future;
 
-/// Runs admitted commands to completion even when the HTTP caller disconnects.
+/// Runs commands to completion even when the HTTP caller disconnects.
 #[derive(Clone)]
 pub(crate) struct BackendTasks {
     handle: tokio::runtime::Handle,

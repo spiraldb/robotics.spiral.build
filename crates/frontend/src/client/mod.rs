@@ -1,4 +1,4 @@
-//! Shared HTTP transport, project lifetime, and polling policy. Feature clients live with their UI.
+//! Shared HTTP transport, project request contexts, and polling policy. Feature clients live with their UI.
 
 pub(crate) mod completions;
 pub(crate) mod decisions;

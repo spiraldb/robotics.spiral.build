@@ -1,5 +1,4 @@
 use super::*;
-use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 use spiral_robotics_common::curation::facts::{CurationFact, FactKind, FactMeasure};
 use spiral_robotics_common::curation::rules::{
     ConditionOp, ConditionValue, CurationRule, RuleCondition,
@@ -21,11 +20,6 @@ impl CurationFixture {
                     .project(&store.connection_settings()),
             ))),
         }
-    }
-    fn admission() -> CatalogLeaseReservation {
-        Arc::new(CatalogMutationLease::default())
-            .try_reserve(CatalogLeaseOwner::CurationStart)
-            .unwrap()
     }
     fn recipe() -> CurationSpec {
         CurationSpec::new("cur", "Long episodes")
@@ -87,7 +81,7 @@ async fn an_invalid_recipe_never_becomes_a_run() {
     let mut no_source = CurationFixture::recipe();
     no_source.set_source(None);
     assert!(matches!(
-        fixture.manager.run(no_source, CurationFixture::admission()).await,
+        fixture.manager.run(no_source).await,
         Err(OperationError::InvalidInput(message)) if message.contains("dataset")
     ));
     let mut unsafe_fact = CurationFixture::recipe();
@@ -100,15 +94,12 @@ async fn an_invalid_recipe_never_becomes_a_run() {
         },
     ));
     assert!(matches!(
-        fixture
-            .manager
-            .run(unsafe_fact, CurationFixture::admission())
-            .await,
+        fixture.manager.run(unsafe_fact).await,
         Err(OperationError::InvalidInput(_))
     ));
     let finished = fixture
         .manager
-        .run(CurationFixture::recipe(), CurationFixture::admission())
+        .run(CurationFixture::recipe())
         .await
         .unwrap();
     assert!(

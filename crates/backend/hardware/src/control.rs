@@ -961,12 +961,6 @@ impl HardwareHandle {
             .unwrap_or_else(|error| error.into_inner())
             .window(cursor)
     }
-    pub fn clear_recording_signals(&self) {
-        self.recording_signals
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .clear();
-    }
 
     /// Observe authoritative states published after control-thread commands.
     pub fn subscribe(&self) -> watch::Receiver<HardwareState> {

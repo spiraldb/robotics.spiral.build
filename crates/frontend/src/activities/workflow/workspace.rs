@@ -135,8 +135,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
     let configured = state.configured();
     let draft_key = AgentDraftKey::new(state.session().workflow_id());
     let draft = drafts.read().get(&draft_key).cloned().unwrap_or_default();
-    let catalog_available =
-        crate::shell::project::ProjectSessionSignals::current().catalog_available();
+    let catalog_available = crate::shell::project::ProjectSelection::current().catalog_available();
     let loading = !controller.loaded() && controller.load_error().is_none();
     let can_send = configured
         && controller.loaded()
@@ -153,7 +152,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
         "Loading workflow…"
     } else if !state.history_available() {
         "Assistant history needs attention"
-    } else if !(studio.live())() {
+    } else if !crate::shell::project::ProjectSelection::current().live() {
         "Reconnecting to Studio…"
     } else if !controller.agent_loaded() {
         "Connecting to Assistant…"

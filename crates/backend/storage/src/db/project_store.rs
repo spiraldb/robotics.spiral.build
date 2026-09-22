@@ -382,8 +382,8 @@ impl DatabaseSession for ProjectConnection {
     }
 }
 
-/// Storage for one immutable destination. Changing projects creates another store;
-/// an existing request can never follow a later change to the active project.
+/// Storage for one immutable destination. Another project, or the same project
+/// reached with other credentials, gets another store.
 pub struct ProjectStore {
     connection_settings: SpiralConnectionSettings,
     catalog: crate::datasets::DatasetCatalogClient,
@@ -445,10 +445,6 @@ impl ProjectStore {
 
     pub(crate) fn credentials(&self) -> Option<SpiralCredentials> {
         self.connection_settings.credentials().cloned()
-    }
-
-    pub(crate) fn is_configured(&self) -> bool {
-        self.connection_settings.project_id().is_some()
     }
 
     pub(crate) fn is_studio_control_relation(&self, path: &[String]) -> bool {
@@ -541,7 +537,6 @@ mod tests {
             ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
         }
         .unwrap();
-        assert!(!unconfigured.is_configured());
         assert!(
             unconfigured
                 .connect()

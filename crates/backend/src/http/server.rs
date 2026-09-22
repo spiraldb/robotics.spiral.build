@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::StudioContext;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
 use clap::Parser;
@@ -212,7 +212,7 @@ impl ServerStartup {
             control_settings,
             public,
         } = self;
-        backend_state
+        let saved = backend_state
             .initialize()
             .await
             .map_err(std::io::Error::other)?;
@@ -220,14 +220,14 @@ impl ServerStartup {
             tracing::info!(path = %path.display(), "Studio state is stored in SQLite");
         }
         let spiral_endpoint = ServiceEndpoint::spiral(
-            &backend_state
+            &saved
                 .spiral_endpoint()
                 .unwrap_or_else(|| ServiceEndpoint::environment_spiral().into_string()),
         )
         .map_err(std::io::Error::other)?
         .into_string();
         let spiral_spfs_endpoint = ServiceEndpoint::spiral_spfs(
-            &backend_state
+            &saved
                 .spiral_spfs_endpoint()
                 .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string()),
         )
@@ -246,7 +246,7 @@ impl ServerStartup {
             .clone()
             .or_else(|| std::env::var("SPIRAL_PROJECT_ID").ok())
             .filter(|project| !project.trim().is_empty())
-            .or_else(|| backend_state.project_id());
+            .or_else(|| saved.project_id());
         if !spiral_robotics_storage::StorageSchema::is_identifier(
             arguments.spiral.studio_table_prefix.trim(),
         ) {
@@ -264,14 +264,14 @@ impl ServerStartup {
                 .map_err(std::io::Error::other)?;
         }
         connection = connection
-            .with_credentials(backend_state.credentials())
-            .with_huggingface_token(backend_state.huggingface_token());
+            .with_credentials(saved.credentials())
+            .with_huggingface_token(saved.huggingface_token());
         let hardware = Arc::new(HardwareHandle::spawn(control_settings));
         let cameras = Arc::new(CameraManager::new());
         if let Some(error) = camera_access_error {
             cameras.note_issue(format!("camera previews will stay blank: {error}"));
         }
-        let resources = crate::project_session::ProjectHardware::new(
+        let resources = crate::projects::ProjectHardware::new(
             hardware.clone(),
             cameras.clone(),
             VideoEncoderSettings::new(
@@ -279,15 +279,13 @@ impl ServerStartup {
                 arguments.video.video_codec.clone(),
             ),
         );
-        let factory = crate::project_session::ProjectSessionFactory::new(
+        let factory = crate::projects::ProjectFactory::new(
             resources,
             table_prefix,
             backend_state.studio().clone(),
         );
-        let projects =
-            crate::project_session::ProjectCoordinator::new(factory, backend_state, connection)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let state = ProjectContext::new(projects);
+        let projects = crate::projects::ProjectRegistry::new(factory, backend_state, connection);
+        let state = StudioContext::new(projects);
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 
@@ -296,7 +294,7 @@ impl ServerStartup {
         println!("Spiral Robotics Studio is running at {public_url}");
 
         let bootstrap = tokio::spawn(
-            crate::project_session::bootstrap::ProjectBootstrap::new(state.clone())
+            crate::projects::bootstrap::ProjectBootstrap::new(state.clone())
                 .run(!arguments.video.no_cameras),
         );
         let cleanup_state = state.clone();
@@ -330,14 +328,16 @@ impl ServerStartup {
         };
         tracing::info!("releasing motors and cameras");
         let cleanup = async {
-            let cleanup_state = cleanup_state.current();
-            cleanup_state.project().shutdown().await;
+            let opened = cleanup_state.opened();
+            cleanup_state.projects().shutdown().await;
             if let Err(error) = hardware.shutdown().await {
                 tracing::error!("hardware shutdown did not verify every motor release: {error}");
             }
-            crate::recording::take::TakeOperations::new(&cleanup_state)
-                .close_ended(None)
-                .await;
+            for project in &opened {
+                crate::recording::take::TakeOperations::new(project)
+                    .close_ended(None)
+                    .await;
+            }
             let camera_result = tokio::task::spawn_blocking({
                 let cameras = cameras.clone();
                 move || cameras.shutdown()

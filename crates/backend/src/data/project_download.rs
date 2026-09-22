@@ -1,7 +1,7 @@
 //! Browser-native project bundle download.
 
 use crate::http::contract::{ApiRoutes, MediaEndpoint};
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::StudioContext;
 use axum::{
     body::Body,
     extract::{Query, State},
@@ -9,7 +9,7 @@ use axum::{
     response::Response,
     routing::get,
 };
-use serde::Deserialize;
+use spiral_robotics_common::project::ProjectKey;
 
 use crate::data::commands::DataCommands;
 
@@ -19,18 +19,18 @@ impl ProjectDownload {
     /// Downloads stay HTTP so the browser can stream bytes to a native file.
     pub(crate) fn register(routes: &mut ApiRoutes) {
         routes.media("/project/export", MediaEndpoint::new(get(Self::export_project), serde_json::json!({"get": {
-            "operationId": "export_project", "parameters": [{"name": "session_id", "in": "query", "required": true, "schema": {"type": "string"}}],
+            "operationId": "export_project", "parameters": [{"name": "endpoint", "in": "query", "required": true, "schema": {"type": "string"}}, {"name": "project_id", "in": "query", "required": true, "schema": {"type": "string"}}],
             "responses": {"200": {"description": "Project bundle download", "content": {"application/vnd.spiral-robotics.project": {"schema": {"type": "string", "format": "binary"}}}}}
         }})["get"].take()));
     }
 
     async fn export_project(
-        State(state): State<ProjectContext>,
-        Query(query): Query<ProjectQuery>,
+        State(state): State<StudioContext>,
+        Query(project): Query<ProjectKey>,
     ) -> Result<Response, (StatusCode, String)> {
         let commands = DataCommands::from(
             state
-                .for_session(&query.session_id)
+                .open(&project)
                 .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?,
         );
         let bytes = commands
@@ -52,9 +52,4 @@ impl ProjectDownload {
             .body(Body::from(bytes))
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
     }
-}
-
-#[derive(Deserialize)]
-struct ProjectQuery {
-    session_id: String,
 }

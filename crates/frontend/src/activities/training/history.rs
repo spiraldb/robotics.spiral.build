@@ -2,7 +2,7 @@
 //! Rollout requests its own run/checkpoint choices while its activity is visible.
 use crate::activities::training::TrainingClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::shell::project::ProjectSessionSignals;
+use crate::shell::project::ProjectSelection;
 use dioxus::prelude::*;
 use spiral_robotics_common::training::TrainingSnapshot;
 
@@ -19,9 +19,9 @@ impl TrainingHistory {
         is_active: ReadSignal<bool>,
         selected: impl Fn() -> Option<String> + 'static,
     ) -> Self {
-        let sessions = ProjectSessionSignals::current();
+        let selection = ProjectSelection::current();
         let request = QueryPolicy::new(QueryDomain::Training, 1_000).use_when(
-            move || is_active() && sessions.studio_available(),
+            move || is_active() && selection.live(),
             move || {
                 let selected = selected();
                 async move {

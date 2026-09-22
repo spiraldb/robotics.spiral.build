@@ -1,7 +1,7 @@
 //! Browser-native camera preview delivery.
 
 use crate::http::contract::{ApiRoutes, MediaEndpoint};
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::StudioContext;
 use crate::robotics::cameras::Frame;
 use axum::{
     body::Body,
@@ -37,7 +37,7 @@ struct CameraQuery {
 
 impl CameraPreview {
     async fn camera_stream(
-        State(state): State<ProjectContext>,
+        State(state): State<StudioContext>,
         Query(query): Query<CameraQuery>,
     ) -> Result<Response, (StatusCode, String)> {
         let receiver = state

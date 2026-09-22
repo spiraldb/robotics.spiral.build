@@ -5,9 +5,7 @@ use crate::panels::camera_panel::{AssignedCamera, CameraWorkspaceLayout};
 use crate::panels::scene::SceneSource;
 use crate::panels::scene::{Viewport, ViewportPresentation};
 use crate::robots::{HardwareViewState, RobotSelection};
-use crate::shell::{
-    frame::WorkspaceFrame, project::ProjectSessionSignals, state::StudioProjectState,
-};
+use crate::shell::{frame::WorkspaceFrame, state::StudioProjectState};
 use dioxus::prelude::*;
 use dioxus_workbench::{Panel, PanelWorkspace};
 
@@ -60,8 +58,7 @@ pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::activity::Activity::Rollout,
         is_active,
     );
-    let telemetry =
-        HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
+    let telemetry = HardwareViewState::use_state(project, is_active);
     let robot_selection = RobotSelection::use_selection(telemetry.snapshot());
     let controller = super::state::RolloutController::use_controller(is_active);
     let training_history =

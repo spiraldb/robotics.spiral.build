@@ -53,7 +53,7 @@ pub use db::{ProjectConnection, ProjectStore};
 pub use db::{SCHEMA_VERSION, StorageSchema};
 pub use manager::StorageManager;
 pub use settings::{
-    BackendStateStore, ServiceEndpoint, SpiralConnectionSettings, SpiralCredentials,
-    StoredStudioPreferences, StoredTrainingRuntimePreference, StoredVideoPreference,
-    StudioPreferencesStore,
+    BackendStateStore, SavedConnection, ServiceEndpoint, SpiralConnectionSettings,
+    SpiralCredentials, StoredStudioPreferences, StoredTrainingRuntimePreference,
+    StoredVideoPreference, StudioPreferencesStore,
 };

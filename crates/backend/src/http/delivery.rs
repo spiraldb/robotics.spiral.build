@@ -1,5 +1,5 @@
 //! HTTP extraction and failure framing. Application policy stays in command owners.
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::{ProjectContext, StudioContext};
 use crate::{BackendCommandError, OperationError};
 use axum::{
     Json,
@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use spiral_robotics_common::command_failure::{CommandFailure, CommandFailureCode};
+use spiral_robotics_common::project::ProjectKey;
 
 #[derive(Debug)]
 pub(crate) struct HttpFailure {
@@ -63,29 +64,46 @@ impl IntoResponse for HttpFailure {
     }
 }
 
-/// Resolve identity before reading a body. Command owners still acquire admission
-/// when executing, closing the race with a subsequent project replacement.
+/// Open the project a request names before reading its body. The endpoint
+/// header is required; a missing or empty project header names the endpoint
+/// before a project is chosen.
 pub(crate) struct ScopedProject<Capability>(pub(crate) Capability);
-impl<Capability: From<ProjectContext>> FromRequestParts<ProjectContext>
+impl<Capability: From<ProjectContext>> FromRequestParts<StudioContext>
     for ScopedProject<Capability>
 {
     type Rejection = HttpFailure;
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &ProjectContext,
+        state: &StudioContext,
     ) -> Result<Self, Self::Rejection> {
-        let mut sessions = parts.headers.get_all("X-Project-Session").iter();
-        let session = sessions
+        let endpoint = Self::header(parts, ProjectKey::ENDPOINT_HEADER)?
+            .filter(|endpoint| !endpoint.is_empty())
+            .ok_or_else(|| {
+                HttpFailure::invalid(format!("{} is required", ProjectKey::ENDPOINT_HEADER))
+            })?;
+        let project = Self::header(parts, ProjectKey::PROJECT_HEADER)?.unwrap_or_default();
+        Ok(Self(Capability::from(
+            state.open(&ProjectKey::new(endpoint, project))?,
+        )))
+    }
+}
+impl<Capability> ScopedProject<Capability> {
+    fn header<'a>(parts: &'a Parts, name: &str) -> Result<Option<&'a str>, HttpFailure> {
+        let mut values = parts.headers.get_all(name).iter();
+        let value = values
             .next()
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| HttpFailure::invalid("X-Project-Session is required"))?;
-        if sessions.next().is_some() {
-            return Err(HttpFailure::invalid(
-                "Supply exactly one X-Project-Session header",
-            ));
+            .map(|value| {
+                value
+                    .to_str()
+                    .map_err(|_| HttpFailure::invalid(format!("{name} must be visible ASCII")))
+            })
+            .transpose()?;
+        if values.next().is_some() {
+            return Err(HttpFailure::invalid(format!(
+                "Supply at most one {name} header"
+            )));
         }
-        Ok(Self(Capability::from(state.for_session(session)?)))
+        Ok(value)
     }
 }
 pub(crate) struct ApiJson<T>(pub(crate) T);

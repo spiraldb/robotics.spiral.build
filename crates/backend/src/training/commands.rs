@@ -2,9 +2,9 @@
 use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
 
 use crate::BackendCommandError;
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 
-/// Project-bound operations; the context owns admission and backend task lifetime.
+/// Project-bound operations; the context owns backend task lifetime.
 #[derive(Clone)]
 pub(crate) struct TrainingCommands {
     state: ProjectContext,
@@ -13,17 +13,16 @@ pub(crate) struct TrainingCommands {
 impl TrainingCommands {
     pub(crate) async fn snapshot(&self) -> Result<TrainingSnapshot, BackendCommandError> {
         self.state
-            .execute(move |state, activity| async move {
+            .execute(move |state| async move {
                 state.preferences().load().await?;
-                state.training().ensure_loaded(activity).await?;
+                state.training().ensure_loaded().await?;
                 Ok(state.training().catalog())
             })
             .await
     }
     pub(super) async fn run(&self, id: String) -> Result<TrainingRun, BackendCommandError> {
-        let activity = self.state.admit()?;
         self.state.preferences().load().await?;
-        self.state.training().ensure_loaded(activity).await?;
+        self.state.training().ensure_loaded().await?;
         self.state.training().run(&id).map_err(Into::into)
     }
 
@@ -32,24 +31,19 @@ impl TrainingCommands {
         config: TrainingConfig,
     ) -> Result<TrainingRun, BackendCommandError> {
         self.state
-            .execute(move |state, activity| async move {
+            .execute(move |state| async move {
                 state.preferences().load().await?;
-                state.training().ensure_loaded(activity.clone()).await?;
-                state.require_catalog_ready()?;
-                state
-                    .training()
-                    .start(config, activity)
-                    .await
-                    .map_err(Into::into)
+                state.training().ensure_loaded().await?;
+                state.training().start(config).await.map_err(Into::into)
             })
             .await
     }
 
     pub(super) async fn stop_training_run(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, activity| async move {
+            .execute(move |state| async move {
                 state.preferences().load().await?;
-                state.training().ensure_loaded(activity).await?;
+                state.training().ensure_loaded().await?;
                 state.training().stop(&id).await.map_err(Into::into)
             })
             .await
@@ -57,9 +51,9 @@ impl TrainingCommands {
 
     pub(super) async fn delete_training_run(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, activity| async move {
+            .execute(move |state| async move {
                 state.preferences().load().await?;
-                state.training().ensure_loaded(activity).await?;
+                state.training().ensure_loaded().await?;
                 let rollout = state.rollout().snapshot();
                 let active_rollout = rollout
                     .phase()
@@ -76,8 +70,8 @@ impl TrainingCommands {
     }
 }
 
-impl From<crate::project_session::context::ProjectContext> for TrainingCommands {
-    fn from(state: crate::project_session::context::ProjectContext) -> Self {
+impl From<crate::projects::context::ProjectContext> for TrainingCommands {
+    fn from(state: crate::projects::context::ProjectContext) -> Self {
         Self { state }
     }
 }

@@ -1,6 +1,5 @@
 //! Saved documents and independent native query executions. No selected workflow or editor draft.
 use super::query::WorkflowQuery;
-use crate::data::catalog_lease::CatalogLeaseReservation;
 use crate::{OperationError, clock::SystemTimeMillis};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::workflow::{
@@ -175,21 +174,14 @@ impl WorkflowManager {
         !self.inner.queries.is_empty()
     }
     /// Execute the submitted SQL to completion. A failed query is a failed
-    /// run; only an invalid submission is an error. The run counts as active
-    /// before the catalog reservation that admitted it is released, so a
-    /// recording can never start in between.
-    pub(super) async fn run(
-        &self,
-        workflow: WorkflowSpec,
-        admission: CatalogLeaseReservation,
-    ) -> Result<WorkflowRun, OperationError> {
+    /// run; only an invalid submission is an error.
+    pub(super) async fn run(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, OperationError> {
         if !workflow.validate().valid() {
             return Err(OperationError::InvalidInput(
                 "Fix SQL validation errors before running.".into(),
             ));
         }
         let _query = self.inner.queries.token();
-        drop(admission);
         let mut snapshot = WorkflowRunSnapshot::started(format!("run-{}", uuid::Uuid::new_v4()))
             .with_started_ms(SystemTime::now().unix_millis());
         snapshot.finish(

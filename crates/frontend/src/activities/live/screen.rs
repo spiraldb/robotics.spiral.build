@@ -8,15 +8,13 @@ use crate::panels::scene::{Viewport, ViewportPresentation};
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::activity::{Activity, WorkspaceActivity};
 use crate::shell::frame::WorkspaceFrame;
-use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
 use dioxus_workbench::{Panel, PanelWorkspace};
 
 #[component]
 pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
     let (workspace, project) = WorkspaceActivity::mount(Activity::Live, is_active);
-    let telemetry =
-        HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
+    let telemetry = HardwareViewState::use_state(project, is_active);
     let selection = RobotSelection::use_selection(telemetry.snapshot());
     let session = LiveSession::use_session(project, telemetry, selection);
     rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(session.telemetry()), LivePanels { session } } }

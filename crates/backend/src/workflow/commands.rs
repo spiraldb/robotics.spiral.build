@@ -1,6 +1,5 @@
 //! Resource capabilities; authoring and the agent loop belong to the caller.
-use crate::data::catalog_lease::CatalogLeaseOwner;
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 use crate::{BackendCommandError, OperationError};
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::workflow::{
@@ -14,11 +13,9 @@ pub(crate) struct WorkflowCommands {
 }
 impl WorkflowCommands {
     pub(super) async fn list(&self) -> Result<Vec<WorkflowSummary>, BackendCommandError> {
-        let _activity = self.state.admit()?;
         self.state.workflow().list().await.map_err(Into::into)
     }
     pub(super) async fn load(&self, id: &str) -> Result<WorkflowDocument, BackendCommandError> {
-        let _activity = self.state.admit()?;
         self.state.workflow().load(id).await.map_err(Into::into)
     }
     pub(super) async fn save(
@@ -26,7 +23,7 @@ impl WorkflowCommands {
         document: WorkflowDocument,
     ) -> Result<WorkflowDocument, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 state.workflow().save(document).await.map_err(Into::into)
             })
             .await
@@ -35,36 +32,21 @@ impl WorkflowCommands {
         &self,
         workflow: WorkflowSpec,
     ) -> Result<WorkflowPlan, BackendCommandError> {
-        let _activity = self.state.admit()?;
         Ok(self.state.workflow().plan(&workflow).await)
     }
     pub(super) async fn run(
         &self,
         workflow: WorkflowSpec,
     ) -> Result<WorkflowRun, BackendCommandError> {
-        let admission = self
-            .state
-            .catalog_lease()
-            .try_reserve(CatalogLeaseOwner::WorkflowStart)
-            .ok_or_else(|| {
-                BackendCommandError::conflict(
-                    "Wait for recording or catalog changes before running a workflow.",
-                )
-            })?;
         self.state
-            .execute(move |state, _activity| async move {
-                state
-                    .workflow()
-                    .run(workflow, admission)
-                    .await
-                    .map_err(Into::into)
+            .execute(move |state| async move {
+                state.workflow().run(workflow).await.map_err(Into::into)
             })
             .await
     }
     pub(super) async fn capabilities(
         &self,
     ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, BackendCommandError> {
-        let _activity = self.state.admit()?;
         super::query::WorkflowQuery::new(self.state.storage().workflow_store())
             .capabilities()
             .await
@@ -75,7 +57,6 @@ impl WorkflowCommands {
         &self,
         selection: DatasetSelection,
     ) -> Result<serde_json::Value, BackendCommandError> {
-        let _activity = self.state.admit()?;
         let inspection = self
             .state
             .storage()

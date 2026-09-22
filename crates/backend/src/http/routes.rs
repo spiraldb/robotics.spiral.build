@@ -1,15 +1,15 @@
 //! Compose the feature-owned HTTP endpoints. No application behavior lives here.
 use super::contract::ApiRoutes;
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::StudioContext;
 use axum::Router;
 pub(super) struct StudioApi;
 impl StudioApi {
-    pub(super) fn router(project: ProjectContext) -> Router {
-        Self::routes().into_router(project)
+    pub(super) fn router(studio: StudioContext) -> Router {
+        Self::routes().into_router(studio)
     }
     pub(super) fn routes() -> ApiRoutes {
         let mut routes = ApiRoutes::new();
-        crate::project_session::http::ProjectEndpoints::register(&mut routes);
+        crate::projects::http::ProjectEndpoints::register(&mut routes);
         crate::transport::http::TransportEndpoints::register(&mut routes);
         crate::recording::http::RecordingEndpoints::register(&mut routes);
         crate::training::http::TrainingEndpoints::register(&mut routes);

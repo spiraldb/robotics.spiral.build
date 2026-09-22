@@ -167,9 +167,9 @@ fn OrderedRules(controller: CurationController) -> Element {
 /// dataset and one quiet line says why the list is missing.
 #[component]
 fn SourceSection(controller: CurationController) -> Element {
-    let sessions = crate::shell::project::ProjectSessionSignals::current();
+    let selection = crate::shell::project::ProjectSelection::current();
     let datasets = QueryPolicy::on_demand(QueryDomain::Catalog).use_when(
-        move || sessions.catalog_available(),
+        move || selection.catalog_available(),
         || DatasetClient::current().list_datasets(),
     );
     let source_label = use_memo(move || controller.spec().source().map(DatasetSelection::label));

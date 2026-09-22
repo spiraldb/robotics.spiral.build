@@ -1,22 +1,15 @@
-//! Project-scoped connection, clock, and notifications shared by workspaces.
+//! Project-scoped clock and notifications shared by workspaces.
 use crate::shell::notifications::{
     MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
 };
-use crate::shell::project::ProjectSessionSignals;
 use dioxus::dioxus_core::CapturedError;
 use dioxus::prelude::*;
 use std::future::Future;
-/// Project lifetime for connection status and notifications shared by routes.
+/// Project lifetime for the clock and notifications shared by routes.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct StudioProjectState {
-    backend: ProjectBackendSignals,
-    notifications: Signal<NotificationCenterState>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct ProjectBackendSignals {
-    live: Memo<bool>,
     clock_ms: Signal<f64>,
+    notifications: Signal<NotificationCenterState>,
 }
 
 impl StudioProjectState {
@@ -26,11 +19,8 @@ impl StudioProjectState {
     fn now_ms() -> f64 {
         js_sys::Date::now()
     }
-    pub(crate) fn live(self) -> Memo<bool> {
-        self.backend.live
-    }
     pub(crate) const fn clock_ms(self) -> Signal<f64> {
-        self.backend.clock_ms
+        self.clock_ms
     }
     pub(super) const fn notifications(self) -> Signal<NotificationCenterState> {
         self.notifications
@@ -110,12 +100,8 @@ impl StudioProjectState {
 }
 impl StudioProjectState {
     pub(super) fn use_provider() -> Self {
-        let sessions = ProjectSessionSignals::current();
         let state = Self {
-            backend: ProjectBackendSignals {
-                live: use_memo(move || sessions.connected()),
-                clock_ms: use_signal(|| 0.0),
-            },
+            clock_ms: use_signal(|| 0.0),
             notifications: use_signal(NotificationCenterState::default),
         };
         use_context_provider(|| state)
@@ -125,7 +111,7 @@ impl StudioProjectState {
         use_future(move || async move {
             loop {
                 gloo_timers::future::TimeoutFuture::new(250).await;
-                self.backend.clock_ms.set(Self::now_ms());
+                self.clock_ms.set(Self::now_ms());
             }
         });
     }

@@ -98,13 +98,13 @@ checks, in a SQLite transaction before mutating Spiral. Spiral's data transactio
 commits first, then SQLite commits. A Spiral failure rolls back staged local
 state. If Spiral commits but the final SQLite commit fails, the error explicitly
 reports partial completion and instructs the operator to retry the same import.
-There is no distributed transaction across these two databases. Project admission
-continues to exclude active work during import and prevents stale requests from
-being retargeted to another project.
+There is no distributed transaction across these two databases. Importing a
+project refuses while it has active work, and replaces its open project so no
+cache of the replaced data survives.
 
 ## Availability and verification
 
-Studio readiness is independent of a configured or reachable Spiral destination.
+Studio features are independent of a chosen or reachable Spiral project.
 Robot setup, preferences, saved workflows, and history load locally. Data queries,
 recording publication, training data access, and artifact reads still require
 Spiral and report their own connection errors. Restart recovery never resumes

@@ -1,13 +1,14 @@
 //! Exercise the actual router with ordinary HTTP requests, without Dioxus bindings.
 use super::routes::StudioApi;
-use crate::project_session::context::ProjectContext;
-use crate::project_session::tests::ProjectFixture;
+use crate::projects::context::StudioContext;
+use crate::projects::tests::{ENDPOINT, ProjectFixture};
 use axum::{
     Router,
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
+use spiral_robotics_common::project::ProjectKey;
 use tower::ServiceExt;
 
 struct HttpFixture {
@@ -17,11 +18,14 @@ struct HttpFixture {
 impl HttpFixture {
     fn new() -> Self {
         let project = ProjectFixture::new();
-        let router = StudioApi::router(ProjectContext::new(project.projects.clone()));
+        let router = StudioApi::router(StudioContext::new(project.projects.clone()));
         Self { project, router }
     }
-    fn session(&self) -> String {
-        self.project.projects.active().info().id().to_owned()
+    /// Name the fixture's project the way the browser does.
+    fn scoped(request: axum::http::request::Builder) -> axum::http::request::Builder {
+        request
+            .header(ProjectKey::ENDPOINT_HEADER, ENDPOINT)
+            .header(ProjectKey::PROJECT_HEADER, "http_project")
     }
     async fn send(&self, request: Request<Body>) -> (StatusCode, Value) {
         let response = self.router.clone().oneshot(request).await.unwrap();
@@ -49,7 +53,7 @@ impl HttpFixture {
 }
 
 #[tokio::test]
-async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_stale_identity() {
+async fn every_documented_scoped_endpoint_is_registered_and_rejects_a_missing_or_stale_project() {
     let fixture = HttpFixture::new();
     let contract = StudioApi::routes().into_document();
     let mut count = 0;
@@ -59,7 +63,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|p| p["name"] == "X-Project-Session")
+                .any(|p| p["name"] == ProjectKey::ENDPOINT_HEADER)
             {
                 continue;
             }
@@ -67,15 +71,17 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             let path = path
                 .replace("{id}", "test-id")
                 .replace("{dataset_id}", "test-dataset");
-            for session in [None, Some("stale-session")] {
+            for endpoint in [None, Some("https://stale.spiraldb.dev")] {
                 let mut request = Request::builder()
                     .method(method.to_uppercase().as_str())
                     .uri(&path);
-                if let Some(session) = session {
-                    request = request.header("X-Project-Session", session);
+                if let Some(endpoint) = endpoint {
+                    request = request
+                        .header(ProjectKey::ENDPOINT_HEADER, endpoint)
+                        .header(ProjectKey::PROJECT_HEADER, "http_project");
                 }
                 let (status, failure) = fixture.send(request.body(Body::empty()).unwrap()).await;
-                let expected = if session.is_some() {
+                let expected = if endpoint.is_some() {
                     StatusCode::CONFLICT
                 } else {
                     StatusCode::BAD_REQUEST
@@ -83,7 +89,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
                 assert_eq!(status, expected, "{method} {path}: {failure}");
                 assert_eq!(
                     failure["code"],
-                    if session.is_some() {
+                    if endpoint.is_some() {
                         "stale_project"
                     } else {
                         "invalid_input"
@@ -92,7 +98,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 74);
+    assert_eq!(count, 73);
     for retired in [
         "/robots/setup",
         "/serial-ports/identify",
@@ -126,14 +132,18 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
     assert!(contract["paths"]["/queries/episode"]["post"].is_object());
     assert!(contract["paths"]["/datasets/robot"]["post"].is_object());
     assert!(contract["paths"].get("/project/setup").is_none());
-    for path in ["/credentials", "/proxy"] {
-        for operation in contract["paths"][path].as_object().unwrap().values() {
+    assert!(contract["paths"].get("/project/status").is_none());
+    for path in ["/credentials", "/proxy", "/settings/connection"] {
+        for (method, operation) in contract["paths"][path].as_object().unwrap() {
+            if path == "/settings/connection" && method == "put" {
+                continue;
+            }
             assert!(
                 operation["parameters"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .all(|parameter| parameter["name"] != "X-Project-Session")
+                    .all(|parameter| parameter["name"] != ProjectKey::ENDPOINT_HEADER)
             );
         }
     }
@@ -141,19 +151,18 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
 }
 
 #[tokio::test]
-async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement() {
+async fn snapshots_are_plain_gets_of_the_project_a_request_names() {
     let fixture = HttpFixture::new();
-    let (status, project) = fixture
+    let (status, saved) = fixture
         .send(
             Request::builder()
-                .uri("/project/status")
+                .uri("/settings/connection")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(project["session"]["id"], fixture.session());
-    let session = fixture.session();
+    assert_eq!(saved["endpoint"], ENDPOINT);
     for path in [
         "/robots/telemetry",
         "/recording/signals?generation=0&offset=0",
@@ -162,9 +171,7 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
     ] {
         let (status, value) = fixture
             .send(
-                Request::builder()
-                    .uri(path)
-                    .header("X-Project-Session", &session)
+                HttpFixture::scoped(Request::builder().uri(path))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -172,18 +179,7 @@ async fn snapshots_are_plain_gets_and_old_sessions_cannot_read_the_replacement()
         assert_eq!(status, StatusCode::OK, "{path}: {value}");
         assert!(value.is_object() || value.is_array());
     }
-    fixture.project.replace("http_replacement");
-    let (status, failure) = fixture
-        .send(
-            Request::builder()
-                .uri("/robots/telemetry")
-                .header("X-Project-Session", &session)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(failure["code"], "stale_project");
+    assert_eq!(fixture.project.projects.opened().len(), 1);
     fixture.shutdown().await;
 }
 
@@ -224,7 +220,6 @@ fn dataset_catalogs_and_episode_playback_keep_distinct_wire_contracts() {
 #[tokio::test]
 async fn malformed_requests_and_unknown_routes_have_structured_failures() {
     let fixture = HttpFixture::new();
-    let session = fixture.session();
     for (method, path, body, content_type, expected) in [
         (
             "POST",
@@ -277,10 +272,7 @@ async fn malformed_requests_and_unknown_routes_have_structured_failures() {
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
         ),
     ] {
-        let mut request = Request::builder()
-            .method(method)
-            .uri(path)
-            .header("X-Project-Session", &session);
+        let mut request = HttpFixture::scoped(Request::builder().method(method).uri(path));
         if let Some(content_type) = content_type {
             request = request.header("Content-Type", content_type);
         }
@@ -289,10 +281,7 @@ async fn malformed_requests_and_unknown_routes_have_structured_failures() {
         assert!(failure["code"].is_string());
         assert!(failure["message"].is_string());
     }
-    let oversized = Request::builder()
-        .method("POST")
-        .uri("/project/import")
-        .header("X-Project-Session", session)
+    let oversized = HttpFixture::scoped(Request::builder().method("POST").uri("/project/import"))
         .header("Content-Type", "application/vnd.spiral-robotics.project")
         .header(
             "Content-Length",

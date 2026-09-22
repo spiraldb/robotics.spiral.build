@@ -9,8 +9,6 @@ pub(crate) enum OperationError {
     InvalidInput(String),
     NotFound(String),
     Conflict(String),
-    ProjectTransition(String),
-    ProjectUnavailable(String),
     StaleProject(String),
     IncompatibleWorkflow(String),
     External(String),
@@ -31,8 +29,6 @@ impl OperationError {
             Self::InvalidInput(message)
             | Self::NotFound(message)
             | Self::Conflict(message)
-            | Self::ProjectTransition(message)
-            | Self::ProjectUnavailable(message)
             | Self::StaleProject(message)
             | Self::IncompatibleWorkflow(message)
             | Self::External(message)
@@ -45,8 +41,6 @@ impl OperationError {
             Self::InvalidInput(_) => CommandFailureCode::InvalidInput,
             Self::NotFound(_) => CommandFailureCode::NotFound,
             Self::Conflict(_) => CommandFailureCode::Conflict,
-            Self::ProjectTransition(_) => CommandFailureCode::ProjectTransition,
-            Self::ProjectUnavailable(_) => CommandFailureCode::ProjectUnavailable,
             Self::StaleProject(_) => CommandFailureCode::StaleProject,
             Self::IncompatibleWorkflow(_) => CommandFailureCode::IncompatibleWorkflow,
             Self::External(_) => CommandFailureCode::External,
@@ -116,8 +110,8 @@ impl From<String> for BackendCommandError {
     }
 }
 
-impl From<crate::project_session::tasks::BackendTaskFailure> for BackendCommandError {
-    fn from(error: crate::project_session::tasks::BackendTaskFailure) -> Self {
+impl From<crate::projects::tasks::BackendTaskFailure> for BackendCommandError {
+    fn from(error: crate::projects::tasks::BackendTaskFailure) -> Self {
         Self(OperationError::Internal(error.to_string()))
     }
 }
@@ -135,16 +129,6 @@ mod tests {
     #[test]
     fn command_facades_preserve_error_categories() {
         for (error, expected, status) in [
-            (
-                OperationError::ProjectTransition("arbitrary text".into()),
-                CommandFailureCode::ProjectTransition,
-                409,
-            ),
-            (
-                OperationError::ProjectUnavailable("arbitrary text".into()),
-                CommandFailureCode::ProjectUnavailable,
-                503,
-            ),
             (
                 OperationError::IncompatibleWorkflow("arbitrary text".into()),
                 CommandFailureCode::IncompatibleWorkflow,

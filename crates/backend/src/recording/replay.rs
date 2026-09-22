@@ -3,7 +3,7 @@ use spiral_robotics_hardware::{ReplayTrajectory, RobotPlaybackRequest};
 use spiral_robotics_storage::episodes::RobotPlaybackRequest as RecordedPlaybackRequest;
 
 use crate::OperationError;
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 use crate::recording::episode_arms::RecordedArms;
 
 pub(super) struct StartReplayCommand {

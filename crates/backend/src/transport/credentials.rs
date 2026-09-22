@@ -1,7 +1,7 @@
 use spiral_robotics_common::credentials::{
     HuggingFaceCredentials, LlmCredentials, SpiralCredentials, StudioCredentials,
 };
-use spiral_robotics_storage::BackendStateStore;
+use spiral_robotics_storage::SpiralConnectionSettings;
 use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
 use url::Url;
 
@@ -12,23 +12,21 @@ const MAX_LOCAL_ENV_BYTES: u64 = 64 * 1024;
 pub(super) struct ConfiguredCredentials;
 
 impl ConfiguredCredentials {
-    pub(super) fn load(state: &BackendStateStore) -> Result<StudioCredentials, String> {
+    /// Spiral and Hugging Face credentials come from the saved connection.
+    pub(super) fn load(saved: &SpiralConnectionSettings) -> Result<StudioCredentials, String> {
         let local_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.local");
         let llm = Self::llm(|name| std::env::var(name).ok(), &local_path)?;
-        let spiral = state.credentials().map(|credentials| {
+        let spiral = saved.credentials().map(|credentials| {
             SpiralCredentials::new(
-                state.spiral_endpoint().unwrap_or_else(|| {
-                    spiral_robotics_storage::ServiceEndpoint::environment_spiral().into_string()
-                }),
-                state.spiral_spfs_endpoint().unwrap_or_else(|| {
-                    spiral_robotics_storage::ServiceEndpoint::environment_spiral_spfs()
-                        .into_string()
-                }),
+                saved.endpoint().to_owned(),
+                saved.spfs_endpoint().to_owned(),
                 credentials.client_id().to_owned(),
                 credentials.client_secret().to_owned(),
             )
         });
-        let hugging_face = state.huggingface_token().map(HuggingFaceCredentials::new);
+        let hugging_face = saved
+            .huggingface_token()
+            .map(|token| HuggingFaceCredentials::new(token.to_owned()));
         Ok(StudioCredentials::new(llm, spiral, hugging_face))
     }
 

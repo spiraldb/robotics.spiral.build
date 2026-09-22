@@ -42,7 +42,7 @@ impl DocumentSummary {
 /// `/api/{collection}/save` stores one and answers with what was stored.
 ///
 /// Build one inside the task that awaits it, as every other Studio client is
-/// built, so the request carries the mounting scope's project session.
+/// built, so the request names the mounting scope's project.
 pub(crate) struct DocumentClient<Doc> {
     project: ProjectClient,
     collection: &'static str,

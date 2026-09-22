@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::project_session::context::ProjectContext;
+use crate::projects::context::ProjectContext;
 use crate::robots::calibration::{
     CalibrationActions, CalibrationControlPort, CalibrationUpdate, RobotCalibrationStore,
 };
@@ -144,14 +144,12 @@ impl RobotCalibrationStore for RobotWorkspace {
 }
 
 impl DeviceCommands {
-    /// Try every usable saved robot once when the studio starts.
+    /// Try every usable saved robot once, when Studio starts on this project or
+    /// a settings save switches to it.
     ///
     /// A failed bus stays disconnected with its error attached; one absent arm
     /// never prevents the web interface or another arm from starting.
     pub(crate) async fn auto_connect_saved_robots(&self) {
-        let Ok(_activity) = self.state.admit() else {
-            return;
-        };
         let adapter = match RobotAdapter::prefetched(&self.state).await {
             Ok(adapter) => adapter,
             Err(error) => {
@@ -165,7 +163,7 @@ impl DeviceCommands {
     }
 }
 
-/// Project-bound operations; the context owns admission and backend task lifetime.
+/// Project-bound operations; the context owns backend task lifetime.
 #[derive(Clone)]
 pub(crate) struct DeviceCommands {
     state: ProjectContext,
@@ -174,7 +172,7 @@ pub(crate) struct DeviceCommands {
 impl DeviceCommands {
     pub(super) async fn list_ports(&self) -> Result<Vec<SerialPortSummary>, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 SerialPortDiscovery::list(&state).await.map_err(Into::into)
             })
             .await
@@ -182,22 +180,20 @@ impl DeviceCommands {
 
     pub(super) async fn refresh_cameras(&self) -> Result<Vec<CameraStatus>, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
-                state.cameras().refresh().await.map_err(Into::into)
-            })
+            .execute(
+                move |state| async move { state.cameras().refresh().await.map_err(Into::into) },
+            )
             .await
     }
 
     pub(crate) fn telemetry(
         &self,
     ) -> Result<spiral_robotics_common::robots::TelemetryFrame, BackendCommandError> {
-        let _activity = self.state.admit()?;
         Ok(self.state.hardware().state().telemetry().clone())
     }
     pub(super) fn hardware_status(
         &self,
     ) -> Result<spiral_robotics_common::robots::HardwareStatus, BackendCommandError> {
-        let _activity = self.state.admit()?;
         let hardware = self.state.hardware().state();
         let mut issues = self.state.cameras().issues();
         if let Some(issue) = hardware.recording_issue() {
@@ -211,7 +207,7 @@ impl DeviceCommands {
     }
     pub(super) async fn list_robots(&self) -> Result<Vec<RobotSummary>, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 let records = state
                     .workspace()
                     .try_list()
@@ -231,7 +227,7 @@ impl DeviceCommands {
         request: spiral_robotics_common::robots::document::RobotDocumentSave,
     ) -> Result<RobotSummary, BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 request
                     .document()
                     .validate()
@@ -265,15 +261,13 @@ impl DeviceCommands {
 
     pub(super) async fn get_robot(&self, id: String) -> Result<RobotSummary, BackendCommandError> {
         self.state
-            .execute(
-                move |state, _activity| async move { Self::from(state).present_robot(&id).await },
-            )
+            .execute(move |state| async move { Self::from(state).present_robot(&id).await })
             .await
     }
 
     pub(super) async fn delete_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 let adapter = RobotAdapter::new(&state);
                 RobotActions::new(&adapter, &adapter)
                     .delete(&id)
@@ -285,7 +279,7 @@ impl DeviceCommands {
 
     pub(super) async fn connect_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 let adapter = RobotAdapter::new(&state);
                 RobotActions::new(&adapter, &adapter)
                     .connect(&id)
@@ -297,7 +291,7 @@ impl DeviceCommands {
 
     pub(super) async fn disconnect_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 state
                     .hardware()
                     .disconnect(&id)
@@ -309,7 +303,7 @@ impl DeviceCommands {
 
     pub(super) async fn hold_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::Hold { robot: id })
                     .await
@@ -320,7 +314,7 @@ impl DeviceCommands {
 
     pub(super) async fn release_robot(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::Release { robot: id })
                     .await
@@ -335,7 +329,7 @@ impl DeviceCommands {
         normalized: BTreeMap<String, f64>,
     ) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 RobotControlActions::new(state.hardware().as_ref())
                     .execute(RobotControlCommand::MoveJoints {
                         robot: id,
@@ -349,7 +343,7 @@ impl DeviceCommands {
 
     pub(super) async fn start_calibration(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 CalibrationControlPort::start_calibration(state.hardware().as_ref(), &id)
                     .await
                     .map_err(Into::into)
@@ -361,7 +355,7 @@ impl DeviceCommands {
         &self,
         id: String,
     ) -> Result<RobotSummary, BackendCommandError> {
-        self.state.execute(move |state, _activity| async move {
+        self.state.execute(move |state| async move {
                 let output = CalibrationActions::new(
                     state.workspace().as_ref(),
                     state.hardware().as_ref(),
@@ -378,7 +372,7 @@ impl DeviceCommands {
 
     pub(super) async fn cancel_calibration(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state, _activity| async move {
+            .execute(move |state| async move {
                 CalibrationControlPort::cancel_calibration(state.hardware().as_ref(), &id)
                     .await
                     .map_err(Into::into)
@@ -390,7 +384,7 @@ impl DeviceCommands {
         &self,
         selection: ModeSelection,
     ) -> Result<(), BackendCommandError> {
-        self.state.execute(move |state, _activity| async move {
+        self.state.execute(move |state| async move {
                 // Replay and policy need their own admission and resource-loading paths.
                 let mode = match selection {
                     ModeSelection::Idle => OperatorMode::Idle,
@@ -447,8 +441,8 @@ impl AutoConnectOutcome {
     }
 }
 
-impl From<crate::project_session::context::ProjectContext> for DeviceCommands {
-    fn from(state: crate::project_session::context::ProjectContext) -> Self {
+impl From<crate::projects::context::ProjectContext> for DeviceCommands {
+    fn from(state: crate::projects::context::ProjectContext) -> Self {
         Self { state }
     }
 }
