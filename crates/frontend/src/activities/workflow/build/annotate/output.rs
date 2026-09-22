@@ -1,15 +1,14 @@
-//! What one annotation node produced: the subtask table, and the selected
-//! episode's recording with those subtasks on its timeline.
+//! What one annotation node produced: the index of intervals it wrote, and
+//! the episode one of them belongs to, playing beside it.
 use super::episodes::AnnotationEpisode;
 use crate::activities::data::{EpisodeReview, EpisodeTransport};
 use crate::activities::workflow::build::document::SubtaskRow;
+use crate::activities::workflow::build::poster::PosterFrames;
+use crate::activities::workflow::build::review::{
+    INTERVAL_MARGIN_SECONDS, SubtaskContext, SubtaskEntry, SubtaskStanding,
+};
 use crate::components::timeline::{IntervalTrack, TimelineInterval};
-use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
-
-/// A row activated from the table plays with a little lead-in and run-out, so
-/// the operator sees the motion enter and leave the interval.
-const INTERVAL_MARGIN_SECONDS: f64 = 0.5;
 
 /// One episode's rows, in time order.
 #[derive(Clone, PartialEq)]
@@ -65,63 +64,102 @@ impl EpisodeSubtasks {
     }
 }
 
-/// The table of every annotated interval, grouped by episode.
-#[component]
-pub(super) fn SubtaskTable(
-    groups: Vec<EpisodeSubtasks>,
-    selected: Signal<Option<String>>,
+/// Which interval the operator is looking at: the episode its player shows,
+/// and the row inside it, if they picked one.
+///
+/// Both halves of the review read this, so the index and the recording can
+/// never disagree about what is on screen.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct ChosenSubtask {
+    episode: Signal<Option<String>>,
+    /// The chosen row's start time, which is what identifies a row within its
+    /// episode everywhere else in Build.
+    start: Signal<Option<f64>>,
+    /// The interval the player has been asked to play but has not yet.
     play: Signal<Option<(f64, f64)>>,
+}
+
+impl ChosenSubtask {
+    pub(super) fn use_chosen() -> Self {
+        Self {
+            episode: use_signal(|| None),
+            start: use_signal(|| None),
+            play: use_signal(|| None),
+        }
+    }
+    pub(super) fn episode(&self) -> Option<String> {
+        self.episode.read().clone()
+    }
+    /// Show one whole episode without playing any particular interval, as the
+    /// index does when its heading is pressed.
+    pub(super) fn show(mut self, episode: &str) {
+        self.episode.set(Some(episode.to_owned()));
+        self.start.set(None);
+    }
+    /// Show one row and play it.
+    pub(super) fn play_row(mut self, row: &SubtaskRow) {
+        self.episode.set(Some(row.episode().to_owned()));
+        self.start.set(Some(row.start_time()));
+        self.play.set(Some((row.start_time(), row.end_time())));
+    }
+    /// Show an episode and, when an exploration named one, its interval.
+    pub(super) fn focus(mut self, episode: &str, interval: Option<(f64, f64)>) {
+        self.episode.set(Some(episode.to_owned()));
+        self.start.set(interval.map(|(start, _)| start));
+        self.play.set(interval);
+    }
+    fn holds(&self, row: &SubtaskRow) -> bool {
+        self.episode.read().as_deref() == Some(row.episode())
+            && *self.start.read() == Some(row.start_time())
+    }
+    /// Take the interval waiting to be played, if one is.
+    fn take_play(mut self) -> Option<(f64, f64)> {
+        self.play.write().take()
+    }
+}
+
+/// Every annotated interval, grouped under the episode it came from.
+#[component]
+pub(super) fn SubtaskIndex(
+    groups: Vec<EpisodeSubtasks>,
+    context: SubtaskContext,
+    frames: PosterFrames,
+    chosen: ChosenSubtask,
 ) -> Element {
     if groups.is_empty() {
         return rsx! {
             p { class: "build-annotate-empty", role: "status",
-                "No subtasks yet. Run the annotation to fill this table." }
+                "No subtasks yet. Run the annotation to fill this list." }
         };
     }
     rsx! {
-        table { class: "build-annotate-table",
-            caption { class: "sr-only", "Annotated subtasks by episode" }
-            thead {
-                tr {
-                    th { scope: "col", "Start" }
-                    th { scope: "col", "End" }
-                    th { scope: "col", "Description" }
-                }
-            }
+        ol { class: "build-entries build-entries-grouped", "aria-label": "Annotated subtasks by episode",
             for group in groups {
-                tbody { key: "{group.episode}", class: "build-annotate-group",
-                    "aria-current": (selected() == Some(group.episode.clone())).then_some("true"),
-                    tr {
-                        th { scope: "colgroup", colspan: "3",
-                            button { r#type: "button", class: "build-annotate-episode-name",
-                                title: "Show this episode below",
-                                onclick: {
-                                    let episode = group.episode.clone();
-                                    move |_| selected.set(Some(episode.clone()))
-                                },
-                                "Episode {group.episode}"
-                            }
-                            span { class: "build-annotate-count",
-                                "{group.rows().len()} subtask(s)" }
-                        }
+                li { key: "{group.episode}", class: "build-entries-group",
+                    "aria-current": (chosen.episode().as_deref() == Some(group.episode())).then_some("true"),
+                    button {
+                        r#type: "button",
+                        class: "build-entries-heading",
+                        title: "{group.episode}",
+                        onclick: {
+                            let episode = group.episode.clone();
+                            move |_| chosen.show(&episode)
+                        },
+                        span { class: "build-entries-heading-name", "{context.name(group.episode())}" }
+                        span { class: "build-entries-heading-count",
+                            "{Subtasks(group.rows().len())}" }
                     }
-                    for row in group.rows() {
-                        tr { key: "{row.start_time()}",
-                            td { "{row.start_time().clock_label()}" }
-                            td { "{row.end_time().clock_label()}" }
-                            td {
-                                button { r#type: "button", class: "build-annotate-row",
-                                    title: "Play this subtask",
-                                    onclick: {
-                                        let episode = group.episode.clone();
-                                        let span = (row.start_time(), row.end_time());
-                                        move |_| {
-                                            selected.set(Some(episode.clone()));
-                                            play.set(Some(span));
-                                        }
-                                    },
-                                    "{row.description()}"
-                                }
+                    ol { class: "build-entries",
+                        for row in group.rows() {
+                            SubtaskEntry {
+                                key: "{row.start_time()}",
+                                row: row.clone(),
+                                standing: SubtaskStanding::plain(chosen.holds(row)),
+                                frames,
+                                on_select: {
+                                    let row = row.clone();
+                                    move |()| chosen.play_row(&row)
+                                },
                             }
                         }
                     }
@@ -131,30 +169,53 @@ pub(super) fn SubtaskTable(
     }
 }
 
-/// The selected episode's cameras, with its subtasks on the shared timeline.
+/// `3 subtasks`, and `1 subtask` when that is what there is.
+#[allow(non_snake_case)]
+fn Subtasks(count: usize) -> String {
+    if count == 1 {
+        "1 subtask".to_owned()
+    } else {
+        format!("{count} subtasks")
+    }
+}
+
+/// The chosen episode on the camera the run sampled, with its subtasks on the
+/// shared timeline.
 #[component]
 pub(super) fn AnnotatedEpisode(
     episode: AnnotationEpisode,
     subtasks: EpisodeSubtasks,
-    play: Signal<Option<(f64, f64)>>,
+    context: SubtaskContext,
+    chosen: ChosenSubtask,
 ) -> Element {
     let transport = EpisodeTransport::use_opened_episode(episode.opened());
     let track = subtasks.track();
     let requested = transport.clone();
     use_effect(move || {
-        if let Some((start, end)) = play() {
-            let mut transport = requested.clone();
-            transport.play_interval(start, end);
-            play.set(None);
+        if let Some((start, end)) = chosen.take_play() {
+            requested.clone().play_interval(
+                (start - INTERVAL_MARGIN_SECONDS).max(0.0),
+                end + INTERVAL_MARGIN_SECONDS,
+            );
         }
     });
     let activated = transport.clone();
     rsx! {
-        section { class: "build-annotate-episode", "aria-label": "Annotated episode",
+        header { class: "build-review-head",
+            p { class: "build-review-subject", "{context.name(subtasks.episode())}" }
+            p { class: "build-review-facts",
+                span { title: "{subtasks.episode()}", "{Subtasks(subtasks.rows().len())}" }
+                if let Some(camera) = context.camera() {
+                    span { "{camera}" }
+                }
+            }
+        }
+        section { class: "build-review-player", "aria-label": "Annotated episode",
             EpisodeReview {
                 episode: episode.opened().clone(),
                 transport,
                 span_tracks: if track.is_empty() { Vec::new() } else { vec![track] },
+                shown_cameras: context.camera().map(str::to_owned).into_iter().collect::<Vec<_>>(),
                 on_interval: move |interval: TimelineInterval| {
                     let (start, end) = interval.span();
                     activated.clone().play_interval(
@@ -191,5 +252,12 @@ mod tests {
         assert_eq!(groups[1].rows()[0].start_time(), 0.0);
         assert!(!groups[0].track().is_empty());
         assert!(EpisodeSubtasks::group(std::iter::empty()).is_empty());
+    }
+
+    #[test]
+    fn a_count_names_what_it_counts_in_the_singular_too() {
+        assert_eq!(Subtasks(1), "1 subtask");
+        assert_eq!(Subtasks(0), "0 subtasks");
+        assert_eq!(Subtasks(12), "12 subtasks");
     }
 }

@@ -70,7 +70,8 @@ impl AnnotationPrompt {
 
     /// The instruction the sheets follow. It states the sampling, that sheet
     /// edges are packaging rather than action boundaries, and the exact range
-    /// every interval has to stay inside.
+    /// every interval has to stay inside. Keep the duration's full precision
+    /// so the advertised endpoint is the one validation accepts.
     pub(super) fn instruction(&self) -> String {
         let mut instruction = String::new();
         if let Some(task) = &self.task {
@@ -79,7 +80,7 @@ impl AnnotationPrompt {
             ));
         }
         instruction.push_str(&format!(
-            "This episode lasts {duration:.3} seconds. It was sampled every {interval} seconds \
+            "This episode lasts {duration} seconds. It was sampled every {interval} seconds \
              and packed into {sheets} contact sheet(s), which follow in chronological order. \
              Each sheet holds up to {per_sheet} tiles, read left to right then top to bottom, \
              and the timestamp burned into a tile is the moment that frame was recorded.\n\n\
@@ -90,8 +91,8 @@ impl AnnotationPrompt {
              Give each one the range it actually occupies: there is no fixed subtask length, so \
              infer the duration from when the action changes, and read the times off the tiles. \
              start_time is inclusive and end_time is exclusive, both in seconds from the start \
-             of the episode, with 0 <= start_time < end_time <= {duration:.3}; never let \
-             end_time exceed {duration:.3}. The ranges must be in order and must not overlap. \
+             of the episode, with 0 <= start_time < end_time <= {duration}; never let \
+             end_time exceed {duration}. The ranges must be in order and must not overlap. \
              Describe each event in one short imperative phrase naming the action and the \
              object it acts on, such as \"grasp the corners of the cloth\". Leave out stretches \
              where nothing is being manipulated, and answer with an empty list if the episode \
@@ -179,7 +180,7 @@ impl SubtaskProposals {
         for proposal in self.proposals {
             if proposal.end_time > duration {
                 return Err(format!(
-                    "Subtask [{}, {}) ends after the {duration:.3} second recording.",
+                    "Subtask [{}, {}) ends after the {duration} second recording.",
                     proposal.start_time, proposal.end_time
                 ));
             }
@@ -213,16 +214,44 @@ mod tests {
         SubtaskProposals::parse(answer)?.into_rows("break_down_subtasks-1", "ep-1", duration)
     }
 
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn the_advertised_endpoint_is_valid_without_allowing_times_past_the_recording() {
+        let duration = 34_245_900_123_f64 / 1e9;
+        let instruction = AnnotationPrompt::new(duration, 0.5, 4).instruction();
+        let endpoint = instruction
+            .split_once("end_time <= ")
+            .unwrap()
+            .1
+            .split_once(';')
+            .unwrap()
+            .0;
+        let answer = format!(
+            r#"{{"subtasks":[{{"start_time":31,"end_time":{endpoint},"description":"fold"}}]}}"#
+        );
+        let annotated = rows(&answer, duration).expect("the advertised endpoint must be valid");
+        assert_eq!(annotated[0].end_time(), duration);
+        assert!(instruction.contains(&format!("lasts {endpoint} seconds")));
+        assert!(instruction.contains(&format!("never let end_time exceed {endpoint}.")));
+
+        let error = rows(
+            r#"{"subtasks":[{"start_time":31,"end_time":34.246,"description":"fold"}]}"#,
+            duration,
+        )
+        .expect_err("rounding must not extend the recording");
+        assert!(error.contains("ends after the 34.245900123 second recording"));
+    }
+
     #[test]
     fn the_instruction_states_the_sampling_the_range_and_that_sheets_do_not_cut_actions() {
         let prompt = AnnotationPrompt::new(20.5, 0.5, 3);
         let instruction = prompt.instruction();
-        assert!(instruction.contains("20.500 seconds"));
+        assert!(instruction.contains("20.5 seconds"));
         assert!(instruction.contains("every 0.5 seconds"));
         assert!(instruction.contains("3 contact sheet(s)"));
         assert!(instruction.contains("up to 20 tiles"));
         assert!(instruction.contains("A sheet edge is not an action boundary."));
-        assert!(instruction.contains("end_time <= 20.500"));
+        assert!(instruction.contains("end_time <= 20.5"));
         assert!(instruction.contains("must not overlap"));
         assert!(!instruction.contains("task instruction"));
         assert!(prompt.system().contains("timestamp"));
@@ -276,7 +305,7 @@ mod tests {
         let refused = |answer: &str| rows(answer, 20.5).expect_err("should be refused");
         assert!(
             refused(r#"{"subtasks":[{"start_time":0.0,"end_time":21.0,"description":"fold"}]}"#)
-                .contains("ends after the 20.500 second recording")
+                .contains("ends after the 20.5 second recording")
         );
         assert!(
             refused(

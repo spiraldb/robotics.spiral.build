@@ -16,6 +16,9 @@ use crate::components::icons::SpinnerIcon;
 /// first few of them, not the whole catalog.
 const EPISODE_LIMIT: usize = 200;
 
+/// The name a graph carries until it has a dataset to take one from.
+const UNTITLED_BUILD: &str = "Untitled build";
+
 #[component]
 pub(super) fn DatasetWorkspace(controller: BuildController) -> Element {
     let dataset = controller.with_payload(|payload| payload.dataset().cloned());
@@ -52,6 +55,7 @@ fn DatasetChoice(controller: BuildController) -> Element {
     let use_chosen = move |_| {
         if let Some(source) = chosen_source.clone() {
             let selection = source.selection().clone();
+            let label = selection.label();
             problem.set(
                 controller
                     .edit(|payload| {
@@ -60,6 +64,13 @@ fn DatasetChoice(controller: BuildController) -> Element {
                     })
                     .err(),
             );
+            // A graph that has never been named takes its dataset's name, the
+            // way one created from the switcher already does. Five saved
+            // builds all called "Untitled build" are five builds nobody can
+            // tell apart in the list that offers them.
+            if controller.name() == UNTITLED_BUILD {
+                controller.set_name(label);
+            }
         }
     };
     rsx! {

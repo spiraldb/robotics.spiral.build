@@ -1,12 +1,10 @@
 //! The Build graph on a Dioxus Flow canvas: the dataset on top, measurements
 //! and explorations below it, laid out from the payload's edges every render.
 //! The controller is the only state; the canvas keeps no second copy.
-use std::collections::BTreeMap;
-
 use dioxus::prelude::*;
 use dioxus_flow::{
     Background, BackgroundVariant, Edge, EdgeKind, Flow, Handle, HandleKind, LayoutDirection,
-    LayoutOptions, MarkerKind, Node, NodeViewCtx, Point, Side, compute_layout,
+    LayoutOptions, MarkerKind, Node, NodeViewCtx, Point, Side, WorldLayer, compute_layout,
 };
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
@@ -28,11 +26,8 @@ const NODE_HEIGHT: f64 = 92.0;
 /// Room under a card for its + and the menu it opens.
 const RANK_GAP: f64 = 76.0;
 const BRANCH_GAP: f64 = 28.0;
-
-/// One quiet line per node id while something runs. A run in flight is not in
-/// the payload, so the measurement views own these lines and hand them to the
-/// canvas; the slot stays empty until they do.
-pub(in crate::activities::workflow) type BuildRunLines = BTreeMap<String, String>;
+/// How far under a card's bottom edge its popovers hang, clear of the +.
+const MENU_DROP: f64 = 22.0;
 
 /// The nodes and edges one payload draws as.
 #[derive(Clone)]
@@ -115,7 +110,11 @@ impl BuildFlow {
 #[derive(Clone, Copy, PartialEq)]
 struct BuildCanvasHand {
     controller: BuildController,
+    /// The one node whose + menu is open, and the one whose removal is being
+    /// confirmed. Both are popovers, and a popover belongs to the canvas
+    /// rather than to the card it hangs from — see `BuildCanvasPopovers`.
     open_menu: Signal<Option<String>>,
+    confirming: Signal<Option<String>>,
     problem: Signal<Option<String>>,
 }
 
@@ -124,8 +123,13 @@ impl BuildCanvasHand {
         Self {
             controller,
             open_menu: use_signal(|| None),
+            confirming: use_signal(|| None),
             problem: use_signal(|| None),
         }
+    }
+    /// The id the removal confirmation returns focus to when it closes.
+    fn remove_action(node: &str) -> String {
+        format!("build-canvas-remove-{node}")
     }
     fn menu_open(self, node: &str) -> bool {
         self.open_menu.read().as_deref() == Some(node)
@@ -140,9 +144,15 @@ impl BuildCanvasHand {
     }
     fn close_menu(mut self) {
         self.open_menu.set(None);
+        self.confirming.set(None);
+    }
+    fn confirm_removal(mut self, node: &str) {
+        self.open_menu.set(None);
+        self.confirming.set(Some(node.to_owned()));
     }
     fn select(mut self, node: String) {
         self.open_menu.set(None);
+        self.confirming.set(None);
         self.controller.select_node(Some(node));
     }
     /// Add the chosen child and select it, or say why the graph refused.
@@ -152,6 +162,7 @@ impl BuildCanvasHand {
     }
     fn remove(mut self, node: &str) {
         let node = node.to_owned();
+        self.confirming.set(None);
         self.problem.set(
             self.controller
                 .edit(|payload| payload.remove_node(&node))
@@ -163,13 +174,7 @@ impl BuildCanvasHand {
 /// The graph pane: the canvas, its zoom and fit controls, and whatever the
 /// document or the last edit needs to say.
 #[component]
-pub(in crate::activities::workflow) fn BuildGraphCanvas(
-    controller: BuildController,
-    /// A quiet line per node while a measurement runs, from the view that
-    /// runs it. Empty until a measurement fills it.
-    #[props(default)]
-    running: BuildRunLines,
-) -> Element {
+pub(in crate::activities::workflow) fn BuildGraphCanvas(controller: BuildController) -> Element {
     let hand = BuildCanvasHand::use_hand(controller);
     let initial = use_hook(|| {
         controller
@@ -185,6 +190,7 @@ pub(in crate::activities::workflow) fn BuildGraphCanvas(
         edges.set(flow.edges);
     });
     let count = nodes.read().len();
+    let running = controller.activity();
     let message = hand.problem().or_else(|| controller.error());
     rsx! {
         section { class: "workflow-flow-wrap build-canvas-graph", "aria-label": "Build graph",
@@ -193,7 +199,7 @@ pub(in crate::activities::workflow) fn BuildGraphCanvas(
             }
             Flow { id: "build-graph-flow", class: "workflow-flow build-canvas-flow",
                 nodes, edges, fit_view: true, fit_view_padding: 0.14,
-                min_zoom: 0.4, max_zoom: 1.25, nodes_draggable: false, delete_key: false,
+                min_zoom: 0.4, max_zoom: 1.0, nodes_draggable: false, delete_key: false,
                 // Two fingers pan as they do on the Workflow graph; a pinch
                 // (or ctrl/⌘ + wheel) and the controls zoom.
                 pan_on_scroll: true, zoom_on_scroll: false,
@@ -205,6 +211,7 @@ pub(in crate::activities::workflow) fn BuildGraphCanvas(
                     rsx! { BuildNodeCardView { ctx, hand, status } }
                 },
                 Background { variant: BackgroundVariant::Dots, gap: 22.0, size: 0.7 }
+                BuildCanvasPopovers { nodes, hand }
                 BuildCanvasFit { count }
                 CanvasControls {
                     label: format!("Build graph of {count} nodes"),
@@ -247,6 +254,15 @@ fn AddGlyph() -> Element {
 
 /// One node: what it is, what it holds, what may follow it, and — while it
 /// runs — one quiet line from the view that runs it.
+///
+/// What it does not hold is either of its popovers. A node is drawn inside a
+/// world tile, and a tile carries `content-visibility: auto` so the engine can
+/// skip the graph it cannot see; the paint containment that comes with it
+/// clips to the tile's own box. The menu hanging under a card was therefore
+/// laid out, hit-testable and simply never drawn below that edge — a live
+/// control nobody could see. Both popovers are rendered by
+/// `BuildCanvasPopovers`, in the world layer the crate provides for exactly
+/// this.
 #[component]
 fn BuildNodeCardView(
     ctx: NodeViewCtx<BuildNodeCard>,
@@ -254,11 +270,8 @@ fn BuildNodeCardView(
     #[props(default)] status: Option<String>,
 ) -> Element {
     let card = ctx.node.data.clone();
-    let mut removing = use_signal(|| false);
     let id = card.id().to_owned();
-    let menu = card.menu().cloned();
     let menu_open = hand.menu_open(&id);
-    let remove_action = format!("build-canvas-remove-{id}");
     rsx! {
         div {
             class: "workflow-stage-card build-canvas-node {card.face().class_name()}",
@@ -272,13 +285,16 @@ fn BuildNodeCardView(
                 strong { class: "workflow-stage-title", "{card.label()}" }
                 if card.removable() {
                     Button {
-                        id: "{remove_action}",
+                        id: "{BuildCanvasHand::remove_action(&id)}",
                         purpose: ActionPurpose::Remove,
                         variant: ButtonVariant::Icon,
                         class: "build-canvas-node-remove",
                         aria_label: "Remove {card.label()}",
                         title: "Remove this node and everything after it",
-                        onclick: move |_| removing.set(true),
+                        onclick: {
+                            let id = id.clone();
+                            move |_| hand.confirm_removal(&id)
+                        },
                         DeleteIcon {}
                     }
                 }
@@ -293,7 +309,7 @@ fn BuildNodeCardView(
             if card.removable() {
                 Handle { id: "parent".to_owned(), kind: HandleKind::Target, position: Side::Top }
             }
-            if let Some(menu) = menu {
+            if card.menu().is_some() {
                 Handle { id: "children".to_owned(), kind: HandleKind::Source, position: Side::Bottom }
                 // The press stops here: opening the menu is not selecting the
                 // node, so pressing + again closes what it opened.
@@ -313,11 +329,41 @@ fn BuildNodeCardView(
                         AddGlyph {}
                     }
                 }
-                if menu_open {
+            }
+        }
+    }
+}
+
+/// The two popovers a node can open, drawn above the graph rather than inside
+/// it: the + menu and the confirmation that removes a branch.
+///
+/// `WorldLayer` shares the viewport transform without being a tile, so a
+/// popover stays fixed to its card through pan and zoom and is never clipped.
+/// Only one node has either open at a time, so this draws at most one of each.
+#[component]
+fn BuildCanvasPopovers(nodes: Signal<Vec<Node<BuildNodeCard>>>, hand: BuildCanvasHand) -> Element {
+    let open = hand.open_menu.read().clone();
+    let confirming = hand.confirming.read().clone();
+    if open.is_none() && confirming.is_none() {
+        return rsx! {};
+    }
+    let placed = |wanted: &Option<String>| {
+        let wanted = wanted.as_deref()?;
+        nodes
+            .read()
+            .iter()
+            .find(|node| node.id == wanted)
+            .map(|node| (node.data.clone(), node.position))
+    };
+    rsx! {
+        WorldLayer { class: "build-canvas-overlay".to_owned(),
+            if let Some((card, at)) = placed(&open) {
+                if let Some(menu) = card.menu().cloned() {
                     div {
                         class: "build-canvas-menu",
                         role: "menu",
                         "aria-label": "Add a step after {card.label()}",
+                        style: "left:{at.x + NODE_WIDTH / 2.0}px;top:{at.y + NODE_HEIGHT + MENU_DROP}px",
                         onpointerdown: move |event| event.stop_propagation(),
                         onkeydown: move |event: KeyboardEvent| {
                             if event.key() == Key::Escape {
@@ -341,10 +387,13 @@ fn BuildNodeCardView(
                     }
                 }
             }
-            if removing() {
-                div { class: "build-canvas-remove", onpointerdown: move |event| event.stop_propagation(),
+            if let Some((card, at)) = placed(&confirming) {
+                div {
+                    class: "build-canvas-remove",
+                    style: "left:{at.x}px;top:{at.y + NODE_HEIGHT + MENU_DROP}px",
+                    onpointerdown: move |event| event.stop_propagation(),
                     InlineConfirmation {
-                        id: "{remove_action}-confirmation",
+                        id: "{BuildCanvasHand::remove_action(card.id())}-confirmation",
                         copy: ConfirmationCopy::new(
                             format!("Remove {} and everything after it?", card.label()),
                             "Remove",
@@ -353,15 +402,14 @@ fn BuildNodeCardView(
                         response: ConfirmationResponse::new(
                             ActionPurpose::Remove,
                             {
-                                let id = id.clone();
-                                move |_| {
-                                    removing.set(false);
-                                    hand.remove(&id);
-                                }
+                                let id = card.id().to_owned();
+                                move |_| hand.remove(&id)
                             },
-                            move |_| removing.set(false),
+                            move |_| hand.close_menu(),
                         ),
-                        dismissal: ConfirmationDismissal::new(remove_action.clone()),
+                        dismissal: ConfirmationDismissal::new(
+                            BuildCanvasHand::remove_action(card.id()),
+                        ),
                     }
                 }
             }

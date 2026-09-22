@@ -45,9 +45,6 @@ impl SamplePlan {
             .collect();
         Ok(Self { seconds })
     }
-    pub(super) fn len(&self) -> usize {
-        self.seconds.len()
-    }
     /// The moments themselves, in order.
     pub(super) fn times(&self) -> &[f64] {
         &self.seconds
@@ -148,7 +145,7 @@ mod tests {
     fn samples_start_at_zero_and_stop_with_the_recording() {
         let plan = SamplePlan::new(3.0, 0.5).unwrap();
         assert_eq!(plan.seconds, [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]);
-        assert_eq!(plan.len(), 6);
+        assert_eq!(plan.times().len(), 6);
         // A recording shorter than one interval is still worth one frame.
         assert_eq!(SamplePlan::new(0.2, 0.5).unwrap().seconds, [0.0]);
         assert!(SamplePlan::new(0.0, 0.5).is_err());
@@ -162,7 +159,7 @@ mod tests {
     #[test]
     fn sheets_hold_twenty_frames_in_chronological_order() {
         let plan = SamplePlan::new(25.0, 0.5).unwrap();
-        assert_eq!(plan.len(), 50);
+        assert_eq!(plan.times().len(), 50);
         let sheets = plan.times().chunks(FRAMES_PER_SHEET).collect::<Vec<_>>();
         assert_eq!(sheets.len(), 3);
         assert_eq!(sheets[0].len(), FRAMES_PER_SHEET);

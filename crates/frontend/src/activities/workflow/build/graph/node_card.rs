@@ -10,13 +10,26 @@ use super::super::state::BuildController;
 
 /// A count with the noun a person would say beside it: "1 episode",
 /// "12 episodes".
-struct Counted(usize, &'static str);
+struct Counted(usize, Noun);
 
 impl Display for Counted {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        let plural = if self.0 == 1 { "" } else { "s" };
-        write!(formatter, "{} {}{plural}", self.0, self.1)
+        let Noun(singular, plural) = self.1;
+        let word = if self.0 == 1 { singular } else { plural };
+        write!(formatter, "{} {word}", self.0)
     }
+}
+
+/// A word in both its numbers, because English does not make the plural by
+/// adding an `s`: "categorys" told an operator the numbers beside it were not
+/// being read by anyone.
+#[derive(Clone, Copy, Debug)]
+struct Noun(&'static str, &'static str);
+
+impl Noun {
+    const EPISODE: Self = Self("episode", "episodes");
+    const SUBTASK: Self = Self("subtask", "subtasks");
+    const CATEGORY: Self = Self("category", "categories");
 }
 
 /// What a node does to the data; drives its glyph and identity tint, in the
@@ -131,8 +144,8 @@ impl BuildNodeCard {
             BuildNodeKind::BreakDownSubtasks(annotation) => {
                 let measured = format!(
                     "{} · {}",
-                    Counted(annotation.completed_episodes().len(), "episode"),
-                    Counted(payload.subtasks_for(node.id()).count(), "subtask"),
+                    Counted(annotation.completed_episodes().len(), Noun::EPISODE),
+                    Counted(payload.subtasks_for(node.id()).count(), Noun::SUBTASK),
                 );
                 match annotation.camera() {
                     Some(camera) => format!("{measured} · {camera}"),
@@ -150,7 +163,7 @@ impl BuildNodeCard {
             }
             BuildNodeKind::GroupSimilarSubtasks => payload.grouping_for(node.id()).map_or_else(
                 || "No categories yet".to_owned(),
-                |grouping| Counted(grouping.categories().len(), "category").to_string(),
+                |grouping| Counted(grouping.categories().len(), Noun::CATEGORY).to_string(),
             ),
         }
     }

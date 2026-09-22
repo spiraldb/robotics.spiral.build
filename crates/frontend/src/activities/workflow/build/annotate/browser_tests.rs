@@ -31,11 +31,12 @@ use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
-let previousFetch, requests, completions;
+let previousFetch, requests, pendingCompletions, maximumCompletionsInFlight;
 export function installAnnotationFetch() {
     previousFetch = globalThis.fetch;
     requests = [];
-    completions = 0;
+    pendingCompletions = [];
+    maximumCompletionsInFlight = 0;
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const url = new URL(request.url);
@@ -46,8 +47,18 @@ export function installAnnotationFetch() {
         const body = await request.json();
         requests.push({path, upstream: url.searchParams.get('url'), body});
         if (path === '/api/proxy') {
-            completions += 1;
-            const start = completions === 1 ? 0 : 4;
+            await new Promise(resolve => {
+                pendingCompletions.push(resolve);
+                maximumCompletionsInFlight = Math.max(
+                    maximumCompletionsInFlight,
+                    pendingCompletions.length,
+                );
+                if (pendingCompletions.length === 2) {
+                    for (const release of pendingCompletions.splice(0)) release();
+                }
+            });
+            const instruction = body.messages[1].content;
+            const start = instruction.includes('20 seconds') ? 0 : 4;
             const answer = JSON.stringify({subtasks:[{start_time:start, end_time:start + 3, description:'grasp the cloth'}]});
             const frames =
                 'data: ' + JSON.stringify({choices:[{delta:{content:answer}}]}) + '\n\n' +
@@ -95,11 +106,13 @@ export function installAnnotationFetch() {
 }
 export function restoreAnnotationFetch() { globalThis.fetch = previousFetch; }
 export function annotationRequests() { return JSON.stringify(requests); }
+export function maximumAnnotationRequestsInFlight() { return maximumCompletionsInFlight; }
 "#)]
 extern "C" {
     fn installAnnotationFetch();
     fn restoreAnnotationFetch();
     fn annotationRequests() -> String;
+    fn maximumAnnotationRequestsInFlight() -> u32;
 }
 
 struct AnnotationFetch;
@@ -214,7 +227,7 @@ impl AnnotationHarness {
                 )
                 .run(vec![
                     AnnotationEpisode::fixture("ep-1", 20_000_000_000),
-                    AnnotationEpisode::fixture("ep-2", 20_000_000_000),
+                    AnnotationEpisode::fixture("ep-2", 21_000_000_000),
                 ])
                 .await;
                 *finished.borrow_mut() = true;
@@ -234,7 +247,7 @@ impl AnnotationHarness {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test]
-async fn annotate_sends_sheets_as_images_and_persists_each_episode_before_the_next() {
+async fn annotate_sends_parallel_image_requests_and_persists_in_episode_order() {
     let fetch = AnnotationFetch::install();
     let harness = AnnotationHarness::default();
     let mut dom = VirtualDom::new_with_props(AnnotationHarness::render, harness.clone());
@@ -280,6 +293,7 @@ async fn annotate_sends_sheets_as_images_and_persists_each_episode_before_the_ne
         .filter(|request| request["path"] == "/api/proxy")
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), 2);
+    assert_eq!(maximumAnnotationRequestsInFlight(), 2);
     assert_eq!(
         completions[0]["upstream"],
         "https://openrouter.ai/api/v1/chat/completions"

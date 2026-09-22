@@ -14,6 +14,9 @@ mod sheet;
 mod browser_tests;
 
 use super::document::{BuildNode, BuildNodeKind, SubtaskAnnotation, SubtaskRow};
+use super::poster::{PosterCut, PosterFrames};
+use super::rerun::ConfirmedRerun;
+use super::review::{EpisodeNames, NoSubtaskChosen, SubtaskContext, SubtaskReview};
 use super::state::BuildController;
 use crate::activities::data::DatasetClient;
 use crate::client::model::ModelClient;
@@ -22,11 +25,12 @@ use dioxus::prelude::*;
 use episodes::AnnotationEpisode;
 use journal::BuildJournal;
 use native::NativeSheets;
-use output::{AnnotatedEpisode, EpisodeSubtasks, SubtaskTable};
-use pipeline::{AnnotationPass, PassSettings};
+use output::{AnnotatedEpisode, ChosenSubtask, EpisodeSubtasks, SubtaskIndex};
+use pipeline::{AnnotationPass, EPISODES_IN_FLIGHT, PassSettings};
 use provider::ProviderAnnotator;
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, Field, FieldLayout, Select, TextInput, TextInputKind,
+    ActionPurpose, Button, ButtonVariant, Chip, ChipTone, Disclosure, Field, FieldLayout, Select,
+    TextInput, TextInputKind,
 };
 
 /// Which episodes one run covers.
@@ -46,6 +50,16 @@ impl RunScope {
             Self::Pending => "Run",
             Self::Failed => "Retry failed",
             Self::All => "Re-annotate all",
+        }
+    }
+    /// What pressing it does, in the operator's own terms.
+    fn explanation(self, episodes: usize) -> String {
+        match self {
+            Self::Pending => format!("Annotate the {episodes} episodes not yet done"),
+            Self::Failed => format!("Try the {episodes} episodes that failed again"),
+            Self::All => {
+                format!("Annotate all {episodes} episodes again, replacing what is stored")
+            }
         }
     }
     fn purpose(self) -> ActionPurpose {
@@ -154,8 +168,7 @@ pub(super) fn AnnotationWorkspace(controller: BuildController, node: String) -> 
         });
     }));
 
-    let mut selected = use_signal(|| None::<String>);
-    let mut play = use_signal(|| None::<(f64, f64)>);
+    let chosen = ChosenSubtask::use_chosen();
     let focus_node = node.clone();
     use_effect(move || {
         let Some(focus) = controller.focus() else {
@@ -165,15 +178,21 @@ pub(super) fn AnnotationWorkspace(controller: BuildController, node: String) -> 
             return;
         }
         controller.take_focus();
-        selected.set(Some(focus.episode().to_owned()));
-        play.set(focus.interval());
+        chosen.focus(focus.episode(), focus.interval());
     });
 
     let model = ModelClient::current();
     // Both clients belong to this mount, and a pass outlives the click that
     // started it, so they are captured here rather than read inside its task.
     let datasets = DatasetClient::current();
+    // `running` is what the pass is actually doing; `wanted` is what the
+    // operator asked for. Pressing Stop clears `wanted`, which stops the next
+    // episode from starting, but the episodes already paid for finish and
+    // save. Collapsing the two would let the interface report idle while
+    // eight model calls were still billing, and would let a second pass start
+    // underneath the first.
     let mut running = use_signal(|| false);
+    let mut wanted = use_signal(|| false);
     let start = {
         let annotation = annotation.clone();
         let episodes = listed.clone();
@@ -181,6 +200,7 @@ pub(super) fn AnnotationWorkspace(controller: BuildController, node: String) -> 
             if *running.peek() {
                 return;
             }
+            wanted.set(true);
             let Some(settings) = annotation.settings() else {
                 return;
             };
@@ -208,11 +228,13 @@ pub(super) fn AnnotationWorkspace(controller: BuildController, node: String) -> 
                     PassSettings::new(node.clone(), model_name, interval).with_task(task),
                     NativeSheets::new(datasets, camera, interval),
                     ProviderAnnotator::new(model),
-                    BuildJournal::new(node, controller, studio, running),
+                    BuildJournal::new(node.clone(), controller, studio, wanted),
                 )
                 .run(chosen)
                 .await;
                 running.set(false);
+                wanted.set(false);
+                controller.report_activity(&node, None);
             });
         }
     };
@@ -225,39 +247,100 @@ pub(super) fn AnnotationWorkspace(controller: BuildController, node: String) -> 
                 "This node does not break down subtasks." }
         };
     };
-    let groups = EpisodeSubtasks::group(annotation.rows().into_iter());
-    let shown = selected()
+    let rows = annotation.rows();
+    let groups = EpisodeSubtasks::group(rows.clone().into_iter());
+    let context = SubtaskContext::new(
+        dataset.clone(),
+        settings.camera().map(str::to_owned),
+        EpisodeNames::of(listed.iter().map(AnnotationEpisode::id)),
+    );
+    let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
+    let shown = chosen
+        .episode()
         .or_else(|| groups.first().map(|group| group.episode().to_owned()))
         .and_then(|id| {
             let episode = listed.iter().find(|episode| episode.id() == id)?.clone();
             let subtasks = groups.iter().find(|group| group.episode() == id).cloned();
             Some((episode, subtasks))
         });
+    let done = settings.completed_episodes().len();
+    let failed = settings.failed_episodes().len();
+    // Every node's progress travels to the canvas, so a graph the operator has
+    // scrolled away from still shows which measurement is working.
+    let reported = node.clone();
+    use_effect(use_reactive(
+        (&running(), &done, &listed.len()),
+        move |(running, done, all)| {
+            controller.report_activity(
+                &reported,
+                running.then(|| format!("{done} of {all} episodes")),
+            );
+        },
+    ));
     rsx! {
         section { class: "build-annotate-workspace", "aria-label": "Break down subtasks",
-            AnnotationSettings { annotation: annotation.clone(), settings: settings.clone(), cameras, disabled: running() }
-            div { class: "build-annotate-actions", role: "group", "aria-label": "Annotation run",
-                for scope in [RunScope::Pending, RunScope::Failed, RunScope::All] {
-                    Button {
-                        key: "{scope.label()}",
-                        purpose: scope.purpose(),
-                        variant: if scope == RunScope::Pending { ButtonVariant::Solid } else { ButtonVariant::Outline },
-                        disabled: running() || settings.camera().is_none()
-                            || scope.episodes(&listed, &settings).is_empty(),
-                        onclick: { let mut start = start.clone(); move |_| start(scope) },
-                        "{scope.label()}"
+            AnnotationRun {
+                settings: settings.clone(),
+                episodes: listed.len(),
+                loading: episodes.read().is_none(),
+                running: running(),
+                stopping: running() && !wanted(),
+                actions: rsx! {
+                    if running() {
+                        Button {
+                            purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
+                            disabled: !wanted(),
+                            title: "Start no further episode; the ones already in flight finish and are saved",
+                            onclick: move |_| wanted.set(false),
+                            if wanted() { "Stop" } else { "Stopping…" }
+                        }
+                    } else {
+                        for scope in [RunScope::Pending, RunScope::Failed] {
+                            {
+                                let count = scope.episodes(&listed, &settings).len();
+                                rsx! {
+                                    Button {
+                                        key: "{scope.label()}",
+                                        purpose: scope.purpose(),
+                                        variant: if scope == RunScope::Pending { ButtonVariant::Solid } else { ButtonVariant::Outline },
+                                        disabled: settings.camera().is_none() || count == 0,
+                                        title: scope.explanation(count),
+                                        onclick: { let mut start = start.clone(); move |_| start(scope) },
+                                        if scope == RunScope::Pending && count > 0 && done > 0 {
+                                            "{scope.label()} {count} left"
+                                        } else {
+                                            "{scope.label()}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
-                Button {
-                    purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline, disabled: !running(),
-                    title: "Finish the episode in flight, save it, and stop",
-                    onclick: move |_| running.set(false),
-                    "Stop"
-                }
+                },
             }
-            AnnotationProgress {
-                settings: settings.clone(), episodes: listed.len(),
-                loading: episodes.read().is_none(), running: running(),
+            AnnotationTools {
+                annotation: annotation.clone(),
+                settings: settings.clone(),
+                cameras,
+                disabled: running(),
+                measured: done > 0,
+                reannotate: {
+                    let count = RunScope::All.episodes(&listed, &settings).len();
+                    let mut start = start.clone();
+                    rsx! {
+                        if count > 0 && !running() {
+                            ConfirmedRerun {
+                                id: "build-annotate-replace".to_owned(),
+                                label: RunScope::All.label().to_owned(),
+                                question: format!(
+                                    "Annotate all {count} episodes again? This replaces the {} subtasks already stored, and costs another full run.",
+                                    rows.len(),
+                                ),
+                                on_confirm: move |()| start(RunScope::All),
+                            }
+                        }
+                    }
+                },
             }
             match episodes.read().as_ref() {
                 Some(Err(error)) => rsx! {
@@ -269,33 +352,134 @@ pub(super) fn AnnotationWorkspace(controller: BuildController, node: String) -> 
                 },
                 _ => rsx! {},
             }
-            SubtaskTable { groups: groups.clone(), selected, play }
-            if let Some((episode, subtasks)) = shown {
-                AnnotatedEpisode {
-                    key: "{episode.id()}",
-                    episode: episode.clone(),
-                    subtasks: subtasks.unwrap_or_else(|| EpisodeSubtasks::none(episode.id())),
-                    play,
+            if failed > 0 {
+                AnnotationFailures { settings: settings.clone(), context: context.clone(), open: !running() }
+            }
+            SubtaskReview {
+                index: rsx! {
+                    SubtaskIndex { groups: groups.clone(), context: context.clone(), frames, chosen }
+                },
+                evidence: match shown {
+                    Some((episode, subtasks)) => rsx! {
+                        AnnotatedEpisode {
+                            key: "{episode.id()}",
+                            episode: episode.clone(),
+                            subtasks: subtasks.unwrap_or_else(|| EpisodeSubtasks::none(episode.id())),
+                            context: context.clone(),
+                            chosen,
+                        }
+                    },
+                    None => rsx! {
+                        NoSubtaskChosen {
+                            prompt: "Run the annotation, then choose a subtask to watch it play.",
+                        }
+                    },
+                },
+            }
+        }
+    }
+}
+
+/// What the run has reached, in the strip Workflow and Curation already use
+/// for the same job: one phase, fixed facts, and the action that changes them.
+#[component]
+fn AnnotationRun(
+    settings: SubtaskAnnotation,
+    episodes: usize,
+    loading: bool,
+    running: bool,
+    stopping: bool,
+    actions: Element,
+) -> Element {
+    let done = settings.completed_episodes().len();
+    let failed = settings.failed_episodes().len();
+    let (phase, state) = match (loading, running, stopping, done) {
+        (true, ..) => ("is-validating", "Reading episodes"),
+        (_, true, true, _) => ("is-running", "Stopping"),
+        (_, true, false, _) => ("is-running", "Annotating"),
+        (_, _, _, 0) => ("is-idle", "Ready"),
+        _ if done >= episodes && episodes > 0 => ("is-complete", "Complete"),
+        _ => ("is-idle", "Part way"),
+    };
+    rsx! {
+        div { class: "run-strip build-annotate-run",
+            span { class: "run-phase {phase}", role: "status",
+                span { class: "run-phase-dot", "aria-hidden": "true" }
+                "{state}"
+            }
+            span { class: "build-annotate-count", role: "status",
+                "{done} of {episodes} episodes · {Remaining(done, episodes)}"
+            }
+            if running {
+                span { class: "build-annotate-inflight",
+                    "up to {EPISODES_IN_FLIGHT} at once" }
+            }
+            if failed > 0 {
+                Chip { tone: ChipTone::Danger, "{failed} failed" }
+            }
+            span { class: "build-annotate-run-actions", {actions} }
+        }
+    }
+}
+
+/// What is left to do, said once beside the count rather than implied by it.
+#[allow(non_snake_case)]
+fn Remaining(done: usize, all: usize) -> String {
+    if done == 0 {
+        "nothing measured yet".to_owned()
+    } else if done >= all {
+        "every episode measured".to_owned()
+    } else {
+        format!("{} to go", all - done)
+    }
+}
+
+/// The episodes a run could not annotate, and why.
+#[component]
+fn AnnotationFailures(settings: SubtaskAnnotation, context: SubtaskContext, open: bool) -> Element {
+    let failed = settings.failed_episodes();
+    rsx! {
+        Disclosure { class: "build-annotate-failures", open,
+            summary: rsx! { "{failed.len()} episodes could not be annotated" },
+            ul {
+                for failure in failed {
+                    li { key: "{failure.episode()}",
+                        strong { title: "{failure.episode()}", "{context.name(failure.episode())}" }
+                        span { "{failure.reason()}" }
+                    }
                 }
             }
         }
     }
 }
 
-/// The camera, model, and sampling one pass runs with.
+/// The camera, model, and sampling one pass runs with, plus the run that
+/// replaces what they already produced.
+///
+/// Before the first run these are the whole job, so they are open. After it
+/// they are settings for a run that has happened, so they fold away behind
+/// one line that says what was used.
 #[component]
-fn AnnotationSettings(
+fn AnnotationTools(
     annotation: AnnotationNode,
     settings: SubtaskAnnotation,
     cameras: Vec<String>,
     disabled: bool,
+    measured: bool,
+    reannotate: Element,
 ) -> Element {
     let camera = settings.camera().unwrap_or_default().to_owned();
     let known = cameras.contains(&camera);
     let pick = annotation.clone();
     let name = annotation.clone();
     let pace = annotation.clone();
-    rsx! {
+    let used = format!(
+        "{} · {} · every {}s",
+        settings.camera().unwrap_or("no camera"),
+        settings.model(),
+        settings.sample_interval_seconds(),
+    );
+    let fields = rsx! {
         div { class: "build-annotate-settings",
             Field { label: "Camera".to_owned(), layout: FieldLayout::Stacked,
                 Select {
@@ -337,44 +521,16 @@ fn AnnotationSettings(
                     },
                 }
             }
+            span { class: "build-annotate-replace-slot", {reannotate} }
         }
+    };
+    if !measured {
+        return fields;
     }
-}
-
-/// How far the node has got, and what it could not annotate.
-#[component]
-fn AnnotationProgress(
-    settings: SubtaskAnnotation,
-    episodes: usize,
-    loading: bool,
-    running: bool,
-) -> Element {
-    let done = settings.completed_episodes().len();
-    let failed = settings.failed_episodes();
     rsx! {
-        div { class: "build-annotate-progress",
-            p { role: "status",
-                if loading { "Reading the dataset's episodes…" }
-                else { "{done} of {episodes} episode(s) annotated." }
-                match settings.camera() {
-                    Some(camera) => rsx! { " Frames come from {camera}, selected and decoded by Spiral." },
-                    None => rsx! { " Choose the camera to sample." },
-                }
-                if running { " Annotating…" }
-            }
-            if !failed.is_empty() {
-                details { class: "build-annotate-failures", open: !running,
-                    summary { "{failed.len()} episode(s) failed" }
-                    ul {
-                        for failure in failed {
-                            li { key: "{failure.episode()}",
-                                strong { "{failure.episode()}" }
-                                span { "{failure.reason()}" }
-                            }
-                        }
-                    }
-                }
-            }
+        Disclosure { class: "build-annotate-tools",
+            summary: rsx! { "Settings · " span { class: "build-annotate-used", "{used}" } },
+            {fields}
         }
     }
 }

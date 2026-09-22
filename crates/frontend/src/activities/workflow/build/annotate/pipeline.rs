@@ -1,13 +1,18 @@
-//! One pass over an annotation node's episodes: sample, ask once, validate,
-//! record, save, and only then move on.
+//! One pass over an annotation node's episodes: keep a bounded set of episode
+//! annotations in flight, then validate, record, and save each result.
 //!
-//! The pass talks to three collaborators through traits, so the order it works
-//! in — including that a failed episode is recorded and the pass carries on —
-//! is exercised without a video decoder, a provider, or a document.
+//! The pass talks to three collaborators through traits, so its concurrency,
+//! failure handling, and persistence are exercised without a video decoder, a
+//! provider, or a document.
 use super::episodes::AnnotationEpisode;
 use super::request::{AnnotationCall, AnnotationPrompt, SubtaskProposals};
 use super::sheet::ContactSheet;
 use crate::activities::workflow::build::document::SubtaskRow;
+use futures_util::StreamExt as _;
+
+/// Enough parallel provider work to hide per-request latency without opening
+/// one request for every episode in a large dataset.
+pub(super) const EPISODES_IN_FLIGHT: usize = 8;
 
 /// What one request may spend on pictures. Chunking a longer episode across
 /// several requests, and reconciling the answers, is its own design.
@@ -78,18 +83,28 @@ impl<S: ContactSheetSource, A: SubtaskAnnotator, R: AnnotationRecorder> Annotati
         }
     }
 
-    /// Annotate each episode in order, saving after every one so a reload
-    /// keeps the episodes already finished. A failed episode is recorded with
-    /// its reason and the pass continues with the next.
+    /// Keep up to eight episode annotations in flight while absorbing their
+    /// results in recording order. Stop prevents the next episode from being
+    /// launched; work already in the window finishes and is saved. A failed
+    /// episode is recorded with its reason and the pass carries on.
     pub(super) async fn run(&self, episodes: Vec<AnnotationEpisode>) {
-        for episode in episodes {
-            if !self.recorder.running() {
-                return;
-            }
-            let outcome = self.annotate(&episode).await;
-            self.recorder.record(episode.id(), outcome);
+        let mut annotations = futures_util::stream::iter(episodes)
+            .take_while(|_| std::future::ready(self.recorder.running()))
+            .map(|episode| self.annotate_episode(episode))
+            .buffered(EPISODES_IN_FLIGHT);
+        while let Some((episode, outcome)) = annotations.next().await {
+            self.recorder.record(&episode, outcome);
             self.recorder.persist().await;
         }
+    }
+
+    async fn annotate_episode(
+        &self,
+        episode: AnnotationEpisode,
+    ) -> (String, Result<Vec<SubtaskRow>, String>) {
+        let id = episode.id().to_owned();
+        let outcome = self.annotate(&episode).await;
+        (id, outcome)
     }
 
     async fn annotate(&self, episode: &AnnotationEpisode) -> Result<Vec<SubtaskRow>, String> {
@@ -177,6 +192,17 @@ mod tests {
         answers: RefCell<Vec<Result<String, String>>>,
         asked: RefCell<Vec<(String, usize)>>,
     }
+
+    #[derive(Default)]
+    struct PendingAnnotator {
+        asked: RefCell<usize>,
+    }
+    impl SubtaskAnnotator for PendingAnnotator {
+        async fn annotate(&self, _: AnnotationCall) -> Result<String, String> {
+            *self.asked.borrow_mut() += 1;
+            std::future::pending().await
+        }
+    }
     impl FakeAnnotator {
         fn answering(answers: Vec<Result<String, String>>) -> Self {
             Self {
@@ -238,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn each_episode_is_asked_once_recorded_and_saved_before_the_next() {
+    fn each_episode_is_asked_once_recorded_and_saved() {
         // Answers are popped from the back, so ep-2's comes first in the list.
         let annotator = FakeAnnotator::answering(vec![answer(1.0, 4.0), answer(0.0, 3.0)]);
         let run = pass(FakeSheets::of(2), annotator, FakeRecorder::default());
@@ -267,6 +293,25 @@ mod tests {
     }
 
     #[test]
+    fn eight_episode_annotations_start_without_waiting_for_an_answer() {
+        let run = pass(
+            FakeSheets::of(1),
+            PendingAnnotator::default(),
+            FakeRecorder::default(),
+        );
+        let episodes = (0..10)
+            .map(|index| AnnotationEpisode::fixture(&format!("ep-{index}"), 10_000_000_000))
+            .collect();
+        {
+            let future = run.run(episodes);
+            futures_util::pin_mut!(future);
+            assert!(future.as_mut().now_or_never().is_none());
+        }
+        assert_eq!(*run.annotator.asked.borrow(), EPISODES_IN_FLIGHT);
+        assert!(run.recorder.written.borrow().is_empty());
+    }
+
+    #[test]
     fn a_failed_episode_is_recorded_with_its_reason_and_the_pass_carries_on() {
         let annotator = FakeAnnotator::answering(vec![
             answer(0.0, 3.0),
@@ -290,7 +335,7 @@ mod tests {
                 .1
                 .as_ref()
                 .unwrap_err()
-                .contains("ends after the 10.000 second recording")
+                .contains("ends after the 10 second recording")
         );
         assert!(written[2].1.is_ok());
         assert_eq!(*run.recorder.saves.borrow(), 3);
@@ -356,22 +401,22 @@ mod tests {
     }
 
     #[test]
-    fn stopping_ends_the_pass_between_episodes_and_leaves_the_rest_untouched() {
-        let annotator = FakeAnnotator::answering(vec![answer(0.0, 3.0), answer(0.0, 3.0)]);
+    fn stopping_finishes_the_in_flight_window_and_leaves_the_rest_untouched() {
+        let annotator = FakeAnnotator::answering(vec![answer(0.0, 3.0); 10]);
         let recorder = FakeRecorder {
             stop_after: Some(1),
             ..FakeRecorder::default()
         };
         let run = pass(FakeSheets::of(1), annotator, recorder);
-        run.run(vec![
-            AnnotationEpisode::fixture("ep-1", 10_000_000_000),
-            AnnotationEpisode::fixture("ep-2", 10_000_000_000),
-            AnnotationEpisode::fixture("ep-3", 10_000_000_000),
-        ])
+        run.run(
+            (0..10)
+                .map(|index| AnnotationEpisode::fixture(&format!("ep-{index}"), 10_000_000_000))
+                .collect(),
+        )
         .now_or_never()
         .expect("the fakes answer immediately");
-        assert_eq!(run.recorder.written.borrow().len(), 1);
-        assert_eq!(run.annotator.asked.borrow().len(), 1);
-        assert_eq!(*run.recorder.saves.borrow(), 1);
+        assert_eq!(run.recorder.written.borrow().len(), EPISODES_IN_FLIGHT);
+        assert_eq!(run.annotator.asked.borrow().len(), EPISODES_IN_FLIGHT);
+        assert_eq!(*run.recorder.saves.borrow(), EPISODES_IN_FLIGHT);
     }
 }

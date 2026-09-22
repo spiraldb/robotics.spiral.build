@@ -18,6 +18,12 @@ pub(in crate::activities) fn EpisodeReview(
     #[props(default)]
     span_tracks: Vec<IntervalTrack>,
     #[props(default)] on_interval: EventHandler<TimelineInterval>,
+    /// The camera topics worth opening here, when the caller only means some
+    /// of them: a measurement that read one camera shows that camera, so the
+    /// review never decodes streams the operator is not being asked about.
+    /// Empty opens every camera the episode recorded.
+    #[props(default)]
+    shown_cameras: Vec<String>,
 ) -> Element {
     let selection = episode.selection();
     let mut cameras = use_resource(use_reactive(&selection, move |selection| async move {
@@ -50,11 +56,14 @@ pub(in crate::activities) fn EpisodeReview(
         section { class: "episode-review", "aria-label": "Recorded episode review",
             match cameras.read().as_ref() {
                 Some(Ok(catalog)) => rsx! {
-                    if catalog.videos().next().is_none() {
-                        p { class: "episode-review-status", "This episode has no recorded cameras." }
+                    if catalog.shown(&shown_cameras).next().is_none() {
+                        p { class: "episode-review-status",
+                            if shown_cameras.is_empty() { "This episode has no recorded cameras." }
+                            else { "This episode did not record {shown_cameras.join(\", \")}." }
+                        }
                     } else {
                         div { class: "episode-review-cameras",
-                            for camera in catalog.videos() {
+                            for camera in catalog.shown(&shown_cameras) {
                                 section { key: "{camera.key()}", class: "episode-review-feed",
                                     h5 { title: camera.label(), "{camera.label().trim_start_matches('/')}" }
                                     EpisodeCamera {

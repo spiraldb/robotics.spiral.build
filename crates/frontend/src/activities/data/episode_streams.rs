@@ -140,6 +140,16 @@ impl StreamCatalog {
             .iter()
             .filter(|stream| stream.kind() == StreamKind::Video)
     }
+    /// The cameras a caller named, in the episode's own topic order; naming
+    /// none means all of them.
+    pub(in crate::activities) fn shown<'a>(
+        &'a self,
+        wanted: &'a [String],
+    ) -> impl Iterator<Item = &'a RecordedStream> {
+        self.videos().filter(move |stream| {
+            wanted.is_empty() || wanted.iter().any(|name| name == stream.name())
+        })
+    }
     /// The part of a camera's name that tells it from the episode's other
     /// cameras: `/left-wrist-camera` beside `/top-camera` reads as
     /// "left-wrist" and "top". A lone camera keeps its whole name.

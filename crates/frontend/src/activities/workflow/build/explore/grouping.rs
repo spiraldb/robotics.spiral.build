@@ -12,24 +12,30 @@ use super::categories::{
 };
 use super::decisions::DecisionRun;
 use super::questions::AssignmentQuestions;
-use super::slice::{SliceActions, SliceScore, SubtaskCamera, SubtaskSlice};
 use super::source::ExplorationSource;
 use crate::activities::workflow::build::document::{
     BuildNodeKind, DEFAULT_ANNOTATION_MODEL, SubtaskCategory, SubtaskGrouping, SubtaskRow,
+};
+use crate::activities::workflow::build::poster::{PosterCut, PosterFrames};
+use crate::activities::workflow::build::rerun::ConfirmedRerun;
+use crate::activities::workflow::build::review::{
+    NoSubtaskChosen, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
 };
 use crate::activities::workflow::build::state::{BuildController, EpisodeFocus};
 use crate::client::model::{ModelClient, ModelRequest};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::workflow::conversation::ProviderMessage;
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, EmptyState, Field, FieldLayout, Notice, NoticeTone,
-    Select, TextInput,
+    ActionPurpose, Button, ButtonVariant, Disclosure, EmptyState, Field, FieldLayout, Notice,
+    NoticeTone, Select, TextInput,
 };
 
 /// How many members a category card names before it is opened.
 const REPRESENTATIVES: usize = 3;
+/// The result-category washes Studio deals to repeated values. Six categories
+/// is the most the grouping proposes, so every one gets its own.
+const CATEGORY_HUES: usize = 6;
 const CATEGORY_ROLE: &str = "You name the categories of manipulation subtasks in a robot \
                              dataset. You answer with JSON and nothing else.";
 
@@ -111,7 +117,7 @@ impl GroupingStage {
         match self {
             Self::Proposing => Some("Reading the subtask descriptions…".to_owned()),
             Self::Assigning { answered, requests } => Some(format!(
-                "Assigning rows · {answered} of {requests} requests answered"
+                "Putting rows in categories · {answered} of {requests} batches answered"
             )),
             Self::Failed(_) => None,
         }
@@ -124,13 +130,29 @@ impl GroupingStage {
     }
 }
 
-/// A category card's content: the category, how many rows joined it, and
-/// the descriptions of the rows that joined it most typically.
+/// A category card's content: the category, how many rows joined it, the
+/// share of the table that is, and the rows that joined it most typically.
 #[derive(Clone, PartialEq)]
 struct CategorySummary {
     category: SubtaskCategory,
     members: usize,
+    /// Members as a fraction of every grouped row, so 91 and 12 do not read
+    /// with the same weight.
+    share: f64,
+    /// Which of the six result-category washes this card wears, dealt by size
+    /// so the same category keeps its colour while nothing is regrouped.
+    hue: usize,
     representatives: Vec<String>,
+}
+
+impl CategorySummary {
+    fn members_label(&self) -> String {
+        if self.members == 1 {
+            "1 subtask".to_owned()
+        } else {
+            format!("{} subtasks", self.members)
+        }
+    }
 }
 
 /// The workspace shown for a selected Group similar subtasks node.
@@ -243,14 +265,14 @@ pub(in crate::activities::workflow::build) fn GroupingWorkspace(
         };
     }
     let rows = reading.rows().to_vec();
-    let dataset = reading.dataset().cloned();
+    let context = reading.context();
     let annotation = reading.annotation().unwrap_or_default().to_owned();
     let grouping = saved.read().clone();
     let open = opened.read().clone();
     let cards = grouping
         .as_ref()
         .map(|grouping| {
-            grouping
+            let mut cards = grouping
                 .categories()
                 .iter()
                 .map(|category| {
@@ -258,6 +280,12 @@ pub(in crate::activities::workflow::build) fn GroupingWorkspace(
                     CategorySummary {
                         category: category.clone(),
                         members: members.len(),
+                        share: if rows.is_empty() {
+                            0.0
+                        } else {
+                            members.len() as f64 / rows.len() as f64
+                        },
+                        hue: 0,
                         representatives: members
                             .iter()
                             .take(REPRESENTATIVES)
@@ -267,7 +295,20 @@ pub(in crate::activities::workflow::build) fn GroupingWorkspace(
                             .collect(),
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            // The model emits its categories in no particular order. Biggest
+            // first is the order an operator reads a taxonomy in, and it makes
+            // the hue a card wears mean its size rather than its birth.
+            cards.sort_by(|left, right| {
+                right
+                    .members
+                    .cmp(&left.members)
+                    .then_with(|| left.category.name().cmp(right.category.name()))
+            });
+            for (rank, card) in cards.iter_mut().enumerate() {
+                card.hue = rank % CATEGORY_HUES;
+            }
+            cards
         })
         .unwrap_or_default();
     let members = match (&open, &grouping) {
@@ -279,6 +320,7 @@ pub(in crate::activities::workflow::build) fn GroupingWorkspace(
         _ => Vec::new(),
     };
     drop(reading);
+    let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
     let busy = stage.read().as_ref().is_some_and(GroupingStage::busy);
     let running = stage.read().as_ref().and_then(GroupingStage::label);
     let problem = stage
@@ -290,30 +332,45 @@ pub(in crate::activities::workflow::build) fn GroupingWorkspace(
         .iter()
         .map(|card| card.category.clone())
         .collect::<Vec<_>>();
+    let chosen = selected_row();
     rsx! {
         section { class: "build-explore-workspace build-explore-grouping", "aria-label": "Group similar subtasks",
-            div { class: "build-explore-query",
-                Button {
-                    purpose: ActionPurpose::Start,
-                    variant: ButtonVariant::Solid,
-                    disabled: busy,
-                    onclick: move |_| group.call(None),
-                    if cards.is_empty() { "Generate categories" } else { "Regenerate categories" }
-                }
-                if let Some(running) = running {
-                    p { class: "build-explore-note", role: "status", "{running}" }
-                }
-            }
-            if let Some(problem) = problem {
-                Notice { tone: NoticeTone::Danger, "{problem}" }
-            }
             if cards.is_empty() {
                 EmptyState { title: "No categories yet",
                     p {
-                        "One model pass reads the saved subtask descriptions and proposes four to eight categories; jev then puts every row in one of them."
+                        "One model pass reads the {rows.len()} saved descriptions and proposes four to eight categories; jev then puts every row in one of them."
+                    }
+                    Button {
+                        purpose: ActionPurpose::Start,
+                        variant: ButtonVariant::Solid,
+                        disabled: busy || rows.is_empty(),
+                        onclick: move |_| group.call(None),
+                        if busy { "Generating…" } else { "Generate categories" }
+                    }
+                    if let Some(running) = running.clone() {
+                        p { class: "build-explore-note", role: "status", "{running}" }
                     }
                 }
             } else {
+                div { class: "build-explore-actions",
+                    p { class: "build-explore-note",
+                        "{cards.len()} categories over {rows.len()} subtasks"
+                    }
+                    if let Some(running) = running.clone() {
+                        p { class: "build-explore-note", role: "status", "{running}" }
+                    }
+                    ConfirmedRerun {
+                        id: "build-explore-regenerate".to_owned(),
+                        label: "Regenerate".to_owned(),
+                        disabled: busy,
+                        question: format!(
+                            "Propose categories again? This replaces the {} categories and all {} assignments below.",
+                            cards.len(),
+                            rows.len(),
+                        ),
+                        on_confirm: move |()| group.call(None),
+                    }
+                }
                 div { class: "build-explore-categories",
                     for summary in cards {
                         CategoryCard {
@@ -330,39 +387,60 @@ pub(in crate::activities::workflow::build) fn GroupingWorkspace(
                     }
                 }
             }
+            if let Some(problem) = problem {
+                Notice { tone: NoticeTone::Danger, "{problem}" }
+            }
             if let Some(edit) = open {
-                CategoryDetail {
-                    edit,
-                    categories,
-                    busy,
-                    on_apply: EventHandler::new(move |edited: Vec<SubtaskCategory>| {
-                        group.call(Some(edited));
-                    }),
-                }
-                ol { class: "build-explore-results",
-                    for (row , probability) in members {
-                        GroupedMember {
-                            key: "{row}",
-                            row: rows[row].clone(),
-                            probability,
-                            selected: selected_row() == Some(row),
-                            dataset: dataset.clone(),
-                            actions: SliceActions::new(
-                                EventHandler::new(move |()| {
-                                    let same = selected_row.peek().as_ref() == Some(&row);
-                                    selected_row.set((!same).then_some(row));
-                                }),
-                                {
+                SubtaskReview {
+                    index: rsx! {
+                        div { class: "build-explore-open",
+                            h3 { class: "build-explore-open-name", "{edit.original()}" }
+                            Disclosure { summary: rsx! { "Rename or merge" },
+                                CategoryDetail {
+                                    edit: edit.clone(),
+                                    categories,
+                                    busy,
+                                    on_apply: EventHandler::new(move |edited: Vec<SubtaskCategory>| {
+                                        group.call(Some(edited));
+                                    }),
+                                }
+                            }
+                        }
+                        ol { class: "build-entries",
+                            for (row , probability) in members {
+                                SubtaskEntry {
+                                    key: "{rows[row].episode()}-{rows[row].start_time()}",
+                                    row: rows[row].clone(),
+                                    standing: SubtaskStanding::scored(probability, true, chosen == Some(row)),
+                                    episode: context.name(rows[row].episode()),
+                                    frames,
+                                    on_select: move |()| selected_row.set(Some(row)),
+                                }
+                            }
+                        }
+                    },
+                    evidence: match chosen.and_then(|row| rows.get(row)) {
+                        Some(row) => rsx! {
+                            SubtaskEvidence {
+                                key: "{row.episode()}-{row.start_time()}",
+                                row: row.clone(),
+                                context: context.clone(),
+                                on_open: {
                                     let focus = EpisodeFocus::new(
                                         annotation.clone(),
-                                        rows[row].episode(),
-                                        Some((rows[row].start_time(), rows[row].end_time())),
+                                        row.episode(),
+                                        Some((row.start_time(), row.end_time())),
                                     );
-                                    EventHandler::new(move |()| controller.focus_episode(focus.clone()))
+                                    move |()| controller.focus_episode(focus.clone())
                                 },
-                            ),
-                        }
-                    }
+                            }
+                        },
+                        None => rsx! {
+                            NoSubtaskChosen {
+                                prompt: "Choose a member to watch it play, most typical first.",
+                            }
+                        },
+                    },
                 }
             }
         }
@@ -373,15 +451,29 @@ pub(in crate::activities::workflow::build) fn GroupingWorkspace(
 /// joined it most typically.
 #[component]
 fn CategoryCard(summary: CategorySummary, opened: bool, on_open: EventHandler<()>) -> Element {
+    let share = (summary.share * 100.0).round();
     rsx! {
-        button {
+        // The examples are a list, and a list may not live inside a button, so
+        // the button is the card's heading and the card is the article.
+        article {
             class: "build-explore-category",
+            style: "--hue: var(--tone-category-{summary.hue + 1})",
             "data-selected": "{opened}",
-            "aria-pressed": "{opened}",
-            onclick: move |_| on_open.call(()),
-            span { class: "build-explore-category-name", "{summary.category.name()}" }
-            span { class: "build-explore-category-count", "{summary.members} subtasks" }
-            span { class: "build-explore-category-definition", "{summary.category.definition()}" }
+            button {
+                r#type: "button",
+                class: "build-explore-category-open",
+                "aria-expanded": "{opened}",
+                onclick: move |_| on_open.call(()),
+                span { class: "build-explore-category-name", "{summary.category.name()}" }
+                span { class: "build-explore-category-count", "{summary.members_label()}" }
+            }
+            div {
+                class: "build-explore-category-share",
+                "aria-hidden": "true",
+                title: "{share}% of every grouped subtask",
+                span { style: "width:{summary.share * 100.0}%" }
+            }
+            p { class: "build-explore-category-definition", "{summary.category.definition()}" }
             ul { class: "build-explore-category-examples",
                 for representative in summary.representatives.iter() {
                     li { key: "{representative}", "{representative}" }
@@ -457,57 +549,23 @@ fn CategoryDetail(
                         }
                     }
                 }
-                Button {
-                    purpose: ActionPurpose::Replace,
-                    variant: ButtonVariant::Outline,
+                ConfirmedRerun {
+                    id: "build-explore-merge".to_owned(),
+                    label: "Merge".to_owned(),
                     disabled: busy || chosen.is_empty(),
-                    onclick: move |_| {
+                    question: format!(
+                        "Merge “{}” into “{chosen}”? Its members are reassigned and the category is gone.",
+                        edit.original(),
+                    ),
+                    on_confirm: move |()| {
                         apply.call(
                             CategoryEdits::new(&merging).merged(&chosen, draft.peek().original()),
                         );
                     },
-                    "Merge and reassign"
                 }
             }
             if let Some(problem) = problem() {
                 Notice { tone: NoticeTone::Danger, "{problem}" }
-            }
-        }
-    }
-}
-
-/// One member of the open category, with its camera while it is selected.
-#[component]
-fn GroupedMember(
-    row: SubtaskRow,
-    probability: f64,
-    selected: bool,
-    dataset: Option<DatasetSelection>,
-    actions: SliceActions,
-) -> Element {
-    let camera = match (selected, dataset) {
-        (false, _) => rsx! {},
-        (true, Some(dataset)) => rsx! {
-            SubtaskCamera {
-                dataset,
-                episode: row.episode().to_owned(),
-                interval: (row.start_time(), row.end_time()),
-            }
-        },
-        (true, None) => rsx! {
-            p { class: "build-explore-note", role: "status",
-                "This Build document has no dataset, so the recording cannot be opened."
-            }
-        },
-    };
-    rsx! {
-        li { class: "build-explore-result",
-            SubtaskSlice {
-                row,
-                score: Some(SliceScore::new(probability, true)),
-                selected,
-                actions,
-                {camera}
             }
         }
     }

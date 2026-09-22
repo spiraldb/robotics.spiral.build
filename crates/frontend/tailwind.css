@@ -10,6 +10,7 @@
    only classes carrying its own prefix; nothing here is edited for Build. */
 @import "./styles/build-canvas.css";
 @import "./styles/build-annotate.css";
+@import "./styles/build-review.css";
 @import "./styles/build-explore.css";
 
 /*

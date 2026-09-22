@@ -1,9 +1,13 @@
 //! Which recorded frames one episode is sampled at, the SQL that selects and
 //! decodes exactly those frames, and how the returned rows are read.
 //!
+//! Shared by the two things in Build that need pictures out of a recording:
+//! the contact sheets an annotation pass reads, and the poster frame a subtask
+//! row shows. Both ask for a handful of moments and want those moments alone
+//! decoded, so both want this.
+//!
 //! Nothing here touches a browser: the index arithmetic and the statements the
 //! engine runs are the part worth checking, and they are checked without one.
-use super::super::sheet::SamplePlan;
 use serde_json::{Map, Value};
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
 use spiral_robotics_common::sql::SqlLiteral;
@@ -61,18 +65,20 @@ impl CameraTiming {
         })
     }
 
-    /// The frames a plan's sample times land on: `round(t × fps)` clamped to
-    /// the packets recorded, deduplicated, ascending. A recording of one
-    /// packet, or one with no span at all, has only its first frame to give.
-    pub(super) fn frames(self, plan: &SamplePlan) -> Vec<SampledFrame> {
+    /// The frames a set of moments land on: `round(t × fps)` clamped to the
+    /// packets recorded, deduplicated, ascending. A recording of one packet,
+    /// or one with no span at all, has only its first frame to give.
+    ///
+    /// The moments must already be in order; every caller samples forward.
+    pub(super) fn frames_at(self, times: &[f64]) -> Vec<SampledFrame> {
         let last = self.packets - 1;
         let rate = if self.span_seconds > 0.0 && last > 0 {
             last as f64 / self.span_seconds
         } else {
             0.0
         };
-        let mut frames = Vec::<SampledFrame>::with_capacity(plan.len());
-        for seconds in plan.times() {
+        let mut frames = Vec::<SampledFrame>::with_capacity(times.len());
+        for seconds in times {
             let index = (seconds * rate).round().clamp(0.0, last as f64) as u64;
             // Samples only move forward, so a repeat can only be the frame
             // just pushed: a recording sparser than the sampling interval
@@ -210,6 +216,13 @@ mod tests {
     use serde_json::json;
     use spiral_robotics_common::relations::QueryColumn;
 
+    /// Every `interval` second while `duration` lasts, as an annotation pass
+    /// samples an episode.
+    fn every(duration: f64, interval: f64) -> Vec<f64> {
+        let count = (duration / interval).ceil().max(1.0) as usize;
+        (0..count).map(|index| index as f64 * interval).collect()
+    }
+
     const DATASET: &str = "dataset_abc130k_sample";
     const CAMERA: &str = "/top-camera";
 
@@ -235,8 +248,8 @@ mod tests {
 
     #[test]
     fn sample_times_become_recorded_frame_indices() {
-        let plan = SamplePlan::new(20.0, 0.5).expect("a sampled plan");
-        let frames = timing().frames(&plan);
+        let plan = every(20.0, 0.5);
+        let frames = timing().frames_at(&plan);
         assert_eq!(frames.len(), 40);
         assert_eq!(
             frames[0],
@@ -262,8 +275,8 @@ mod tests {
     fn a_sample_past_the_recording_clamps_to_its_last_frame() {
         // Sampling further than the camera recorded: every later sample lands
         // on the last frame, and only the first of them is kept.
-        let plan = SamplePlan::new(40.0, 0.5).expect("a sampled plan");
-        let frames = timing().frames(&plan);
+        let plan = every(40.0, 0.5);
+        let frames = timing().frames_at(&plan);
         assert_eq!(frames.last().expect("frames").index, 599);
         assert_eq!(frames.iter().filter(|frame| frame.index == 599).count(), 1);
     }
@@ -275,9 +288,9 @@ mod tests {
             &row(json!({"packets": 1, "first_ns": 5_u64, "last_ns": 5_u64})),
         )
         .expect("one packet is a recording");
-        let plan = SamplePlan::new(10.0, 0.5).expect("a sampled plan");
+        let plan = every(10.0, 0.5);
         assert_eq!(
-            single.frames(&plan),
+            single.frames_at(&plan),
             [SampledFrame {
                 seconds: 0.0,
                 index: 0
@@ -286,7 +299,7 @@ mod tests {
         // Packets without usable times are still one frame rather than none.
         let untimed =
             CameraTiming::from_row(CAMERA, &row(json!({"packets": 30}))).expect("packets exist");
-        assert_eq!(untimed.frames(&plan).len(), 1);
+        assert_eq!(untimed.frames_at(&plan).len(), 1);
     }
 
     #[test]
@@ -312,8 +325,8 @@ mod tests {
 
     #[test]
     fn the_frame_query_selects_and_decodes_only_the_sampled_frames() {
-        let plan = SamplePlan::new(1.5, 0.5).expect("a sampled plan");
-        let frames = timing().frames(&plan);
+        let plan = every(1.5, 0.5);
+        let frames = timing().frames_at(&plan);
         let sql = frames_sql(DATASET, CAMERA, &frames);
         assert!(sql.contains("WHERE r.id = $1"));
         assert!(sql.contains("spql.video.frame_indices([0, 15, 29])"));
@@ -327,7 +340,7 @@ mod tests {
     #[test]
     fn frames_are_selected_in_batches_a_response_can_carry() {
         // 900 seconds at a quarter of a second: 3600 samples, 60 queries.
-        let plan = SamplePlan::new(900.0, 0.25).expect("a sampled plan");
+        let plan = every(900.0, 0.25);
         let frames = CameraTiming::from_row(
             CAMERA,
             &row(json!({
@@ -337,7 +350,7 @@ mod tests {
             })),
         )
         .expect("the recording has packets")
-        .frames(&plan);
+        .frames_at(&plan);
         assert_eq!(frames.len(), 3_600);
         let chunks = frames.chunks(MAX_FRAMES_PER_QUERY).collect::<Vec<_>>();
         assert_eq!(MAX_FRAMES_PER_QUERY, 60);
@@ -354,7 +367,7 @@ mod tests {
         );
         assert!(chunks[0].last().expect("frames").index < chunks[1][0].index);
         // A short episode is still one query.
-        let short = timing().frames(&SamplePlan::new(20.0, 0.5).expect("a sampled plan"));
+        let short = timing().frames_at(&every(20.0, 0.5));
         assert_eq!(short.chunks(MAX_FRAMES_PER_QUERY).count(), 1);
     }
 
@@ -368,7 +381,7 @@ mod tests {
     }
 
     fn sampled() -> Vec<SampledFrame> {
-        timing().frames(&SamplePlan::new(1.5, 0.5).expect("a sampled plan"))
+        timing().frames_at(&every(1.5, 0.5))
     }
 
     #[test]

@@ -10,8 +10,12 @@ use dioxus::prelude::*;
 use spiral_robotics_common::build::{BuildDocument, BuildDocumentSummary};
 use spiral_robotics_common::command_failure::CommandFailureCode;
 use spiral_robotics_common::datasets::DatasetSelection;
+use std::collections::BTreeMap;
 
 const UNTITLED: &str = "Untitled build";
+
+/// One quiet line per node that is measuring something right now.
+pub(crate) type BuildActivity = BTreeMap<String, String>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BuildPendingCommand {
@@ -63,6 +67,11 @@ pub(crate) struct BuildController {
     documents: Signal<Vec<BuildDocumentSummary>>,
     selected_node: Signal<Option<String>>,
     focus: Signal<Option<EpisodeFocus>>,
+    /// One line per node that is measuring something right now. A run in
+    /// flight is not in the payload, so the view that runs it says so here and
+    /// the canvas reads it: a node the operator has scrolled away from still
+    /// shows that it is working.
+    activity: Signal<BuildActivity>,
     command: Signal<Option<BuildPendingCommand>>,
     conflict: Signal<bool>,
     error: Signal<Option<String>>,
@@ -80,6 +89,7 @@ impl BuildController {
                 documents: Signal::new(Vec::new()),
                 selected_node: Signal::new(Some(DATASET_NODE_ID.to_owned())),
                 focus: Signal::new(None),
+                activity: Signal::new(BuildActivity::new()),
                 command: Signal::new(None),
                 conflict: Signal::new(false),
                 error: Signal::new(None),
@@ -160,6 +170,18 @@ impl BuildController {
     }
     pub(crate) fn select_node(mut self, node: Option<String>) {
         self.selected_node.set(node);
+    }
+    /// What every node that is measuring right now has to say for itself.
+    pub(crate) fn activity(&self) -> BuildActivity {
+        self.activity.read().clone()
+    }
+    /// One node's line while it runs; `None` once it has stopped.
+    pub(crate) fn report_activity(mut self, node: &str, line: Option<String>) {
+        let mut activity = self.activity.write();
+        match line {
+            Some(line) => activity.insert(node.to_owned(), line),
+            None => activity.remove(node),
+        };
     }
     pub(crate) fn focus(&self) -> Option<EpisodeFocus> {
         self.focus.read().clone()

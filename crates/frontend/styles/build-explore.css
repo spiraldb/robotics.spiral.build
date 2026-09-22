@@ -3,81 +3,58 @@
    must be unlayered too. */
 
 @layer components {
+  /* Query or categories on top, then the review takes the rest. The workspace
+     itself never scrolls: the ranking inside it does. */
   .build-explore-workspace {
-    @apply flex min-h-0 min-w-0 flex-col gap-2 overflow-y-auto p-3;
+    @apply flex h-full min-h-0 min-w-0 flex-col;
+    background: var(--tone-surface);
   }
 
   /* The query row keeps the field wide and its two actions at their own
      width, so a long query never squeezes the buttons out of reach. */
   .build-explore-query {
-    @apply flex flex-wrap items-center gap-2;
+    @apply flex flex-wrap items-center gap-2 border-b border-line px-3 py-2;
   }
 
   .build-explore-query-input {
     @apply min-w-48 flex-1;
   }
 
+  .build-explore-actions {
+    @apply flex flex-wrap items-center gap-3 border-b border-line px-3 py-2;
+  }
+
   .build-explore-note {
-    @apply m-0 text-[11px] text-ink-soft;
+    @apply m-0 px-3 py-1 text-[11px] text-ink-soft;
   }
 
-  .build-explore-results {
-    @apply m-0 flex list-none flex-col gap-1.5 p-0;
+  .build-explore-query ~ .build-explore-note,
+  .build-explore-actions .build-explore-note {
+    @apply p-0;
   }
 
-  .build-explore-result {
-    @apply min-w-0;
+  .build-explore-actions .ui-button {
+    @apply ml-auto;
   }
 
-  .build-explore-slice {
-    @apply flex min-w-0 flex-col gap-1 rounded border border-line bg-surface p-2;
-  }
-
-  .build-explore-slice[data-selected="true"] {
-    border-color: var(--tone-accent);
-    background: var(--tone-selected);
-  }
-
-  /* The whole head is the hit target: a result is selected by its text, not
-     by a control beside it. */
-  .build-explore-slice-head {
-    @apply flex min-w-0 cursor-pointer items-baseline gap-2 border-0 bg-transparent p-0 text-left;
-  }
-
-  /* One column for every probability, so the ranking reads as a column of
-     numbers rather than a ragged edge. */
-  .build-explore-slice-score {
-    @apply w-14 shrink-0 text-right font-mono text-[11px] tabular-nums text-ink;
-  }
-
-  .build-explore-slice-score[data-answered="false"] {
-    @apply text-[10px] text-ink-faint;
-  }
-
-  .build-explore-slice-description {
-    @apply min-w-0 flex-1 text-[12px] leading-5 text-ink;
-  }
-
-  .build-explore-slice-facts {
-    @apply flex flex-wrap items-center gap-2 pl-16 font-mono text-[10px] text-ink-faint;
-  }
-
-  .build-explore-slice-camera {
-    @apply mt-1 border-t border-line pt-2;
-  }
-
+  /* Six cards at most, so they sit in one band above the members rather than a
+     grid that reflows as the pane resizes. */
   .build-explore-categories {
-    @apply grid gap-2;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr));
+    @apply grid gap-2 border-b border-line p-3;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
   }
 
   .build-explore-category {
-    @apply flex cursor-pointer flex-col items-start gap-1 rounded border border-line bg-surface p-2 text-left;
+    @apply flex flex-col items-stretch gap-1 rounded border border-line bg-surface p-2 text-left;
   }
 
   .build-explore-category[data-selected="true"] {
-    border-color: var(--tone-accent);
-    background: var(--tone-selected);
+    border-color: var(--hue);
+    background: color-mix(in srgb, var(--hue) 8%, var(--tone-surface));
+  }
+
+  .build-explore-category-open {
+    @apply flex min-h-6 w-full cursor-pointer items-baseline justify-between gap-2 border-0 bg-transparent p-0 text-left;
   }
 
   .build-explore-category-name {
@@ -85,24 +62,56 @@
   }
 
   .build-explore-category-count {
-    @apply text-[10px] text-ink-faint;
+    @apply shrink-0 font-mono text-[10px] tabular-nums;
+    color: var(--tone-ink-soft);
+  }
+
+  /* How much of the table joined this category, so 91 and 12 do not read with
+     the same weight. The bar is never the only carrier: the count is beside it. */
+  .build-explore-category-share {
+    @apply h-0.5 w-full overflow-hidden rounded-full;
+    background: var(--tone-line);
+  }
+
+  .build-explore-category-share span {
+    @apply block h-full rounded-full;
+    background: var(--hue);
   }
 
   .build-explore-category-definition {
-    @apply text-[11px] leading-4 text-ink-soft;
+    @apply m-0 text-[11px] leading-4 text-ink-soft;
   }
 
   /* The representatives are evidence for the definition above them, so they
      stay quiet and never grow past three lines. */
   .build-explore-category-examples {
-    @apply m-0 flex list-none flex-col gap-0.5 p-0 text-[10px] text-ink-faint;
+    @apply m-0 flex list-none flex-col gap-0.5 p-0 text-[10px] p-0;
+    color: var(--tone-ink-soft);
   }
 
   .build-explore-category-examples li {
     @apply truncate;
   }
 
+  /* The open category names itself above its members, and keeps its editing
+     behind a disclosure: renaming and merging are occasional, reading the
+     members is the reason you opened it. */
+  .build-explore-open {
+    @apply flex flex-col gap-1 border-b border-line px-3 py-2;
+  }
+
+  .build-explore-open-name {
+    @apply m-0 text-[12px] font-semibold text-ink;
+  }
+
+  /* A definition is a sentence, so it gets a row of its own rather than a
+     149px box showing twenty of its hundred characters. */
   .build-explore-editor {
-    @apply flex flex-wrap items-end gap-2 rounded border border-line bg-sunken p-2;
+    @apply grid items-end gap-2 rounded border border-line bg-sunken p-2;
+    grid-template-columns: minmax(8rem, 1fr) auto auto;
+  }
+
+  .build-explore-editor > .ui-field:nth-child(2) {
+    grid-column: 1 / -1;
   }
 }

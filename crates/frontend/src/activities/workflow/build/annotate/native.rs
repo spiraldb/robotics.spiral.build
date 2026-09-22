@@ -6,13 +6,13 @@
 //! small JPEG through the episode query endpoint. A recording whose keyframe
 //! intervals are far too large for the playback decoder is therefore still
 //! annotated: no whole group of pictures is ever held in the page.
-mod selection;
-
+use super::super::frames::{
+    self as selection, CameraTiming, MAX_FRAMES_PER_QUERY, NativeFrame, SampledFrame,
+};
 use super::episodes::AnnotationEpisode;
 use super::pipeline::ContactSheetSource;
 use super::sheet::{ContactSheet, FRAMES_PER_SHEET, SamplePlan, SheetLayout};
 use crate::activities::data::DatasetClient;
-use selection::{CameraTiming, MAX_FRAMES_PER_QUERY, NativeFrame, SampledFrame};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use wasm_bindgen::{JsCast as _, JsValue};
 
@@ -96,7 +96,7 @@ impl NativeSheets {
 impl ContactSheetSource for NativeSheets {
     async fn sheets(&self, episode: &AnnotationEpisode) -> Result<Vec<ContactSheet>, String> {
         let plan = SamplePlan::new(episode.duration(), self.sample_interval)?;
-        let sampled = self.timing(episode).await?.frames(&plan);
+        let sampled = self.timing(episode).await?.frames_at(plan.times());
         let mut frames = Vec::with_capacity(sampled.len());
         for chunk in sampled.chunks(MAX_FRAMES_PER_QUERY) {
             frames.extend(self.decode(episode, chunk).await?);

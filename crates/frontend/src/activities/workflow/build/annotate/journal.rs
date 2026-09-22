@@ -18,8 +18,9 @@ pub(super) struct BuildJournal {
     controller: BuildController,
     /// Reports save failures through the project's notifications.
     studio: StudioProjectState,
-    /// Cleared by Stop; the pass returns at the next episode boundary.
-    running: Signal<bool>,
+    /// What the operator still wants: cleared by Stop, after which the pass
+    /// starts no further episode but finishes the ones in flight.
+    wanted: Signal<bool>,
 }
 
 impl BuildJournal {
@@ -27,13 +28,13 @@ impl BuildJournal {
         node: impl Into<String>,
         controller: BuildController,
         studio: StudioProjectState,
-        running: Signal<bool>,
+        wanted: Signal<bool>,
     ) -> Self {
         Self {
             node: node.into(),
             controller,
             studio,
-            running,
+            wanted,
         }
     }
 }
@@ -79,6 +80,6 @@ impl AnnotationRecorder for BuildJournal {
     }
 
     fn running(&self) -> bool {
-        *self.running.peek()
+        *self.wanted.peek()
     }
 }
