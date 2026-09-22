@@ -1,6 +1,6 @@
 //! Validation for project connection and runtime preferences.
 
-use spiral_robotics_common::settings::DataSettings;
+use spiral_robotics_common::settings::{DataSettings, SettingsUpdate};
 use url::Url;
 
 use crate::OperationError;
@@ -131,6 +131,28 @@ impl UpdateDataSettingsCommand {
     }
     pub(crate) fn video_enabled(&self) -> bool {
         self.video_enabled
+    }
+}
+
+/// A blank secret keeps the saved one; clearing it saves an empty one.
+impl From<SettingsUpdate> for UpdateDataSettingsCommand {
+    fn from(update: SettingsUpdate) -> Self {
+        let (connection, training, video) = update.into_parts();
+        let (endpoint, spfs, project, client_id, secret, clear_secret, huggingface_token) =
+            connection.into_parts();
+        let secret = if clear_secret {
+            Some(String::new())
+        } else if secret.trim().is_empty() {
+            None
+        } else {
+            Some(secret)
+        };
+        Self::new(endpoint, project, training.endpoint())
+            .with_spfs_endpoint(spfs)
+            .with_client(client_id)
+            .with_client_secret(secret)
+            .with_huggingface_token(huggingface_token)
+            .with_video_enabled(video.enabled())
     }
 }
 

@@ -1,6 +1,6 @@
 //! Saved explorations: list, load by identity, and one revision-guarded save.
-use super::commands::ExplorationCommands;
-use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
+use crate::OperationError;
+use crate::http::delivery::{ApiJson, ApiPath, Project};
 use crate::projects::context::StudioContext;
 use axum::{
     Json, Router,
@@ -19,32 +19,34 @@ const MAX_SAVE_BODY_BYTES: usize = 2 * MAX_EXPLORATION_PAYLOAD_BYTES;
 
 pub(crate) struct ExplorationEndpoints;
 impl ExplorationEndpoints {
-    pub(crate) fn router() -> Router<StudioContext> {
+    pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
             .route("/explorations", get(Self::list))
             .route("/explorations/{id}", get(Self::load))
-            // A payload reaches 32 MiB, far past the default JSON body bound.
-            .route(
-                "/explorations/save",
-                post(Self::save).layer(DefaultBodyLimit::max(MAX_SAVE_BODY_BYTES)),
-            )
+    }
+    pub(crate) fn commands() -> Router<StudioContext> {
+        // A payload reaches 32 MiB, far past the default JSON body bound.
+        Router::new().route(
+            "/explorations/save",
+            post(Self::save).layer(DefaultBodyLimit::max(MAX_SAVE_BODY_BYTES)),
+        )
     }
     async fn list(
-        ScopedProject(commands): ScopedProject<ExplorationCommands>,
-    ) -> Result<Json<Vec<ExplorationSummary>>, HttpFailure> {
-        Ok(Json(commands.list().await?))
+        Project(project): Project,
+    ) -> Result<Json<Vec<ExplorationSummary>>, OperationError> {
+        Ok(Json(project.explorations().list().await?))
     }
     async fn load(
-        ScopedProject(commands): ScopedProject<ExplorationCommands>,
+        Project(project): Project,
         ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<ExplorationDocument>, HttpFailure> {
-        Ok(Json(commands.load(&id).await?))
+    ) -> Result<Json<ExplorationDocument>, OperationError> {
+        Ok(Json(project.explorations().load(&id).await?))
     }
     async fn save(
-        ScopedProject(commands): ScopedProject<ExplorationCommands>,
+        Project(project): Project,
         ApiJson(document): ApiJson<ExplorationDocument>,
-    ) -> Result<Json<ExplorationDocument>, HttpFailure> {
-        Ok(Json(commands.save(document).await?))
+    ) -> Result<Json<ExplorationDocument>, OperationError> {
+        Ok(Json(project.explorations().save(document).await?))
     }
 }
 

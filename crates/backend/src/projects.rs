@@ -4,7 +4,6 @@
 pub(crate) mod bootstrap;
 pub(crate) mod context;
 pub(crate) mod http;
-pub(crate) mod tasks;
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -208,7 +207,7 @@ impl OpenProject {
     }
 
     fn connection(&self) -> SpiralConnectionSettings {
-        self.storage().connection_settings()
+        self.storage().project_store().connection_settings()
     }
     fn workspace(&self) -> &Arc<RobotWorkspace> {
         &self.catalog.workspace
@@ -238,11 +237,15 @@ impl OpenProject {
     pub(crate) async fn settings(&self) -> Result<DataSettings, OperationError> {
         let preferences = self
             .storage()
-            .load_studio_preferences()
+            .preferences()
+            .load()
             .await
             .map_err(OperationError::External)?;
         Ok(DataSettings::new(
-            Self::present(&self.connection(), self.storage().table_prefix()),
+            Self::present(
+                &self.connection(),
+                self.storage().project_store().table_prefix(),
+            ),
             TrainingRuntimeSettings::new(preferences.training().endpoint()),
             VideoSettings::new(preferences.video().enabled()),
         ))
@@ -250,7 +253,7 @@ impl OpenProject {
 
     /// Reach Spiral with this connection before Studio switches to it.
     async fn validate(&self) -> Result<(), OperationError> {
-        let (available, detail) = self.storage().test_spiral().await;
+        let (available, detail) = self.storage().database().test().await;
         if available {
             Ok(())
         } else {
@@ -266,14 +269,16 @@ impl OpenProject {
     ) -> Result<(), OperationError> {
         let endpoint_changed = self
             .storage()
-            .load_studio_preferences()
+            .preferences()
+            .load()
             .await
             .map_err(OperationError::External)?
             .training()
             .endpoint()
             != preferences.training().endpoint();
         self.storage()
-            .save_studio_preferences(&preferences)
+            .preferences()
+            .save(&preferences)
             .await
             .map_err(OperationError::External)?;
         if endpoint_changed {
@@ -455,7 +460,8 @@ impl ProjectRegistry {
         let candidate = self.factory.create(origin.connection())?;
         let summary = candidate
             .storage()
-            .import_project_bundle(document)
+            .transfer()
+            .import_project(document)
             .await
             .map_err(OperationError::External)?;
         if let Some(slot) = self
@@ -796,7 +802,8 @@ pub(crate) mod tests {
             StoredStudioPreferences::from_settings("http://127.0.0.1:5050", false).unwrap();
         project
             .storage()
-            .save_studio_preferences(&preferences)
+            .preferences()
+            .save(&preferences)
             .await
             .unwrap();
         let settings = project.settings().await.unwrap();

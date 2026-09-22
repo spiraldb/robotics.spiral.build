@@ -20,7 +20,7 @@ pub(crate) struct CameraPreview;
 
 impl CameraPreview {
     /// Camera previews stay HTTP because browser image elements consume MJPEG URLs.
-    pub(crate) fn router() -> Router<StudioContext> {
+    pub(crate) fn reads() -> Router<StudioContext> {
         Router::new().route("/cameras/stream.mjpeg", get(Self::camera_stream))
     }
 }

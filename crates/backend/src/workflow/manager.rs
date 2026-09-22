@@ -72,17 +72,35 @@ impl WorkflowManager {
         self.inner
             .storage
             .workflows()
+            .list()
             .await
             .map_err(OperationError::External)
     }
     pub(super) async fn load(&self, id: &str) -> Result<WorkflowDocument, OperationError> {
         self.load_document(id).await
     }
+    /// A dataset with the cameras a workflow can preview from it.
+    pub(super) async fn cameras(
+        &self,
+        selection: spiral_robotics_common::datasets::DatasetSelection,
+    ) -> Result<serde_json::Value, OperationError> {
+        let storage = &self.inner.storage;
+        let inspection = storage
+            .inspect_dataset(selection)
+            .await
+            .map_err(OperationError::External)?;
+        let cameras = storage
+            .workflow_cameras(&inspection)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(serde_json::json!({"dataset": inspection, "cameras": cameras}))
+    }
     async fn load_document(&self, id: &str) -> Result<WorkflowDocument, OperationError> {
         let stored = self
             .inner
             .storage
-            .load_workflow(id)
+            .workflows()
+            .load(id)
             .await
             .map_err(OperationError::External)?
             .ok_or_else(|| {
@@ -116,7 +134,8 @@ impl WorkflowManager {
         let previous = self
             .inner
             .storage
-            .load_workflow(id)
+            .workflows()
+            .load(id)
             .await
             .map_err(OperationError::External)?;
         let revision = previous
@@ -147,7 +166,8 @@ impl WorkflowManager {
         if !self
             .inner
             .storage
-            .save_workflow(document.workflow(), (&graph, &conversation))
+            .workflows()
+            .save(document.workflow(), (&graph, &conversation))
             .await
             .map_err(OperationError::External)?
         {

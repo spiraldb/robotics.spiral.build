@@ -9,7 +9,7 @@ use spiral_robotics_common::exploration::{ExplorationDocument, ExplorationSummar
 
 use crate::db::StorageClock;
 
-pub(crate) struct ExplorationPersistence<'a> {
+pub struct ExplorationPersistence<'a> {
     project_store: &'a crate::StudioProject,
 }
 
@@ -33,7 +33,7 @@ impl<'a> ExplorationPersistence<'a> {
         Ok(document)
     }
 
-    pub(crate) async fn list(&self) -> Result<Vec<ExplorationSummary>, String> {
+    pub async fn list(&self) -> Result<Vec<ExplorationSummary>, String> {
         use crate::studio::explorations as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
         let rows: Vec<(String, String, i64)> = table::Entity::find()
@@ -59,7 +59,7 @@ impl<'a> ExplorationPersistence<'a> {
             .collect()
     }
 
-    pub(crate) async fn load(&self, id: &str) -> Result<Option<ExplorationDocument>, String> {
+    pub async fn load(&self, id: &str) -> Result<Option<ExplorationDocument>, String> {
         use crate::studio::explorations as table;
         use sea_orm::EntityTrait;
         let row = table::Entity::find_by_id((self.project_store.key().to_owned(), id.to_owned()))
@@ -73,7 +73,7 @@ impl<'a> ExplorationPersistence<'a> {
     /// revision 0 inserts a document that does not exist yet, and revision n
     /// replaces exactly revision n. The stored copy carries n + 1. `false`
     /// means another save won the race and nothing was written.
-    pub(crate) async fn save(&self, document: &ExplorationDocument) -> Result<bool, String> {
+    pub async fn save(&self, document: &ExplorationDocument) -> Result<bool, String> {
         use crate::studio::explorations as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
         document.validate()?;

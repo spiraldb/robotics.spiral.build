@@ -820,7 +820,7 @@ mod tests {
                 read.sql()?,
                 read.max_rows(),
             );
-            let bytes = storage.query_for_episode_arrow(&request).await?;
+            let bytes = storage.queries().arrow_for_episode(&request).await?;
             let reader =
                 arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None)
                     .map_err(|e| e.to_string())?;

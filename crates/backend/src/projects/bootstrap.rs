@@ -29,8 +29,8 @@ impl ProjectBootstrap {
     async fn reconnect_saved_robots(&self) {
         match self.0.open(&self.0.projects().saved_settings().project()) {
             Ok(project) => {
-                crate::robots::commands::DeviceCommands::from(project)
-                    .auto_connect_saved_robots()
+                crate::robots::operations::RobotOperations::new(&project)
+                    .auto_connect_saved()
                     .await
             }
             Err(error) => tracing::warn!("could not open the saved Studio project: {error}"),

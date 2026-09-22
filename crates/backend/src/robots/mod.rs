@@ -1,11 +1,7 @@
 //! Robot discovery, configuration, calibration, and live commands.
 
-pub(crate) mod calibration;
 pub(crate) mod camera_preview;
-pub(crate) mod commands;
-pub(crate) mod control;
 pub(crate) mod discovery;
 pub(crate) mod http;
-pub(crate) mod mode;
-pub(crate) mod service;
+pub(crate) mod operations;
 pub(crate) mod workspace;

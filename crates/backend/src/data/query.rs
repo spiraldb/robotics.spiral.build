@@ -1,5 +1,6 @@
 //! Read-only SQL admission and preview limits.
 
+use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest};
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 
 use crate::OperationError;
@@ -29,6 +30,24 @@ impl QueryCommand {
 }
 
 impl QueryCommand {
+    /// A preview request, admitted: read-only, with a bounded row count.
+    pub(super) fn admitted(request: QueryRequest) -> Result<Self, OperationError> {
+        let (statement, max_rows) = request.into_parts();
+        Self::new(statement, max_rows).validated()
+    }
+
+    /// One exact dataset member's query, with its statement admitted the same way.
+    pub(super) fn admitted_for_episode(
+        request: EpisodeQueryRequest,
+    ) -> Result<EpisodeQueryRequest, OperationError> {
+        let command = Self::new(request.statement(), request.max_rows()).validated()?;
+        Ok(EpisodeQueryRequest::new(
+            request.episode().clone(),
+            command.statement,
+            command.max_rows,
+        ))
+    }
+
     pub(super) fn validated(mut self) -> Result<Self, OperationError> {
         ReadOnlyQuery::new(&self.statement, ReadOnlyQueryMode::Preview)
             .authorize()

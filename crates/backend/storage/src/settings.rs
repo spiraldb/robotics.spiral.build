@@ -13,7 +13,7 @@ use url::Url;
 const BACKEND_STATE_FILE: &str = "backend-state.json";
 
 /// Project-owned Studio preference persistence.
-pub(crate) struct StudioPreferencePersistence<'a> {
+pub struct StudioPreferencePersistence<'a> {
     project_store: &'a crate::StudioProject,
 }
 
@@ -22,7 +22,7 @@ impl<'a> StudioPreferencePersistence<'a> {
         Self { project_store }
     }
 
-    pub(crate) async fn load(&self) -> Result<StoredStudioPreferences, String> {
+    pub async fn load(&self) -> Result<StoredStudioPreferences, String> {
         use crate::studio::studio_settings;
         use sea_orm::EntityTrait;
         let row = studio_settings::Entity::find_by_id(self.project_store.key().to_owned())
@@ -34,7 +34,7 @@ impl<'a> StudioPreferencePersistence<'a> {
             .map(Option::unwrap_or_default)
     }
 
-    pub(crate) async fn save(&self, preferences: &StoredStudioPreferences) -> Result<(), String> {
+    pub async fn save(&self, preferences: &StoredStudioPreferences) -> Result<(), String> {
         use crate::studio::studio_settings;
         use sea_orm::{EntityTrait, Set};
         let row = studio_settings::ActiveModel {

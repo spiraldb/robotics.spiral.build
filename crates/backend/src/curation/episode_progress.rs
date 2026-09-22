@@ -32,6 +32,7 @@ impl EpisodeProgress {
         );
         let bindings = self
             .storage
+            .queries()
             .query_for_episode(&EpisodeQueryRequest::new(request.episode().clone(), sql, 2))
             .await?;
         if bindings.truncated() || bindings.rows().len() != 1 {

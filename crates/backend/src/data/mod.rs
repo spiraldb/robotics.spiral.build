@@ -1,6 +1,5 @@
 //! Dataset inspection, SQL admission, and catalog settings.
 
-pub(crate) mod commands;
 pub(crate) mod http;
 pub(crate) mod project_download;
 pub(crate) mod query;

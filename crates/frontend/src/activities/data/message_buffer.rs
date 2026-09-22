@@ -600,8 +600,8 @@ mod tests {
         let split = vec![batch.slice(0, 1), batch.slice(1, 2)];
         let page = MessagePage::keep(batch.schema(), split, 2).unwrap();
         let cursor = page.next.unwrap();
-        assert_eq!(cursor.time().unwrap(), u64::MAX);
-        assert_eq!(cursor.chunk().unwrap(), 100);
+        assert_eq!(cursor.time(), u64::MAX);
+        assert_eq!(cursor.chunk(), 100);
         assert_eq!(cursor.ordinal(), 5);
         assert_eq!(
             page.batches

@@ -16,7 +16,7 @@ async fn save_status(fixture: &ProjectFixture, body: String) -> StatusCode {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap();
-    ExplorationEndpoints::router()
+    ExplorationEndpoints::commands()
         .with_state(StudioContext::new(fixture.projects.clone()))
         .oneshot(request)
         .await

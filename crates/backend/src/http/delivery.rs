@@ -1,8 +1,9 @@
-//! HTTP extraction and failure framing. Application policy stays in command owners.
+//! HTTP extraction and failure framing. Application policy stays in feature owners.
+use crate::OperationError;
 use crate::projects::context::{ProjectContext, StudioContext};
-use crate::{BackendCommandError, OperationError};
 use axum::{
     Json,
+    body::Bytes,
     extract::{FromRequest, FromRequestParts, Path, Query, Request},
     http::{StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
@@ -48,11 +49,6 @@ impl From<CommandFailure> for HttpFailure {
         }
     }
 }
-impl From<BackendCommandError> for HttpFailure {
-    fn from(error: BackendCommandError) -> Self {
-        CommandFailure::from(error).into()
-    }
-}
 impl From<OperationError> for HttpFailure {
     fn from(error: OperationError) -> Self {
         CommandFailure::from(error).into()
@@ -63,14 +59,17 @@ impl IntoResponse for HttpFailure {
         (self.status, Json(self.failure)).into_response()
     }
 }
+impl IntoResponse for OperationError {
+    fn into_response(self) -> Response {
+        HttpFailure::from(self).into_response()
+    }
+}
 
 /// Open the project a request names before reading its body. The endpoint
 /// header is required; a missing or empty project header names the endpoint
 /// before a project is chosen.
-pub(crate) struct ScopedProject<Capability>(pub(crate) Capability);
-impl<Capability: From<ProjectContext>> FromRequestParts<StudioContext>
-    for ScopedProject<Capability>
-{
+pub(crate) struct Project(pub(crate) ProjectContext);
+impl FromRequestParts<StudioContext> for Project {
     type Rejection = HttpFailure;
     async fn from_request_parts(
         parts: &mut Parts,
@@ -82,12 +81,10 @@ impl<Capability: From<ProjectContext>> FromRequestParts<StudioContext>
                 HttpFailure::invalid(format!("{} is required", ProjectKey::ENDPOINT_HEADER))
             })?;
         let project = Self::header(parts, ProjectKey::PROJECT_HEADER)?.unwrap_or_default();
-        Ok(Self(Capability::from(
-            state.open(&ProjectKey::new(endpoint, project))?,
-        )))
+        Ok(Self(state.open(&ProjectKey::new(endpoint, project))?))
     }
 }
-impl<Capability> ScopedProject<Capability> {
+impl Project {
     fn header<'a>(parts: &'a Parts, name: &str) -> Result<Option<&'a str>, HttpFailure> {
         let mut values = parts.headers.get_all(name).iter();
         let value = values
@@ -113,6 +110,17 @@ impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequest<S> for ApiJson<T> {
         Json::<T>::from_request(request, state)
             .await
             .map(|Json(value)| Self(value))
+            .map_err(|error| HttpFailure::rejection(error.status(), error.body_text()))
+    }
+}
+/// A raw body, bounded by the route's `DefaultBodyLimit`.
+pub(crate) struct ApiBytes(pub(crate) Bytes);
+impl<S: Send + Sync> FromRequest<S> for ApiBytes {
+    type Rejection = HttpFailure;
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Bytes::from_request(request, state)
+            .await
+            .map(Self)
             .map_err(|error| HttpFailure::rejection(error.status(), error.body_text()))
     }
 }

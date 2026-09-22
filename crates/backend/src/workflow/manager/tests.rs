@@ -19,7 +19,12 @@ impl WorkflowFixture {
     }
     /// Plan as the browser does: the plan SQL through the preview query path.
     async fn plan(&self, workflow: &WorkflowSpec) -> WorkflowPlan {
-        match self.storage.query(&workflow.plan_sql().unwrap(), 1).await {
+        match self
+            .storage
+            .queries()
+            .query(&workflow.plan_sql().unwrap(), 1)
+            .await
+        {
             Ok(result) => WorkflowPlan::from_explain(&result),
             Err(error) => WorkflowPlan::failed(error),
         }

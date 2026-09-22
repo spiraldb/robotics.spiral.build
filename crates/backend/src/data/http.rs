@@ -1,6 +1,8 @@
-//! HTTP endpoints for queries.
+//! HTTP endpoints for datasets and queries.
 
-use crate::http::delivery::{ApiJson, ArrowResponse, HttpFailure, ScopedProject};
+use super::query::QueryCommand;
+use crate::OperationError;
+use crate::http::delivery::{ApiJson, ArrowResponse, Project};
 use crate::projects::context::StudioContext;
 
 use axum::{
@@ -8,23 +10,24 @@ use axum::{
     routing::{get, post},
 };
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetSelection, DatasetSummary, ProjectResource,
+    DatasetInspection, DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetSummary,
+    DatasetTopic, EpisodeCoverageRequest, EpisodeSelection, HuggingFaceDatasetImportSummary,
+    HuggingFaceDatasetInspection, HuggingFaceDatasetSource, ProjectResource, StreamCoverage,
 };
-use spiral_robotics_common::datasets::{
-    HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
+use spiral_robotics_common::relations::{
+    EpisodeQueryRequest, QueryRequest, RelationCatalog, SpiralQuerySnapshot,
 };
-use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQuerySnapshot};
+use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
 pub(crate) struct DatasetQueryEndpoints;
 
 impl DatasetQueryEndpoints {
-    pub(crate) fn router() -> Router<StudioContext> {
+    pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
             .route("/datasets", get(Self::datasets))
             .route("/data-catalog", get(Self::project_resources))
             .route("/datasets/inspect", post(Self::inspect_dataset))
             .route("/datasets/robot", post(Self::dataset_robot))
-            .route("/datasets/robot/save", post(Self::save_dataset_robot))
             .route("/datasets/episode-topics", post(Self::episode_topics))
             .route("/datasets/episode-coverage", post(Self::episode_coverage))
             .route("/relations", get(Self::relation_catalog))
@@ -38,94 +41,159 @@ impl DatasetQueryEndpoints {
                 "/datasets/hugging-face/inspect",
                 post(Self::inspect_hugging_face_dataset),
             )
+    }
+    pub(crate) fn commands() -> Router<StudioContext> {
+        Router::new()
+            .route("/datasets/robot/save", post(Self::save_dataset_robot))
             .route(
                 "/datasets/hugging-face/import",
                 post(Self::import_hugging_face_dataset),
             )
     }
     async fn project_resources(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-    ) -> Result<Json<Vec<ProjectResource>>, HttpFailure> {
-        Ok(Json(commands.project_resources().await?))
+        Project(project): Project,
+    ) -> Result<Json<Vec<ProjectResource>>, OperationError> {
+        let resources = project
+            .storage()
+            .project_resources()
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(resources))
     }
     async fn dataset_robot(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        Project(project): Project,
         ApiJson(selection): ApiJson<DatasetSelection>,
-    ) -> Result<Json<Option<spiral_robotics_common::datasets::DatasetRobot>>, HttpFailure> {
-        Ok(Json(commands.dataset_robot(selection).await?))
+    ) -> Result<Json<Option<DatasetRobot>>, OperationError> {
+        let robot = project
+            .storage()
+            .dataset_robot(selection)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(robot))
     }
     async fn save_dataset_robot(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(save): ApiJson<spiral_robotics_common::datasets::DatasetRobotSave>,
-    ) -> Result<Json<()>, HttpFailure> {
-        Ok(Json(commands.save_dataset_robot(save).await?))
+        Project(project): Project,
+        ApiJson(save): ApiJson<DatasetRobotSave>,
+    ) -> Result<Json<()>, OperationError> {
+        project
+            .storage()
+            .save_dataset_robot(save)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(()))
     }
     async fn datasets(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-    ) -> Result<Json<Vec<DatasetSummary>>, HttpFailure> {
-        Ok(Json(commands.datasets().await?))
+        Project(project): Project,
+    ) -> Result<Json<Vec<DatasetSummary>>, OperationError> {
+        let datasets = project
+            .storage()
+            .datasets()
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(datasets))
     }
     async fn inspect_dataset(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        Project(project): Project,
         ApiJson(selection): ApiJson<DatasetSelection>,
-    ) -> Result<Json<DatasetInspection>, HttpFailure> {
-        Ok(Json(commands.inspect_dataset(selection).await?))
+    ) -> Result<Json<DatasetInspection>, OperationError> {
+        let inspection = project
+            .storage()
+            .inspect_dataset(selection)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(inspection))
     }
-
     async fn episode_topics(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeSelection>,
-    ) -> Result<Json<Vec<spiral_robotics_common::datasets::DatasetTopic>>, HttpFailure> {
-        Ok(Json(commands.episode_topics(request).await?))
+        Project(project): Project,
+        ApiJson(request): ApiJson<EpisodeSelection>,
+    ) -> Result<Json<Vec<DatasetTopic>>, OperationError> {
+        let topics = project
+            .storage()
+            .episode_topics(request)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(topics))
     }
-
     async fn episode_coverage(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::datasets::EpisodeCoverageRequest>,
-    ) -> Result<Json<Vec<spiral_robotics_common::datasets::StreamCoverage>>, HttpFailure> {
-        Ok(Json(commands.episode_coverage(request).await?))
+        Project(project): Project,
+        ApiJson(request): ApiJson<EpisodeCoverageRequest>,
+    ) -> Result<Json<Vec<StreamCoverage>>, OperationError> {
+        let coverage = project
+            .storage()
+            .episode_coverage(request)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(coverage))
     }
-
     async fn relation_catalog(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-    ) -> Result<Json<RelationCatalog>, HttpFailure> {
-        let result = commands.relations().await?;
-        Ok(Json(result))
+        Project(project): Project,
+    ) -> Result<Json<RelationCatalog>, OperationError> {
+        let catalog = project
+            .storage()
+            .queries()
+            .relation_catalog()
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(catalog))
     }
     async fn run_spiral_query(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        Project(project): Project,
         ApiJson(request): ApiJson<QueryRequest>,
-    ) -> Result<Json<SpiralQuerySnapshot>, HttpFailure> {
-        let (statement, max_rows) = request.into_parts();
-        let result = commands.query(statement, max_rows).await?;
-        Ok(Json(result))
+    ) -> Result<Json<SpiralQuerySnapshot>, OperationError> {
+        let query = QueryCommand::admitted(request)?;
+        let snapshot = project
+            .storage()
+            .queries()
+            .query(query.statement(), query.max_rows())
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(snapshot))
     }
     async fn run_episode_query(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::relations::EpisodeQueryRequest>,
-    ) -> Result<Json<SpiralQuerySnapshot>, HttpFailure> {
-        Ok(Json(commands.query_for_episode(request).await?))
+        Project(project): Project,
+        ApiJson(request): ApiJson<EpisodeQueryRequest>,
+    ) -> Result<Json<SpiralQuerySnapshot>, OperationError> {
+        let request = QueryCommand::admitted_for_episode(request)?;
+        let snapshot = project
+            .storage()
+            .queries()
+            .query_for_episode(&request)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(snapshot))
     }
     async fn run_episode_arrow_query(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::relations::EpisodeQueryRequest>,
-    ) -> Result<ArrowResponse, HttpFailure> {
-        Ok(ArrowResponse(
-            commands.query_for_episode_arrow(request).await?,
-        ))
+        Project(project): Project,
+        ApiJson(request): ApiJson<EpisodeQueryRequest>,
+    ) -> Result<ArrowResponse, OperationError> {
+        let stream = project
+            .storage()
+            .queries()
+            .arrow_for_episode(&request)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(ArrowResponse(stream))
     }
     async fn inspect_hugging_face_dataset(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
         ApiJson(request): ApiJson<HuggingFaceDatasetSource>,
-    ) -> Result<Json<HuggingFaceDatasetInspection>, HttpFailure> {
-        let result = commands.inspect_hugging_face_dataset(request).await?;
-        Ok(Json(result))
+    ) -> Result<Json<HuggingFaceDatasetInspection>, OperationError> {
+        let inspection = HuggingFaceDatasetInspection::discover(request)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(inspection))
     }
     async fn import_hugging_face_dataset(
-        ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
+        Project(project): Project,
         ApiJson(request): ApiJson<HuggingFaceDatasetSource>,
-    ) -> Result<Json<HuggingFaceDatasetImportSummary>, HttpFailure> {
-        let result = commands.import_hugging_face_dataset(request).await?;
-        Ok(Json(result))
+    ) -> Result<Json<HuggingFaceDatasetImportSummary>, OperationError> {
+        let inspection = HuggingFaceDatasetInspection::discover(request)
+            .await
+            .map_err(OperationError::External)?;
+        let summary = project
+            .storage()
+            .import_huggingface_dataset(inspection)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(summary))
     }
 }

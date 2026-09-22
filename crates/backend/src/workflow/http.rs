@@ -1,6 +1,6 @@
 //! Documents and runs; no remote editor session.
-use super::commands::WorkflowCommands;
-use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
+use crate::OperationError;
+use crate::http::delivery::{ApiJson, ApiPath, Project};
 use crate::projects::context::StudioContext;
 use axum::{
     Json, Router,
@@ -15,41 +15,43 @@ use spiral_robotics_common::{
 };
 pub(crate) struct WorkflowEndpoints;
 impl WorkflowEndpoints {
-    pub(crate) fn router() -> Router<StudioContext> {
+    pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
             .route("/workflows", get(Self::list))
             .route("/workflows/{id}", get(Self::load))
-            .route("/workflows/save", post(Self::save))
-            .route("/workflow-runs", post(Self::run))
             .route("/datasets/cameras", post(Self::cameras))
     }
-    async fn list(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
-    ) -> Result<Json<Vec<WorkflowSummary>>, HttpFailure> {
-        Ok(Json(commands.list().await?))
+    /// A run is a command: stopping the browser does not cancel an admitted query.
+    pub(crate) fn commands() -> Router<StudioContext> {
+        Router::new()
+            .route("/workflows/save", post(Self::save))
+            .route("/workflow-runs", post(Self::run))
+    }
+    async fn list(Project(project): Project) -> Result<Json<Vec<WorkflowSummary>>, OperationError> {
+        Ok(Json(project.workflow().list().await?))
     }
     async fn load(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        Project(project): Project,
         ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<WorkflowDocument>, HttpFailure> {
-        Ok(Json(commands.load(&id).await?))
+    ) -> Result<Json<WorkflowDocument>, OperationError> {
+        Ok(Json(project.workflow().load(&id).await?))
     }
     async fn save(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        Project(project): Project,
         ApiJson(document): ApiJson<WorkflowDocument>,
-    ) -> Result<Json<WorkflowDocument>, HttpFailure> {
-        Ok(Json(commands.save(document).await?))
+    ) -> Result<Json<WorkflowDocument>, OperationError> {
+        Ok(Json(project.workflow().save(document).await?))
     }
     async fn run(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        Project(project): Project,
         ApiJson(workflow): ApiJson<WorkflowSpec>,
-    ) -> Result<Json<WorkflowRun>, HttpFailure> {
-        Ok(Json(commands.run(workflow).await?))
+    ) -> Result<Json<WorkflowRun>, OperationError> {
+        Ok(Json(project.workflow().run(workflow).await?))
     }
     async fn cameras(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
+        Project(project): Project,
         ApiJson(selection): ApiJson<DatasetSelection>,
-    ) -> Result<Json<serde_json::Value>, HttpFailure> {
-        Ok(Json(commands.cameras(selection).await?))
+    ) -> Result<Json<serde_json::Value>, OperationError> {
+        Ok(Json(project.workflow().cameras(selection).await?))
     }
 }

@@ -90,29 +90,25 @@ impl MessageRead {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageCursor {
-    time: String,
-    chunk: String,
+    time: u64,
+    chunk: u64,
     ordinal: u32,
 }
 impl MessageCursor {
-    pub fn new(time: u64, chunk: u64, ordinal: u32) -> Self {
+    pub const fn new(time: u64, chunk: u64, ordinal: u32) -> Self {
         Self {
-            time: time.to_string(),
-            chunk: chunk.to_string(),
+            time,
+            chunk,
             ordinal,
         }
     }
-    pub fn time(&self) -> Result<u64, String> {
+    pub const fn time(&self) -> u64 {
         self.time
-            .parse()
-            .map_err(|_| "Invalid message cursor timestamp".into())
     }
-    pub fn chunk(&self) -> Result<u64, String> {
+    pub const fn chunk(&self) -> u64 {
         self.chunk
-            .parse()
-            .map_err(|_| "Invalid message cursor chunk offset".into())
     }
-    pub fn ordinal(&self) -> u32 {
+    pub const fn ordinal(&self) -> u32 {
         self.ordinal
     }
 }
@@ -120,8 +116,8 @@ impl MessageCursor {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageWindow {
-    start: String,
-    end: String,
+    start: u64,
+    end: u64,
     fields: Vec<Vec<String>>,
     after: Option<MessageCursor>,
     limit: usize,
@@ -129,8 +125,8 @@ pub struct MessageWindow {
 impl MessageWindow {
     pub fn new(bounds: (u64, u64), fields: Vec<Vec<String>>) -> Self {
         Self {
-            start: bounds.0.to_string(),
-            end: bounds.1.to_string(),
+            start: bounds.0,
+            end: bounds.1,
             fields,
             after: None,
             limit: 2048,
@@ -176,8 +172,8 @@ impl MessageWindow {
         let (start, end) = self.bounds()?;
         let after = match &self.after {
             Some(cursor) => {
-                let time = cursor.time()?;
-                let chunk = cursor.chunk()?;
+                let time = cursor.time();
+                let chunk = cursor.chunk();
                 format!(
                     " AND (log_time > {time} OR (log_time = {time} AND (chunk_start_offset > {chunk} OR (chunk_start_offset = {chunk} AND sample_ordinal > {}))))",
                     cursor.ordinal()
@@ -191,11 +187,7 @@ impl MessageWindow {
         ))
     }
     pub fn bounds(&self) -> Result<(u64, u64), String> {
-        let start = self
-            .start
-            .parse::<u64>()
-            .map_err(|_| "Invalid window start")?;
-        let end = self.end.parse::<u64>().map_err(|_| "Invalid window end")?;
+        let (start, end) = (self.start, self.end);
         if start >= end || self.limit == 0 || self.limit > 4096 || self.fields.len() > 64 {
             return Err(
                 "Message reads require an ordered time window, 1–4096 rows and at most 64 fields"

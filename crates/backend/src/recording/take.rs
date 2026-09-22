@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use spiral_robotics_common::identity::DatasetId;
-use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo};
+use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingStart};
 use spiral_robotics_hardware::{CaptureClock, HardwareState, ModeSelection};
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter,
@@ -25,15 +25,18 @@ pub(super) struct TakeRequest {
     follower: String,
 }
 
-impl TakeRequest {
-    pub(super) fn new(dataset_id: String, (leader, follower): (String, String)) -> Self {
+impl From<RecordingStart> for TakeRequest {
+    fn from(request: RecordingStart) -> Self {
+        let (dataset_id, (leader, follower)) = request.into_parts();
         Self {
             dataset_id,
             leader,
             follower,
         }
     }
+}
 
+impl TakeRequest {
     fn validated(self) -> Result<Self, OperationError> {
         let dataset_id = DatasetId::try_from(self.dataset_id.as_str())
             .map(String::from)
@@ -74,10 +77,16 @@ impl<'a> TakeOperations<'a> {
         Self { state }
     }
 
-    /// Enter teleoperation, then open one take. Once teleoperation is entered,
-    /// any failure returns to idle; a failed rollback is reported, because an
+    /// Enter teleoperation, then open one take, and close it whenever the
+    /// control loop ends it on its own. Once teleoperation is entered, any
+    /// failure returns to idle; a failed rollback is reported, because an
     /// unnoticed live teleoperation session is safety-relevant.
     pub(super) async fn start(&self, request: TakeRequest) -> Result<EpisodeInfo, OperationError> {
+        self.state
+            .storage()
+            .validate_mcap_destination(&request.dataset_id)
+            .await
+            .map_err(OperationError::External)?;
         let mut take = self.state.recording_session().try_change()?;
         if take.is_open() || self.state.hardware().state().recording().is_some() {
             return Err(OperationError::conflict(
@@ -90,6 +99,12 @@ impl<'a> TakeOperations<'a> {
         match self.open(&request, sample_hz).await {
             Ok((summary, capture)) => {
                 take.open(OpenTake::new(summary.id().to_owned(), capture));
+                let (state, episode) = (self.state.clone(), summary.id().to_owned());
+                tokio::spawn(async move {
+                    TakeOperations::new(&state)
+                        .close_when_the_control_loop_ends(&episode)
+                        .await;
+                });
                 Ok(summary)
             }
             Err(error) => match self.set_mode(ModeSelection::Idle).await {
@@ -164,7 +179,7 @@ impl<'a> TakeOperations<'a> {
     /// Close `episode` when the control loop ends it on its own: a robot
     /// detaches, or the writer fails. An explicit stop closes it first, which
     /// makes this a no-op.
-    pub(super) async fn close_when_the_control_loop_ends(&self, episode: &str) {
+    async fn close_when_the_control_loop_ends(&self, episode: &str) {
         let shown = |state: &HardwareState| {
             state
                 .recording()
@@ -432,7 +447,8 @@ impl<'a> TakeOperations<'a> {
         let video_enabled = self
             .state
             .storage()
-            .load_studio_preferences()
+            .preferences()
+            .load()
             .await
             .map_err(OperationError::External)?
             .video()

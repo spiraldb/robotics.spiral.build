@@ -1,28 +1,49 @@
 //! Compose the feature-owned HTTP endpoints. No application behavior lives here.
 use super::delivery::HttpFailure;
+use crate::OperationError;
 use crate::projects::context::StudioContext;
 use axum::{
     Router,
+    extract::Request,
     http::{HeaderValue, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 pub(super) struct StudioApi;
 impl StudioApi {
+    /// Every feature splits its routes into reads and commands, and one rule
+    /// covers both: a read stays in its request, so Axum cancels it when the
+    /// caller disconnects; a command runs to completion regardless, so a
+    /// dropped connection never leaves a write or a hardware change half done.
     pub(super) fn router(studio: StudioContext) -> Router {
-        Router::new()
-            .merge(crate::projects::http::ProjectEndpoints::router())
-            .merge(crate::transport::http::TransportEndpoints::router())
-            .merge(crate::recording::http::RecordingEndpoints::router())
-            .merge(crate::training::http::TrainingEndpoints::router())
-            .merge(crate::workflow::http::WorkflowEndpoints::router())
-            .merge(crate::curation::http::CurationEndpoints::router())
-            .merge(crate::exploration::http::ExplorationEndpoints::router())
-            .merge(crate::robots::http::RobotEndpoints::router())
-            .merge(crate::data::settings_http::SettingsEndpoints::router())
-            .merge(crate::data::http::DatasetQueryEndpoints::router())
-            .merge(crate::data::project_download::ProjectDownload::router())
-            .merge(crate::robots::camera_preview::CameraPreview::router())
-            .merge(crate::rollout::http::RolloutEndpoints::router())
+        let reads = Router::new()
+            .merge(crate::transport::http::TransportEndpoints::reads())
+            .merge(crate::recording::http::RecordingEndpoints::reads())
+            .merge(crate::training::http::TrainingEndpoints::reads())
+            .merge(crate::workflow::http::WorkflowEndpoints::reads())
+            .merge(crate::curation::http::CurationEndpoints::reads())
+            .merge(crate::exploration::http::ExplorationEndpoints::reads())
+            .merge(crate::robots::http::RobotEndpoints::reads())
+            .merge(crate::data::settings_http::SettingsEndpoints::reads())
+            .merge(crate::data::http::DatasetQueryEndpoints::reads())
+            .merge(crate::data::project_download::ProjectDownload::reads())
+            .merge(crate::robots::camera_preview::CameraPreview::reads())
+            .merge(crate::rollout::http::RolloutEndpoints::reads());
+        let commands = Router::new()
+            .merge(crate::projects::http::ProjectEndpoints::commands())
+            .merge(crate::recording::http::RecordingEndpoints::commands())
+            .merge(crate::training::http::TrainingEndpoints::commands())
+            .merge(crate::workflow::http::WorkflowEndpoints::commands())
+            .merge(crate::curation::http::CurationEndpoints::commands())
+            .merge(crate::exploration::http::ExplorationEndpoints::commands())
+            .merge(crate::robots::http::RobotEndpoints::commands())
+            .merge(crate::data::settings_http::SettingsEndpoints::commands())
+            .merge(crate::data::http::DatasetQueryEndpoints::commands())
+            .merge(crate::rollout::http::RolloutEndpoints::commands())
+            .layer(middleware::from_fn(Self::run_to_completion));
+        reads
+            .merge(commands)
             .fallback(HttpFailure::not_found)
             .method_not_allowed_fallback(HttpFailure::method_not_allowed)
             .layer(SetResponseHeaderLayer::overriding(
@@ -30,6 +51,14 @@ impl StudioApi {
                 HeaderValue::from_static("no-store"),
             ))
             .with_state(studio)
+    }
+
+    async fn run_to_completion(request: Request, next: Next) -> Response {
+        tokio::spawn(next.run(request))
+            .await
+            .unwrap_or_else(|error| {
+                OperationError::Internal(format!("backend task failed: {error}")).into_response()
+            })
     }
 }
 #[cfg(test)]

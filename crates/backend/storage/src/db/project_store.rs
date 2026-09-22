@@ -424,7 +424,7 @@ impl ProjectStore {
         &self.catalog
     }
 
-    pub(crate) fn project_id(&self) -> String {
+    pub fn project_id(&self) -> String {
         self.connection_settings
             .project_id()
             .unwrap_or_default()
@@ -435,15 +435,15 @@ impl ProjectStore {
         self.connection_settings.clone()
     }
 
-    pub(crate) fn endpoint(&self) -> String {
+    pub fn endpoint(&self) -> String {
         self.connection_settings.endpoint().to_owned()
     }
 
-    pub(crate) fn spfs_endpoint(&self) -> String {
+    pub fn spfs_endpoint(&self) -> String {
         self.connection_settings.spfs_endpoint().to_owned()
     }
 
-    pub(crate) fn credentials(&self) -> Option<SpiralCredentials> {
+    pub fn credentials(&self) -> Option<SpiralCredentials> {
         self.connection_settings.credentials().cloned()
     }
 
@@ -466,7 +466,7 @@ impl ProjectStore {
         .any(|suffix| *name == format!("{}_{suffix}", self.table_prefix))
     }
 
-    pub(crate) fn table_prefix(&self) -> &str {
+    pub fn table_prefix(&self) -> &str {
         &self.table_prefix
     }
 
@@ -571,7 +571,7 @@ mod tests {
 }
 
 /// Connection configuration and managed-relation provisioning.
-pub(crate) struct ProjectDatabasePersistence<'a> {
+pub struct ProjectDatabasePersistence<'a> {
     project_store: &'a ProjectStore,
 }
 
@@ -580,7 +580,7 @@ impl<'a> ProjectDatabasePersistence<'a> {
         Self { project_store }
     }
 
-    pub(crate) async fn test(&self) -> (bool, String) {
+    pub async fn test(&self) -> (bool, String) {
         let endpoint = self.project_store.endpoint();
         let project = self.project_store.project_id();
         if project.is_empty() {

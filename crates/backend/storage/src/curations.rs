@@ -54,7 +54,7 @@ impl StoredCurationDocument {
     }
 }
 
-pub(crate) struct CurationPersistence<'a> {
+pub struct CurationPersistence<'a> {
     project_store: &'a crate::StudioProject,
 }
 
@@ -63,7 +63,7 @@ impl<'a> CurationPersistence<'a> {
         Self { project_store }
     }
 
-    pub(crate) async fn list(&self) -> Result<Vec<CurationSummary>, String> {
+    pub async fn list(&self) -> Result<Vec<CurationSummary>, String> {
         use crate::studio::curations as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
         let rows: Vec<(String, String)> = table::Entity::find()
@@ -82,10 +82,7 @@ impl<'a> CurationPersistence<'a> {
             .collect())
     }
 
-    pub(crate) async fn load(
-        &self,
-        curation_id: &str,
-    ) -> Result<Option<StoredCurationDocument>, String> {
+    pub async fn load(&self, curation_id: &str) -> Result<Option<StoredCurationDocument>, String> {
         use crate::studio::curations as table;
         use sea_orm::EntityTrait;
         let row = table::Entity::find_by_id((
@@ -100,7 +97,7 @@ impl<'a> CurationPersistence<'a> {
     }
 
     /// Revision 1 inserts; revision n replaces revision n-1 and nothing else.
-    pub(crate) async fn save(&self, document: &StoredCurationDocument) -> Result<bool, String> {
+    pub async fn save(&self, document: &StoredCurationDocument) -> Result<bool, String> {
         use crate::studio::curations as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
         let curation = document.curation();

@@ -85,9 +85,8 @@ impl TopicCoverageRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicCoverage {
     messages: u64,
-    /// Nanoseconds travel as strings so JavaScript never rounds them.
-    first_ns: Option<String>,
-    last_ns: Option<String>,
+    first_ns: Option<u64>,
+    last_ns: Option<u64>,
     buckets: Vec<u32>,
 }
 
@@ -115,32 +114,18 @@ impl TopicCoverage {
         let index = (offset * buckets as u128 / span).min(buckets as u128 - 1) as usize;
         self.buckets[index] = self.buckets[index].saturating_add(1);
         self.messages = self.messages.saturating_add(1);
-        let first = self
-            .first_ns
-            .as_deref()
-            .and_then(|value| value.parse::<u64>().ok());
-        if first.is_none_or(|first| log_time < first) {
-            self.first_ns = Some(log_time.to_string());
-        }
-        let last = self
-            .last_ns
-            .as_deref()
-            .and_then(|value| value.parse::<u64>().ok());
-        if last.is_none_or(|last| log_time > last) {
-            self.last_ns = Some(log_time.to_string());
-        }
+        self.first_ns = Some(self.first_ns.map_or(log_time, |first| first.min(log_time)));
+        self.last_ns = Some(self.last_ns.map_or(log_time, |last| last.max(log_time)));
     }
 
     pub const fn messages(&self) -> u64 {
         self.messages
     }
-    pub fn first_ns(&self) -> Option<u64> {
+    pub const fn first_ns(&self) -> Option<u64> {
         self.first_ns
-            .as_deref()
-            .and_then(|value| value.parse().ok())
     }
-    pub fn last_ns(&self) -> Option<u64> {
-        self.last_ns.as_deref().and_then(|value| value.parse().ok())
+    pub const fn last_ns(&self) -> Option<u64> {
+        self.last_ns
     }
     pub fn buckets(&self) -> &[u32] {
         &self.buckets
@@ -227,7 +212,5 @@ mod tests {
         assert_eq!(coverage.messages(), 6);
         assert_eq!(coverage.first_ns(), Some(999));
         assert_eq!(coverage.last_ns(), Some(1_400));
-        let json = serde_json::to_value(&coverage).unwrap();
-        assert_eq!(json["first_ns"], "999");
     }
 }

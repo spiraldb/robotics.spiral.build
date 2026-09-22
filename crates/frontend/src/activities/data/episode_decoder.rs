@@ -65,11 +65,7 @@ impl EncodedCamera {
             .packets()
             .iter()
             .map(|packet| {
-                let timestamp = packet
-                    .timestamp_ns()
-                    .parse::<u64>()
-                    .map_err(|_| "Invalid camera timestamp")?;
-                let relative = (i128::from(timestamp) - i128::from(start_ns)) / 1_000;
+                let relative = (i128::from(packet.timestamp_ns()) - i128::from(start_ns)) / 1_000;
                 Ok(CameraPacket {
                     microseconds: i64::try_from(relative)
                         .map_err(|_| "Camera timestamp exceeds playback range")?,

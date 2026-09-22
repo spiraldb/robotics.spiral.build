@@ -1,7 +1,6 @@
 //! What a request can reach: Studio-wide services, and the project it names.
 use crate::curation::manager::CurationManager;
 use crate::exploration::manager::ExplorationManager;
-use crate::projects::tasks::BackendTasks;
 use crate::projects::{OpenProject, ProjectRegistry};
 use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
@@ -15,20 +14,16 @@ use spiral_robotics_hardware::HardwareHandle;
 use spiral_robotics_storage::{StorageManager, episodes::RecordingBuffer};
 use std::sync::Arc;
 
-/// Services shared by every request: the open projects, the hardware they
-/// share, and the runtime that owns backend tasks.
+/// Services shared by every request: the open projects and the hardware
+/// they share.
 #[derive(Clone)]
 pub(crate) struct StudioContext {
     projects: Arc<ProjectRegistry>,
-    tasks: BackendTasks,
 }
 
 impl StudioContext {
     pub(crate) fn new(projects: Arc<ProjectRegistry>) -> Self {
-        Self {
-            projects,
-            tasks: BackendTasks::current(),
-        }
+        Self { projects }
     }
 
     pub(crate) fn open(&self, key: &ProjectKey) -> Result<ProjectContext, crate::OperationError> {
@@ -70,25 +65,6 @@ impl ProjectContext {
     /// settings change just opened.
     pub(crate) fn with_project(&self, project: Arc<OpenProject>) -> Self {
         self.studio.with_project(project)
-    }
-
-    pub(crate) fn tasks(&self) -> &BackendTasks {
-        &self.studio.tasks
-    }
-
-    /// Run a command to completion even if its HTTP caller disconnects.
-    pub(crate) async fn execute<Output, Work>(
-        &self,
-        command: impl FnOnce(Self) -> Work + Send + 'static,
-    ) -> Result<Output, crate::BackendCommandError>
-    where
-        Output: Send + 'static,
-        Work: std::future::Future<Output = Result<Output, crate::BackendCommandError>> + Send,
-    {
-        let state = self.clone();
-        self.tasks()
-            .execute(async move { command(state).await })
-            .await?
     }
 
     pub(crate) fn project(&self) -> &Arc<OpenProject> {

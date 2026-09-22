@@ -11,13 +11,11 @@ use axum::{
 };
 use spiral_robotics_common::project::ProjectKey;
 
-use crate::data::commands::DataCommands;
-
 pub(crate) struct ProjectDownload;
 
 impl ProjectDownload {
     /// Downloads stay HTTP so the browser can stream bytes to a native file.
-    pub(crate) fn router() -> Router<StudioContext> {
+    pub(crate) fn reads() -> Router<StudioContext> {
         Router::new().route("/project/export", get(Self::export_project))
     }
 
@@ -25,15 +23,15 @@ impl ProjectDownload {
         State(state): State<StudioContext>,
         Query(project): Query<ProjectKey>,
     ) -> Result<Response, (StatusCode, String)> {
-        let commands = DataCommands::from(
-            state
-                .open(&project)
-                .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?,
-        );
-        let bytes = commands
+        let project = state
+            .open(&project)
+            .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
+        let bytes = project
+            .storage()
+            .transfer()
             .export_project()
             .await
-            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
         Response::builder()
             .status(StatusCode::OK)
             .header(

@@ -176,7 +176,7 @@ impl SpiralSql {
 }
 
 /// Read-only query and catalog operations over one project store.
-pub(crate) struct ProjectQueries<'a> {
+pub struct ProjectQueries<'a> {
     project_store: &'a ProjectStore,
 }
 
@@ -185,11 +185,7 @@ impl<'a> ProjectQueries<'a> {
         Self { project_store }
     }
 
-    pub(crate) async fn query(
-        &self,
-        sql: &str,
-        max_rows: usize,
-    ) -> Result<SpiralQuerySnapshot, String> {
+    pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQuerySnapshot, String> {
         SpiralSql::ensure_read_only(sql, ReadOnlyQueryMode::Preview)?;
         let mut connection = self.project_store.connect().await?;
         QueryExecution::new(
@@ -202,7 +198,7 @@ impl<'a> ProjectQueries<'a> {
 
     /// The same bounded read, scoped to one exact dataset member through a
     /// bound UUID parameter (`$1`).
-    pub(crate) async fn query_for_episode(
+    pub async fn query_for_episode(
         &self,
         request: &EpisodeQueryRequest,
     ) -> Result<SpiralQuerySnapshot, String> {
@@ -226,7 +222,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// The same episode read as one Arrow IPC stream, exact to the value.
-    pub(crate) async fn arrow_for_episode(
+    pub async fn arrow_for_episode(
         &self,
         request: &EpisodeQueryRequest,
     ) -> Result<Vec<u8>, String> {
@@ -246,7 +242,7 @@ impl<'a> ProjectQueries<'a> {
             .await
     }
 
-    pub(crate) async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
+    pub async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
         let project = self.project_store.project_id();
         if project.is_empty() {
             return Ok(

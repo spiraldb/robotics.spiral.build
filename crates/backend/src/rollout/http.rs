@@ -1,5 +1,6 @@
 //! Rollout endpoints.
-use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
+use crate::OperationError;
+use crate::http::delivery::{ApiJson, ApiPath, Project};
 use crate::projects::context::StudioContext;
 use axum::{
     Json, Router,
@@ -8,39 +9,53 @@ use axum::{
 use spiral_robotics_common::rollout::{RolloutConfig, RolloutSnapshot};
 pub(crate) struct RolloutEndpoints;
 impl RolloutEndpoints {
-    pub(crate) fn router() -> Router<StudioContext> {
+    pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
-            .route(
-                "/rollout-runs",
-                get(Self::fetch_rollout).post(Self::start_rollout),
-            )
+            .route("/rollout-runs", get(Self::fetch_rollout))
             .route("/rollout-runs/{id}", get(Self::fetch_run))
+    }
+    pub(crate) fn commands() -> Router<StudioContext> {
+        Router::new()
+            .route("/rollout-runs", post(Self::start_rollout))
             .route("/rollout-runs/{id}/stop", post(Self::stop_rollout))
     }
     async fn start_rollout(
-        ScopedProject(commands): ScopedProject<crate::rollout::commands::RolloutCommands>,
+        Project(project): Project,
         ApiJson(config): ApiJson<RolloutConfig>,
-    ) -> Result<Json<RolloutSnapshot>, HttpFailure> {
-        let result = commands.start_rollout(config).await?;
-        Ok(Json(result))
+    ) -> Result<Json<RolloutSnapshot>, OperationError> {
+        let config = project.training().admit_rollout(config).await?;
+        let snapshot = project
+            .rollout()
+            .start(config)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(snapshot))
     }
     async fn stop_rollout(
-        ScopedProject(commands): ScopedProject<crate::rollout::commands::RolloutCommands>,
+        Project(project): Project,
         ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<()>, HttpFailure> {
-        commands.stop_rollout(id).await?;
+    ) -> Result<Json<()>, OperationError> {
+        project
+            .rollout()
+            .stop(&id)
+            .await
+            .map_err(OperationError::External)?;
         Ok(Json(()))
     }
     async fn fetch_rollout(
-        ScopedProject(commands): ScopedProject<crate::rollout::commands::RolloutCommands>,
-    ) -> Result<Json<Vec<RolloutSnapshot>>, HttpFailure> {
-        let result = commands.runs().await?;
-        Ok(Json(result))
+        Project(project): Project,
+    ) -> Result<Json<Vec<RolloutSnapshot>>, OperationError> {
+        let runs = project
+            .rollout()
+            .runs()
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(runs))
     }
     async fn fetch_run(
-        ScopedProject(commands): ScopedProject<crate::rollout::commands::RolloutCommands>,
+        Project(project): Project,
         ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<RolloutSnapshot>, HttpFailure> {
-        Ok(Json(commands.run(id).await?))
+    ) -> Result<Json<RolloutSnapshot>, OperationError> {
+        Ok(Json(project.rollout().run(&id).await?))
     }
 }

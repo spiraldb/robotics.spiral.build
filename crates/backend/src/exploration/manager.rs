@@ -24,13 +24,15 @@ impl ExplorationManager {
     pub(super) async fn list(&self) -> Result<Vec<ExplorationSummary>, OperationError> {
         self.storage
             .explorations()
+            .list()
             .await
             .map_err(OperationError::External)
     }
 
     pub(super) async fn load(&self, id: &str) -> Result<ExplorationDocument, OperationError> {
         self.storage
-            .load_exploration(id)
+            .explorations()
+            .load(id)
             .await
             .map_err(OperationError::External)?
             .ok_or_else(|| OperationError::NotFound("That exploration no longer exists.".into()))
@@ -50,7 +52,8 @@ impl ExplorationManager {
             .ok_or_else(|| OperationError::Internal("Exploration revision overflowed.".into()))?;
         if !self
             .storage
-            .save_exploration(&document)
+            .explorations()
+            .save(&document)
             .await
             .map_err(OperationError::External)?
         {

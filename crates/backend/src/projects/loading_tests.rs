@@ -67,14 +67,16 @@ async fn studio_loads_and_saves_without_opening_spiral() {
     fixture
         .session
         .storage()
-        .save_studio_preferences(&preferences)
+        .preferences()
+        .save(&preferences)
         .await
         .unwrap();
     assert_eq!(
         fixture
             .session
             .storage()
-            .load_studio_preferences()
+            .preferences()
+            .load()
             .await
             .unwrap()
             .training()
@@ -94,14 +96,15 @@ async fn studio_loads_and_saves_without_opening_spiral() {
         fixture
             .session
             .storage()
-            .load_training_history()
+            .training_history()
+            .load()
             .await
             .unwrap()
             .is_empty()
     );
     assert!(fixture.session.workflow().list().await.unwrap().is_empty());
     assert_eq!(fixture.spiral_calls.load(Ordering::SeqCst), 0);
-    let (available, _) = fixture.session.storage().test_spiral().await;
+    let (available, _) = fixture.session.storage().database().test().await;
     assert!(!available);
     assert_eq!(fixture.spiral_calls.load(Ordering::SeqCst), 1);
     fixture.shutdown().await;
@@ -113,7 +116,8 @@ async fn concurrent_rollout_reads_restore_history_without_resuming_motion_or_cal
     fixture
         .session
         .storage()
-        .save_rollout_session(
+        .rollout_sessions()
+        .save(
             &RolloutSnapshot::new(
                 Some("interrupted-session".into()),
                 Some("training-run".into()),

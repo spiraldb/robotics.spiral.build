@@ -1,61 +1,62 @@
 //! HTTP endpoints for training.
 
-use crate::http::delivery::{ApiJson, ApiPath, Created, HttpFailure, ScopedProject};
+use crate::OperationError;
+use crate::http::delivery::{ApiJson, ApiPath, Created, Project};
 use crate::projects::context::StudioContext;
 
 use axum::{
     Json, Router,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
 
 pub(crate) struct TrainingEndpoints;
 
 impl TrainingEndpoints {
-    pub(crate) fn router() -> Router<StudioContext> {
+    pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
-            .route(
-                "/training/runs",
-                get(Self::fetch_training).post(Self::start_training_run),
-            )
-            .route(
-                "/training/runs/{id}",
-                get(Self::fetch_run).delete(Self::delete_training_run),
-            )
+            .route("/training/runs", get(Self::fetch_training))
+            .route("/training/runs/{id}", get(Self::fetch_run))
+    }
+    pub(crate) fn commands() -> Router<StudioContext> {
+        Router::new()
+            .route("/training/runs", post(Self::start_training_run))
+            .route("/training/runs/{id}", delete(Self::delete_training_run))
             .route("/training/runs/{id}/stop", post(Self::stop_training_run))
     }
     async fn start_training_run(
-        ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,
+        Project(project): Project,
         ApiJson(config): ApiJson<TrainingConfig>,
-    ) -> Result<Created<TrainingRun>, HttpFailure> {
-        let result = commands.start_training_run(config).await?;
-        Ok(Created(result))
+    ) -> Result<Created<TrainingRun>, OperationError> {
+        Ok(Created(project.training().start(config).await?))
     }
     async fn stop_training_run(
-        ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,
+        Project(project): Project,
         ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<()>, HttpFailure> {
-        commands.stop_training_run(id).await?;
+    ) -> Result<Json<()>, OperationError> {
+        project.training().stop(&id).await?;
         Ok(Json(()))
     }
     async fn delete_training_run(
-        ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,
+        Project(project): Project,
         ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<()>, HttpFailure> {
-        commands.delete_training_run(id).await?;
+    ) -> Result<Json<()>, OperationError> {
+        let active_rollout = project.rollout().active_run_id();
+        project
+            .training()
+            .delete(&id, active_rollout.as_deref())
+            .await?;
         Ok(Json(()))
     }
-
     async fn fetch_training(
-        ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,
-    ) -> Result<Json<TrainingSnapshot>, HttpFailure> {
-        let result = commands.snapshot().await?;
-        Ok(Json(result))
+        Project(project): Project,
+    ) -> Result<Json<TrainingSnapshot>, OperationError> {
+        Ok(Json(project.training().catalog().await?))
     }
     async fn fetch_run(
-        ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,
+        Project(project): Project,
         ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<TrainingRun>, HttpFailure> {
-        Ok(Json(commands.run(id).await?))
+    ) -> Result<Json<TrainingRun>, OperationError> {
+        Ok(Json(project.training().run(&id).await?))
     }
 }

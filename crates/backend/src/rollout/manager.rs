@@ -471,7 +471,8 @@ impl RolloutManager {
         let current = self.snapshot();
         let mut runs = self
             .storage
-            .load_rollout_sessions()
+            .rollout_sessions()
+            .load()
             .await?
             .into_iter()
             .map(|stored| {
@@ -502,6 +503,16 @@ impl RolloutManager {
 
     pub(crate) fn snapshot(&self) -> RolloutSnapshot {
         self.lifecycle.state.borrow().clone()
+    }
+
+    /// The training run an active rollout executes; that run must not be deleted.
+    pub(crate) fn active_run_id(&self) -> Option<String> {
+        let snapshot = self.snapshot();
+        snapshot
+            .phase()
+            .active()
+            .then(|| snapshot.run_id().map(str::to_owned))
+            .flatten()
     }
 
     pub(super) async fn start(
@@ -567,7 +578,7 @@ impl RolloutManager {
     }
 
     async fn persist_current(&self) {
-        if let Err(error) = self.storage.save_rollout_session(&self.snapshot()).await {
+        if let Err(error) = self.storage.rollout_sessions().save(&self.snapshot()).await {
             tracing::error!("could not persist rollout state: {error}");
         }
     }
@@ -630,7 +641,8 @@ impl RolloutManager {
                 .map_err(|error| format!("checkpoint identity is invalid: {error}"))?;
         let policy_loader = HttpPolicyLoader::new(
             self.storage
-                .load_studio_preferences()
+                .preferences()
+                .load()
                 .await?
                 .training()
                 .endpoint(),

@@ -76,54 +76,12 @@ impl From<spiral_robotics_storage::episodes::EpisodeError> for OperationError {
     }
 }
 
-/// Failure returned by every backend command facade.
-#[derive(Debug)]
-pub(crate) struct BackendCommandError(OperationError);
-
-impl BackendCommandError {
-    pub(crate) fn invalid(message: impl Into<String>) -> Self {
-        Self(OperationError::invalid_input(message))
-    }
-}
-
-impl std::fmt::Display for BackendCommandError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.0, formatter)
-    }
-}
-
-impl std::error::Error for BackendCommandError {}
-
-impl From<OperationError> for BackendCommandError {
-    fn from(error: OperationError) -> Self {
-        Self(error)
-    }
-}
-
-impl From<String> for BackendCommandError {
-    fn from(message: String) -> Self {
-        Self(OperationError::External(message))
-    }
-}
-
-impl From<crate::projects::tasks::BackendTaskFailure> for BackendCommandError {
-    fn from(error: crate::projects::tasks::BackendTaskFailure) -> Self {
-        Self(OperationError::Internal(error.to_string()))
-    }
-}
-
-impl From<BackendCommandError> for CommandFailure {
-    fn from(error: BackendCommandError) -> Self {
-        error.0.into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn command_facades_preserve_error_categories() {
+    fn failures_preserve_error_categories() {
         for (error, expected, status) in [
             (
                 OperationError::IncompatibleWorkflow("arbitrary text".into()),
@@ -141,7 +99,7 @@ mod tests {
                 409,
             ),
         ] {
-            let failure = CommandFailure::from(BackendCommandError::from(error));
+            let failure = CommandFailure::from(error);
             assert_eq!(failure.code(), expected);
             assert_eq!(failure.code().http_status(), status);
             assert_eq!(failure.message(), "arbitrary text");

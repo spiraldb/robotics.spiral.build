@@ -7,7 +7,7 @@ use spiral_robotics_common::workflow::{WorkflowSpec, WorkflowSummary};
 
 use crate::db::StorageClock;
 
-pub(crate) struct WorkflowPersistence<'a> {
+pub struct WorkflowPersistence<'a> {
     project_store: &'a crate::StudioProject,
 }
 
@@ -16,7 +16,7 @@ impl<'a> WorkflowPersistence<'a> {
         Self { project_store }
     }
 
-    pub(crate) async fn list(&self) -> Result<Vec<WorkflowSummary>, String> {
+    pub async fn list(&self) -> Result<Vec<WorkflowSummary>, String> {
         use crate::studio::workflows as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
         let rows: Vec<(String, String)> = table::Entity::find()
@@ -35,10 +35,7 @@ impl<'a> WorkflowPersistence<'a> {
             .collect())
     }
 
-    pub(crate) async fn load(
-        &self,
-        workflow_id: &str,
-    ) -> Result<Option<StoredWorkflowDocument>, String> {
+    pub async fn load(&self, workflow_id: &str) -> Result<Option<StoredWorkflowDocument>, String> {
         use crate::studio::workflows as table;
         use sea_orm::EntityTrait;
         let row = table::Entity::find_by_id((
@@ -52,7 +49,7 @@ impl<'a> WorkflowPersistence<'a> {
             .transpose()
     }
 
-    pub(crate) async fn save(
+    pub async fn save(
         &self,
         workflow: &WorkflowSpec,
         contents: (&WorkflowJson, &WorkflowJson),

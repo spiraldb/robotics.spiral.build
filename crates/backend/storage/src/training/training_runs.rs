@@ -7,7 +7,7 @@ use spiral_robotics_common::training::{
 };
 
 /// Durable training-history operations for one project.
-pub(crate) struct TrainingHistoryPersistence<'a> {
+pub struct TrainingHistoryPersistence<'a> {
     project_store: &'a crate::StudioProject,
 }
 
@@ -16,7 +16,7 @@ impl<'a> TrainingHistoryPersistence<'a> {
         Self { project_store }
     }
 
-    pub(crate) async fn load(&self) -> Result<Vec<TrainingRun>, String> {
+    pub async fn load(&self) -> Result<Vec<TrainingRun>, String> {
         use crate::studio::training_runs as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
         let rows = table::Entity::find()
@@ -33,7 +33,7 @@ impl<'a> TrainingHistoryPersistence<'a> {
             .collect()
     }
 
-    pub(crate) async fn load_run(&self, id: &str) -> Result<Option<TrainingRun>, String> {
+    pub async fn load_run(&self, id: &str) -> Result<Option<TrainingRun>, String> {
         use crate::studio::training_runs as table;
         use sea_orm::EntityTrait;
         let row = table::Entity::find_by_id((self.project_store.key().to_owned(), id.to_owned()))
@@ -48,7 +48,7 @@ impl<'a> TrainingHistoryPersistence<'a> {
     }
 
     /// Rewrite one retained run in place, keeping its position.
-    pub(crate) async fn update_run(&self, run: &TrainingRun) -> Result<(), String> {
+    pub async fn update_run(&self, run: &TrainingRun) -> Result<(), String> {
         use crate::studio::training_runs as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, sea_query::Expr};
         let document = crate::studio::StoredDocument::encode(&StoredTrainingRun::stored(run))?;
@@ -66,7 +66,7 @@ impl<'a> TrainingHistoryPersistence<'a> {
         }
     }
 
-    pub(crate) async fn save(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
+    pub async fn save(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
         use crate::studio::training_runs as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
         let transaction = self

@@ -3,7 +3,7 @@
 use spiral_robotics_common::rollout::{RolloutMetrics, RolloutPhase, RolloutSnapshot};
 
 /// Durable rollout-session operations for one project.
-pub(crate) struct RolloutSessionPersistence<'a> {
+pub struct RolloutSessionPersistence<'a> {
     project_store: &'a crate::StudioProject,
 }
 
@@ -13,7 +13,7 @@ impl<'a> RolloutSessionPersistence<'a> {
     }
 
     /// Every recorded session, in identity order.
-    pub(crate) async fn load(&self) -> Result<Vec<RolloutSnapshot>, String> {
+    pub async fn load(&self) -> Result<Vec<RolloutSnapshot>, String> {
         use crate::studio::rollout_runs as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
         let rows = table::Entity::find()
@@ -32,7 +32,7 @@ impl<'a> RolloutSessionPersistence<'a> {
 
     /// Write `snapshot` under its session. A snapshot that never named a
     /// session has nothing durable to say.
-    pub(crate) async fn save(&self, snapshot: &RolloutSnapshot) -> Result<(), String> {
+    pub async fn save(&self, snapshot: &RolloutSnapshot) -> Result<(), String> {
         use crate::studio::rollout_runs as table;
         use sea_orm::{EntityTrait, Set};
         let Some(session) = StoredRolloutSession::stored(snapshot) else {

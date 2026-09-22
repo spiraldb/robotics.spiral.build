@@ -72,7 +72,8 @@ impl TrainingManager {
         let runs = self
             .inner
             .storage
-            .load_training_history()
+            .training_history()
+            .load()
             .await
             .map_err(OperationError::External)?;
         for run in runs.iter().filter(|run| run.phase().active()) {
@@ -251,10 +252,10 @@ impl TrainingManager {
         change: impl FnOnce(&mut TrainingSnapshot) -> Result<(), String>,
     ) -> Result<(), String> {
         let _write = self.inner.writes.lock().await;
-        let runs = self.inner.storage.load_training_history().await?;
+        let runs = self.inner.storage.training_history().load().await?;
         let mut history = TrainingSnapshot::new(TrainingReadiness::default(), runs);
         change(&mut history)?;
-        self.inner.storage.save_training_history(&history).await
+        self.inner.storage.training_history().save(&history).await
     }
 
     /// Change one stored run. Updates name their run, so they apply to a
@@ -268,7 +269,8 @@ impl TrainingManager {
         let run = self
             .inner
             .storage
-            .load_training_run(run_id)
+            .training_history()
+            .load_run(run_id)
             .await?
             .ok_or_else(|| format!("training run {run_id:?} is not in history"))?;
         let mut history = TrainingSnapshot::new(TrainingReadiness::default(), vec![run]);
@@ -277,13 +279,13 @@ impl TrainingManager {
             .runs()
             .first()
             .ok_or_else(|| format!("training run {run_id:?} was removed"))?;
-        self.inner.storage.update_training_run(run).await
+        self.inner.storage.training_history().update_run(run).await
     }
 
     async fn probe_readiness(&self) -> TrainingReadiness {
         let backend_probe = self.probe_backend();
         let spiral_probe = async {
-            tokio::time::timeout(Duration::from_secs(8), self.inner.storage.test_spiral())
+            tokio::time::timeout(Duration::from_secs(8), self.inner.storage.database().test())
                 .await
                 .unwrap_or_else(|_| {
                     (
@@ -306,8 +308,8 @@ impl TrainingManager {
             (_, Ok(_), Some(blocker)) => blocker.to_owned(),
             (_, Ok(backend), None) => format!(
                 "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
-                self.inner.storage.project_id(),
-                self.inner.storage.table_prefix(),
+                self.inner.storage.project_store().project_id(),
+                self.inner.storage.project_store().table_prefix(),
                 probe = backend.display_summary(),
             ),
         };
@@ -318,7 +320,7 @@ impl TrainingManager {
     /// runs start on. The blocking HTTP client is built inside the blocking
     /// task that uses it.
     async fn runtime_endpoint(&self) -> Result<String, String> {
-        let preferences = self.inner.storage.load_studio_preferences().await?;
+        let preferences = self.inner.storage.preferences().load().await?;
         Ok(preferences.training().endpoint().to_owned())
     }
 
@@ -618,11 +620,14 @@ impl RemoteJobMonitor {
 
     fn job_request(&self) -> TrainingJobRequest {
         let (storage, config) = (&self.manager.inner.storage, &self.config);
-        let credentials = storage.spiral_credentials();
+        let credentials = storage.project_store().credentials();
         let spiral = SpiralJobConnection::new(
-            SpiralServiceEndpoints::new(storage.spiral_endpoint(), storage.spiral_spfs_endpoint()),
-            storage.project_id(),
-            storage.table_prefix(),
+            SpiralServiceEndpoints::new(
+                storage.project_store().endpoint(),
+                storage.project_store().spfs_endpoint(),
+            ),
+            storage.project_store().project_id(),
+            storage.project_store().table_prefix(),
         )
         .with_credentials(
             credentials

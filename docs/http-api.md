@@ -11,8 +11,9 @@ schema or versioned contract.
    `project_id` name the project Studio starts with.
 2. Send `X-Spiral-Endpoint: <endpoint>` and `X-Spiral-Project: <project_id>` on
    project reads and commands. Omit the project header before a project is chosen;
-   Studio-only features such as robot setup still work. Studio-wide `/credentials`
-   and `/proxy` and `GET /settings/connection` need neither header.
+   Studio-only features such as robot setup still work. Studio-wide `/credentials`,
+   `/proxy`, `GET /settings/connection`, and `POST /datasets/hugging-face/inspect`
+   need neither header.
 3. The backend keeps no current project. A request may name any project on the
    saved endpoint, which the backend reaches with the saved credentials. A request
    naming another endpoint fails with `stale_project`; read the saved connection
@@ -69,12 +70,14 @@ slows down in background tabs and on failures, and never automatically retries a
 mutation. See [frontend fetch flow](frontend-fetch-flow.md) for intervals and
 state ownership.
 
-Backend task ownership is explicit: an abandoned asynchronous read is cancelled,
-and bounded backend reads time out after eight seconds. The browser's shared
-polling deadline is ten seconds. A command continues if its HTTP caller
-disappears. A timeout or dropped connection therefore does **not** prove that a
-command failed or was cancelled. Refresh state before deciding whether to issue
-another command; this API does not provide automatic mutation deduplication.
+Every route is a read or a command. A read is cancelled when its caller
+disconnects; the browser's shared ten-second polling deadline aborts the fetch,
+which drops the read. A cancelled query stops fetching its results, but a
+statement Spiral is already executing finishes there. A command runs to
+completion even if its HTTP caller disappears. A timeout or dropped connection
+therefore does **not** prove that a command failed or was cancelled. Refresh
+state before deciding whether to issue another command; this API does not
+provide automatic mutation deduplication.
 
 The named project is opened before JSON or upload bodies are consumed. A request
 keeps that project until its work completes; saving another project never
@@ -135,19 +138,15 @@ The frontend builds authenticated model requests using Studio-wide `/credentials
 and sends them through `/proxy`. It parses provider streams, owns retry decisions,
 conversation history, and tool execution. Disconnecting cancels the proxied request.
 
-## Endpoint inventory
+## Feature notes
 
-All paths below are relative to `/api`. Request and response names refer to types
-in `crates/common`. `—` means no request body.
+Paths are relative to `/api`. Each feature's routes are in its `http.rs`, and
+request and response types are in `crates/common`.
 
 ### External HTTP and credentials
 
-These endpoints are Studio-wide and work without the project headers. They do not select credentials or destinations based on a project.
-
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| GET | `/credentials` | — | StudioCredentials |
-| GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS | `/proxy?url=…` | Upstream method, headers, and raw body | Upstream HTTP status, relevant headers, and streamed body |
+`GET /credentials` and `/proxy?url=…` (any method) are Studio-wide and work without
+the project headers. They do not select credentials or destinations based on a project.
 
 `StudioCredentials` contains optional `llm` (`base_url`, `api_key`, `default_model`),
 `spiral` (`endpoint`, `spfs_endpoint`, `client_id`, `client_secret`), and
@@ -168,26 +167,7 @@ Provider-specific request construction, stream parsing, error handling, and
 retries belong to frontend clients. Native dataset queries and persistence keep
 their existing project APIs.
 
-### Project
-
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| POST | `/project/import` | Raw project bundle | ProjectImportSummary |
-| GET | `/recording/signals` | RecordingCursor (query) | RecordingWindow |
-
-### Training
-
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| POST | `/training/runs` | TrainingConfig | TrainingRun |
-| POST | `/training/runs/{id}/stop` | — | `null` |
-| DELETE | `/training/runs/{id}` | — | `null` |
-| POST | `/rollout-runs` | RolloutConfig | RolloutSnapshot |
-| POST | `/rollout-runs/{id}/stop` | — | `null` |
-| GET | `/training/runs` | — | TrainingSnapshot (bounded catalog) |
-| GET | `/training/runs/{id}` | — | TrainingRun (full bounded history) |
-| GET | `/rollout-runs` | — | Vec<RolloutSnapshot> |
-| GET | `/rollout-runs/{id}` | — | RolloutSnapshot |
+### Training and rollout
 
 Training selection and assembly of catalog/detail responses are frontend state.
 Rollout IDs are execution `session_id` values, distinct from their training `run_id`.
@@ -196,55 +176,14 @@ when Studio stopped reads as failed. Stop targets an exact ID.
 
 ### Recording sessions
 
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| POST | `/recording` | RecordingStart | EpisodeInfo |
-| POST | `/recording/stop` | RecordingFinish | EpisodeInfo |
-| PATCH | `/recording` | PauseUpdate | `null` |
-| DELETE | `/recording/takes/{id}` | — | `null` |
-| GET | `/recording/takes/{id}` | — | EpisodeInspectionSnapshot |
-| POST | `/recording/takes/{id}/camera` | RecordingCameraRequest | EpisodeVideo |
-
-Take IDs above refer to the current recording session. Published dataset content
-uses `/datasets/episode-topics` and episode queries with explicit
-dataset/member identities; no recording-header fallback exists.
-
-### Robots
-
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| GET | `/serial-ports` | — | Vec<SerialPortSummary> |
-| POST | `/cameras/refresh` | — | Vec<CameraStatus> |
-| GET | `/robots/telemetry` | — | TelemetryFrame |
-| GET | `/hardware/status` | — | HardwareStatus (mode, cameras, issues) |
-| GET | `/robots` | — | Vec<RobotSummary> |
-| POST | `/robots/save` | RobotDocumentSave | RobotSummary (includes complete document) |
-| GET | `/robots/{id}` | — | RobotSummary |
-| DELETE | `/robots/{id}` | — | `null` |
-| POST | `/robots/{id}/connect` | — | `null` |
-| POST | `/robots/{id}/disconnect` | — | `null` |
-| POST | `/robots/{id}/hold` | — | `null` |
-| POST | `/robots/{id}/release` | — | `null` |
-| POST | `/robots/{id}/goal` | RobotGoal | `null` |
-| POST | `/robots/{id}/calibration/start` | — | `null` |
-| POST | `/robots/{id}/calibration/finish` | — | RobotSummary |
-| POST | `/robots/{id}/calibration/cancel` | — | `null` |
-| POST | `/robots/{id}/calibration/reapply` | — | CalibrationApplication |
-| PUT | `/mode` | ModeSelection | `null` |
-
 RecordingStart contains `dataset_id`, `leader`, and `follower`. The browser picks
 the pair; the backend revalidates hardware admission before recording begins.
 
-### Settings
+Take IDs refer to the current recording session. Published dataset content
+uses `/datasets/episode-topics` and episode queries with explicit
+dataset/member identities; no recording-header fallback exists.
 
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| GET | `/settings/connection` | — | SpiralSettings (Studio-wide, no project headers) |
-| PUT | `/settings/connection` | SpiralConnectionUpdate | SpiralSettings |
-| GET | `/settings` | — | DataSettings |
-| PUT | `/settings` | SettingsUpdate | DataSettings |
-| POST | `/settings/spiral/test` | — | ConnectionTest |
-| POST | `/settings/training/test` | — | ConnectionTest |
+### Settings
 
 `SpiralConnectionUpdate.huggingface_token` is write-only: omitted or `null` keeps
 the saved token; a non-empty string replaces it; an empty string removes it.
@@ -253,26 +192,7 @@ the token in its local SQLite database and supplies it to the native ADBC
 database. Saving a changed token replaces the project connection through the
 normal settings lifecycle. Project exports and agent context do not contain it.
 
-### Queries
-
-The recording catalog uses `/recording-datasets`; `/datasets` lists Spiral dataset
-resources. These return distinct `RecordingDatasetSummary` and `DatasetSummary` contracts.
-
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| GET | `/data-catalog` | — | ProjectResource[] (actual namespace paths and resource kinds) |
-| GET | `/datasets` | — | DatasetSummary[] |
-| POST | `/datasets/inspect` | DatasetSelection | DatasetInspection |
-| POST | `/datasets/robot` | DatasetSelection | Saved DatasetRobot or `null`; read-only, with no model analysis |
-| POST | `/datasets/robot/save` | DatasetRobotSave (dataset, robot or `null`) | `null`; the browser resolves, validates, and attaches meshes first |
-| POST | `/datasets/episode-topics` | EpisodeSelection (dataset, episode_id) | DatasetTopic[] (topics with messages in the exact recording, with schema revisions and counts) |
-| POST | `/datasets/topic-coverage` | TopicCoverageRequest (MessageRead with a plain window, `buckets` 8–2048) | TopicCoverage (message total, first/last log time as strings, one count per bucket) |
-| GET | `/relations` | — | RelationCatalog |
-| POST | `/queries` | QueryRequest | SpiralQuerySnapshot |
-| POST | `/queries/episode` | EpisodeQueryRequest (episode selection, statement with `$1` bound to the episode UUID, max_rows) | SpiralQuerySnapshot |
-| POST | `/queries/episode/arrow` | EpisodeQueryRequest | `application/vnd.apache.arrow.stream`: the complete result, or an error past `max_rows` (at most 10,000) or 32 MiB; see [episode playback](episode-playback.md) |
-| POST | `/datasets/hugging-face/inspect` | HuggingFaceDatasetSource | HuggingFaceDatasetInspection |
-| POST | `/datasets/hugging-face/import` | HuggingFaceDatasetSource | HuggingFaceDatasetImportSummary |
+### Hugging Face import
 
 Dataset import accepts public Hugging Face repositories containing MCAP files. The
 request has `dataset_id`, `repository`, and optional `revision` (default `main`);
@@ -286,24 +206,7 @@ lists the dataset and source relation to create. Import uses Spiral's
 before committing. Existing targets are refused. It does not publish rows into a
 separate Studio dataset registry. Project snapshot restore is a separate operation.
 
-### Workflow
-
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| GET | `/workflows` | — | WorkflowSummary[] |
-| GET | `/workflows/{id}` | — | WorkflowDocument |
-| POST | `/workflows/save` | WorkflowDocument | WorkflowDocument (new saved revision) |
-| POST | `/workflow-runs` | WorkflowSpec | WorkflowRun (completed or failed) |
-| POST | `/datasets/cameras` | DatasetSelection | Dataset and camera inspection |
-
 ### Curation
-
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| GET | `/curations` | — | CurationSummary[] |
-| GET | `/curations/{id}` | — | CurationSpec |
-| POST | `/curations/save` | CurationSpec (stored revision) | CurationSpec (next revision) |
-| POST | `/curation-runs` | CurationSpec | CurationRun (completed or failed) |
 
 A curation is a typed recipe over one dataset (measurements, exclusion rules,
 transforms) compiled to one read-only query; see [curation](curation.md).
@@ -311,12 +214,6 @@ A run is one request that answers when the run ends, like a workflow run; the
 browser keeps the run list. Save is the only write and uses optimistic revisions.
 
 ### Explorations
-
-| Method | Path | Body or query | Response |
-| --- | --- | --- | --- |
-| GET | `/explorations` | — | ExplorationSummary[] |
-| GET | `/explorations/{id}` | — | ExplorationDocument |
-| POST | `/explorations/save` | ExplorationDocument (loaded revision) | ExplorationDocument (next revision) |
 
 An exploration is one opaque, versioned JSON payload per graph: the
 frontend owns its schema and `encoding` version, and the backend stores, lists,
@@ -328,11 +225,9 @@ bound, twice the payload limit so a document's JSON framing always fits.
 
 ## Files and media
 
-- `POST /project/import`: raw `.spiral-project` bytes with
-  `Content-Type: application/vnd.spiral-robotics.project` and the project header.
-  The backend enforces the 256 MiB limit against both the advertised length and
-  actual streamed bytes. The browser sends its native File without making a
-  project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
+- `POST /project/import`: raw `.spiral-project` bytes with the project header. A
+  body past 256 MiB fails with 413. The browser sends its native File without
+  making a project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
 - `GET /project/export?endpoint=...&project_id=...`: version 3 project bundle download, a ZIP
   containing exactly `studio.sqlite3` (project-scoped control records, no backend
   credentials) and `spiral.data` (MCAP sources and checkpoint artifacts).
@@ -353,28 +248,23 @@ There is no browser event stream or `/api/events` endpoint.
 
 ## Maintaining the boundary
 
-Each backend feature owns its application operations and HTTP adapter together:
-`training/{commands,http}.rs`, `rollout/{commands,http}.rs`,
-`robots/{commands,http}.rs`, and the corresponding recording, data, workflow, and
-project modules. `http/routes.rs` only composes these features.
+Each backend feature owns its HTTP adapter, `http.rs`, beside the code it calls:
+a manager for features with runtime state (training, rollout, workflow,
+curation, explorations), or an operations type over the request's
+`ProjectContext` (`robots/operations.rs`, `recording/take.rs`,
+`recording/catalog.rs`). Handlers extract the request, call that owner, and
+return its result; `OperationError` is the failure response. `Project` opens the
+project a request names, before its body is read.
 
-The dependency direction is delivery → application → project resources. Application
-operations take a transport-neutral `ProjectContext`; they never import Axum or
-HTTP state. The context retains the project a request named and the backend task
-executor. `projects/tasks.rs` owns cancellation versus command completion, and
-`recording/take.rs` opens, pauses, and closes a take, including one the control
-loop stops on its own.
-
-Each feature's HTTP adapter returns a plain Axum `Router` of its routes, and
-`http/routes.rs` merges them. `ScopedProject<Capability>` declares the required
-project-bound operation owner; `Created<T>` declares a 201 JSON response. A route
-that needs its own request bound sets it with Axum's `DefaultBodyLimit` layer, as
-`/explorations/save` does.
+Each adapter returns two plain Axum routers, `reads()` and `commands()`.
+`http/routes.rs` merges them and applies the one lifetime rule: commands run to
+completion in their own task, reads stay in the request. `Created<T>` declares a
+201 JSON response. A route that needs its own request bound sets it with Axum's
+`DefaultBodyLimit` layer, as `/explorations/save` and `/project/import` do.
 
 Shared message types live in the corresponding features of `crates/common`.
 Named responses stay named through application operations and UI presentation.
-Router tests send ordinary HTTP requests through the real router. Update this
-human-readable inventory when changing an endpoint.
+Router tests send ordinary HTTP requests through the real router.
 
 The frontend's feature clients live beside their consuming features, for example
 `activities/training/client.rs` and `settings/robots/client.rs`. Each owns request

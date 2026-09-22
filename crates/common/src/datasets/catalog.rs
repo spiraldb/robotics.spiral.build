@@ -218,7 +218,7 @@ impl ProjectResource {
     }
 }
 
-/// Encoded Annex B packets; nanoseconds travel as strings to preserve integer precision in JS.
+/// Encoded Annex B packets.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeVideo {
     codec: String,
@@ -238,13 +238,13 @@ impl EpisodeVideo {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct VideoPacket {
-    timestamp_ns: String,
+    timestamp_ns: u64,
     data: String,
     keyframe: bool,
 }
 impl VideoPacket {
-    pub fn timestamp_ns(&self) -> &str {
-        &self.timestamp_ns
+    pub const fn timestamp_ns(&self) -> u64 {
+        self.timestamp_ns
     }
     pub fn data(&self) -> &str {
         &self.data
@@ -254,7 +254,7 @@ impl VideoPacket {
     }
     pub fn new(timestamp_ns: u64, data: String, keyframe: bool) -> Self {
         Self {
-            timestamp_ns: timestamp_ns.to_string(),
+            timestamp_ns,
             data,
             keyframe,
         }

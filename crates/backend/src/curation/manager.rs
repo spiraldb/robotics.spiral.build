@@ -81,6 +81,7 @@ impl CurationManager {
         self.inner
             .storage
             .curations()
+            .list()
             .await
             .map_err(OperationError::External)
     }
@@ -88,7 +89,8 @@ impl CurationManager {
         let stored = self
             .inner
             .storage
-            .load_curation(id)
+            .curations()
+            .load(id)
             .await
             .map_err(OperationError::External)?
             .ok_or_else(|| {
@@ -129,7 +131,8 @@ impl CurationManager {
         let stored_revision = self
             .inner
             .storage
-            .load_curation(curation.id())
+            .curations()
+            .load(curation.id())
             .await
             .map_err(OperationError::External)?
             .map_or(0, |stored| stored.curation().revision());
@@ -147,7 +150,8 @@ impl CurationManager {
         if !self
             .inner
             .storage
-            .save_curation(&document)
+            .curations()
+            .save(&document)
             .await
             .map_err(OperationError::External)?
         {

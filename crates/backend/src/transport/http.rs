@@ -17,7 +17,7 @@ use std::{str::FromStr, time::Duration};
 pub(crate) struct TransportEndpoints;
 
 impl TransportEndpoints {
-    pub(crate) fn router() -> Router<StudioContext> {
+    pub(crate) fn reads() -> Router<StudioContext> {
         let relayed = MethodFilter::GET
             .or(MethodFilter::POST)
             .or(MethodFilter::PUT)

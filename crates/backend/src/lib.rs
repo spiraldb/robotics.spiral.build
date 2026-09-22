@@ -23,6 +23,5 @@ mod training;
 mod transport;
 mod workflow;
 
-pub(crate) use error::BackendCommandError;
 pub(crate) use error::OperationError;
 pub use http::server::StudioServer;
