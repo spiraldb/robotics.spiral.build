@@ -335,8 +335,8 @@ impl ServerStartup {
             if let Err(error) = hardware.shutdown().await {
                 tracing::error!("hardware shutdown did not verify every motor release: {error}");
             }
-            crate::recording::supervisor::RecordingSupervisor::new(cleanup_state)
-                .finish_stale_video_capture()
+            crate::recording::take::TakeOperations::new(&cleanup_state)
+                .close_ended(None)
                 .await;
             let camera_result = tokio::task::spawn_blocking({
                 let cameras = cameras.clone();

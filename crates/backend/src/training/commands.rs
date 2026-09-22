@@ -34,11 +34,11 @@ impl TrainingCommands {
         self.state
             .execute(move |state, activity| async move {
                 state.preferences().load().await?;
-                state.training().ensure_loaded(activity).await?;
+                state.training().ensure_loaded(activity.clone()).await?;
                 state.require_catalog_ready()?;
                 state
                     .training()
-                    .start_validated(config)
+                    .start(config, activity)
                     .await
                     .map_err(Into::into)
             })
@@ -50,11 +50,7 @@ impl TrainingCommands {
             .execute(move |state, activity| async move {
                 state.preferences().load().await?;
                 state.training().ensure_loaded(activity).await?;
-                state
-                    .training()
-                    .stop(&id)
-                    .await
-                    .map_err(|error| crate::OperationError::conflict(error).into())
+                state.training().stop(&id).await.map_err(Into::into)
             })
             .await
     }
@@ -72,7 +68,7 @@ impl TrainingCommands {
                     .flatten();
                 state
                     .training()
-                    .delete_inactive(&id, active_rollout)
+                    .delete(&id, active_rollout)
                     .await
                     .map_err(Into::into)
             })

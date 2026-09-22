@@ -16,7 +16,6 @@ mod http;
 mod project_admission;
 mod project_session;
 mod recording;
-mod recording_session;
 mod robotics;
 mod robots;
 mod rollout;

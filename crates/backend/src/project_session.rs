@@ -27,7 +27,7 @@ use crate::curation::manager::CurationManager;
 use crate::data::catalog_lease::CatalogMutationLease;
 use crate::data::settings::{DataSettingsUpdate, UpdateDataSettingsCommand};
 use crate::project_admission::{ProjectActivity, ProjectAdmissionGate, ProjectTransition};
-use crate::recording_session::RecordingSessionManager;
+use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
 use crate::robots::workspace::RobotWorkspace;
@@ -110,7 +110,7 @@ pub(crate) struct ProjectSession {
     catalog: ProjectCatalog,
     activities: ProjectActivities,
     preferences: Arc<crate::data::preferences::RuntimePreferences>,
-    recording: Arc<RecordingSessionManager>,
+    recording: Arc<RecordingSession>,
     readiness: ProjectReadiness,
 }
 
@@ -203,7 +203,6 @@ impl ProjectSessionFactory {
         let training = Arc::new(TrainingManager::new(
             storage.clone(),
             Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
-            self.admission.clone(),
         ));
         let workflow = Arc::new(WorkflowManager::new(storage.clone()));
         let curation = Arc::new(CurationManager::new(storage.clone()));
@@ -216,7 +215,7 @@ impl ProjectSessionFactory {
             ),
             preferences.clone(),
         );
-        let recording = Arc::new(RecordingSessionManager::new(lease.clone()));
+        let recording = Arc::new(RecordingSession::default());
         Arc::new(ProjectSession {
             info,
             catalog: ProjectCatalog {
@@ -323,7 +322,7 @@ impl ProjectSession {
     fn preferences(&self) -> &Arc<crate::data::preferences::RuntimePreferences> {
         &self.preferences
     }
-    fn recording(&self) -> &Arc<RecordingSessionManager> {
+    fn recording(&self) -> &Arc<RecordingSession> {
         &self.recording
     }
     fn readiness(&self) -> &ProjectReadiness {
@@ -391,7 +390,7 @@ impl ProjectSession {
 
     fn busy(&self) -> bool {
         self.catalog_lease().is_held()
-            || self.recording().episode().is_some()
+            || self.recording().active()
             || self
                 .training()
                 .snapshot()

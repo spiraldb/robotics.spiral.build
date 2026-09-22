@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::rollout::{MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig};
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
-use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
+use spiral_robotics_common::training::{TrainingConfig, TrainingSnapshot};
 
 use crate::OperationError;
 use crate::rollout::service::{MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration};
@@ -46,28 +46,6 @@ impl ActTrainingResourceEstimate {
 }
 
 impl TrainingManager {
-    pub(super) async fn start_validated(
-        &self,
-        command: TrainingConfig,
-    ) -> Result<TrainingRun, OperationError> {
-        if let Some(reason) = command.policy().mcap_training_blocker() {
-            return Err(OperationError::Conflict(reason.into()));
-        }
-        self.start(command.validated()?)
-            .await
-            .map_err(OperationError::conflict)
-    }
-
-    pub(super) async fn delete_inactive(
-        &self,
-        run_id: &str,
-        active_rollout: Option<&str>,
-    ) -> Result<(), OperationError> {
-        let snapshot = self.snapshot();
-        let run_id = Self::admitted_deletion(&snapshot, active_rollout, run_id)?;
-        self.delete(&run_id).await.map_err(OperationError::External)
-    }
-
     pub(crate) fn admit_rollout(
         &self,
         command: RolloutConfig,
@@ -75,7 +53,7 @@ impl TrainingManager {
         Self::admitted_rollout(&self.snapshot(), command)
     }
 
-    fn admitted_deletion(
+    pub(super) fn admitted_deletion(
         snapshot: &TrainingSnapshot,
         active_rollout: Option<&str>,
         run_id: &str,
@@ -168,7 +146,7 @@ impl TrainingManager {
 /// The configuration already carries every value an operator can set; these
 /// rules decide whether that combination may start a run. Keeping them on the
 /// configuration means no second copy has to exist to hold them.
-trait StartTrainingAdmission: Sized {
+pub(super) trait StartTrainingAdmission: Sized {
     fn normalize_identifiers(&mut self);
     fn estimated_act_resource_bytes(&self, runtime_image_bytes: usize) -> Option<usize>;
     fn validated(self) -> Result<Self, OperationError>;
@@ -424,7 +402,7 @@ impl StartTrainingAdmission for TrainingConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRunPhase};
+    use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, TrainingRunPhase};
 
     fn rollout_command() -> RolloutConfig {
         RolloutConfig::new("run-1", 20_000, "follower").with_duration(30)

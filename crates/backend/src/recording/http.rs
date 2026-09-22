@@ -95,7 +95,11 @@ impl RecordingEndpoints {
     ) -> Result<Json<()>, HttpFailure> {
         let (episode, robot, source_arm, start_seconds) = request.into_parts();
         commands
-            .start_replay(episode, robot, source_arm, start_seconds)
+            .start_replay(crate::recording::replay::StartReplayCommand::new(
+                (episode, robot),
+                source_arm,
+                start_seconds,
+            ))
             .await?;
         Ok(Json(()))
     }

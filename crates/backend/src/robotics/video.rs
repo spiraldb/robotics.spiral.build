@@ -552,8 +552,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_pause_preserves_finished_packets_errors_and_pending_encoders() {
-        use crate::data::catalog_lease::CatalogMutationLease;
-        use crate::recording_session::RecordingSessionManager;
         use std::future::Future as _;
         use std::task::{Context, Waker};
 
@@ -590,12 +588,7 @@ mod tests {
             tasks: VecDeque::from([encoded, failed, waiting]),
             failures: Vec::new(),
         });
-        let lease = Arc::new(CatalogMutationLease::default());
-        let session = Arc::new(RecordingSessionManager::new(lease.clone()));
-        let token = session.reserve_start(|| false).unwrap().unwrap();
-        session.begin(token, ("episode_000001".into(), Some(capture)));
-        let mut operation = session.claim_capture_change().unwrap();
-        let mut finish = Box::pin(operation.finish_media());
+        let mut finish = Box::pin(capture.finish_pause());
         assert!(
             finish
                 .as_mut()
@@ -604,24 +597,17 @@ mod tests {
         );
         // Cancel after collecting two results but while the last encoder waits.
         drop(finish);
-        drop(operation);
-        assert!(lease.is_held());
         assert_eq!(
-            session
-                .camera_preview("episode_000001", "wrist")
-                .unwrap()
+            CameraRecording::preview(&capture.completed_assets(), "wrist")
                 .unwrap()
                 .packets()
                 .len(),
             8
         );
         release.send(()).unwrap();
-        let mut retry = session.claim_finalization().unwrap().unwrap();
-        let (cameras, failures) = retry.finish_media().await;
+        let failures = capture.finish_pause().await;
         assert_eq!(failures, ["first encoder failed", "last encoder failed"]);
-        assert_eq!(cameras.len(), 1);
-        retry.complete(cameras);
-        assert!(!lease.is_held());
+        assert_eq!(capture.completed_assets().len(), 1);
     }
 
     #[test]

@@ -1117,14 +1117,8 @@ pub const MAX_TRAINING_HISTORY_RUNS: usize = 40;
 /// Internal training state transition.
 ///
 /// The backend folds these transitions into its retained run history.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TrainingUpdate {
-    /// Replace the bootstrap placeholder with the state restored from SpiralDB.
-    Snapshot {
-        snapshot: Box<TrainingSnapshot>,
-    },
     Readiness {
         readiness: TrainingReadiness,
     },
@@ -1166,7 +1160,6 @@ impl TrainingSnapshot {
 
     pub fn apply(&mut self, update: TrainingUpdate) {
         match update {
-            TrainingUpdate::Snapshot { snapshot } => *self = *snapshot,
             TrainingUpdate::Readiness { readiness } => self.readiness = readiness,
             TrainingUpdate::RunAdded { run } => {
                 self.runs
@@ -1515,20 +1508,6 @@ mod tests {
         assert_eq!(snapshot.runs()[0].id(), "run-b");
     }
 
-    #[test]
-    fn bootstrap_training_snapshot_replaces_the_placeholder_atomically() {
-        let mut snapshot = TrainingSnapshot::default();
-        let restored = TrainingSnapshot::new(
-            TrainingReadiness::default(),
-            vec![TrainingSnapshotTest::run("restored-run")],
-        );
-
-        snapshot.apply(TrainingUpdate::Snapshot {
-            snapshot: Box::new(restored.clone()),
-        });
-
-        assert_eq!(snapshot, restored);
-    }
     #[test]
     fn catalog_omits_detailed_history_without_modifying_runs() {
         let runs = ["a", "b"]

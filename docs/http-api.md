@@ -383,7 +383,8 @@ operations take a transport-neutral `ProjectContext`; they never import Axum or
 HTTP state. The context retains one project identity and the backend task executor.
 `project_session/tasks.rs` owns cancellation versus command completion,
 `project_session/setup.rs` builds the setup projection, and
-`recording/supervisor.rs` finalizes automatically stopped recordings.
+`recording/take.rs` opens, pauses, and closes a take, including one the control
+loop stops on its own.
 
 An endpoint registers its method, path, and handler once. `http/contract.rs` derives
 request/response schemas from that handler's extractors and return type, then

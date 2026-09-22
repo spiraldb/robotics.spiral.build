@@ -3,7 +3,7 @@ use super::ProjectReadiness;
 use crate::curation::manager::CurationManager;
 use crate::data::catalog_lease::CatalogMutationLease;
 use crate::exploration::manager::ExplorationManager;
-use crate::recording_session::RecordingSessionManager;
+use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
 use crate::robots::workspace::RobotWorkspace;
@@ -112,7 +112,7 @@ impl ProjectContext {
     pub(crate) fn cameras(&self) -> &Arc<CameraManager> {
         self.projects.cameras()
     }
-    pub(crate) fn recording_session(&self) -> &Arc<RecordingSessionManager> {
+    pub(crate) fn recording_session(&self) -> &Arc<RecordingSession> {
         self.project.recording()
     }
     pub(crate) fn video_encoder(&self) -> &VideoEncoderSettings {
