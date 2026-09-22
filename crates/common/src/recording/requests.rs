@@ -39,7 +39,7 @@ impl RecordingFinish {
     }
 }
 
-/// Sets the paused state of the current recording or replay.
+/// Sets the paused state of the current recording.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,65 +52,6 @@ impl PauseUpdate {
     }
     pub fn into_parts(self) -> (bool,) {
         (self.paused,)
-    }
-}
-
-/// Selects a robot and source arm for a physical seek within an episode.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EpisodeSeek {
-    robot: String,
-    source_arm: Option<String>,
-    seconds: f64,
-}
-impl EpisodeSeek {
-    pub fn new(robot: String, seconds: f64) -> Self {
-        Self {
-            robot,
-            source_arm: None,
-            seconds,
-        }
-    }
-    pub fn with_source_arm(mut self, source_arm: Option<String>) -> Self {
-        self.source_arm = source_arm;
-        self
-    }
-    pub fn into_parts(self) -> (String, Option<String>, f64) {
-        (self.robot, self.source_arm, self.seconds)
-    }
-}
-
-/// Selects the episode, target robot, and start time for replay.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReplayStart {
-    episode: String,
-    robot: String,
-    source_arm: Option<String>,
-    start_seconds: f64,
-}
-impl ReplayStart {
-    pub fn new(episode: String, robot: String, start_seconds: f64) -> Self {
-        Self {
-            episode,
-            robot,
-            source_arm: None,
-            start_seconds,
-        }
-    }
-    pub fn with_source_arm(mut self, source_arm: Option<String>) -> Self {
-        self.source_arm = source_arm;
-        self
-    }
-    pub fn into_parts(self) -> (String, String, Option<String>, f64) {
-        (
-            self.episode,
-            self.robot,
-            self.source_arm,
-            self.start_seconds,
-        )
     }
 }
 

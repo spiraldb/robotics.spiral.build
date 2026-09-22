@@ -29,7 +29,7 @@ pub(in crate::activities) fn EpisodeCamera(
                     vec!["value".into(), "data".into()],
                 ],
             );
-            let source = MessageBuffer::load(request.with_window(window), true).await?;
+            let source = MessageBuffer::load(request.with_window(window)).await?;
             Ok::<_, String>(Rc::new(EncodedCamera::from_messages(
                 source.batches(),
                 timeline.start_ns(),

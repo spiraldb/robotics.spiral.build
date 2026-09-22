@@ -2,7 +2,6 @@
 #[cfg(test)]
 mod catalog_tests;
 mod coverage;
-mod messages;
 mod sources;
 mod topics;
 pub(crate) use sources::{McapDatasetDefinition, McapFile, McapSourceBlob, McapSources};
@@ -192,7 +191,7 @@ impl DatasetCatalogClient {
             .schema
             .observations
             .into_iter()
-            .map(|observation| observation.topic(dataset.version_id()))
+            .map(DatasetObservation::topic)
             .collect::<Result<Vec<_>, _>>()?;
         topics.sort_by(|left, right| left.name().cmp(right.name()));
         Ok(DatasetInspection::new(
@@ -386,7 +385,7 @@ struct ScanLocator {
     payload: String,
 }
 impl DatasetObservation {
-    fn topic(self, version: &str) -> Result<DatasetTopic, String> {
+    fn topic(self) -> Result<DatasetTopic, String> {
         let mut variant = String::new();
         let name = if self.scan_locator.codec == "spiral.mcap.topic-scan"
             && self.scan_locator.codec_version == 1
@@ -407,7 +406,6 @@ impl DatasetObservation {
             .collect();
         Ok(DatasetTopic::new(name, schemas)
             .with_revision(spiral_robotics_common::datasets::TopicRevision::new(
-                version.into(),
                 variant,
             ))
             .with_coverage(self.coverage.member_count, self.coverage.sample_count))
@@ -589,7 +587,7 @@ mod tests {
             "coverage":{"memberCount":52,"sampleCount":10937},
             "scanLocator":{"codec":"spiral.mcap.topic-scan","codecVersion":1,"payload":"{\"topic\":\"/camera/top/video\"}"}
         })).unwrap();
-        let topic = observation.topic("version").unwrap();
+        let topic = observation.topic().unwrap();
         assert_eq!(topic.name(), "/camera/top/video");
         assert_eq!(topic.samples(), Some(10937));
         assert_eq!(topic.members(), 52);

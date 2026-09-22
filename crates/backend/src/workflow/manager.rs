@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use spiral_robotics_common::workflow::{
     WorkflowRunSnapshot, WorkflowSpec, WorkflowSummary,
     conversation::WorkflowConversation,
-    document::{WorkflowDocument, WorkflowPlan, WorkflowRun, WorkflowSqlPlan},
+    document::{WorkflowDocument, WorkflowRun, WorkflowSqlPlan},
 };
 use spiral_robotics_storage::{StorageManager, workflows::WorkflowJson};
 use std::{sync::Arc, time::SystemTime};
@@ -156,15 +156,6 @@ impl WorkflowManager {
             ));
         }
         Ok(document)
-    }
-    pub(super) async fn plan(&self, workflow: &WorkflowSpec) -> WorkflowPlan {
-        match WorkflowQuery::new(self.inner.storage.workflow_store())
-            .plan(workflow)
-            .await
-        {
-            Ok(plan) => plan,
-            Err(error) => WorkflowPlan::failed(error),
-        }
     }
     /// Execute the submitted SQL to completion. A failed query is a failed
     /// run; only an invalid submission is an error.

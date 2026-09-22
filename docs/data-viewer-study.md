@@ -91,7 +91,7 @@ The catalog remains in the left workbench. An opened recording provides its deta
 
 The main area shows supported camera/image content, plots of selected numeric fields, and a raw-message inspector. Reuse the existing movable panels. Keep Query and Relations available, with deliberate focus actions. Prefer one Timeline across the inspection area; its transport follows the recording rather than the currently focused panel.
 
-Viewing requires no arm connection. 3D robot rendering, physical replay, and training are separate capabilities enabled only when the data satisfies their contracts. A dataset without joint data should not open an empty SO-101 chart.
+Viewing requires no arm connection. 3D robot rendering and training are separate capabilities enabled only when the data satisfies their contracts. A dataset without joint data should not open an empty SO-101 chart.
 
 For a seek, the backend resolves the selected stream windows and the latest appropriate sample. The UI distinguishes a held sample from a gap or unavailable stream. Preserve absolute log timestamps precisely and derive relative display time from a recording origin. Do not pass epoch nanoseconds through a JavaScript number or force asynchronous topics onto one sampled table.
 

@@ -5254,7 +5254,6 @@ dependencies = [
  "spiral-robotics-inference",
  "spiral-robotics-storage",
  "spiral-robotics-training",
- "spiral-robotics-viewport",
  "tempfile",
  "tokio",
  "tokio-stream",

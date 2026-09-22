@@ -8,9 +8,7 @@ use dioxus::prelude::*;
 use super::recording_review::EpisodePreview;
 use super::session::LiveSession;
 use super::signals::{RecordingTimeline, SignalStore};
-use super::timeline::{
-    LiveTimelinePanel, SignalSource, TimelineSignals, TimelineSubject, TimelineTarget,
-};
+use super::timeline::{LiveTimelinePanel, SignalSource, TimelineSignals, TimelineSubject};
 use super::transport::{LiveClock, LivePreview, LiveTransport};
 use crate::components::time_series::TimelineSignalLane;
 use crate::panels::camera::{CameraEditorSource, RecordedCameraSourceRequest};
@@ -27,14 +25,13 @@ pub(super) struct LiveTimeline {
 impl LiveTimeline {
     pub(super) fn use_timeline(session: LiveSession) -> Self {
         let controller = session.timeline_controller();
-        let mut robot_sync_target = controller.robot_sync_target_signal();
         let preview = LivePreview::use_preview(session);
         let subject = session
             .telemetry()
             .recording()
             .map(TimelineSubject::Recording)
             .unwrap_or_else(|| {
-                TimelineSubject::empty("Live", "Record an episode to begin using the shared clock.")
+                TimelineSubject::empty("Record an episode to begin using the shared clock.")
             });
         preview.use_source_identity(&subject);
         let source = preview.source(&subject);
@@ -42,39 +39,9 @@ impl LiveTimeline {
             Self::signal_lanes(session, &subject, source.as_ref()),
             Self::signal_source(&subject, source.as_ref()),
         );
-        let replay = session
-            .telemetry()
-            .replay()
-            .filter(|replay| subject.episode_id() == Some(replay.episode()));
-        let target = subject.target();
-        // Two `None`s compare equal, so with no episode on the clock this read as
-        // "armed" and the physical-motion toggle rendered checked at rest. Nothing
-        // is armed until there is a target to arm it against.
-        let armed = target.is_some() && robot_sync_target.read().as_ref() == target.as_ref();
-        let clock = LiveClock::new(
-            controller.playhead_signal()(),
-            controller.phase(replay.as_ref()),
-        )
-        .with_options(controller.follow_live_signal()(), armed);
+        let clock = LiveClock::new(controller.playhead_signal()(), controller.previewing())
+            .with_follow_live(controller.follow_live_signal()());
         let transport = LiveTransport::new(preview, subject, clock);
-        let must_disarm = armed && transport.robot_sync_blocker().is_some();
-        use_effect(use_reactive(
-            (&target, &must_disarm),
-            move |(current_target, must_disarm)| {
-                let armed = robot_sync_target.peek().to_owned();
-                let target_changed = armed.is_some() && armed.as_ref() != current_target.as_ref();
-                if !target_changed && !must_disarm {
-                    return;
-                }
-                robot_sync_target.set(None);
-                let armed_episode = armed.as_ref().map(TimelineTarget::episode);
-                if let Some(replay) = session.telemetry().replay()
-                    && armed_episode == Some(replay.episode())
-                {
-                    session.stop_replay(replay.episode());
-                }
-            },
-        ));
         Self {
             source,
             transport,

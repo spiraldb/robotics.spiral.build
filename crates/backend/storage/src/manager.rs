@@ -239,6 +239,16 @@ impl StorageManager {
             .await
     }
 
+    /// The same episode query as one complete Arrow IPC stream.
+    pub async fn query_for_episode_arrow(
+        &self,
+        request: &spiral_robotics_common::relations::EpisodeQueryRequest,
+    ) -> Result<Vec<u8>, String> {
+        ProjectQueries::new(&self.project_store)
+            .arrow_for_episode(request)
+            .await
+    }
+
     pub async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
         ProjectQueries::new(&self.project_store)
             .relation_catalog()

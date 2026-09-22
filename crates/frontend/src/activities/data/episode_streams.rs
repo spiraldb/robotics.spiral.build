@@ -569,7 +569,7 @@ impl StreamChoices {
         self.schemas
             .write()
             .insert(key.to_owned(), StreamSchema::Loading);
-        let result = match MessageBuffer::load(read, false).await {
+        let result = match MessageBuffer::load(read).await {
             Ok(buffer) => buffer.value_field(),
             Err(error) => Err(error),
         };
@@ -717,7 +717,7 @@ mod tests {
                 .enumerate()
                 .map(|(index, name)| {
                     DatasetTopic::new((*name).into(), vec!["foxglove.CompressedVideo".into()])
-                        .with_revision(TopicRevision::new("v".into(), format!("{index:09}")))
+                        .with_revision(TopicRevision::new(format!("{index:09}")))
                 })
                 .collect();
             let catalog = StreamCatalog::new(topics, &episode());
@@ -757,16 +757,16 @@ mod tests {
     fn data_streams_rank_busiest_first_with_ties_in_topic_order() {
         let topics = vec![
             DatasetTopic::new("/a".into(), vec!["Sensor".into()])
-                .with_revision(TopicRevision::new("v".into(), "111111111".into()))
+                .with_revision(TopicRevision::new("111111111".into()))
                 .with_coverage(1, Some(600)),
             DatasetTopic::new("/b".into(), vec!["Sensor".into()])
-                .with_revision(TopicRevision::new("v".into(), "222222222".into()))
+                .with_revision(TopicRevision::new("222222222".into()))
                 .with_coverage(1, Some(9_000)),
             DatasetTopic::new("/c".into(), vec!["Sensor".into()])
-                .with_revision(TopicRevision::new("v".into(), "333333333".into()))
+                .with_revision(TopicRevision::new("333333333".into()))
                 .with_coverage(1, Some(600)),
             DatasetTopic::new("/cam".into(), vec!["foxglove.CompressedVideo".into()])
-                .with_revision(TopicRevision::new("v".into(), "444444444".into()))
+                .with_revision(TopicRevision::new("444444444".into()))
                 .with_coverage(1, Some(90_000)),
         ];
         let ranked = StreamCatalog::new(topics, &episode())
@@ -781,11 +781,11 @@ mod tests {
     fn streams_are_keyed_by_revision_and_typed_by_schema_name() {
         let topics = vec![
             DatasetTopic::new("/b".into(), vec!["Sensor".into()])
-                .with_revision(TopicRevision::new("v".into(), "222222222".into())),
+                .with_revision(TopicRevision::new("222222222".into())),
             DatasetTopic::new("/a".into(), vec!["foxglove.CompressedVideo".into()])
-                .with_revision(TopicRevision::new("v".into(), "111111111".into())),
+                .with_revision(TopicRevision::new("111111111".into())),
             DatasetTopic::new("/b".into(), vec!["Sensor2".into()])
-                .with_revision(TopicRevision::new("v".into(), "333333333".into())),
+                .with_revision(TopicRevision::new("333333333".into())),
             DatasetTopic::new("/unreadable".into(), vec![]),
         ];
         let catalog = StreamCatalog::new(topics, &episode());

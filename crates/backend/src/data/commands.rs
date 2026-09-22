@@ -48,54 +48,25 @@ impl DataCommands {
             })
             .await?
     }
-    pub(super) async fn robot_discovery_context(
+    /// Persist the robot the browser resolved for a dataset's current version.
+    pub(super) async fn save_dataset_robot(
         &self,
-        selection: DatasetSelection,
-    ) -> Result<spiral_robotics_common::datasets::RobotDiscoveryContext, BackendCommandError> {
-        let commands = self.clone();
-        self.state
-            .tasks()
-            .read(async move {
-                super::robot_visualization::RobotVisualization::context(
-                    commands.state.storage(),
-                    selection,
-                )
-                .await
-                .map_err(|message| crate::OperationError::External(message).into())
-            })
-            .await?
-    }
-    pub(super) async fn inspect_robot_stream(
-        &self,
-        request: spiral_robotics_common::datasets::RobotStreamInspectionRequest,
-    ) -> Result<serde_json::Value, BackendCommandError> {
-        let commands = self.clone();
-        self.state
-            .tasks()
-            .read(async move {
-                super::robot_visualization::RobotVisualization::inspect_stream(
-                    commands.state.storage(),
-                    request,
-                )
-                .await
-                .map_err(|message| crate::OperationError::External(message).into())
-            })
-            .await?
-    }
-    pub(super) async fn save_robot_discovery(
-        &self,
-        result: spiral_robotics_common::datasets::RobotDiscoveryResult,
+        save: spiral_robotics_common::datasets::DatasetRobotSave,
     ) -> Result<(), BackendCommandError> {
         let commands = self.clone();
         self.state
             .tasks()
             .execute(async move {
-                super::robot_visualization::RobotVisualization::save(
-                    commands.state.storage(),
-                    result,
-                )
-                .await
-                .map_err(|message| crate::OperationError::External(message).into())
+                let (selection, robot) = save.into_parts();
+                let storage = commands.state.storage();
+                let inspection = storage.inspect_dataset(selection).await?;
+                let dataset = inspection.dataset();
+                Ok(storage
+                    .save_dataset_robot(
+                        (dataset.resource_id(), dataset.version_id()),
+                        robot.as_ref(),
+                    )
+                    .await?)
             })
             .await?
     }
@@ -179,24 +150,6 @@ impl DataCommands {
                     .state
                     .storage()
                     .episode_coverage(request)
-                    .await
-                    .map_err(Into::into)
-            })
-            .await?
-    }
-
-    pub(super) async fn episode_messages(
-        &self,
-        request: spiral_robotics_common::datasets::MessageRead,
-    ) -> Result<Vec<u8>, BackendCommandError> {
-        let commands = self.clone();
-        self.state
-            .tasks()
-            .execute(async move {
-                commands
-                    .state
-                    .storage()
-                    .episode_messages(request)
                     .await
                     .map_err(Into::into)
             })
@@ -360,6 +313,25 @@ impl DataCommands {
                     .state
                     .storage()
                     .query_for_episode(&request)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?
+    }
+
+    /// The same episode query as one complete Arrow IPC stream.
+    pub(super) async fn query_for_episode_arrow(
+        &self,
+        request: spiral_robotics_common::relations::EpisodeQueryRequest,
+    ) -> Result<Vec<u8>, BackendCommandError> {
+        let commands = self.clone();
+        self.state
+            .tasks()
+            .execute(async move {
+                commands
+                    .state
+                    .storage()
+                    .query_for_episode_arrow(&request)
                     .await
                     .map_err(Into::into)
             })

@@ -376,18 +376,12 @@ impl DeviceCommands {
         selection: ModeSelection,
     ) -> Result<(), BackendCommandError> {
         self.state.execute(move |state| async move {
-                // Replay and policy need their own admission and resource-loading paths.
+                // Policy needs its own admission and resource-loading path.
                 let mode = match selection {
                     ModeSelection::Idle => OperatorMode::Idle,
                     ModeSelection::Manual { robot } => OperatorMode::Manual { robot },
                     ModeSelection::Teleoperate { leader, follower } => {
                         OperatorMode::Teleoperate { leader, follower }
-                    }
-                    ModeSelection::Replay { .. } => {
-                        return Err(BackendCommandError::from(OperationError::invalid_input(
-                            "start a replay with POST /api/replay, which loads the take first"
-                                .to_owned(),
-                        )));
                     }
                     ModeSelection::Policy { .. } => {
                         return Err(BackendCommandError::from(OperationError::invalid_input(

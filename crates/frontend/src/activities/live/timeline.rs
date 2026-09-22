@@ -8,18 +8,18 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use spiral_robotics_common::recording::{EpisodeInfo, RecordingProgress};
+use spiral_robotics_common::recording::RecordingProgress;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
-    ConfirmationResponse, InlineConfirmation, Toggle,
+    ConfirmationResponse, InlineConfirmation,
 };
 
 use super::transport::LiveTransport;
 use crate::components::charts::{CharmingChart, ChartPresentation};
 use crate::components::time_series::{TimelineSignalLane, TimelineSignalLanes, TraceChartLayout};
 use crate::components::timeline::{
-    PlaybackClock, SeekPhase, Timeline, TimelineAction, TimelineContent, TimelineEvent,
-    TimelineInteraction, TimelineState, ViewWindow,
+    PlaybackClock, Timeline, TimelineAction, TimelineContent, TimelineEvent, TimelineInteraction,
+    TimelineState, ViewWindow,
 };
 use crate::format::ClockPresentation;
 
@@ -28,84 +28,36 @@ const TIMELINE_CHART_ID: &str = "studio-timeline-signal-chart";
 /// The semantic subject of the canonical Timeline.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TimelineSubject {
-    Empty { label: String, reason: String },
+    Empty { reason: String },
     Recording(RecordingProgress),
-    Episode { episode: EpisodeInfo },
-}
-
-/// Stable identity carried by every time operation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TimelineTarget {
-    Recording(String),
-    Episode(String),
 }
 
 impl TimelineSubject {
-    pub(super) fn empty(label: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(super) fn empty(reason: impl Into<String>) -> Self {
         Self::Empty {
-            label: label.into(),
             reason: reason.into(),
         }
     }
 
+    /// The take on the clock; its identity is stable across pause and resume.
     pub(super) fn episode_id(&self) -> Option<&str> {
-        match self {
-            Self::Empty { .. } => None,
-            Self::Recording(progress) => Some(progress.episode()),
-            Self::Episode { episode, .. } => Some(episode.id()),
-        }
-    }
-
-    pub(super) fn target(&self) -> Option<TimelineTarget> {
-        match self {
-            Self::Empty { .. } => None,
-            Self::Recording(progress) => {
-                Some(TimelineTarget::Recording(progress.episode().to_owned()))
-            }
-            Self::Episode { episode, .. } => Some(TimelineTarget::Episode(episode.id().to_owned())),
-        }
-    }
-
-    pub(super) fn episode(&self) -> Option<&EpisodeInfo> {
-        match self {
-            Self::Episode { episode, .. } => Some(episode),
-            Self::Empty { .. } | Self::Recording(_) => None,
-        }
+        self.recording().map(RecordingProgress::episode)
     }
 
     pub(super) fn duration_seconds(&self) -> f64 {
-        match self {
-            Self::Empty { .. } => 0.0,
-            Self::Recording(progress) => progress.elapsed_seconds(),
-            Self::Episode { episode, .. } => episode.duration_seconds(),
-        }
-        .max(0.0)
+        self.recording()
+            .map_or(0.0, RecordingProgress::elapsed_seconds)
+            .max(0.0)
     }
 
     fn frames(&self) -> u64 {
-        match self {
-            Self::Empty { .. } => 0,
-            Self::Recording(progress) => progress.frames(),
-            Self::Episode { episode, .. } => episode.frames(),
-        }
+        self.recording().map_or(0, RecordingProgress::frames)
     }
 
     pub(super) fn recording(&self) -> Option<&RecordingProgress> {
         match self {
             Self::Recording(progress) => Some(progress),
-            Self::Empty { .. } | Self::Episode { .. } => None,
-        }
-    }
-
-    pub(super) fn is_paused_recording(&self) -> bool {
-        self.recording().is_some_and(|progress| progress.paused())
-    }
-
-    pub(super) fn available(&self) -> bool {
-        match self {
-            Self::Empty { .. } => false,
-            Self::Recording(progress) => progress.error().is_none(),
-            Self::Episode { episode, .. } => episode.usable(),
+            Self::Empty { .. } => None,
         }
     }
 
@@ -113,31 +65,22 @@ impl TimelineSubject {
         match self {
             Self::Empty { reason, .. } => Some(reason),
             Self::Recording(progress) => progress.error(),
-            Self::Episode { episode, .. } => episode.problem(),
+        }
+    }
+
+    /// Why the recorded frames cannot be previewed or scrubbed, if they cannot.
+    pub(super) fn preview_blocker(&self) -> Option<String> {
+        match self.recording() {
+            Some(progress) if progress.paused() => progress.error().map(str::to_owned),
+            _ => Some("Pause the current recording to preview it.".to_owned()),
         }
     }
 
     /// The episode whose recorded data should be loaded for the current view.
     pub(super) fn recorded_episode(&self) -> Option<&str> {
-        match self {
-            Self::Episode { episode, .. } => Some(episode.id()),
-            Self::Recording(progress) if progress.paused() => Some(progress.episode()),
-            Self::Empty { .. } | Self::Recording(_) => None,
-        }
-    }
-}
-
-impl From<EpisodeInfo> for TimelineSubject {
-    fn from(episode: EpisodeInfo) -> Self {
-        Self::Episode { episode }
-    }
-}
-
-impl TimelineTarget {
-    pub(super) fn episode(&self) -> &str {
-        match self {
-            Self::Recording(episode) | Self::Episode(episode) => episode,
-        }
+        self.recording()
+            .filter(|progress| progress.paused())
+            .map(RecordingProgress::episode)
     }
 }
 
@@ -195,7 +138,7 @@ pub(super) fn LiveTimelinePanel(transport: LiveTransport, signals: TimelineSigna
     } else {
         transport.seconds().clamp(0.0, duration)
     };
-    let identity = format!("{:?}", subject.target());
+    let identity = format!("{:?}", subject.episode_id());
     let mut window = use_signal(|| None::<ViewWindow>);
     let mut confirm_discard = use_signal(|| false);
     use_effect(use_reactive(&identity, move |_| {
@@ -204,14 +147,13 @@ pub(super) fn LiveTimelinePanel(transport: LiveTransport, signals: TimelineSigna
     }));
     let view = window().unwrap_or_else(|| ViewWindow::full(duration));
     let mut clock = PlaybackClock::new(duration);
-    clock.set_playing(transport.phase().playing());
+    clock.set_playing(transport.playing());
     clock.seek(seconds);
     let shared_state = TimelineState::new(identity.clone(), clock)
         .with_window(view)
         .with_external_playback()
         .with_blocked_seek(transport.seek_blocker())
-        .with_blocked_play(transport.play_blocker());
-    let mut scrubbing = use_signal(|| false);
+        .with_blocked_play(transport.seek_blocker());
     let interaction = TimelineInteraction::new(shared_state, {
         let transport = transport.clone();
         EventHandler::new(move |event: TimelineEvent| {
@@ -220,18 +162,11 @@ pub(super) fn LiveTimelinePanel(transport: LiveTransport, signals: TimelineSigna
             }
             match event.action() {
                 TimelineAction::SetPlaying(next) => {
-                    if next != transport.phase().playing() {
+                    if next != transport.playing() {
                         transport.press_play();
                     }
                 }
                 TimelineAction::Seek { seconds, phase } => {
-                    if phase != SeekPhase::Cancel
-                        && !scrubbing()
-                        && transport.phase().robot_sync_active()
-                    {
-                        transport.pause_robot_sync();
-                    }
-                    scrubbing.set(phase == SeekPhase::Preview);
                     if transport.follow_live() && seconds + 0.025 < duration {
                         transport.set_follow_live(false);
                     }
@@ -248,7 +183,9 @@ pub(super) fn LiveTimelinePanel(transport: LiveTransport, signals: TimelineSigna
     .with_identity(rsx! { TimelineIdentity { subject: subject.clone() } })
     .with_toolbar(rsx! {
         CaptureControls { transport: transport.clone(), recording: recording.clone(), confirm_discard }
-        RobotSyncControls { transport: transport.clone(), recording }
+        if recording.is_some() {
+            FollowLiveControl { transport: transport.clone() }
+        }
     })
     .with_notice(rsx! { TimelineNotice { transport: transport.clone(), source } });
     rsx! { div { class: "studio-timeline", "aria-label": "Live Timeline", Timeline { interaction, content } } }
@@ -310,29 +247,17 @@ fn CaptureControls(
     }
 }
 
-/// Arming the robot to the clock, and returning the playhead to the newest
-/// recorded sample.
+/// Returning the playhead to the newest recorded sample.
 #[component]
-fn RobotSyncControls(transport: LiveTransport, recording: Option<RecordingProgress>) -> Element {
-    let blocker = transport.robot_sync_blocker();
-    let title = blocker.clone().unwrap_or_else(|| {
-        "Keep the compatible robot synchronized while playing or seeking".into()
-    });
+fn FollowLiveControl(transport: LiveTransport) -> Element {
     let follow_live = transport.follow_live();
     rsx! {
-        Toggle {
-            purpose: ActionPurpose::Sync, class: "timeline-sync-toggle", label: "Sync robot", title: "{title}",
-            checked: transport.robot_sync_armed(), disabled: blocker.is_some(),
-            onchange: { let transport = transport.clone(); move |enabled| transport.set_robot_sync(enabled) },
-        }
-        if recording.is_some() {
-            Button {
-                purpose: ActionPurpose::Sync, variant: ButtonVariant::Outline,
-                class: if follow_live { "text-accent" } else { "" }, aria_pressed: follow_live,
-                title: if follow_live { "Stop following the newest recorded sample" } else { "Return the playhead to the newest recorded sample" },
-                onclick: move |_| transport.set_follow_live(!follow_live),
-                if follow_live { "Following live" } else { "Follow live" }
-            }
+        Button {
+            purpose: ActionPurpose::Sync, variant: ButtonVariant::Outline,
+            class: if follow_live { "text-accent" } else { "" }, aria_pressed: follow_live,
+            title: if follow_live { "Stop following the newest recorded sample" } else { "Return the playhead to the newest recorded sample" },
+            onclick: move |_| transport.set_follow_live(!follow_live),
+            if follow_live { "Following live" } else { "Follow live" }
         }
     }
 }
@@ -490,27 +415,19 @@ mod tests {
         };
         let active = recording(false);
         let paused = recording(true);
-        assert_eq!(active.target(), paused.target());
+        assert_eq!(active.episode_id(), paused.episode_id());
         assert_eq!(active.recorded_episode(), None);
         assert_eq!(paused.recorded_episode(), Some("take-1"));
         assert_eq!(paused.duration_seconds(), 1.0);
         assert_eq!(paused.frames(), 60);
-        let completed =
-            TimelineSubject::from(EpisodeInfo::new("take-1", "default").with_timeline(60, 1.0));
-        assert_eq!(completed.recorded_episode(), Some("take-1"));
-        assert_ne!(
-            completed.target(),
-            paused.target(),
-            "finalization must disarm recording-scoped robot synchronization"
-        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn an_empty_timeline_cannot_be_armed_or_replayed() {
-        let subject = TimelineSubject::empty("Inspection", "Select a recording.");
-        assert!(subject.target().is_none());
+    fn an_empty_timeline_has_nothing_to_preview() {
+        let subject = TimelineSubject::empty("Select a recording.");
+        assert!(subject.episode_id().is_none());
         assert!(subject.recorded_episode().is_none());
-        assert!(!subject.available());
+        assert!(subject.preview_blocker().is_some());
         assert_eq!(subject.problem(), Some("Select a recording."));
     }
 

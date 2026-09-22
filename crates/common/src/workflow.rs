@@ -65,6 +65,10 @@ impl WorkflowSpec {
     pub fn execution_sql(&self) -> Result<String, String> {
         Ok(self.sql.clone())
     }
+    /// Spiral's structured plan for the executed SQL, as one read-only query.
+    pub fn plan_sql(&self) -> Result<String, String> {
+        Ok(format!("EXPLAIN (FORMAT JSON) {}", self.execution_sql()?))
+    }
     pub fn accepts_output_from(&self, executed: &Self) -> bool {
         self.id == executed.id && self.sql == executed.sql
     }

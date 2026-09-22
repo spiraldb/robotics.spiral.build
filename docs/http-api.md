@@ -12,6 +12,13 @@ builds do not determine endpoint URLs. Breaking wire changes require an explicit
 contract revision and client migration. This migration removes the former
 `/api/server-functions/*` endpoints.
 
+Version 5.0.0 removes robot replay and physical seek (`POST`/`PATCH /replay`,
+`POST /recording/takes/{id}/seek`, the `replay` mode and telemetry field), the
+robot-discovery context, stream-inspection, and save endpoints (replaced by
+`POST /datasets/robot/save`), `/datasets/episode-messages` (replaced by
+`POST /queries/episode/arrow`), and `/workflows/plan` and `/models/capabilities`
+(both are `/queries` reads). `TopicRevision` no longer carries a dataset version.
+
 Version 4.0.0 removes `/project/status`, the `X-Project-Session` header, and the
 `project_transition` and `project_unavailable` failure codes. The backend no
 longer has a current project: each request names its project with
@@ -138,17 +145,17 @@ Training polling accepts `?selected=<run-id>` to include bounded full history fo
 one run. Omit it when only the run catalog and current metrics are needed.
 Workflow authoring is local to the browser. Save sends a `WorkflowDocument` whose
 document revision is the expected saved version. Its optional `planned_sql` field
-contains `{sql, plan}`: the exact SQL and the `/workflows/plan` response used for
-display. Save/load preserves this snapshot alongside SQL and conversation; a plan
+contains `{sql, plan}`: the exact SQL and the plan used for display. Save/load preserves this snapshot alongside SQL and conversation; a plan
 for different SQL is rejected. Documents without a snapshot remain supported.
 Run sends a complete `WorkflowSpec`
 and returns a `WorkflowRun` containing that exact SQL definition and a run snapshot.
-`WorkflowSpec` contains `id`, `name`, `revision`, and `sql`. `/workflows/plan`
-returns a native JSON `report` (EXPLAIN schema version 2) and optional `error`.
+`WorkflowSpec` contains `id`, `name`, `revision`, and `sql`. The browser plans
+by sending `EXPLAIN (FORMAT JSON) <sql>` to `/queries` and reading the native JSON
+report (EXPLAIN schema version 2) from the single result cell.
 The report contains logical, optimized logical, and physical diagnostic graphs,
 plus the native report metadata. Logical graphs remain available if physical
-lowering fails. Studio displays these with Dioxus Flow.
-`/models/capabilities` returns the installed native AI function catalog.
+lowering fails. Studio displays these with Dioxus Flow. The installed native AI
+function catalog is likewise a `/queries` read of `spql.meta.scalar_functions()`.
 Read executions by their run IDs. Workflow cancellation is not exposed.
 The frontend builds authenticated model requests using Studio-wide `/credentials`
 and sends them through `/proxy`. It parses provider streams, owns retry decisions,
@@ -223,12 +230,9 @@ when Studio stopped reads as failed. Stop targets an exact ID.
 | DELETE | `/recording/takes/{id}` | — | `null` |
 | GET | `/recording/takes/{id}` | — | EpisodeInspectionSnapshot |
 | POST | `/recording/takes/{id}/camera` | RecordingCameraRequest | EpisodeVideo |
-| POST | `/recording/takes/{id}/seek` | EpisodeSeek | `null` |
-| POST | `/replay` | ReplayStart | `null` |
-| PATCH | `/replay` | PauseUpdate | `null` |
 
 Take IDs above refer to the current recording session. Published dataset content
-uses `/datasets/episode-topics` and `/datasets/episode-messages` with explicit
+uses `/datasets/episode-topics` and episode queries with explicit
 dataset/member identities; no recording-header fallback exists.
 
 ### Robots
@@ -286,12 +290,13 @@ resources. These return distinct `RecordingDatasetSummary` and `DatasetSummary` 
 | GET | `/datasets` | — | DatasetSummary[] |
 | POST | `/datasets/inspect` | DatasetSelection | DatasetInspection |
 | POST | `/datasets/robot` | DatasetSelection | Saved DatasetRobot or `null`; read-only, with no model analysis |
+| POST | `/datasets/robot/save` | DatasetRobotSave (dataset, robot or `null`) | `null`; the browser resolves, validates, and attaches meshes first |
 | POST | `/datasets/episode-topics` | EpisodeSelection (dataset, episode_id) | DatasetTopic[] (topics with messages in the exact recording, with schema revisions and counts) |
-| POST | `/datasets/episode-messages` | MessageRead (topic, revision, optional window) | `application/vnd.apache.arrow.stream` pages; see [episode playback](episode-playback.md) |
 | POST | `/datasets/topic-coverage` | TopicCoverageRequest (MessageRead with a plain window, `buckets` 8–2048) | TopicCoverage (message total, first/last log time as strings, one count per bucket) |
 | GET | `/relations` | — | RelationCatalog |
 | POST | `/queries` | QueryRequest | SpiralQuerySnapshot |
 | POST | `/queries/episode` | EpisodeQueryRequest (episode selection, statement with `$1` bound to the episode UUID, max_rows) | SpiralQuerySnapshot |
+| POST | `/queries/episode/arrow` | EpisodeQueryRequest | `application/vnd.apache.arrow.stream`: the complete result, or an error past `max_rows` (at most 10,000) or 32 MiB; see [episode playback](episode-playback.md) |
 | POST | `/datasets/hugging-face/inspect` | HuggingFaceDatasetSource | HuggingFaceDatasetInspection |
 | POST | `/datasets/hugging-face/import` | HuggingFaceDatasetSource | HuggingFaceDatasetImportSummary |
 
@@ -314,10 +319,8 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
 | GET | `/workflows` | — | WorkflowSummary[] |
 | GET | `/workflows/{id}` | — | WorkflowDocument |
 | POST | `/workflows/save` | WorkflowDocument | WorkflowDocument (new saved revision) |
-| POST | `/workflows/plan` | WorkflowSpec | WorkflowPlan |
 | POST | `/workflow-runs` | WorkflowSpec | WorkflowRun (completed or failed) |
 | POST | `/datasets/cameras` | DatasetSelection | Dataset and camera inspection |
-| GET | `/models/capabilities` | — | SpiralQuerySnapshot (native AI catalog) |
 
 ### Curation
 

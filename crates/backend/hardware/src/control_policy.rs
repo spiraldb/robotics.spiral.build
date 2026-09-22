@@ -13,7 +13,6 @@ pub(crate) enum ControlMode {
     Idle,
     Manual { robot: String },
     Teleoperate { leader: String, follower: String },
-    Replay { robot: String, episode: String },
     Policy { robot: String, session: String },
 }
 
@@ -23,7 +22,6 @@ impl ControlMode {
             Self::Idle => "Idle",
             Self::Manual { .. } => "Manual",
             Self::Teleoperate { .. } => "Teleoperation",
-            Self::Replay { .. } => "Replay",
             Self::Policy { .. } => "Policy",
         }
     }
@@ -31,9 +29,7 @@ impl ControlMode {
     fn involves(&self, robot: &str) -> bool {
         match self {
             Self::Idle => false,
-            Self::Manual { robot: owner }
-            | Self::Replay { robot: owner, .. }
-            | Self::Policy { robot: owner, .. } => owner == robot,
+            Self::Manual { robot: owner } | Self::Policy { robot: owner, .. } => owner == robot,
             Self::Teleoperate { leader, follower } => leader == robot || follower == robot,
         }
     }
@@ -79,10 +75,7 @@ pub(crate) enum Intent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Event {
-    ReplayLost,
     TeleoperationUnavailable,
-    ReplayFinished,
-    ReplayFailed { robot: String, error: String },
     RobotLost { robot: String, reason: String },
 }
 
@@ -104,11 +97,7 @@ pub(crate) enum FailureAction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Effect {
-    ClearReplay,
     ResetAllTargets,
-    ResetTargets {
-        robot: String,
-    },
     SetTorque {
         robot: String,
         engaged: bool,
@@ -230,38 +219,14 @@ impl ControlState {
     /// Decide the ownership consequence of an observed outer-layer event.
     pub(crate) fn decide_event(&self, event: Event) -> Decision {
         match event {
-            Event::ReplayLost => Decision {
-                effects: vec![
-                    Effect::ClearReplay,
-                    Effect::ResetAllTargets,
-                    Effect::CommitModeWithError {
-                        mode: ControlMode::Idle,
-                        error: "the replay was lost".to_owned(),
-                    },
-                ],
-            },
             Event::TeleoperationUnavailable => Decision {
                 effects: vec![Effect::SetActivity {
                     active: false,
                     error: Some("both arms must be calibrated".to_owned()),
                 }],
             },
-            Event::ReplayFinished => Decision {
-                effects: vec![Effect::ClearReplay, Effect::CommitMode(ControlMode::Idle)],
-            },
-            Event::ReplayFailed { robot, error } => Decision {
-                effects: vec![
-                    Effect::ClearReplay,
-                    Effect::ResetTargets { robot },
-                    Effect::CommitModeWithError {
-                        mode: ControlMode::Idle,
-                        error,
-                    },
-                ],
-            },
             Event::RobotLost { robot, reason } if self.mode.involves(&robot) => Decision {
                 effects: vec![
-                    Effect::ClearReplay,
                     Effect::ResetAllTargets,
                     Effect::CommitModeWithError {
                         mode: ControlMode::Idle,
@@ -279,7 +244,6 @@ impl ControlState {
         let mut effects = Vec::new();
         if self.mode != ControlMode::Idle {
             effects.extend([
-                Effect::ClearReplay,
                 Effect::ResetAllTargets,
                 Effect::CommitModeWithError {
                     mode: ControlMode::Idle,
@@ -310,9 +274,7 @@ impl ControlState {
 
         match &mode {
             ControlMode::Idle => {}
-            ControlMode::Manual { robot }
-            | ControlMode::Replay { robot, .. }
-            | ControlMode::Policy { robot, .. } => {
+            ControlMode::Manual { robot } | ControlMode::Policy { robot, .. } => {
                 self.ready_joints(robot)?;
             }
             ControlMode::Teleoperate { leader, follower } => {
@@ -330,12 +292,7 @@ impl ControlState {
             }
         }
 
-        let mut effects = Vec::new();
-        // A replay plan belongs to one admitted ownership transaction. Even a
-        // replay-to-replay replacement drops the old plan first, so a failed
-        // replacement can never resume stale motion.
-        effects.push(Effect::ClearReplay);
-        effects.push(Effect::ResetAllTargets);
+        let mut effects = vec![Effect::ResetAllTargets];
 
         match &mode {
             ControlMode::Teleoperate { leader, follower } => {
@@ -352,7 +309,7 @@ impl ControlState {
                     on_failure: FailureAction::AbandonTransition,
                 });
             }
-            ControlMode::Replay { robot, .. } | ControlMode::Policy { robot, .. } => {
+            ControlMode::Policy { robot, .. } => {
                 effects.push(Effect::SetTorque {
                     robot: robot.clone(),
                     engaged: true,
@@ -391,7 +348,6 @@ impl Decision {
 
     fn idle_effects() -> Vec<Effect> {
         vec![
-            Effect::ClearReplay,
             Effect::ResetAllTargets,
             Effect::CommitMode(ControlMode::Idle),
         ]
@@ -438,66 +394,6 @@ impl FailureAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayState {
-    Seeking,
-    Playing,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayEvent {
-    Paused,
-    SeekObserved { arrived: bool },
-    PlaybackObserved { finished: bool },
-    Failed(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayDecision {
-    Keep,
-    EnterPlaying,
-    FinishToIdle,
-    FailToIdle(String),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayTransitionError {
-    PlaybackObservedWhileSeeking,
-    SeekObservedWhilePlaying,
-}
-
-/// Own the legal replay lifecycle; clocks, positions, and target conversion
-/// remain observations supplied by the hardware adapter.
-impl ReplayState {
-    pub(crate) fn decide(
-        self,
-        event: ReplayEvent,
-    ) -> Result<ReplayDecision, ReplayTransitionError> {
-        match (self, event) {
-            (_, ReplayEvent::Paused) => Ok(ReplayDecision::Keep),
-            (_, ReplayEvent::Failed(error)) => Ok(ReplayDecision::FailToIdle(error)),
-            (ReplayState::Seeking, ReplayEvent::SeekObserved { arrived: true }) => {
-                Ok(ReplayDecision::EnterPlaying)
-            }
-            (ReplayState::Seeking, ReplayEvent::SeekObserved { arrived: false }) => {
-                Ok(ReplayDecision::Keep)
-            }
-            (ReplayState::Playing, ReplayEvent::PlaybackObserved { finished: true }) => {
-                Ok(ReplayDecision::FinishToIdle)
-            }
-            (ReplayState::Playing, ReplayEvent::PlaybackObserved { finished: false }) => {
-                Ok(ReplayDecision::Keep)
-            }
-            (ReplayState::Seeking, ReplayEvent::PlaybackObserved { .. }) => {
-                Err(ReplayTransitionError::PlaybackObservedWhileSeeking)
-            }
-            (ReplayState::Playing, ReplayEvent::SeekObserved { .. }) => {
-                Err(ReplayTransitionError::SeekObservedWhilePlaying)
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_clears_replay_resets_targets_then_commits() {
+    fn idle_resets_targets_then_commits() {
         let decision = state().decide(Intent::Select(ControlMode::Idle)).unwrap();
         assert_eq!(decision.effects, Decision::idle_effects());
     }
@@ -534,11 +430,7 @@ mod tests {
         let decision = state().decide(Intent::Select(mode.clone())).unwrap();
         assert_eq!(
             decision.effects,
-            vec![
-                Effect::ClearReplay,
-                Effect::ResetAllTargets,
-                Effect::CommitMode(mode)
-            ]
+            vec![Effect::ResetAllTargets, Effect::CommitMode(mode)]
         );
     }
 
@@ -574,9 +466,9 @@ mod tests {
                 robot: "leader".to_owned(),
             })
             .unwrap();
-        assert_eq!(&decision.effects[..3], Decision::idle_effects());
+        assert_eq!(&decision.effects[..2], Decision::idle_effects());
         assert_eq!(
-            decision.effects[3],
+            decision.effects[2],
             Effect::SetTorque {
                 robot: "leader".to_owned(),
                 engaged: false,
@@ -597,7 +489,6 @@ mod tests {
         assert_eq!(
             decision.effects,
             vec![
-                Effect::ClearReplay,
                 Effect::ResetAllTargets,
                 Effect::SetTorque {
                     robot: "leader".to_owned(),
@@ -615,34 +506,17 @@ mod tests {
     }
 
     #[test]
-    fn replay_and_policy_engage_their_exclusive_owner_before_commit() {
-        for mode in [
-            ControlMode::Replay {
-                robot: "leader".to_owned(),
-                episode: "take".to_owned(),
-            },
-            ControlMode::Policy {
-                robot: "leader".to_owned(),
-                session: "run".to_owned(),
-            },
-        ] {
-            let decision = state().decide(Intent::Select(mode.clone())).unwrap();
-            assert_eq!(decision.effects.last(), Some(&Effect::CommitMode(mode)));
-            assert!(decision.effects.iter().any(|effect| matches!(
-                effect,
-                Effect::SetTorque { robot, engaged: true, .. } if robot == "leader"
-            )));
-        }
-    }
-
-    #[test]
-    fn replay_replacement_discards_the_old_plan_before_physical_transition() {
-        let mode = ControlMode::Replay {
+    fn policy_engages_its_exclusive_owner_before_commit() {
+        let mode = ControlMode::Policy {
             robot: "leader".to_owned(),
-            episode: "replacement".to_owned(),
+            session: "run".to_owned(),
         };
-        let decision = state().decide(Intent::Select(mode)).unwrap();
-        assert_eq!(decision.effects.first(), Some(&Effect::ClearReplay));
+        let decision = state().decide(Intent::Select(mode.clone())).unwrap();
+        assert_eq!(decision.effects.last(), Some(&Effect::CommitMode(mode)));
+        assert!(decision.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SetTorque { robot, engaged: true, .. } if robot == "leader"
+        )));
     }
 
     #[test]
@@ -656,10 +530,6 @@ mod tests {
         for mode in [
             ControlMode::Manual {
                 robot: "leader".to_owned(),
-            },
-            ControlMode::Replay {
-                robot: "leader".to_owned(),
-                episode: "take".to_owned(),
             },
             ControlMode::Policy {
                 robot: "leader".to_owned(),
@@ -758,9 +628,8 @@ mod tests {
     #[test]
     fn calibration_surrenders_ownership_before_requesting_release() {
         let mut state = state();
-        state.mode = ControlMode::Replay {
+        state.mode = ControlMode::Manual {
             robot: "leader".to_owned(),
-            episode: "take".to_owned(),
         };
         assert_eq!(
             state
@@ -770,11 +639,10 @@ mod tests {
                 .unwrap()
                 .effects,
             vec![
-                Effect::ClearReplay,
                 Effect::ResetAllTargets,
                 Effect::CommitModeWithError {
                     mode: ControlMode::Idle,
-                    error: "stopped Replay to calibrate leader".to_owned(),
+                    error: "stopped Manual to calibrate leader".to_owned(),
                 },
                 Effect::SetTorque {
                     robot: "leader".to_owned(),
@@ -822,7 +690,6 @@ mod tests {
                 })
                 .effects,
             vec![
-                Effect::ClearReplay,
                 Effect::ResetAllTargets,
                 Effect::CommitModeWithError {
                     mode: ControlMode::Idle,
@@ -842,82 +709,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_observations_have_explicit_ownership_and_target_effects() {
-        let state = state();
+    fn unavailable_teleoperation_reports_inactivity_without_changing_owner() {
         assert_eq!(
-            state.decide_event(Event::ReplayLost).effects,
-            vec![
-                Effect::ClearReplay,
-                Effect::ResetAllTargets,
-                Effect::CommitModeWithError {
-                    mode: ControlMode::Idle,
-                    error: "the replay was lost".to_owned(),
-                },
-            ]
-        );
-        assert_eq!(
-            state.decide_event(Event::TeleoperationUnavailable).effects,
+            state()
+                .decide_event(Event::TeleoperationUnavailable)
+                .effects,
             vec![Effect::SetActivity {
                 active: false,
                 error: Some("both arms must be calibrated".to_owned()),
             }]
         );
-        assert_eq!(
-            state.decide_event(Event::ReplayFinished).effects,
-            vec![Effect::ClearReplay, Effect::CommitMode(ControlMode::Idle)]
-        );
-        assert_eq!(
-            state
-                .decide_event(Event::ReplayFailed {
-                    robot: "leader".to_owned(),
-                    error: "unsafe trajectory".to_owned(),
-                })
-                .effects,
-            vec![
-                Effect::ClearReplay,
-                Effect::ResetTargets {
-                    robot: "leader".to_owned()
-                },
-                Effect::CommitModeWithError {
-                    mode: ControlMode::Idle,
-                    error: "unsafe trajectory".to_owned(),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn replay_lifecycle_has_only_legal_phase_transitions() {
-        assert_eq!(
-            ReplayState::Seeking.decide(ReplayEvent::SeekObserved { arrived: false }),
-            Ok(ReplayDecision::Keep)
-        );
-        assert_eq!(
-            ReplayState::Seeking.decide(ReplayEvent::SeekObserved { arrived: true }),
-            Ok(ReplayDecision::EnterPlaying)
-        );
-        assert_eq!(
-            ReplayState::Playing.decide(ReplayEvent::PlaybackObserved { finished: false }),
-            Ok(ReplayDecision::Keep)
-        );
-        assert_eq!(
-            ReplayState::Playing.decide(ReplayEvent::PlaybackObserved { finished: true }),
-            Ok(ReplayDecision::FinishToIdle)
-        );
-        assert_eq!(
-            ReplayState::Seeking.decide(ReplayEvent::PlaybackObserved { finished: true }),
-            Err(ReplayTransitionError::PlaybackObservedWhileSeeking)
-        );
-        assert_eq!(
-            ReplayState::Playing.decide(ReplayEvent::SeekObserved { arrived: true }),
-            Err(ReplayTransitionError::SeekObservedWhilePlaying)
-        );
-        for state in [ReplayState::Seeking, ReplayState::Playing] {
-            assert_eq!(state.decide(ReplayEvent::Paused), Ok(ReplayDecision::Keep));
-            assert_eq!(
-                state.decide(ReplayEvent::Failed("fault".to_owned())),
-                Ok(ReplayDecision::FailToIdle("fault".to_owned()))
-            );
-        }
     }
 }

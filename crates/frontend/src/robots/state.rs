@@ -2,8 +2,8 @@
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
-use spiral_robotics_common::recording::{RecordingProgress, ReplayProgress};
-use spiral_robotics_common::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
+use spiral_robotics_common::recording::RecordingProgress;
+use spiral_robotics_common::robots::{ModeSelection, RobotTelemetry, TelemetryFrame};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct HardwareViewState {
@@ -37,16 +37,6 @@ impl HardwareViewState {
         self,
     ) -> MappedSignal<crate::robots::RobotSetupSnapshot, Signal<super::setup::RobotSetupLoad>> {
         self.setup.snapshot()
-    }
-    pub(crate) fn connected_robots(&self) -> Vec<RobotSummary> {
-        self.setup
-            .snapshot()
-            .read()
-            .robots()
-            .iter()
-            .filter(|robot| robot.connection().connected())
-            .cloned()
-            .collect()
     }
     pub(crate) fn mode(&self) -> ModeSelection {
         self.setup.snapshot().read().mode().selection().to_owned()
@@ -127,9 +117,6 @@ impl HardwareViewState {
 
     pub(crate) fn recording(self) -> Option<RecordingProgress> {
         self.telemetry.read().recording().cloned()
-    }
-    pub(crate) fn replay(self) -> Option<ReplayProgress> {
-        self.telemetry.read().replay().cloned()
     }
 }
 

@@ -44,49 +44,49 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/hugging-face/import").json(&source))
     }
 
-    pub(super) async fn robot_discovery_context(
-        &self,
-        selection: &DatasetSelection,
-    ) -> Result<spiral_robotics_common::datasets::RobotDiscoveryContext, CommandError> {
-        self.project
-            .request(
-                HttpRequest::new("POST", "/api/datasets/robot-discovery/context").json(selection),
-            )
-            .await
-    }
-
     pub(super) async fn read_robot_description(&self, url: &str) -> Result<String, CommandError> {
-        let credentials = crate::client::proxy::ProxyClient::credentials().await?;
-        let mut request = crate::client::proxy::ProxyClient::request("GET", url).header(
-            "accept",
-            "text/plain, application/json, application/xml, text/xml",
-        );
-        if url.starts_with("https://huggingface.co/")
-            && let Some(credentials) = credentials.hugging_face()
-        {
-            request = request.header("authorization", format!("Bearer {}", credentials.token()));
-        }
-        crate::client::proxy::ProxyClient::text(request.timeout(30_000), 512 * 1024).await
-    }
-
-    pub(super) async fn inspect_robot_stream(
-        &self,
-        request: &spiral_robotics_common::datasets::RobotStreamInspectionRequest,
-    ) -> Result<serde_json::Value, CommandError> {
-        self.project
-            .request(
-                HttpRequest::new("POST", "/api/datasets/robot-discovery/inspect-stream")
-                    .json(request),
+        let request = Self::robot_source(url)
+            .await?
+            .header(
+                "accept",
+                "text/plain, application/json, application/xml, text/xml",
             )
-            .await
+            .timeout(30_000);
+        crate::client::proxy::ProxyClient::text(request, 512 * 1024).await
     }
 
-    pub(super) async fn save_robot_discovery(
+    pub(super) async fn read_robot_asset(
         &self,
-        result: &spiral_robotics_common::datasets::RobotDiscoveryResult,
+        url: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CommandError> {
+        let request = Self::robot_source(url).await?.timeout(30_000);
+        crate::client::proxy::ProxyClient::bytes(request, max_bytes).await
+    }
+
+    /// A public model file, authenticated for Hugging Face when a token is set.
+    async fn robot_source(url: &str) -> Result<HttpRequest, CommandError> {
+        let credentials = crate::client::proxy::ProxyClient::credentials().await?;
+        let request = crate::client::proxy::ProxyClient::request("GET", url);
+        Ok(
+            match credentials
+                .hugging_face()
+                .filter(|_| url.starts_with("https://huggingface.co/"))
+            {
+                Some(credentials) => {
+                    request.header("authorization", format!("Bearer {}", credentials.token()))
+                }
+                None => request,
+            },
+        )
+    }
+
+    pub(super) async fn save_dataset_robot(
+        &self,
+        save: &spiral_robotics_common::datasets::DatasetRobotSave,
     ) -> Result<(), CommandError> {
         self.project
-            .request(HttpRequest::new("POST", "/api/datasets/robot-discovery/save").json(result))
+            .request(HttpRequest::new("POST", "/api/datasets/robot/save").json(save))
             .await
     }
 
@@ -147,15 +147,6 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/episode-coverage").json(&request))
     }
 
-    pub(super) fn episode_messages(
-        &self,
-        request: spiral_robotics_common::datasets::MessageRead,
-    ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
-        self.project.request_bytes(
-            HttpRequest::new("POST", "/api/datasets/episode-messages").json(&request),
-        )
-    }
-
     pub(in crate::activities) fn run_spiral_query(
         &self,
         statement: String,
@@ -172,5 +163,14 @@ impl DatasetClient {
     ) -> impl Future<Output = Result<SpiralQuerySnapshot, CommandError>> + use<> {
         self.project
             .request(HttpRequest::new("POST", "/api/queries/episode").json(request))
+    }
+    /// The same episode query as one complete Arrow IPC stream, refused
+    /// rather than cut short; the statement bounds its own rows.
+    pub(super) fn run_episode_arrow_query(
+        &self,
+        request: &EpisodeQueryRequest,
+    ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
+        self.project
+            .request_bytes(HttpRequest::new("POST", "/api/queries/episode/arrow").json(request))
     }
 }

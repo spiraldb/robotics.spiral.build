@@ -22,11 +22,12 @@ export function installWorkflowFetch(nextMode) {
         }
         const body = request.method === 'GET' ? null : await request.clone().json();
         calls.push({url, body, transport:path, metadata, project:request.headers.get('X-Spiral-Project')});
-        if (url === '/api/models/capabilities') return Response.json({columns:[],rows:[],truncated:false,elapsed_ms:0});
-        if (url === '/api/workflows/plan') {
+        if (url === '/api/queries' && body.statement.startsWith('EXPLAIN')) {
             const graph = {schema_version:1,root:0,nodes:[{id:0,operator:'Values',inputs:[],output:{},properties:{}}]};
-            return Response.json({report:{explain_schema_version:2,logical_plan:graph,optimized_logical_plan:graph,physical_plan:graph,physical_lowering_error:null},error:null});
+            const plan = JSON.stringify({explain_schema_version:2,logical_plan:graph,optimized_logical_plan:graph,physical_plan:graph,physical_lowering_error:null});
+            return Response.json({columns:[{name:'plan',data_type:'Utf8',nullable:false}],rows:[{plan}],truncated:false,elapsed_ms:0});
         }
+        if (url === '/api/queries') return Response.json({columns:[],rows:[],truncated:false,elapsed_ms:0});
         if (url === '/api/workflow-runs' && request.method === 'POST') {
             if (mode === 'running') await new Promise(() => {});
             const number = calls.filter(call => call.url === '/api/workflow-runs').length;
@@ -212,12 +213,18 @@ async fn browser_loop_plans_and_updates_the_local_draft_without_applying_or_savi
     assert_eq!(
         calls
             .iter()
-            .map(|call| call["url"].as_str().unwrap())
+            .map(|call| {
+                let url = call["url"].as_str().unwrap();
+                match call["body"]["statement"].as_str() {
+                    Some(statement) => format!("{url} {}", statement.split(' ').next().unwrap()),
+                    None => url.to_owned(),
+                }
+            })
             .collect::<Vec<_>>(),
         [
-            "/api/models/capabilities",
+            "/api/queries SELECT",
             "https://provider.test/v1/chat/completions",
-            "/api/workflows/plan",
+            "/api/queries EXPLAIN",
             "https://provider.test/v1/chat/completions"
         ]
     );

@@ -440,7 +440,7 @@ impl ProjectRegistry {
             || !matches!(hardware.mode(), HardwareModeSelection::Idle)
         {
             return Err(OperationError::conflict(
-                "Stop recording, replay, rollout, and training before importing a project.",
+                "Stop recording, rollout, and training before importing a project.",
             ));
         }
         // The import replaces the robot configurations connected robots use.
@@ -536,7 +536,7 @@ impl ProjectRegistry {
         match DestinationChangeContext::new(&hardware, visible.as_ref()).admission() {
             DestinationChangeAdmission::Ready => Ok(()),
             DestinationChangeAdmission::Busy => Err(OperationError::conflict(
-                "Stop recording, replay, and rollout, and disconnect this project's robots before changing projects.",
+                "Stop recording and rollout, and disconnect this project's robots before changing projects.",
             )),
             DestinationChangeAdmission::DisconnectOrphaned(ids) => {
                 for id in ids {

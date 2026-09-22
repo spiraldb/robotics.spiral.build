@@ -132,11 +132,11 @@ impl TimelineSample {
 }
 
 pub(crate) trait EpisodePlaybackTime {
-    fn replay_slot(self) -> u64;
+    fn render_slot(self) -> u64;
 }
 
 impl EpisodePlaybackTime for f64 {
-    fn replay_slot(self) -> u64 {
+    fn render_slot(self) -> u64 {
         if !self.is_finite() || self <= 0.0 {
             return 0;
         }

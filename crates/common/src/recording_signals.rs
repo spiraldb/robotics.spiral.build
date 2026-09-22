@@ -308,16 +308,13 @@ mod tests {
                     .map(|(id, joints)| RobotTelemetry::new(id, false, joints))
                     .collect(),
             )
-            .with_operations(
-                episode.map(|episode| {
-                    RecordingProgress::new(
-                        RecordingIdentity::new(episode, "default", Vec::new()),
-                        RecordingClock::new(1, elapsed, elapsed),
-                        RecordingState::default(),
-                    )
-                }),
-                None,
-            )
+            .with_recording(episode.map(|episode| {
+                RecordingProgress::new(
+                    RecordingIdentity::new(episode, "default", Vec::new()),
+                    RecordingClock::new(1, elapsed, elapsed),
+                    RecordingState::default(),
+                )
+            }))
     }
 
     fn reading(store: &RecordingSignals, arm: &str, joint: &str, at: usize) -> Option<f32> {

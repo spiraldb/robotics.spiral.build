@@ -36,15 +36,12 @@ use crate::HardwareInputError;
 use crate::calibration::{Calibration, CalibrationError, EncoderCounts, MotorRangeTracker};
 use crate::control_policy::{
     CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
-    Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent,
-    ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
-    ReplayState as ReplayPolicyState, RobotAdmission,
+    Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent, RobotAdmission,
 };
 use crate::state::CompletedRecording;
 use spiral_robotics_common::recording::{
     EpisodeArm, RecordingClock as RecordingProgressClock, RecordingGap, RecordingIdentity,
-    RecordingProgress, RecordingState, ReplayIdentity, ReplayPhase, ReplayProgress, ReplayPurpose,
-    ReplayTimeline, ReplayTransport,
+    RecordingProgress, RecordingState,
 };
 use spiral_robotics_common::robots::{
     CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointDiagnostics,
@@ -295,19 +292,6 @@ pub const DEFAULT_TELEOP_MAX_STEP_COUNTS: i64 = 40;
 /// Consecutive failed transfers before a bus is considered lost.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
-/// How close every joint must get to a replay's requested frame before playback runs.
-///
-/// In normalized units, so this is a fraction of each joint's measured travel
-/// rather than a count that means something different on every joint.
-const REPLAY_SEEK_TOLERANCE: f64 = 0.02;
-
-/// How long an arm may spend moving to a replay's requested pose before giving up.
-///
-/// A joint blocked by the bench, or by the operator's own hand, would otherwise
-/// leave a replay waiting to start forever with an energized arm pushing
-/// against whatever is in the way.
-const REPLAY_SEEK_TIMEOUT: Duration = Duration::from_secs(20);
-
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 /// Everything the control thread needs to open one arm: a configuration with a port.
@@ -503,61 +487,6 @@ impl TryFrom<BTreeMap<String, f64>> for JointGoals {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub struct ReplayTrajectory {
-    frames: Vec<BTreeMap<String, f64>>,
-    sample_hz: f64,
-}
-
-impl ReplayTrajectory {
-    pub fn new(
-        frames: Vec<BTreeMap<String, f64>>,
-        sample_hz: f64,
-    ) -> Result<Self, HardwareInputError> {
-        if frames.is_empty() {
-            return Err(HardwareInputError::new(
-                "a replay trajectory must contain at least one frame",
-            ));
-        }
-        if !sample_hz.is_finite() || sample_hz <= 0.0 {
-            return Err(HardwareInputError::new(
-                "replay sample rate must be finite and greater than zero",
-            ));
-        }
-        let expected_joints = frames[0]
-            .keys()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        for (index, frame) in frames.iter().enumerate() {
-            JointGoals::try_from(frame.clone())?;
-            let actual_joints = frame.keys().map(String::as_str).collect::<BTreeSet<_>>();
-            if actual_joints != expected_joints {
-                return Err(HardwareInputError::new(format!(
-                    "replay frame {index} changes the trajectory's joint set"
-                )));
-            }
-        }
-        Ok(Self { frames, sample_hz })
-    }
-
-    pub fn single_pose(
-        pose: BTreeMap<String, f64>,
-        sample_hz: f64,
-    ) -> Result<Self, HardwareInputError> {
-        Self::new(vec![pose], sample_hz)
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub struct RobotPlaybackRequest {
-    robot: String,
-    episode: String,
-    trajectory: ReplayTrajectory,
-    start_frame: usize,
-    resolved_start_seconds: f64,
-    purpose: ReplayPurpose,
-}
-
 /// One normalized command admitted under a specific policy session.
 #[derive(Debug, PartialEq)]
 pub struct PolicyGoals {
@@ -579,57 +508,6 @@ impl PolicyGoals {
             session,
             normalized,
         })
-    }
-}
-
-impl RobotPlaybackRequest {
-    pub fn timeline(
-        robot: String,
-        episode: String,
-        trajectory: ReplayTrajectory,
-    ) -> Result<Self, HardwareInputError> {
-        HardwareInputError::validate_name("robot identifier", &robot)?;
-        HardwareInputError::validate_name("replay identifier", &episode)?;
-        Ok(Self {
-            robot,
-            episode,
-            trajectory,
-            start_frame: 0,
-            resolved_start_seconds: 0.0,
-            purpose: ReplayPurpose::Timeline,
-        })
-    }
-
-    pub fn physical_seek(
-        robot: String,
-        episode: String,
-        trajectory: ReplayTrajectory,
-    ) -> Result<Self, HardwareInputError> {
-        Ok(Self {
-            purpose: ReplayPurpose::PhysicalSeek,
-            ..Self::timeline(robot, episode, trajectory)?
-        })
-    }
-
-    pub fn starting_at(
-        mut self,
-        start_frame: usize,
-        resolved_start_seconds: f64,
-    ) -> Result<Self, HardwareInputError> {
-        if start_frame >= self.trajectory.frames.len() {
-            return Err(HardwareInputError::new(format!(
-                "replay start frame {start_frame} is outside {} trajectory frames",
-                self.trajectory.frames.len()
-            )));
-        }
-        if !resolved_start_seconds.is_finite() || resolved_start_seconds < 0.0 {
-            return Err(HardwareInputError::new(
-                "replay start time must be finite and non-negative",
-            ));
-        }
-        self.start_frame = start_frame;
-        self.resolved_start_seconds = resolved_start_seconds;
-        Ok(self)
     }
 }
 
@@ -700,14 +578,6 @@ enum Command {
     SetRecordingPaused {
         paused: bool,
         reply: Reply<(Option<EpisodeCheckpoint>, f64)>,
-    },
-    SetReplayPaused {
-        paused: bool,
-        reply: Reply<()>,
-    },
-    StartReplay {
-        request: Box<RobotPlaybackRequest>,
-        reply: Reply<()>,
     },
     Shutdown {
         reply: Reply<()>,
@@ -856,58 +726,6 @@ impl Recording {
 
     fn follow_error(&self) -> Option<f64> {
         self.tracking.follow_error()
-    }
-}
-
-/// An episode being played back onto one arm.
-struct Replay {
-    episode: String,
-    robot: String,
-    frames: Vec<BTreeMap<String, f64>>,
-    /// Seconds between recorded frames, so playback runs at the rate it was
-    /// captured at rather than at whatever the control loop happens to manage.
-    frame_period: f64,
-    purpose: ReplayPurpose,
-    phase: ReplayPhase,
-    timing: ReplayTiming,
-}
-
-/// Mutable playback clock and pause/seek bookkeeping for one replay.
-struct ReplayTiming {
-    /// Fractional index into `frames`, advanced by real elapsed time.
-    position: f64,
-    /// Frame position and episode time are not interchangeable after frames
-    /// without commandable poses have been filtered out.
-    start_position: f64,
-    resolved_start_seconds: f64,
-    /// A paused replay keeps its loaded trajectory and current position. The
-    /// arm holds where it is until the same replay resumes.
-    paused: bool,
-    /// When the seek started, so a blocked arm gives up instead of pushing.
-    seeking_since: Instant,
-}
-
-impl Replay {
-    /// The pose this replay wants the arm at right now.
-    fn pose(&self) -> Option<&BTreeMap<String, f64>> {
-        self.frames.get(self.cursor())
-    }
-
-    fn cursor(&self) -> usize {
-        self.timing.position as usize
-    }
-
-    fn finished(&self) -> bool {
-        self.phase == ReplayPhase::Playing && self.cursor() >= self.frames.len()
-    }
-
-    fn duration_seconds(&self) -> f64 {
-        self.frames.len() as f64 * self.frame_period
-    }
-
-    fn elapsed_seconds(&self) -> f64 {
-        self.timing.resolved_start_seconds
-            + (self.timing.position - self.timing.start_position).max(0.0) * self.frame_period
     }
 }
 
@@ -1105,21 +923,6 @@ impl HardwareHandle {
             })??;
         }
         Ok(elapsed_seconds)
-    }
-
-    /// Play or physically seek through a validated recorded trajectory.
-    pub async fn start_replay(&self, request: RobotPlaybackRequest) -> Result<(), String> {
-        self.request(|reply| Command::StartReplay {
-            request: Box::new(request),
-            reply,
-        })
-        .await
-    }
-
-    /// Pause or resume the loaded replay without returning to frame zero.
-    pub async fn set_replay_paused(&self, paused: bool) -> Result<(), String> {
-        self.request(|reply| Command::SetReplayPaused { paused, reply })
-            .await
     }
 
     /// Adopt a calibration that has just been committed to SpiralDB.
@@ -1602,10 +1405,6 @@ impl From<&ModeSelection> for ControlMode {
                 leader: leader.clone(),
                 follower: follower.clone(),
             },
-            ModeSelection::Replay { robot, episode } => ControlMode::Replay {
-                robot: robot.clone(),
-                episode: episode.clone(),
-            },
             ModeSelection::Policy { robot, session } => ControlMode::Policy {
                 robot: robot.clone(),
                 session: session.clone(),
@@ -1623,17 +1422,7 @@ impl From<ControlMode> for ModeSelection {
             ControlMode::Teleoperate { leader, follower } => {
                 ModeSelection::Teleoperate { leader, follower }
             }
-            ControlMode::Replay { robot, episode } => ModeSelection::Replay { robot, episode },
             ControlMode::Policy { robot, session } => ModeSelection::Policy { robot, session },
-        }
-    }
-}
-
-impl From<ReplayPhase> for ReplayPolicyState {
-    fn from(phase: ReplayPhase) -> Self {
-        match phase {
-            ReplayPhase::Seeking => Self::Seeking,
-            ReplayPhase::Playing => Self::Playing,
         }
     }
 }
@@ -1644,20 +1433,12 @@ struct Controller {
     published: PublishedControllerState,
     state: watch::Sender<HardwareState>,
     recording_signals: Arc<RwLock<RecordingSignals>>,
-    operations: ActiveOperations,
-    #[cfg(test)]
-    use_test_bus: bool,
-}
-
-#[derive(Default)]
-struct ActiveOperations {
     /// The take being captured, if any. Recording is deliberately not a mode:
     /// an operator records *while* teleoperating, and a take of an idle arm
     /// being moved by hand is a legitimate take too.
     recording: Option<Recording>,
-    /// The episode being played back, if any. This one *is* a mode, because it
-    /// drives motors and only one thing may do that at a time.
-    replay: Option<Replay>,
+    #[cfg(test)]
+    use_test_bus: bool,
 }
 
 /// Controller-owned values copied into each published hardware snapshot.
@@ -1681,7 +1462,7 @@ impl Controller {
             robots: BTreeMap::new(),
             published: PublishedControllerState::default(),
             state,
-            operations: ActiveOperations::default(),
+            recording: None,
             recording_signals: Arc::new(RwLock::new(RecordingSignals::default())),
             #[cfg(test)]
             use_test_bus: false,
@@ -1861,12 +1642,6 @@ impl Controller {
             Command::SetRecordingPaused { paused, reply } => {
                 let _ = reply.send(self.set_recording_paused(paused));
             }
-            Command::SetReplayPaused { paused, reply } => {
-                let _ = reply.send(self.set_replay_paused(paused));
-            }
-            Command::StartReplay { request, reply } => {
-                let _ = reply.send(self.start_replay(*request));
-            }
             Command::Shutdown { reply } => {
                 // `run` intercepts shutdown so it can leave the control loop.
                 // Keeping this arm explicit prevents a future dispatch change
@@ -1881,7 +1656,7 @@ impl Controller {
         writer: Box<dyn RecordingWriter>,
         arms: Vec<EpisodeArm>,
     ) -> Result<(), String> {
-        if let Some(existing) = &self.operations.recording {
+        if let Some(existing) = &self.recording {
             return Err(format!(
                 "take {} is already recording; stop it first",
                 existing.writer.id()
@@ -1905,7 +1680,7 @@ impl Controller {
         let clock = RecordingClock::started_now();
         writer.update_clock(clock.started, Some(Duration::ZERO));
         self.published.recording_issue = None;
-        self.operations.recording = Some(Recording {
+        self.recording = Some(Recording {
             writer,
             arms,
             resume_mode: self.published.mode.selection().clone(),
@@ -1919,7 +1694,6 @@ impl Controller {
 
     fn stop_recording(&mut self, keep: bool) -> Result<CompletedRecording, String> {
         let mut recording = self
-            .operations
             .recording
             .take()
             .ok_or_else(|| "no take is being recorded".to_owned())?;
@@ -1950,7 +1724,6 @@ impl Controller {
         if paused {
             let (checkpoint, elapsed_seconds) = {
                 let recording = self
-                    .operations
                     .recording
                     .as_mut()
                     .ok_or_else(|| "no take is being recorded".to_owned())?;
@@ -1972,7 +1745,6 @@ impl Controller {
             return Ok((Some(checkpoint), elapsed_seconds));
         }
         let resume_mode = self
-            .operations
             .recording
             .as_ref()
             .ok_or_else(|| "no take is being recorded".to_owned())?
@@ -1980,12 +1752,11 @@ impl Controller {
             .clone();
         self.set_mode(resume_mode)?;
         let elapsed_seconds = self
-            .operations
             .recording
             .as_ref()
             .map(|recording| recording.active_elapsed(Instant::now()).as_secs_f64())
             .unwrap_or_default();
-        if let Some(recording) = self.operations.recording.as_mut()
+        if let Some(recording) = self.recording.as_mut()
             && recording.clock.is_paused()
         {
             let now = Instant::now();
@@ -1999,7 +1770,7 @@ impl Controller {
 
     /// Append this cycle's positions to the take in progress.
     fn capture_sample(&mut self) {
-        let Some(recording) = self.operations.recording.as_mut() else {
+        let Some(recording) = self.recording.as_mut() else {
             return;
         };
 
@@ -2101,135 +1872,6 @@ impl Controller {
                     Some(format!("stopped recording: {reason}. {error}"));
             }
         }
-    }
-
-    fn start_replay(&mut self, request: RobotPlaybackRequest) -> Result<(), String> {
-        let RobotPlaybackRequest {
-            robot,
-            episode,
-            trajectory: ReplayTrajectory { frames, sample_hz },
-            start_frame,
-            resolved_start_seconds,
-            purpose,
-        } = request;
-        if frames.is_empty() {
-            return Err(format!("take {episode:?} has no frames to replay"));
-        }
-        if !sample_hz.is_finite() || sample_hz <= 0.0 {
-            return Err(format!(
-                "take {episode:?} records an unusable sample rate of {sample_hz}"
-            ));
-        }
-        if start_frame >= frames.len() {
-            return Err(format!(
-                "take {episode:?} has no replay frame at index {start_frame}"
-            ));
-        }
-        if !resolved_start_seconds.is_finite() || resolved_start_seconds < 0.0 {
-            return Err(format!(
-                "take {episode:?} resolves to an unusable replay time of {resolved_start_seconds}"
-            ));
-        }
-        let calibration = self.require_calibrated(&robot)?.clone();
-        let replay_joints = frames[0].keys().cloned().collect::<BTreeSet<_>>();
-        // Validate the complete trajectory, not just its first pose. Silently
-        // dropping an unknown or non-finite joint in a later frame would make
-        // the physical replay differ from the episode it claims to reproduce.
-        for (frame, pose) in frames.iter().enumerate() {
-            if pose.is_empty() {
-                return Err(format!(
-                    "take {episode:?} has no commandable joints in replay frame {frame}"
-                ));
-            }
-            if pose.keys().cloned().collect::<BTreeSet<_>>() != replay_joints {
-                return Err(format!(
-                    "take {episode:?} changes its replay joint set in frame {frame}"
-                ));
-            }
-            for (joint, value) in pose {
-                if !calibration.motors().contains_key(joint) {
-                    return Err(format!(
-                        "robot {robot:?} has no calibrated joint {joint:?} used by replay frame {frame} of {episode:?}"
-                    ));
-                }
-                if !value.is_finite() || !(-1.0..=1.0).contains(value) {
-                    return Err(format!(
-                        "take {episode:?} has a normalized value outside [-1, 1] for joint {joint:?} in replay frame {frame}"
-                    ));
-                }
-            }
-        }
-
-        // Set the mode through the same path every other mode goes through, so
-        // replay inherits the calibration check, the sweep refusal, the
-        // target reset, and the torque handling rather than reimplementing them.
-        self.set_mode(ModeSelection::Replay {
-            robot: robot.to_owned(),
-            episode: episode.to_owned(),
-        })?;
-
-        let start_position = start_frame as f64;
-        self.operations.replay = Some(Replay {
-            episode: episode.to_owned(),
-            robot: robot.to_owned(),
-            frames,
-            frame_period: 1.0 / sample_hz,
-            purpose,
-            phase: ReplayPhase::Seeking,
-            timing: ReplayTiming {
-                position: start_position,
-                start_position,
-                resolved_start_seconds,
-                paused: false,
-                seeking_since: Instant::now(),
-            },
-        });
-        Ok(())
-    }
-
-    fn set_replay_paused(&mut self, paused: bool) -> Result<(), String> {
-        // A physical seek is an atomic motion consequence, not Timeline
-        // transport. A late pause from the replay that preceded a scrub must
-        // not freeze the replacement seek before the arm can move.
-        if self
-            .operations
-            .replay
-            .as_ref()
-            .is_some_and(|replay| replay.purpose == ReplayPurpose::PhysicalSeek)
-        {
-            return Ok(());
-        }
-        let robot = self
-            .operations
-            .replay
-            .as_ref()
-            .map(|replay| replay.robot.clone())
-            .ok_or_else(|| "no episode is being replayed".to_owned())?;
-        if self
-            .operations
-            .replay
-            .as_ref()
-            .is_some_and(|replay| replay.timing.paused == paused)
-        {
-            return Ok(());
-        }
-        if paused {
-            let arm = self
-                .robots
-                .get_mut(&robot)
-                .ok_or_else(|| format!("robot {robot:?} is not connected"))?;
-            // Freeze the target at the measured pose before suspending the
-            // timeline. This prevents the last queued replay target from
-            // continuing to pull the arm after Pause was acknowledged.
-            arm.follow_measured_positions();
-        }
-        if let Some(replay) = self.operations.replay.as_mut() {
-            replay.timing.paused = paused;
-            if !paused && replay.phase == ReplayPhase::Seeking {
-                replay.timing.seeking_since = Instant::now();
-            }
-        }
-        Ok(())
     }
 
     fn connect(&mut self, spec: RobotSpec) -> Result<(), String> {
@@ -2521,14 +2163,8 @@ impl Controller {
     fn execute_control_decision(&mut self, decision: ControlDecision) -> Result<(), String> {
         for effect in decision.into_effects() {
             match effect {
-                ControlEffect::ClearReplay => self.operations.replay = None,
                 ControlEffect::ResetAllTargets => {
                     for robot in self.robots.values_mut() {
-                        robot.follow_measured_positions();
-                    }
-                }
-                ControlEffect::ResetTargets { robot } => {
-                    if let Some(robot) = self.robots.get_mut(&robot) {
                         robot.follow_measured_positions();
                     }
                 }
@@ -2565,14 +2201,8 @@ impl Controller {
 
     fn apply_state_effect(&mut self, effect: ControlEffect) {
         match effect {
-            ControlEffect::ClearReplay => self.operations.replay = None,
             ControlEffect::ResetAllTargets => {
                 for robot in self.robots.values_mut() {
-                    robot.follow_measured_positions();
-                }
-            }
-            ControlEffect::ResetTargets { robot } => {
-                if let Some(robot) = self.robots.get_mut(&robot) {
                     robot.follow_measured_positions();
                 }
             }
@@ -2605,18 +2235,6 @@ impl Controller {
             !matches!(selection, ModeSelection::Idle),
             Some(error),
         );
-    }
-
-    fn require_calibrated(&self, id: &str) -> Result<&Calibration, String> {
-        let robot = self
-            .robots
-            .get(id)
-            .ok_or_else(|| format!("robot {id:?} is not connected"))?;
-        robot
-            .spec
-            .calibration
-            .as_ref()
-            .ok_or_else(|| format!("robot {id:?} must be calibrated first"))
     }
 
     fn start_calibration(&mut self, id: &str) -> Result<(), String> {
@@ -2749,20 +2367,10 @@ impl Controller {
     }
 
     fn drive_robots(&mut self) {
-        // An arm keeping up with recorded motion needs the same faster ramp a
-        // teleoperation follower gets, for the same reason: the trajectory it is
-        // chasing was produced by a human hand moving at human speed. While a
-        // replay is still walking to the take's first frame it stays on the
-        // gentle manual ramp, because that move is not in the recording and the
-        // operator has no way to anticipate it.
+        // An arm chasing a live leader or a policy needs a faster ramp than a
+        // manual slider move: the motion it follows is produced at human speed.
         let quick = match self.published.mode.selection() {
             ModeSelection::Teleoperate { follower, .. } => Some(follower.as_str()),
-            ModeSelection::Replay { robot, .. } => self
-                .operations
-                .replay
-                .as_ref()
-                .filter(|replay| replay.phase == ReplayPhase::Playing)
-                .map(|_| robot.as_str()),
             ModeSelection::Policy { robot, .. } => Some(robot.as_str()),
             _ => None,
         };
@@ -2777,13 +2385,6 @@ impl Controller {
     }
 
     fn apply_mode(&mut self) {
-        if matches!(
-            self.published.mode.selection(),
-            ModeSelection::Replay { .. }
-        ) {
-            self.apply_replay();
-            return;
-        }
         let ModeSelection::Teleoperate { leader, follower } =
             self.published.mode.selection().clone()
         else {
@@ -2829,202 +2430,6 @@ impl Controller {
             follower_robot.motion.target.extend(targets);
         }
         self.published.mode.update_activity(true, None);
-    }
-
-    /// Walk the replay forward one control cycle.
-    ///
-    /// Two phases. The arm is first ramped to the requested frame at the
-    /// gentle manual rate, because a recording rarely matches where the
-    /// arm is standing — the previous take left it at *its* last pose. Only once
-    /// every joint is there does playback begin, and playback advances by real
-    /// elapsed time so a take captured at sixty hertz plays at sixty hertz
-    /// whatever rate this loop is managing today.
-    fn apply_replay(&mut self) {
-        let Some(replay) = self.operations.replay.as_mut() else {
-            let decision = self.control_state().decide_event(ControlEvent::ReplayLost);
-            self.execute_control_decision(decision)
-                .expect("replay-loss policy contains no physical effects");
-            return;
-        };
-        let (robot_id, episode) = (replay.robot.clone(), replay.episode.clone());
-
-        if replay.timing.paused {
-            let decision = ReplayPolicyState::from(replay.phase)
-                .decide(ReplayPolicyEvent::Paused)
-                .expect("pause is legal in every replay phase");
-            debug_assert_eq!(decision, ReplayPolicyDecision::Keep);
-            return;
-        }
-
-        let Some(robot) = self.robots.get(&robot_id) else {
-            let decision = ReplayPolicyState::from(replay.phase)
-                .decide(ReplayPolicyEvent::Failed(
-                    "stopped Replay: the arm is no longer connected".to_owned(),
-                ))
-                .expect("failure is legal in every replay phase");
-            self.apply_replay_policy(&robot_id, decision);
-            return;
-        };
-        let Some(calibration) = robot.spec.calibration.clone() else {
-            let decision = ReplayPolicyState::from(replay.phase)
-                .decide(ReplayPolicyEvent::Failed(format!(
-                    "stopped Replay: robot {robot_id:?} is no longer calibrated"
-                )))
-                .expect("failure is legal in every replay phase");
-            self.apply_replay_policy(&robot_id, decision);
-            return;
-        };
-
-        if replay.phase == ReplayPhase::Seeking {
-            let Some(first) = replay.pose().cloned() else {
-                self.fail_replay(
-                    &robot_id,
-                    format!("take {episode:?} has no frames to replay"),
-                );
-                return;
-            };
-            let arrived =
-                first.iter().try_fold(true, |arrived, (joint, wanted)| {
-                    let motor = calibration.motors().get(joint).ok_or_else(|| {
-                        format!("calibration no longer contains replay joint {joint:?}")
-                    })?;
-                    let measured =
-                        robot.motion.positions.get(joint).copied().ok_or_else(|| {
-                            format!("robot stopped reporting replay joint {joint:?}")
-                        })?;
-                    let actual = motor.normalize_raw(measured);
-                    Ok::<bool, String>(arrived && (actual - wanted).abs() <= REPLAY_SEEK_TOLERANCE)
-                });
-            let arrived = match arrived {
-                Ok(arrived) => arrived,
-                Err(error) => {
-                    let decision = ReplayPolicyState::Seeking
-                        .decide(ReplayPolicyEvent::Failed(format!(
-                            "stopped Replay: {error}"
-                        )))
-                        .expect("failure is legal while seeking");
-                    self.apply_replay_policy(&robot_id, decision);
-                    return;
-                }
-            };
-
-            if !arrived && replay.timing.seeking_since.elapsed() >= REPLAY_SEEK_TIMEOUT {
-                let waited = REPLAY_SEEK_TIMEOUT.as_secs();
-                let decision = ReplayPolicyState::Seeking.decide(ReplayPolicyEvent::Failed(format!(
-                        "stopped Replay: {robot_id} did not reach the requested pose in {episode} within {waited} seconds. Check whether a joint is obstructed."
-                    )),
-                )
-                .expect("failure is legal while seeking");
-                self.apply_replay_policy(&robot_id, decision);
-                return;
-            }
-            let decision = ReplayPolicyState::Seeking
-                .decide(ReplayPolicyEvent::SeekObserved { arrived })
-                .expect("seek observation is legal while seeking");
-            if self.apply_replay_policy(&robot_id, decision) {
-                return;
-            }
-        }
-
-        let Some(replay) = self.operations.replay.as_mut() else {
-            return;
-        };
-        if replay.phase == ReplayPhase::Playing {
-            let decision = ReplayPolicyState::Playing
-                .decide(ReplayPolicyEvent::PlaybackObserved {
-                    finished: replay.finished(),
-                })
-                .expect("playback observation is legal while playing");
-            if self.apply_replay_policy(&robot_id, decision) {
-                return;
-            }
-            let replay = self
-                .operations
-                .replay
-                .as_mut()
-                .expect("keeping playback preserves the replay");
-            replay.timing.position += self.settings.period.as_secs_f64() / replay.frame_period;
-        }
-
-        let Some(replay) = self.operations.replay.as_ref() else {
-            return;
-        };
-        let Some(pose) = replay.pose().cloned() else {
-            return;
-        };
-        let targets = pose
-            .iter()
-            .map(|(joint, value)| {
-                let motor = calibration.motors().get(joint).ok_or_else(|| {
-                    format!("calibration no longer contains replay joint {joint:?}")
-                })?;
-                let target = motor.denormalize(*value).map_err(|error| {
-                    format!("could not command replay joint {joint:?}: {error}")
-                })?;
-                Ok((joint.clone(), target))
-            })
-            .collect::<Result<BTreeMap<_, _>, String>>();
-        let targets = match targets {
-            Ok(targets) => targets,
-            Err(error) => {
-                let state = self
-                    .operations
-                    .replay
-                    .as_ref()
-                    .map(|replay| ReplayPolicyState::from(replay.phase))
-                    .unwrap_or(ReplayPolicyState::Playing);
-                let decision = state
-                    .decide(ReplayPolicyEvent::Failed(format!(
-                        "stopped Replay: {error}"
-                    )))
-                    .expect("failure is legal in every replay phase");
-                self.apply_replay_policy(&robot_id, decision);
-                return;
-            }
-        };
-        if let Some(robot) = self.robots.get_mut(&robot_id) {
-            robot.motion.target.extend(targets);
-        }
-        self.published.mode.update_activity(true, None);
-    }
-
-    /// Apply the lifecycle consequence chosen by the application policy.
-    /// Returns true when the replay ended and this cycle must stop processing.
-    fn apply_replay_policy(&mut self, robot_id: &str, decision: ReplayPolicyDecision) -> bool {
-        match decision {
-            ReplayPolicyDecision::Keep => false,
-            ReplayPolicyDecision::EnterPlaying => {
-                if let Some(replay) = self.operations.replay.as_mut() {
-                    replay.phase = ReplayPhase::Playing;
-                }
-                false
-            }
-            ReplayPolicyDecision::FinishToIdle => {
-                // Completion leaves the arm holding its final pose; only the
-                // exclusive replay owner is released.
-                let decision = self
-                    .control_state()
-                    .decide_event(ControlEvent::ReplayFinished);
-                self.execute_control_decision(decision)
-                    .expect("replay completion contains no physical effects");
-                true
-            }
-            ReplayPolicyDecision::FailToIdle(error) => {
-                self.fail_replay(robot_id, error);
-                true
-            }
-        }
-    }
-
-    fn fail_replay(&mut self, robot_id: &str, error: String) {
-        let decision = self
-            .control_state()
-            .decide_event(ControlEvent::ReplayFailed {
-                robot: robot_id.to_owned(),
-                error,
-            });
-        self.execute_control_decision(decision)
-            .expect("replay failure policy contains no physical effects");
     }
 
     /// Fall back to idle when a robot the current mode depends on goes away.
@@ -3076,7 +2481,6 @@ impl Controller {
         }
 
         let recording_error = self
-            .operations
             .recording
             .as_ref()
             .is_some_and(|recording| recording.arms.iter().any(|arm| arm.id() == id))
@@ -3107,7 +2511,7 @@ impl Controller {
     /// release attempts run even when an earlier cleanup step failed.
     fn shutdown_all(&mut self) -> Result<(), String> {
         let mut failures = Vec::new();
-        if self.operations.recording.is_some()
+        if self.recording.is_some()
             && let Err(error) = self.stop_recording(true)
         {
             self.published.recording_issue = Some(format!(
@@ -3130,7 +2534,7 @@ impl Controller {
 
     fn publish(&mut self) {
         self.published.sequence += 1;
-        let recording = self.operations.recording.as_ref().map(|recording| {
+        let recording = self.recording.as_ref().map(|recording| {
             let now = Instant::now();
             let identity = RecordingIdentity::new(
                 recording.writer.id().to_owned(),
@@ -3154,21 +2558,6 @@ impl Controller {
             );
             RecordingProgress::new(identity, clock, state)
         });
-        let replay = self.operations.replay.as_ref().map(|replay| {
-            let identity = ReplayIdentity::new(replay.episode.clone(), replay.robot.clone());
-            // Seeking preserves the requested episode position while the arm
-            // ramps there, so visualizations never jump back to frame zero
-            // after a committed scrub.
-            let timeline = ReplayTimeline::new(
-                replay.cursor().min(replay.frames.len()) as u64,
-                replay.frames.len() as u64,
-                replay.elapsed_seconds(),
-            )
-            .with_duration_seconds(replay.duration_seconds());
-            let transport =
-                ReplayTransport::new(replay.purpose, replay.phase, replay.timing.paused);
-            ReplayProgress::new(identity, timeline, transport)
-        });
         let state = HardwareState {
             telemetry: TelemetryFrame::new(
                 self.published.sequence,
@@ -3181,7 +2570,7 @@ impl Controller {
                     .map(ConnectedRobot::telemetry)
                     .collect(),
             )
-            .with_operations(recording, replay),
+            .with_recording(recording),
             connections: self.published.connections.clone(),
             mode: self.published.mode.clone(),
             limits: self
@@ -3271,19 +2660,6 @@ mod tests {
         RobotSpec::try_from(config).expect("robot specification")
     }
 
-    fn timeline_replay(
-        robot: &str,
-        frames: Vec<BTreeMap<String, f64>>,
-        sample_hz: f64,
-    ) -> RobotPlaybackRequest {
-        RobotPlaybackRequest::timeline(
-            robot.to_owned(),
-            "episode_000001".to_owned(),
-            ReplayTrajectory::new(frames, sample_hz).expect("valid trajectory"),
-        )
-        .expect("valid replay request")
-    }
-
     fn policy_goals(robot: &str, session: &str, goals: BTreeMap<String, f64>) -> PolicyGoals {
         PolicyGoals::new(
             robot.to_owned(),
@@ -3369,488 +2745,6 @@ mod tests {
         let mut extra = exact;
         extra.insert("phantom".to_owned(), 0);
         assert!(configured.validate_read_keys(&extra, "test").is_err());
-    }
-
-    #[test]
-    fn a_replay_walks_to_the_start_before_it_plays() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.poll_robots();
-
-        // A trajectory that starts well away from where the arm is standing.
-        let frames = (0..4)
-            .map(|step| BTreeMap::from([("gripper".to_owned(), 0.5 + 0.1 * step as f64)]))
-            .collect::<Vec<_>>();
-        controller
-            .start_replay(
-                RobotPlaybackRequest::timeline(
-                    "arm".to_owned(),
-                    "episode_000001".to_owned(),
-                    ReplayTrajectory::new(frames, 60.0).expect("valid trajectory"),
-                )
-                .expect("valid replay request"),
-            )
-            .expect("start replay");
-
-        assert_eq!(
-            controller
-                .operations
-                .replay
-                .as_ref()
-                .map(|replay| replay.phase),
-            Some(ReplayPhase::Seeking)
-        );
-        // Entering replay energizes the arm, the same way entering teleoperation
-        // holds its follower.
-        assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Engaged);
-
-        // Seeking uses the gentle manual ramp, so the arm does not lunge at a
-        // start pose the operator never saw coming.
-        let mut cycles = 0;
-        while controller
-            .operations
-            .replay
-            .as_ref()
-            .is_some_and(|replay| replay.phase == ReplayPhase::Seeking)
-            && cycles < 400
-        {
-            controller.poll_robots();
-            controller.apply_mode();
-            controller.drive_robots();
-            cycles += 1;
-        }
-        assert!(cycles > 1, "the arm had to travel to reach the start");
-        assert_eq!(
-            controller
-                .operations
-                .replay
-                .as_ref()
-                .map(|replay| replay.phase),
-            Some(ReplayPhase::Playing),
-            "the replay starts playing once the arm arrives"
-        );
-
-        // Playing to the end leaves idle with no fault attached.
-        for _ in 0..400 {
-            controller.poll_robots();
-            controller.apply_mode();
-            controller.drive_robots();
-            if controller.operations.replay.is_none() {
-                break;
-            }
-        }
-        assert!(
-            controller.operations.replay.is_none(),
-            "the replay finished"
-        );
-        assert_eq!(
-            controller.published.mode.selection().clone(),
-            ModeSelection::Idle
-        );
-        assert_eq!(
-            controller.published.mode.error(),
-            None,
-            "reaching the end of a take is not a fault"
-        );
-    }
-
-    #[test]
-    fn a_paused_replay_resumes_from_the_same_frame() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.poll_robots();
-        let frames = (0..24)
-            .map(|step| BTreeMap::from([("gripper".to_owned(), 0.05 + 0.01 * step as f64)]))
-            .collect::<Vec<_>>();
-        controller
-            .start_replay(
-                RobotPlaybackRequest::timeline(
-                    "arm".to_owned(),
-                    "episode_000001".to_owned(),
-                    ReplayTrajectory::new(frames, 60.0).expect("valid trajectory"),
-                )
-                .expect("valid replay request"),
-            )
-            .expect("start replay");
-
-        for _ in 0..400 {
-            controller.poll_robots();
-            controller.apply_mode();
-            controller.drive_robots();
-            if controller
-                .operations
-                .replay
-                .as_ref()
-                .is_some_and(|replay| replay.phase == ReplayPhase::Playing)
-            {
-                break;
-            }
-        }
-        for _ in 0..4 {
-            controller.poll_robots();
-            controller.apply_mode();
-            controller.drive_robots();
-        }
-        let paused_at = controller
-            .operations
-            .replay
-            .as_ref()
-            .expect("replay is active")
-            .timing
-            .position;
-        assert!(paused_at > 0.0, "the replay advanced before pausing");
-
-        controller.set_replay_paused(true).expect("pause replay");
-        for _ in 0..12 {
-            controller.poll_robots();
-            controller.apply_mode();
-            controller.drive_robots();
-        }
-        assert_eq!(
-            controller
-                .operations
-                .replay
-                .as_ref()
-                .expect("paused replay remains loaded")
-                .timing
-                .position,
-            paused_at,
-            "pause must retain the exact trajectory position"
-        );
-
-        controller.set_replay_paused(false).expect("resume replay");
-        controller.poll_robots();
-        controller.apply_mode();
-        controller.drive_robots();
-        assert!(
-            controller
-                .operations
-                .replay
-                .as_ref()
-                .expect("replay continues")
-                .timing
-                .position
-                > paused_at,
-            "resume continues forward instead of seeking to frame zero"
-        );
-    }
-
-    #[test]
-    fn a_replay_can_begin_at_the_committed_timeline_position() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.poll_robots();
-        let frames = (0..120)
-            .map(|step| BTreeMap::from([("gripper".to_owned(), step as f64 / 240.0)]))
-            .collect::<Vec<_>>();
-
-        controller
-            .start_replay(
-                timeline_replay("arm", frames, 60.0)
-                    .starting_at(60, 1.25)
-                    .expect("valid replay start"),
-            )
-            .expect("start replay at playhead");
-
-        let replay = controller
-            .operations
-            .replay
-            .as_ref()
-            .expect("replay is active");
-        assert_eq!(replay.timing.position, 60.0);
-        assert_eq!(replay.cursor(), 60);
-        assert_eq!(replay.elapsed_seconds(), 1.25);
-        assert_eq!(
-            replay.pose().and_then(|pose| pose.get("gripper")),
-            Some(&0.25)
-        );
-    }
-
-    #[test]
-    fn a_late_transport_pause_cannot_freeze_a_physical_seek() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.poll_robots();
-        controller
-            .start_replay(
-                RobotPlaybackRequest::physical_seek(
-                    "arm".to_owned(),
-                    "episode_000001".to_owned(),
-                    ReplayTrajectory::single_pose(
-                        BTreeMap::from([("gripper".to_owned(), 0.25)]),
-                        60.0,
-                    )
-                    .expect("valid pose"),
-                )
-                .expect("valid physical seek"),
-            )
-            .expect("start physical seek");
-
-        controller
-            .set_replay_paused(true)
-            .expect("late pause is harmless");
-
-        assert!(
-            !controller
-                .operations
-                .replay
-                .as_ref()
-                .expect("seek remains active")
-                .timing
-                .paused,
-            "one-frame physical motion must finish even if the prior replay's pause arrives late"
-        );
-    }
-
-    #[test]
-    fn a_one_frame_timeline_replay_still_supports_transport_pause() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.poll_robots();
-        controller
-            .start_replay(timeline_replay(
-                "arm",
-                vec![BTreeMap::from([("gripper".to_owned(), 0.25)])],
-                60.0,
-            ))
-            .expect("start timeline replay");
-
-        controller.set_replay_paused(true).expect("pause replay");
-
-        let replay = controller
-            .operations
-            .replay
-            .as_ref()
-            .expect("replay remains loaded");
-        assert_eq!(replay.purpose, ReplayPurpose::Timeline);
-        assert!(replay.timing.paused);
-    }
-
-    #[test]
-    fn a_replay_needs_a_calibrated_arm_and_joints_that_exist() {
-        let mut controller = controller();
-        controller.connect(spec("bare", None)).expect("connect");
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-
-        let pose = vec![BTreeMap::from([("gripper".to_owned(), 0.1)])];
-        assert!(
-            controller
-                .start_replay(timeline_replay("bare", pose.clone(), 60.0))
-                .expect_err("uncalibrated")
-                .contains("calibrated")
-        );
-        assert!(
-            ReplayTrajectory::new(Vec::new(), 60.0)
-                .expect_err("no frames")
-                .to_string()
-                .contains("at least one frame")
-        );
-        assert!(
-            ReplayTrajectory::new(pose.clone(), 0.0)
-                .expect_err("bad rate")
-                .to_string()
-                .contains("sample rate")
-        );
-        assert!(
-            controller
-                .start_replay(timeline_replay(
-                    "arm",
-                    vec![BTreeMap::from([("sixth_axis".to_owned(), 0.1)])],
-                    60.0,
-                ))
-                .expect_err("unknown joint")
-                .contains("sixth_axis")
-        );
-        assert!(controller.operations.replay.is_none());
-        assert_eq!(
-            controller.published.mode.selection().clone(),
-            ModeSelection::Idle
-        );
-    }
-
-    #[test]
-    fn replay_static_shape_and_live_joint_membership_are_both_enforced() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-
-        assert!(
-            ReplayTrajectory::new(
-                vec![
-                    BTreeMap::from([("gripper".to_owned(), 0.0)]),
-                    BTreeMap::from([("sixth_axis".to_owned(), 0.1)]),
-                ],
-                60.0,
-            )
-            .is_err(),
-            "a changing joint set must be rejected before actor admission"
-        );
-
-        let frames = vec![
-            BTreeMap::from([("sixth_axis".to_owned(), 0.0)]),
-            BTreeMap::from([("sixth_axis".to_owned(), 0.1)]),
-        ];
-        let error = controller
-            .start_replay(timeline_replay("arm", frames, 60.0))
-            .expect_err("unknown live joint");
-        assert!(error.contains("no calibrated joint"), "{error}");
-
-        for (label, frames) in [
-            (
-                "later non-finite value",
-                vec![
-                    BTreeMap::from([("gripper".to_owned(), 0.0)]),
-                    BTreeMap::from([("gripper".to_owned(), f64::NAN)]),
-                ],
-            ),
-            (
-                "empty pose",
-                vec![
-                    BTreeMap::from([("gripper".to_owned(), 0.0)]),
-                    BTreeMap::new(),
-                ],
-            ),
-        ] {
-            assert!(
-                ReplayTrajectory::new(frames, 60.0).is_err(),
-                "{label} must be rejected before actor admission"
-            );
-        }
-        assert!(controller.operations.replay.is_none());
-        assert_eq!(
-            controller.published.mode.selection().clone(),
-            ModeSelection::Idle
-        );
-    }
-
-    #[test]
-    fn replay_seek_fails_closed_when_required_joint_state_disappears() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.poll_robots();
-        controller
-            .start_replay(timeline_replay(
-                "arm",
-                vec![BTreeMap::from([("gripper".to_owned(), 0.5)])],
-                60.0,
-            ))
-            .expect("start replay");
-        controller
-            .robots
-            .get_mut("arm")
-            .unwrap()
-            .motion
-            .positions
-            .remove("gripper");
-
-        controller.apply_replay();
-
-        assert!(controller.operations.replay.is_none());
-        assert_eq!(
-            controller.published.mode.selection().clone(),
-            ModeSelection::Idle
-        );
-        assert!(!controller.published.mode.active());
-        assert!(
-            controller
-                .published
-                .mode
-                .error()
-                .is_some_and(|error| error.contains("stopped reporting"))
-        );
-        assert!(
-            !controller.robots["arm"]
-                .motion
-                .target
-                .contains_key("gripper"),
-            "failure pins targets to the remaining measured state"
-        );
-    }
-
-    #[test]
-    fn replay_seek_fails_closed_if_calibration_becomes_missing() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.poll_robots();
-        controller
-            .start_replay(timeline_replay(
-                "arm",
-                vec![BTreeMap::from([("gripper".to_owned(), 0.5)])],
-                60.0,
-            ))
-            .expect("start replay");
-        controller.robots.get_mut("arm").unwrap().spec.calibration = None;
-
-        controller.apply_replay();
-
-        assert!(controller.operations.replay.is_none());
-        assert_eq!(
-            controller.published.mode.selection().clone(),
-            ModeSelection::Idle
-        );
-        assert!(!controller.published.mode.active());
-        assert!(controller.published.mode.error().is_some());
-        let robot = &controller.robots["arm"];
-        assert_eq!(robot.motion.target, robot.motion.positions);
-    }
-
-    #[test]
-    fn leaving_replay_drops_the_trajectory() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.poll_robots();
-        controller
-            .start_replay(timeline_replay(
-                "arm",
-                vec![BTreeMap::from([("gripper".to_owned(), 0.1)])],
-                60.0,
-            ))
-            .expect("start replay");
-        assert!(controller.operations.replay.is_some());
-
-        controller.set_mode(ModeSelection::Idle).expect("stop");
-        assert!(
-            controller.operations.replay.is_none(),
-            "an idle studio must not keep samples queued to drive an arm"
-        );
-
-        // And losing the arm does the same, with a reason.
-        controller.poll_robots();
-        controller
-            .start_replay(timeline_replay(
-                "arm",
-                vec![BTreeMap::from([("gripper".to_owned(), 0.1)])],
-                60.0,
-            ))
-            .expect("start replay again");
-        controller.leave_mode_involving("arm", "its motor bus stopped responding");
-        assert!(controller.operations.replay.is_none());
-        assert!(
-            controller
-                .published
-                .mode
-                .error()
-                .is_some_and(|error| error.contains("Replay"))
-        );
     }
 
     #[test]

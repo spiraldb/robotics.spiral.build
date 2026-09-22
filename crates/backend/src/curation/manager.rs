@@ -72,64 +72,10 @@ impl CurationManager {
             .into_preview_drained(ROSTER_ROWS)
             .await
             .map_err(OperationError::External)?;
-        let totals = if roster.truncated() {
-            Some(
-                connection
-                    .execute_query(compiled.totals_sql())
-                    .await
-                    .map_err(OperationError::External)?
-                    .into_preview_drained(1)
-                    .await
-                    .map_err(OperationError::External)?,
-            )
-        } else {
-            None
-        };
         let outcome = compiled
-            .outcome(&roster, totals.as_ref())
+            .outcome(&roster)
             .map_err(OperationError::External)?;
-        if outcome.totals().truncated() {
-            return Ok(outcome);
-        }
-        let mut entering = outcome.verdicts().iter().collect::<Vec<_>>();
-        let mut impacts = Vec::new();
-        for step in curation.steps() {
-            let incoming = entering.len() as u64;
-            match step {
-                spiral_robotics_common::curation::CurationStep::Filter(rule) => {
-                    entering
-                        .retain(|verdict| !verdict.excluded_by().iter().any(|id| id == rule.id()));
-                    impacts.push(
-                        spiral_robotics_common::curation::run::CurationStageImpact::new(
-                            rule.id().to_owned(),
-                            incoming,
-                            entering.len() as u64,
-                        ),
-                    );
-                }
-                spiral_robotics_common::curation::CurationStep::Transform(transform) => {
-                    let mut impact =
-                        spiral_robotics_common::curation::run::CurationStageImpact::new(
-                            transform.id().to_owned(),
-                            incoming,
-                            incoming,
-                        );
-                    impact.set_affected_episodes(
-                        entering
-                            .iter()
-                            .filter(|verdict| {
-                                verdict
-                                    .eligible_transforms()
-                                    .iter()
-                                    .any(|id| id == transform.id())
-                            })
-                            .count() as u64,
-                    );
-                    impacts.push(impact);
-                }
-            }
-        }
-        Ok(outcome.with_stage_impacts(impacts))
+        Ok(outcome.with_stage_impacts(compiled.stage_impacts(curation, &roster)))
     }
     pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, OperationError> {
         self.inner
@@ -226,7 +172,7 @@ impl CurationManager {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let mut snapshot = CurationRunSnapshot::started(format!("curation-run-{id}"))
             .with_started_ms(SystemTime::now().unix_millis());
-        snapshot.set_sql(Some(compiled.roster_sql().to_owned()));
+        snapshot.set_sql(Some(compiled.roster_sql()));
         let output_relation = format!("curation_{id}");
         match self.judge(&curation, &output_relation).await {
             Ok(judged) => {
@@ -246,7 +192,8 @@ impl CurationManager {
         self.inner.queries.close();
         self.inner.queries.wait().await;
     }
-    /// Run the roster query; when Spiral bounded it, run the exact totals too.
+    /// Materialize the judged population, then read its bounded roster, whose
+    /// rows carry the exact totals and stage counts.
     async fn judge(&self, curation: &CurationSpec, output: &str) -> Result<JudgedRun, String> {
         let compiled = CurationSql::new(curation).compile()?;
         let started = Instant::now();
@@ -276,23 +223,7 @@ impl CurationManager {
             .await?
             .into_preview_drained(ROSTER_ROWS)
             .await?;
-        let totals = if roster.truncated() {
-            Some(
-                connection
-                    .execute_query(&compiled.output_totals_sql(output))
-                    .await?
-                    .into_preview_drained(1)
-                    .await?,
-            )
-        } else {
-            None
-        };
-        let stage_totals = connection
-            .execute_query(&compiled.stage_totals_sql(output, curation))
-            .await?
-            .into_preview_drained(1)
-            .await?;
-        let mut impacts = compiled.stage_impacts(curation, &stage_totals)?;
+        let mut impacts = compiled.stage_impacts(curation, &roster);
         for selection in &progress {
             let effect = connection
                 .execute_query(&selection.effect_sql(output))
@@ -334,9 +265,7 @@ impl CurationManager {
                 );
             }
         }
-        let outcome = compiled
-            .outcome(&roster, totals.as_ref())?
-            .with_stage_impacts(impacts);
+        let outcome = compiled.outcome(&roster)?.with_stage_impacts(impacts);
         connection.commit().await?;
         Ok(JudgedRun {
             outcome: outcome

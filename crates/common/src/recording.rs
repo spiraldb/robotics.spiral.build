@@ -1,4 +1,4 @@
-//! Episode recording, inspection, and replay contracts.
+//! Episode recording and inspection contracts.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ struct EpisodeTimeline {
     /// the omission happened and how much real time passed there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     recording_gaps: Vec<RecordingGap>,
-    /// Rate the take was captured at, so a replay can honour its timing.
+    /// Rate the take was captured at, so review and export honour its timing.
     sample_hz: f64,
     /// When the take started, as milliseconds since the Unix epoch.
     ///
@@ -64,7 +64,7 @@ struct EpisodeAssessment {
     /// A discarded take remains in SpiralDB and is excluded from training,
     /// because the judgement is the operator's and deleting on their behalf is not.
     discarded: bool,
-    /// Why this committed take cannot currently be replayed or trained.
+    /// Why this committed take cannot currently be reviewed or trained.
     problem: Option<String>,
 }
 
@@ -145,7 +145,7 @@ impl EpisodeInfo {
         self.timeline.frames
     }
 
-    /// True when the take is complete enough to replay or export.
+    /// True when the take is complete enough to review or export.
     pub fn usable(&self) -> bool {
         self.timeline.frames > 0 && self.assessment.problem.is_none()
     }
@@ -492,7 +492,7 @@ impl RecordingProgress {
 /// A deliberate pause in an otherwise continuous recording session.
 ///
 /// `after_seconds` is expressed on the gap-free active timeline. This keeps
-/// replay and dataset sampling contiguous while retaining enough provenance to
+/// review and dataset sampling contiguous while retaining enough provenance to
 /// display or audit every omitted wall-clock interval.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -518,163 +518,9 @@ impl RecordingGap {
     }
 }
 
-/// Why a replay trajectory is loaded.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplayPurpose {
-    /// User-facing episode transport controlled by Play/Pause.
-    #[default]
-    Timeline,
-    /// One committed Timeline scrub moving the robot to a single pose.
-    PhysicalSeek,
-}
-
-/// Whether a replay is positioning the arm or advancing through the episode.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplayPhase {
-    Seeking,
-    /// Default preserves the behavior of progress sent by an older backend.
-    #[default]
-    Playing,
-}
-
-/// An episode being played back right now.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ReplayProgress {
-    #[serde(flatten)]
-    identity: ReplayIdentity,
-    #[serde(flatten)]
-    timeline: ReplayTimeline,
-    #[serde(flatten)]
-    transport: ReplayTransport,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ReplayIdentity {
-    episode: String,
-    /// The arm being driven.
-    robot: String,
-}
-
-impl ReplayIdentity {
-    pub fn new(episode: impl Into<String>, robot: impl Into<String>) -> Self {
-        Self {
-            episode: episode.into(),
-            robot: robot.into(),
-        }
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct ReplayTimeline {
-    /// Frames played so far.
-    frame: u64,
-    frames: u64,
-    elapsed_seconds: f64,
-    duration_seconds: f64,
-}
-
-impl ReplayTimeline {
-    pub const fn new(frame: u64, frames: u64, elapsed_seconds: f64) -> Self {
-        Self {
-            frame,
-            frames,
-            elapsed_seconds,
-            duration_seconds: 0.0,
-        }
-    }
-    pub const fn with_duration_seconds(mut self, duration_seconds: f64) -> Self {
-        self.duration_seconds = duration_seconds;
-        self
-    }
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ReplayTransport {
-    /// Whether this is Timeline transport or a one-pose physical seek.
-    #[serde(default)]
-    purpose: ReplayPurpose,
-    /// Positioning never advances the episode clock or recorded media.
-    #[serde(default)]
-    phase: ReplayPhase,
-    /// Whether playback is holding its current frame without discarding the
-    /// loaded trajectory. Resuming continues from this exact position.
-    #[serde(default)]
-    paused: bool,
-}
-
-impl ReplayTransport {
-    pub const fn new(purpose: ReplayPurpose, phase: ReplayPhase, paused: bool) -> Self {
-        Self {
-            purpose,
-            phase,
-            paused,
-        }
-    }
-}
-
-impl ReplayProgress {
-    pub fn new(
-        identity: ReplayIdentity,
-        timeline: ReplayTimeline,
-        transport: ReplayTransport,
-    ) -> Self {
-        Self {
-            identity,
-            timeline,
-            transport,
-        }
-    }
-    pub fn episode(&self) -> &str {
-        &self.identity.episode
-    }
-    pub const fn elapsed_seconds(&self) -> f64 {
-        self.timeline.elapsed_seconds
-    }
-    pub const fn purpose(&self) -> ReplayPurpose {
-        self.transport.purpose
-    }
-    pub const fn phase(&self) -> ReplayPhase {
-        self.transport.phase
-    }
-    pub const fn paused(&self) -> bool {
-        self.transport.paused
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn set_transport(&mut self, transport: ReplayTransport) {
-        self.transport = transport;
-    }
-}
-
 #[cfg(test)]
 mod progress_tests {
     use super::*;
-
-    #[test]
-    fn older_replay_progress_defaults_to_timeline_playback() {
-        let replay: ReplayProgress = serde_json::from_str(
-            r#"{
-                "episode":"episode_000001",
-                "robot":"follower",
-                "frame":12,
-                "frames":60,
-                "elapsed_seconds":0.2,
-                "duration_seconds":1.0
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(replay.purpose(), ReplayPurpose::Timeline);
-        assert_eq!(replay.phase(), ReplayPhase::Playing);
-        assert!(!replay.paused());
-    }
 
     #[test]
     fn an_unfinished_take_is_listed_but_not_offered() {
@@ -711,6 +557,4 @@ mod progress_tests {
 }
 
 mod requests;
-pub use requests::{
-    EpisodeSeek, PauseUpdate, RecordingCameraRequest, RecordingFinish, RecordingStart, ReplayStart,
-};
+pub use requests::{PauseUpdate, RecordingCameraRequest, RecordingFinish, RecordingStart};

@@ -695,15 +695,9 @@ mod tests {
                 let mut next = None;
                 let mut all = Vec::<serde_json::Value>::new();
                 loop {
-                    let bytes = storage.episode_messages(read.clone().with_window(window.clone().with_cursor(next))).await?;
-                    let reader = arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).map_err(|e| e.to_string())?;
-                    next = serde_json::from_str(reader.schema().metadata().get("studio.next_cursor").unwrap()).map_err(|e| e.to_string())?;
-                    let batches = reader.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
-                    let mut json = Vec::new();
-                    let mut writer = arrow_json::writer::WriterBuilder::new().with_explicit_nulls(true).build::<_, arrow_json::writer::JsonArray>(&mut json);
-                    writer.write_batches(&batches.iter().collect::<Vec<_>>()).map_err(|e| e.to_string())?;
-                    writer.finish().map_err(|e| e.to_string())?; drop(writer);
-                    all.extend(serde_json::from_slice::<Vec<serde_json::Value>>(&json).map_err(|e| e.to_string())?);
+                    let page = MessagePage::read(&storage, &read.clone().with_window(window.clone().with_cursor(next))).await?;
+                    next = page.next;
+                    all.extend(page.rows);
                     if next.is_none() { break; }
                 }
                 assert_eq!(all.len(), 120, "paginated messages exceed the preview bound");
@@ -752,19 +746,16 @@ mod tests {
             let topic = topics.iter().find(|topic| topic.name() == "/environment").unwrap();
             let request = spiral_robotics_common::datasets::MessageRead::schema(
                 spiral_robotics_common::datasets::EpisodeTopicRequest::new(dataset, topic.name().into(), member), topic.revision().unwrap().clone());
-            let schema_bytes = storage.episode_messages(request.clone()).await?;
-            let schema_reader = arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(schema_bytes), None).map_err(|e| e.to_string())?;
-            assert!(schema_reader.schema().field_with_name("value").is_ok());
+            let schema = MessagePage::read(&storage, &request).await?;
+            assert!(schema.schema.field_with_name("value").is_ok());
+            assert!(schema.rows.is_empty());
             let mut cursor = None;
             let window = spiral_robotics_common::datasets::MessageWindow::new((100, 101), vec![vec!["value".into(), "counter".into()]]).with_limit(1);
             for expected in [u64::MAX - 1, u64::MAX] {
-                let bytes = storage.episode_messages(request.clone().with_window(window.clone().with_cursor(cursor))).await?;
-                let reader = arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).map_err(|e| e.to_string())?;
-                cursor = serde_json::from_str(&reader.schema().metadata()["studio.next_cursor"]).map_err(|e| e.to_string())?;
-                let batches = reader.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
-                assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-                let batch = batches.iter().find(|batch| batch.num_rows() > 0).unwrap();
-                assert_eq!(crate::db::ArrowColumns::new(batch, "sensor").unsigned("field_0", 0)?, expected);
+                let page = MessagePage::read(&storage, &request.clone().with_window(window.clone().with_cursor(cursor))).await?;
+                cursor = page.next;
+                assert_eq!(page.rows.len(), 1);
+                assert_eq!(page.rows[0]["field_0"].as_u64(), Some(expected));
             }
             assert!(cursor.is_none());
 
@@ -812,6 +803,62 @@ mod tests {
         }
         outcome.expect("MCAP source boundary");
     }
+    /// One page of a message read, fetched the way the browser pages: one
+    /// Arrow episode query, continuing after the last kept row.
+    struct MessagePage {
+        schema: Arc<Schema>,
+        rows: Vec<serde_json::Value>,
+        next: Option<spiral_robotics_common::datasets::MessageCursor>,
+    }
+    impl MessagePage {
+        async fn read(
+            storage: &StorageManager,
+            read: &spiral_robotics_common::datasets::MessageRead,
+        ) -> Result<Self, String> {
+            let request = spiral_robotics_common::relations::EpisodeQueryRequest::new(
+                read.episode(),
+                read.sql()?,
+                read.max_rows(),
+            );
+            let bytes = storage.query_for_episode_arrow(&request).await?;
+            let reader =
+                arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None)
+                    .map_err(|e| e.to_string())?;
+            let schema = reader.schema();
+            let batches = reader
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            let mut rows = Vec::<serde_json::Value>::new();
+            if !batches.is_empty() {
+                let mut json = Vec::new();
+                let mut writer = arrow_json::writer::WriterBuilder::new()
+                    .with_explicit_nulls(true)
+                    .build::<_, arrow_json::writer::JsonArray>(&mut json);
+                writer
+                    .write_batches(&batches.iter().collect::<Vec<_>>())
+                    .map_err(|e| e.to_string())?;
+                writer.finish().map_err(|e| e.to_string())?;
+                drop(writer);
+                rows = serde_json::from_slice(&json).map_err(|e| e.to_string())?;
+            }
+            let limit = read.window().map_or(0, |window| window.limit());
+            let next = if rows.len() > limit {
+                let last = &rows[limit - 1];
+                let position =
+                    |name: &str| last[name].as_u64().ok_or_else(|| format!("Missing {name}"));
+                Some(spiral_robotics_common::datasets::MessageCursor::new(
+                    position("log_time")?,
+                    position("chunk_start_offset")?,
+                    u32::try_from(position("sample_ordinal")?).map_err(|e| e.to_string())?,
+                ))
+            } else {
+                None
+            };
+            rows.truncate(limit);
+            Ok(Self { schema, rows, next })
+        }
+    }
+
     struct SensorFixture;
     impl SensorFixture {
         fn encode() -> Result<Vec<u8>, String> {

@@ -348,12 +348,11 @@ learned spatial grammar without importing its visual weight: the layout is
 powerful, but the chrome remains Notion-like, compact, and quiet.
 
 The **Timeline is the shared clock**, not a footer or a dataset rail. It is
-registered in Live and synchronizes recording, replay, camera
-video, recorded 3D pose, signals, query selection, and optionally a
-safety-gated physical seek. Signals belongs to the episode on that clock. Full
-camera images belong in camera panels; robot ownership remains explicit through
-arm and role, and actionable camera failures stay inside the affected frame
-rather than being duplicated in the Live workbench.
+registered in Live and synchronizes recording, camera video, recorded 3D
+pose, signals, and query selection. Signals belongs to the episode on that
+clock. Full camera images belong in camera panels; robot ownership remains
+explicit through arm and role, and actionable camera failures stay inside the
+affected frame rather than being duplicated in the Live workbench.
 
 Density is the point, not a side effect. The base face is 12px, ordinary
 controls are 24px tall, and most gaps come from a 2/4/6/8px rhythm. Record is
@@ -760,7 +759,7 @@ or sizing needs, register it as a panel. Do not add another fixed shell region
 or let one component mutate another tile’s tabs.
 
 **The Timeline-Is-One-Clock Rule.** Live, Episodes, Query, camera media, scene,
-signals, and replay share one playhead contract. Do not create a second timeline
+and signals share one playhead contract. Do not create a second timeline
 with different geometry or ownership.
 
 **The Desktop-Only Rule.** Design and test the Studio at 1024 CSS pixels and
@@ -768,8 +767,7 @@ wider with mouse, touchpad, and keyboard input. Do not add viewport breakpoints,
 mobile navigation, touch gestures, or touch-target overrides.
 
 **The Consequence-On-The-Page Rule.** Text describing energize, release, stop,
-discard, replay, or physical seek is rendered on the page, never only in a
-tooltip.
+or discard is rendered on the page, never only in a tooltip.
 
 **The No-Unfolding-Prose Rule.** A live value changes tint, chip, or control
 state; it does not insert a sentence that pushes the panel below it.
@@ -920,27 +918,17 @@ The Timeline owns:
 - Record, Pause/Resume, Stop, and Discard capture transport;
 - one icon-only Play/Pause transport with an accessible action name;
 - Follow Live while an episode is growing;
-- signal lanes and explicit recording gaps;
-- one explicit **Sync robot** option that applies to playback and committed seek.
+- signal lanes and explicit recording gaps.
 
 Every Timeline action carries the identity of the recording or episode it acts
 upon. Timeline transport never discovers its target from an unrelated ambient
-selection. With **Sync robot** off, Play/Pause and seeking change recorded
-visualizations only. With it on, the same Play/Pause control drives the
-compatible robot and committed seeks move it through the server-owned safety
-path. Turning the option off stops active robot motion; there is no second
-Replay/Pause/Resume/Stop transport competing with the Timeline clock.
-
-A committed physical seek may use a bounded one-frame replay inside the
-hardware controller. That one-frame consequence never owns preview transport,
-changes the Timeline playhead, or replaces the stable toolbar while the arm is
-travelling to the requested pose.
+selection. Play/Pause and seeking change recorded visualizations only; they
+never move a robot.
 
 Dragging or keyboard-seeking emits preview updates while the pointer or key is
 moving, then a committed seek at release or commit. Each accepted playhead
 change produces one synchronized projection for the Scene, every recorded
-Camera panel, Signals, and the Timeline itself. When **Sync robot** is enabled,
-physical motion is sent only for the committed seek.
+Camera panel, Signals, and the Timeline itself.
 
 ### State Ownership
 
@@ -956,7 +944,7 @@ physical motion is sent only for the committed seek.
 | Rollout checkpoint, execution inputs, fixed follower, and readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, live Scene, follower Camera, Inference lane |
 | Timeline subject, playhead, preview playback, and Follow Live | Timeline Controller within the active activity | Scene, Cameras, Signals, Timeline |
 | Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
-| Hardware, recording, replay, storage, and safety state | Backend | Activity Controller through the wire API |
+| Hardware, recording, storage, and safety state | Backend | Activity Controller through the wire API |
 
 Primary visualization content, camera content, and Timeline content are derived
 projection outputs. They are not additional independent sources of semantic
@@ -991,8 +979,7 @@ authoritative throughout; Assistant activity never creates a browser-local
 graph or a second Run control.
 
 **Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity Controller
-→ one synchronized recorded projection`. A committed, explicitly armed
-physical seek additionally becomes a backend request.
+→ one synchronized recorded projection`.
 
 **Receive live telemetry:** `Backend event → Live Activity Controller → Live
 projection → Scene + Cameras + Signals + Timeline`.
@@ -1515,12 +1502,10 @@ second reading of a value that is already on the page.
 ### Timeline
 
 - **Transport:** Record, Pause/Resume, Stop/Discard, one icon-only Play/Pause,
-  **Sync robot**, and the 16px clock occupy one stable toolbar. Record always
-  implies Teleop. Play/Pause affects visualizations only until robot sync is
-  explicitly enabled.
+  and the 16px clock occupy one stable toolbar. Record always implies Teleop.
+  Play/Pause affects visualizations only.
 - **Playhead:** One pointer and keyboard-operable time cursor drives every
-  recorded surface. Scrubbing updates camera, scene, and signals; with robot
-  sync enabled, physical motion commits only on release.
+  recorded surface. Scrubbing updates camera, scene, and signals.
 - **Lanes:** Joint signals share the episode scale and make recording gaps
   explicit instead of compressing them away. One Charming/ECharts canvas owns
   the six aligned grids so their scales, tooltip, and resize lifecycle stay in
@@ -1823,8 +1808,8 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
   from episode media streams.
 - **Do** keep one stable camera node per Live feed and preserve panel identity
   while the layout changes.
-- **Do** keep Timeline synchronized with scene, camera, signals, query selection,
-  replay, and optional physical seek.
+- **Do** keep Timeline synchronized with scene, camera, signals, and query
+  selection.
 - **Do** print every plotted value and keep joint colours stable by name.
 - **Do** keep the base at 12px with 24px controls and a 2/4/6/8px rhythm.
 - **Do** use tabular figures and fixed boxes for changing telemetry.
@@ -1912,8 +1897,8 @@ in progress; and every animation is removed under `prefers-reduced-motion`.
 - **Don't** put robot setup back into the active Live flow.
 - **Don't** add headings or helper labels that restate the visible region below
   them (“Operate and capture,” “Record always uses Teleop,” “Select an arm”).
-- **Don't** create a second Timeline, change its ownership between Query and
-  Episodes, or restart replay from zero after Pause.
+- **Don't** create a second Timeline or change its ownership between Query and
+  Episodes.
 - **Don't** let scrub move only the playhead; camera, 3D, signals, and video must
   show the corresponding time.
 - **Don't** let a workbench mutate visualization panels independently; derive

@@ -4,8 +4,8 @@ use crate::OperationError;
 
 /// Modes an operator may enter directly.
 ///
-/// Replay and policy sessions are deliberately absent: their use cases must
-/// load and validate an episode or checkpoint before control can change.
+/// Policy sessions are deliberately absent: their use case must load and
+/// validate a checkpoint before control can change.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OperatorMode {
     Idle,

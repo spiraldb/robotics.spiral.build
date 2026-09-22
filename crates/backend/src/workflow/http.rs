@@ -1,4 +1,4 @@
-//! Documents, planning, runs, and model transport; no remote editor session.
+//! Documents and runs; no remote editor session.
 use super::commands::WorkflowCommands;
 use crate::http::{
     contract::ApiRoutes,
@@ -9,7 +9,7 @@ use spiral_robotics_common::{
     datasets::DatasetSelection,
     workflow::{
         WorkflowSpec, WorkflowSummary,
-        document::{WorkflowDocument, WorkflowPlan, WorkflowRun},
+        document::{WorkflowDocument, WorkflowRun},
     },
 };
 pub(crate) struct WorkflowEndpoints;
@@ -18,9 +18,7 @@ impl WorkflowEndpoints {
         routes.get("/workflows", Self::list);
         routes.get("/workflows/{id}", Self::load);
         routes.post("/workflows/save", Self::save);
-        routes.post("/workflows/plan", Self::plan);
         routes.post("/workflow-runs", Self::run);
-        routes.get("/models/capabilities", Self::capabilities);
         routes.post("/datasets/cameras", Self::cameras);
     }
     async fn list(
@@ -40,22 +38,11 @@ impl WorkflowEndpoints {
     ) -> Result<Json<WorkflowDocument>, HttpFailure> {
         Ok(Json(commands.save(document).await?))
     }
-    async fn plan(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
-        ApiJson(workflow): ApiJson<WorkflowSpec>,
-    ) -> Result<Json<WorkflowPlan>, HttpFailure> {
-        Ok(Json(commands.plan(workflow).await?))
-    }
     async fn run(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,
         ApiJson(workflow): ApiJson<WorkflowSpec>,
     ) -> Result<Json<WorkflowRun>, HttpFailure> {
         Ok(Json(commands.run(workflow).await?))
-    }
-    async fn capabilities(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
-    ) -> Result<Json<spiral_robotics_common::relations::SpiralQuerySnapshot>, HttpFailure> {
-        Ok(Json(commands.capabilities().await?))
     }
     async fn cameras(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,

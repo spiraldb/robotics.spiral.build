@@ -32,25 +32,28 @@ reloads when shown again.
 `POST /api/datasets/episode-topics` reads the selected member's native
 `spql.mcap.channels` summary and joins topic identities to native catalog
 observations. Incompatible schema variants remain distinct. Each source carries
-the dataset version and native schema variant; requests bind the member UUID.
+its native schema variant; requests bind the member UUID.
 
-`POST /api/datasets/episode-messages` accepts `MessageRead` and returns
-`application/vnd.apache.arrow.stream`. The same endpoint serves schema discovery,
-message tables, plots and recorded camera packets. There are no dedicated Data
-joint, JSON topic-preview, or video endpoints.
+The browser reads messages with ordinary episode SQL. `MessageRead` (in
+`common`) writes the `spql.mcap.read_topic` query for one topic revision, and
+`POST /api/queries/episode/arrow` runs it with `$1` bound to the member UUID and
+returns `application/vnd.apache.arrow.stream`. The same query serves schema
+discovery, message tables, plots and recorded camera packets. There are no
+dedicated Data joint, JSON topic-preview, video, or message endpoints.
 
-- A schema-only request returns the native Arrow schema, including nested types,
-  field metadata and nullability, without reading message rows.
+- A schema read is the same query with `LIMIT 0`: the native Arrow schema,
+  including nested types, field metadata and nullability, without message rows.
 - A window specifies a half-open nanosecond interval, structured field paths,
   a row limit, and an optional continuation cursor.
 - Pages retain `log_time`, `publish_time`, `channel_id`, `chunk_start_offset` and `sample_ordinal`.
   Projection aliases correspond to the ordered requested paths.
 - Ordering and continuation use `(log_time, chunk_start_offset, sample_ordinal)` so messages with
-  equal timestamps across chunks are not skipped. IPC metadata includes the complete read
-  identity and an explicit next cursor.
-- The backend validates schema paths and checks the dataset revision before and
-  after reading. The browser rejects mismatched identities or changing schemas.
-  Existing project-session guards and cancellation apply to binary reads.
+  equal timestamps across chunks are not skipped. Each page asks for one row past its
+  limit; that row means the browser continues after the last kept message.
+- The Arrow endpoint returns the complete result or refuses it (over 10,000 rows
+  or 32 MiB); it never truncates. Reads are pinned to the member UUID, so a new
+  take appended to the dataset does not disturb an open episode. The browser
+  rejects a schema that changes between pages.
 
 Arrow retains exact integers, timestamps, nulls and binary packets. Plot geometry
 uses floating point; current-value text is formatted from the original Arrow

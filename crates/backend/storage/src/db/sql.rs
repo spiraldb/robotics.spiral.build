@@ -35,6 +35,8 @@ use spiral_robotics_common::sql::ReadOnlyQueryMode;
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INTERNAL_QUERY_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_ARROW_ROWS: usize = 10_000;
+const MAX_ARROW_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const QUERY_JSON_CHUNK_ROWS: usize = 64;
 const QUERY_IMAGE_PREVIEW_MAX_EDGE: u32 = 640;
 const QUERY_IMAGE_JPEG_QUALITY: u8 = 82;
@@ -221,6 +223,27 @@ impl<'a> ProjectQueries<'a> {
         )
         .run_async(&mut connection)
         .await
+    }
+
+    /// The same episode read as one Arrow IPC stream, exact to the value.
+    pub(crate) async fn arrow_for_episode(
+        &self,
+        request: &EpisodeQueryRequest,
+    ) -> Result<Vec<u8>, String> {
+        SpiralSql::ensure_read_only(request.statement(), ReadOnlyQueryMode::Preview)?;
+        let statement = crate::datasets::EpisodeTopicQuery::for_episode(
+            request.episode().dataset(),
+            request.episode().episode_id(),
+            request.statement().trim().to_owned(),
+        )?
+        .into_statement();
+        let mut connection = self.project_store.connect().await?;
+        connection
+            .query(statement)
+            .await
+            .map_err(|error| format!("executing Spiral query: {error}"))?
+            .into_arrow_ipc(request.max_rows().clamp(1, MAX_ARROW_ROWS))
+            .await
     }
 
     pub(crate) async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
@@ -483,6 +506,33 @@ impl QueryExecution {
 }
 
 impl RecordBatchStream {
+    /// The complete result as one Arrow IPC stream. A result past `max_rows`
+    /// rows or the byte limit is refused rather than cut short, so a caller
+    /// bounds its own query.
+    pub async fn into_arrow_ipc(mut self, max_rows: usize) -> Result<Vec<u8>, String> {
+        let schema = Arc::clone(self.schema());
+        let mut writer = arrow_ipc::writer::StreamWriter::try_new(Vec::new(), &schema)
+            .map_err(|error| error.to_string())?;
+        let mut rows = 0_usize;
+        while let Some(batch) = self.next().await {
+            let batch = batch.map_err(|error| format!("reading Spiral result: {error}"))?;
+            rows += batch.num_rows();
+            if rows > max_rows {
+                return Err(format!(
+                    "The result exceeds {max_rows} rows; narrow the query"
+                ));
+            }
+            writer.write(&batch).map_err(|error| error.to_string())?;
+            if writer.get_ref().len() > MAX_ARROW_RESPONSE_BYTES {
+                return Err(
+                    "The result exceeds 32 MiB; select fewer fields or a smaller window".into(),
+                );
+            }
+        }
+        writer.finish().map_err(|error| error.to_string())?;
+        writer.into_inner().map_err(|error| error.to_string())
+    }
+
     /// A preview limit bounds the browser payload, not query execution. Drain
     /// the remaining batches to finish inference and surface late errors.
     pub async fn into_preview_drained(

@@ -33,13 +33,10 @@ pub use cameras::{
 pub use control::{
     ArmConditionSummary, CONTROL_HZ, ControlSettings, DEFAULT_MAX_STEP_COUNTS,
     DEFAULT_TELEOP_MAX_STEP_COUNTS, EpisodeCheckpoint, HardwareHandle, HardwareState, JointGoals,
-    PolicyGoals, RecordingCompletion, RecordingWriter, ReplayTrajectory, RobotPlaybackRequest,
-    RobotSpec, Sample,
+    PolicyGoals, RecordingCompletion, RecordingWriter, RobotSpec, Sample,
 };
 pub use serial_ports::SerialPortCatalog;
-pub use spiral_robotics_common::recording::{
-    EpisodeArm, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress, ReplayPurpose,
-};
+pub use spiral_robotics_common::recording::{EpisodeArm, RecordingGap, RecordingProgress};
 pub use spiral_robotics_common::robots::{
     CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointTelemetry, ModeSelection,
     MotorCondition, MotorFault, MotorLimits, PortSettings, RobotTelemetry,

@@ -3,7 +3,7 @@
 //! The Data timeline asks for every stream at once; each stream's query
 //! projects only `log_time` and counts rows as they stream, so no message
 //! payloads are read.
-use super::messages::MessageQuery;
+use super::EpisodeTopicQuery;
 use crate::{
     StorageManager,
     db::{ArrowColumns, DatabaseSession},
@@ -20,63 +20,43 @@ const CONCURRENT_COVERAGE_QUERIES: usize = 8;
 
 impl StorageManager {
     /// Every stream of an episode, a few queries at a time, answered in
-    /// request order. The batch belongs to one dataset revision, so the
-    /// catalog is inspected once before the counts and checked once after
-    /// them rather than around every stream. One stream that cannot be
-    /// counted reports its error in place instead of failing the others.
+    /// request order. One stream that cannot be counted reports its error in
+    /// place instead of failing the others.
     pub async fn episode_coverage(
         &self,
         request: EpisodeCoverageRequest,
     ) -> Result<Vec<StreamCoverage>, String> {
         request.validate()?;
-        let Some(first) = request.streams().first() else {
-            return Ok(Vec::new());
-        };
-        let dataset = first.read().topic().dataset();
-        if request
-            .streams()
-            .iter()
-            .any(|stream| stream.read().topic().dataset() != dataset)
-        {
-            return Err("Coverage covers the streams of one dataset per request".into());
-        }
-        let inspection = self
-            .project_store()
-            .dataset_catalog()
-            .inspect(dataset.clone())
-            .await?;
         let outcomes = futures::stream::iter(request.streams().iter().cloned())
-            .map(|stream| {
-                let known = Self::revision_known(&inspection, stream.read());
-                async move {
-                    let counted = match known {
-                        Ok(()) => self.count_log_times(&stream).await,
-                        Err(error) => Err(error),
-                    };
-                    match counted {
-                        Ok(coverage) => StreamCoverage::Ready { coverage },
-                        Err(error) => StreamCoverage::Failed { error },
-                    }
+            .map(|stream| async move {
+                match self.count_log_times(&stream).await {
+                    Ok(coverage) => StreamCoverage::Ready { coverage },
+                    Err(error) => StreamCoverage::Failed { error },
                 }
             })
             .buffered(CONCURRENT_COVERAGE_QUERIES)
             .collect()
             .await;
-        self.require_same_revision_after(first.read()).await?;
         Ok(outcomes)
     }
 
-    /// Bucket one stream's `log_time`s; the caller has already checked the
-    /// dataset revision.
+    /// Bucket one stream's `log_time`s.
     async fn count_log_times(
         &self,
         request: &TopicCoverageRequest,
     ) -> Result<TopicCoverage, String> {
         let bounds = request.bounds()?;
-        let statement = MessageQuery::new(request.read()).statement(
-            "log_time",
-            &format!("AND log_time >= {} AND log_time < {}", bounds.0, bounds.1),
-        )?;
+        let read = request.read();
+        let statement = EpisodeTopicQuery::for_sql(
+            read.topic(),
+            format!(
+                "SELECT log_time FROM {} WHERE id = $1 AND log_time >= {} AND log_time < {}",
+                read.source_sql(),
+                bounds.0,
+                bounds.1
+            ),
+        )?
+        .statement;
         let mut connection = self.project_store().connect().await?;
         let mut stream = connection
             .query(statement)

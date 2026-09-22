@@ -4,7 +4,7 @@ use crate::{BackendCommandError, OperationError};
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::workflow::{
     WorkflowSpec, WorkflowSummary,
-    document::{WorkflowDocument, WorkflowPlan, WorkflowRun},
+    document::{WorkflowDocument, WorkflowRun},
 };
 
 #[derive(Clone)]
@@ -28,12 +28,6 @@ impl WorkflowCommands {
             })
             .await
     }
-    pub(super) async fn plan(
-        &self,
-        workflow: WorkflowSpec,
-    ) -> Result<WorkflowPlan, BackendCommandError> {
-        Ok(self.state.workflow().plan(&workflow).await)
-    }
     pub(super) async fn run(
         &self,
         workflow: WorkflowSpec,
@@ -43,15 +37,6 @@ impl WorkflowCommands {
                 state.workflow().run(workflow).await.map_err(Into::into)
             })
             .await
-    }
-    pub(super) async fn capabilities(
-        &self,
-    ) -> Result<spiral_robotics_common::relations::SpiralQuerySnapshot, BackendCommandError> {
-        super::query::WorkflowQuery::new(self.state.storage().workflow_store())
-            .capabilities()
-            .await
-            .map_err(OperationError::External)
-            .map_err(Into::into)
     }
     pub(super) async fn cameras(
         &self,

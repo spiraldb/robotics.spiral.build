@@ -163,7 +163,7 @@ mod tests {
                 "/joints".into(),
                 "01a0989fb65870a7a5459902f9e3e090".into(),
             ),
-            TopicRevision::new("v1".into(), "variant".into()),
+            TopicRevision::new("variant".into()),
         );
         match window {
             Some(window) => read.with_window(window),

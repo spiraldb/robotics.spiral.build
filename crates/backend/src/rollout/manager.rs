@@ -1058,9 +1058,6 @@ impl ModeSelectionPolicy for ModeSelection {
             Self::Teleoperate { leader, follower } => {
                 format!("Teleoperation from {leader} to {follower}")
             }
-            Self::Replay { robot, episode } => {
-                format!("Replay of {episode} on {robot}")
-            }
             Self::Policy { robot, session } => {
                 format!("Policy session {session} on {robot}")
             }

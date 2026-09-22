@@ -19,6 +19,14 @@ impl ProxyClient {
         request: HttpRequest,
         max_bytes: usize,
     ) -> Result<String, CommandError> {
+        String::from_utf8(Self::bytes(request, max_bytes).await?)
+            .map_err(|_| CommandError::transport("Upstream response is not UTF-8 text"))
+    }
+
+    pub(crate) async fn bytes(
+        request: HttpRequest,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CommandError> {
         let (response, _cancel) = request.response("*/*").await?;
         let status = response.status();
         let body = response
@@ -43,7 +51,6 @@ impl ProxyClient {
                 "Upstream HTTP request returned {status}"
             )));
         }
-        String::from_utf8(bytes)
-            .map_err(|_| CommandError::transport("Upstream response is not UTF-8 text"))
+        Ok(bytes)
     }
 }

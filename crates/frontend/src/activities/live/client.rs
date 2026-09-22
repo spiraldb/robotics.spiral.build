@@ -4,8 +4,7 @@ use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::recording::{
-    EpisodeInfo, EpisodeInspectionSnapshot, EpisodeSeek, PauseUpdate, RecordingFinish,
-    RecordingStart, ReplayStart,
+    EpisodeInfo, EpisodeInspectionSnapshot, PauseUpdate, RecordingFinish, RecordingStart,
 };
 use std::future::Future;
 
@@ -80,41 +79,6 @@ impl RecordingClient {
         self.project.mutate(
             &[Telemetry, Recording],
             HttpRequest::new("PATCH", "/api/recording").json(&PauseUpdate::new(paused)),
-        )
-    }
-
-    pub(super) fn seek_episode(
-        &self,
-        id: String,
-        request: EpisodeSeek,
-    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.project.mutate(
-            &[Telemetry, RobotSetup],
-            HttpRequest::new(
-                "POST",
-                format!("/api/recording/takes/{id}/seek", id = id.url_component()),
-            )
-            .json(&request),
-        )
-    }
-
-    pub(super) fn start_replay(
-        &self,
-        request: ReplayStart,
-    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.project.mutate(
-            &[Telemetry, RobotSetup],
-            HttpRequest::new("POST", "/api/replay").json(&request),
-        )
-    }
-
-    pub(super) fn set_replay_paused(
-        &self,
-        paused: bool,
-    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        self.project.mutate(
-            &[Telemetry],
-            HttpRequest::new("PATCH", "/api/replay").json(&PauseUpdate::new(paused)),
         )
     }
 }

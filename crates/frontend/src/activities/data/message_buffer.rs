@@ -7,7 +7,10 @@ use arrow_array::{
     Array, FixedSizeListArray, LargeListArray, ListArray, RecordBatch, StructArray, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
-use spiral_robotics_common::datasets::{MessageCursor, MessageRead};
+use spiral_robotics_common::{
+    datasets::{MessageCursor, MessageRead},
+    relations::EpisodeQueryRequest,
+};
 use std::{collections::BTreeMap, io::Cursor, rc::Rc, sync::Arc};
 
 /// Trace colours within one lane: the category tints, then the stage tints.
@@ -216,76 +219,43 @@ impl FieldCell {
 pub(super) struct MessageBuffer {
     schema: Arc<Schema>,
     batches: Vec<RecordBatch>,
-    next: Option<MessageCursor>,
 }
 impl MessageBuffer {
-    pub(super) async fn load(mut request: MessageRead, complete: bool) -> Result<Rc<Self>, String> {
-        let mut loaded: Option<Self> = None;
-        let mut bytes = 0;
-        let mut rows = 0;
-        loop {
-            let response = DatasetClient::current()
-                .episode_messages(request.clone())
-                .await
-                .map_err(|e| e.to_string())?;
-            bytes += response.len();
+    /// A schema read's empty buffer, or every message in a window, one keyset
+    /// page per episode query.
+    pub(super) async fn load(mut request: MessageRead) -> Result<Rc<Self>, String> {
+        let first = MessagePage::read(&request).await?;
+        let mut loaded = Self {
+            schema: first.schema,
+            batches: first.batches,
+        };
+        let mut next = first.next;
+        let mut bytes = first.bytes;
+        while let Some(cursor) = next {
+            let window = request.window().ok_or("Unexpected schema continuation")?;
+            if window.after() == Some(&cursor) {
+                return Err("Message cursor did not advance".into());
+            }
+            request = request
+                .clone()
+                .with_window(window.clone().with_cursor(Some(cursor)));
+            let page = MessagePage::read(&request).await?;
+            bytes += page.bytes;
             if bytes > 128 * 1024 * 1024 {
                 return Err("Selected message window exceeds 128 MiB; narrow the window or select fewer fields".into());
             }
-            let reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(response), None)
-                .map_err(|e| e.to_string())?;
-            let schema = reader.schema();
-            let identity: MessageRead = serde_json::from_str(
-                schema
-                    .metadata()
-                    .get("studio.message_read")
-                    .ok_or("Missing message identity")?,
-            )
-            .map_err(|e| e.to_string())?;
-            if identity != request {
-                return Err("Message response belongs to another read".into());
+            if page.schema.fields() != loaded.schema.fields() {
+                return Err("Message schema changed between pages".into());
             }
-            let next: Option<MessageCursor> = serde_json::from_str(
-                schema
-                    .metadata()
-                    .get("studio.next_cursor")
-                    .ok_or("Missing page completeness")?,
-            )
-            .map_err(|e| e.to_string())?;
-            let batches = reader
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            rows += batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-            if rows > 36_000 {
+            loaded.batches.extend(page.batches);
+            if loaded.rows() > 36_000 {
                 return Err(
                     "Selected message window exceeds 36,000 samples; narrow the window".into(),
                 );
             }
-            let result = loaded.get_or_insert_with(|| Self {
-                schema: schema.clone(),
-                batches: vec![],
-                next: None,
-            });
-            if schema.fields() != result.schema.fields() {
-                return Err("Message schema changed between pages".into());
-            }
-            result.batches.extend(batches);
-            result.next = next.clone();
-            if !complete || next.is_none() {
-                break;
-            }
-            if request.window().and_then(|w| w.after()) == next.as_ref() {
-                return Err("Message cursor did not advance".into());
-            }
-            request = request.clone().with_window(
-                request
-                    .window()
-                    .ok_or("Unexpected schema continuation")?
-                    .clone()
-                    .with_cursor(next),
-            );
+            next = page.next;
         }
-        Ok(Rc::new(loaded.expect("at least one page")))
+        Ok(Rc::new(loaded))
     }
     pub(super) fn value_field(&self) -> Result<MessageField, String> {
         self.schema
@@ -436,6 +406,87 @@ impl MessageBuffer {
     }
 }
 
+/// One episode query's worth of a read: at most its window's limit, and
+/// where the next page starts when the query found one row more.
+struct MessagePage {
+    schema: Arc<Schema>,
+    batches: Vec<RecordBatch>,
+    next: Option<MessageCursor>,
+    bytes: usize,
+}
+impl MessagePage {
+    async fn read(request: &MessageRead) -> Result<Self, String> {
+        let response = DatasetClient::current()
+            .run_episode_arrow_query(&EpisodeQueryRequest::new(
+                request.episode(),
+                request.sql()?,
+                request.max_rows(),
+            ))
+            .await
+            .map_err(|e| e.to_string())?;
+        let bytes = response.len();
+        let reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(response), None)
+            .map_err(|e| e.to_string())?;
+        let schema = reader.schema();
+        let batches = reader
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let limit = request.window().map_or(0, |window| window.limit());
+        let mut page = Self::keep(schema, batches, limit)?;
+        page.bytes = bytes;
+        Ok(page)
+    }
+    /// The first `limit` rows; one more means the read continues after them.
+    fn keep(
+        schema: Arc<Schema>,
+        mut batches: Vec<RecordBatch>,
+        limit: usize,
+    ) -> Result<Self, String> {
+        let mut kept = 0;
+        let mut more = false;
+        for batch in &mut batches {
+            let keep = batch.num_rows().min(limit - kept);
+            if keep < batch.num_rows() {
+                more = true;
+                *batch = batch.slice(0, keep);
+            }
+            kept += keep;
+        }
+        batches.retain(|batch| batch.num_rows() > 0);
+        let next = match batches.last().filter(|_| more) {
+            Some(last) => Some(Self::cursor(last, last.num_rows() - 1)?),
+            None => None,
+        };
+        Ok(Self {
+            schema,
+            batches,
+            next,
+            bytes: 0,
+        })
+    }
+    /// The keyset position of one message.
+    fn cursor(batch: &RecordBatch, row: usize) -> Result<MessageCursor, String> {
+        let position = |name: &str| {
+            let column = batch
+                .column_by_name(name)
+                .ok_or_else(|| format!("Missing native {name}"))?;
+            let value = arrow_cast::cast(&column.slice(row, 1), &DataType::UInt64)
+                .map_err(|e| e.to_string())?;
+            value
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .filter(|values| !values.is_null(0))
+                .map(|values| values.value(0))
+                .ok_or_else(|| format!("Null native {name}"))
+        };
+        Ok(MessageCursor::new(
+            position("log_time")?,
+            position("chunk_start_offset")?,
+            u32::try_from(position("sample_ordinal")?).map_err(|e| e.to_string())?,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,7 +542,6 @@ mod tests {
         let buffer = MessageBuffer {
             schema: batch.schema(),
             batches: vec![batch],
-            next: None,
         };
         assert!(buffer.at(origin - 1).unwrap().is_none());
         assert!(buffer.json_at(origin - 1).unwrap().is_none());
@@ -524,6 +574,52 @@ mod tests {
                 .iter()
                 .all(|point| point.value().is_none())
         );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn pages_keep_exact_values_and_continue_after_a_tied_timestamp() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "log_time",
+                Arc::new(UInt64Array::from(vec![u64::MAX; 3])) as ArrayRef,
+            ),
+            (
+                "sample_ordinal",
+                Arc::new(arrow_array::UInt32Array::from(vec![4, 5, 6])),
+            ),
+            (
+                "field_0",
+                Arc::new(UInt64Array::from(vec![Some(u64::MAX), None, Some(1)])),
+            ),
+            (
+                "chunk_start_offset",
+                Arc::new(UInt64Array::from(vec![100, 100, 200])),
+            ),
+        ])
+        .unwrap();
+        let split = vec![batch.slice(0, 1), batch.slice(1, 2)];
+        let page = MessagePage::keep(batch.schema(), split, 2).unwrap();
+        let cursor = page.next.unwrap();
+        assert_eq!(cursor.time().unwrap(), u64::MAX);
+        assert_eq!(cursor.chunk().unwrap(), 100);
+        assert_eq!(cursor.ordinal(), 5);
+        assert_eq!(
+            page.batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            2
+        );
+        let exact = page.batches[0]
+            .column_by_name("field_0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(exact, u64::MAX);
+        let last = MessagePage::keep(batch.schema(), vec![batch.slice(2, 1)], 2).unwrap();
+        assert!(last.next.is_none());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::recording::{RecordingProgress, ReplayProgress};
+use crate::recording::RecordingProgress;
 
 pub mod visualization;
 
@@ -359,14 +359,6 @@ pub enum ModeSelection {
     Manual { robot: String },
     /// A leader arm's measured pose is mirrored onto a follower arm.
     Teleoperate { leader: String, follower: String },
-    /// A recorded episode's joint targets are played back onto one arm.
-    ///
-    /// The trajectory itself is not carried here: this type is the *published*
-    /// mode, and a mode the browser can post is a mode the browser could post
-    /// a hundred megabytes into. Replay is started through its own endpoint,
-    /// which loads the episode server-side and hands the samples to the
-    /// control thread directly.
-    Replay { robot: String, episode: String },
     /// A backend-owned remote policy session commands one calibrated arm.
     Policy { robot: String, session: String },
 }
@@ -378,7 +370,6 @@ impl ModeSelection {
             Self::Idle => "Idle",
             Self::Manual { .. } => "Manual",
             Self::Teleoperate { .. } => "Teleoperation",
-            Self::Replay { .. } => "Replay",
             Self::Policy { .. } => "Policy",
         }
     }
@@ -437,8 +428,6 @@ pub struct TelemetryFrame {
     robots: Vec<RobotTelemetry>,
     /// Present only while a take is being captured.
     recording: Option<RecordingProgress>,
-    /// Present only while an episode is being played back.
-    replay: Option<ReplayProgress>,
 }
 
 impl TelemetryFrame {
@@ -449,20 +438,14 @@ impl TelemetryFrame {
             target_hz,
             robots: Vec::new(),
             recording: None,
-            replay: None,
         }
     }
     pub fn with_robots(mut self, robots: Vec<RobotTelemetry>) -> Self {
         self.robots = robots;
         self
     }
-    pub fn with_operations(
-        mut self,
-        recording: Option<RecordingProgress>,
-        replay: Option<ReplayProgress>,
-    ) -> Self {
+    pub fn with_recording(mut self, recording: Option<RecordingProgress>) -> Self {
         self.recording = recording;
-        self.replay = replay;
         self
     }
     pub const fn sequence(&self) -> u64 {
@@ -479,9 +462,6 @@ impl TelemetryFrame {
     }
     pub const fn recording(&self) -> Option<&RecordingProgress> {
         self.recording.as_ref()
-    }
-    pub const fn replay(&self) -> Option<&ReplayProgress> {
-        self.replay.as_ref()
     }
 }
 
@@ -996,13 +976,6 @@ mod tests {
                     follower: "right".to_owned(),
                 },
                 r#"{"mode":"teleoperate","leader":"left","follower":"right"}"#,
-            ),
-            (
-                ModeSelection::Replay {
-                    robot: "right".to_owned(),
-                    episode: "episode_000007".to_owned(),
-                },
-                r#"{"mode":"replay","robot":"right","episode":"episode_000007"}"#,
             ),
             (
                 ModeSelection::Policy {

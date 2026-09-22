@@ -98,7 +98,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_a_missing_or
             }
         }
     }
-    assert_eq!(count, 73);
+    assert_eq!(count, 66);
     for retired in [
         "/robots/setup",
         "/serial-ports/identify",
@@ -110,6 +110,14 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_a_missing_or
         "/models/complete",
         "/models/decide",
         "/datasets/robot-discovery/read-description",
+        "/datasets/robot-discovery/context",
+        "/datasets/robot-discovery/inspect-stream",
+        "/datasets/robot-discovery/save",
+        "/datasets/episode-messages",
+        "/workflows/plan",
+        "/models/capabilities",
+        "/replay",
+        "/recording/takes/{id}/seek",
     ] {
         assert!(contract["paths"].get(retired).is_none(), "{retired}");
     }
@@ -201,10 +209,10 @@ fn dataset_catalogs_and_episode_playback_keep_distinct_wire_contracts() {
         topics["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
         "#/components/schemas/DatasetTopic"
     );
-    let messages = &paths["/datasets/episode-messages"]["post"];
+    let messages = &paths["/queries/episode/arrow"]["post"];
     assert_eq!(
         messages["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-        "#/components/schemas/MessageRead"
+        "#/components/schemas/EpisodeQueryRequest"
     );
     assert_eq!(
         messages["responses"]["200"]["content"]["application/vnd.apache.arrow.stream"]["schema"]["format"],

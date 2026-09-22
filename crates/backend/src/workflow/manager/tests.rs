@@ -1,20 +1,27 @@
 use super::*;
-use spiral_robotics_common::workflow::WorkflowRunPhase;
+use spiral_robotics_common::workflow::{WorkflowRunPhase, document::WorkflowPlan};
 use spiral_robotics_storage::ProjectStore;
 struct WorkflowFixture {
     manager: WorkflowManager,
-    store: Arc<ProjectStore>,
+    storage: Arc<StorageManager>,
 }
 impl WorkflowFixture {
     fn new() -> Self {
         let store = Arc::new(ProjectStore::workflow_test());
+        let storage = Arc::new(StorageManager::new(
+            store.clone(),
+            spiral_robotics_storage::StudioStore::in_memory().project(&store.connection_settings()),
+        ));
         Self {
-            manager: WorkflowManager::new(Arc::new(StorageManager::new(
-                store.clone(),
-                spiral_robotics_storage::StudioStore::in_memory()
-                    .project(&store.connection_settings()),
-            ))),
-            store,
+            manager: WorkflowManager::new(storage.clone()),
+            storage,
+        }
+    }
+    /// Plan as the browser does: the plan SQL through the preview query path.
+    async fn plan(&self, workflow: &WorkflowSpec) -> WorkflowPlan {
+        match self.storage.query(&workflow.plan_sql().unwrap(), 1).await {
+            Ok(result) => WorkflowPlan::from_explain(&result),
+            Err(error) => WorkflowPlan::failed(error),
         }
     }
     fn query() -> WorkflowSpec {
@@ -138,17 +145,17 @@ async fn independent_workflows_run_concurrently() {
 async fn planning_checks_native_sql() {
     let fixture = WorkflowFixture::new();
     let mut graph = WorkflowFixture::query();
-    let plan = fixture.manager.plan(&graph).await;
+    let plan = fixture.plan(&graph).await;
     assert!(plan.error().is_none(), "{:?}", plan.error());
     graph.set_sql("SELECT missing_column");
-    assert!(fixture.manager.plan(&graph).await.error().is_some());
+    assert!(fixture.plan(&graph).await.error().is_some());
 }
 
 #[tokio::test]
 async fn saved_native_plan_round_trips_and_remains_bound_to_its_sql() {
     let fixture = WorkflowFixture::new();
     let workflow = WorkflowFixture::query();
-    let plan = fixture.manager.plan(&workflow).await;
+    let plan = fixture.plan(&workflow).await;
     assert!(plan.report().is_some());
     let saved = SavedWorkflow {
         planned_sql: Some(WorkflowSqlPlan::new(&workflow, plan.clone())),
@@ -172,21 +179,11 @@ async fn saved_native_plan_round_trips_and_remains_bound_to_its_sql() {
 }
 
 #[tokio::test]
-async fn native_capabilities_and_plan_do_not_execute_inference() {
+async fn native_plan_does_not_execute_inference() {
     let fixture = WorkflowFixture::new();
-    let query = WorkflowQuery::new(fixture.store.clone());
-    let capabilities = query.capabilities().await.unwrap();
-    assert!(
-        capabilities
-            .rows()
-            .iter()
-            .any(|row| row["function_set"] == "spql.ai.score"),
-        "{:?}",
-        capabilities.rows()
-    );
     let workflow = WorkflowSpec::new("ai", "Native AI")
         .with_sql("SELECT spql.ai.score(NULL, 'a dimly lit scene') AS score");
-    let plan = fixture.manager.plan(&workflow).await;
+    let plan = fixture.plan(&workflow).await;
     assert!(plan.error().is_none(), "{:?}", plan.error());
     let report = plan.report().unwrap();
     assert!(!report.logical().nodes().is_empty());
@@ -210,7 +207,7 @@ async fn native_capabilities_and_plan_do_not_execute_inference() {
     );
     let image_workflow = WorkflowSpec::new("image", "Image operations")
         .with_sql("SELECT spql.image.mean_luminance(spql.image.decode(NULL)) AS luminance");
-    let image_plan = fixture.manager.plan(&image_workflow).await;
+    let image_plan = fixture.plan(&image_workflow).await;
     assert!(image_plan.error().is_none(), "{:?}", image_plan.error());
     let image_report = image_plan.report().unwrap();
     let calls = image_report
@@ -232,6 +229,6 @@ async fn native_capabilities_and_plan_do_not_execute_inference() {
             .any(|function| function.starts_with("spql.image.") && function.ends_with("decode")),
         "{calls:?}"
     );
-    let result = query.run(&workflow).await.unwrap();
-    assert!(result.rows()[0]["score"].is_null());
+    let run = fixture.run(workflow).await;
+    assert!(run.snapshot().result().unwrap().rows()[0]["score"].is_null());
 }

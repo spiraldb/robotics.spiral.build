@@ -56,8 +56,7 @@ consumers**:
   curation — selecting, transforming, and deriving the datasets worth
   training on.
 - **Consumers** put the core to work: training a policy, rolling a checkpoint
-  out on real hardware, replaying an episode, and backing up the complete
-  project.
+  out on real hardware, and backing up the complete project.
 
 The full hardware loop — connect, calibrate, teleoperate, record, train,
 run a policy — remains shipped and supported, but it is one path through the
@@ -67,8 +66,8 @@ through the follower's bounded control path.
 
 Success is an ML engineer pointing the Studio at data — theirs or the
 world's — understanding any episode against one synchronized clock, curating
-a training set with queries instead of scripts, and training and replaying
-from it without writing glue code or operating a second data stack.
+a training set with queries instead of scripts, and training from it without
+writing glue code or operating a second data stack.
 
 ## Positioning
 
@@ -77,8 +76,8 @@ from it without writing glue code or operating a second data stack.
   consumers. The Studio competes as the *database-backed* robot-data
   workbench: viewers show files, the Studio owns a queryable project.
 - **One trusted Rust backend, one portable browser frontend.** The backend owns
-  hardware, safety, recording, ingestion, media encoding, data services, and
-  replay. It also owns Workflow's OpenAI-compatible Assistant transport,
+  hardware, safety, recording, ingestion, media encoding, and data services.
+  It also owns Workflow's OpenAI-compatible Assistant transport,
   credentials, tool loop, and durable project-scoped conversations. The browser is
   an interchangeable operating surface that talks only to that backend; it
   never holds service credentials or drives hardware directly.
@@ -107,9 +106,9 @@ from it without writing glue code or operating a second data stack.
   stream model is also the ingestion target: external channels land as
   streams on one clock, not as a resampled wide table.
 - **Robot-specific behavior is a capability, not an assumption.** An episode
-  is viewable and queryable on its own. Replay, physical seek, and
-  training compatibility are conditional capabilities an episode has when its
-  streams match a configured robot's contract. Ingested episodes without a
+  is viewable and queryable on its own. Training compatibility is a
+  conditional capability an episode has when its streams match a configured
+  robot's contract. Ingested episodes without a
   matching robot remain full citizens of the catalog.
 - **SpiralDB owns the queryable project.** Robots, settings, saved workflows,
   training history, checkpoints, and rollout state use the shared ADBC
@@ -150,8 +149,8 @@ Spiral Robotics backend
   backend and does not connect directly to robots or SpiralDB.
 - **The backend is the one consequential system.** It normally runs near the
   arms and owns all hardware connections, the control loop, safety decisions,
-  camera capture, video encoding, SpiralDB credentials and persistence, and
-  replay execution. As ingestion arrives, it also owns external-source
+  camera capture, video encoding, and SpiralDB credentials and persistence.
+  As ingestion arrives, it also owns external-source
   credentials and ingestion jobs. It already owns Workflow's pinned model
   artifact resolution, local candle execution, cancellation, and derived
   relation lifecycle. It also owns Workflow provider configuration, the
@@ -164,9 +163,6 @@ Spiral Robotics backend
   telemetry, and unavailable services must suspend or block consequential
   actions without pretending the physical system is safe merely because the
   browser lost contact.
-- **Replay never drives from a live database stream.** The backend obtains and
-  validates the SpiralDB trajectory before motion, then executes through the
-  same bounded control path used by every physical mode.
 - **Service settings are backend-scoped.** Secrets are stored and used by the
   backend. The browser receives configuration state, not stored tokens.
 
@@ -267,7 +263,7 @@ never becomes the motor-control runtime.
   to a 21% Datasets rail beside the episode workspace and a full-width
   Timeline.
 - Four backend motion modes: **Idle**, **Manual**, **Teleoperation**, and
-  **Replay**. The Studio presents their operator-facing form as **Hold**
+  **Policy**. The Studio presents their operator-facing form as **Hold**
   (torque engaged and joints writable), **Release** (torque off and telemetry
   read-only), and **Teleop** (leader mapped to follower).
 - A live 3D scene drawn from URDF, live MJPEG camera panels, and one stable
@@ -282,22 +278,18 @@ never becomes the motor-control runtime.
   be scrubbed to synchronize recorded camera frames, recorded 3D pose,
   signals, and the playhead. Browser WebCodecs decoding is owned by Rust/WASM;
   camera timestamps follow capture time and seeks begin at a preceding
-  keyframe. Physical time-seeking is separate, explicit, server-gated, and
-  applied on committed release rather than every pointer move.
+  keyframe. Scrubbing is visual only and never moves the follower.
 - Dataset semantics are explicit: one native Dataset contains many MCAP
-  episodes. An episode can be selected, deleted, or replayed on a compatible
-  follower. Deletion removes its source row and refreshes the Dataset while
-  retaining the local MCAP file. Calibration changes affect future recordings;
-  existing recordings retain their captured normalized values and are never
-  rewritten. Historical degrees require a calibration snapshot.
+  episodes. An episode can be selected or deleted. Deletion removes its
+  source row and refreshes the Dataset while retaining the local MCAP file.
+  Calibration changes affect future recordings; existing recordings retain
+  their captured normalized values and are never rewritten. Historical degrees
+  require a calibration snapshot.
 - Settings imports and exports the active project as versioned
   `.spiral-project` format 2, including original MCAP bytes, Dataset names
   (including empty datasets), checkpoints, and Studio-owned Workflow caches.
   Restore rebuilds native Dataset populations with Studio state in one
   transaction. Format-1 backups require the old application.
-- Replay ramps a compatible calibrated follower to the first pose before
-  playback. Pause/resume keeps the current replay frame rather than restarting
-  the episode.
 - Native recording import writes a Blob source row, creates the filtered
   source view and target Dataset when needed, and refreshes the population in
   one transaction. An identical recording key and byte payload is an
@@ -321,8 +313,8 @@ never becomes the motor-control runtime.
   separate, principled system rather than another storage or runtime mode.
 
 **Shipped with a safety boundary:** Studio-managed ACT control from a durable
-Spiral checkpoint. The same control thread that bounds manual, teleoperation,
-and replay motion gates policy commands by an unguessable active session. The
+Spiral checkpoint. The same control thread that bounds manual and
+teleoperation motion gates policy commands by an unguessable active session. The
 selected remote runtime chooses its PyTorch device; an inference that cannot
 meet the observation safety window is rejected before a new action is sent.
 
@@ -340,7 +332,7 @@ today, and nothing below may be presented as existing behavior:
   the recipe, the judgement, and the sheet; the derived dataset does not
   exist yet.
 - **Generalized episodes.** Episode schema loosened so robot-specific
-  semantics (arms, follow error, replay) are optional capabilities rather
+  semantics (arms, follow error) are optional capabilities rather
   than required fields.
 
 **Constraints**
@@ -376,8 +368,8 @@ today, and nothing below may be presented as existing behavior:
   belong in separate integration lanes.
 - **Safety is enforced by the server.** Enabling torque first copies measured
   position into the goal so an arm cannot snap to stale state. Uncalibrated
-  arms cannot accept normalized position commands. Manual, teleoperation,
-  replay, and timeline-seek motion use bounded ramps. A non-responsive motor
+  arms cannot accept normalized position commands. Manual, teleoperation, and
+  policy motion use bounded ramps. A non-responsive motor
   bus stops dependent modes and ends an active recording instead of writing a
   silent hole.
 - **Camera identity is not stable.** The OS-reported identifier may change
@@ -406,7 +398,7 @@ tree), *dataset* (a collection of episodes), *episode* / *take* (one kept
 multi-stream trajectory, recorded or ingested; *episode* is canonical in data
 and wire naming), *producer* (a path that creates episodes: recording or
 ingestion), *consumer* (a use of the data core: query, curation, training,
-rollout, replay, export), *ingestion*
+rollout, export), *ingestion*
 (backend-owned import of external data into the project), *Timeline* /
 *playhead* (the shared episode clock and its current time), and *Follow Δ*
 (the gap between measured and commanded joint position).
@@ -475,22 +467,20 @@ oversized streams, cancellation, and secret redaction.
    take datasets out. Hardware collection is one producer, never the front
    door the rest of the product hides behind.
 2. **The browser observes and requests; the backend owns consequences.**
-   Hardware, safety, recording, ingestion, credentials, data persistence, and
-   replay remain backend responsibilities regardless of which client is
-   connected.
+   Hardware, safety, recording, ingestion, credentials, and data persistence
+   remain backend responsibilities regardless of which client is connected.
 3. **The wire API is the product boundary.** The current Dioxus UI is one
    client, so correctness cannot depend on browser-local state or component
    behavior.
 4. **One clock composes the episode.** State, action, camera media, gaps,
-   signals, query selection, and replay meet at the Timeline without erasing
-   their natural stream rates.
+   signals, and query selection meet at the Timeline without erasing their
+   natural stream rates.
 5. **One SpiralDB project holds the complete durable system; explicit files are
    transfer formats.** Robot JSON, whole-project bundles, and external source
    files stay portable, while no filesystem spool or retry queue becomes a
    second source of truth.
 6. **Robot semantics are capabilities, not assumptions.** An episode earns
-   replay, physical seek, and training compatibility by matching a configured
-   robot's contract; without a match it remains fully viewable, queryable, and
-   curatable.
+   training compatibility by matching a configured robot's contract; without
+   a match it remains fully viewable, queryable, and curatable.
 7. **Safety is enforced where it cannot be bypassed.** Every client receives
    the same bounded, calibrated, server-owned motion behavior.

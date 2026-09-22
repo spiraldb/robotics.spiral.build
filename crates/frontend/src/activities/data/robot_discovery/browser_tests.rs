@@ -1,4 +1,4 @@
-//! Exercise the browser loop, native tool transport, and validation repair together.
+//! Exercise the browser loop, stream evidence, and validation repair together.
 use super::*;
 use crate::client::{project::ProjectClient, queries::QueryRefresh};
 use dioxus::prelude::*;
@@ -31,28 +31,27 @@ export function installRobotDiscoveryFetch() {
         const body = await request.clone().json();
         const recordedPath = path === '/api/proxy' ? metadata.url : path;
         robotRequests.push({path:recordedPath, transport:path, project: request.headers.get('X-Spiral-Project'), metadata, body});
-        if (path === '/api/datasets/robot-discovery/context') return Response.json({
-            episode:{dataset:{path:['dataset_demo']},episode_id:'episode-1'},
-            topics:[{name:'/joints',schemas:['sensor_msgs/JointState'],members:1,samples:3,revision:null}]
+        if (path === '/api/queries') return Response.json({
+            columns:[{name:'id',data_type:'Utf8',nullable:false}],rows:[{id:'episode-1'}],truncated:false,elapsed_ms:0
         });
-        if (path === '/api/datasets/robot-discovery/inspect-stream') {
-            return Response.json({schema:[{name:'position'}],samples:[{value:{position:[0.25]}}]});
-        }
-        if (path === '/api/datasets/robot-discovery/save') {
+        if (path === '/api/datasets/episode-topics') return Response.json([
+            {name:'/joints',schemas:['sensor_msgs/JointState'],members:1,samples:3,revision:{variant:'joints'}}
+        ]);
+        if (path === '/api/queries/episode') return Response.json({
+            columns:[{name:'value',data_type:'Struct',nullable:false}],rows:[{value:{position:[0.25]}}],truncated:false,elapsed_ms:0
+        });
+        if (path === '/api/datasets/robot/save') {
             saveCount += 1;
-            if (saveCount === 1) return Response.json(
-                {code:'external',message:'Bindings must match the model independent joints'},
-                {status:502}
-            );
             return Response.json(null);
         }
         if (path !== '/api/proxy') throw new Error('Unexpected request ' + path);
         completionCount += 1;
+        const urdf = '<robot name="demo"><link name="base"><visual><geometry><box size="0.1 0.1 0.1"/></geometry></visual></link></robot>';
         const calls = [
             ['read-description','read_description',{url:'https://huggingface.co/datasets/acme/demo/resolve/pinned-sha/README.md'}],
             ['inspect-stream','inspect_stream',{topic:'/joints',schema:'sensor_msgs/JointState'}],
-            ['first-finish','finish',{robot:{urdf:'<robot name="demo"><link name="base"/></robot>',bindings:[],meshes:{}}}],
-            ['repaired-finish','finish',{robot:{urdf:'<robot name="demo"><link name="base"/></robot>',bindings:[],meshes:{}}}]
+            ['first-finish','finish',{robot:{urdf,bindings:[{joint:'elbow',topic:'/joints',schema:'sensor_msgs/JointState',field:['position'],selector:{kind:'index',index:0},scale:1,offset:0}],meshes:{}}}],
+            ['repaired-finish','finish',{robot:{urdf,bindings:[],meshes:{}}}]
         ];
         const [id, name, args] = calls[completionCount - 1];
         const message = {role:'assistant',content:'Inspecting the imported robot.',tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]};
@@ -179,11 +178,22 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
                     .as_str()
                     .is_some_and(|content| content.contains("Bindings must match")))
     );
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| request["path"] == "/api/datasets/robot-discovery/save")
-            .count(),
-        2
+    let samples = requests
+        .iter()
+        .find(|request| request["path"] == "/api/queries/episode")
+        .unwrap();
+    assert_eq!(samples["body"]["episode"]["episode_id"], "episode-1");
+    assert!(
+        samples["body"]["statement"]
+            .as_str()
+            .unwrap()
+            .contains("spql.mcap.read_topic('dataset_demo', '/joints', 'joints')")
     );
+    let saves = requests
+        .iter()
+        .filter(|request| request["path"] == "/api/datasets/robot/save")
+        .collect::<Vec<_>>();
+    assert_eq!(saves.len(), 1);
+    assert_eq!(saves[0]["body"]["dataset"]["path"], json!(["dataset_demo"]));
+    assert_eq!(saves[0]["body"]["robot"]["bindings"], json!([]));
 }

@@ -200,7 +200,7 @@ impl JointSamples {
                 .with_window(MessageWindow::new(bounds, vec![]));
             samples.push(Self {
                 bindings,
-                buffer: MessageBuffer::load(read, true).await?,
+                buffer: MessageBuffer::load(read).await?,
             });
         }
         Ok(samples)

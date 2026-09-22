@@ -185,11 +185,9 @@ fn StreamPlot(
                 gloo_timers::future::TimeoutFuture::new(250).await;
             }
             let projections = fields.iter().map(MessageField::projection).collect();
-            let buffer = MessageBuffer::load(
-                read.with_window(MessageWindow::new(bounds, projections)),
-                true,
-            )
-            .await?;
+            let buffer =
+                MessageBuffer::load(read.with_window(MessageWindow::new(bounds, projections)))
+                    .await?;
             let lanes = buffer.lanes(&fields, range.start_ns())?;
             Ok(Some(Rc::new(PlottedStream {
                 buffer,

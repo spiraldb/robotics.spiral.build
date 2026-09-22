@@ -6,22 +6,6 @@
 use crate::OperationError;
 use spiral_robotics_storage::episodes::EpisodeId;
 
-/// Current episode use that makes deletion unsafe.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct EpisodeActivity {
-    recording: Option<String>,
-    replaying: Option<String>,
-}
-
-impl EpisodeActivity {
-    pub(super) fn new(recording: Option<String>, replaying: Option<String>) -> Self {
-        Self {
-            recording,
-            replaying,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeleteEpisodeCommand {
     episode: String,
@@ -49,7 +33,8 @@ impl DeleteEpisodeCommand {
 /// Consequences required by episode catalog actions.
 ///
 pub(crate) trait EpisodeCatalogPort {
-    fn activity(&self) -> EpisodeActivity;
+    /// The take being recorded right now, which must not be deleted.
+    fn recording_episode(&self) -> Option<String>;
     async fn delete_episode(&self, episode: String) -> Result<(), OperationError>;
 }
 
@@ -64,15 +49,9 @@ impl<'a, P: EpisodeCatalogPort + ?Sized> EpisodeCatalogActions<'a, P> {
 
     pub(super) async fn delete(&self, command: DeleteEpisodeCommand) -> Result<(), OperationError> {
         let episode = command.validated()?.episode;
-        let activity = self.port.activity();
-        if activity.recording.as_deref() == Some(&episode) {
+        if self.port.recording_episode().as_deref() == Some(&episode) {
             return Err(OperationError::Conflict(format!(
                 "take {episode:?} is still recording; stop it first"
-            )));
-        }
-        if activity.replaying.as_deref() == Some(&episode) {
-            return Err(OperationError::Conflict(format!(
-                "take {episode:?} is driving an arm; stop replay before deleting it"
             )));
         }
         self.port.delete_episode(episode).await
@@ -87,13 +66,13 @@ mod tests {
 
     #[derive(Default)]
     struct FakeCatalog {
-        activity: EpisodeActivity,
+        recording: Option<String>,
         deleted: Mutex<Vec<String>>,
     }
 
     impl EpisodeCatalogPort for FakeCatalog {
-        fn activity(&self) -> EpisodeActivity {
-            self.activity.clone()
+        fn recording_episode(&self) -> Option<String> {
+            self.recording.clone()
         }
 
         async fn delete_episode(&self, episode: String) -> Result<(), OperationError> {
@@ -105,10 +84,7 @@ mod tests {
     #[tokio::test]
     async fn an_active_recording_is_never_deleted() {
         let catalog = FakeCatalog {
-            activity: EpisodeActivity {
-                recording: Some("episode_000001".to_owned()),
-                replaying: None,
-            },
+            recording: Some("episode_000001".to_owned()),
             ..FakeCatalog::default()
         };
 
@@ -118,27 +94,6 @@ mod tests {
             })
             .await
             .expect_err("recording must block deletion");
-
-        assert!(matches!(error, OperationError::Conflict(_)));
-        assert!(catalog.deleted.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn an_active_replay_is_never_deleted() {
-        let catalog = FakeCatalog {
-            activity: EpisodeActivity {
-                recording: None,
-                replaying: Some("episode_000002".to_owned()),
-            },
-            ..FakeCatalog::default()
-        };
-
-        let error = EpisodeCatalogActions::new(&catalog)
-            .delete(DeleteEpisodeCommand {
-                episode: "episode_000002".to_owned(),
-            })
-            .await
-            .expect_err("replay must block deletion");
 
         assert!(matches!(error, OperationError::Conflict(_)));
         assert!(catalog.deleted.lock().unwrap().is_empty());

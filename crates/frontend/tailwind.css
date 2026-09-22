@@ -3286,10 +3286,9 @@
 /*
   2026 session workflow: one light workspace.
 
-  Recording is a transport, episodes are a compact selectable strip, replay is
-  the selected episode's primary action, and export belongs to the session. The
-  UI intentionally does not promote tracking diagnostics or operator judgement
-  into parallel workflows.
+  Recording is a transport, episodes are a compact selectable strip, and export
+  belongs to the session. The UI intentionally does not promote tracking
+  diagnostics or operator judgement into parallel workflows.
 */
 @layer components {
   /* Device hierarchy: identity and readiness first, setup details second, file

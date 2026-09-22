@@ -1,4 +1,5 @@
 //! Native, serialization-only query diagnostics. These graphs never execute in Studio.
+use crate::relations::SpiralQuerySnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -24,6 +25,22 @@ impl WorkflowPlan {
             report: Some(report),
             error: None,
         })
+    }
+    /// The plan in the result of [`super::WorkflowSpec::plan_sql`], or why
+    /// there is none.
+    pub fn from_explain(result: &SpiralQuerySnapshot) -> Self {
+        if result.truncated() {
+            return Self::failed("The native plan exceeds the display limit.");
+        }
+        match result
+            .rows()
+            .first()
+            .and_then(|row| row.values().next())
+            .and_then(Value::as_str)
+        {
+            Some(json) => Self::from_native_json(json).unwrap_or_else(Self::failed),
+            None => Self::failed("Spiral did not return a JSON plan report."),
+        }
     }
     pub fn failed(error: impl Into<String>) -> Self {
         Self {

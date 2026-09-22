@@ -89,7 +89,7 @@ impl ApiRoutes {
     pub(super) fn into_document(mut self) -> Value {
         json!({
             "openapi": "3.1.0",
-            "info": { "title": "Spiral Robotics HTTP API", "version": "4.0.0",
+            "info": { "title": "Spiral Robotics HTTP API", "version": "5.0.0",
                 "description": "Backend-owned commands and frontend-initiated snapshots. X-Spiral-Endpoint and X-Spiral-Project name the project a request acts on; they are not authentication. Reads are never cached. Commands are never automatically retried. See docs/http-api.md for operation lifetimes and polling." },
             "servers": [{ "url": "/api" }],
             "paths": self.paths,

@@ -32,7 +32,7 @@ convention. An arbitrary external dataset is not automatically writable by Studi
 
 ## Live review versus published data
 
-Live's current-take preview and physical replay are recording-session operations.
+Live's current-take preview is a recording-session operation.
 `RecordingBuffer` retains only the latest completed/checkpointed take and has no
 project connection or persisted-file fallback. Camera preview retains the same
 session's encoded packets after publication and releases them when a new capture
@@ -50,8 +50,6 @@ releases the catalog lease together, even when publication reports an error.
 These endpoints live under `/recording/takes/{id}`. Their IDs identify session
 captures; they are not dataset member UUIDs. After a session is replaced or Studio
 restarts, persisted content is inspected through Data's dataset/member/topic APIs.
-Physical replay of arbitrary persisted datasets needs an explicit validated robot
-input mapping; the recording endpoints do not pretend to provide it.
 
 The producer may put Studio metadata into its MCAP files. That metadata is ordinary
 optional content once published. Studio’s old MCAP reader and its reader-specific
@@ -62,7 +60,7 @@ tests are removed. Dataset reads and schema decoding go through Spiral.
 | Area | Boundary after cleanup |
 | --- | --- |
 | Data browser, topic inspection, cameras, numeric timelines | Dataset/member/topic APIs; no capture-header or source-filename lookup |
-| Live take inspection, seeking, camera preview, physical replay | Recording-owned APIs and an in-memory current-session buffer |
+| Live take inspection, seeking, camera preview | Recording-owned APIs and an in-memory current-session buffer |
 | Workflow | Reads Spiral relations; source provenance is not a workflow contract |
 | Training | Worker owns dataset reads; unavailable MCAP image decoding remains explicit, with no Studio decoder fallback |
 | Local capture and Hugging Face import | Shared dataset definition, Blob representation, refresh, and membership validation |

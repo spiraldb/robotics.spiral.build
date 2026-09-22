@@ -1,6 +1,6 @@
-//! Current-session recording samples and physical replay; no persisted dataset reads.
+//! Current-session recording samples; no persisted dataset reads.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingGap};
 
 use super::EpisodeId;
@@ -24,40 +23,6 @@ const SAMPLE_QUEUE_DEPTH: usize = 2_048;
 /// Hard storage limit for a single recorded episode.
 pub const MAX_EPISODE_FRAMES: u64 = 1_000_000;
 const NO_SAMPLE_TIMESTAMP_BITS: u64 = u64::MAX;
-
-type NormalizedPose = BTreeMap<String, f64>;
-pub type TimelineJointValues = BTreeMap<String, Option<f64>>;
-
-/// Every owned value of one arm at a timeline sample, in declaration order.
-pub type TimelineArmSampleParts = (
-    String,
-    TimelineJointValues,
-    BTreeMap<String, i64>,
-    Option<TimelineJointValues>,
-    Option<TimelineJointValues>,
-    Option<TimelineJointValues>,
-);
-
-#[derive(Debug)]
-pub struct ReplayTrajectory {
-    frames: Vec<NormalizedPose>,
-    start_frame: usize,
-    resolved_start_seconds: f64,
-}
-
-impl ReplayTrajectory {
-    pub fn into_frames(self) -> Vec<NormalizedPose> {
-        self.frames
-    }
-
-    pub const fn start_frame(&self) -> usize {
-        self.start_frame
-    }
-
-    pub const fn resolved_start_seconds(&self) -> f64 {
-        self.resolved_start_seconds
-    }
-}
 
 #[derive(Debug)]
 pub enum EpisodeError {
@@ -330,17 +295,6 @@ impl EpisodeRecordingRequest {
     }
 }
 
-pub struct RobotPlaybackRequest<'a> {
-    arm: &'a str,
-    seconds: f64,
-}
-
-impl<'a> RobotPlaybackRequest<'a> {
-    pub fn new(arm: &'a str, seconds: f64) -> Self {
-        Self { arm, seconds }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct EpisodeCompletion {
     duration_seconds: f64,
@@ -558,66 +512,17 @@ impl EpisodeInspection {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineArmSample {
-    arm: String,
-    normalized: TimelineJointValues,
-    raw: BTreeMap<String, i64>,
-    velocity: Option<TimelineJointValues>,
-    effort: Option<TimelineJointValues>,
-    action: Option<TimelineJointValues>,
-}
-
-impl TimelineArmSample {
-    pub fn into_parts(self) -> TimelineArmSampleParts {
-        (
-            self.arm,
-            self.normalized,
-            self.raw,
-            self.velocity,
-            self.effort,
-            self.action,
-        )
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineSample {
-    frame: u64,
-    seconds: f64,
-    follow_error_degrees: Option<f64>,
-    arms: Vec<TimelineArmSample>,
-}
-
-impl TimelineSample {
-    pub fn into_parts(self) -> (u64, f64, Option<f64>, Vec<TimelineArmSample>) {
-        (
-            self.frame,
-            self.seconds,
-            self.follow_error_degrees,
-            self.arms,
-        )
-    }
-}
-
 /// Current-session capture and review only. Persisted datasets are read through
 /// dataset/member/topic APIs, never through this buffer.
 #[derive(Default)]
 pub struct RecordingBuffer {
     completed: Arc<Mutex<Option<FullEpisode>>>,
-    /// Serializes physical seek requests within the current recording session.
-    seek_sequence: AtomicU64,
-    latest_seek: Mutex<BTreeMap<String, u64>>,
-    seek_gate: tokio::sync::Mutex<()>,
 }
 
 impl RecordingBuffer {
     pub fn new() -> Self {
         Self {
             completed: Arc::new(Mutex::new(None)),
-            seek_sequence: AtomicU64::new(0),
-            latest_seek: Mutex::new(BTreeMap::new()),
-            seek_gate: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -643,110 +548,6 @@ impl RecordingBuffer {
             .with_arms(request.arms, request.condition);
         SpiralEpisodeEncoder::new(start.clone())?;
         EpisodeWriter::start(start, Arc::clone(&self.completed))
-    }
-
-    pub fn trajectory_at(
-        &self,
-        id: &str,
-        request: RobotPlaybackRequest<'_>,
-    ) -> Result<ReplayTrajectory, EpisodeError> {
-        let arm = request.arm;
-        let seconds = request.seconds;
-        if !seconds.is_finite() || seconds < 0.0 {
-            return Err(EpisodeError::Invalid(
-                "replay start time must be finite and non-negative".to_owned(),
-            ));
-        }
-        let episode = self.completed_episode(id)?;
-        let arm_index = episode
-            .start
-            .arms
-            .iter()
-            .position(|entry| entry.id() == arm)
-            .ok_or_else(|| {
-                EpisodeError::Invalid(format!("take {id:?} did not record arm {arm:?}"))
-            })?;
-        let joints = episode.start.arms()[arm_index].joints();
-        let timestamped = episode
-            .samples
-            .iter()
-            .filter_map(|sample| {
-                let values = &sample.normalized()[arm_index];
-                if values.iter().any(Option::is_none) {
-                    return None;
-                }
-                Some((
-                    sample.seconds(),
-                    joints
-                        .iter()
-                        .enumerate()
-                        .map(|(index, joint)| {
-                            (joint.clone(), values[index].expect("complete pose"))
-                        })
-                        .collect::<BTreeMap<_, _>>(),
-                ))
-            })
-            .collect::<Vec<_>>();
-        if timestamped.is_empty() {
-            return Err(EpisodeError::Invalid(format!(
-                "take {id:?} has no calibrated positions for {arm:?}"
-            )));
-        }
-        let start_frame = timestamped
-            .iter()
-            .enumerate()
-            .min_by(|(left_index, (left, _)), (right_index, (right, _))| {
-                (seconds - left)
-                    .abs()
-                    .total_cmp(&(seconds - right).abs())
-                    .then_with(|| left_index.cmp(right_index))
-            })
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        let resolved_start_seconds = timestamped[start_frame].0;
-        Ok(ReplayTrajectory {
-            frames: timestamped.into_iter().map(|(_, pose)| pose).collect(),
-            start_frame,
-            resolved_start_seconds,
-        })
-    }
-
-    pub fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
-        if !seconds.is_finite() {
-            return Err(EpisodeError::Invalid(
-                "timeline time must be finite".to_owned(),
-            ));
-        }
-        let episode = self.completed_episode(id)?;
-        let (frame, sample) = episode
-            .samples
-            .iter()
-            .enumerate()
-            .min_by(|(left_index, left), (right_index, right)| {
-                (seconds - left.seconds())
-                    .abs()
-                    .total_cmp(&(seconds - right.seconds()).abs())
-                    .then_with(|| left_index.cmp(right_index))
-            })
-            .ok_or_else(|| EpisodeError::Invalid(format!("take {id:?} has no samples")))?;
-        Ok(episode.start.timeline_sample(sample, frame as u64))
-    }
-
-    pub fn reserve_seek(&self, robot: &str) -> u64 {
-        let ticket = self.seek_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        self.latest_seek
-            .lock_unpoisoned()
-            .insert(robot.to_owned(), ticket);
-        ticket
-    }
-    pub fn seek_is_current(&self, robot: &str, ticket: u64) -> bool {
-        self.latest_seek
-            .lock_unpoisoned()
-            .get(robot)
-            .is_some_and(|latest| *latest == ticket)
-    }
-    pub async fn lock_seek(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.seek_gate.lock().await
     }
 
     /// Read a completed capture before its MCAP publication finishes.
@@ -1087,66 +888,6 @@ impl EpisodeStart {
                 completion.discarded(),
                 completion.max_follow_error_degrees(),
             )
-    }
-
-    fn timeline_sample(&self, sample: &Sample, frame: u64) -> TimelineSample {
-        let start = self;
-        let arms = start
-            .arms
-            .iter()
-            .enumerate()
-            .map(|(arm_index, arm)| {
-                let values = |values: Option<&[Vec<Option<f64>>]>| {
-                    values.map(|values| {
-                        arm.joints()
-                            .iter()
-                            .enumerate()
-                            .map(|(joint_index, joint)| {
-                                (joint.clone(), values[arm_index][joint_index])
-                            })
-                            .collect()
-                    })
-                };
-                TimelineArmSample {
-                    arm: arm.id().to_owned(),
-                    normalized: arm
-                        .joints()
-                        .iter()
-                        .enumerate()
-                        .map(|(joint_index, joint)| {
-                            (joint.clone(), sample.normalized()[arm_index][joint_index])
-                        })
-                        .collect(),
-                    raw: arm
-                        .joints()
-                        .iter()
-                        .enumerate()
-                        .map(|(joint_index, joint)| {
-                            (joint.clone(), sample.raw()[arm_index][joint_index])
-                        })
-                        .collect(),
-                    velocity: values(sample.velocity()),
-                    effort: values(sample.effort()),
-                    action: sample
-                        .action()
-                        .get(arm_index)
-                        .and_then(Option::as_ref)
-                        .map(|values| {
-                            arm.joints()
-                                .iter()
-                                .enumerate()
-                                .map(|(joint_index, joint)| (joint.clone(), values[joint_index]))
-                                .collect()
-                        }),
-                }
-            })
-            .collect();
-        TimelineSample {
-            frame,
-            seconds: sample.seconds(),
-            follow_error_degrees: sample.follow_error_degrees(),
-            arms,
-        }
     }
 }
 
