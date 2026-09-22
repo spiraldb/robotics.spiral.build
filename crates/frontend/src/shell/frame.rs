@@ -1,7 +1,7 @@
 //! Low-frequency Studio chrome around the activity workspaces.
 
 use crate::activities::curation::state::CurationEditorStatus;
-use crate::activities::workflow::state::WorkflowEditorStatus;
+use crate::activities::workflow::state::WorkflowViewStatus;
 use dioxus::prelude::*;
 use spiral_robotics_common::status::BackendReadinessState;
 use spiral_robotics_common::workflow::WorkflowRunPhase;
@@ -95,7 +95,7 @@ pub(crate) enum WorkspaceStatus {
     General,
     Hardware(crate::robots::HardwareViewState),
     Training(crate::activities::training::history::TrainingHistory),
-    Workflow(Memo<Option<WorkflowEditorStatus>>),
+    Workflow(Memo<Option<WorkflowViewStatus>>),
     Curation(Memo<Option<CurationEditorStatus>>),
 }
 
@@ -484,8 +484,8 @@ pub(crate) struct WorkflowStatusProjection {
     graph: String,
 }
 
-impl From<&WorkflowEditorStatus> for WorkflowStatusProjection {
-    fn from(state: &WorkflowEditorStatus) -> Self {
+impl From<&WorkflowViewStatus> for WorkflowStatusProjection {
+    fn from(state: &WorkflowViewStatus) -> Self {
         WorkflowStatusContext {
             state: Some(state),
             backend_connected: true,
@@ -516,7 +516,7 @@ impl From<&spiral_robotics_common::training::TrainingSnapshot> for TrainingStatu
 }
 
 struct WorkflowStatusContext<'a> {
-    state: Option<&'a WorkflowEditorStatus>,
+    state: Option<&'a WorkflowViewStatus>,
     backend_connected: bool,
     readiness: BackendReadinessState,
     catalog_available: bool,
@@ -545,7 +545,20 @@ impl WorkflowStatusContext<'_> {
             };
         };
 
-        let phase = match state.snapshot().phase() {
+        // The bar belongs to whichever view is open: Explore measures a
+        // dataset and has no SQL, so naming the Agent's document there would
+        // describe a screen the operator is not looking at.
+        let agent = match state {
+            WorkflowViewStatus::Agent(agent) => agent,
+            WorkflowViewStatus::Exploration(measure) => {
+                return WorkflowStatusProjection {
+                    domain: "Measurement graph".to_owned(),
+                    phase: measure.measured(),
+                    graph: measure.name().to_owned(),
+                };
+            }
+        };
+        let phase = match agent.snapshot().phase() {
             WorkflowRunPhase::Idle => "Idle",
             WorkflowRunPhase::Validating => "Validating",
             WorkflowRunPhase::Running => "Running",
@@ -556,7 +569,7 @@ impl WorkflowStatusContext<'_> {
         WorkflowStatusProjection {
             domain: "Spiral relations".to_owned(),
             phase: phase.to_owned(),
-            graph: format!("{} · SQL", state.workflow().name()),
+            graph: format!("{} · SQL", agent.workflow().name()),
         }
     }
 }
@@ -564,13 +577,14 @@ impl WorkflowStatusContext<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activities::workflow::state::WorkflowEditorStatus;
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn workflow_status_projects_authoritative_graph_and_run_phase() {
         let graph = spiral_robotics_common::workflow::WorkflowSpec::default().with_revision(7);
         let mut run = spiral_robotics_common::workflow::WorkflowRunSnapshot::idle_for(&graph);
         run.set_phase(WorkflowRunPhase::Running);
-        let state = WorkflowEditorStatus::new(graph, run);
+        let state = WorkflowViewStatus::Agent(Box::new(WorkflowEditorStatus::new(graph, run)));
 
         let status = WorkflowStatusContext {
             state: Some(&state),
@@ -598,10 +612,10 @@ mod tests {
         assert_eq!(loading.graph, "Loading SQL…");
 
         let graph = spiral_robotics_common::workflow::WorkflowSpec::default();
-        let state = WorkflowEditorStatus::new(
+        let state = WorkflowViewStatus::Agent(Box::new(WorkflowEditorStatus::new(
             graph.clone(),
             spiral_robotics_common::workflow::WorkflowRunSnapshot::idle_for(&graph),
-        );
+        )));
         let unavailable = WorkflowStatusContext {
             state: Some(&state),
             backend_connected: false,

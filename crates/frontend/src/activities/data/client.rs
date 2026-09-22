@@ -10,8 +10,8 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
-    pub(super) fn model_client(&self) -> crate::client::model::ModelClient {
-        crate::client::model::ModelClient::new(self.project.clone())
+    pub(super) fn model_client(&self) -> crate::client::completions::ModelClient {
+        crate::client::completions::ModelClient::new(self.project.clone())
     }
     pub(super) fn robot(
         &self,
@@ -110,12 +110,12 @@ impl DatasetClient {
         self.project
             .request(HttpRequest::new("POST", "/api/datasets/inspect").json(&selection))
     }
-    pub(in crate::activities) fn current() -> Self {
+    pub(crate) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
         }
     }
-    pub(in crate::activities) fn list_datasets(
+    pub(crate) fn list_datasets(
         &self,
     ) -> impl Future<
         Output = Result<Vec<spiral_robotics_common::datasets::DatasetSummary>, CommandError>,

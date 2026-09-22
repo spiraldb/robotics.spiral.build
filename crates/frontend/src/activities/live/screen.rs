@@ -6,18 +6,15 @@ use super::workbench::LiveWorkbench;
 use crate::panels::camera_panel::{AssignedCamera, CameraWorkspaceLayout};
 use crate::panels::scene::{Viewport, ViewportPresentation};
 use crate::robots::{HardwareViewState, RobotSelection};
+use crate::shell::activity::{Activity, WorkspaceActivity};
 use crate::shell::frame::WorkspaceFrame;
-use crate::shell::{project::ProjectSessionSignals, state::StudioProjectState};
+use crate::shell::project::ProjectSessionSignals;
 use dioxus::prelude::*;
-use dioxus_workbench::{Panel, PanelId, PanelWorkspace};
+use dioxus_workbench::{Panel, PanelWorkspace};
 
 #[component]
 pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
-    let workspace = crate::shell::activity::WorkspaceActivity::provide(
-        crate::shell::activity::Activity::Live,
-        is_active,
-    );
-    let project = StudioProjectState::current();
+    let (workspace, project) = WorkspaceActivity::mount(Activity::Live, is_active);
     let telemetry =
         HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
     let selection = RobotSelection::use_selection(telemetry.snapshot());
@@ -28,8 +25,8 @@ pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
 #[component]
 fn LivePanels(session: LiveSession) -> Element {
     let timeline = LiveTimeline::use_timeline(session);
-    let actions = timeline.actions();
-    let mut selection = session.selection().selected();
+    let transport = timeline.transport();
+    let selection = session.selection().selected();
     let cameras = session
         .selection()
         .focused(session.telemetry().snapshot().read().robots())
@@ -43,7 +40,7 @@ fn LivePanels(session: LiveSession) -> Element {
         .unwrap_or_default();
     let mut panels = vec![
         Panel::new("workbench", "Live", "workbench", rsx! {
-            aside { class: "studio-v2-workbench", LiveWorkbench { project: session.project(), hardware: session.telemetry(), selection: session.selection(), datasets: session.datasets(), on_action: move |action| session.dispatch_live_action(action) } }
+            aside { class: "studio-v2-workbench", LiveWorkbench { project: session.project(), hardware: session.telemetry(), selection: session.selection(), capture: session.capture(), on_action: move |action| session.dispatch_live_action(action) } }
         }).with_class("workbench-editor"),
         Panel::new("scene", "Scene", "primary", rsx! {
             Viewport { telemetry: session.telemetry(), robot_selection: session.selection(), source: timeline.scene_source(), presentation: ViewportPresentation::new(None) }
@@ -61,12 +58,10 @@ fn LivePanels(session: LiveSession) -> Element {
     );
     let initial_layout = CameraWorkspaceLayout::initial(&panels, "timeline", 0.29);
     rsx! {
-        div { class: "min-h-0 min-w-0 overflow-hidden", tabindex: "-1", onkeydown: move |event| actions.on_key(event),
+        div { class: "min-h-0 min-w-0 overflow-hidden", tabindex: "-1", onkeydown: move |event| transport.on_key(event),
             PanelWorkspace {
                 panels, initial_layout, layout_scope: Some("spiral_robotics.panel-layout.v7.live".to_owned()),
-                on_panel_activate: move |id: PanelId| {
-                    if let Some(camera) = cameras.iter().find(|camera| camera.panel_id() == id) { selection.set(Some(camera.selection())); }
-                },
+                on_panel_activate: CameraWorkspaceLayout::on_activate(cameras, selection),
             }
         }
     }
@@ -75,6 +70,7 @@ fn LivePanels(session: LiveSession) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dioxus_workbench::PanelId;
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn live_layout_preserves_named_homes_when_camera_panels_change() {

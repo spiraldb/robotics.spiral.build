@@ -51,14 +51,16 @@ impl TrainingRunIdentity {
 }
 
 impl TrainingController {
-    pub(super) fn use_controller(dataset_id: &str) -> Self {
-        let config_sql = String::new();
-        let config_dataset = dataset_id.to_owned();
-        let controller = use_hook(|| Self {
+    /// The draft names its own dataset: the catalog field writes it straight
+    /// into the config, so there is no second copy of the choice to keep in step.
+    pub(super) fn use_controller() -> Self {
+        use_hook(|| Self {
             draft: TrainingDraftSignals {
-                config: Signal::new({
-                    TrainingConfig::for_dataset("act-run-001", config_dataset, config_sql)
-                }),
+                config: Signal::new(TrainingConfig::for_dataset(
+                    "act-run-001",
+                    "default".to_owned(),
+                    String::new(),
+                )),
                 automatic_run_name: Signal::new(true),
             },
             history: TrainingHistorySignals {
@@ -70,13 +72,7 @@ impl TrainingController {
                 stopping: Signal::new(None),
                 deleting: Signal::new(None),
             },
-        });
-        let dataset_dependency = dataset_id.to_owned();
-        use_effect(use_reactive((&dataset_dependency,), move |(dataset_id,)| {
-            let mut config = controller.draft.config;
-            config.write().set_dataset_id(dataset_id);
-        }));
-        controller
+        })
     }
 
     pub(super) fn config(&self) -> TrainingConfig {

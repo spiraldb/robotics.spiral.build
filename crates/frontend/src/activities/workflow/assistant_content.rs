@@ -48,14 +48,13 @@ pub(super) fn AssistantConversation(
                                                 strong { "{tool.summary()}" }
                                                 if let Some(error) = tool.error() { p { class: "workflow-tool-error", "{error}" } }
                                                 if let Some(receipt) = tool.receipt() {
-                                                    if controller.receipt_panel(receipt).is_some() {
-                                                        {let target = receipt.to_owned();
-                                                        rsx! { Button {
+                                                    if let Some(panel) = controller.receipt_panel(receipt) {
+                                                        Button {
                                                             purpose: ActionPurpose::Navigate, variant: ButtonVariant::Link,
                                                             class: "workflow-agent-receipt-action",
-                                                            onclick: move |_| controller.open_agent_receipt(target.clone()),
+                                                            onclick: move |_| controller.activate_panel(panel.clone()),
                                                             "{receipt.label()}"
-                                                        } }}
+                                                        }
                                                     }
                                                 }
                                             }

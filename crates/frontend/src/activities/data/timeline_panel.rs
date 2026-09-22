@@ -329,17 +329,17 @@ fn ShowCheck(
 }
 
 #[component]
-fn StreamDensity(coverage: Option<CoverageState>, transport: EpisodeTransport) -> Element {
+fn StreamDensity(coverage: CoverageState, transport: EpisodeTransport) -> Element {
     let range = transport.range();
     match coverage {
-        None => rsx! { div { class: "data-track data-track-empty" } },
-        Some(CoverageState::Loading) => {
+        CoverageState::Uncounted => rsx! { div { class: "data-track data-track-empty" } },
+        CoverageState::Loading => {
             rsx! { div { class: "data-track data-track-loading", role: "status", "aria-label": "Counting messages" } }
         }
-        Some(CoverageState::Failed(error)) => {
+        CoverageState::Failed(error) => {
             rsx! { div { class: "data-track data-track-failed", title: "{error}", span { "Density unavailable" } } }
         }
-        Some(CoverageState::Ready(coverage)) => {
+        CoverageState::Ready(coverage) => {
             let moment = |nanos: Option<u64>| {
                 nanos
                     .map(|nanos| range.seconds_of(nanos).precise_clock_label())

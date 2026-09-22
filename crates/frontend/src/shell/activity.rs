@@ -58,6 +58,24 @@ impl WorkspaceActivity {
         })
     }
 
+    /// What every workspace's entry component starts with: this activity
+    /// announced to everything beneath it, and the project it draws.
+    ///
+    /// All seven `*Workspace` components open the same way; this is that
+    /// opening. The project comes back as a value so the workspace can hand it
+    /// down as a prop instead of each panel below it reaching into context for
+    /// it again.
+    // Streams B and C move their remaining `*Workspace` entry components onto this.
+    pub(crate) fn mount(
+        activity: Activity,
+        is_active: ReadSignal<bool>,
+    ) -> (Self, crate::shell::state::StudioProjectState) {
+        (
+            Self::provide(activity, is_active),
+            crate::shell::state::StudioProjectState::current(),
+        )
+    }
+
     pub(crate) fn current() -> Self {
         use_context()
     }

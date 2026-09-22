@@ -4,17 +4,19 @@
 //! line, a footer that names what executes), so a curation recipe and a
 //! workflow graph read as one vocabulary. A filter's identity tint is the
 //! same wash its reason chips wear on the tiles it struck.
-use crate::components::canvas_controls::CanvasControls;
+use crate::components::flow_canvas::{CanvasControls, FlowFit, FlowMargins, ReadableViewport};
 use crate::components::icons::{
     DataIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon, ResultNodeIcon,
 };
 use dioxus::prelude::*;
 use dioxus_flow::{
     Background, BackgroundVariant, Edge, EdgeKind, Flow, Handle, HandleKind, MarkerKind, MiniMap,
-    Node, NodeViewCtx, Point, Rect, Side, Viewport, use_flow,
+    Node, NodeViewCtx, Point, Side,
 };
 use spiral_robotics_common::curation::rules::TransformOperation;
-use spiral_robotics_common::curation::run::{CurationOutcome, CurationVerdict};
+use spiral_robotics_common::curation::run::{
+    CurationOutcome, CurationStageImpact, CurationVerdict,
+};
 use spiral_robotics_common::curation::{CurationSpec, CurationStep};
 
 use super::sheet::RuleTone;
@@ -130,14 +132,54 @@ pub(super) fn StageMark(kind: StageKind, tone: Option<RuleTone>) -> Element {
     }
 }
 
+/// What a transform did to the episodes that reached it — the one measurement
+/// its footer reports, in the order a run can know it.
+#[derive(Clone, Copy, PartialEq)]
+enum TransformEffect {
+    Trimmed { kept_ns: u64, removed_ns: u64 },
+    Scored(u64),
+    Eligible(u64),
+    Unreported,
+}
+
+impl TransformEffect {
+    fn of(impact: &CurationStageImpact) -> Self {
+        if let Some((kept_ns, removed_ns)) = impact.retained_ns().zip(impact.excluded_ns()) {
+            Self::Trimmed {
+                kept_ns,
+                removed_ns,
+            }
+        } else if let Some(scored) = impact.scored_episodes() {
+            Self::Scored(scored)
+        } else {
+            impact
+                .affected_episodes()
+                .map_or(Self::Unreported, Self::Eligible)
+        }
+    }
+    fn note(self) -> Option<String> {
+        match self {
+            Self::Trimmed {
+                kept_ns,
+                removed_ns,
+            } => Some(format!(
+                "{:.1} s kept · {:.1} s removed",
+                kept_ns as f64 / 1e9,
+                removed_ns as f64 / 1e9
+            )),
+            Self::Scored(scored) => Some(format!("{scored} scored")),
+            Self::Eligible(affected) => Some(format!("{affected} eligible")),
+            Self::Unreported => None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 struct StageFlow {
     incoming: u64,
     retained: u64,
     excluded: u64,
-    duration: Option<(u64, u64)>,
-    affected: Option<u64>,
-    scored: Option<u64>,
+    effect: TransformEffect,
 }
 
 impl StageFlow {
@@ -146,9 +188,7 @@ impl StageFlow {
             incoming: episodes,
             retained: episodes,
             excluded: 0,
-            duration: None,
-            affected: None,
-            scored: None,
+            effect: TransformEffect::Unreported,
         }
     }
     fn from_outcome(outcome: &CurationOutcome, id: &str) -> Option<Self> {
@@ -160,9 +200,7 @@ impl StageFlow {
                 incoming: impact.incoming(),
                 retained: impact.retained(),
                 excluded: impact.excluded(),
-                duration: impact.retained_ns().zip(impact.excluded_ns()),
-                affected: impact.affected_episodes(),
-                scored: impact.scored_episodes(),
+                effect: TransformEffect::of(impact),
             })
     }
     /// The footer's measured note: what this stage did to its incoming episodes.
@@ -170,19 +208,7 @@ impl StageFlow {
         match kind {
             StageKind::Source | StageKind::Output => None,
             StageKind::Filter => Some(format!("{} in", self.incoming)),
-            StageKind::Model | StageKind::Media | StageKind::Trim => {
-                if let Some((kept, removed)) = self.duration {
-                    Some(format!(
-                        "{:.1} s kept · {:.1} s removed",
-                        kept as f64 / 1e9,
-                        removed as f64 / 1e9
-                    ))
-                } else if let Some(scored) = self.scored {
-                    Some(format!("{scored} scored"))
-                } else {
-                    self.affected.map(|affected| format!("{affected} eligible"))
-                }
-            }
+            StageKind::Model | StageKind::Media | StageKind::Trim => self.effect.note(),
         }
     }
 }
@@ -435,6 +461,7 @@ fn PipelineCanvas(
         .find(|stage| stage.selection == selected)
         .map(PipelineStage::node_id)
         .unwrap_or_default();
+    let overflowing = use_signal(|| false);
     rsx! {
         div { class: "curation-pipeline-canvas",
             Flow { id: "curation-pipeline-flow", class: "curation-flow",
@@ -455,109 +482,19 @@ fn PipelineCanvas(
                 },
                 node_view: move |ctx: NodeViewCtx<PipelineNodeKind>| rsx! { PipelineNode { ctx, pending } },
                 Background { variant: BackgroundVariant::Dots, gap: 22.0, size: 0.7 }
-                PipelineViewport { selected_id }
+                // Fit while readable, otherwise start at the dataset and let a
+                // drag expose the rest of a long recipe. A stage selected in
+                // the recipe slides its card into view at the same zoom.
+                FlowFit {
+                    fit: ReadableViewport::new(FlowMargins::new(16.0, 12.0, 12.0), MIN_READABLE_ZOOM),
+                    overflowing,
+                    reveal: selected_id,
+                }
                 CanvasControls { label: "Pipeline view", fit_label: "Fit the whole pipeline" }
+                if overflowing() { MiniMap { width: 112.0, height: 56.0 } }
             }
         }
     }
-}
-
-/// Match the workflow canvas: fit while readable, otherwise start at the
-/// dataset and let a drag expose the rest of a long recipe. Selecting a
-/// stage that sits outside the pane slides it into view at the same zoom,
-/// so a rule chosen in the recipe always shows its card, and a pane that
-/// narrows (the side sheet opening) keeps the selected card in view.
-#[component]
-fn PipelineViewport(selected_id: ReadSignal<String>) -> Element {
-    let flow = use_flow();
-    let mut automatic_viewport = use_signal(|| None::<Viewport>);
-    let mut revealed = use_signal(String::new);
-    let mut overflowing = use_signal(|| false);
-    use_effect(move || {
-        let container = *flow.container.read();
-        let geometry = flow.geoms.read();
-        let selected = selected_id();
-        if container.width <= 0.0 || container.height <= 0.0 {
-            return;
-        }
-        let Some(bounds) = geometry
-            .iter()
-            .map(|node| node.rect)
-            .reduce(|left, right| left.union(&right))
-        else {
-            return;
-        };
-        let current = *flow.viewport.peek();
-        let settled = automatic_viewport.peek().is_some();
-        let user_controlled = automatic_viewport
-            .peek()
-            .is_some_and(|last| last != current);
-        let selection_changed = *revealed.peek() != selected;
-        if selection_changed {
-            revealed.set(selected.clone());
-        }
-        if user_controlled && !selection_changed {
-            return;
-        }
-        let safe = Rect::new(
-            16.0,
-            12.0,
-            (container.width - 32.0).max(1.0),
-            (container.height - 24.0).max(1.0),
-        );
-        let fit_zoom = (safe.width / bounds.width).min(safe.height / bounds.height);
-        let fits = fit_zoom >= MIN_READABLE_ZOOM;
-        if *overflowing.peek() != !fits {
-            overflowing.set(!fits);
-        }
-        let base = if user_controlled {
-            current
-        } else if fits {
-            Viewport::fit(Some(bounds), safe, MIN_READABLE_ZOOM, 1.0)
-        } else {
-            let zoom = (safe.height / bounds.height).clamp(MIN_READABLE_ZOOM, 1.0);
-            Viewport::new(
-                safe.x - bounds.x * zoom,
-                safe.y + (safe.height - bounds.height * zoom) / 2.0 - bounds.y * zoom,
-                zoom,
-            )
-        };
-        let target = geometry
-            .iter()
-            .find(|node| node.id == selected)
-            .map_or(base, |node| {
-                reveal(base, node.rect, bounds, container.width)
-            });
-        automatic_viewport.set(Some(target));
-        if target != current {
-            let duration = if settled && selection_changed { 200 } else { 0 };
-            flow.set_viewport(target, duration);
-        }
-    });
-    rsx! {
-        if overflowing() { MiniMap { width: 112.0, height: 56.0 } }
-    }
-}
-
-/// The viewport that keeps `rect` in the pane: `base` when it already is,
-/// otherwise the card centred, but never with the strip's first or last card
-/// slid away from the pane's edge.
-fn reveal(base: Viewport, rect: Rect, bounds: Rect, width: f64) -> Viewport {
-    const MARGIN: f64 = 24.0;
-    let left = base.x + rect.x * base.zoom;
-    let right = base.x + rect.max_x() * base.zoom;
-    if left >= MARGIN && right <= width - MARGIN {
-        return base;
-    }
-    let centred = width / 2.0 - rect.center().x * base.zoom;
-    let first = MARGIN - bounds.x * base.zoom;
-    let last = width - MARGIN - bounds.max_x() * base.zoom;
-    let x = if last > first {
-        first
-    } else {
-        centred.clamp(last, first)
-    };
-    Viewport::new(x, base.y, base.zoom)
 }
 
 #[component]
@@ -615,17 +552,23 @@ fn PipelineNode(ctx: NodeViewCtx<PipelineNodeKind>, pending: PipelinePending) ->
     }
 }
 
-/// The value a builtin or declared fact took for one episode.
-pub(super) fn measured_value(verdict: &CurationVerdict, key: &str) -> Option<f64> {
-    match key {
-        "duration_s" => verdict.episode().duration_seconds(),
-        "messages" => verdict.episode().message_count().map(|value| value as f64),
-        "channels" => verdict.episode().channel_count().map(|value| value as f64),
-        "size_mb" => verdict
-            .episode()
-            .source_bytes()
-            .map(|value| value as f64 / 1_000_000.0),
-        _ => verdict.fact(key)?.as_f64(),
+pub(super) trait MeasuredEpisode {
+    /// The value a builtin or declared fact took for this episode.
+    fn measured(&self, key: &str) -> Option<f64>;
+}
+
+impl MeasuredEpisode for CurationVerdict {
+    fn measured(&self, key: &str) -> Option<f64> {
+        match key {
+            "duration_s" => self.episode().duration_seconds(),
+            "messages" => self.episode().message_count().map(|value| value as f64),
+            "channels" => self.episode().channel_count().map(|value| value as f64),
+            "size_mb" => self
+                .episode()
+                .source_bytes()
+                .map(|value| value as f64 / 1_000_000.0),
+            _ => self.fact(key)?.as_f64(),
+        }
     }
 }
 
@@ -666,7 +609,8 @@ impl FilterDistribution {
         let values = incoming
             .iter()
             .filter_map(|verdict| {
-                measured_value(verdict, condition.fact())
+                verdict
+                    .measured(condition.fact())
                     .filter(|value| value.is_finite())
                     .map(|value| {
                         (

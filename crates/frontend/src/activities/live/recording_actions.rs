@@ -16,7 +16,7 @@ use crate::shell::notifications::MessageSource;
 impl LiveSession {
     pub(super) fn recording_blocker(self) -> Option<String> {
         if !spiral_robotics_common::identity::DatasetId::is_canonical(
-            self.datasets().selected().read().trim(),
+            self.capture().chosen().read().trim(),
         ) {
             Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())
         } else if matches!(self.telemetry().mode(), ModeSelection::Replay { .. }) {
@@ -49,7 +49,7 @@ impl LiveSession {
         else {
             return;
         };
-        let dataset_id = self.datasets().selected().read().trim().to_owned();
+        let dataset_id = self.capture().chosen().read().trim().to_owned();
         self.commands().run("", async move {
             RecordingClient::current()
                 .start_recording(spiral_robotics_common::recording::RecordingStart::new(

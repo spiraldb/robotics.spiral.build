@@ -11,9 +11,9 @@ Turn a robot dataset into searchable moments: inspect one demonstration, discove
 
 ### Proposed UI
 
-**Build** adds a dataset → measurement → exploration graph to Workflow, alongside the existing **Agent** tab.
+**Explore** adds a dataset → measurement → exploration graph to Workflow, alongside the existing **Agent** tab.
 
-Start with one dataset node. A small **+** centered on its bottom edge opens a measurement menu: **Break down subtasks** or **Find unproductive moments**. Choosing one creates a connected node. Use the same quiet bottom-center **+** on measurement nodes for their supported child actions; no labeled button row.
+Start with one dataset node. A small **+** centered on its bottom edge opens a measurement menu with **Break down subtasks**. Choosing one creates a connected node. Use the same quiet bottom-center **+** on measurement nodes for their supported child actions; no labeled button row.
 
 **Chosen layout: [B — graph beside results](../../.impeccable/mocks/workflow-build-b.png).** Keep the graph in a resizable left pane and a larger workspace for the selected node on the right. Match the current Studio design: compact tabs and controls, white panels, pale dotted canvas, thin borders, and blue selection. The mockup's imagery and counts are illustrative.
 
@@ -28,11 +28,11 @@ Selecting a node changes the right workspace:
 
 Each measurement's **+** exposes only the child actions its output supports. Search and grouping read the saved subtask table and never rerun annotation. Search persists nothing; grouping persists its categories and assignments. Keep video results in the workspace so graph nodes remain small and readable.
 
-**Implementation order:** implement and persist the Build graph first, clearly marking measurements and explorations that cannot execute yet. Add annotation, then jev search and grouping.
+**Implementation order:** implement and persist the exploration graph first, clearly marking measurements and explorations that cannot execute yet. Add annotation, then jev search and grouping.
 
 ### Annotation
 
-**Orchestration lives on the frontend, following the Workflow agent.** A Build measurement controller owns episode iteration, contact-sheet preparation, prompts, model and jev requests, result validation, and progress. Frames are selected and decoded natively by Spiral SQL through the episode query endpoint, the way Curation samples a camera; the browser only composes them into contact sheets. The backend stores one versioned Build document per graph and never interprets it. The frontend reads Studio-wide credentials, constructs authenticated provider requests, and handles provider responses and retries. The backend relays HTTP through `/api/proxy`, preserving streaming and cancellation without interpreting model requests or selecting credentials. This measurement is a fixed pipeline with one annotation call per episode. Closing or reloading the browser stops its orchestration; already-persisted rows remain available.
+**Orchestration lives on the frontend, following the Workflow agent.** An Explore measurement controller owns episode iteration, contact-sheet preparation, prompts, model and jev requests, result validation, and progress. Frames are selected and decoded natively by Spiral SQL through the episode query endpoint, the way Curation samples a camera; the browser only composes them into contact sheets. The backend stores one versioned exploration per graph and never interprets it. The frontend reads Studio-wide credentials, constructs authenticated provider requests, and handles provider responses and retries. The backend relays HTTP through `/api/proxy`, preserving streaming and cancellation without interpreting model requests or selecting credentials. This measurement is a fixed pipeline with one annotation call per episode. Closing or reloading the browser stops its orchestration; already-persisted rows remain available.
 
 **One annotation call per episode, up to eight episodes at once.** Start with one selected camera and the **latest Gemini Flash** (`google/gemini-3.8-flash` on OpenRouter as of 2026-09-21; Macrodata used 3.5 Flash) as the model. Our pipeline adapts [Macrodata's frame-packing and single-pass approach](https://macrodata.co/blog/annotating-robot-video-subtasks):
 
@@ -95,6 +95,6 @@ An episode can have many subtask rows. Search returns rows; the episode referenc
 | `subtask_category` | `name`, `definition`, from the LLM pass |
 | `subtask_group` | `episode`, `start_time` (the subtask row key), `category`, `probability`, `confidence`, from jev |
 
-**Persistence.** The graph, its node configuration, the subtask rows, and the groupings are one versioned JSON document per Build graph, saved through `/api/build-documents` with the same revision-conflict rule as workflows. The backend stores the payload opaquely; the frontend owns its schema and encoding version. The frontend saves after every annotated episode, so a reload keeps finished rows.
+**Persistence.** The graph, its node configuration, the subtask rows, and the groupings are one versioned JSON document per exploration, saved through `/api/explorations` with the same revision-conflict rule as workflows. The backend stores the payload opaquely; the frontend owns its schema and encoding version. The frontend saves after every annotated episode, so a reload keeps finished rows.
 
 Similarity means the same described operation, as jev judges from the descriptions. The video grid lets the user compare differences in execution. Good boundaries and specific action descriptions are essential; matching text alone does not establish matching motion or success.

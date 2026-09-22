@@ -15,16 +15,6 @@ impl CommandError {
         self.0.code()
     }
 
-    pub(crate) fn retryable(&self) -> bool {
-        !matches!(
-            self.code(),
-            CommandFailureCode::IncompatibleWorkflow
-                | CommandFailureCode::InvalidInput
-                | CommandFailureCode::NotFound
-                | CommandFailureCode::StaleProject
-        )
-    }
-
     pub(crate) fn recovery_guidance(&self) -> &'static str {
         match self.code() {
             CommandFailureCode::ProjectTransition => {

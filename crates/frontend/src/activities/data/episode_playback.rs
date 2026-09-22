@@ -1,6 +1,6 @@
 //! Recorded cameras render the episode playhead; they never own a playback clock.
 use super::{
-    episode_decoder::{CameraPlayback, EncodedCamera, MediaReservation},
+    episode_decoder::{CameraPlayback, EncodedCamera},
     episode_transport::{EpisodeTimeRange, EpisodeTransport, FeedState},
     message_buffer::MessageBuffer,
 };
@@ -12,26 +12,14 @@ use std::{
 };
 use wasm_bindgen::JsCast as _;
 
-struct LoadedCamera {
-    encoded: Rc<EncodedCamera>,
-    _memory: MediaReservation,
-}
-impl PartialEq for LoadedCamera {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other)
-    }
-}
-
 #[component]
 pub(in crate::activities) fn EpisodeCamera(
     request: MessageRead,
     timeline: EpisodeTimeRange,
     transport: EpisodeTransport,
 ) -> Element {
-    let media = transport.media();
     let load_request = request.clone();
     let mut video = use_resource(move || {
-        let media = media.clone();
         let request = load_request.clone();
         async move {
             let window = MessageWindow::new(
@@ -42,12 +30,10 @@ pub(in crate::activities) fn EpisodeCamera(
                 ],
             );
             let source = MessageBuffer::load(request.with_window(window), true).await?;
-            let encoded = EncodedCamera::from_messages(source.batches(), timeline.start_ns())?;
-            let memory = media.encoded().reserve(encoded.memory_bytes())?;
-            Ok::<_, String>(Rc::new(LoadedCamera {
-                encoded: Rc::new(encoded),
-                _memory: memory,
-            }))
+            Ok::<_, String>(Rc::new(EncodedCamera::from_messages(
+                source.batches(),
+                timeline.start_ns(),
+            )?))
         }
     });
     let mut status = transport.clone();
@@ -95,26 +81,19 @@ struct FrameRequests {
 /// Seeking this deep into a keyframe interval is reported as buffering so the
 /// shared clock waits instead of racing ahead of the picture.
 const QUIET_RESTART_PACKETS: usize = 15;
-const UNCOVERED_RETRIES: u8 = 8;
 
 #[component]
-fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: String) -> Element {
+fn CameraFrames(camera: Rc<EncodedCamera>, transport: EpisodeTransport, topic: String) -> Element {
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);
     let mut failure = use_signal(|| None::<String>);
     let mut covered = use_signal(|| false);
     let panel = dioxus_workbench::PanelContext::current();
     let activity = crate::shell::activity::WorkspaceActivity::current();
-    let media = transport.media();
     // The decode loop takes the playback out of its cell while it awaits the
     // decoder and puts it back afterwards, so no borrow spans an await.
     let fresh_playback = {
         let camera = camera.clone();
-        move || {
-            Rc::new(RefCell::new(Some(CameraPlayback::new(
-                camera.encoded.clone(),
-                media.decoded().clone(),
-            ))))
-        }
+        move || Rc::new(RefCell::new(Some(CameraPlayback::new(camera.clone()))))
     };
     let mut playback = use_signal(fresh_playback.clone());
     let requests = use_hook(|| {
@@ -138,7 +117,7 @@ fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: St
         }
         // A playhead before the first recorded frame holds that frame; an
         // opened episode shows a picture, never an empty mat.
-        let target = drive_camera.encoded.held_frame_seconds(seconds);
+        let target = drive_camera.held_frame_seconds(seconds);
         drive_requests.wanted.set(Some(target));
         if drive_requests.running.replace(true) {
             return;
@@ -147,7 +126,6 @@ fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: St
         let mut status = status.clone();
         let topic = drive_topic.clone();
         spawn(async move {
-            let mut retries = 0_u8;
             while let Some(target) = requests.wanted.take() {
                 let Some(mut decoder) = playback.borrow_mut().take() else {
                     break;
@@ -158,25 +136,15 @@ fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: St
                 if deep_restart {
                     status.report(&topic, FeedState::Loading);
                 }
-                let prepared = decoder.prepare(target).await;
-                let outcome = prepared.and_then(|prepared| {
-                    decoder
-                        .draw(&canvas, target)
-                        .map(|drawn| (drawn, prepared.covered()))
-                });
+                let outcome = decoder
+                    .prepare(target)
+                    .await
+                    .and_then(|()| decoder.draw(&canvas, target));
                 *playback.borrow_mut() = Some(decoder);
                 match outcome {
-                    Ok((drawn, ready)) => {
+                    Ok(drawn) => {
                         covered.set(drawn);
                         status.report(&topic, FeedState::Ready);
-                        // A slow decoder answers after the wait; ask again for a paused playhead.
-                        if !ready && requests.wanted.get().is_none() && retries < UNCOVERED_RETRIES
-                        {
-                            retries += 1;
-                            requests.wanted.set(Some(target));
-                        } else if ready {
-                            retries = 0;
-                        }
                     }
                     Err(error) => {
                         failure.set(Some(error));
@@ -190,9 +158,8 @@ fn CameraFrames(camera: Rc<LoadedCamera>, transport: EpisodeTransport, topic: St
     });
     let seconds = transport.seconds();
     let frame_available = camera
-        .encoded
         .first_frame_after(seconds)
-        .or_else(|| camera.encoded.frame_seconds(seconds))
+        .or_else(|| camera.frame_seconds(seconds))
         .is_some();
     let uncovered = !covered();
     let retry_playback = fresh_playback.clone();

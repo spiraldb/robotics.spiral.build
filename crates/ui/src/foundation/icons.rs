@@ -1,6 +1,7 @@
-//! The utility glyphs the primitives themselves draw. Domain icons belong to
-//! the surface that means them; these stay small so the crate never becomes
-//! an icon set.
+//! The utility glyphs of the design language: what a control, a disclosure or
+//! a transport draws when it needs a mark rather than a word. Domain icons
+//! belong to the surface that means them — a robot arm, a curation sheet, a
+//! stage kind — so those stay in the frontend and these stay small.
 
 use dioxus::prelude::*;
 
@@ -84,6 +85,116 @@ pub fn GripIcon() -> Element {
             for (x, y) in [(5, 3), (11, 3), (5, 8), (11, 8), (5, 13), (11, 13)] {
                 circle { cx: "{x}", cy: "{y}", r: "1.2" }
             }
+        }
+    }
+}
+
+/// Work in progress. The ring spins through `ui-icon--spin`.
+#[component]
+pub fn SpinnerIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon ui-icon--spin", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M13 8a5 5 0 1 1-1.9-3.93" }
+        }
+    }
+}
+
+/// Done, confirmed, satisfied.
+#[component]
+pub fn CheckIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3.5 8.5 6.5 11.5 12.5 4.5" }
+        }
+    }
+}
+
+/// Transport: start the run, the query, the playback.
+#[component]
+pub fn PlayIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M4.75 3.25v9.5l7.5-4.75-7.5-4.75Z" }
+        }
+    }
+}
+
+/// Transport: hold where it is.
+#[component]
+pub fn PauseIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M5 3.5v9M11 3.5v9" }
+        }
+    }
+}
+
+/// Transport: end the current turn or run.
+#[component]
+pub fn StopIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "4", y: "4", width: "8", height: "8", rx: "1" }
+        }
+    }
+}
+
+/// Transport: jump to the beginning.
+#[component]
+pub fn SkipToStartIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M4 3.5v9M12 3.5 6 8l6 4.5z" }
+        }
+    }
+}
+
+/// Transport: jump to the end.
+#[component]
+pub fn SkipToEndIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M12 3.5v9M4 3.5 10 8l-6 4.5z" }
+        }
+    }
+}
+
+/// Transport: nudge one step back.
+#[component]
+pub fn StepBackIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M10.5 4 6.5 8l4 4M5 4v8" }
+        }
+    }
+}
+
+/// Transport: nudge one step forward.
+#[component]
+pub fn StepForwardIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M5.5 4 9.5 8l-4 4M11 4v8" }
+        }
+    }
+}
+
+/// Show more of it.
+#[component]
+pub fn ZoomInIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M8 3.75v8.5M3.75 8h8.5" }
+        }
+    }
+}
+
+/// Show less of it.
+#[component]
+pub fn ZoomOutIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3.75 8h8.5" }
         }
     }
 }

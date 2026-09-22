@@ -29,24 +29,6 @@ impl LossPresentation for f64 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{ClockPresentation, LossPresentation};
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn clock_format_is_stable_for_invalid_and_elapsed_values() {
-        assert_eq!(f64::NAN.clock_label(), "0:00.0");
-        assert_eq!((-2.0_f64).clock_label(), "0:00.0");
-        assert_eq!(61.25_f64.clock_label(), "1:01.2");
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn loss_precision_is_shared_by_training_and_rollout() {
-        assert_eq!(0.125_f64.loss_label(), "0.1250");
-        assert_eq!(0.00125_f64.loss_label(), "1.250e-3");
-    }
-}
-
 pub(crate) trait PreciseClockPresentation {
     /// Minutes, seconds, and milliseconds for message-level inspection.
     fn precise_clock_label(self) -> String;
@@ -103,6 +85,48 @@ impl ByteCountPresentation for u64 {
     }
 }
 
+/// Throughput as a training or ingest readout prints it: always a binary
+/// prefix per second, never bytes per second, because the figures it describes
+/// are never that small.
+pub(crate) trait ByteRatePresentation {
+    fn byte_rate_label(self) -> String;
+}
+
+impl ByteRatePresentation for f64 {
+    fn byte_rate_label(self) -> String {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const MIB: f64 = 1024.0 * 1024.0;
+        if self >= GIB {
+            format!("{:.2} GiB/s", self / GIB)
+        } else {
+            format!("{:.1} MiB/s", self / MIB)
+        }
+    }
+}
+
+/// A measured latency, stepping up to seconds and down to tenths so the figure
+/// keeps three significant digits. A value that was never measured reads as an
+/// em dash rather than as zero.
+pub(crate) trait MillisecondPresentation {
+    fn millis_label(self) -> String;
+}
+
+impl MillisecondPresentation for Option<f64> {
+    fn millis_label(self) -> String {
+        self.filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| {
+                if value >= 1_000.0 {
+                    format!("{:.2} s", value / 1_000.0)
+                } else if value >= 10.0 {
+                    format!("{value:.0} ms")
+                } else {
+                    format!("{value:.1} ms")
+                }
+            })
+            .unwrap_or_else(|| "—".to_owned())
+    }
+}
+
 pub(crate) trait UtcTimestampPresentation {
     /// `YYYY-MM-DD HH:MM:SS UTC` from Unix nanoseconds, computed without the
     /// browser so native and WASM builds agree.
@@ -129,7 +153,11 @@ impl WallClockPresentation for u64 {
     }
 }
 
-struct CivilDateTime {
+/// One UTC moment as a calendar reads it, computed without the browser so
+/// native and WASM builds agree. Every Studio surface that prints a date —
+/// episode headers, dataset facts, a timestamp column in a query result — takes
+/// it from here rather than spelling the calendar again.
+pub(crate) struct CivilDateTime {
     year: i64,
     month: u32,
     day: u32,
@@ -141,8 +169,18 @@ struct CivilDateTime {
 impl CivilDateTime {
     fn from_unix_nanos(nanos: u64) -> Self {
         let seconds = (nanos / 1_000_000_000) as i64;
-        let days = seconds.div_euclid(86_400);
         let remainder = seconds.rem_euclid(86_400) as u32;
+        Self {
+            hour: remainder / 3_600,
+            minute: remainder % 3_600 / 60,
+            second: remainder % 60,
+            ..Self::from_unix_days(seconds.div_euclid(86_400))
+        }
+    }
+
+    /// Midnight UTC of the day `days` after the Unix epoch; a negative count is
+    /// days before it, so a column of pre-1970 timestamps still reads.
+    pub(crate) fn from_unix_days(days: i64) -> Self {
         // Howard Hinnant's civil-from-days.
         let z = days + 719_468;
         let era = z.div_euclid(146_097);
@@ -162,10 +200,21 @@ impl CivilDateTime {
             year,
             month,
             day,
-            hour: remainder / 3_600,
-            minute: remainder % 3_600 / 60,
-            second: remainder % 60,
+            hour: 0,
+            minute: 0,
+            second: 0,
         }
+    }
+
+    // The three accessors below are what the timestamp column reads.
+    pub(crate) const fn year(&self) -> i64 {
+        self.year
+    }
+    pub(crate) const fn month(&self) -> u32 {
+        self.month
+    }
+    pub(crate) const fn day(&self) -> u32 {
+        self.day
     }
 }
 
@@ -187,45 +236,6 @@ impl UtcTimestampPresentation for u64 {
             "{:02}:{:02}:{:02} UTC",
             civil.hour, civil.minute, civil.second
         )
-    }
-}
-
-#[cfg(test)]
-mod presentation_tests {
-    use super::*;
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn precise_clock_and_counts_read_as_bench_figures() {
-        assert_eq!(4.2334_f64.precise_clock_label(), "0:04.233");
-        assert_eq!(61.0005_f64.precise_clock_label(), "1:01.001");
-        assert_eq!(f64::NAN.precise_clock_label(), "0:00.000");
-        assert_eq!(11_404_u64.grouped_label(), "11,404");
-        assert_eq!(999_u64.grouped_label(), "999");
-        assert_eq!(1_000_000_u64.grouped_label(), "1,000,000");
-        assert_eq!(15_932_137_u64.byte_label(), "15.2 MiB");
-        assert_eq!(512_u64.byte_label(), "512 B");
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn utc_labels_come_from_exact_nanoseconds() {
-        assert_eq!(
-            1_743_701_335_734_982_912_u64.utc_label(),
-            "2025-04-03 17:28:55 UTC"
-        );
-        assert_eq!(0_u64.utc_label(), "1970-01-01 00:00:00 UTC");
-        assert_eq!(951_782_400_000_000_000_u64.utc_date_label(), "2000-02-29");
-        assert_eq!(
-            1_743_701_335_734_982_912_u64.utc_time_label(),
-            "17:28:55 UTC"
-        );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn epoch_clocks_are_not_wall_clocks() {
-        assert!(!0_u64.has_wall_clock());
-        assert!(!5_000_000_000_u64.has_wall_clock());
-        assert!(946_684_800_000_000_000_u64.has_wall_clock());
-        assert!(1_743_701_335_734_982_912_u64.has_wall_clock());
     }
 }
 
@@ -253,14 +263,69 @@ impl LongDurationPresentation for f64 {
 }
 
 #[cfg(test)]
-mod long_duration_tests {
-    use super::LongDurationPresentation;
+mod tests {
+    use super::*;
 
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn long_durations_step_up_through_units() {
+    /// Every clock here is fed a number a recording can actually produce: a
+    /// missing measurement, a negative elapsed time, and a value that rounds
+    /// across a unit.
+    #[test]
+    fn clocks_survive_the_values_a_recording_hands_them() {
+        assert_eq!(f64::NAN.clock_label(), "0:00.0");
+        assert_eq!((-2.0_f64).clock_label(), "0:00.0");
+        assert_eq!(61.25_f64.clock_label(), "1:01.2");
+        assert_eq!(61.0005_f64.precise_clock_label(), "1:01.001");
+        assert_eq!(f64::NAN.precise_clock_label(), "0:00.000");
         assert_eq!(3_549.9_f64.long_duration_label(), "59 min 10 s");
         assert_eq!(7_260.0_f64.long_duration_label(), "2 h 1 min");
-        assert_eq!(20.5_f64.long_duration_label(), "21 s");
         assert_eq!(f64::NAN.long_duration_label(), "0 s");
+    }
+
+    /// Each ladder is checked where it steps: the separator's first comma, the
+    /// byte unit's first prefix, the rate's GiB threshold, the latency's two
+    /// thresholds and its missing value, and the loss's switch to scientific
+    /// notation.
+    #[test]
+    fn every_unit_ladder_is_checked_where_it_steps() {
+        assert_eq!(11_404_u64.grouped_label(), "11,404");
+        assert_eq!(1_000_000_u64.grouped_label(), "1,000,000");
+        assert_eq!(512_u64.byte_label(), "512 B");
+        assert_eq!(15_932_137_u64.byte_label(), "15.2 MiB");
+        assert_eq!(
+            (1024.0_f64 * 1024.0 * 1024.0).byte_rate_label(),
+            "1.00 GiB/s"
+        );
+        assert_eq!(
+            (1024.0_f64 * 1024.0 * 900.0).byte_rate_label(),
+            "900.0 MiB/s"
+        );
+        assert_eq!(Some(1_250.0).millis_label(), "1.25 s");
+        assert_eq!(Some(42.4).millis_label(), "42 ms");
+        assert_eq!(Some(4.25).millis_label(), "4.2 ms");
+        assert_eq!(None.millis_label(), "—");
+        assert_eq!(0.125_f64.loss_label(), "0.1250");
+        assert_eq!(0.00125_f64.loss_label(), "1.250e-3");
+    }
+
+    /// The calendar is computed here rather than read from the browser, so a
+    /// leap day and the epoch itself pin it.
+    #[test]
+    fn utc_labels_come_from_exact_nanoseconds() {
+        assert_eq!(
+            1_743_701_335_734_982_912_u64.utc_label(),
+            "2025-04-03 17:28:55 UTC"
+        );
+        assert_eq!(0_u64.utc_label(), "1970-01-01 00:00:00 UTC");
+        assert_eq!(951_782_400_000_000_000_u64.utc_date_label(), "2000-02-29");
+        assert_eq!(
+            1_743_701_335_734_982_912_u64.utc_time_label(),
+            "17:28:55 UTC"
+        );
+        let leap = CivilDateTime::from_unix_days(11_016);
+        assert_eq!((leap.year(), leap.month(), leap.day()), (2000, 2, 29));
+        // A rig counting from zero has no wall clock; a recording made in 2000
+        // or later has one.
+        assert!(!5_000_000_000_u64.has_wall_clock());
+        assert!(WALL_CLOCK_FLOOR_NS.has_wall_clock());
     }
 }

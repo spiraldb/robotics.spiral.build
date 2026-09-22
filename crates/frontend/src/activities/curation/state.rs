@@ -4,7 +4,10 @@ use super::CurationClient;
 use super::pipeline::PipelineSelection;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use crate::client::runs::RunLedger;
-use crate::components::run_phase::RunPhasePresentation;
+use crate::components::document_session::{
+    DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
+};
+use crate::components::run_strip::RunPhasePresentation;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
@@ -13,18 +16,32 @@ use spiral_robotics_common::curation::facts::CurationFact;
 use spiral_robotics_common::curation::interpretation::RuleProposal;
 use spiral_robotics_common::curation::run::{CurationOutcome, CurationRun, CurationRunSnapshot};
 use spiral_robotics_common::curation::{
-    CurationSpec, CurationSummary, CurationValidationReport, DEFAULT_CURATION_NAME,
+    CurationSpec, CurationValidationReport, DEFAULT_CURATION_NAME,
 };
 use spiral_robotics_common::runs::RunPhase;
 
 pub(crate) const RECIPE_PANEL_ID: &str = "curation-recipe";
 pub(crate) const SHEET_PANEL_ID: &str = "curation-sheet";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CurationPendingCommand {
-    Saving,
-    Selecting,
-    Starting,
+impl StudioDocument for CurationSpec {
+    const NOUN: &'static str = "curation";
+    const COLLECTION: &'static str = "curations";
+    const REPORTS_AS: MessageSource = MessageSource::Curation;
+
+    fn id(&self) -> &str {
+        self.id()
+    }
+    fn set_name(&mut self, name: String) {
+        self.set_name(name);
+    }
+    fn fresh(id: String) -> Self {
+        Self::new(id, DEFAULT_CURATION_NAME)
+    }
+    fn acknowledge_save(&mut self, saved: &Self) {
+        if self.id() == saved.id() {
+            self.set_revision(saved.revision());
+        }
+    }
 }
 
 /// Which verdicts the sheet lays out.
@@ -82,31 +99,17 @@ impl SheetOrder {
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct CurationController {
-    document: CurationDocumentSignals,
+    session: DocumentSession<CurationSpec>,
     runs: CurationRunSignals,
-    lifecycle: CurationLifecycleSignals,
     view: CurationViewSignals,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct CurationDocumentSignals {
-    baseline: Signal<CurationSpec>,
-    draft: Signal<CurationSpec>,
-    conflict: Signal<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 struct CurationRunSignals {
     runs: Signal<Vec<CurationRun>>,
     selected_run: Signal<Option<String>>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct CurationLifecycleSignals {
-    loaded: Signal<bool>,
-    command: Signal<Option<CurationPendingCommand>>,
-    load_error: Signal<Option<String>>,
-    curations: Signal<Vec<CurationSummary>>,
+    /// A judging run Studio has accepted but not yet reported back.
+    starting: Signal<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -123,22 +126,13 @@ struct CurationViewSignals {
 
 impl CurationController {
     pub(super) fn use_controller() -> Self {
-        let initial = use_hook(Self::fresh_curation);
+        let session = DocumentSession::use_session();
         use_hook(|| Self {
-            document: CurationDocumentSignals {
-                baseline: Signal::new(initial.clone()),
-                draft: Signal::new(initial),
-                conflict: Signal::new(false),
-            },
+            session,
             runs: CurationRunSignals {
                 runs: Signal::new(Vec::new()),
                 selected_run: Signal::new(None),
-            },
-            lifecycle: CurationLifecycleSignals {
-                loaded: Signal::new(false),
-                command: Signal::new(None),
-                load_error: Signal::new(None),
-                curations: Signal::new(Vec::new()),
+                starting: Signal::new(false),
             },
             view: CurationViewSignals {
                 active_panel: Signal::new(None),
@@ -153,12 +147,11 @@ impl CurationController {
     }
 
     pub(super) fn spec(&self) -> CurationSpec {
-        self.document.draft.read().clone()
+        self.session.draft()
     }
     /// Every recipe edit goes through here so the draft stays one value.
     pub(super) fn edit(self, change: impl FnOnce(&mut CurationSpec)) {
-        let mut draft = self.document.draft;
-        change(&mut draft.write());
+        self.session.edit(change);
     }
     pub(super) fn add_proposal(self, proposal: &RuleProposal) -> Result<(), String> {
         let identity = format!(
@@ -173,24 +166,21 @@ impl CurationController {
         Ok(())
     }
     fn validation(&self) -> CurationValidationReport {
-        self.document.draft.read().validate()
-    }
-    pub(super) fn set_name(self, name: String) {
-        self.edit(|spec| spec.set_name(name));
+        self.session.with_draft(CurationSpec::validate)
     }
 
     /// The run the sheet shows: the selected one, else the latest for this
     /// recipe, with staleness judged against the current draft.
     pub(super) fn snapshot(&self) -> CurationRunSnapshot {
-        let draft = self.document.draft.read();
-        match self.visible_run() {
+        let visible = self.visible_run();
+        self.session.with_draft(|draft| match visible {
             Some(run) => {
                 let mut snapshot = run.snapshot().clone();
                 snapshot.set_result_stale(!draft.accepts_output_from(run.curation()));
                 snapshot
             }
-            None => CurationRunSnapshot::idle_for(&draft),
-        }
+            None => CurationRunSnapshot::idle_for(draft),
+        })
     }
     pub(super) fn outcome(&self) -> Option<CurationOutcome> {
         self.visible_run()
@@ -213,7 +203,7 @@ impl CurationController {
             .cloned()
     }
     pub(super) fn curation_runs(&self) -> Vec<CurationRun> {
-        let id = self.document.draft.read().id().to_owned();
+        let id = self.session.with_draft(|draft| draft.id().to_owned());
         let mut runs = self
             .runs
             .runs
@@ -237,22 +227,27 @@ impl CurationController {
     }
 
     pub(super) fn loaded(&self) -> bool {
-        *self.lifecycle.loaded.read()
+        self.session.loaded()
     }
     pub(super) fn load_error(&self) -> Option<String> {
-        self.lifecycle.load_error.read().clone()
+        self.session.load_error()
     }
-    pub(super) fn command(&self) -> Option<CurationPendingCommand> {
-        *self.lifecycle.command.read()
-    }
-    pub(super) fn curations(&self) -> Vec<CurationSummary> {
-        self.lifecycle.curations.read().clone()
-    }
-    pub(super) fn revision_conflict(&self) -> bool {
-        *self.document.conflict.read()
+    pub(super) fn command(&self) -> Option<DocumentCommand> {
+        self.session.command()
     }
     pub(super) fn unsaved_changes(&self) -> bool {
-        *self.document.draft.read() != *self.document.baseline.read()
+        self.session.unsaved_changes()
+    }
+    pub(super) fn curations(&self) -> Vec<DocumentSummary> {
+        self.session.summaries()
+    }
+    pub(super) fn set_name(self, name: String) {
+        self.session.set_name(name);
+    }
+    /// Judging is under way, or Studio has accepted a start it has not yet
+    /// reported back.
+    pub(super) fn judging(&self) -> bool {
+        self.snapshot().phase().active() || *self.runs.starting.read()
     }
 
     pub(super) fn active_panel(&self) -> Option<PanelId> {
@@ -353,12 +348,6 @@ impl CurationController {
         if let Some(error) = self.load_error() {
             return Some(format!("Could not load the saved curation: {error}"));
         }
-        if self.revision_conflict() {
-            return Some(
-                "The curation changed in another session. Reload it before editing again."
-                    .to_owned(),
-            );
-        }
         if self.command().is_some() {
             return Some("Wait for the current document operation.".to_owned());
         }
@@ -386,76 +375,30 @@ impl CurationController {
         None
     }
 
-    fn spawn(&self, task: impl std::future::Future<Output = ()> + 'static) {
-        dioxus::dioxus_core::Runtime::current().spawn(self.document.draft.origin_scope(), task);
-    }
-    fn fresh_curation() -> CurationSpec {
-        CurationSpec::new(
-            format!(
-                "curation-{}-{:x}",
-                js_sys::Date::now() as u64,
-                (js_sys::Math::random() * u64::MAX as f64) as u64
-            ),
-            DEFAULT_CURATION_NAME,
-        )
-    }
-    fn install(mut self, curation: CurationSpec) {
-        self.document.draft.set(curation.clone());
-        self.document.baseline.set(curation);
-        self.document.conflict.set(false);
-        self.runs.selected_run.set(None);
-        self.view.selected_episode.set(None);
-        self.view.hovered_rule.set(None);
-        self.view.filter.set(SheetFilter::All);
-        self.view.lens.set(None);
-        self.view.order.set(SheetOrder::Recorded);
-        self.view.pipeline_selection.set(PipelineSelection::Source);
-        self.lifecycle.loaded.set(true);
-        self.lifecycle.load_error.set(None);
+    /// Everything the sheet shows besides the recipe belongs to the recipe
+    /// that was open: a newly installed one starts with no run selected, no
+    /// episode open, no hover, and the pipeline at its source.
+    fn adopt(self, _curation: &CurationSpec) -> Result<(), String> {
+        let mut view = self.view;
+        let mut runs = self.runs;
+        runs.selected_run.set(None);
+        view.selected_episode.set(None);
+        view.hovered_rule.set(None);
+        view.filter.set(SheetFilter::All);
+        view.lens.set(None);
+        view.order.set(SheetOrder::Recorded);
+        view.pipeline_selection.set(PipelineSelection::Source);
+        Ok(())
     }
 
-    pub(super) fn save(mut self, studio: StudioProjectState) {
+    pub(super) fn save(self, studio: StudioProjectState) {
         if self.save_disabled_reason().is_some() {
             return;
         }
-        let submitted = self.spec();
-        self.lifecycle
-            .command
-            .set(Some(CurationPendingCommand::Saving));
-        self.spawn(async move {
-            let client = CurationClient::current();
-            match client.save(&submitted).await {
-                Ok(saved) => {
-                    // A save acknowledges its input; edits made meanwhile stay local.
-                    if self.spec().id() == saved.id() {
-                        self.document
-                            .draft
-                            .write()
-                            .set_revision(saved.revision());
-                        self.document.baseline.set(saved);
-                        self.document.conflict.set(false);
-                    }
-                    if let Ok(curations) = client.list().await {
-                        self.lifecycle.curations.set(curations);
-                    }
-                }
-                Err(error) => {
-                    self.document.conflict.set(
-                        error.code()
-                            == spiral_robotics_common::command_failure::CommandFailureCode::Conflict,
-                    );
-                    studio.report_from(MessageSource::Curation, error.to_string());
-                }
-            }
-            self.lifecycle.command.set(None);
-        });
+        self.session.save(studio);
     }
     pub(super) fn discard(self) {
-        if self.command().is_some() {
-            return;
-        }
-        let baseline = self.document.baseline.peek().clone();
-        self.install(baseline);
+        self.session.discard(move |curation| self.adopt(curation));
     }
     pub(super) fn run(mut self, studio: StudioProjectState) {
         if self.run_disabled_reason().is_some() {
@@ -466,10 +409,8 @@ impl CurationController {
             return;
         }
         let curation = self.spec();
-        self.lifecycle
-            .command
-            .set(Some(CurationPendingCommand::Starting));
-        self.spawn(async move {
+        self.runs.starting.set(true);
+        self.session.spawn(async move {
             match CurationClient::current().start(&curation).await {
                 Ok(run) => {
                     self.runs.selected_run.set(None);
@@ -478,7 +419,7 @@ impl CurationController {
                 }
                 Err(error) => studio.report_from(MessageSource::Curation, error.to_string()),
             }
-            self.lifecycle.command.set(None);
+            self.runs.starting.set(false);
             QueryRefresh::current().invalidate(&[QueryDomain::Curation]);
         });
     }
@@ -486,60 +427,25 @@ impl CurationController {
         if self.selection_reason().is_some() {
             return;
         }
-        self.open_document(id);
+        self.session.open(id, move |curation| self.adopt(curation));
     }
-    pub(super) fn reload_current(mut self) {
-        self.lifecycle.load_error.set(None);
-        let id = self.spec().id().to_owned();
-        let known = self.curations().iter().any(|curation| curation.id() == id);
+    /// Read the open curation again after a failed load: the saved one when
+    /// Studio still lists it, the first saved one when nothing is open yet,
+    /// and a blank recipe when what was open is gone.
+    pub(super) fn reload_current(self) {
         if !self.loaded() {
-            self.load_initial();
-        } else if known {
-            self.open_document(Some(id));
-        } else {
-            self.install(Self::fresh_curation());
-        }
-    }
-    fn open_document(mut self, id: Option<String>) {
-        let Some(id) = id else {
-            self.install(Self::fresh_curation());
+            self.session
+                .load_initial(move |curation| self.adopt(curation));
             return;
-        };
-        self.lifecycle
-            .command
-            .set(Some(CurationPendingCommand::Selecting));
-        self.spawn(async move {
-            match CurationClient::current().load(&id).await {
-                Ok(curation) => self.install(curation),
-                Err(error) => self.lifecycle.load_error.set(Some(error.to_string())),
-            }
-            self.lifecycle.command.set(None);
-        });
-    }
-    fn load_initial(mut self) {
-        self.lifecycle
-            .command
-            .set(Some(CurationPendingCommand::Selecting));
-        self.spawn(async move {
-            let client = CurationClient::current();
-            let result = async {
-                let curations = client.list().await?;
-                let curation = match curations.first() {
-                    Some(summary) => client.load(summary.id()).await?,
-                    None => Self::fresh_curation(),
-                };
-                Ok::<_, crate::client::transport::CommandError>((curations, curation))
-            }
-            .await;
-            match result {
-                Ok((curations, curation)) => {
-                    self.lifecycle.curations.set(curations);
-                    self.install(curation);
-                }
-                Err(error) => self.lifecycle.load_error.set(Some(error.to_string())),
-            }
-            self.lifecycle.command.set(None);
-        });
+        }
+        let id = self.spec().id().to_owned();
+        let known = self
+            .session
+            .summaries()
+            .iter()
+            .any(|summary| summary.id() == id);
+        self.session
+            .open(known.then_some(id), move |curation| self.adopt(curation));
     }
 
     pub(super) fn use_polling(self, is_active: ReadSignal<bool>) {
@@ -550,39 +456,30 @@ impl CurationController {
                 && self.command().is_none()
                 && self.load_error().is_none()
             {
-                self.load_initial();
+                self.session
+                    .load_initial(move |curation| self.adopt(curation));
             }
         });
-        let active = use_memo(move || {
-            self.runs
-                .runs
-                .read()
-                .iter()
-                .any(|run| run.snapshot().phase().active())
-                || self.command() == Some(CurationPendingCommand::Starting)
-        });
-        let runs = QueryPolicy::new(QueryDomain::Curation, 500)
-            .with_activity(active.into())
-            .use_when(
-                move || is_active() && sessions.studio_available(),
-                move || {
-                    let active = self
-                        .runs
-                        .runs
-                        .peek()
-                        .iter()
-                        .find(|run| run.snapshot().phase().active())
-                        .and_then(|run| run.snapshot().run_id())
-                        .map(str::to_owned);
-                    async move {
-                        let client = CurationClient::current();
-                        match active {
-                            Some(id) => client.run(&id).await.map(|run| vec![run]),
-                            None => client.runs().await,
-                        }
+        let runs = QueryPolicy::new(QueryDomain::Curation, 500).use_when(
+            move || is_active() && sessions.studio_available(),
+            move || {
+                let active = self
+                    .runs
+                    .runs
+                    .peek()
+                    .iter()
+                    .find(|run| run.snapshot().phase().active())
+                    .and_then(|run| run.snapshot().run_id())
+                    .map(str::to_owned);
+                async move {
+                    let client = CurationClient::current();
+                    match active {
+                        Some(id) => client.run(&id).await.map(|run| vec![run]),
+                        None => client.runs().await,
                     }
-                },
-            );
+                }
+            },
+        );
         self.runs.runs.observe(runs);
     }
 

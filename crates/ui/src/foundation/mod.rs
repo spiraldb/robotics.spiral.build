@@ -8,8 +8,9 @@ mod styles;
 pub use focus::BrowserFocus;
 pub(crate) use focus::{RovingGroup, RovingStep};
 pub use icons::{
-    ArrowDownIcon, ArrowUpIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon, GripIcon,
-    RefreshIcon, UnassignIcon,
+    ArrowDownIcon, ArrowUpIcon, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon,
+    GripIcon, PauseIcon, PlayIcon, RefreshIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon,
+    StepBackIcon, StepForwardIcon, StopIcon, UnassignIcon, ZoomInIcon, ZoomOutIcon,
 };
 pub use styles::UiStyles;
 pub(crate) use styles::{AttributeClass, ClassNames};

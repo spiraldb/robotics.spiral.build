@@ -1,7 +1,7 @@
 //! Browser-owned authoring loop. Tools edit the same draft as the canvas.
 mod tools;
 use super::{WorkflowClient, state::WorkflowController};
-use crate::client::model::{ModelClient, ModelRequest};
+use crate::client::completions::{ModelClient, ModelRequest};
 use dioxus::dioxus_core::Task;
 use dioxus::prelude::*;
 use serde_json::{Value, json};

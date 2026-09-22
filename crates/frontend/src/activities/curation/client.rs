@@ -1,16 +1,22 @@
-//! Stateless recipe documents and judged runs.
+//! Previewing a recipe and judging episodes with it. The recipe document
+//! itself is listed, loaded, and saved by `client::documents`.
 use crate::client::{
     http::UrlComponent,
     project::ProjectClient,
     transport::{CommandError, HttpRequest},
 };
-use spiral_robotics_common::curation::{CurationSpec, CurationSummary, run::CurationRun};
+use spiral_robotics_common::curation::{CurationSpec, run::CurationRun};
 
 #[derive(Clone)]
 pub(crate) struct CurationClient {
     project: ProjectClient,
 }
 impl CurationClient {
+    pub(super) fn current() -> Self {
+        Self {
+            project: ProjectClient::current(),
+        }
+    }
     pub(super) async fn preview(
         &self,
         curation: &CurationSpec,
@@ -25,29 +31,6 @@ impl CurationClient {
     ) -> Result<spiral_robotics_common::curation::progress::ProgressScoreResult, CommandError> {
         self.project
             .request(HttpRequest::new("POST", "/api/curations/progress-score").json(request))
-            .await
-    }
-    pub(super) fn current() -> Self {
-        Self {
-            project: ProjectClient::current(),
-        }
-    }
-    pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, CommandError> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/curations"))
-            .await
-    }
-    pub(super) async fn load(&self, id: &str) -> Result<CurationSpec, CommandError> {
-        self.project
-            .request(HttpRequest::new(
-                "GET",
-                format!("/api/curations/{}", id.url_component()),
-            ))
-            .await
-    }
-    pub(super) async fn save(&self, curation: &CurationSpec) -> Result<CurationSpec, CommandError> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/curations/save").json(curation))
             .await
     }
     pub(super) async fn runs(&self) -> Result<Vec<CurationRun>, CommandError> {

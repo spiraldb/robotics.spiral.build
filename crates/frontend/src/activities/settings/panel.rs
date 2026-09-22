@@ -623,11 +623,10 @@ fn SettingsField(label: &'static str, value: String, behavior: SettingsInputBeha
 
 #[component]
 pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
-    let workspace = crate::shell::activity::WorkspaceActivity::provide(
+    let (workspace, project) = crate::shell::activity::WorkspaceActivity::mount(
         crate::shell::activity::Activity::Settings,
         is_active,
     );
-    let project = StudioProjectState::current();
     let telemetry =
         HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
     let selection = RobotSelection::use_selection(telemetry.snapshot());

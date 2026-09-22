@@ -334,15 +334,15 @@ transforms) compiled to one read-only query; see [curation](curation.md).
 Runs are in-memory and polled like workflow runs; Save is the only write and
 uses optimistic revisions.
 
-### Build documents
+### Explorations
 
 | Method | Path | Body or query | Response |
 | --- | --- | --- | --- |
-| GET | `/build-documents` | — | BuildDocumentSummary[] |
-| GET | `/build-documents/{id}` | — | BuildDocument |
-| POST | `/build-documents/save` | BuildDocument (loaded revision) | BuildDocument (next revision) |
+| GET | `/explorations` | — | ExplorationSummary[] |
+| GET | `/explorations/{id}` | — | ExplorationDocument |
+| POST | `/explorations/save` | ExplorationDocument (loaded revision) | ExplorationDocument (next revision) |
 
-A Build document is one opaque, versioned JSON payload per Build graph: the
+An exploration is one opaque, versioned JSON payload per graph: the
 frontend owns its schema and `encoding` version, and the backend stores, lists,
 and loads it by identity without reading it. Save carries the revision the
 document was loaded at, 0 for one never saved, and returns the stored copy one

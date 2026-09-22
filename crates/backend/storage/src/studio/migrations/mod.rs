@@ -11,6 +11,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateCurations),
             Box::new(CreateDatasetRobots),
             Box::new(CreateBuildDocuments),
+            Box::new(RenameToExplorations),
         ]
     }
 }
@@ -117,6 +118,30 @@ impl MigrationTrait for CreateBuildDocuments {
         manager
             .get_connection()
             .execute_unprepared(include_str!("m20260921_000005_build_documents.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+/// `build_documents` keeps its rows and takes the name of the view that owns
+/// them; the old migration above still creates the table under its old name.
+struct RenameToExplorations;
+impl MigrationName for RenameToExplorations {
+    fn name(&self) -> &str {
+        "m20260921_000006_explorations"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for RenameToExplorations {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260921_000006_explorations.sql"))
             .await?;
         Ok(())
     }

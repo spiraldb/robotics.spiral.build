@@ -1,6 +1,16 @@
-//! Small, consistent line icons shared across frontend surfaces.
+//! The domain glyphs: an activity in the rail, a stage kind, a stream, a node.
+//! Each one means something only Studio means, so it is drawn here rather than
+//! in `crates/ui`, which owns the design language's utility marks.
+//!
+//! Those utility marks are re-exported below so a surface reaches for one icon
+//! module, not two.
 
 use dioxus::prelude::*;
+
+pub(crate) use spiral_robotics_ui::{
+    CheckIcon, PauseIcon, PlayIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon,
+    StepForwardIcon, StopIcon, ZoomInIcon, ZoomOutIcon,
+};
 
 /// The robot explorer: a compact arm silhouette rather than a generic sidebar.
 #[component]
@@ -170,69 +180,12 @@ pub(crate) fn JoinStageIcon() -> Element {
     }
 }
 
-/// Start something: a run, a query.
-#[component]
-pub(crate) fn PlayIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M4.75 3.25v9.5l7.5-4.75-7.5-4.75Z" }
-        }
-    }
-}
-
-/// Stop the current turn or run.
-#[component]
-pub(crate) fn StopIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            rect { x: "4", y: "4", width: "8", height: "8", rx: "1" }
-        }
-    }
-}
-
 /// Send a message: an upward arrow, the direction the thread grows.
 #[component]
 pub(crate) fn SendIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M8 12.75V3.5M4.25 7.25 8 3.5l3.75 3.75" }
-        }
-    }
-}
-
-/// Work in progress. The ring spins through `ui-icon--spin`.
-#[component]
-pub(crate) fn SpinnerIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon ui-icon--spin", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M13 8a5 5 0 1 1-1.9-3.93" }
-        }
-    }
-}
-
-#[component]
-pub(super) fn CheckIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M3.5 8.5 6.5 11.5 12.5 4.5" }
-        }
-    }
-}
-
-#[component]
-pub(super) fn ZoomInIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M8 3.75v8.5M3.75 8h8.5" }
-        }
-    }
-}
-
-#[component]
-pub(super) fn ZoomOutIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M3.75 8h8.5" }
         }
     }
 }
@@ -263,56 +216,6 @@ pub(crate) fn DetailsIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M3 4h10M3 8h6M3 12h8" }
-        }
-    }
-}
-
-/// Transport: hold the clock where it is.
-#[component]
-pub(super) fn PauseIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M5 3.5v9M11 3.5v9" }
-        }
-    }
-}
-
-/// Transport: jump to the first message.
-#[component]
-pub(super) fn SkipToStartIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M4 3.5v9M12 3.5 6 8l6 4.5z" }
-        }
-    }
-}
-
-/// Transport: jump to the last message.
-#[component]
-pub(super) fn SkipToEndIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M12 3.5v9M4 3.5 10 8l-6 4.5z" }
-        }
-    }
-}
-
-/// Transport: nudge the playhead backwards by one step.
-#[component]
-pub(super) fn StepBackIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M10.5 4 6.5 8l4 4M5 4v8" }
-        }
-    }
-}
-
-/// Transport: nudge the playhead forwards by one step.
-#[component]
-pub(super) fn StepForwardIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M5.5 4 9.5 8l-4 4M11 4v8" }
         }
     }
 }

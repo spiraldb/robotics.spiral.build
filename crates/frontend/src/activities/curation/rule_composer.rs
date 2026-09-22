@@ -1,7 +1,7 @@
 //! One place to add the next step: describe it for the browser-owned interpreter,
 //! or pick a kind and fill in the row that appears.
 use super::{pipeline::PipelineSelection, state::CurationController};
-use crate::client::model::ModelClient;
+use crate::client::completions::ModelClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::{
     facts::TopicRef,
@@ -80,7 +80,7 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
                             let cameras = camera_topics.clone();
                             move |value: String| {
                                 error.set(None);
-                                match add_by_kind(controller, &value, cameras.first()) {
+                                match ManualStep::add(controller, &value, cameras.first()) {
                                     Ok(Some(draft)) => proposal.set(Some(draft)),
                                     Ok(None) => proposal.set(None),
                                     Err(message) => error.set(Some(message)),
@@ -126,56 +126,85 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
     }
 }
 
-fn fresh_id(prefix: &str) -> String {
-    format!(
-        "{prefix}-{}-{:x}",
-        js_sys::Date::now() as u64,
-        (js_sys::Math::random() * u32::MAX as f64) as u64
-    )
-}
+/// A step the operator picks from the kind list rather than describing in
+/// words.
+struct ManualStep;
 
-/// Add a step of one kind. Filters over built-in facts and camera transforms
-/// land in the recipe at once, ready to fill in; a kind that still needs a
-/// choice (which camera to measure) comes back as a draft to complete.
-fn add_by_kind(
-    controller: CurationController,
-    key: &str,
-    camera: Option<&String>,
-) -> Result<Option<RuleProposal>, String> {
-    match key {
-        "duration" | "message_count" => {
-            let fact = if key == "duration" {
-                "duration_s"
-            } else {
-                "messages"
-            };
-            let id = fresh_id("rule");
-            let rule = CurationRule::new(
-                id.clone(),
-                "",
-                RuleCondition::new(fact, ConditionOp::Below, ConditionValue::None),
-            );
-            controller.edit(move |spec| spec.add_rule(rule));
-            controller.select_pipeline(PipelineSelection::Step(id));
-            Ok(None)
-        }
-        "camera_luminance" | "productive_chunks" => {
-            let mut draft = RuleProposal::default();
-            draft.set_intent(RuleIntent::from_key(key));
-            if draft.problems().is_empty() {
-                controller.add_proposal(&draft).map(|()| None)
-            } else {
-                Ok(Some(draft))
+impl ManualStep {
+    /// Add a step of one kind. Filters over built-in facts and camera
+    /// transforms land in the recipe at once, ready to fill in; a kind that
+    /// still needs a choice (which camera to measure) comes back as a draft
+    /// to complete.
+    fn add(
+        controller: CurationController,
+        key: &str,
+        camera: Option<&String>,
+    ) -> Result<Option<RuleProposal>, String> {
+        match key {
+            "duration" | "message_count" => {
+                let fact = if key == "duration" {
+                    "duration_s"
+                } else {
+                    "messages"
+                };
+                let id = Self::fresh_id("rule");
+                let rule = CurationRule::new(
+                    id.clone(),
+                    "",
+                    RuleCondition::new(fact, ConditionOp::Below, ConditionValue::None),
+                );
+                controller.edit(move |spec| spec.add_rule(rule));
+                controller.select_pipeline(PipelineSelection::Step(id));
+                Ok(None)
+            }
+            "camera_luminance" | "productive_chunks" => {
+                let mut draft = RuleProposal::default();
+                draft.set_intent(RuleIntent::from_key(key));
+                if draft.problems().is_empty() {
+                    controller.add_proposal(&draft).map(|()| None)
+                } else {
+                    Ok(Some(draft))
+                }
+            }
+            other => {
+                let operation = Self::operation(other, camera)
+                    .ok_or_else(|| "That kind of step is not available.".to_owned())?;
+                let id = Self::fresh_id("transform");
+                let transform = CurationTransform::new(id.clone(), "", operation);
+                controller.edit(move |spec| spec.add_transform(transform));
+                controller.select_pipeline(PipelineSelection::Step(id));
+                Ok(None)
             }
         }
-        other => {
-            let operation = ManualTransform::operation(other, camera)
-                .ok_or_else(|| "That kind of step is not available.".to_owned())?;
-            let id = fresh_id("transform");
-            let transform = CurationTransform::new(id.clone(), "", operation);
-            controller.edit(move |spec| spec.add_transform(transform));
-            controller.select_pipeline(PipelineSelection::Step(id));
-            Ok(None)
+    }
+
+    fn fresh_id(prefix: &str) -> String {
+        format!(
+            "{prefix}-{}-{:x}",
+            js_sys::Date::now() as u64,
+            (js_sys::Math::random() * u32::MAX as f64) as u64
+        )
+    }
+
+    /// Manual-only operations reuse the canonical transforms and their
+    /// ordered editors.
+    fn operation(key: &str, camera: Option<&String>) -> Option<TransformOperation> {
+        let topic = || TopicRef::new(camera.cloned().unwrap_or_default());
+        match key {
+            "resize_camera" => Some(TransformOperation::ResizeCamera {
+                topic: topic(),
+                width: 224,
+                height: 224,
+            }),
+            "camera_color_profile" => Some(TransformOperation::CameraColorProfile {
+                topic: topic(),
+                profile: "bt709_full".into(),
+            }),
+            "trim_time" => Some(TransformOperation::TrimTime {
+                start_seconds: 0.0,
+                end_seconds: None,
+            }),
+            _ => None,
         }
     }
 }
@@ -230,31 +259,6 @@ fn ProposalEditor(
                 }
             }
             }
-        }
-    }
-}
-
-/// Manual-only operations reuse the canonical transforms and their ordered editors.
-struct ManualTransform;
-
-impl ManualTransform {
-    fn operation(key: &str, camera: Option<&String>) -> Option<TransformOperation> {
-        let topic = || TopicRef::new(camera.cloned().unwrap_or_default());
-        match key {
-            "resize_camera" => Some(TransformOperation::ResizeCamera {
-                topic: topic(),
-                width: 224,
-                height: 224,
-            }),
-            "camera_color_profile" => Some(TransformOperation::CameraColorProfile {
-                topic: topic(),
-                profile: "bt709_full".into(),
-            }),
-            "trim_time" => Some(TransformOperation::TrimTime {
-                start_seconds: 0.0,
-                end_seconds: None,
-            }),
-            _ => None,
         }
     }
 }

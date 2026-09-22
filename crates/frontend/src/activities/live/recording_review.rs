@@ -2,12 +2,11 @@
 //!
 //! A snapshot contains the complete visual joint timeline in a compact
 //! columnar form. Data attaches the immutable loaded object to its catalog
-//! entry and resolves playback and scrubbing from that object in memory. The
-//! small workspace cache below is only for paused recordings outside Data;
-//! physical motion continues through backend-owned validation and control.
+//! entry and resolves playback and scrubbing from that object in memory.
+//! Physical motion continues through backend-owned validation and control.
 
 use super::RecordingClient;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
@@ -26,7 +25,6 @@ use crate::shell::state::StudioProjectState;
 const EPISODE_RENDER_HZ: f64 = 30.0;
 const RECORDED_REQUEST_TIMEOUT_MS: u32 = 15_000;
 const TRACE_BUCKETS: usize = 240;
-const MAX_CACHED_EPISODES: usize = 4;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineArmSample {
@@ -124,11 +122,6 @@ impl TimelineSample {
         self
     }
 
-    #[cfg(test)]
-    const fn frame(&self) -> u64 {
-        self.frame
-    }
-
     pub(crate) const fn seconds(&self) -> f64 {
         self.seconds
     }
@@ -169,11 +162,6 @@ impl EpisodePreview {
 
     pub(crate) fn episode(&self) -> &str {
         &self.episode
-    }
-
-    #[cfg(test)]
-    const fn sample(&self) -> &TimelineSample {
-        &self.sample
     }
 
     pub(super) fn signal_lanes(&self) -> &Arc<[TimelineSignalLane; 6]> {
@@ -219,38 +207,6 @@ impl EpisodeData {
     }
 }
 
-/// Small FIFO cache for recorded sources outside the Data catalog lifecycle.
-/// A new persisted frame count replaces an older snapshot with the same ID.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct EpisodeInspectionCache {
-    entries: VecDeque<Arc<EpisodeData>>,
-}
-
-impl EpisodeInspectionCache {
-    fn get(&self, episode: &str, expected_frames: Option<u64>) -> Option<Arc<EpisodeData>> {
-        self.entries
-            .iter()
-            .find(|entry| {
-                entry.snapshot.episode().id() == episode
-                    && expected_frames
-                        .is_none_or(|frames| entry.snapshot.episode().frames() == frames)
-            })
-            .cloned()
-    }
-
-    fn insert(&mut self, inspection: Arc<EpisodeData>) {
-        self.entries
-            .retain(|entry| entry.snapshot.episode().id() != inspection.snapshot.episode().id());
-        self.entries.push_front(inspection);
-        self.entries.truncate(MAX_CACHED_EPISODES);
-    }
-
-    pub(super) fn invalidate(&mut self, episode: &str) {
-        self.entries
-            .retain(|entry| entry.snapshot.episode().id() != episode);
-    }
-}
-
 pub(crate) struct EpisodePreviewRequest {
     episode: String,
     expected_frames: Option<u64>,
@@ -267,11 +223,12 @@ impl EpisodePreviewRequest {
     }
 }
 
-#[derive(Clone, Copy)]
+/// The one recorded preview the Live timeline is showing, and the ticket that
+/// tells a completing read whether it is still the read anyone is waiting for.
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct EpisodePreviewSignals {
     state: Signal<Option<RecordedSource<EpisodePreview>>>,
     revision: Signal<u64>,
-    cache: Signal<EpisodeInspectionCache>,
 }
 
 impl EpisodePreviewSignals {
@@ -279,30 +236,24 @@ impl EpisodePreviewSignals {
         use_hook(|| Self {
             state: Signal::new(None),
             revision: Signal::new(0),
-            cache: Signal::new(EpisodeInspectionCache::default()),
         })
     }
 
-    pub(super) const fn new(
-        state: Signal<Option<RecordedSource<EpisodePreview>>>,
-        revision: Signal<u64>,
-        cache: Signal<EpisodeInspectionCache>,
-    ) -> Self {
-        Self {
-            state,
-            revision,
-            cache,
-        }
+    pub(super) fn source(self) -> Option<RecordedSource<EpisodePreview>> {
+        self.state.read().clone()
     }
 
-    pub(super) const fn into_signals(
-        self,
-    ) -> (
-        Signal<Option<RecordedSource<EpisodePreview>>>,
-        Signal<u64>,
-        Signal<EpisodeInspectionCache>,
-    ) {
-        (self.state, self.revision, self.cache)
+    /// Stop showing what is on screen. A read already in flight still lands.
+    pub(super) fn clear(mut self) {
+        self.state.set(None);
+    }
+
+    /// Stop showing what is on screen and disown every read in flight, for when
+    /// the episode behind them has changed rather than merely been left.
+    pub(super) fn discard(mut self) {
+        let next = self.revision.peek().wrapping_add(1);
+        self.revision.set(next);
+        self.state.set(None);
     }
 }
 
@@ -317,7 +268,6 @@ impl EpisodePreviewSignals {
         let EpisodePreviewSignals {
             mut state,
             mut revision,
-            mut cache,
         } = self;
         // A controller clock may advance while the one snapshot request is in
         // flight. Record the newest requested time without starting another read;
@@ -325,7 +275,7 @@ impl EpisodePreviewSignals {
         let same_episode_loading = state.peek().as_ref().is_some_and(|source| {
             source.episode() == episode && matches!(source.state(), LoadState::Loading { .. })
         });
-        if same_episode_loading && cache.peek().get(&episode, expected_frames).is_none() {
+        if same_episode_loading {
             if let Some(source) = state.write().as_mut() {
                 source.set_seconds(seconds);
             }
@@ -334,28 +284,6 @@ impl EpisodePreviewSignals {
 
         let ticket = revision.peek().wrapping_add(1);
         revision.set(ticket);
-        if let Some(inspection) = cache.peek().get(&episode, expected_frames) {
-            match inspection.preview_at(seconds) {
-                Ok(preview) => state.set(Some(RecordedSource::new(
-                    episode,
-                    seconds,
-                    LoadState::Ready(preview),
-                ))),
-                Err(error) => {
-                    state.set(Some(RecordedSource::new(
-                        episode,
-                        seconds,
-                        LoadState::Failed {
-                            reason: error.clone(),
-                            previous: None,
-                        },
-                    )));
-                    studio.report(error);
-                }
-            }
-            return;
-        }
-
         let previous = state
             .peek()
             .as_ref()
@@ -402,7 +330,6 @@ impl EpisodePreviewSignals {
                         .map_or(seconds, |source| source.seconds());
                     match inspection.preview_at(requested_seconds) {
                         Ok(preview) => {
-                            cache.write().insert(Arc::clone(&inspection));
                             state.set(Some(RecordedSource::new(
                                 episode,
                                 requested_seconds,
@@ -768,17 +695,6 @@ mod tests {
         EpisodeOptionalFrameMatrix,
     };
 
-    fn snapshot() -> EpisodeInspectionSnapshot {
-        snapshot_with_normalized(vec![
-            Some(0.0),
-            Some(0.1),
-            Some(0.5),
-            Some(0.6),
-            Some(1.0),
-            None,
-        ])
-    }
-
     fn snapshot_with_normalized(normalized: Vec<Option<f64>>) -> EpisodeInspectionSnapshot {
         let joints = vec!["shoulder_pan".to_owned(), "gripper".to_owned()];
         let absent = EpisodeOptionalFrameMatrix::new(vec![false; 3], vec![None; 6]);
@@ -798,37 +714,6 @@ mod tests {
         .with_action(absent);
         EpisodeInspectionSnapshot::new(episode, vec![0.0, 1.0, 2.0], vec![None, Some(0.5), None])
             .with_arms(vec![arm])
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn a_cached_snapshot_resolves_nearest_frames_without_another_request() {
-        let inspection = Arc::new(EpisodeData::try_new(snapshot()).expect("snapshot"));
-        let mut cache = EpisodeInspectionCache::default();
-        cache.insert(Arc::clone(&inspection));
-
-        let cached = cache.get("take-1", Some(3)).expect("cached episode");
-        let preview = cached.preview_at(0.6).expect("preview");
-
-        assert_eq!(preview.sample().frame(), 1);
-        assert_eq!(preview.sample().seconds(), 1.0);
-        let follower = preview
-            .sample()
-            .arms()
-            .iter()
-            .find(|arm| arm.arm() == "follower")
-            .expect("follower sample");
-        assert_eq!(follower.degrees()["shoulder_pan"], Some(0.0));
-        assert_eq!(preview.signal_lanes()[0].series()[0].points().len(), 3);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn a_new_frame_count_invalidates_the_cached_revision() {
-        let inspection = Arc::new(EpisodeData::try_new(snapshot()).expect("snapshot"));
-        let mut cache = EpisodeInspectionCache::default();
-        cache.insert(inspection);
-
-        assert!(cache.get("take-1", Some(3)).is_some());
-        assert!(cache.get("take-1", Some(4)).is_none());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

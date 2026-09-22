@@ -12,6 +12,6 @@ mod plan_display;
 
 mod assistant_content;
 
-mod build;
+mod explore;
 
 mod function_discovery;

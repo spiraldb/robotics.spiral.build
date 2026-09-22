@@ -72,7 +72,7 @@ impl RecordedStream {
     pub(in crate::activities) fn label(&self) -> &str {
         &self.label
     }
-    pub(super) fn name(&self) -> &str {
+    pub(in crate::activities) fn name(&self) -> &str {
         self.topic.name()
     }
     pub(super) fn kind(&self) -> StreamKind {
@@ -107,7 +107,35 @@ pub(crate) struct StreamCatalog {
     streams: Vec<RecordedStream>,
 }
 
+/// Camera names worth leading with: a view of the whole workspace shows what
+/// the arm is doing to what, which a camera on the gripper cannot.
+const OVERVIEW_NAMES: [&str; 4] = ["top", "front", "head", "overview"];
+/// Camera names worth leading with last: they follow the gripper, so the scene
+/// leaves the frame exactly when what is happening matters.
+const CLOSE_UP_NAMES: [&str; 2] = ["wrist", "gripper"];
+
 impl StreamCatalog {
+    /// Which of these cameras shows the workspace best: an overview before an
+    /// unremarkable name, and a wrist or gripper camera last. Every surface
+    /// that leads with one camera out of several asks this.
+    pub(in crate::activities) fn overview_camera(cameras: &[String]) -> Option<&str> {
+        fn rank(camera: &str) -> u8 {
+            let name = camera.to_lowercase();
+            if OVERVIEW_NAMES.iter().any(|word| name.contains(word)) {
+                0
+            } else if CLOSE_UP_NAMES.iter().any(|word| name.contains(word)) {
+                2
+            } else {
+                1
+            }
+        }
+        // `min_by_key` keeps the first of equal ranks, so the dataset's own
+        // topic order decides between two cameras that read alike.
+        cameras
+            .iter()
+            .min_by_key(|camera| rank(camera))
+            .map(String::as_str)
+    }
     pub(in crate::activities) fn new(
         mut topics: Vec<DatasetTopic>,
         episode: &EpisodeSelection,
@@ -248,8 +276,12 @@ pub(super) enum StreamSchema {
     Failed(String),
 }
 
+/// How many messages a stream has in each timeline bucket. A stream the
+/// episode never counted — one with no messages at all, or one whose episode
+/// has not been asked about yet — is `Uncounted`, not an absent answer.
 #[derive(Clone, PartialEq)]
 pub(super) enum CoverageState {
+    Uncounted,
     Loading,
     Ready(TopicCoverage),
     Failed(String),
@@ -552,8 +584,12 @@ impl StreamChoices {
         result.ok()
     }
 
-    pub(super) fn coverage(&self, key: &str) -> Option<CoverageState> {
-        self.coverage.read().get(key).cloned()
+    pub(super) fn coverage(&self, key: &str) -> CoverageState {
+        self.coverage
+            .read()
+            .get(key)
+            .cloned()
+            .unwrap_or(CoverageState::Uncounted)
     }
     /// Count every stream's messages into timeline buckets with one request,
     /// so the rows fill together instead of one at a time.
@@ -821,5 +857,32 @@ mod tests {
             false,
         ));
         assert_eq!(counters.default_plot_leaves().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod camera_preference_tests {
+    use super::StreamCatalog;
+
+    #[test]
+    fn the_leading_camera_looks_at_the_workspace_before_the_gripper() {
+        let named = |names: [&str; 3]| names.map(str::to_owned).to_vec();
+        assert_eq!(
+            StreamCatalog::overview_camera(&named([
+                "/left-wrist-camera",
+                "/top-camera",
+                "/right-wrist-camera"
+            ])),
+            Some("/top-camera")
+        );
+        assert_eq!(
+            StreamCatalog::overview_camera(&named(["/cam_low", "/cam_right_wrist", "/HEAD_CAM"])),
+            Some("/HEAD_CAM")
+        );
+        assert_eq!(
+            StreamCatalog::overview_camera(&named(["/gripper_cam", "/scene", "/front_rgb"])),
+            Some("/front_rgb")
+        );
+        assert_eq!(StreamCatalog::overview_camera(&[]), None);
     }
 }

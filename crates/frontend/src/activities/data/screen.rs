@@ -11,7 +11,10 @@ use super::{
     plots_panel::PlotsPanel,
     timeline_panel::{TimelinePanel, TimelineSubject},
 };
-use crate::shell::frame::WorkspaceFrame;
+use crate::shell::{
+    activity::{Activity, WorkspaceActivity},
+    frame::WorkspaceFrame,
+};
 use dioxus::prelude::*;
 use dioxus_workbench::{
     DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelPlacement, PanelWorkspace, SplitAxis,
@@ -28,10 +31,7 @@ const EDITORS_SPLIT: &str = "data-editors";
 
 #[component]
 pub(crate) fn DataWorkspace(is_active: ReadSignal<bool>) -> Element {
-    let workspace = crate::shell::activity::WorkspaceActivity::provide(
-        crate::shell::activity::Activity::Data,
-        is_active,
-    );
+    let workspace = WorkspaceActivity::provide(Activity::Data, is_active);
     rsx! { WorkspaceFrame { workspace, DataPanels {} } }
 }
 
@@ -368,7 +368,7 @@ fn DataPanels() -> Element {
     // Space, the arrows and Home/End also work while focus rests on the page
     // itself, not only inside the workspace. A key pressed inside it is
     // handled there and never reaches this listener as a page key.
-    let activity = crate::shell::activity::WorkspaceActivity::current();
+    let activity = WorkspaceActivity::current();
     let page_keys = use_hook(|| {
         let mut transport = transport.clone();
         let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
@@ -544,7 +544,7 @@ fn DataPanels() -> Element {
     // The primary tile keeps a stable tab order; content follows the selection.
     let mut panels = vec![
         Panel::new("stage", "3D Stage", "stage", rsx! {
-            super::robot_stage::RobotStage { episode: episode.clone(), streams: streams.clone(), transport: transport.clone() }
+            super::robot_stage::RobotStagePanel { episode: episode.clone(), streams: streams.clone(), transport: transport.clone() }
         }).with_class("data-primary-panel"),
         Panel::new(
             "catalog",

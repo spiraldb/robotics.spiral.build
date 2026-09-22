@@ -7,11 +7,11 @@
 #![allow(async_fn_in_trait)]
 
 mod adapters;
-mod build;
 mod clock;
 mod curation;
 mod data;
 mod error;
+mod exploration;
 mod http;
 mod project_admission;
 mod project_session;

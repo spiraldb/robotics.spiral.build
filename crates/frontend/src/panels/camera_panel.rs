@@ -154,6 +154,19 @@ impl CameraWorkspaceLayout {
             visualization,
         ))
     }
+
+    /// Bringing a camera panel forward selects that camera everywhere: the
+    /// dock and the scene follow one choice rather than two.
+    pub(crate) fn on_activate(
+        cameras: Vec<AssignedCamera>,
+        mut selection: Signal<Option<Selection>>,
+    ) -> EventHandler<PanelId> {
+        EventHandler::new(move |activated: PanelId| {
+            if let Some(camera) = cameras.iter().find(|camera| camera.panel_id() == activated) {
+                selection.set(Some(camera.selection()));
+            }
+        })
+    }
 }
 
 struct CameraRows<'a>(&'a [PanelId]);

@@ -10,11 +10,11 @@ use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_common::rollout::RolloutSnapshot;
 use spiral_robotics_common::training::{TrainingRun, TrainingSnapshot};
 
-use crate::build_documents::BuildDocumentPersistence;
 use crate::curations::{CurationPersistence, StoredCurationDocument};
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
+use crate::explorations::ExplorationPersistence;
 use crate::rollout_runs::RolloutSessionPersistence;
 use crate::settings::{
     SpiralConnectionSettings, StoredStudioPreferences, StudioPreferencePersistence,
@@ -157,27 +157,27 @@ impl StorageManager {
         CurationPersistence::new(&self.studio).save(document).await
     }
 
-    pub async fn build_documents(
+    pub async fn explorations(
         &self,
-    ) -> Result<Vec<spiral_robotics_common::build::BuildDocumentSummary>, String> {
-        BuildDocumentPersistence::new(&self.studio).list().await
+    ) -> Result<Vec<spiral_robotics_common::exploration::ExplorationSummary>, String> {
+        ExplorationPersistence::new(&self.studio).list().await
     }
 
-    pub async fn load_build_document(
+    pub async fn load_exploration(
         &self,
         document_id: &str,
-    ) -> Result<Option<spiral_robotics_common::build::BuildDocument>, String> {
-        BuildDocumentPersistence::new(&self.studio)
+    ) -> Result<Option<spiral_robotics_common::exploration::ExplorationDocument>, String> {
+        ExplorationPersistence::new(&self.studio)
             .load(document_id)
             .await
     }
 
-    /// Persist one Build document revision; false when another save won.
-    pub async fn save_build_document(
+    /// Persist one exploration revision; false when another save won.
+    pub async fn save_exploration(
         &self,
-        document: &spiral_robotics_common::build::BuildDocument,
+        document: &spiral_robotics_common::exploration::ExplorationDocument,
     ) -> Result<bool, String> {
-        BuildDocumentPersistence::new(&self.studio)
+        ExplorationPersistence::new(&self.studio)
             .save(document)
             .await
     }

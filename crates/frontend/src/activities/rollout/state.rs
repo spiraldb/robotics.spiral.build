@@ -22,12 +22,10 @@ impl RolloutController {
     pub(super) fn use_controller(is_active: ReadSignal<bool>) -> Self {
         let controller = Self::use_state();
         let sessions = crate::shell::project::ProjectSessionSignals::current();
-        let active = use_memo(move || controller.snapshot.read().phase().active());
         let request = crate::client::queries::QueryPolicy::new(
             crate::client::queries::QueryDomain::Rollout,
             500,
         )
-        .with_activity(active.into())
         .use_when(
             move || *is_active.read() && sessions.studio_available(),
             move || {

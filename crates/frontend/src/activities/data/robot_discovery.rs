@@ -3,7 +3,7 @@
 mod browser_tests;
 
 use super::DatasetClient;
-use crate::client::model::ModelRequest;
+use crate::client::completions::ModelRequest;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};

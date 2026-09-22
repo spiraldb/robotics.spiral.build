@@ -6,12 +6,13 @@
    backend code, and viewport math cannot add unrelated CSS utilities. */
 @source "./src/**/*.rs";
 
-/* Build (Workflow › Build) styles live in one file per owner. Each file adds
-   only classes carrying its own prefix; nothing here is edited for Build. */
-@import "./styles/build-canvas.css";
-@import "./styles/build-annotate.css";
-@import "./styles/build-review.css";
-@import "./styles/build-explore.css";
+/* Explore (the Workflow › Explore view) styles live in one file per owner.
+   Each file adds only classes carrying its own prefix; nothing here is edited
+   for Explore. */
+@import "./styles/explore-canvas.css";
+@import "./styles/explore-annotate.css";
+@import "./styles/explore-review.css";
+@import "./styles/explore-similar.css";
 
 /*
   One palette, named by role rather than by hue.
@@ -89,6 +90,21 @@
   /* The one easing the Studio moves with: fast out of the gate, settled early. */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
 
+  /* The chart palette: ECharts paints onto a canvas and cannot resolve var(),
+     so ChartColor::css() reads these off the document root when a chart is
+     built, falling back to the same literals kept in ChartColor::declaration. */
+  --chart-line: #e8e8e6;
+  --chart-ink-soft: #65645f;
+  --chart-ink-faint: #71706c;
+  --chart-surface: #ffffff;
+  --chart-selected: rgba(8, 104, 184, 0.1);
+  --chart-train: #2a78d6;
+  --chart-validation: #d9572b;
+  --chart-throughput: #3a7654;
+  --chart-transfer: #7560b8;
+  --chart-cpu: #d9572b;
+  --chart-gpu: #2a78d6;
+  --chart-memory: #7a58a5;
 }
 
 /* dioxus-workbench, spoken in this palette ---------------------------------
@@ -1352,14 +1368,6 @@
 
   .document-state.is-draft .document-state-dot {
     background: var(--tone-caution);
-  }
-
-  .document-state.is-conflict {
-    @apply text-danger;
-  }
-
-  .document-state.is-conflict .document-state-dot {
-    background: var(--tone-danger);
   }
 
   @keyframes workflow-settle {
@@ -3580,12 +3588,10 @@
 .episode-camera-message .data-text-action { color: var(--tone-accent-ink); text-decoration: underline; }
 
 /* Catalog rows on the shared tree: an episode row is a small grid (ordinal,
-   name, duration, then a second line) and a table row leads from its group's
-   indent. The tree's own row rules are unlayered, so these are too. */
+   name, duration, then a second line). The tree's own row rules are unlayered,
+   so these are too. */
 .data-episode .ui-tree-label { display: grid; grid-template-columns: 2.25rem minmax(0, 1fr) auto; align-items: baseline; column-gap: 8px; padding-block: 4px; color: var(--tone-ink); font-weight: 400; }
 .data-episode .ui-tree-label[aria-pressed="true"] .data-episode-ordinal { color: var(--tone-accent); }
-.data-table-row { width: 100%; min-height: 28px; gap: 8px; padding-left: 20px; padding-right: 12px; font-weight: 400; }
-.data-table-row small { margin-left: auto; flex-shrink: 0; font-size: 10px; color: var(--tone-ink-faint); }
 
 /* Inference metrics read label-left, value-right in one 48px row; the kit's
    strip stacks a fact, so the row form is restated here at the same layer. */
@@ -3648,10 +3654,6 @@
     @apply text-danger;
   }
 
-  .data-table-list {
-    @apply m-0 list-none p-0;
-  }
-
   .data-dataset-count,
   .data-stream-count {
     @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
@@ -3683,26 +3685,6 @@
 
   .data-rail-more {
     @apply px-2 py-1;
-  }
-
-  .data-rail-tables {
-    @apply mt-3 border-t border-line pt-1;
-  }
-
-  .data-rail-tables-count {
-    @apply font-mono text-[10px] tabular-nums text-ink-faint;
-  }
-
-  .data-rail-tables-group {
-    @apply mt-0 border-t-0 pt-0;
-  }
-
-  .data-rail-tables-group > summary {
-    padding-left: 1.25rem;
-  }
-
-  .data-rail-tables-group .data-table-row {
-    padding-left: 2rem;
   }
 
   /* Welcome and dataset overview ---------------------------------------- */
@@ -3773,6 +3755,12 @@
   .data-transport-identity {
     @apply flex min-w-0 items-baseline gap-1.5;
     flex: 0 1 14rem;
+  }
+
+  /* A surface whose own header already names the episode leaves this empty;
+     an empty slot keeps none of its 14rem. */
+  .data-transport-identity:empty {
+    @apply hidden;
   }
 
   .data-transport-identity strong {
@@ -4820,18 +4808,56 @@
 .curation-stage-preview > .curation-episode { padding: 0; }
 .curation-progress-evidence { gap: 8px; }
 
-/* A recorded-camera row and the existing shared timeline, on one clock. */
-.episode-review { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
-.episode-review-cameras { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); align-items: start; gap: 8px; }
-.episode-review-feed { min-width: 0; overflow: hidden; border: 1px solid var(--tone-line); border-radius: 4px; }
-.episode-review-feed h5 { margin: 0; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; color: var(--tone-ink); }
-.episode-review-feed .episode-camera-panel { flex: none; position: relative; min-height: 164px; }
-.episode-review-feed .episode-camera-image { flex: none; min-height: 140px; }
-.episode-review-feed .episode-camera-canvas { display: block; width: 100%; height: auto; max-height: 240px; object-fit: contain; }
-.episode-review .data-timeline { --data-name-w: 9rem; height: auto; min-height: 72px; overflow: hidden; border: 1px solid var(--tone-line); border-radius: 4px; }
-.episode-review .data-transport { flex-wrap: wrap; }
-.episode-review-status { margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
-.episode-review-status[role="alert"] { color: var(--tone-danger); }
+/* One recording seen whole: the camera this view is about at the size it
+   deserves, every other camera of the episode as a strip under it, and the
+   shared timeline pinned beneath them on one clock.
+
+   Three 4:3 recordings in a grid of 16:9 cells letterboxed all three onto the
+   camera mat and left the third alone beside an empty cell. Here a picture is
+   drawn at the recording's own shape — the canvas carries the mat, so nothing
+   is ever matted around — the strip fills the width it is given, and the
+   pictures give height back to the clock rather than the other way round. */
+.episode-inspection { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 8px; }
+.episode-inspection-tiles { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; gap: 8px; }
+.episode-inspection-tile { display: flex; min-width: 0; min-height: 0; flex-direction: column; }
+.episode-inspection-tile h5 { flex: none; margin: 0; padding: 0 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; color: var(--tone-ink-soft); }
+.episode-inspection-tile .episode-camera-canvas { border-radius: 4px; background: var(--tone-camera); }
+
+/* The measured camera. It takes whatever height the composition has left and
+   sits at the largest size that keeps the recording's own shape. */
+.episode-inspection-featured { flex: 1; }
+.episode-inspection-featured .episode-camera-panel { flex: 1; min-height: 0; position: relative; }
+.episode-inspection-featured .episode-camera-image { display: flex; flex: 1; min-height: 0; align-items: center; justify-content: center; background: none; }
+.episode-inspection-featured .episode-camera-canvas { width: auto; height: auto; max-width: 100%; max-height: 100%; }
+
+/* The rest of the recording, at one height and their own widths: context for
+   the picture above, not a second thing to watch. */
+.episode-inspection-strip { display: flex; flex: none; align-items: flex-end; gap: 8px; }
+.episode-inspection-strip:empty { display: none; }
+.episode-inspection-strip .episode-inspection-tile { flex: none; }
+.episode-inspection-strip .episode-inspection-tile h5 { font-size: 10px; }
+.episode-inspection-strip .episode-camera-panel { flex: none; min-width: 5rem; min-height: 4.5rem; position: relative; }
+.episode-inspection-strip .episode-camera-image { flex: none; align-self: flex-start; position: relative; background: none; }
+.episode-inspection-strip .episode-camera-canvas { display: block; width: auto; height: 4.5rem; }
+.episode-inspection-strip .episode-inspection-view { height: 4.5rem; flex: none; border-radius: 4px; }
+.episode-inspection-view { display: flex; flex: 1; min-height: 0; position: relative; aspect-ratio: 16 / 9; border-radius: 4px; overflow: hidden; background: var(--tone-camera); }
+.episode-inspection-view > * { flex: 1; min-width: 0; }
+/* A tile this size is a picture of the robot, not a place to fly a camera
+   around, so the gesture legend and the orientation cube stay out of it. */
+.episode-inspection-view .viewport-help, .episode-inspection-view .view-cube { display: none; }
+/* A recording shown whole has no tracks, so the column their names would sit
+   in is an empty gutter beside the ruler. */
+.episode-inspection[data-tracks="none"] > .data-timeline { --data-name-w: 0px; }
+.episode-inspection[data-tracks="none"] .data-timeline-corner { display: none; }
+.episode-inspection > .data-timeline { flex: none; --data-name-w: 9rem; height: auto; min-height: 72px; overflow: hidden; border: 1px solid var(--tone-line); border-radius: 4px; }
+.episode-inspection .data-transport { flex-wrap: wrap; }
+/* A camera that has not opened yet rests on the sunken surface rather than the
+   mat: the featured picture is most of the pane, and a pane of black reads as a
+   dead feed rather than as one still arriving. The mat comes with the picture. */
+.episode-inspection .episode-camera-message { background: var(--tone-sunken); color: var(--tone-ink-soft); }
+.episode-inspection .episode-camera-message[role="alert"] { color: var(--tone-danger); }
+.episode-inspection-status { margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
+.episode-inspection-status[role="alert"] { color: var(--tone-danger); }
 
 /* Before and after frames sit side by side at a bounded width, so one
    sampled frame never stretches to half the sheet. */
@@ -4844,12 +4870,5 @@
 .curation-stage-preview:has(.curation-progress-evidence) > .curation-stage-heading { flex: none; }
 .curation-stage-preview:has(.curation-progress-evidence) > .curation-episode { flex: 1; min-height: 0; gap: 4px; }
 .curation-progress-evidence { flex: 1; min-height: 0; }
-.curation-progress-evidence .episode-review { flex: 1; min-height: 0; gap: 8px; }
-.curation-progress-evidence .episode-review-cameras { flex: 1; min-height: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); align-items: stretch; }
-.curation-progress-evidence .episode-review-feed { display: flex; flex-direction: column; min-height: 0; }
-.curation-progress-evidence .episode-review-feed h5 { flex: none; padding: 4px 8px; }
-.curation-progress-evidence .episode-camera-panel { flex: 1; min-height: 0; }
-.curation-progress-evidence .episode-camera-image { position: relative; flex: 1; min-height: 0; }
-.curation-progress-evidence .episode-camera-canvas { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; object-fit: contain; }
-.curation-progress-evidence .data-timeline { flex: none; }
+.curation-progress-evidence .episode-inspection { flex: 1; min-height: 0; }
 .curation-progress-evidence .data-timeline-body { flex: none; overflow: hidden; }

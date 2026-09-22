@@ -68,7 +68,7 @@ pub(super) fn ProgressEvidence(
     episode: crate::activities::data::OpenedEpisode,
     selection: ProgressSelection,
 ) -> Element {
-    use crate::activities::data::{EpisodeReview, EpisodeTransport};
+    use crate::activities::data::{EpisodeInspection, EpisodeTransport};
     use crate::components::timeline::{
         NumericTrack, TimelineInterval, TimelineSample, TimelineTrack, TimelineTrackState,
     };
@@ -128,7 +128,7 @@ pub(super) fn ProgressEvidence(
     let mut review = transport.clone();
     rsx! {
         section { class: "curation-evidence curation-progress-evidence",
-            EpisodeReview { episode, transport, tracks, on_interval: move |interval: TimelineInterval| {
+            EpisodeInspection { episode, transport, tracks, on_interval: move |interval: TimelineInterval| {
                 let (start, end) = interval.span();
                 review.play_interval(start - 0.5, end + 0.5);
             } }

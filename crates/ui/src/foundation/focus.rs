@@ -34,6 +34,15 @@ pub(crate) enum RovingStep {
     Last,
 }
 
+/// What arriving in a field does with the text already in it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusReach {
+    /// Leave the caret where the browser puts it.
+    Caret,
+    /// Select the whole value, for a field opened to be replaced.
+    SelectAll,
+}
+
 /// The one owner of focus movement.
 pub struct BrowserFocus;
 
@@ -45,18 +54,29 @@ impl BrowserFocus {
 
     /// Move focus after Dioxus has committed a replacement subtree.
     pub fn after_render(id: String) {
+        Self::reach(id, FocusReach::Caret);
+    }
+
+    /// Move focus to a text field after a render and select what it already
+    /// holds, so the first keystroke replaces the old value rather than
+    /// appending to it.
+    pub fn select_after_render(id: String) {
+        Self::reach(id, FocusReach::SelectAll);
+    }
+
+    fn reach(id: String, reach: FocusReach) {
         dioxus::dioxus_core::spawn_forever(async move {
             for attempt in 0..16 {
                 let delay_ms = if attempt == 0 { 0 } else { 16 };
                 gloo_timers::future::TimeoutFuture::new(delay_ms).await;
-                if Self::element(&id) {
+                if Self::element(&id, reach) {
                     break;
                 }
             }
         });
     }
 
-    fn element(id: &str) -> bool {
+    fn element(id: &str, reach: FocusReach) -> bool {
         use wasm_bindgen::JsCast as _;
 
         let Some(element) = web_sys::window()
@@ -66,7 +86,15 @@ impl BrowserFocus {
         else {
             return false;
         };
-        element.focus().is_ok()
+        if element.focus().is_err() {
+            return false;
+        }
+        if reach == FocusReach::SelectAll
+            && let Some(input) = element.dyn_ref::<web_sys::HtmlInputElement>()
+        {
+            input.select();
+        }
+        true
     }
 
     /// Move focus among a group's members, found from the active element, and

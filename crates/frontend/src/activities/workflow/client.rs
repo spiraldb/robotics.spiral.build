@@ -1,4 +1,6 @@
-//! Stateless document, execution, and model capabilities.
+//! Planning and executing a workflow, and what Spiral can answer about. The
+//! workflow document itself is listed, loaded, and saved by
+//! `client::documents`.
 use crate::client::{
     http::UrlComponent,
     project::ProjectClient,
@@ -6,8 +8,8 @@ use crate::client::{
 };
 use spiral_robotics_common::relations::RelationCatalog;
 use spiral_robotics_common::workflow::{
-    WorkflowSpec, WorkflowSummary,
-    document::{WorkflowDocument, WorkflowPlan, WorkflowRun},
+    WorkflowSpec,
+    document::{WorkflowPlan, WorkflowRun},
 };
 
 #[derive(Clone)]
@@ -19,27 +21,6 @@ impl WorkflowClient {
         Self {
             project: ProjectClient::current(),
         }
-    }
-    pub(super) async fn list(&self) -> Result<Vec<WorkflowSummary>, CommandError> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/workflows"))
-            .await
-    }
-    pub(super) async fn load(&self, id: &str) -> Result<WorkflowDocument, CommandError> {
-        self.project
-            .request(HttpRequest::new(
-                "GET",
-                format!("/api/workflows/{}", id.url_component()),
-            ))
-            .await
-    }
-    pub(super) async fn save(
-        &self,
-        document: &WorkflowDocument,
-    ) -> Result<WorkflowDocument, CommandError> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/workflows/save").json(document))
-            .await
     }
     pub(super) async fn plan(&self, workflow: &WorkflowSpec) -> Result<WorkflowPlan, CommandError> {
         self.project

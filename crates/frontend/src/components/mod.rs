@@ -7,6 +7,14 @@ pub(crate) mod icons;
 
 pub(crate) mod time_series;
 
-pub(crate) mod run_phase;
-
 pub(crate) mod timeline;
+
+pub(crate) mod document_session;
+
+/// The dataset field five surfaces spell separately. Streams D, E, and F move
+/// their remaining callers onto it.
+pub(crate) mod dataset_picker;
+
+pub(crate) mod run_strip;
+
+pub(crate) mod flow_canvas;

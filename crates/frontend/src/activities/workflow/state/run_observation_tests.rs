@@ -30,7 +30,7 @@ impl RunObservationHarness {
         let mut controller = WorkflowController::use_controller();
         use_hook(move || {
             let workflow = controller.spec();
-            controller.document.runs.set(vec![WorkflowRun::new(
+            controller.runs.runs.set(vec![WorkflowRun::new(
                 workflow.clone(),
                 WorkflowRunSnapshot::started(&workflow, "run-one").with_started_ms(1_000),
             )]);
@@ -83,7 +83,7 @@ async fn reopening_and_discard_reuse_saved_plans_without_a_backend_request() {
     let harness = RunObservationHarness::default();
     let mut dom = VirtualDom::new_with_props(RunObservationHarness::render, harness.clone());
     dom.rebuild_in_place();
-    let mut controller = harness.controller();
+    let controller = harness.controller();
     let workflow = WorkflowSpec::new("saved-plan", "Saved query").with_sql("SELECT 42");
     let graph = serde_json::json!({"schema_version":1,"root":0,"nodes":[
         {"id":0,"operator":"Values","inputs":[],"output":{},"properties":{}}
@@ -98,7 +98,12 @@ async fn reopening_and_discard_reuse_saved_plans_without_a_backend_request() {
     .unwrap();
     let document = WorkflowDocument::new(workflow.clone())
         .with_plan(Some(WorkflowSqlPlan::new(&workflow, plan.clone())));
-    dom.in_scope(ScopeId::ROOT, || controller.install(document.clone()));
+    let install = |document: WorkflowDocument| {
+        controller
+            .session
+            .install(document, |opened| controller.adopt(opened));
+    };
+    dom.in_scope(ScopeId::ROOT, || install(document.clone()));
     // This harness has no ProjectClient: a backend request would panic.
     assert_eq!(
         controller.plan_query(&controller.spec()).await.unwrap(),
@@ -112,17 +117,17 @@ async fn reopening_and_discard_reuse_saved_plans_without_a_backend_request() {
         plan
     );
     dom.in_scope(ScopeId::ROOT, || {
-        controller.document.draft.write().set_sql("SELECT 99");
+        controller
+            .session
+            .edit(|document| document.workflow_mut().set_sql("SELECT 99"));
         controller.remember_plan(&workflow, plan.clone());
     });
     assert!(controller.plan_for(&controller.spec()).is_none());
-    dom.in_scope(ScopeId::ROOT, || controller.install(document));
+    dom.in_scope(ScopeId::ROOT, || install(document));
     assert_eq!(
         controller.plan_query(&controller.spec()).await.unwrap(),
         plan
     );
-    dom.in_scope(ScopeId::ROOT, || {
-        controller.install(WorkflowDocument::new(workflow))
-    });
+    dom.in_scope(ScopeId::ROOT, || install(WorkflowDocument::new(workflow)));
     assert!(controller.plan_for(&controller.spec()).is_none());
 }

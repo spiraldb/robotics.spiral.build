@@ -38,19 +38,23 @@ pub use display::{
     FactListProps, FactProps, Notice, NoticeProps, NoticeTone,
 };
 pub use foundation::{
-    ArrowDownIcon, ArrowUpIcon, BrowserFocus, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon,
-    GripIcon, RefreshIcon, UiStyles, UnassignIcon,
+    ArrowDownIcon, ArrowUpIcon, BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon,
+    DeleteIcon, GripIcon, PauseIcon, PlayIcon, RefreshIcon, SkipToEndIcon, SkipToStartIcon,
+    SpinnerIcon, StepBackIcon, StepForwardIcon, StopIcon, UiStyles, UnassignIcon, ZoomInIcon,
+    ZoomOutIcon,
 };
 
 /// Everything a surface typically needs.
 pub mod prelude {
     pub use crate::{
         ActionPurpose, BlockingConfirmation, BrowserFocus, Button, ButtonAuxiliaryHandlers,
-        ButtonSize, ButtonVariant, ChevronIcon, Chip, ChipTone, CloseIcon, ConfirmationCopy,
-        ConfirmationDismissal, ConfirmationResponse, DeleteIcon, Disclosure, EmptyState, Fact,
-        FactLayout, FactList, Field, FieldLayout, FileButton, FileInput, InlineConfirmation,
-        LinkButton, ModeButton, ModeGroup, Notice, NoticeTone, RefreshIcon, Reorder, ReorderHandle,
-        ReorderList, ReorderMove, Select, SheetHeading, SheetPosition, SideSheet, TextInput,
-        TextInputKind, Toggle, Tree, TreeBranch, TreeItem, UnassignIcon,
+        ButtonSize, ButtonVariant, CheckIcon, ChevronIcon, Chip, ChipTone, CloseIcon,
+        ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, DeleteIcon, Disclosure,
+        EmptyState, Fact, FactLayout, FactList, Field, FieldLayout, FileButton, FileInput,
+        InlineConfirmation, LinkButton, ModeButton, ModeGroup, Notice, NoticeTone, PauseIcon,
+        PlayIcon, RefreshIcon, Reorder, ReorderHandle, ReorderList, ReorderMove, Select,
+        SheetHeading, SheetPosition, SideSheet, SkipToEndIcon, SkipToStartIcon, SpinnerIcon,
+        StepBackIcon, StepForwardIcon, StopIcon, TextInput, TextInputKind, Toggle, Tree,
+        TreeBranch, TreeItem, UnassignIcon, ZoomInIcon, ZoomOutIcon,
     };
 }

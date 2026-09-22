@@ -6,11 +6,11 @@
 //! in those contracts). Storage identities, database schemas, hardware-only
 //! state, and native backend types belong to their owning crates.
 
-pub mod build;
 pub mod command_failure;
 pub mod credentials;
 pub mod curation;
 pub mod datasets;
+pub mod exploration;
 pub mod identity;
 pub mod project;
 pub mod recording;

@@ -115,12 +115,12 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
     assert!(contract["paths"]["/hardware/status"]["get"].is_object());
     assert!(contract["paths"]["/curations/save"]["post"].is_object());
     assert!(contract["paths"]["/curation-runs/{id}"]["get"].is_object());
-    assert!(contract["paths"]["/build-documents"]["get"].is_object());
-    assert!(contract["paths"]["/build-documents/{id}"]["get"].is_object());
+    assert!(contract["paths"]["/explorations"]["get"].is_object());
+    assert!(contract["paths"]["/explorations/{id}"]["get"].is_object());
     assert_eq!(
-        contract["paths"]["/build-documents/save"]["post"]["requestBody"]["content"]["application/json"]
+        contract["paths"]["/explorations/save"]["post"]["requestBody"]["content"]["application/json"]
             ["schema"]["$ref"],
-        "#/components/schemas/BuildDocument"
+        "#/components/schemas/ExplorationDocument"
     );
     assert!(contract["paths"]["/queries/episode"]["post"].is_object());
     assert!(contract["paths"]["/datasets/robot"]["post"].is_object());

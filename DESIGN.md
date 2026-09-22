@@ -1236,9 +1236,8 @@ so it owns the center; Results prove it beneath, and the Assistant authors it
 from a tall column at the side.
 
 - **Composition:** One 36px bar, then a 24/76 horizontal split. The bar
-  opens with the workflow glyph and a Build | Agent segmented control. Agent
-  is selected; Build is disabled and identified as planned until that surface
-  exists. The left 24% is a tall
+  opens with the workflow glyph and an Explore | Agent segmented control.
+  Agent is selected here; Explore mounts its own graph and workspace. The left 24% is a tall
   Assistant tile. The right 76%
   divides 46/54 vertically: above, the Graph across the full width; below,
   Results across the full width. A pipeline is wider than it is tall, so the

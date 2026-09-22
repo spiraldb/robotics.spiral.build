@@ -9,15 +9,17 @@
 mod workflow_graph;
 use dioxus::prelude::*;
 use dioxus_flow::{
-    Background, BackgroundVariant, Edge, EdgeKind, Flow, Handle, HandleKind, LayoutDirection,
-    LayoutOptions, MiniMap, Node, NodeViewCtx, Point, Rect, Side, Viewport, use_flow,
-    use_flow_handle,
+    Background, BackgroundVariant, Edge, EdgeKind, Flow, Handle, HandleKind, MiniMap, Node,
+    NodeViewCtx, Point, Rect, Side, use_flow, use_flow_handle,
 };
 use spiral_robotics_common::workflow::plan::{DiagnosticNode, SpiralPlanReport};
 use workflow_graph::{
     StageContent, StageKind, StageOutput, SummaryKind, WorkflowGraph, WorkflowStage,
 };
 
+use crate::components::flow_canvas::{
+    CanvasControls, CardGraph, FlowFit, FlowMargins, PopoverPlacement, ReadableViewport,
+};
 use crate::components::icons::{
     DataIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon, ResultNodeIcon,
 };
@@ -98,39 +100,9 @@ impl From<&WorkflowGraph> for PlanFlow {
                 })
             })
             .collect::<Vec<_>>();
-        let geometry = nodes
-            .iter()
-            .map(|node| dioxus_flow::LayoutNode {
-                id: node.id.clone(),
-                size: node.rect().size(),
-            })
-            .collect::<Vec<_>>();
-        let connections = edges
-            .iter()
-            .map(|edge| (edge.source.clone(), edge.target.clone()))
-            .collect::<Vec<_>>();
-        let positions = dioxus_flow::compute_layout(
-            &geometry,
-            &connections,
-            &LayoutOptions::default()
-                .direction(LayoutDirection::LeftToRight)
-                .gaps(28.0, 56.0),
-        );
-        for node in &mut nodes {
-            if let Some(position) = positions.get(&node.id) {
-                node.position = *position;
-            }
-        }
-        // Reading order follows the layout: left to right, then top to bottom.
-        let mut order = nodes
-            .iter()
-            .map(|node| (node.position.x, node.position.y, node.id.clone()))
-            .collect::<Vec<_>>();
-        order.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        for (rank, (_, _, id)) in order.into_iter().enumerate() {
-            if let Some(node) = nodes.iter_mut().find(|node| node.id == id) {
-                node.data.order = rank;
-            }
+        let order = CardGraph::left_to_right(28.0, 56.0).rank_layout(&mut nodes, &edges);
+        for (node, rank) in nodes.iter_mut().zip(order) {
+            node.data.order = rank;
         }
         Self { nodes, edges }
     }
@@ -202,49 +174,28 @@ impl GraphSelection {
     }
 }
 
-/// Where the sheet sits, as inline style: left-aligned with the selected
-/// cards, below them when the pane has room, above them when only that side
-/// has room, and over them from the top of a canvas too short for either,
-/// always inside the canvas. `anchor` and `container` are both in screen
-/// pixels. Every placement names `top` and `bottom` (one of them `auto`):
-/// the style attribute is diffed property by property, so a declaration
-/// that merely disappears stays applied, and a sheet that moved from above
-/// to below would keep both edges and collapse to a line.
-fn popover_placement(anchor: Rect, container: Rect) -> String {
-    const WIDTH: f64 = 320.0;
-    const GAP: f64 = 8.0;
-    const COMFORTABLE: f64 = 240.0;
-    const MIN_HEIGHT: f64 = 120.0;
-    let left = anchor.x.min(container.width - GAP - WIDTH).max(GAP);
-    let below_top = (anchor.max_y() + GAP).max(GAP);
-    let below_space = container.height - GAP - below_top;
-    let above_bottom = (container.height - anchor.y + GAP).max(GAP);
-    let above_space = container.height - GAP - above_bottom;
-    if below_space >= COMFORTABLE || (below_space >= above_space && below_space >= MIN_HEIGHT) {
-        format!("left:{left:.0}px;top:{below_top:.0}px;bottom:auto;max-height:{below_space:.0}px")
-    } else if above_space >= MIN_HEIGHT {
-        format!(
-            "left:{left:.0}px;top:auto;bottom:{above_bottom:.0}px;max-height:{above_space:.0}px"
-        )
-    } else {
-        let space = (container.height - 2.0 * GAP).max(GAP);
-        format!("left:{left:.0}px;top:{GAP:.0}px;bottom:auto;max-height:{space:.0}px")
-    }
+/// What the canvas itself has selected: a card, a connection, or nothing.
+#[derive(Clone, Copy)]
+struct CanvasSelection {
+    nodes: Signal<Vec<Node<StageNode>>>,
+    edges: Signal<Vec<Edge>>,
 }
 
-/// Closing the sheet is deselecting: the canvas and the sheet always agree
-/// on what is selected.
-fn deselect(mut nodes: Signal<Vec<Node<StageNode>>>, mut edges: Signal<Vec<Edge>>) {
-    nodes.with_mut(|nodes| {
-        for node in nodes.iter_mut() {
-            node.selected = false;
-        }
-    });
-    edges.with_mut(|edges| {
-        for edge in edges.iter_mut() {
-            edge.selected = false;
-        }
-    });
+impl CanvasSelection {
+    /// Closing the sheet is deselecting: the canvas and the sheet always agree
+    /// on what is selected.
+    fn clear(mut self) {
+        self.nodes.with_mut(|nodes| {
+            for node in nodes.iter_mut() {
+                node.selected = false;
+            }
+        });
+        self.edges.with_mut(|edges| {
+            for edge in edges.iter_mut() {
+                edge.selected = false;
+            }
+        });
+    }
 }
 
 #[component]
@@ -252,6 +203,7 @@ fn WorkflowPlanGraph(graph: WorkflowGraph, active: bool) -> Element {
     let initial = use_hook(|| PlanFlow::from(&graph));
     let nodes = use_signal(|| initial.nodes);
     let mut edges = use_signal(|| initial.edges);
+    let selection = CanvasSelection { nodes, edges };
     let flow = use_flow_handle::<StageNode>();
     let overflowing = use_signal(|| false);
     use_effect(use_reactive((&active,), move |(active,)| {
@@ -290,6 +242,13 @@ fn WorkflowPlanGraph(graph: WorkflowGraph, active: bool) -> Element {
     let root = graph.root.clone();
     let card_root = root.clone();
     let stage_count = graph.stages.len();
+    // A selection made off the pane — from the sheet's own links or a resize —
+    // brings its card back into view.
+    let revealed = match selected() {
+        Some(GraphSelection::Stage { stage, .. }) => stage.id.clone(),
+        Some(GraphSelection::Edge(details)) => details.source.id.clone(),
+        None => String::new(),
+    };
     rsx! {
         div { class: "workflow-plan-graph",
             div { class: "workflow-flow-wrap",
@@ -297,7 +256,7 @@ fn WorkflowPlanGraph(graph: WorkflowGraph, active: bool) -> Element {
                 // the pane, the selected card, or the sheet itself.
                 onkeydown: move |event| {
                     if event.key() == Key::Escape && selected.peek().is_some() {
-                        deselect(nodes, edges);
+                        selection.clear();
                     }
                 },
                 Flow { id: "workflow-native-plan", class: "workflow-flow",
@@ -306,25 +265,22 @@ fn WorkflowPlanGraph(graph: WorkflowGraph, active: bool) -> Element {
                     is_valid_connection: move |_| false,
                     node_view: move |ctx: NodeViewCtx<StageNode>| rsx! { PlanStageCard { ctx, root: card_root.clone() } },
                     Background { variant: BackgroundVariant::Dots, gap: 22.0, size: 0.7 }
-                    PlanInitialViewport { overflowing }
-                    PlanCanvasControls { stage_count }
+                    // The controls own the bottom 40px; the rest of the pane is canvas.
+                    FlowFit {
+                        fit: ReadableViewport::new(FlowMargins::new(24.0, 20.0, 48.0), MIN_READABLE_ZOOM),
+                        overflowing,
+                        reveal: revealed,
+                    }
+                    CanvasControls {
+                        label: "Graph view of {stage_count} stages",
+                        fit_label: "Fit the whole graph",
+                    }
                     if overflowing() { MiniMap { width: 112.0, height: 64.0 } }
-                    if let Some(selection) = selected() {
-                        StagePopover { selection, root: root.clone(), on_close: move |_| deselect(nodes, edges) }
+                    if let Some(shown) = selected() {
+                        StagePopover { selection: shown, root: root.clone(), on_close: move |_| selection.clear() }
                     }
                 }
             }
-        }
-    }
-}
-
-/// Zoom and fit live on the canvas itself, quiet until needed.
-#[component]
-fn PlanCanvasControls(stage_count: usize) -> Element {
-    rsx! {
-        crate::components::canvas_controls::CanvasControls {
-            label: format!("Graph view of {stage_count} stages"),
-            fit_label: "Fit the whole graph",
         }
     }
 }
@@ -387,7 +343,7 @@ fn StagePopover(selection: GraphSelection, root: String, on_close: EventHandler<
             .reduce(|a, b| a.union(&b))
             .unwrap_or(Rect::ZERO)
     };
-    let placement = popover_placement(anchor, container);
+    let placement = PopoverPlacement::of(anchor, container);
     rsx! {
         section {
             class: "workflow-stage-popover",
@@ -571,89 +527,6 @@ fn StageColumns(output: serde_json::Value, added: Vec<String>) -> Element {
 }
 
 #[component]
-fn PlanInitialViewport(overflowing: Signal<bool>) -> Element {
-    let core = use_flow();
-    let mut previous_layout = use_signal(|| None::<(Rect, Rect)>);
-    let mut automatic_viewport = use_signal(|| None::<Viewport>);
-    let mut user_controlled = use_signal(|| false);
-    let mut overflowing = overflowing;
-    use_effect(move || {
-        let container = *core.container.read();
-        let geometry = core.geoms.read();
-        if container.width <= 0.0 || container.height <= 0.0 {
-            return;
-        }
-        let Some(bounds) = geometry
-            .iter()
-            .map(|node| node.rect)
-            .reduce(|a, b| a.union(&b))
-        else {
-            return;
-        };
-        let previous = *previous_layout.peek();
-        if previous == Some((container, bounds)) {
-            return;
-        }
-        let current = *core.viewport.peek();
-        if automatic_viewport
-            .peek()
-            .is_some_and(|last| last != current)
-        {
-            user_controlled.set(true);
-        }
-        previous_layout.set(Some((container, bounds)));
-        // Dock layout can settle after Flow mounts. Refit until the user moves
-        // the viewport, then preserve its graph-space center and zoom on resize.
-        if *user_controlled.peek() {
-            if let Some((previous, _)) = previous {
-                core.set_viewport(
-                    Viewport::new(
-                        current.x + (container.width - previous.width) / 2.0,
-                        current.y + (container.height - previous.height) / 2.0,
-                        current.zoom,
-                    ),
-                    0,
-                );
-            }
-            return;
-        }
-        // The controls own the bottom 40px; the rest of the pane is canvas.
-        let safe = Rect::new(
-            24.0,
-            20.0,
-            (container.width - 48.0).max(1.0),
-            (container.height - 68.0).max(1.0),
-        );
-        // Fit the whole graph while it stays readable. A pipeline wider than
-        // the pane is going to be panned anyway, so it keeps its cards at the
-        // largest size the pane's height allows, starts at its sources, and
-        // gets the minimap: legible stages beat a complete but unreadable one.
-        let fit_zoom = (safe.width / bounds.width).min(safe.height / bounds.height);
-        let fits = fit_zoom >= MIN_READABLE_ZOOM;
-        if *overflowing.peek() != !fits {
-            overflowing.set(!fits);
-        }
-        let viewport = if fits {
-            Viewport::fit(Some(bounds), safe, MIN_READABLE_ZOOM, 1.0)
-        } else {
-            let zoom = (safe.height / bounds.height).clamp(MIN_READABLE_ZOOM, 1.0);
-            let source_x = geometry
-                .iter()
-                .map(|node| node.rect.x)
-                .fold(f64::INFINITY, f64::min);
-            Viewport::new(
-                safe.x - source_x * zoom,
-                container.height / 2.0 - bounds.center().y * zoom,
-                zoom,
-            )
-        };
-        automatic_viewport.set(Some(viewport));
-        core.set_viewport(viewport, 0);
-    });
-    rsx! {}
-}
-
-#[component]
 fn PlanStageCard(ctx: NodeViewCtx<StageNode>, root: String) -> Element {
     let stage = &ctx.node.data.stage;
     let kind = stage.kind(&root);
@@ -780,49 +653,6 @@ mod tests {
             };
             assert_eq!(output["schema"]["fields"][0]["name"], name);
             assert_eq!(edge.label.as_deref(), Some(side));
-        }
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn sheet_sits_below_above_or_over_the_card_and_always_names_both_edges() {
-        let container = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 1000.0,
-            height: 400.0,
-        };
-        let card = |y: f64| Rect {
-            x: 100.0,
-            y,
-            width: 168.0,
-            height: 69.0,
-        };
-        // Room below: aligned with the card, the sheet starts under it.
-        let below = popover_placement(card(20.0), container);
-        assert_eq!(below, "left:100px;top:97px;bottom:auto;max-height:295px");
-        // Room only above: the sheet ends over the card.
-        let above = popover_placement(card(300.0), container);
-        assert_eq!(above, "left:100px;top:auto;bottom:108px;max-height:284px");
-        // A canvas too short for either side: the sheet covers from the top
-        // and never leaves the canvas.
-        let short = Rect {
-            width: 1000.0,
-            height: 180.0,
-            ..container
-        };
-        let over = popover_placement(card(60.0), short);
-        assert_eq!(over, "left:100px;top:8px;bottom:auto;max-height:164px");
-        // The right edge clamps the sheet inside the canvas.
-        let clamped = popover_placement(
-            Rect {
-                x: 900.0,
-                ..card(20.0)
-            },
-            container,
-        );
-        assert!(clamped.starts_with("left:672px;"));
-        for placement in [below, above, over, clamped] {
-            assert!(placement.contains("top:") && placement.contains("bottom:"));
         }
     }
 

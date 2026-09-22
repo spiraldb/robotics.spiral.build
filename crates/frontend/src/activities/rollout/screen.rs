@@ -9,7 +9,7 @@ use crate::shell::{
     frame::WorkspaceFrame, project::ProjectSessionSignals, state::StudioProjectState,
 };
 use dioxus::prelude::*;
-use dioxus_workbench::{Panel, PanelId, PanelWorkspace};
+use dioxus_workbench::{Panel, PanelWorkspace};
 
 struct RolloutCameras;
 impl RolloutCameras {
@@ -56,11 +56,10 @@ impl RolloutCameras {
 
 #[component]
 pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
-    let workspace = crate::shell::activity::WorkspaceActivity::provide(
+    let (workspace, project) = crate::shell::activity::WorkspaceActivity::mount(
         crate::shell::activity::Activity::Rollout,
         is_active,
     );
-    let project = StudioProjectState::current();
     let telemetry =
         HardwareViewState::use_state(project, is_active, ProjectSessionSignals::current());
     let robot_selection = RobotSelection::use_selection(telemetry.snapshot());
@@ -78,7 +77,7 @@ fn RolloutPanels(
     controller: super::state::RolloutController,
     training_history: crate::activities::training::history::TrainingHistory,
 ) -> Element {
-    let mut selection = robot_selection.selected();
+    let selection = robot_selection.selected();
     let follower = telemetry
         .snapshot()
         .read()
@@ -112,9 +111,7 @@ fn RolloutPanels(
         div { class: "min-h-0 min-w-0 overflow-hidden", tabindex: "-1",
             PanelWorkspace {
                 panels, initial_layout, layout_scope: Some("spiral_robotics.panel-layout.v6.rollout".to_owned()),
-                on_panel_activate: move |id: PanelId| {
-                    if let Some(camera) = cameras.iter().find(|camera| camera.panel_id() == id) { selection.set(Some(camera.selection())); }
-                },
+                on_panel_activate: CameraWorkspaceLayout::on_activate(cameras, selection),
             }
         }
     }
@@ -123,6 +120,7 @@ fn RolloutPanels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dioxus_workbench::PanelId;
     use spiral_robotics_common::robots::{CameraBinding, RobotAvailability, RobotSummary};
 
     #[wasm_bindgen_test::wasm_bindgen_test]

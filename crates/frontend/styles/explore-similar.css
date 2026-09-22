@@ -1,0 +1,226 @@
+/* Explore › similar styles. Prefix every class with `explore-similar-`. Use @layer components
+   like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
+   must be unlayered too. */
+
+@layer components {
+  /* Query or categories on top, then the review takes the rest. The workspace
+     itself never scrolls: the ranking inside it does. */
+  .explore-similar-workspace {
+    @apply flex h-full min-h-0 min-w-0 flex-col;
+    background: var(--tone-surface);
+  }
+
+  /* The query row keeps the field wide and its two actions at their own
+     width, so a long query never squeezes the buttons out of reach. */
+  .explore-similar-query {
+    @apply flex flex-wrap items-center gap-2 border-b border-line px-3 py-2;
+  }
+
+  .explore-similar-query-input {
+    @apply min-w-48 flex-1;
+  }
+
+  /* The same 28px band the annotation's status line is, so the three
+     workspaces open at one height. */
+  .explore-similar-actions {
+    @apply flex min-h-7 flex-wrap items-center gap-3 border-b border-line px-3 py-0.5;
+  }
+
+  .explore-similar-note {
+    @apply m-0 px-3 py-1 text-[11px] text-ink-soft;
+  }
+
+  .explore-similar-query ~ .explore-similar-note,
+  .explore-similar-actions .explore-similar-note {
+    @apply p-0;
+  }
+
+  /* The action sits at the strip's far end, away from the counts it replaces,
+     the way the annotation's status line puts its own. It is `ConfirmedRerun`,
+     whose button is wrapped, so the wrapper is what moves. */
+  .explore-similar-actions > .explore-rerun,
+  .explore-similar-actions > .ui-button {
+    @apply ml-auto;
+  }
+
+  /* Which episodes the answer reached: one cell per episode the annotation
+     measured, in the order it measured them. A status line rather than a
+     chart — one 24px row, the count in real text beside it, and the tint only
+     ever repeating what that count already says. The surface sets `--hue`:
+     the search has none and falls back to the accent, an open category lends
+     the strip its own. */
+  .explore-similar-coverage {
+    @apply flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-3 py-1;
+  }
+
+  .explore-similar-open .explore-similar-coverage {
+    @apply border-0 p-0;
+  }
+
+  .explore-similar-coverage-count {
+    @apply m-0 shrink-0 text-[11px] text-ink-soft;
+  }
+
+  /* The cells take the rest of the line and wrap under the count when the
+     column is too narrow for both, so a 16rem index shows the same strip a
+     900px workspace does. */
+  .explore-similar-coverage-cells {
+    @apply flex min-w-32 flex-1 basis-48 items-stretch gap-px;
+  }
+
+  /* A 24px target painting a 16px bar, so the row stays a status line while
+     the cell stays clickable. */
+  .explore-similar-coverage-cell {
+    @apply h-6 min-w-1 max-w-3 flex-1 cursor-pointer border-0;
+    padding: 4px 0;
+    background-color: color-mix(in srgb, var(--hue, var(--tone-accent)) var(--fill, 0%), var(--tone-line));
+    background-clip: content-box;
+    transition:
+      padding 100ms ease-out,
+      background-color 100ms ease-out;
+  }
+
+  .explore-similar-coverage-cell:hover:not(:disabled) {
+    padding: 2px 0;
+  }
+
+  /* The episode the evidence column is showing stands to full height, so the
+     strip says where the recording came from without a second colour. */
+  .explore-similar-coverage-cell[aria-pressed="true"] {
+    padding: 0;
+  }
+
+  .explore-similar-coverage-cell:disabled {
+    @apply cursor-default;
+  }
+
+  /* Six cards at most, so they sit in one band above the members rather than a
+     grid that reflows as the pane resizes. */
+  .explore-similar-categories {
+    @apply grid gap-2 border-b border-line p-3;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
+  }
+
+  .explore-similar-category {
+    @apply flex flex-col items-stretch gap-1 rounded border border-line bg-surface p-2 text-left;
+    transition:
+      background-color 100ms ease-out,
+      border-color 100ms ease-out;
+  }
+
+  .explore-similar-category[data-selected="true"] {
+    border-color: var(--hue);
+    background: color-mix(in srgb, var(--hue) 8%, var(--tone-surface));
+  }
+
+  /* One row of chips while a category is open: the same six categories, the
+     same two counts, in the height a single line costs. */
+  .explore-similar-chips {
+    @apply flex flex-wrap items-center gap-1 border-b border-line px-3 py-2;
+  }
+
+  /* The name is what a chip is for, so it keeps its width and the row wraps
+     rather than cutting six names to three words each. */
+  .explore-similar-chip {
+    @apply flex min-h-6 max-w-full cursor-pointer items-baseline gap-1.5 rounded border border-line bg-surface px-1.5 py-0.5 text-left;
+    transition:
+      background-color 100ms ease-out,
+      border-color 100ms ease-out;
+  }
+
+  .explore-similar-chip[data-selected="true"] {
+    border-color: var(--hue);
+    background: color-mix(in srgb, var(--hue) 8%, var(--tone-surface));
+  }
+
+  .explore-similar-chip-name {
+    @apply truncate text-[11px] font-medium text-ink;
+    flex: 0 1 auto;
+  }
+
+  .explore-similar-chip-count {
+    @apply shrink-0 font-mono text-[10px] tabular-nums;
+    color: var(--tone-ink-soft);
+  }
+
+  .explore-similar-category-open {
+    @apply flex min-h-6 w-full cursor-pointer items-baseline justify-between gap-2 border-0 bg-transparent p-0 text-left;
+  }
+
+  .explore-similar-category-name {
+    @apply text-[12px] font-medium text-ink;
+  }
+
+  /* The share, the rows, and the episodes they came from, directly under the
+     bar that draws the first of them. */
+  .explore-similar-category-count {
+    @apply m-0 font-mono text-[10px] tabular-nums;
+    color: var(--tone-ink-soft);
+  }
+
+  /* How much of the table joined this category, so 91 and 12 do not read with
+     the same weight. The bar is never the only carrier: the count is beside it. */
+  .explore-similar-category-share {
+    @apply h-0.5 w-full overflow-hidden rounded-full;
+    background: var(--tone-line);
+  }
+
+  .explore-similar-category-share span {
+    @apply block h-full rounded-full;
+    background: var(--hue);
+  }
+
+  .explore-similar-category-definition {
+    @apply m-0 text-[11px] leading-4 text-ink-soft;
+  }
+
+  /* The representatives are evidence for the definition above them, so they
+     stay quiet and never grow past three lines. */
+  .explore-similar-category-examples {
+    @apply m-0 flex list-none flex-col gap-0.5 p-0 text-[10px] p-0;
+    color: var(--tone-ink-soft);
+  }
+
+  .explore-similar-category-examples li {
+    @apply truncate;
+  }
+
+  /* The open category names itself above its members, and keeps its editing
+     behind a disclosure: renaming and merging are occasional, reading the
+     members is the reason you opened it. It holds the top of the index while
+     the members scroll under it, so the strip stays where it was clicked. */
+  .explore-similar-open {
+    @apply sticky top-0 z-[1] flex flex-col gap-1 border-b border-line bg-surface px-3 py-2;
+  }
+
+  .explore-similar-open-name {
+    @apply m-0 flex min-w-0 flex-wrap items-baseline gap-x-2 text-[12px] font-semibold text-ink;
+  }
+
+  /* The open category holds the top of the index, and its definition is the
+     one sentence that says what belongs in it, so it is never cut off. */
+  .explore-similar-open-definition {
+    @apply min-w-0 flex-1 basis-40 text-[11px] font-normal leading-4 text-ink-soft;
+  }
+
+  /* A definition is a sentence, so it gets a row of its own rather than a
+     149px box showing twenty of its hundred characters. */
+  .explore-similar-editor {
+    @apply grid items-end gap-2 rounded border border-line bg-sunken p-2;
+    grid-template-columns: minmax(8rem, 1fr) auto auto;
+  }
+
+  .explore-similar-editor > .ui-field:nth-child(2) {
+    grid-column: 1 / -1;
+  }
+
+  /* Nothing here reports work in progress, so under `reduce` every one of
+     these transitions becomes the state change it was decorating. */
+  @media (prefers-reduced-motion: reduce) {
+    .explore-similar-coverage-cell,
+    .explore-similar-category,
+    .explore-similar-chip {
+      transition: none;
+    }
+  }
+}

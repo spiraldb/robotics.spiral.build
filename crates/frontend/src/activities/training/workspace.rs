@@ -1,6 +1,5 @@
 //! Training setup and run monitoring.
 
-use crate::activities::dataset_catalog::DatasetCatalogFeedback;
 use std::collections::BTreeSet;
 
 use charming::Chart;
@@ -24,11 +23,12 @@ use spiral_robotics_ui::{
 };
 
 use crate::components::charts::{
-    COLOR_CPU, COLOR_GPU, COLOR_INK_FAINT, COLOR_LINE, COLOR_MEMORY, COLOR_SELECTED, COLOR_SURFACE,
-    COLOR_THROUGHPUT, COLOR_TRAIN, COLOR_TRANSFER, COLOR_VALIDATION, CharmingChart, ChartPoints,
-    MONO_FONT, StudioTooltip, TooltipRateUnit,
+    CharmingChart, ChartColor, ChartPoints, MONO_FONT, StudioTooltip, TooltipRateUnit,
 };
-use crate::format::LossPresentation;
+use crate::components::dataset_picker::DatasetCatalog;
+use crate::format::{
+    ByteCountPresentation, ByteRatePresentation, LossPresentation, MillisecondPresentation,
+};
 use crate::shell::state::StudioProjectState;
 
 const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
@@ -36,7 +36,7 @@ const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 
 #[component]
 fn TrainingPanels(
-    data: crate::activities::dataset_catalog::DatasetChoices,
+    project: StudioProjectState,
     controller: super::state::TrainingController,
     training_history: super::history::TrainingHistory,
 ) -> Element {
@@ -62,9 +62,7 @@ fn TrainingPanels(
         "Setup",
         "training-control",
         rsx! {
-            TrainingRunControl {
-                data, controller, training_history,
-            }
+            TrainingRunControl { project, controller, training_history }
         },
     )
     .with_class("training-control-editor");
@@ -83,7 +81,7 @@ fn TrainingPanels(
         .collect::<Vec<_>>();
     let registered_runs = opened_runs
         .iter()
-        .map(|run| (run.id().training_panel_id(), run.id().to_owned()))
+        .map(|run| (run.panel_id(), run.id().to_owned()))
         .collect::<Vec<_>>();
     let mut panels = vec![control, history];
     let right_panel_ids = if opened_runs.is_empty() {
@@ -104,10 +102,10 @@ fn TrainingPanels(
     } else {
         let ids = opened_runs
             .iter()
-            .map(|run| run.id().training_panel_id())
+            .map(|run| run.panel_id())
             .collect::<Vec<_>>();
         for run in opened_runs {
-            let panel_id = run.id().training_panel_id();
+            let panel_id = run.panel_id();
             panels.push(
                 Panel::new(
                     panel_id,
@@ -129,8 +127,8 @@ fn TrainingPanels(
 
     let selected_panel = controller
         .selected_run()
-        .filter(|id| snapshot.runs().iter().any(|run| run.id() == id))
-        .map(|id| PanelId::from(id.training_panel_id()));
+        .and_then(|id| snapshot.runs().iter().find(|run| run.id() == id))
+        .map(|run| PanelId::from(run.panel_id()));
     let closeable_runs = registered_runs.clone();
     let left = LayoutNode::split(
         "training-left-rail",
@@ -181,18 +179,17 @@ fn TrainingPanels(
 
 #[component]
 fn TrainingRunControl(
-    data: crate::activities::dataset_catalog::DatasetChoices,
+    project: StudioProjectState,
     controller: super::state::TrainingController,
     training_history: super::history::TrainingHistory,
 ) -> Element {
-    let studio = StudioProjectState::current();
-    let dataset_id = data.selected().read().to_owned();
+    let catalog = DatasetCatalog::use_catalog();
     let snapshot = training_history.snapshot().read().to_owned();
     let readiness = snapshot.readiness().to_owned();
     let active_run = snapshot.active_run().cloned();
-    let mut selected_dataset = data.selected();
     let config = controller.config();
-    let dataset_ids = data
+    let dataset_id = config.dataset_id().to_owned();
+    let dataset_ids = catalog
         .datasets()
         .into_iter()
         .filter_map(|dataset| {
@@ -285,7 +282,7 @@ fn TrainingRunControl(
                     div { class: "training-active-heading",
                         div {
                             strong { "{run.config().run_name()}" }
-                            span { class: run.phase().presentation_class(), "{run.phase().label()}" }
+                            span { class: run.phase_class(), "{run.phase().label()}" }
                             small { "Dataset · {run.config().dataset_id()}" }
                         }
                         span { class: "training-step-readout", "{run.current_step()} / {run.config().steps()}" }
@@ -315,7 +312,7 @@ fn TrainingRunControl(
                         aria_busy: run.phase() == TrainingRunPhase::Stopping || stopping.is_some(),
                         onclick: move |_| {
                             let id = active_id.clone().unwrap_or_default();
-                            controller.stop(studio, id);
+                            controller.stop(project, id);
                         },
                         if run.phase() == TrainingRunPhase::Stopping || stopping.is_some() { "Stopping…" } else { "Stop training" }
                     }
@@ -330,13 +327,34 @@ fn TrainingRunControl(
                     Select {
                         value: dataset_id.clone(),
                         disabled: active_run.is_some(),
-                        onchange: move |value| selected_dataset.set(value),
+                        onchange: move |value: String| {
+                            controller.edit_config(move |config| config.set_dataset_id(value));
+                        },
                         for id in dataset_ids.iter() {
-                            option { value: "{id}", "{id}" }
+                            // Stored bare, written the way every other activity
+                            // writes it.
+                            option { value: "{id}", "dataset_{id}" }
                         }
                     }
                 }
-                DatasetCatalogFeedback { data }
+                if let Some(problem) = catalog.problem() {
+                    div { class: "training-inline-state training-inline-state-caution", role: "status",
+                        div { class: "training-inline-copy",
+                            strong { "Could not load datasets" }
+                            span { "{problem}" }
+                            p { "{problem.recovery_guidance()}" }
+                            Button {
+                                purpose: ActionPurpose::Retry,
+                                variant: ButtonVariant::Outline,
+                                aria_label: "Retry loading datasets",
+                                onclick: move |_| catalog.reread(),
+                                "Retry"
+                            }
+                        }
+                    }
+                } else if catalog.reading() {
+                    p { class: "text-[11px] text-ink-faint", role: "status", "Loading datasets…" }
+                }
                 FactList { mono: true, class: "training-source-meta",
                     Fact { label: "Cameras", "{camera_summary}" }
                 }
@@ -540,7 +558,7 @@ fn TrainingRunControl(
                 aria_busy: starting,
                 title: if active_run.is_some() { "Stop the active run first".to_owned() } else if let Some(reason) = training_blocker { reason.to_owned() } else if !dataset_valid { "Choose a valid dataset ID first".to_owned() } else if !readiness.ready() { readiness_recovery.clone() } else { "Start training".to_owned() },
                 onclick: move |_| {
-                    controller.start(studio, training_history);
+                    controller.start(project, training_history);
                 },
                 if starting { "Starting…" } else { "Run training" }
             }
@@ -613,7 +631,7 @@ fn TrainingHistoryRow(
                 },
                 span { class: "training-history-name", "{run.config().run_name()}" }
                 span { class: "training-history-dataset", "{run.config().dataset_id()}" }
-                span { class: run.phase().presentation_class(), "{run.phase().label()}" }
+                span { class: run.phase_class(), "{run.phase().label()}" }
                 span { class: "training-history-step", "{run.current_step()} / {run.config().steps()}" }
             }
             Button {
@@ -694,7 +712,7 @@ fn TrainingRunDetail(run: TrainingRun, details_loaded: bool) -> Element {
                 div { class: "training-run-identity",
                     div {
                         h2 { "{run.config().run_name()}" }
-                        span { class: run.phase().presentation_class(), "{run.phase().label()}" }
+                        span { class: run.phase_class(), "{run.phase().label()}" }
                     }
                     p { "Dataset · {run.config().dataset_id()} · {run.config().policy().label()} · {run.config().device()}" }
                 }
@@ -746,36 +764,6 @@ fn TrainingRunDetail(run: TrainingRun, details_loaded: bool) -> Element {
     }
 }
 
-trait TrainingIdentityPresentation {
-    fn training_panel_id(&self) -> String;
-    fn chart_dom_id(&self, prefix: &str) -> String;
-    fn training_chart_group(&self) -> String;
-}
-
-impl TrainingIdentityPresentation for str {
-    fn training_panel_id(&self) -> String {
-        format!("training-run-{self}")
-    }
-
-    fn chart_dom_id(&self, prefix: &str) -> String {
-        let safe = self
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                    character
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>();
-        format!("{prefix}-{safe}")
-    }
-
-    fn training_chart_group(&self) -> String {
-        self.chart_dom_id("training-step-window")
-    }
-}
-
 trait TrainingReadinessPresentation {
     fn guidance(&self) -> (String, String);
 }
@@ -818,9 +806,10 @@ fn TrainingLearning(run: TrainingRun) -> Element {
     let latest_train = latest_train.unwrap_or_else(|| "—".to_owned());
     let latest_validation = latest_validation.unwrap_or_else(|| "—".to_owned());
     let lr = lr.unwrap_or_else(|| "—".to_owned());
-    let chart_id = run.id().chart_dom_id("training-loss");
-    let chart_group = run.id().training_chart_group();
+    let chart_id = run.chart_dom_id("training-loss");
+    let chart_group = run.chart_group();
     let loss_chart = run.loss_chart();
+    let ticks = run.event_ticks();
 
     rsx! {
         section { class: "training-learning",
@@ -865,20 +854,12 @@ fn TrainingLearning(run: TrainingRun) -> Element {
             div { class: "training-event-strip",
                 div { class: "training-event-track",
                     i { class: "training-event-axis" }
-                    for checkpoint in &run.checkpoints() {
+                    for tick in ticks {
                         span {
-                            class: "training-event-tick training-event-checkpoint",
-                            style: "left: {checkpoint.step().percent_of(run.config().steps()):.3}%",
-                            title: "Checkpoint saved at step {checkpoint.step()}",
-                            "aria-label": "Checkpoint at step {checkpoint.step()}",
-                        }
-                    }
-                    for point in run.metrics().iter().filter(|point| point.event().is_some()) {
-                        span {
-                            class: if point.event().is_some_and(|event| event.contains("loader stall")) { "training-event-tick training-event-stall" } else { "training-event-tick training-event-validation" },
-                            style: "left: {point.step().percent_of(run.config().steps()):.3}%",
-                            title: point.event_label(),
-                            "aria-label": point.event_label(),
+                            class: "training-event-tick {tick.class}",
+                            style: "left: {tick.percent:.3}%",
+                            title: "{tick.label}",
+                            "aria-label": "{tick.label}",
                         }
                     }
                 }
@@ -929,19 +910,13 @@ fn TrainingInputs(run: TrainingRun) -> Element {
 
 #[component]
 fn TrainingPerformance(run: TrainingRun) -> Element {
-    let metrics = run.metrics();
-    let last = metrics.last();
-    let observed_steps = last
-        .map_or(run.current_step(), |point| {
-            point.step().max(run.current_step())
-        })
-        .max(1);
-    let chart_group = run.id().training_chart_group();
+    let last = run.metrics().last();
+    let chart_group = run.chart_group();
     let throughput = last
         .map(|point| format!("{:.1} samples/s", point.examples_per_second()))
         .unwrap_or_else(|| "—".to_owned());
     let transfer = last
-        .map(|point| point.transfer_bytes_per_second().formatted_rate())
+        .map(|point| point.transfer_bytes_per_second().byte_rate_label())
         .unwrap_or_else(|| "—".to_owned());
     let cpu = last
         .and_then(|point| point.cpu_percent())
@@ -953,28 +928,20 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
         .unwrap_or_else(|| "—".to_owned());
     let memory = last
         .and_then(|point| point.memory_bytes())
-        .map(TrainingByteCountPresentation::formatted_bytes)
+        .map(ByteCountPresentation::byte_label)
         .unwrap_or_else(|| "—".to_owned());
-    let loader_ms = last
-        .and_then(|point| point.loader_ms())
-        .formatted_milliseconds();
+    let loader_ms = last.and_then(|point| point.loader_ms()).millis_label();
     let arrow_encode_ms = last
         .and_then(|point| point.arrow_encode_ms())
-        .formatted_milliseconds();
-    let upload_ms = last
-        .and_then(|point| point.upload_ms())
-        .formatted_milliseconds();
-    let device_copy_ms = last
-        .and_then(|point| point.device_copy_ms())
-        .formatted_milliseconds();
-    let model_ms = last
-        .and_then(|point| point.model_ms())
-        .formatted_milliseconds();
-    let throughput_chart = ResourceSeries::Throughput.chart(metrics, observed_steps);
-    let transfer_chart = ResourceSeries::Transfer.chart(metrics, observed_steps);
-    let cpu_chart = ResourceSeries::Cpu.chart(metrics, observed_steps);
-    let gpu_chart = ResourceSeries::Gpu.chart(metrics, observed_steps);
-    let memory_chart = ResourceSeries::Memory.chart(metrics, observed_steps);
+        .millis_label();
+    let upload_ms = last.and_then(|point| point.upload_ms()).millis_label();
+    let device_copy_ms = last.and_then(|point| point.device_copy_ms()).millis_label();
+    let model_ms = last.and_then(|point| point.model_ms()).millis_label();
+    let throughput_chart = ResourceSeries::Throughput.chart(&run);
+    let transfer_chart = ResourceSeries::Transfer.chart(&run);
+    let cpu_chart = ResourceSeries::Cpu.chart(&run);
+    let gpu_chart = ResourceSeries::Gpu.chart(&run);
+    let memory_chart = ResourceSeries::Memory.chart(&run);
 
     rsx! {
         section { class: "training-resources",
@@ -986,11 +953,11 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
                 Fact { label: "Model", title: "Runtime forward pass, backward pass, gradient clipping, and optimizer step.", "{model_ms}" }
             }
             div { class: "training-resource-grid",
-                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("training-rate"), "Training rate", throughput).with_chart(throughput_chart, chart_group.clone()).with_presentation("resource-throughput", "Samples completed per second.") }
-                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("input-rate"), "Input rate", transfer).with_chart(transfer_chart, chart_group.clone()).with_presentation("resource-transfer", "Prepared camera data per second.") }
-                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("cpu-utilization"), "CPU", cpu).with_chart(cpu_chart, chart_group.clone()).with_presentation("resource-cpu", "Runtime process CPU utilization. 100% is one fully occupied core.") }
-                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("gpu-utilization"), "GPU", gpu).with_chart(gpu_chart, chart_group.clone()).with_presentation("resource-gpu", "Whole-device utilization reported by the selected runtime; other processes may contribute.") }
-                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("memory-usage"), "Memory", memory).with_chart(memory_chart, chart_group).with_presentation("resource-memory", "Current resident memory used by the runtime process, including training allocations.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.chart_dom_id("training-rate"), "Training rate", throughput).with_chart(throughput_chart, chart_group.clone()).with_presentation("resource-throughput", "Samples completed per second.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.chart_dom_id("input-rate"), "Input rate", transfer).with_chart(transfer_chart, chart_group.clone()).with_presentation("resource-transfer", "Prepared camera data per second.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.chart_dom_id("cpu-utilization"), "CPU", cpu).with_chart(cpu_chart, chart_group.clone()).with_presentation("resource-cpu", "Runtime process CPU utilization. 100% is one fully occupied core.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.chart_dom_id("gpu-utilization"), "GPU", gpu).with_chart(gpu_chart, chart_group.clone()).with_presentation("resource-gpu", "Whole-device utilization reported by the selected runtime; other processes may contribute.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.chart_dom_id("memory-usage"), "Memory", memory).with_chart(memory_chart, chart_group).with_presentation("resource-memory", "Current resident memory used by the runtime process, including training allocations.") }
             }
         }
     }
@@ -1069,13 +1036,58 @@ enum ResourceSeries {
     Memory,
 }
 
-trait TrainingPhasePresentation {
-    fn presentation_class(self) -> &'static str;
+/// One run, as Training draws it: what its panel and charts are called, what
+/// its phase looks like, and the series and marks read off its metrics.
+/// `TrainingRun` lives in `crates/common`, so this is an extension trait rather
+/// than an inherent impl; it is one trait for one subject, not one per method.
+trait TrainingPresentation {
+    fn panel_id(&self) -> String;
+    fn chart_dom_id(&self, prefix: &str) -> String;
+    /// Every chart of one run shares a zoom group, so dragging one step window
+    /// moves them all.
+    fn chart_group(&self) -> String;
+    fn phase_class(&self) -> &'static str;
+    /// The last step any evidence mentions, which is what the step axis spans.
+    fn observed_steps(&self) -> u64;
+    fn metric_series(&self, value: impl Fn(&TrainingMetricPoint) -> Option<f64>) -> DataFrame;
+    fn loss_chart(&self) -> Chart;
+    /// Checkpoints and metric events on one axis, already placed and labelled.
+    fn event_ticks(&self) -> Vec<TrainingEventTick>;
 }
 
-impl TrainingPhasePresentation for TrainingRunPhase {
-    fn presentation_class(self) -> &'static str {
-        match self {
+/// One mark on the run's event strip.
+struct TrainingEventTick {
+    class: &'static str,
+    percent: f64,
+    label: String,
+}
+
+impl TrainingPresentation for TrainingRun {
+    fn panel_id(&self) -> String {
+        format!("training-run-{}", self.id())
+    }
+
+    fn chart_dom_id(&self, prefix: &str) -> String {
+        let safe = self
+            .id()
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        format!("{prefix}-{safe}")
+    }
+
+    fn chart_group(&self) -> String {
+        self.chart_dom_id("training-step-window")
+    }
+
+    fn phase_class(&self) -> &'static str {
+        match self.phase() {
             TrainingRunPhase::Starting | TrainingRunPhase::Running | TrainingRunPhase::Stopping => {
                 "training-phase training-phase-active"
             }
@@ -1084,31 +1096,42 @@ impl TrainingPhasePresentation for TrainingRunPhase {
             TrainingRunPhase::Failed => "training-phase training-phase-failed",
         }
     }
-}
 
-trait TrainingRunPresentation {
-    fn loss_chart(&self) -> Chart;
-}
-
-impl TrainingRunPresentation for TrainingRun {
-    fn loss_chart(&self) -> Chart {
-        let train = self
-            .metrics()
-            .series_data(|point| Some(point.train_loss()), true);
-        let validation = self
-            .metrics()
-            .series_data(|point| point.validation_loss(), true);
-        let observed_steps = self
-            .metrics()
+    fn observed_steps(&self) -> u64 {
+        self.metrics()
             .last()
             .map_or(self.current_step(), |point| {
                 point.step().max(self.current_step())
             })
-            .max(1);
+            .max(1)
+    }
+
+    fn metric_series(&self, value: impl Fn(&TrainingMetricPoint) -> Option<f64>) -> DataFrame {
+        let points = self
+            .metrics()
+            .iter()
+            .filter_map(|point| {
+                let value = value(point)?;
+                (value.is_finite() && value >= 0.0).then_some((point.step() as f64, value))
+            })
+            .collect::<Vec<_>>();
+        points
+            .downsample_extrema(TRAINING_CHART_POINT_BUDGET)
+            .into_iter()
+            .map(|(step, value)| TrainingChartStyle::point(step, Some(value)))
+            .collect()
+    }
+
+    fn loss_chart(&self) -> Chart {
+        let train = self.metric_series(|point| Some(point.train_loss()).filter(|loss| *loss > 0.0));
+        let validation =
+            self.metric_series(|point| point.validation_loss().filter(|loss| *loss > 0.0));
+        let (train_color, validation_color) =
+            (ChartColor::Train.css(), ChartColor::Validation.css());
 
         Chart::new()
             .animation(false)
-            .color(vec![COLOR_TRAIN, COLOR_VALIDATION])
+            .color(vec![train_color.clone(), validation_color.clone()])
             .tooltip(StudioTooltip::numeric(4))
             .grid(
                 Grid::new()
@@ -1121,43 +1144,67 @@ impl TrainingRunPresentation for TrainingRun {
             .x_axis(
                 TrainingChartStyle::axis(AxisType::Value, true)
                     .min(0)
-                    .max(observed_steps as f64)
+                    .max(self.observed_steps() as f64)
                     .split_number(4),
             )
             .y_axis(TrainingChartStyle::axis(AxisType::Value, true).split_number(5))
             .data_zoom(TrainingChartStyle::slider_zoom(48.0, 12.0))
             .series(
-                MetricLineSpec::new("train-loss", "Train", COLOR_TRAIN)
+                MetricLineSpec::new("train-loss", "Train", train_color)
                     .with_width(2.0)
                     .render(train),
             )
             .series(
-                MetricLineSpec::new("validation-loss", "Validation", COLOR_VALIDATION)
+                MetricLineSpec::new("validation-loss", "Validation", validation_color)
                     .with_width(1.8)
                     .render(validation),
             )
     }
+
+    fn event_ticks(&self) -> Vec<TrainingEventTick> {
+        let place = |step: u64| {
+            (step as f64 / self.config().steps().max(1) as f64 * 100.0).clamp(0.0, 100.0)
+        };
+        self.checkpoints()
+            .iter()
+            .map(|checkpoint| TrainingEventTick {
+                class: "training-event-checkpoint",
+                percent: place(checkpoint.step()),
+                label: format!("Checkpoint saved at step {}", checkpoint.step()),
+            })
+            .chain(self.metrics().iter().filter_map(|point| {
+                let event = point.event()?;
+                Some(TrainingEventTick {
+                    class: if event.contains("loader stall") {
+                        "training-event-stall"
+                    } else {
+                        "training-event-validation"
+                    },
+                    percent: place(point.step()),
+                    label: format!("{event} at step {}", point.step()),
+                })
+            }))
+            .collect()
+    }
 }
 
 impl ResourceSeries {
-    fn chart(self, metrics: &[TrainingMetricPoint], observed_steps: u64) -> Chart {
+    fn chart(self, run: &TrainingRun) -> Chart {
         let (id, name, color) = match self {
-            Self::Throughput => ("training-rate", "Training rate", COLOR_THROUGHPUT),
-            Self::Transfer => ("input-rate", "Input rate", COLOR_TRANSFER),
-            Self::Cpu => ("cpu-utilization", "CPU", COLOR_CPU),
-            Self::Gpu => ("gpu-utilization", "GPU", COLOR_GPU),
-            Self::Memory => ("memory-usage", "Memory", COLOR_MEMORY),
+            Self::Throughput => ("training-rate", "Training rate", ChartColor::Throughput),
+            Self::Transfer => ("input-rate", "Input rate", ChartColor::Transfer),
+            Self::Cpu => ("cpu-utilization", "CPU", ChartColor::Cpu),
+            Self::Gpu => ("gpu-utilization", "GPU", ChartColor::Gpu),
+            Self::Memory => ("memory-usage", "Memory", ChartColor::Memory),
         };
-        let data = metrics.series_data(
-            |point| match self {
-                Self::Throughput => Some(point.examples_per_second()),
-                Self::Transfer => Some(point.transfer_bytes_per_second()),
-                Self::Cpu => point.cpu_percent(),
-                Self::Gpu => point.gpu_percent(),
-                Self::Memory => point.memory_bytes().map(|value| value as f64),
-            },
-            false,
-        );
+        let color = color.css();
+        let data = run.metric_series(|point| match self {
+            Self::Throughput => Some(point.examples_per_second()),
+            Self::Transfer => Some(point.transfer_bytes_per_second()),
+            Self::Cpu => point.cpu_percent(),
+            Self::Gpu => point.gpu_percent(),
+            Self::Memory => point.memory_bytes().map(|value| value as f64),
+        });
         let tooltip = match self {
             Self::Throughput => StudioTooltip::rate(TooltipRateUnit::SamplesPerSecond),
             Self::Transfer => StudioTooltip::rate(TooltipRateUnit::BytesPerSecond),
@@ -1167,13 +1214,13 @@ impl ResourceSeries {
 
         Chart::new()
             .animation(false)
-            .color(vec![color])
+            .color(vec![color.clone()])
             .tooltip(tooltip)
             .grid(Grid::new().left(0).right(0).top(6).bottom(40))
             .x_axis(
                 TrainingChartStyle::axis(AxisType::Value, false)
                     .min(0)
-                    .max(observed_steps.max(1) as f64),
+                    .max(run.observed_steps() as f64),
             )
             .y_axis(match self {
                 Self::Gpu => TrainingChartStyle::axis(AxisType::Value, false)
@@ -1185,7 +1232,7 @@ impl ResourceSeries {
             })
             .data_zoom(TrainingChartStyle::slider_zoom(8.0, 8.0))
             .series(
-                MetricLineSpec::new(id, name, color)
+                MetricLineSpec::new(id, name, color.clone())
                     .with_width(1.5)
                     .render(data)
                     .area_style(AreaStyle::new().color(color).opacity(0.09)),
@@ -1193,47 +1240,15 @@ impl ResourceSeries {
     }
 }
 
-trait TrainingMetricSeries {
-    fn series_data(
-        &self,
-        value: impl Fn(&TrainingMetricPoint) -> Option<f64>,
-        positive_only: bool,
-    ) -> DataFrame;
-}
-
-impl TrainingMetricSeries for [TrainingMetricPoint] {
-    fn series_data(
-        &self,
-        value: impl Fn(&TrainingMetricPoint) -> Option<f64>,
-        positive_only: bool,
-    ) -> DataFrame {
-        let points = self
-            .iter()
-            .filter_map(|point| {
-                let value = value(point)?;
-                (value.is_finite()
-                    && (!positive_only || value > 0.0)
-                    && (positive_only || value >= 0.0))
-                    .then_some((point.step() as f64, value))
-            })
-            .collect::<Vec<_>>();
-        points
-            .downsample_extrema(TRAINING_CHART_POINT_BUDGET)
-            .into_iter()
-            .map(|(step, value)| TrainingChartStyle::point(step, Some(value)))
-            .collect()
-    }
-}
-
-struct MetricLineSpec<'a> {
-    id: &'a str,
-    name: &'a str,
-    color: &'a str,
+struct MetricLineSpec {
+    id: &'static str,
+    name: &'static str,
+    color: String,
     width: f64,
 }
 
-impl<'a> MetricLineSpec<'a> {
-    const fn new(id: &'a str, name: &'a str, color: &'a str) -> Self {
+impl MetricLineSpec {
+    fn new(id: &'static str, name: &'static str, color: String) -> Self {
         Self {
             id,
             name,
@@ -1276,9 +1291,9 @@ impl TrainingChartStyle {
             .left(left)
             .right(right)
             .bottom(4)
-            .background_color(COLOR_SURFACE)
-            .border_color(COLOR_LINE)
-            .filler_color(COLOR_SELECTED)
+            .background_color(ChartColor::Surface.css())
+            .border_color(ChartColor::Line.css())
+            .filler_color(ChartColor::Selected.css())
     }
 
     fn axis(kind: AxisType, visible: bool) -> Axis {
@@ -1292,94 +1307,17 @@ impl TrainingChartStyle {
                     .show(visible)
                     .font_family(MONO_FONT)
                     .font_size(10)
-                    .color(COLOR_INK_FAINT),
+                    .color(ChartColor::InkFaint.css()),
             )
             .split_line(
                 SplitLine::new()
                     .show(visible)
-                    .line_style(LineStyle::new().color(COLOR_LINE).width(1)),
+                    .line_style(LineStyle::new().color(ChartColor::Line.css()).width(1)),
             )
     }
 
     fn point(x: f64, y: Option<f64>) -> DataPoint {
         DataPoint::from(vec![CompositeValue::from(x), CompositeValue::from(y)])
-    }
-}
-
-trait TrainingStepPresentation {
-    fn percent_of(self, total_steps: u64) -> f64;
-}
-
-impl TrainingStepPresentation for u64 {
-    fn percent_of(self, total_steps: u64) -> f64 {
-        (self as f64 / total_steps.max(1) as f64 * 100.0).clamp(0.0, 100.0)
-    }
-}
-
-trait TrainingMetricEventPresentation {
-    fn event_label(&self) -> String;
-}
-
-impl TrainingMetricEventPresentation for TrainingMetricPoint {
-    fn event_label(&self) -> String {
-        format!(
-            "{} at step {}",
-            self.event().unwrap_or("Event"),
-            self.step()
-        )
-    }
-}
-
-trait TrainingByteRatePresentation {
-    fn formatted_rate(self) -> String;
-}
-
-impl TrainingByteRatePresentation for f64 {
-    fn formatted_rate(self) -> String {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-        const MIB: f64 = 1024.0 * 1024.0;
-        if self >= GIB {
-            format!("{:.2} GiB/s", self / GIB)
-        } else {
-            format!("{:.1} MiB/s", self / MIB)
-        }
-    }
-}
-
-trait TrainingByteCountPresentation {
-    fn formatted_bytes(self) -> String;
-}
-
-impl TrainingByteCountPresentation for u64 {
-    fn formatted_bytes(self) -> String {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-        const MIB: f64 = 1024.0 * 1024.0;
-        let bytes = self as f64;
-        if bytes >= GIB {
-            format!("{:.2} GiB", bytes / GIB)
-        } else {
-            format!("{:.1} MiB", bytes / MIB)
-        }
-    }
-}
-
-trait TrainingDurationPresentation {
-    fn formatted_milliseconds(self) -> String;
-}
-
-impl TrainingDurationPresentation for Option<f64> {
-    fn formatted_milliseconds(self) -> String {
-        self.filter(|value| value.is_finite() && *value >= 0.0)
-            .map(|value| {
-                if value >= 1_000.0 {
-                    format!("{:.2} s", value / 1_000.0)
-                } else if value >= 10.0 {
-                    format!("{value:.0} ms")
-                } else {
-                    format!("{value:.1} ms")
-                }
-            })
-            .unwrap_or_else(|| "—".to_owned())
     }
 }
 
@@ -1406,14 +1344,7 @@ impl RuntimeDevicePresentation for str {
 mod tests {
 
     use super::*;
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn phase_timings_keep_submillisecond_detail_and_scan_long_uploads_as_seconds() {
-        assert_eq!(Some(0.26).formatted_milliseconds(), "0.3 ms");
-        assert_eq!(Some(149.4).formatted_milliseconds(), "149 ms");
-        assert_eq!(Some(2_963.0).formatted_milliseconds(), "2.96 s");
-        assert_eq!(None.formatted_milliseconds(), "—");
-    }
+    use spiral_robotics_common::training::TrainingCheckpoint;
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn runtime_device_options_submit_identifiers_instead_of_hardware_labels() {
@@ -1448,16 +1379,37 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn throughput_uses_the_optimizer_step_axis_and_slider_zoom() {
-        let metrics = vec![TrainingMetricPoint::new(50, 0.0).with_throughput(0.0, 25.0)];
-        let chart = ResourceSeries::Throughput.chart(&metrics, 100);
-        let option = serde_json::to_value(chart).expect("chart should serialize");
+        let run = TrainingRun::default()
+            .with_phase(TrainingRunPhase::Running, 100)
+            .with_metrics(vec![
+                TrainingMetricPoint::new(50, 0.0).with_throughput(0.0, 25.0),
+            ]);
+        let option = serde_json::to_value(ResourceSeries::Throughput.chart(&run))
+            .expect("chart should serialize");
         assert_eq!(option["xAxis"]["max"], 100.0);
         assert_eq!(option["series"][0]["data"][0][0], 50.0);
         assert_eq!(option["dataZoom"].as_array().map(Vec::len), Some(1));
         assert_eq!(option["dataZoom"][0]["type"], "slider");
         assert_eq!(option["dataZoom"][0]["show"], true);
         assert_eq!(option["dataZoom"][0]["xAxisIndex"], 0);
-        assert_eq!(50_u64.percent_of(100), 50.0);
+    }
+
+    /// Checkpoints and metric events land on one axis, as a fraction of the
+    /// steps the run was configured for.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn event_ticks_place_checkpoints_and_stalls_on_the_configured_step_axis() {
+        let run = TrainingRun::default()
+            .with_checkpoints(vec![TrainingCheckpoint::new(50, 0)])
+            .with_metrics(vec![
+                TrainingMetricPoint::new(25, 0.5)
+                    .with_timeline(1.0, Some("loader stall".to_owned())),
+            ]);
+        let ticks = run.event_ticks();
+        assert_eq!(ticks[0].class, "training-event-checkpoint");
+        assert_eq!(ticks[0].label, "Checkpoint saved at step 50");
+        assert_eq!(ticks[1].class, "training-event-stall");
+        assert_eq!(ticks[1].label, "loader stall at step 25");
+        assert!(ticks[0].percent > ticks[1].percent);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -1479,13 +1431,12 @@ mod tests {
 
 #[component]
 pub(crate) fn TrainingWorkspace(is_active: ReadSignal<bool>) -> Element {
-    let workspace = crate::shell::activity::WorkspaceActivity::provide(
+    let (workspace, project) = crate::shell::activity::WorkspaceActivity::mount(
         crate::shell::activity::Activity::Training,
         is_active,
     );
-    let choices = crate::activities::dataset_catalog::DatasetChoices::use_choices();
-    let controller = super::state::TrainingController::use_controller(&choices.selected().read());
+    let controller = super::state::TrainingController::use_controller();
     let history =
         super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());
-    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Training(history), TrainingPanels { data: choices, controller, training_history: history } } }
+    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Training(history), TrainingPanels { project, controller, training_history: history } } }
 }

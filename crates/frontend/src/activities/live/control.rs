@@ -11,7 +11,7 @@ use spiral_robotics_common::robots::{
     JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonAuxiliaryHandlers, ButtonVariant};
-use spiral_robotics_viewport as arm;
+use spiral_robotics_viewport as viewport;
 
 use crate::robots::Selection;
 use crate::robots::{HardwareViewState, RobotSelection};
@@ -48,45 +48,69 @@ pub(super) fn JointPanel(
         };
     };
 
-    let telemetry = hardware.robot_telemetry(robot.id());
+    // Every readout below reports one connected arm. An arm that is not
+    // reporting has nothing to say in any of them, so the panel answers that
+    // once here rather than printing eight dashed cells above the answer.
+    let Some(telemetry) = hardware.robot_telemetry(robot.id()) else {
+        return rsx! {
+            p { class: "px-2 py-1 text-[11px] text-ink-faint", "Connect this arm to see its joints." }
+        };
+    };
+    let arm = ConnectedArm::new(robot, telemetry);
 
     rsx! {
         div { class: "live-joint-panel flex flex-col",
-            if let Some(error) = telemetry.as_ref().and_then(|robot| robot.error().to_owned()) {
+            if let Some(error) = arm.telemetry().error() {
                 p { class: "mx-2 mt-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger",
                     "{error}"
                 }
             }
 
-            ToolReadout {
-                telemetry: telemetry.clone(),
-                robot: robot.clone(),
-            }
+            ToolReadout { arm: arm.clone() }
 
-            ConditionReadout {
-                robot: robot.clone(),
-                telemetry: telemetry.clone(),
-            }
+            ConditionReadout { arm: arm.clone() }
 
             JointControls {
                 project, hardware,
-                robot: robot.clone(),
+                arm: arm.clone(),
                 behavior: JointInteraction::new(robot_selection.selected(), on_select, on_point),
             }
 
-            MotorDetail {
-                selection: robot_selection.selected(),
-                robot: robot.clone(),
-                telemetry: telemetry.clone(),
-            }
+            MotorDetail { selection: robot_selection.selected(), arm }
 
         }
     }
 }
 
+/// The one arm the panel is reporting on, and what it is currently reporting.
+///
+/// The summary and the telemetry are always read together and are always both
+/// present once the panel has decided it has an arm to show, so they travel as
+/// one value rather than as two props each child has to re-pair.
+#[derive(Clone, PartialEq)]
+struct ConnectedArm {
+    robot: RobotSummary,
+    telemetry: RobotTelemetry,
+}
+
+impl ConnectedArm {
+    const fn new(robot: RobotSummary, telemetry: RobotTelemetry) -> Self {
+        Self { robot, telemetry }
+    }
+
+    const fn robot(&self) -> &RobotSummary {
+        &self.robot
+    }
+
+    const fn telemetry(&self) -> &RobotTelemetry {
+        &self.telemetry
+    }
+}
+
 /// Where the arm is holding its gripper, solved from the robot description.
 #[component]
-fn ToolReadout(telemetry: Option<RobotTelemetry>, robot: RobotSummary) -> Element {
+fn ToolReadout(arm: ConnectedArm) -> Element {
+    let robot = arm.robot().clone();
     let configured = use_memo(use_reactive(&robot, |robot| {
         robot
             .document()?
@@ -94,10 +118,11 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, robot: RobotSummary) -> Elemen
             .ok()?
             .and_then(|configuration| ConfiguredModel::new(configuration).ok())
     }));
-    let pose = telemetry
-        .as_ref()
-        .filter(|_| robot.calibrated())
-        .and_then(|telemetry| {
+    let telemetry = arm.telemetry();
+    let pose = arm
+        .robot()
+        .calibrated()
+        .then(|| {
             let configured = configured.read();
             let configured = configured.as_ref()?;
             let positions = configured.measured_positions(telemetry.joints());
@@ -107,19 +132,16 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, robot: RobotSummary) -> Elemen
                 .tool_link()
                 .and_then(|link| configured.model.tool_position(link, &positions));
             Some((tip, configured.model.joint_fraction("gripper", &positions)))
-        });
+        })
+        .flatten();
     let tip = pose.and_then(|(tip, _)| tip);
-    let tracking_error = telemetry.as_ref().and_then(|robot| {
-        robot
-            .joints()
-            .iter()
-            .filter_map(|joint| Some((joint.degrees()? - joint.target_degrees()?).abs()))
-            .filter(|error| error.is_finite())
-            .reduce(f64::max)
-    });
-    let lagging = telemetry
-        .as_ref()
-        .is_some_and(RobotTelemetry::tracking_lagging);
+    let tracking_error = telemetry
+        .joints()
+        .iter()
+        .filter_map(|joint| Some((joint.degrees()? - joint.target_degrees()?).abs()))
+        .filter(|error| error.is_finite())
+        .reduce(f64::max);
+    let lagging = telemetry.tracking_lagging();
 
     rsx! {
         dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-1 pt-2",
@@ -189,10 +211,8 @@ impl RobotMotorLimits for RobotSummary {
 /// direction. Neither cell names which motor is hot: that does not fit in a
 /// readout, and the joint row a few pixels below tints itself instead.
 #[component]
-fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Element {
-    let joints = telemetry
-        .map(|robot| robot.joints().to_owned())
-        .unwrap_or_default();
+fn ConditionReadout(arm: ConnectedArm) -> Element {
+    let joints = arm.telemetry().joints();
 
     // The hottest motor decides both thermal cells, so they always describe the
     // same motor as each other.
@@ -278,11 +298,8 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
 /// deliberate act rather than a live value, so opening this does not put the
 /// layout at the mercy of the telemetry stream.
 #[component]
-fn MotorDetail(
-    selection: Signal<Option<Selection>>,
-    robot: RobotSummary,
-    telemetry: Option<RobotTelemetry>,
-) -> Element {
+fn MotorDetail(selection: Signal<Option<Selection>>, arm: ConnectedArm) -> Element {
+    let robot = arm.robot();
     let selected = selection.read().to_owned();
     let Some(name) = selected.and_then(|selection| match selection {
         Selection::Joint {
@@ -293,18 +310,18 @@ fn MotorDetail(
     }) else {
         return rsx! {};
     };
-    let Some(joint) = telemetry.and_then(|telemetry| {
-        telemetry
-            .joints()
-            .iter()
-            .find(|joint| joint.name() == name)
-            .cloned()
-    }) else {
+    let Some(joint) = arm
+        .telemetry()
+        .joints()
+        .iter()
+        .find(|joint| joint.name() == name)
+        .cloned()
+    else {
         return rsx! {};
     };
 
-    let label =
-        arm::Joint::named(joint.name()).map_or(joint.name().to_owned(), |j| j.label().to_owned());
+    let label = viewport::Joint::named(joint.name())
+        .map_or(joint.name().to_owned(), |named| named.label().to_owned());
     let model = robot
         .motors()
         .iter()
@@ -440,17 +457,17 @@ fn Readout(label: String, value: Option<String>, details: ReadoutDetails) -> Ele
 fn JointControls(
     project: StudioProjectState,
     hardware: HardwareViewState,
-    robot: RobotSummary,
+    arm: ConnectedArm,
     behavior: JointInteraction,
 ) -> Element {
-    let telemetry = hardware.robot_telemetry(robot.id());
+    let robot = arm.robot();
     let JointInteraction {
         selection,
         on_select,
         on_point,
     } = behavior;
-    let torque = telemetry.as_ref().is_some_and(|robot| robot.torque());
-    let drivable = hardware.is_manual_target(robot.id()) && torque && robot.calibrated();
+    let drivable =
+        hardware.is_manual_target(robot.id()) && arm.telemetry().torque() && robot.calibrated();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
     // is only meaningful for as long as this arm is actually being driven, so
@@ -529,12 +546,6 @@ fn JointControls(
         }
     });
 
-    let Some(telemetry) = telemetry else {
-        return rsx! {
-            p { class: "px-2 py-1 text-[11px] text-ink-faint", "Connect this arm to see its joints." }
-        };
-    };
-
     let id = robot.id().to_owned();
 
     rsx! {
@@ -549,7 +560,7 @@ fn JointControls(
                     "Calibrate this arm in the robot explorer to command its joints."
                 }
             }
-            for joint in telemetry.joints().to_owned() {
+            for joint in arm.telemetry().joints().to_owned() {
                 JointRow {
                     key: "{joint.name()}",
                     joint: joint.clone(),
@@ -671,8 +682,8 @@ struct JointRowActions {
 
 #[component]
 fn JointRow(joint: JointTelemetry, state: JointRowState, actions: JointRowActions) -> Element {
-    let label =
-        arm::Joint::named(joint.name()).map_or(joint.name().to_owned(), |j| j.label().to_owned());
+    let label = viewport::Joint::named(joint.name())
+        .map_or(joint.name().to_owned(), |j| j.label().to_owned());
     let measured = joint.normalized().unwrap_or(0.0);
     let shown = state.value.unwrap_or(measured);
     let interactive = state.drivable && joint.range().is_some();

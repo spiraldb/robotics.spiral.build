@@ -12,7 +12,7 @@ use spiral_robotics_ui::{
     TextInput, TextInputKind,
 };
 
-use crate::format::LossPresentation;
+use crate::format::{GroupedCountPresentation, LossPresentation};
 use crate::robots::HardwareViewState;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
@@ -20,7 +20,7 @@ use crate::shell::state::StudioProjectState;
 const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
 
 #[derive(Clone, Debug, PartialEq)]
-struct CheckpointChoice {
+pub(super) struct CheckpointChoice {
     identity: CheckpointIdentity,
     step: u64,
     validation_loss: Option<f64>,
@@ -56,7 +56,7 @@ enum PendingRolloutAction {
 
 /// Rollout never asks the operator to choose a target. The configured follower
 /// role is the only arm this activity is allowed to command.
-pub(crate) trait RobotFleet {
+pub(super) trait RobotFleet {
     fn follower(&self) -> Option<RobotSummary>;
 }
 
@@ -176,7 +176,7 @@ pub(super) fn RolloutWorkbench(
                         for choice in &checkpoints {
                             option {
                                 value: choice.identity.key.clone(),
-                                "{choice.identity.run_name} · step {choice.step.rollout_count()}"
+                                "{choice.identity.run_name} · step {choice.step.grouped_label()}"
                                 if choice.identity.run_active { " · training" }
                             }
                         }
@@ -193,7 +193,7 @@ pub(super) fn RolloutWorkbench(
                     }
                 } else if let Some(run) = training.active_run() {
                     p { class: "rollout-empty-copy",
-                        "Checkpoints appear every {run.config().checkpoint_every().rollout_count()} steps."
+                        "Checkpoints appear every {run.config().checkpoint_every().grouped_label()} steps."
                     }
                 } else {
                     p { class: "rollout-empty-copy", "Train a policy to create a checkpoint." }
@@ -442,16 +442,13 @@ impl RolloutCameraSummary {
 #[component]
 pub(super) fn InferencePanel(controller: super::state::RolloutController) -> Element {
     let rollout = controller.snapshot().read().to_owned();
-    let metrics = &rollout.metrics();
-    let latency = metrics.last_latency_ms().rollout_metric();
-    let model = metrics.last_model_ms().rollout_metric();
-    let misses = metrics.missed_deadlines().to_string();
+    let metrics = rollout.metrics().to_owned();
     rsx! {
         section { class: "rollout-inference",
             FactList { layout: FactLayout::Strip, mono: true, class: "rollout-metric-strip",
-                InferenceMetric { label: "Latency", value: latency, unit: "ms" }
-                InferenceMetric { label: "Model", value: model, unit: "ms" }
-                InferenceMetric { label: "Misses", value: misses, unit: "" }
+                InferenceMetric { label: "Latency", value: rollout.latency_label(RolloutLatency::Last), unit: "ms" }
+                InferenceMetric { label: "Model", value: rollout.latency_label(RolloutLatency::Model), unit: "ms" }
+                InferenceMetric { label: "Misses", value: metrics.missed_deadlines().to_string(), unit: "" }
             }
             if metrics.inference_count() == 0 {
                 div { class: "rollout-inference-empty",
@@ -460,10 +457,8 @@ pub(super) fn InferencePanel(controller: super::state::RolloutController) -> Ele
                 }
             } else {
                 div { class: "rollout-inference-empty",
-                    strong { "{metrics.command_count().rollout_count()} commands" }
-                    p {
-                        "{metrics.inference_count().rollout_count()} chunks · mean {metrics.mean_latency_ms().rollout_metric()} ms · max {metrics.max_latency_ms().rollout_metric()} ms"
-                    }
+                    strong { "{metrics.command_count().grouped_label()} commands" }
+                    p { "{rollout.inference_summary()}" }
                 }
             }
         }
@@ -480,27 +475,26 @@ fn InferenceMetric(label: &'static str, value: String, unit: &'static str) -> El
     }
 }
 
-pub(crate) trait TrainingSnapshotRollout {
+/// Training history, read for the one thing Rollout wants from it: the
+/// checkpoints a policy can actually be run from, newest step first.
+pub(super) trait TrainingSnapshotRollout {
+    fn checkpoint_choices(&self) -> Vec<CheckpointChoice>;
+    /// The cameras the chosen checkpoint's policy expects, which is what
+    /// Rollout docks camera panels for. Falls back to the newest checkpoint.
     fn selected_checkpoint_camera_roles(&self, selected_key: Option<&str>) -> Vec<String>;
 }
 
-trait TrainingSnapshotCheckpointChoices {
-    fn checkpoint_choices(&self) -> Vec<CheckpointChoice>;
-}
-
-impl TrainingSnapshotCheckpointChoices for TrainingSnapshot {
+impl TrainingSnapshotRollout for TrainingSnapshot {
     fn checkpoint_choices(&self) -> Vec<CheckpointChoice> {
         let mut choices = self
             .runs()
             .iter()
-            .flat_map(TrainingRunRollout::checkpoint_choices)
+            .flat_map(CheckpointChoice::for_run)
             .collect::<Vec<_>>();
         choices.sort_by_key(|choice| std::cmp::Reverse(choice.step));
         choices
     }
-}
 
-impl TrainingSnapshotRollout for TrainingSnapshot {
     fn selected_checkpoint_camera_roles(&self, selected_key: Option<&str>) -> Vec<String> {
         let choices = self.checkpoint_choices();
         selected_key
@@ -511,60 +505,49 @@ impl TrainingSnapshotRollout for TrainingSnapshot {
     }
 }
 
-trait TrainingRunRollout {
-    fn checkpoint_choices(&self) -> Vec<CheckpointChoice>;
-}
-
-impl TrainingRunRollout for TrainingRun {
-    fn checkpoint_choices(&self) -> Vec<CheckpointChoice> {
-        self.checkpoints()
+impl CheckpointChoice {
+    fn for_run(run: &TrainingRun) -> Vec<Self> {
+        run.checkpoints()
             .iter()
-            .filter_map(|checkpoint| CheckpointChoice::for_checkpoint(self, checkpoint))
+            .filter(|checkpoint| checkpoint.inference_ready())
+            .map(|checkpoint| Self {
+                identity: CheckpointIdentity {
+                    key: format!("{}::{}", run.id(), checkpoint.step()),
+                    run_id: run.id().to_owned(),
+                    run_name: run.config().run_name().to_owned(),
+                    run_active: run.phase().active(),
+                },
+                step: checkpoint.step(),
+                validation_loss: checkpoint.validation_loss(),
+                policy: CheckpointPolicy::for_checkpoint(run, checkpoint),
+            })
             .collect()
     }
 }
 
-impl CheckpointChoice {
-    fn for_checkpoint(run: &TrainingRun, checkpoint: &TrainingCheckpoint) -> Option<Self> {
-        checkpoint.inference_ready().then(|| Self {
-            identity: CheckpointIdentity {
-                key: format!("{}::{}", run.id(), checkpoint.step()),
-                run_id: run.id().to_owned(),
-                run_name: run.config().run_name().to_owned(),
-                run_active: run.phase().active(),
-            },
-            step: checkpoint.step(),
-            validation_loss: checkpoint.validation_loss(),
-            policy: CheckpointPolicy {
-                action_steps: (if checkpoint.recommended_action_steps() == 0 {
-                    run.config().chunk_size()
-                } else {
-                    checkpoint
-                        .recommended_action_steps()
-                        .min(run.config().chunk_size())
-                })
-                .min(MAX_ROLLOUT_ACTION_STEPS),
-                sample_hz: checkpoint.sample_hz(),
-                camera_roles: run.config().act().camera_streams().camera_roles(),
-            },
-        })
-    }
-}
-
-trait CameraStreamRoles {
-    fn camera_roles(&self) -> Vec<String>;
-}
-
-impl CameraStreamRoles for [String] {
-    fn camera_roles(&self) -> Vec<String> {
-        let mut roles = Vec::with_capacity(self.len());
-        for stream in self {
+impl CheckpointPolicy {
+    fn for_checkpoint(run: &TrainingRun, checkpoint: &TrainingCheckpoint) -> Self {
+        // A recorded camera stream is named `{robot}.camera.{role}`; the policy
+        // was trained on the roles, in first-seen order.
+        let mut camera_roles = Vec::new();
+        for stream in run.config().act().camera_streams() {
             let role = stream.rsplit('.').next().unwrap_or(stream).to_owned();
-            if !roles.contains(&role) {
-                roles.push(role);
+            if !camera_roles.contains(&role) {
+                camera_roles.push(role);
             }
         }
-        roles
+        Self {
+            action_steps: (if checkpoint.recommended_action_steps() == 0 {
+                run.config().chunk_size()
+            } else {
+                checkpoint
+                    .recommended_action_steps()
+                    .min(run.config().chunk_size())
+            })
+            .min(MAX_ROLLOUT_ACTION_STEPS),
+            sample_hz: checkpoint.sample_hz(),
+            camera_roles,
+        }
     }
 }
 
@@ -605,13 +588,31 @@ impl RolloutPreconditions<'_> {
     }
 }
 
-trait RolloutRuntimePresentation {
+/// A rollout as this screen reads it aloud: what the runtime line says, how it
+/// is toned, and what the inference strip prints. `RolloutSnapshot` lives in
+/// `crates/common`, so this is an extension trait rather than an inherent impl;
+/// it is one trait for one subject, not one per method.
+trait RolloutPresentation {
     fn runtime_title(&self, blocker: Option<&str>) -> &'static str;
     fn runtime_detail(&self) -> String;
     fn runtime_note_class(&self) -> &'static str;
+    /// A latency in milliseconds to one decimal, or an em dash when the policy
+    /// has not reported one. The unit is printed beside the figure, not in it.
+    fn latency_label(&self, measure: RolloutLatency) -> String;
+    /// "{chunks} chunks · mean {…} ms · max {…} ms".
+    fn inference_summary(&self) -> String;
 }
 
-impl RolloutRuntimePresentation for RolloutSnapshot {
+/// Which of the four latencies the inference strip is asking for.
+#[derive(Clone, Copy)]
+enum RolloutLatency {
+    Last,
+    Model,
+    Mean,
+    Peak,
+}
+
+impl RolloutPresentation for RolloutSnapshot {
     fn runtime_title(&self, blocker: Option<&str>) -> &'static str {
         match self.phase() {
             RolloutPhase::Idle if self.finished_ms().is_some() => "Policy stopped",
@@ -641,33 +642,27 @@ impl RolloutRuntimePresentation for RolloutSnapshot {
             _ => "rollout-runtime-note",
         }
     }
-}
 
-trait RolloutMetricPresentation {
-    fn rollout_metric(self) -> String;
-}
-
-impl RolloutMetricPresentation for Option<f64> {
-    fn rollout_metric(self) -> String {
-        self.filter(|value| value.is_finite())
-            .map(|value| format!("{value:.1}"))
-            .unwrap_or_else(|| "—".to_owned())
+    fn latency_label(&self, measure: RolloutLatency) -> String {
+        let metrics = self.metrics();
+        match measure {
+            RolloutLatency::Last => metrics.last_latency_ms(),
+            RolloutLatency::Model => metrics.last_model_ms(),
+            RolloutLatency::Mean => metrics.mean_latency_ms(),
+            RolloutLatency::Peak => metrics.max_latency_ms(),
+        }
+        .filter(|value| value.is_finite())
+        .map(|value| format!("{value:.1}"))
+        .unwrap_or_else(|| "—".to_owned())
     }
-}
 
-trait RolloutCountPresentation {
-    fn rollout_count(self) -> String;
-}
-
-impl RolloutCountPresentation for u64 {
-    fn rollout_count(self) -> String {
-        let text = self.to_string();
-        text.as_bytes()
-            .rchunks(3)
-            .rev()
-            .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join(",")
+    fn inference_summary(&self) -> String {
+        format!(
+            "{} chunks · mean {} ms · max {} ms",
+            self.metrics().inference_count().grouped_label(),
+            self.latency_label(RolloutLatency::Mean),
+            self.latency_label(RolloutLatency::Peak),
+        )
     }
 }
 
@@ -683,8 +678,8 @@ mod tests {
     };
 
     use super::{
-        CameraStreamRoles, MAX_ROLLOUT_ACTION_STEPS, RobotFleet, RolloutCameraSummary,
-        RolloutPreconditions, RolloutRuntimePresentation, TrainingRunRollout,
+        CheckpointChoice, MAX_ROLLOUT_ACTION_STEPS, RobotFleet, RolloutCameraSummary,
+        RolloutPreconditions, RolloutPresentation,
     };
 
     fn robot(id: &str, role: &str) -> RobotSummary {
@@ -768,21 +763,17 @@ mod tests {
         );
     }
 
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn rollout_camera_roles_follow_the_recorded_stream_contract() {
-        assert_eq!(
-            [
-                "follower.camera.gripper".to_owned(),
-                "follower.camera.top".to_owned(),
-            ]
-            .camera_roles(),
-            ["gripper", "top"]
-        );
-    }
-
+    /// A recorded camera stream is `{robot}.camera.{role}`; the policy names
+    /// the roles, once each.
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_lists_inference_ready_checkpoints_from_an_active_run() {
-        let run = TrainingRun::starting("active-run", TrainingConfig::default())
+        let mut config = TrainingConfig::default();
+        config.act_mut().set_camera_streams(vec![
+            "follower.camera.gripper".to_owned(),
+            "follower.camera.top".to_owned(),
+            "leader.camera.top".to_owned(),
+        ]);
+        let run = TrainingRun::starting("active-run", config)
             .with_source(TrainingSource::default())
             .with_phase(TrainingRunPhase::Running, 0)
             .with_checkpoints(vec![
@@ -790,8 +781,9 @@ mod tests {
                 TrainingCheckpoint::new(10_000, 0),
             ]);
 
-        let choices = run.checkpoint_choices();
+        let choices = CheckpointChoice::for_run(&run);
 
+        assert_eq!(choices[0].policy.camera_roles, ["gripper", "top"]);
         assert_eq!(choices.len(), 1);
         assert_eq!(choices[0].step, 20_000);
         assert!(choices[0].identity.run_active);

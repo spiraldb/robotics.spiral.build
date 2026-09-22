@@ -1,7 +1,8 @@
 //! State owned by the mounted Live workspace and shared by its panels.
 use super::RecordingClient;
-use super::{signals::SignalStore, timeline_state::TimelineController};
-use crate::activities::dataset_catalog::DatasetChoices;
+use super::signals::SignalStore;
+use super::transport::TimelineController;
+use super::workbench::CaptureDestination;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
@@ -12,7 +13,7 @@ pub(crate) struct LiveSession {
     project: StudioProjectState,
     telemetry: HardwareViewState,
     selection: RobotSelection,
-    datasets: DatasetChoices,
+    capture: CaptureDestination,
     timeline: TimelineController,
     recording_signals: Signal<SignalStore>,
 }
@@ -23,14 +24,14 @@ impl LiveSession {
         selection: RobotSelection,
     ) -> Self {
         let is_active = telemetry.is_active_signal();
-        let datasets = DatasetChoices::use_choices();
+        let capture = CaptureDestination::use_destination();
         let timeline = TimelineController::use_controller();
         let recording_signals = use_signal(SignalStore::default);
         let session = use_hook(|| Self {
             project,
             telemetry,
             selection,
-            datasets,
+            capture,
             timeline,
             recording_signals,
         });
@@ -68,8 +69,8 @@ impl LiveSession {
     pub(super) fn commands(self) -> HardwareCommands {
         HardwareCommands::new(self.project, self.telemetry)
     }
-    pub(super) fn datasets(self) -> DatasetChoices {
-        self.datasets
+    pub(super) fn capture(self) -> CaptureDestination {
+        self.capture
     }
     pub(super) fn timeline_controller(self) -> TimelineController {
         self.timeline

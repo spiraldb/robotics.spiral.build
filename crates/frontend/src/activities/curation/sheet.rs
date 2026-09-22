@@ -13,13 +13,13 @@ use spiral_robotics_common::runs::RunPhase;
 use super::client::CurationClient;
 use super::episode::EpisodeSheet;
 use super::pipeline::{
-    FilterHistogram, Pipeline, PipelinePending, PipelineSelection, PipelineStage, StageKind,
-    StageMark, measured_value,
+    FilterHistogram, MeasuredEpisode as _, Pipeline, PipelinePending, PipelineSelection,
+    PipelineStage, StageKind, StageMark,
 };
 use super::state::{CurationController, SheetFilter, SheetOrder};
 use crate::components::document_bar::ExecutedSql;
 use crate::components::icons::{CurationIcon, ResultNodeIcon, SpinnerIcon};
-use crate::components::run_phase::RunPhasePresentation;
+use crate::components::run_strip::{RunChoice, RunDuration, RunStrip};
 use crate::format::ClockPresentation;
 use crate::shell::state::StudioProjectState;
 use spiral_robotics_ui::SheetPosition;
@@ -64,7 +64,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
     // A step still being written must not take the measurements away from
     // the rest of the recipe: the preview judges every complete step and the
     // incomplete one's card says so.
-    let eligibility = spec.source().map(|_| EpisodeEligibility(measurable(&spec)));
+    let eligibility = spec.source().map(|_| EpisodeEligibility(spec.measurable()));
     let mut metadata = use_resource(use_reactive(
         (&eligibility,),
         move |(eligibility,)| async move {
@@ -105,9 +105,23 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
         }
     });
     let runs = controller.curation_runs();
+    let run_choices = runs
+        .iter()
+        .enumerate()
+        .map(|(place, run)| {
+            RunChoice::new(
+                run.snapshot().run_id().unwrap_or_default(),
+                (place + 1, runs.len()),
+                run.snapshot().phase(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let shown_run = run_choices
+        .iter()
+        .find(|choice| Some(choice.id()) == snapshot.run_id())
+        .cloned();
     let filter = controller.filter();
     let order = controller.order();
-    let hovered = controller.hovered_rule();
     let selected = controller.selected_episode();
     let phase = snapshot.phase();
     let lens = judged.as_ref().and_then(|judged| controller.lens(judged));
@@ -144,6 +158,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
         .as_ref()
         .filter(|stage| stage.kind == StageKind::Filter)
         .and_then(|stage| stage.selection.step_id().map(str::to_owned));
+    let focus = SheetFocus::new(controller, lens.clone(), filter_rule.clone());
     let output_selected = selection == PipelineSelection::Output;
     // The curated output always shows one episode's evidence beside the kept
     // tiles: the first one until another is chosen, and never none.
@@ -182,39 +197,26 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
         .map(|index| SheetPosition::new(index, roster.len()));
     rsx! {
         section { class: "curation-sheet", "aria-label": "Curation sheet",
-            if !runs.is_empty() {
-                div { class: "run-strip curation-run-strip",
-                    span { class: "run-phase {phase.class_name()}", role: "status",
-                        span { class: "run-phase-dot", "aria-hidden": "true" }
-                        "{phase.run_label()}"
-                    }
-                    if runs.len() > 1 {
-                        label { r#for: "curation-result-run", class: "sr-only", "Run" }
-                        Select { id: "curation-result-run", class: "run-select",
-                            value: snapshot.run_id().unwrap_or_default(),
-                            onchange: move |value| controller.select_run(value),
-                            for (index, run) in runs.iter().enumerate() {
-                                option { key: "{run.snapshot().run_id().unwrap_or_default()}",
-                                    value: run.snapshot().run_id().unwrap_or_default(),
-                                    selected: run.snapshot().run_id() == snapshot.run_id(),
-                                    if run.snapshot().phase() == RunPhase::Completed { "Run {index + 1} of {runs.len()}" }
-                                    else { "Run {index + 1} of {runs.len()} · {run.snapshot().phase().run_label().to_ascii_lowercase()}" }
-                                }
+            if let Some(current) = shown_run {
+                RunStrip {
+                    id: "curation-result-run",
+                    runs: run_choices,
+                    current,
+                    on_select: move |id| controller.select_run(id),
+                    facts: rsx! {
+                        if let Some(outcome) = run_outcome.as_ref().filter(|_| current_run) {
+                            span { class: "run-duration", title: "Spiral judging time", "{RunDuration::millis(outcome.elapsed_ms())}" }
+                            if outcome.totals().truncated() {
+                                Chip { tone: ChipTone::Caution, title: "The sheet lists the first {outcome.totals().listed()} episodes; the counts cover every episode.", "Sheet truncated" }
                             }
                         }
-                    }
-                    if let Some(outcome) = run_outcome.as_ref().filter(|_| current_run) {
-                        span { class: "run-duration", title: "Spiral judging time", "{ElapsedText(outcome.elapsed_ms())}" }
-                        if outcome.totals().truncated() {
-                            Chip { tone: ChipTone::Caution, title: "The sheet lists the first {outcome.totals().listed()} episodes; the counts cover every episode.", "Sheet truncated" }
+                        if phase.active() {
+                            span { class: "run-elapsed", role: "status", "Reading episodes…" }
                         }
-                    }
-                    if phase.active() {
-                        span { class: "run-elapsed", role: "status", "Reading episodes…" }
-                    }
-                    if let Some(sql) = snapshot.sql() {
-                        ExecutedSql { sql: sql.to_owned() }
-                    }
+                        if let Some(sql) = snapshot.sql() {
+                            ExecutedSql { sql: sql.to_owned() }
+                        }
+                    },
                 }
             }
             if snapshot.result_stale() && preview.outcome().is_none() && run_outcome.is_some() {
@@ -273,8 +275,8 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                                         if selection == PipelineSelection::Output { "No episode is kept by the current recipe." } else { "This filter excluded no episode." } }
                                 } else {
                                     TileGrid {
-                                        roster: roster.clone(), judged: judged.clone(), lens: lens.clone(),
-                                        filter, hovered, selected: selected.clone(), stage_rule: filter_rule.clone(), on_select: select,
+                                        roster: roster.clone(), judged: judged.clone(),
+                                        focus: focus.clone(), filter, on_select: select,
                                     }
                                 }
                             } else if phase.active() || preview == EligibilityState::Pending {
@@ -413,22 +415,28 @@ fn StageHeading(stage: PipelineStage, children: Element) -> Element {
     }
 }
 
-/// The recipe with every incomplete step left out, so the preview can run
-/// while a new rule waits for its value.
-fn measurable(spec: &CurationSpec) -> CurationSpec {
-    let catalog = spec.catalog();
-    let mut measurable = spec.clone();
-    for rule in spec.rules() {
-        if rule.condition().validate(&catalog).is_err() {
-            measurable.remove_rule(rule.id());
+trait MeasurableRecipe {
+    /// This recipe with every incomplete step left out, so the preview can run
+    /// while a new rule waits for its value.
+    fn measurable(&self) -> Self;
+}
+
+impl MeasurableRecipe for CurationSpec {
+    fn measurable(&self) -> Self {
+        let catalog = self.catalog();
+        let mut measurable = self.clone();
+        for rule in self.rules() {
+            if rule.condition().validate(&catalog).is_err() {
+                measurable.remove_rule(rule.id());
+            }
         }
-    }
-    for transform in spec.transforms() {
-        if transform.validate(&catalog).is_err() {
-            measurable.remove_transform(transform.id());
+        for transform in self.transforms() {
+            if transform.validate(&catalog).is_err() {
+                measurable.remove_transform(transform.id());
+            }
         }
+        measurable
     }
-    measurable
 }
 
 /// Model parameters do not change episode eligibility. Keeping this query key
@@ -724,6 +732,20 @@ impl SheetTile {
     pub(super) fn label(&self) -> &str {
         &self.label
     }
+    /// Whether the label is an identifier rather than words: it then keeps to
+    /// one mono line instead of wrapping like a task name. Hex digits and
+    /// separators make up nearly all of a UUID or a content hash; a task name
+    /// keeps its vowels and spaces.
+    fn label_is_identifier(&self) -> bool {
+        let coded = self
+            .label
+            .chars()
+            .filter(|character| {
+                character.is_ascii_hexdigit() || matches!(character, '-' | '_' | '.')
+            })
+            .count();
+        self.label.len() >= 16 && coded * 100 >= self.label.len() * 85
+    }
     pub(super) const fn verdict(&self) -> &CurationVerdict {
         &self.verdict
     }
@@ -737,11 +759,8 @@ impl SheetTile {
 fn TileGrid(
     roster: Roster,
     judged: CurationSpec,
-    lens: Option<CurationFact>,
+    focus: SheetFocus,
     filter: SheetFilter,
-    hovered: Option<String>,
-    selected: Option<String>,
-    #[props(default)] stage_rule: Option<String>,
     on_select: EventHandler<String>,
 ) -> Element {
     if roster.len() == 0 {
@@ -756,17 +775,7 @@ fn TileGrid(
         };
     }
     let catalog = judged.catalog();
-    // On a filter's own stage every tile answers that rule, so the tile prints
-    // the value the rule tested instead of repeating the rule's words.
-    let tested = stage_rule
-        .as_deref()
-        .and_then(|id| judged.rules().iter().find(|rule| rule.id() == id))
-        .map(|rule| rule.condition().fact().to_owned())
-        .filter(|key| key != "duration_s")
-        .map(|key| {
-            let label = catalog.label(&key);
-            (key, label)
-        });
+    let tested = focus.tested(&judged, &catalog);
     let longest = roster
         .tiles
         .iter()
@@ -778,11 +787,9 @@ fn TileGrid(
                 EpisodeTile {
                     key: "{tile.verdict.episode().id()}",
                     tile: tile.clone(),
-                    look: TileLook::of(tile, &judged, &catalog, TileContext {
-                        lens: lens.as_ref(),
-                        hovered: hovered.as_deref(),
-                        selected: selected.as_deref(),
-                        stage_rule: stage_rule.as_deref(),
+                    look: TileLook::of(tile, &judged, TileContext {
+                        focus: &focus,
+                        catalog: &catalog,
                         tested: tested.as_ref().map(|(key, label)| (key.as_str(), label.as_str())),
                         longest,
                     }),
@@ -794,15 +801,55 @@ fn TileGrid(
     }
 }
 
+/// What the sheet is looking at while it lays the tiles out: the measurement
+/// every tile prints, the rule under the pointer, the episode whose evidence
+/// is open, and the filter stage whose tiles these are.
+#[derive(Clone, PartialEq)]
+struct SheetFocus {
+    lens: Option<CurationFact>,
+    hovered_rule: Option<String>,
+    open_episode: Option<String>,
+    stage_rule: Option<String>,
+}
+
+impl SheetFocus {
+    fn new(
+        controller: CurationController,
+        lens: Option<CurationFact>,
+        stage_rule: Option<String>,
+    ) -> Self {
+        Self {
+            lens,
+            hovered_rule: controller.hovered_rule(),
+            open_episode: controller.selected_episode(),
+            stage_rule,
+        }
+    }
+    /// On a filter's own stage every tile answers that rule, so the tile prints
+    /// the value the rule tested instead of repeating the rule's words.
+    fn tested(
+        &self,
+        judged: &CurationSpec,
+        catalog: &spiral_robotics_common::curation::facts::FactCatalog,
+    ) -> Option<(String, String)> {
+        self.stage_rule
+            .as_deref()
+            .and_then(|id| judged.rules().iter().find(|rule| rule.id() == id))
+            .map(|rule| rule.condition().fact().to_owned())
+            .filter(|key| key != "duration_s")
+            .map(|key| {
+                let label = catalog.label(&key);
+                (key, label)
+            })
+    }
+}
+
 /// What every tile is judged against when it is drawn.
 #[derive(Clone, Copy)]
 struct TileContext<'a> {
-    lens: Option<&'a CurationFact>,
-    hovered: Option<&'a str>,
-    selected: Option<&'a str>,
-    /// The filter whose stage is open; its reason goes without saying.
-    stage_rule: Option<&'a str>,
-    /// The fact that filter tests, printed on every tile in its place.
+    focus: &'a SheetFocus,
+    catalog: &'a spiral_robotics_common::curation::facts::FactCatalog,
+    /// The fact the open filter tests, printed on every tile in its place.
     tested: Option<(&'a str, &'a str)>,
     longest: f64,
 }
@@ -860,12 +907,7 @@ struct TileLook {
 }
 
 impl TileLook {
-    fn of(
-        tile: &SheetTile,
-        judged: &CurationSpec,
-        catalog: &spiral_robotics_common::curation::facts::FactCatalog,
-        context: TileContext<'_>,
-    ) -> Self {
+    fn of(tile: &SheetTile, judged: &CurationSpec, context: TileContext<'_>) -> Self {
         let verdict = &tile.verdict;
         let reasons: Vec<Reason> = verdict
             .excluded_by()
@@ -875,13 +917,13 @@ impl TileLook {
                     .rules()
                     .iter()
                     .find(|rule| rule.id() == rule_id)
-                    .map_or_else(|| rule_id.to_owned(), |rule| rule.reason(catalog)),
+                    .map_or_else(|| rule_id.to_owned(), |rule| rule.reason(context.catalog)),
                 tone: RuleTone::of(judged, rule_id),
             })
             .collect();
         // On a filter's own stage the heading has already said why every
         // tile is here; the tooltip keeps the other rules that also fired.
-        let shown_reasons = if context.stage_rule.is_some() {
+        let shown_reasons = if context.focus.stage_rule.is_some() {
             Vec::new()
         } else {
             reasons.clone()
@@ -898,13 +940,14 @@ impl TileLook {
             Some((key, label)) => Some(TileFact {
                 label: label.to_owned(),
                 value: FactValueText::new(
-                    measured_value(verdict, key)
+                    verdict
+                        .measured(key)
                         .map(|value| serde_json::json!(value))
                         .as_ref(),
                     FactKind::Number,
                 ),
             }),
-            None => context.lens.map(|lens| TileFact {
+            None => context.focus.lens.as_ref().map(|lens| TileFact {
                 label: lens.label().to_owned(),
                 value: FactValueText::new(verdict.fact(lens.key()), lens.kind()),
             }),
@@ -920,22 +963,10 @@ impl TileLook {
             fact,
             facts,
             fill,
-            highlight: TileHighlight::for_rule(context.hovered, verdict),
-            selected: context.selected == Some(verdict.episode().id()),
+            highlight: TileHighlight::for_rule(context.focus.hovered_rule.as_deref(), verdict),
+            selected: context.focus.open_episode.as_deref() == Some(verdict.episode().id()),
         }
     }
-}
-
-/// Whether a tile's label is an identifier rather than words: it then keeps
-/// to one mono line instead of wrapping like a task name. Hex digits and
-/// separators make up nearly all of a UUID or a content hash; a task name
-/// keeps its vowels and spaces.
-fn is_identifier(label: &str) -> bool {
-    let coded = label
-        .chars()
-        .filter(|character| character.is_ascii_hexdigit() || matches!(character, '-' | '_' | '.'))
-        .count();
-    label.len() >= 16 && coded * 100 >= label.len() * 85
 }
 
 #[component]
@@ -990,7 +1021,7 @@ fn EpisodeTile(
                 onclick: move |_| on_select.call(id.clone()),
                 div { class: "curation-tile-head",
                     span { class: "curation-tile-ordinal", "{tile.ordinal}" }
-                    span { class: "curation-tile-name", "data-identifier": is_identifier(&tile.label), "{tile.label}" }
+                    span { class: "curation-tile-name", "data-identifier": tile.label_is_identifier(), "{tile.label}" }
                 }
                 div { class: "curation-tile-line",
                     span { class: "curation-tile-clock", "{duration}" }
@@ -1066,27 +1097,6 @@ impl SheetLabels {
                 .unwrap_or(relative)
                 .replace('_', " "),
             None => episode.file_name().to_owned(),
-        }
-    }
-}
-
-/// Elapsed time in the unit a person would say.
-struct ElapsedText(u64);
-
-impl std::fmt::Display for ElapsedText {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let millis = self.0;
-        if millis < 1_000 {
-            write!(formatter, "{millis} ms")
-        } else if millis < 60_000 {
-            write!(formatter, "{:.1} s", millis as f64 / 1000.0)
-        } else {
-            write!(
-                formatter,
-                "{}m {:02}s",
-                millis / 60_000,
-                (millis / 1000) % 60
-            )
         }
     }
 }
@@ -1197,9 +1207,6 @@ mod tests {
             "12"
         );
         assert_eq!(FactValueText::new(None, FactKind::Text).to_string(), "—");
-        assert_eq!(ElapsedText(640).to_string(), "640 ms");
-        assert_eq!(ElapsedText(12_400).to_string(), "12.4 s");
-        assert_eq!(ElapsedText(125_000).to_string(), "2m 05s");
         assert_eq!(RuleTone::at(6), RuleTone::at(0));
     }
 

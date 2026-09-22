@@ -4,9 +4,9 @@
 #[allow(unreachable_pub)]
 mod backend_settings;
 #[allow(unreachable_pub)]
-pub(crate) mod build_documents;
-#[allow(unreachable_pub)]
 pub(crate) mod curations;
+#[allow(unreachable_pub)]
+pub(crate) mod explorations;
 mod migrations;
 #[allow(unreachable_pub)]
 pub(crate) mod robots;

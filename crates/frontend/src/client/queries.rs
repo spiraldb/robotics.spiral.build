@@ -45,18 +45,57 @@ impl QueryRefresh {
     }
 }
 
+/// How long a policy waits before reading again.
+///
+/// A fixed interval never changes. A measured one is consulted after every
+/// completed request, so a read can slow down — or stop entirely — when what
+/// it watches is idle or off screen, without its caller rebuilding the policy.
+#[derive(Clone, Copy)]
+enum QueryInterval {
+    OnDemand,
+    Fixed(u32),
+    Measured(ReadSignal<Option<u32>>),
+}
+
+impl QueryInterval {
+    /// Whether this interval ever repeats a read. Constant per call site, so
+    /// the timer hook it guards is too.
+    const fn repeats(self) -> bool {
+        !matches!(self, Self::OnDemand)
+    }
+    /// How long to wait before the next read, read reactively.
+    fn milliseconds(self) -> Option<u32> {
+        match self {
+            Self::OnDemand => None,
+            Self::Fixed(interval_ms) => Some(interval_ms),
+            Self::Measured(interval_ms) => interval_ms(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct QueryPolicy {
     domain: QueryDomain,
-    interval_ms: Option<u32>,
-    active: Option<ReadSignal<bool>>,
+    interval: QueryInterval,
 }
 impl QueryPolicy {
     pub(crate) const fn new(domain: QueryDomain, interval_ms: u32) -> Self {
         Self {
             domain,
-            interval_ms: Some(interval_ms),
-            active: None,
+            interval: QueryInterval::Fixed(interval_ms),
+        }
+    }
+
+    /// A read whose cadence answers what it finds: the signal is read after
+    /// every completed request, and `None` parks the read until it names an
+    /// interval again.
+    pub(crate) const fn measured(
+        domain: QueryDomain,
+        interval_ms: ReadSignal<Option<u32>>,
+    ) -> Self {
+        Self {
+            domain,
+            interval: QueryInterval::Measured(interval_ms),
         }
     }
 
@@ -64,16 +103,8 @@ impl QueryPolicy {
     pub(crate) const fn on_demand(domain: QueryDomain) -> Self {
         Self {
             domain,
-            interval_ms: None,
-            active: None,
+            interval: QueryInterval::OnDemand,
         }
-    }
-
-    /// Background jobs refresh quickly while active and slow down when idle.
-    /// The timer reads this flag without restarting an in-flight request.
-    pub(crate) fn with_activity(mut self, active: ReadSignal<bool>) -> Self {
-        self.active = Some(active);
-        self
     }
 
     /// Reactive inputs and command invalidations cancel obsolete reads. A timer
@@ -110,41 +141,27 @@ impl QueryPolicy {
                 }
             }
         });
-        if let Some(interval_ms) = self.interval_ms {
-            self.use_timer(resource, interval_ms);
+        if self.interval.repeats() {
+            Self::use_timer(resource, self.interval);
         }
         resource
     }
 
     fn use_timer<T: 'static, E: 'static>(
-        self,
         mut resource: Resource<Result<T, E>>,
-        interval_ms: u32,
+        interval: QueryInterval,
     ) {
         // This timer depends on the read's lifecycle. Restarting a read cancels
         // its old timer; completing it starts a new delay. Neither a slow read
-        // nor a paused resource has a running refresh timer.
+        // nor a paused resource has a running refresh timer, so the caller's
+        // interval is the whole policy.
         use_resource(move || {
             let ready = *resource.state().read() == UseResourceState::Ready;
             let completed_task = resource.task();
-            let active = self.active.is_none_or(|active| *active.read());
-            let normal_interval = if active {
-                interval_ms
-            } else {
-                interval_ms.max(5_000)
-            };
-            let failed = resource.peek().as_ref().is_some_and(Result::is_err);
-            let hidden = web_sys::window()
-                .and_then(|window| window.document())
-                .is_some_and(|document| document.hidden());
-            let interval = normal_interval.max(if hidden {
-                5_000
-            } else if failed {
-                1_000
-            } else {
-                0
-            });
-            let timer = ready.then(|| gloo_timers::future::TimeoutFuture::new(interval));
+            let timer = ready
+                .then(|| interval.milliseconds())
+                .flatten()
+                .map(gloo_timers::future::TimeoutFuture::new);
             async move {
                 if let Some(timer) = timer {
                     timer.await;
@@ -313,12 +330,9 @@ mod tests {
         let mut dom = VirtualDom::new_with_props(QueryHarness::render, harness.clone());
         dom.rebuild_in_place();
         dom.render_immediate_to_vec();
-        // Account for the production background-tab polling interval as well.
-        let interval = if web_sys::window().unwrap().document().unwrap().hidden() {
-            5_100
-        } else {
-            50
-        };
+        // Comfortably past the harness's 20 ms interval, whether or not the
+        // test tab is in the foreground.
+        let interval = 50;
         gloo_timers::future::TimeoutFuture::new(interval).await;
         dom.render_immediate_to_vec();
         assert_eq!(harness.0.borrow().reads.len(), 1);

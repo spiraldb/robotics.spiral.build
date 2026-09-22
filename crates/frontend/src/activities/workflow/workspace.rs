@@ -25,29 +25,28 @@ use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, 
 use spiral_robotics_common::workflow::{WorkflowAgentPhase, WorkflowRunPhase};
 use spiral_robotics_ui::{
     ActionPurpose, ArrowDownIcon, Button, ButtonVariant, Chip, ChipTone, EmptyState, Notice,
-    NoticeTone, Select,
+    NoticeTone,
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
-use crate::activities::workflow::build::graph::WorkflowView;
+use crate::activities::workflow::explore::graph::WorkflowView;
 use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, RESULTS_PANEL_ID,
 };
 use crate::components::icons::{
     ConversationIcon, ResultNodeIcon, SendIcon, SpinnerIcon, StopIcon, WorkflowIcon,
 };
-use crate::components::run_phase::RunPhasePresentation;
+use crate::components::run_strip::{RunChoice, RunDuration, RunStrip};
 use crate::shell::state::StudioProjectState;
 
 const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-agent-v14";
 
 #[component]
-fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
-    // Build keeps its own document, graph, and selection while the Agent is on
-    // screen, so its controller lives beside Workflow's rather than inside the
-    // view that draws it.
-    let build_controller = super::build::state::BuildController::use_controller();
-    let view = use_signal(|| WorkflowView::Agent);
+fn WorkflowPanels(
+    controller: super::state::WorkflowController,
+    exploration_controller: super::explore::state::ExplorationController,
+    view: Signal<WorkflowView>,
+) -> Element {
     let panels = vec![
         Panel::new(
             RESULTS_PANEL_ID,
@@ -77,10 +76,10 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
 
     rsx! {
         div { class: "workflow-workspace",
-            super::document_controls::WorkflowDocumentControls { controller, build_controller, view }
+            super::document_controls::WorkflowDocumentControls { controller, exploration_controller, view }
             div { class: "workflow-panels",
-                if view() == WorkflowView::Build {
-                    super::build::graph::BuildPanels { controller: build_controller }
+                if view() == WorkflowView::Explore {
+                    super::explore::graph::ExplorePanels { controller: exploration_controller }
                 } else {
                     PanelWorkspace {
                         panels,
@@ -269,10 +268,7 @@ fn WorkflowAssistant(controller: super::state::WorkflowController) -> Element {
                 } else {
                     super::assistant_content::AssistantConversation { messages, controller }
                 }
-                if let Some(error) = controller
-                    .agent_error()
-                    .or_else(|| state.session().error().map(str::to_owned))
-                {
+                if let Some(error) = state.session().error() {
                     div { class: "workflow-assistant-error", role: "alert",
                         strong { "Assistant needs attention" }
                         p { "{error}" }
@@ -473,21 +469,6 @@ impl PartialEq for WorkflowPlanInput {
     }
 }
 
-struct RunDuration(u64);
-
-impl RunDuration {
-    fn display(&self) -> String {
-        if self.0 < 1000 {
-            format!("{} ms", self.0)
-        } else if self.0 < 60_000 {
-            format!("{:.1} s", self.0 as f64 / 1000.0)
-        } else {
-            let seconds = self.0 / 1000;
-            format!("{}m {:02}s", seconds / 60, seconds % 60)
-        }
-    }
-}
-
 #[component]
 fn WorkflowRunElapsed(started_ms: u64) -> Element {
     let mut now = use_signal(|| js_sys::Date::now() as u64);
@@ -511,6 +492,21 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
 
     let spec = controller.spec();
     let runs = controller.workflow_runs();
+    let run_choices = runs
+        .iter()
+        .enumerate()
+        .map(|(place, run)| {
+            RunChoice::new(
+                run.snapshot().run_id().unwrap_or_default(),
+                (place + 1, runs.len()),
+                run.snapshot().phase(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let current_run = run_choices
+        .iter()
+        .find(|choice| Some(choice.id()) == snapshot.run_id())
+        .cloned();
 
     let empty_workflow = spec.sql().trim().is_empty();
     let historical_results = runs.is_empty()
@@ -557,44 +553,29 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
 
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
-            if !runs.is_empty() {
-                div { class: "run-strip",
-                    span { class: "run-phase {snapshot.phase().class_name()}", role: "status",
-                        span { class: "run-phase-dot", "aria-hidden": "true" }
-                        "{snapshot.phase().run_label()}"
-                    }
-                    if runs.len() > 1 {
-                        label { r#for: "workflow-result-run", class: "sr-only", "Run" }
-                        Select { id: "workflow-result-run", class: "run-select",
-                            value: snapshot.run_id().unwrap_or_default(),
-                            onchange: move |value| controller.select_run(value),
-                            for (index, run) in runs.iter().enumerate() {
-                                option { key: "{run.snapshot().run_id().unwrap_or_default()}",
-                                    value: run.snapshot().run_id().unwrap_or_default(),
-                                    selected: run.snapshot().run_id() == snapshot.run_id(),
-                                    // The phase dot already names the selected run's state; only
-                                    // runs that did not complete say so in the list.
-                                    if run.snapshot().phase() == WorkflowRunPhase::Completed { "Run {index + 1} of {runs.len()}" }
-                                    else { "Run {index + 1} of {runs.len()} · {run.snapshot().phase().run_label().to_ascii_lowercase()}" }
-                                }
+            if let Some(current) = current_run {
+                RunStrip {
+                    id: "workflow-result-run",
+                    runs: run_choices,
+                    current,
+                    on_select: move |id| controller.select_run(id),
+                    facts: rsx! {
+                        if let Some(result) = snapshot.result() {
+                            span { class: "run-count",
+                                strong { "{result.rows().len()}" }
+                                if result.truncated() { " preview rows" } else if result.rows().len() == 1 { " row" } else { " rows" }
+                            }
+                            span { class: "run-duration", title: "Spiral execution time",
+                                "{RunDuration::millis(result.elapsed_ms())}"
+                            }
+                            if result.truncated() {
+                                Chip { tone: ChipTone::Caution, title: "Spiral returned more rows than this preview keeps. Use SQL to count or narrow the total.", "Truncated" }
                             }
                         }
-                    }
-                    if let Some(result) = snapshot.result() {
-                        span { class: "run-count",
-                            strong { "{result.rows().len()}" }
-                            if result.truncated() { " preview rows" } else if result.rows().len() == 1 { " row" } else { " rows" }
+                        if snapshot.phase().active() {
+                            WorkflowRunElapsed { started_ms: snapshot.started_ms() }
                         }
-                        span { class: "run-duration", title: "Spiral execution time",
-                            "{RunDuration(result.elapsed_ms()).display()}"
-                        }
-                        if result.truncated() {
-                            Chip { tone: ChipTone::Caution, title: "Spiral returned more rows than this preview keeps. Use SQL to count or narrow the total.", "Truncated" }
-                        }
-                    }
-                    if snapshot.phase().active() {
-                        WorkflowRunElapsed { started_ms: snapshot.started_ms() }
-                    }
+                    },
                 }
             }
             if snapshot.result_stale() {
@@ -689,13 +670,6 @@ mod tests {
         assert!(first.clear_if_unchanged(&mut drafts, "use top camera"));
         assert_eq!(drafts.get(&second).unwrap(), "use wrist camera");
     }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn run_durations_read_in_the_unit_a_person_would_say() {
-        assert_eq!(RunDuration(640).display(), "640 ms");
-        assert_eq!(RunDuration(56_500).display(), "56.5 s");
-        assert_eq!(RunDuration(125_000).display(), "2m 05s");
-    }
 }
 
 #[component]
@@ -705,7 +679,20 @@ pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
         is_active,
     );
     let controller = super::state::WorkflowController::use_controller();
-    controller.use_polling(is_active);
-    let status = use_memo(move || controller.editor_status());
-    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(status), WorkflowPanels { controller } } }
+    // Explore keeps its own document, graph, and selection while the Agent
+    // is on screen, so its controller lives beside Workflow's rather than
+    // inside the view that draws it — and the status bar, which speaks for
+    // whichever view is open, reads both from here.
+    let exploration_controller = super::explore::state::ExplorationController::use_controller();
+    let view = use_signal(|| WorkflowView::Agent);
+    controller.use_polling(is_active, view);
+    let status = use_memo(move || match view() {
+        WorkflowView::Agent => controller
+            .editor_status()
+            .map(|status| super::state::WorkflowViewStatus::Agent(Box::new(status))),
+        WorkflowView::Explore => Some(super::state::WorkflowViewStatus::Exploration(
+            exploration_controller.measure(),
+        )),
+    });
+    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(status), WorkflowPanels { controller, exploration_controller, view } } }
 }

@@ -1,7 +1,7 @@
 //! Native SQLite snapshots contain one project's records and no backend secrets.
 use super::{
-    StudioProject, build_documents, curations, dataset_robots, robots, rollout_runs,
-    studio_settings, training_runs, workflows,
+    StudioProject, curations, dataset_robots, explorations, robots, rollout_runs, studio_settings,
+    training_runs, workflows,
 };
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -20,7 +20,7 @@ impl StudioSnapshot {
         "robots",
         "workflows",
         "curations",
-        "build_documents",
+        "explorations",
         "training_runs",
         "studio_settings",
         "rollout_runs",
@@ -235,12 +235,12 @@ impl StudioSnapshot {
                 serde_json::from_value(row.document.clone()).map_err(|error| error.to_string())?;
             document.validate(&row)?;
         }
-        for row in build_documents::Entity::find()
+        for row in explorations::Entity::find()
             .all(&self.database)
             .await
             .map_err(|error| error.to_string())?
         {
-            crate::build_documents::BuildDocumentPersistence::document(row)?;
+            crate::explorations::ExplorationPersistence::document(row)?;
         }
         for row in training_runs::Entity::find()
             .all(&self.database)
@@ -336,7 +336,7 @@ impl StudioSnapshot {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        for mut row in build_documents::Entity::find()
+        for mut row in explorations::Entity::find()
             .all(&self.database)
             .await
             .map_err(|error| error.to_string())?

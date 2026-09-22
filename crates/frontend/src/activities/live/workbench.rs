@@ -1,6 +1,5 @@
 //! Live screen workbench: capture, control, and selected-arm state.
 
-use crate::activities::dataset_catalog::DatasetCatalogFeedback;
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
@@ -11,9 +10,9 @@ use spiral_robotics_ui::{
     TextInput,
 };
 
-use crate::activities::dataset_catalog::DatasetChoices;
 use crate::activities::live::actions::LiveAction;
 use crate::activities::live::control::JointPanel;
+use crate::components::dataset_picker::DatasetCatalog;
 use crate::robots::Selection;
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
@@ -25,7 +24,7 @@ pub(super) fn LiveWorkbench(
     project: StudioProjectState,
     hardware: HardwareViewState,
     selection: RobotSelection,
-    datasets: DatasetChoices,
+    capture: CaptureDestination,
     on_action: EventHandler<LiveAction>,
 ) -> Element {
     let robots = hardware.snapshot().read().robots().to_owned();
@@ -33,7 +32,7 @@ pub(super) fn LiveWorkbench(
     rsx! {
         div { class: "studio-workbench-scroll live-workbench",
             ControlSection { project, hardware, selection, on_action }
-            CaptureSection { datasets, recording: hardware.recording() }
+            CaptureSection { capture, recording: hardware.recording() }
 
             section { class: "workbench-section live-properties",
                 header { class: "workbench-section-heading",
@@ -54,21 +53,52 @@ pub(super) fn LiveWorkbench(
     }
 }
 
+/// Where new episodes are saved.
+///
+/// Not a choice from the catalog: recording into a dataset that does not exist
+/// yet is how most datasets start, so the operator types a name and the
+/// catalog only offers what is already there as suggestions.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct CaptureDestination {
+    chosen: Signal<String>,
+    catalog: DatasetCatalog,
+}
+
+impl CaptureDestination {
+    pub(super) fn use_destination() -> Self {
+        Self {
+            chosen: use_signal(|| "default".to_owned()),
+            catalog: DatasetCatalog::use_catalog(),
+        }
+    }
+
+    /// The dataset name new episodes are recorded into.
+    pub(super) const fn chosen(self) -> Signal<String> {
+        self.chosen
+    }
+
+    /// The catalog's dataset names, plus whatever is currently typed.
+    fn suggestions(self) -> BTreeSet<String> {
+        self.catalog
+            .datasets()
+            .into_iter()
+            .filter_map(|dataset| {
+                dataset
+                    .selection()
+                    .label()
+                    .strip_prefix("dataset_")
+                    .map(str::to_owned)
+            })
+            .chain(std::iter::once(self.chosen.read().to_owned()))
+            .collect()
+    }
+}
+
 #[component]
-fn CaptureSection(datasets: DatasetChoices, recording: Option<RecordingProgress>) -> Element {
-    let mut selected_dataset = datasets.selected();
-    let dataset_ids = datasets
-        .datasets()
-        .into_iter()
-        .filter_map(|dataset| {
-            dataset
-                .selection()
-                .label()
-                .strip_prefix("dataset_")
-                .map(str::to_owned)
-        })
-        .chain(std::iter::once(selected_dataset.read().to_owned()))
-        .collect::<BTreeSet<_>>();
+fn CaptureSection(capture: CaptureDestination, recording: Option<RecordingProgress>) -> Element {
+    let mut selected_dataset = capture.chosen;
+    let dataset_ids = capture.suggestions();
+    let catalog = capture.catalog;
 
     rsx! {
         section { class: "workbench-section capture-destination",
@@ -92,7 +122,23 @@ fn CaptureSection(datasets: DatasetChoices, recording: Option<RecordingProgress>
             datalist { id: "live-dataset-options",
                 for id in dataset_ids { option { value: "{id}" } }
             }
-            DatasetCatalogFeedback { data: datasets }
+            if let Some(problem) = catalog.problem() {
+                div { class: "min-w-0 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "status",
+                    strong { class: "block font-medium", "Could not load datasets" }
+                    div { class: "break-words", "{problem}" }
+                    div { class: "mt-1", "{problem.recovery_guidance()}" }
+                    Button {
+                        purpose: ActionPurpose::Retry,
+                        variant: ButtonVariant::Outline,
+                        class: "mt-1",
+                        aria_label: "Retry loading datasets",
+                        onclick: move |_| catalog.reread(),
+                        "Retry"
+                    }
+                }
+            } else if catalog.reading() {
+                div { class: "text-[11px] text-ink-faint", role: "status", "Loading datasets…" }
+            }
             p {
                 if recording.is_some() {
                     "Dataset assignment is locked until this episode finishes."

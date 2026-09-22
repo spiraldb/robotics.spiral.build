@@ -28,8 +28,8 @@ This cutover stores SQL literals; a separate bound-parameter editor is not imple
 
 ## Assistant investigation and plan inspection
 
-Workflow opens in Agent mode. The adjacent Build mode is visibly unavailable
-until its dataset and measurement surface exists. The three dockable Agent
+Workflow opens in Agent mode. The adjacent Explore mode holds the dataset and
+measurement graph. The three dockable Agent
 panes are Graph, Results, and Assistant. Assistant owns a
 tall 24% column at the left. The graph owns the upper tile of the
 remaining width (46% of the height) and reads left to right; selecting a node

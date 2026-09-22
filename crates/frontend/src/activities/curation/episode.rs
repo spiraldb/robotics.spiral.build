@@ -183,9 +183,9 @@ impl SheetTile {
 
 #[component]
 fn TransformEpisodeEvidence(episode: crate::activities::data::OpenedEpisode) -> Element {
-    use crate::activities::data::{EpisodeReview, EpisodeTransport};
+    use crate::activities::data::{EpisodeInspection, EpisodeTransport};
     let transport = EpisodeTransport::use_opened_episode(&episode);
-    rsx! { EpisodeReview { episode, transport } }
+    rsx! { EpisodeInspection { episode, transport } }
 }
 
 /// The frames a camera measurement decoded for this episode. They load as

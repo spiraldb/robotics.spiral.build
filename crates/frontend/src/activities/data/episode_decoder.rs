@@ -165,15 +165,6 @@ impl EncodedCamera {
         Ok(camera)
     }
 
-    pub(super) fn memory_bytes(&self) -> u64 {
-        (self.packets.capacity() * std::mem::size_of::<CameraPacket>()
-            + self
-                .packets
-                .iter()
-                .map(|packet| packet.bytes.capacity())
-                .sum::<usize>()) as u64
-    }
-
     pub(super) fn frame_seconds(&self, seconds: f64) -> Option<f64> {
         let index = self
             .packets
@@ -214,7 +205,16 @@ impl EncodedCamera {
     }
 }
 
-struct DecodedFrame(VideoFrame, Option<MediaReservation>, u64);
+/// One camera's packets are read once per open episode; a component compares
+/// the buffer it was handed by identity rather than by every packet in it.
+impl PartialEq for EncodedCamera {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+/// A decoded frame and the bytes it occupies, released together.
+struct DecodedFrame(VideoFrame, u64);
 impl Drop for DecodedFrame {
     fn drop(&mut self) {
         self.0.close();
@@ -224,18 +224,9 @@ impl Drop for DecodedFrame {
 const RETAIN_BEFORE_US: f64 = 250_000.0;
 const LOOKAHEAD_PACKETS: usize = 6;
 const FRAME_WAIT_ROUNDS: usize = 60;
-
-/// What one `prepare` achieved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Prepared {
-    covered: bool,
-}
-impl Prepared {
-    /// The frame for the requested moment is decoded and retained.
-    pub(super) fn covered(self) -> bool {
-        self.covered
-    }
-}
+/// A keyframe interval whose decoded frames exceed this cannot be held in
+/// memory at once, so the camera says so rather than crashing the tab.
+const DECODED_INTERVAL_LIMIT: u64 = 128 * 1024 * 1024;
 
 /// Follows the shared playhead through one camera's packets: forward
 /// playback decodes each frame once, a jump restarts from the preceding
@@ -251,13 +242,10 @@ pub(super) struct CameraPlayback {
 }
 
 impl CameraPlayback {
-    pub(super) fn new(camera: Rc<EncodedCamera>, budget: MediaBudget) -> Self {
+    pub(super) fn new(camera: Rc<EncodedCamera>) -> Self {
         Self {
             camera,
-            output: Rc::new(RefCell::new(DecoderOutput {
-                budget: Some(budget),
-                ..Default::default()
-            })),
+            output: Rc::new(RefCell::new(DecoderOutput::default())),
             session: None,
             group: 0..0,
             fed: 0,
@@ -310,11 +298,11 @@ impl CameraPlayback {
     }
 
     /// Decode up to the frame for `seconds`, releasing frames well behind it.
-    pub(super) async fn prepare(&mut self, seconds: f64) -> Result<Prepared, String> {
+    pub(super) async fn prepare(&mut self, seconds: f64) -> Result<(), String> {
         let Some((range, target_index)) = self.target(seconds) else {
             self.session = None;
             self.output.borrow_mut().clear();
-            return Ok(Prepared { covered: false });
+            return Ok(());
         };
         if self.needs_restart(&range, target_index) {
             self.restart(range.clone())?;
@@ -338,7 +326,7 @@ impl CameraPlayback {
         for _ in 0..FRAME_WAIT_ROUNDS {
             self.output.borrow().check()?;
             if self.output.borrow().has_frame_at(target_timestamp) {
-                return Ok(Prepared { covered: true });
+                return Ok(());
             }
             if self.fed >= range.end && !self.flushed {
                 // The last frames of an interval only leave the decoder on flush;
@@ -353,10 +341,7 @@ impl CameraPlayback {
             }
             gloo_timers::future::TimeoutFuture::new(4).await;
         }
-        self.output.borrow().check()?;
-        Ok(Prepared {
-            covered: self.output.borrow().has_frame_at(target_timestamp),
-        })
+        self.output.borrow().check()
     }
 
     /// Paint the latest retained frame at or before `seconds`; `false` clears.
@@ -387,18 +372,7 @@ impl DecodedGroup {
         camera: &EncodedCamera,
         range: Range<usize>,
     ) -> Result<Self, String> {
-        Self::decode_with_budget(camera, range, None).await
-    }
-
-    async fn decode_with_budget(
-        camera: &EncodedCamera,
-        range: Range<usize>,
-        budget: Option<MediaBudget>,
-    ) -> Result<Self, String> {
-        let output = Rc::new(RefCell::new(DecoderOutput {
-            budget,
-            ..Default::default()
-        }));
+        let output = Rc::new(RefCell::new(DecoderOutput::default()));
         let session = DecoderSession::new(output.clone()).map_err(DecoderSession::error)?;
         let config = Object::new();
         Reflect::set(&config, &"codec".into(), &camera.codec.clone().into())
@@ -476,7 +450,6 @@ struct DecoderOutput {
     frames: Vec<DecodedFrame>,
     bytes: u64,
     error: Option<String>,
-    budget: Option<MediaBudget>,
     /// Frames stamped before this moment are released as soon as they decode.
     retain_after: f64,
 }
@@ -486,7 +459,6 @@ impl Default for DecoderOutput {
             frames: Vec::new(),
             bytes: 0,
             error: None,
-            budget: None,
             retain_after: f64::NEG_INFINITY,
         }
     }
@@ -499,21 +471,12 @@ impl DecoderOutput {
         }
         // Four bytes per coded pixel conservatively bounds common H.264 surfaces.
         let size = u64::from(frame.coded_width()) * u64::from(frame.coded_height()) * 4;
-        let mut frame = DecodedFrame(frame, None, size);
+        let frame = DecodedFrame(frame, size);
         self.bytes = self.bytes.saturating_add(size);
-        if self.bytes > 128 * 1024 * 1024 {
+        if self.bytes > DECODED_INTERVAL_LIMIT {
             self.error =
                 Some("Camera keyframe interval exceeds the 128 MiB decoded playback limit".into());
         } else if self.error.is_none() {
-            if let Some(budget) = &self.budget {
-                match budget.reserve(size) {
-                    Ok(reservation) => frame.1 = Some(reservation),
-                    Err(error) => {
-                        self.error = Some(error);
-                        return;
-                    }
-                }
-            }
             self.frames.push(frame);
         }
     }
@@ -523,7 +486,7 @@ impl DecoderOutput {
             .frames
             .iter()
             .filter(|frame| frame.0.timestamp() < cutoff)
-            .map(|frame| frame.2)
+            .map(|frame| frame.1)
             .sum::<u64>();
         self.frames.retain(|frame| frame.0.timestamp() >= cutoff);
         self.bytes = self.bytes.saturating_sub(released);
@@ -616,60 +579,13 @@ impl Drop for DecoderSession {
     }
 }
 
-/// One episode's shared encoded or decoded memory accounting. Reservations
-/// follow the owning packet/frame lifetime, including cancelled decode futures.
-#[derive(Clone)]
-pub(super) struct MediaBudget {
-    usage: Rc<RefCell<u64>>,
-    limit: u64,
-}
-impl MediaBudget {
-    pub(super) fn new(limit: u64) -> Self {
-        Self {
-            usage: Rc::new(RefCell::new(0)),
-            limit,
-        }
-    }
-    pub(super) fn reserve(&self, bytes: u64) -> Result<MediaReservation, String> {
-        let mut usage = self.usage.borrow_mut();
-        if bytes > self.limit.saturating_sub(*usage) {
-            return Err("Episode media memory limit reached; close a camera and retry".into());
-        }
-        *usage += bytes;
-        Ok(MediaReservation {
-            budget: self.clone(),
-            bytes,
-        })
-    }
-}
-pub(super) struct MediaReservation {
-    budget: MediaBudget,
-    bytes: u64,
-}
-impl Drop for MediaReservation {
-    fn drop(&mut self) {
-        *self.budget.usage.borrow_mut() -= self.bytes;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use spiral_robotics_common::datasets::VideoPacket;
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn simultaneous_camera_memory_is_bounded_and_released_on_close() {
-        let budget = MediaBudget::new(100);
-        let first = budget.reserve(60).unwrap();
-        assert!(budget.reserve(50).is_err());
-        let second = budget.reserve(40).unwrap();
-        drop(first);
-        assert!(budget.reserve(61).is_err());
-        drop(second);
-        assert!(budget.reserve(100).is_ok());
-    }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn arrow_camera_budget_counts_owned_packets_once() {
+    fn recorded_video_messages_become_one_packet_each() {
         use arrow_array::{ArrayRef, BinaryArray, RecordBatch, StringArray, UInt64Array};
         use std::sync::Arc;
         let bytes = include_bytes!("fixtures/seek.h264");
@@ -687,13 +603,7 @@ mod tests {
         .unwrap();
         let camera = EncodedCamera::from_messages(&[batch], 1000).unwrap();
         assert_eq!(camera.packets[0].bytes, bytes);
-        assert!(camera.memory_bytes() >= bytes.len() as u64);
-        assert!(camera.memory_bytes() < bytes.len() as u64 + 1024);
-        assert!(
-            MediaBudget::new(bytes.len() as u64 + 1024)
-                .reserve(camera.memory_bytes())
-                .is_ok()
-        );
+        assert_eq!(camera.packets[0].microseconds, 0);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

@@ -1,16 +1,15 @@
-//! The selected episode owns one clock, one view window, and shared media limits.
+//! The selected episode owns one clock and one view window.
 //!
 //! Every Data panel — cameras, plots, the timeline, messages — reads the same
 //! playhead and the same visible span. Nothing here fetches data; the transport
 //! only says *when* the operator is looking.
-use super::episode_decoder::MediaBudget;
 pub(super) use crate::components::timeline::KeyboardFocus;
 use crate::components::timeline::{
     PlaybackClock, TimelineAction, TimelineEvent, TimelineInteraction, TimelineState, TransportKey,
     ViewWindow,
 };
 use dioxus::prelude::*;
-use std::{collections::BTreeMap, rc::Rc};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct EpisodeTimeRange {
@@ -50,26 +49,12 @@ pub(super) enum FeedState {
     Unavailable,
 }
 
-pub(super) struct EpisodeMedia {
-    encoded: MediaBudget,
-    decoded: MediaBudget,
-}
-impl EpisodeMedia {
-    pub(super) fn encoded(&self) -> &MediaBudget {
-        &self.encoded
-    }
-    pub(super) fn decoded(&self) -> &MediaBudget {
-        &self.decoded
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct EpisodeTransport {
     clock: Signal<PlaybackClock>,
     view: Signal<ViewWindow>,
     range: Signal<EpisodeTimeRange>,
     feeds: Signal<BTreeMap<String, FeedState>>,
-    media: Rc<EpisodeMedia>,
     generation: Signal<u64>,
 }
 impl PartialEq for EpisodeTransport {
@@ -108,21 +93,11 @@ impl EpisodeTransport {
         let view = use_signal(|| ViewWindow::full(initial.duration()));
         let range = use_signal(|| initial);
         let feeds = use_signal(BTreeMap::new);
-        let media = use_hook(|| {
-            Rc::new(EpisodeMedia {
-                encoded: MediaBudget::new(128 * 1024 * 1024),
-                // Accounted at four bytes per coded pixel; browsers keep H.264
-                // output as NV12/I420, so this admits roughly three visible
-                // 720p cameras with 30-frame keyframe intervals at once.
-                decoded: MediaBudget::new(512 * 1024 * 1024),
-            })
-        });
         let transport = Self {
             clock,
             view,
             range,
             feeds,
-            media,
             generation: use_signal(|| 0),
         };
         let running = transport.clone();
@@ -180,9 +155,6 @@ impl EpisodeTransport {
     }
     pub(super) fn view(&self) -> ViewWindow {
         *self.view.read()
-    }
-    pub(super) fn media(&self) -> Rc<EpisodeMedia> {
-        self.media.clone()
     }
     pub(super) fn report(&mut self, topic: &str, state: FeedState) {
         if self.feeds.peek().get(topic) != Some(&state) {
@@ -244,7 +216,7 @@ mod tests {
         components::timeline::SeekPhase,
         shell::activity::{Activity, WorkspaceActivity},
     };
-    use std::cell::RefCell;
+    use std::{cell::RefCell, rc::Rc};
 
     #[derive(Clone, Default)]
     struct TransportHarness(Rc<RefCell<Option<EpisodeTransport>>>);

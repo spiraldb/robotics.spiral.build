@@ -2,7 +2,8 @@
 #[cfg(all(test, target_arch = "wasm32"))]
 mod browser_tests;
 
-use crate::client::model::{DecisionResponse, ModelClient};
+use crate::client::completions::ModelClient;
+use crate::client::decisions::{DecisionQuestion, DecisionResponse};
 use serde_json::{Value, json};
 use spiral_robotics_common::curation::{
     interpretation::{InterpretationRequest, RuleIntent, RuleProposal},
@@ -20,7 +21,6 @@ impl RuleInterpreter {
         let quantities = QuantityCandidate::extract(request.prompt());
         let answers = model
             .decide(
-                "typesafe/jev-1.13",
                 json!({"request": request.prompt(), "quantities": quantities}),
                 Self::questions(&request, &quantities),
             )
@@ -28,22 +28,24 @@ impl RuleInterpreter {
             .map_err(|error| error.to_string())?;
         Ok(Self::bind(&request, &quantities, answers))
     }
-    fn choice(instructions: &str, criteria: BTreeMap<String, String>) -> Value {
+    /// A choice among `criteria` with the escape every interpretation needs:
+    /// the request may simply not say.
+    fn or_unresolved(instructions: &str, criteria: BTreeMap<String, String>) -> Value {
         let mut criteria = criteria;
         criteria.insert(
             "unresolved".into(),
             "Not specified, ambiguous, unsupported, or none of these choices.".into(),
         );
-        json!({"type": "choice", "instructions": instructions, "criteria": criteria})
+        DecisionQuestion::choice(instructions, criteria).into()
     }
     fn questions(request: &InterpretationRequest, quantities: &[QuantityCandidate]) -> Value {
         let mut questions = json!({
-            "operation": {"type": "choice", "instructions": "Read `request`. Which single dataset property or operation is requested? Classify informal grammar by meaning. Omitted thresholds are handled separately. Choose unresolved for multiple independent changes or no requested change.", "criteria": Self::operation_choices()},
-            "comparison": Self::choice("Read `request`. For a whole-episode filter, choose the condition under which episodes must be EXCLUDED. A keep condition requires its logical complement. Respect negation. For an interval transform, multiple conditions, or no requested change choose unresolved.", [("below", "Exclude values strictly less than the threshold (<)"), ("at_most", "Exclude values less than or equal to the threshold (<=)"), ("above", "Exclude values strictly greater than the threshold (>)"), ("at_least", "Exclude values greater than or equal to the threshold (>=)")].into_iter().map(|(key, label)| (key.into(), label.into())).collect()),
-            "quantity": Self::choice("Read `request` and its exact extracted `quantities`. Which single quantity is the requested whole-episode filter threshold? For Remove unproductive moments, choose unresolved; it has a built-in policy. Each candidate supplies its literal and surrounding source context. Ignore camera identifiers, frame indices and rejected examples. Select unresolved when no threshold is given, multiple thresholds are requested, or the intended quantity is ambiguous. Unit conversion is done by code, not this decision.", quantities.iter().enumerate().map(|(index, quantity)| (format!("q{index}"), serde_json::to_string(quantity).expect("finite extracted quantity"))).collect())
+            "operation": Value::from(DecisionQuestion::choice("Read `request`. Which single dataset property or operation is requested? Classify informal grammar by meaning. Omitted thresholds are handled separately. Choose unresolved for multiple independent changes or no requested change.", Self::operation_choices())),
+            "comparison": Self::or_unresolved("Read `request`. For a whole-episode filter, choose the condition under which episodes must be EXCLUDED. A keep condition requires its logical complement. Respect negation. For an interval transform, multiple conditions, or no requested change choose unresolved.", [("below", "Exclude values strictly less than the threshold (<)"), ("at_most", "Exclude values less than or equal to the threshold (<=)"), ("above", "Exclude values strictly greater than the threshold (>)"), ("at_least", "Exclude values greater than or equal to the threshold (>=)")].into_iter().map(|(key, label)| (key.into(), label.into())).collect()),
+            "quantity": Self::or_unresolved("Read `request` and its exact extracted `quantities`. Which single quantity is the requested whole-episode filter threshold? For Remove unproductive moments, choose unresolved; it has a built-in policy. Each candidate supplies its literal and surrounding source context. Ignore camera identifiers, frame indices and rejected examples. Select unresolved when no threshold is given, multiple thresholds are requested, or the intended quantity is ambiguous. Unit conversion is done by code, not this decision.", quantities.iter().enumerate().map(|(index, quantity)| (format!("q{index}"), serde_json::to_string(quantity).expect("finite extracted quantity"))).collect())
         });
         if !request.cameras().is_empty() {
-            questions["camera"] = Self::choice(
+            questions["camera"] = Self::or_unresolved(
                 "Read `request`. Which exact listed camera does it identify? If no camera is specified or multiple match, choose unresolved.",
                 request
                     .cameras()

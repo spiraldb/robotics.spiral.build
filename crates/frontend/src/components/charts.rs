@@ -10,20 +10,63 @@ use charming::element::{
 };
 use dioxus::prelude::*;
 
-pub(crate) const COLOR_LINE: &str = "#e8e8e6";
-pub(crate) const COLOR_INK_SOFT: &str = "#65645f";
-pub(crate) const COLOR_INK_FAINT: &str = "#71706c";
-pub(crate) const COLOR_SURFACE: &str = "#ffffff";
-pub(crate) const COLOR_SELECTED: &str = "rgba(8, 104, 184, 0.10)";
-pub(crate) const COLOR_TRAIN: &str = "#2a78d6";
-pub(crate) const COLOR_VALIDATION: &str = "#d9572b";
-pub(crate) const COLOR_THROUGHPUT: &str = "#3a7654";
-pub(crate) const COLOR_TRANSFER: &str = "#7560b8";
-pub(crate) const COLOR_CPU: &str = "#d9572b";
-pub(crate) const COLOR_GPU: &str = "#2a78d6";
-pub(crate) const COLOR_MEMORY: &str = "#7a58a5";
-
 pub(crate) const MONO_FONT: &str = "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace";
+
+/// A colour a chart paints with, named by what it means rather than by its hex.
+///
+/// The stylesheet owns the values as `--chart-*` custom properties, the way the
+/// rest of Studio reads `--tone-*` / `--ui-*`. ECharts paints onto a canvas and
+/// never resolves `var(…)`, so [`ChartColor::css`] reads the property off the
+/// document root when a chart is built; the literal beside each token is what
+/// `tailwind.css` declares, and is what a chart drawn before the stylesheet
+/// arrives falls back to.
+#[derive(Clone, Copy)]
+pub(crate) enum ChartColor {
+    Line,
+    InkSoft,
+    InkFaint,
+    Surface,
+    Selected,
+    Train,
+    Validation,
+    Throughput,
+    Transfer,
+    Cpu,
+    Gpu,
+    Memory,
+}
+
+impl ChartColor {
+    const fn declaration(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Line => ("--chart-line", "#e8e8e6"),
+            Self::InkSoft => ("--chart-ink-soft", "#65645f"),
+            Self::InkFaint => ("--chart-ink-faint", "#71706c"),
+            Self::Surface => ("--chart-surface", "#ffffff"),
+            Self::Selected => ("--chart-selected", "rgba(8, 104, 184, 0.10)"),
+            Self::Train => ("--chart-train", "#2a78d6"),
+            Self::Validation => ("--chart-validation", "#d9572b"),
+            Self::Throughput => ("--chart-throughput", "#3a7654"),
+            Self::Transfer => ("--chart-transfer", "#7560b8"),
+            Self::Cpu => ("--chart-cpu", "#d9572b"),
+            Self::Gpu => ("--chart-gpu", "#2a78d6"),
+            Self::Memory => ("--chart-memory", "#7a58a5"),
+        }
+    }
+
+    pub(crate) fn css(self) -> String {
+        let (token, fallback) = self.declaration();
+        web_sys::window()
+            .and_then(|window| {
+                let root = window.document()?.document_element()?;
+                window.get_computed_style(&root).ok()?
+            })
+            .and_then(|style| style.get_property_value(token).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| fallback.to_owned())
+    }
+}
 
 const STUDIO_TOOLTIP_CSS: &str =
     "border-radius: 4px; box-shadow: 0 1px 3px rgba(55, 53, 47, 0.10);";
@@ -36,80 +79,71 @@ pub(crate) enum TooltipRateUnit {
 
 pub(crate) struct StudioTooltip;
 
-impl StudioTooltip {
-    pub(crate) fn numeric(maximum_fraction_digits: u8) -> Tooltip {
-        let maximum_fraction_digits = maximum_fraction_digits.min(6);
-        let formatter = JsFunction::new_with_args(
-            "value",
-            &format!(
-                r#"
+/// What every tooltip formatter starts with: take the value off the sample,
+/// refuse anything that is not a finite number, and leave `numeric` in scope.
+/// Spelled once here rather than at the head of each formatter.
+const TOOLTIP_NUMERIC_PRELUDE: &str = r#"
 const raw = Array.isArray(value) ? value[value.length - 1] : value;
 if (raw === null || raw === undefined || raw === '') return '—';
 const numeric = Number(raw);
 if (!Number.isFinite(numeric)) return '—';
+"#;
+
+/// The binary-prefix ladder, matching `format::ByteCountPresentation` — the
+/// same two steps the Rust side prints, so a tooltip and a fact never disagree.
+/// Leaves `scaled` and `unit` in scope for the caller to suffix.
+const TOOLTIP_BINARY_LADDER: &str = r#"
+const large = Math.abs(numeric) >= 1073741824;
+const scaled = numeric / (large ? 1073741824 : 1048576);
+const unit = large ? 'GiB' : 'MiB';
+"#;
+
+impl StudioTooltip {
+    pub(crate) fn numeric(maximum_fraction_digits: u8) -> Tooltip {
+        let maximum_fraction_digits = maximum_fraction_digits.min(6);
+        Self::axis(Self::value_formatter(&format!(
+            r#"
 const magnitude = Math.abs(numeric);
 const options = magnitude > 0 && magnitude < 0.001
   ? {{ maximumSignificantDigits: 3 }}
   : {{ maximumFractionDigits: {maximum_fraction_digits} }};
 return numeric.toLocaleString(undefined, options);
 "#
-            ),
-        );
-        Self::axis(formatter)
+        )))
     }
 
     pub(crate) fn rate(unit: TooltipRateUnit) -> Tooltip {
-        let body = match unit {
+        Self::single_series(&match unit {
             TooltipRateUnit::SamplesPerSecond => {
-                r#"
-const raw = Array.isArray(value) ? value[value.length - 1] : value;
-const numeric = Number(raw);
-if (!Number.isFinite(numeric)) return '—';
-return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' samples/s';
-"#
+                "return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' samples/s';"
+                    .to_owned()
             }
-            TooltipRateUnit::BytesPerSecond => {
-                r#"
-const raw = Array.isArray(value) ? value[value.length - 1] : value;
-const numeric = Number(raw);
-if (!Number.isFinite(numeric)) return '—';
-const gib = 1073741824;
-const mib = 1048576;
-const large = Math.abs(numeric) >= gib;
-const scaled = numeric / (large ? gib : mib);
-return scaled.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (large ? ' GiB/s' : ' MiB/s');
-"#
-            }
-        };
-        Self::single_series(body)
+            TooltipRateUnit::BytesPerSecond => format!(
+                "{TOOLTIP_BINARY_LADDER}\
+                 return scaled.toLocaleString(undefined, {{ maximumFractionDigits: 2 }}) + ' ' + unit + '/s';"
+            ),
+        })
     }
 
     pub(crate) fn percent() -> Tooltip {
         Self::single_series(
-            r#"
-const raw = Array.isArray(value) ? value[value.length - 1] : value;
-const numeric = Number(raw);
-if (!Number.isFinite(numeric)) return '—';
-return numeric.toLocaleString(undefined, { maximumFractionDigits: 1 }) + '%';
-"#,
+            "return numeric.toLocaleString(undefined, { maximumFractionDigits: 1 }) + '%';",
         )
     }
 
     pub(crate) fn bytes() -> Tooltip {
-        Self::single_series(
-            r#"
-const raw = Array.isArray(value) ? value[value.length - 1] : value;
-const numeric = Number(raw);
-if (!Number.isFinite(numeric)) return '—';
-const gib = 1073741824;
-const mib = 1048576;
-const large = Math.abs(numeric) >= gib;
-const scaled = numeric / (large ? gib : mib);
-return scaled.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (large ? ' GiB' : ' MiB');
-"#,
-        )
+        Self::single_series(&format!(
+            "{TOOLTIP_BINARY_LADDER}\
+             return scaled.toLocaleString(undefined, {{ maximumFractionDigits: 2 }}) + ' ' + unit;"
+        ))
     }
 
+    fn value_formatter(body: &str) -> JsFunction {
+        JsFunction::new_with_args("value", &format!("{TOOLTIP_NUMERIC_PRELUDE}{body}"))
+    }
+
+    /// A chart with one line: the popup says the value and nothing else, so the
+    /// same body serves the axis readout and the popup.
     fn single_series(value_formatter_body: &str) -> Tooltip {
         let popup_formatter_body = format!(
             r#"
@@ -117,10 +151,10 @@ const point = Array.isArray(params)
   ? params.find((candidate) => candidate && candidate.value !== null && candidate.value !== undefined)
   : params;
 const value = point ? point.value : null;
-{value_formatter_body}
+{TOOLTIP_NUMERIC_PRELUDE}{value_formatter_body}
 "#
         );
-        Self::axis(JsFunction::new_with_args("value", value_formatter_body))
+        Self::axis(Self::value_formatter(value_formatter_body))
             .formatter(JsFunction::new_with_args("params", &popup_formatter_body))
     }
 
@@ -134,13 +168,13 @@ const value = point ? point.value : null;
                     .animation(false)
                     .line_style(
                         LineStyle::new()
-                            .color(COLOR_INK_FAINT)
+                            .color(ChartColor::InkFaint.css())
                             .width(1)
                             .opacity(0.3),
                     ),
             )
-            .background_color(COLOR_SURFACE)
-            .border_color(COLOR_LINE)
+            .background_color(ChartColor::Surface.css())
+            .border_color(ChartColor::Line.css())
             .border_width(1)
             .padding(Padding::Double(4.0, 6.0))
             .value_formatter(value_formatter)
@@ -417,7 +451,7 @@ impl StudioEcharts for charming::Echarts {
         let _ = js_sys::Reflect::set(
             &text_style,
             &JsValue::from_str("color"),
-            &JsValue::from_str(COLOR_INK_SOFT),
+            &JsValue::from_str(&ChartColor::InkSoft.css()),
         );
         let _ = js_sys::Reflect::set(
             &text_style,
@@ -556,7 +590,7 @@ mod tests {
         let numeric = serde_json::to_value(StudioTooltip::numeric(3))
             .expect("numeric tooltip should serialize");
         assert_eq!(numeric["padding"], serde_json::json!([4.0, 6.0]));
-        assert_eq!(numeric["borderColor"], COLOR_LINE);
+        assert_eq!(numeric["borderColor"], ChartColor::Line.css());
         assert_eq!(numeric["axisPointer"]["lineStyle"]["opacity"], 0.3);
         assert!(numeric["formatter"].is_null());
 
