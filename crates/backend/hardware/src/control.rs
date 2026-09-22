@@ -33,12 +33,7 @@ use crate::bus::{
 use crate::feetech::FeetechBus;
 
 use crate::HardwareInputError;
-#[cfg(test)]
-use crate::calibration::MotorDirection;
-use crate::calibration::{
-    Calibration, CalibrationError, CalibrationInput, MotorRangeTracker, MotorSpec,
-    MotorSpecifications,
-};
+use crate::calibration::{Calibration, CalibrationError, EncoderCounts, MotorRangeTracker};
 use crate::control_policy::{
     CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
     Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent,
@@ -53,8 +48,9 @@ use spiral_robotics_common::recording::{
 };
 use spiral_robotics_common::robots::{
     CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointDiagnostics,
-    JointIdentity, JointKinematics, JointRange, JointTelemetry, ModeSelection, ModeStatus,
+    JointIdentity, JointKinematics, JointTelemetry, ModeSelection, ModeStatus,
     MotorElectricalReadings, MotorFault, MotorLimits, PortSettings, RobotTelemetry, TelemetryFrame,
+    config::{MotorConfig, MotorRange, RobotConfig},
 };
 use tokio::sync::{oneshot, watch};
 
@@ -314,55 +310,49 @@ const REPLAY_SEEK_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 
-/// Everything the control thread needs to open one arm.
+/// Everything the control thread needs to open one arm: a configuration with a port.
 #[derive(Clone, Debug)]
 pub struct RobotSpec {
-    id: String,
-    port: PortSettings,
-    motors: BTreeMap<String, MotorSpec>,
+    config: RobotConfig,
+    /// Derived from `config` whenever it changes; `None` until every motor is measured.
     calibration: Option<Calibration>,
+}
+
+impl TryFrom<RobotConfig> for RobotSpec {
+    type Error = HardwareInputError;
+
+    fn try_from(config: RobotConfig) -> Result<Self, HardwareInputError> {
+        if config.port().is_none() {
+            return Err(HardwareInputError::new(format!(
+                "robot {:?} has no serial port assigned; set one before connecting",
+                config.id()
+            )));
+        }
+        Ok(Self {
+            calibration: Calibration::of(&config),
+            config,
+        })
+    }
 }
 
 impl RobotSpec {
     pub fn id(&self) -> &str {
-        &self.id
+        self.config.id()
     }
 
-    pub fn new(
-        id: String,
-        port: PortSettings,
-        motors: BTreeMap<String, MotorSpec>,
-    ) -> Result<Self, HardwareInputError> {
-        HardwareInputError::validate_name("robot identifier", &id)?;
-        if port.path().trim().is_empty() {
-            return Err(HardwareInputError::new(
-                "serial port path must not be empty",
-            ));
-        }
-        if port.baud_rate() == 0 {
-            return Err(HardwareInputError::new(
-                "serial port baud rate must be greater than zero",
-            ));
-        }
-        MotorSpec::validate_set(&motors)
-            .map_err(|error| HardwareInputError::new(format!("invalid motor set: {error}")))?;
-        Ok(Self {
-            id,
-            port,
-            motors,
-            calibration: None,
-        })
+    fn port(&self) -> &PortSettings {
+        self.config
+            .port()
+            .expect("a robot specification is only built with a port")
     }
 
-    pub fn with_calibration(
-        mut self,
-        calibration: Calibration,
-    ) -> Result<Self, HardwareInputError> {
-        calibration
-            .validate_for_motor_specs(&self.motors)
-            .map_err(|error| HardwareInputError::new(format!("invalid calibration: {error}")))?;
-        self.calibration = Some(calibration);
-        Ok(self)
+    fn motors(&self) -> &BTreeMap<String, MotorConfig> {
+        self.config.motors()
+    }
+
+    /// Adopt a freshly measured sweep, which must cover exactly this arm's motors.
+    fn with_calibration(self, ranges: BTreeMap<String, MotorRange>) -> Result<Self, String> {
+        Self::try_from(self.config.with_calibration(ranges)?).map_err(|error| error.to_string())
     }
 }
 
@@ -681,9 +671,9 @@ enum Command {
         id: String,
         reply: Reply<()>,
     },
-    CalibrationInputFor {
+    CalibrationRangesFor {
         id: String,
-        reply: Reply<CalibrationInput>,
+        reply: Reply<BTreeMap<String, MotorRange>>,
     },
     Forget {
         id: String,
@@ -695,7 +685,7 @@ enum Command {
     },
     ApplyCalibration {
         id: String,
-        calibration: Box<Calibration>,
+        ranges: BTreeMap<String, MotorRange>,
         reply: Reply<()>,
     },
     StartRecording {
@@ -1047,12 +1037,15 @@ impl HardwareHandle {
 
     /// Read the ranges the sweep has recorded so far.
     ///
-    /// This deliberately leaves the sweep running. The caller has to build,
-    /// validate, and store a calibration from the result, and any of those can
+    /// This deliberately leaves the sweep running. The caller has to
+    /// validate and store the ranges, and any of those can
     /// fail — discarding the operator's sweep before then would throw away
     /// minutes of work that is still perfectly good.
-    pub async fn calibration_input(&self, id: &str) -> Result<CalibrationInput, String> {
-        self.request(|reply| Command::CalibrationInputFor {
+    pub async fn calibration_ranges(
+        &self,
+        id: &str,
+    ) -> Result<BTreeMap<String, MotorRange>, String> {
+        self.request(|reply| Command::CalibrationRangesFor {
             id: id.to_owned(),
             reply,
         })
@@ -1133,11 +1126,11 @@ impl HardwareHandle {
     pub async fn apply_calibration(
         &self,
         id: &str,
-        calibration: Calibration,
+        ranges: BTreeMap<String, MotorRange>,
     ) -> Result<(), String> {
         self.request(|reply| Command::ApplyCalibration {
             id: id.to_owned(),
-            calibration: Box::new(calibration),
+            ranges,
             reply,
         })
         .await
@@ -1410,16 +1403,8 @@ impl ConnectedRobot {
         }
     }
 
-    /// The robot's motors in bus-ID order, which for an SO-101 is also the
-    /// order the joints appear along the arm.
-    fn ordered_motors(&self) -> Vec<(&String, &MotorSpec)> {
-        let mut motors = self.spec.motors.iter().collect::<Vec<_>>();
-        motors.sort_by(|(left_name, left), (right_name, right)| {
-            left.id()
-                .cmp(&right.id())
-                .then_with(|| left_name.cmp(right_name))
-        });
-        motors
+    fn ordered_motors(&self) -> Vec<(&String, &MotorConfig)> {
+        self.spec.config.motors_in_bus_order()
     }
 
     /// This instant's positions for the named joints, normalized and raw.
@@ -1441,7 +1426,7 @@ impl ConnectedRobot {
             normalized.push(
                 calibration
                     .and_then(|calibration| calibration.motors().get(joint))
-                    .and_then(|motor| motor.normalize_raw(counts).ok()),
+                    .map(|motor| motor.normalize_raw(counts)),
             );
         }
         (normalized, raw)
@@ -1462,7 +1447,7 @@ impl ConnectedRobot {
                 .map(|joint| {
                     let counts = self.motion.commanded.get(joint).copied()?;
                     let motor = calibration.motors().get(joint)?;
-                    motor.normalize_raw(counts).ok()
+                    Some(motor.normalize_raw(counts))
                 })
                 .collect(),
         )
@@ -1538,20 +1523,14 @@ impl ConnectedRobot {
                 let kinematics = JointKinematics::new(
                     raw,
                     motor.map(|motor| motor.degrees_from_center(raw)),
-                    motor.and_then(|motor| motor.normalize_raw(raw).ok()),
+                    motor.map(|motor| motor.normalize_raw(raw)),
                 )
                 .with_raw_targets(goal_raw, target_raw)
                 .with_calibrated_target(
                     target_raw
                         .zip(motor)
                         .map(|(target, motor)| motor.degrees_from_center(target)),
-                    motor.map(|motor| {
-                        JointRange::new(
-                            motor.reading().range_min(),
-                            motor.reading().center(),
-                            motor.reading().range_max(),
-                        )
-                    }),
+                    motor.map(|motor| motor.range()),
                 );
                 let electrical = MotorElectricalReadings::new(
                     track.and_then(|track| track.sample.electrical().temperature_celsius()),
@@ -1588,7 +1567,7 @@ impl ConnectedRobot {
                 .map(|(name, range)| {
                     CalibrationJointProgress::new(name.clone(), range.minimum(), range.position())
                         .with_max(range.maximum())
-                        .with_encoder_counts_per_turn(MotorSpec::encoder_counts_per_turn())
+                        .with_encoder_counts_per_turn(EncoderCounts::PER_TURN)
                         .with_ready(
                             range.maximum().saturating_sub(range.minimum())
                                 >= crate::calibration::MINIMUM_CALIBRATION_TRAVEL,
@@ -1598,7 +1577,7 @@ impl ConnectedRobot {
             CalibrationProgress::new(joints, sweep.is_ready())
         });
         RobotTelemetry::new(
-            self.spec.id.clone(),
+            self.spec.id().to_owned(),
             self.motion.torque.is_engaged(),
             joints,
         )
@@ -1842,8 +1821,8 @@ impl Controller {
             Command::StartCalibration { id, reply } => {
                 let _ = reply.send(self.start_calibration(&id));
             }
-            Command::CalibrationInputFor { id, reply } => {
-                let _ = reply.send(self.calibration_input(&id));
+            Command::CalibrationRangesFor { id, reply } => {
+                let _ = reply.send(self.calibration_ranges(&id));
             }
             Command::Forget { id, reply } => {
                 let result = if self.robots.contains_key(&id) {
@@ -1866,12 +1845,8 @@ impl Controller {
                 };
                 let _ = reply.send(result);
             }
-            Command::ApplyCalibration {
-                id,
-                calibration,
-                reply,
-            } => {
-                let _ = reply.send(self.apply_calibration(&id, *calibration));
+            Command::ApplyCalibration { id, ranges, reply } => {
+                let _ = reply.send(self.apply_calibration(&id, ranges));
             }
             Command::StartRecording {
                 writer,
@@ -2258,46 +2233,34 @@ impl Controller {
     }
 
     fn connect(&mut self, spec: RobotSpec) -> Result<(), String> {
-        if self.robots.contains_key(&spec.id) {
-            return Err(format!("robot {:?} is already connected", spec.id));
-        }
-        MotorSpecifications::try_from(&spec.motors)
-            .map_err(|error| format!("robot {:?} has invalid motors: {error}", spec.id))?;
-        if let Some(calibration) = &spec.calibration {
-            calibration
-                .validate_for_motor_specs(&spec.motors)
-                .map_err(|error| {
-                    format!(
-                        "calibration for robot {:?} does not match its configured motors: {error}",
-                        spec.id
-                    )
-                })?;
+        if self.robots.contains_key(spec.id()) {
+            return Err(format!("robot {:?} is already connected", spec.id()));
         }
         // Two robots cannot share one physical serial port.
         let holder = self
             .robots
             .values()
-            .find(|robot| robot.spec.port.path() == spec.port.path());
+            .find(|robot| robot.spec.port().path() == spec.port().path());
         if let Some(holder) = holder {
             return Err(format!(
                 "port {:?} is already open for robot {:?}",
-                spec.port.path(),
-                holder.spec.id
+                spec.port().path(),
+                holder.spec.id()
             ));
         }
 
         let open = |spec: &RobotSpec| -> Result<Box<dyn MotorBus>, String> {
             #[cfg(test)]
             if self.use_test_bus {
-                Ok(Box::new(SimulatedBus::new(&spec.motors, true)))
+                Ok(Box::new(SimulatedBus::new(spec.motors(), true)))
             } else {
-                FeetechBus::connect(spec.port.path(), spec.port.baud_rate(), &spec.motors)
+                FeetechBus::connect(spec.port().path(), spec.port().baud_rate(), spec.motors())
                     .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
                     .map_err(|error| error.to_string())
             }
             #[cfg(not(test))]
             {
-                FeetechBus::connect(spec.port.path(), spec.port.baud_rate(), &spec.motors)
+                FeetechBus::connect(spec.port().path(), spec.port().baud_rate(), spec.motors())
                     .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
                     .map_err(|error| error.to_string())
             }
@@ -2305,7 +2268,7 @@ impl Controller {
 
         let mut bus = open(&spec).inspect_err(|error| {
             self.published.connections.insert(
-                spec.id.clone(),
+                spec.id().to_owned(),
                 ConnectionStatus::new(false, Some(error.clone())),
             );
         })?;
@@ -2315,19 +2278,19 @@ impl Controller {
         let positions = bus.read_positions().map_err(|error| {
             let message = format!(
                 "could not reach all motors on {}: {error}",
-                spec.port.path()
+                spec.port().path()
             );
             self.published.connections.insert(
-                spec.id.clone(),
+                spec.id().to_owned(),
                 ConnectionStatus::new(false, Some(message.clone())),
             );
             message
         })?;
-        spec.motors
+        spec.motors()
             .validate_read_keys(&positions, "initial position read")
             .inspect_err(|message| {
                 self.published.connections.insert(
-                    spec.id.clone(),
+                    spec.id().to_owned(),
                     ConnectionStatus::new(false, Some(message.clone())),
                 );
             })?;
@@ -2338,10 +2301,10 @@ impl Controller {
         bus.set_torque(false).map_err(|error| {
             let message = format!(
                 "could not establish released torque state on {}: {error}",
-                spec.port.path()
+                spec.port().path()
             );
             self.published.connections.insert(
-                spec.id.clone(),
+                spec.id().to_owned(),
                 ConnectionStatus::new(false, Some(message.clone())),
             );
             message
@@ -2356,7 +2319,7 @@ impl Controller {
             .map(|(name, limits)| (name, limits.into()))
             .collect();
 
-        let id = spec.id.clone();
+        let id = spec.id().to_owned();
         self.robots.insert(
             id.clone(),
             ConnectedRobot {
@@ -2543,12 +2506,7 @@ impl Controller {
                 let calibration = match robot.spec.calibration.as_ref() {
                     None => CalibrationAdmission::Missing,
                     Some(calibration) => {
-                        match calibration.validate_for_motor_specs(&robot.spec.motors) {
-                            Ok(()) => CalibrationAdmission::Ready(
-                                calibration.motors().keys().cloned().collect(),
-                            ),
-                            Err(error) => CalibrationAdmission::Invalid(error.to_string()),
-                        }
+                        CalibrationAdmission::Ready(calibration.motors().keys().cloned().collect())
                     }
                 };
                 (
@@ -2654,17 +2612,11 @@ impl Controller {
             .robots
             .get(id)
             .ok_or_else(|| format!("robot {id:?} is not connected"))?;
-        let calibration = robot
+        robot
             .spec
             .calibration
             .as_ref()
-            .ok_or_else(|| format!("robot {id:?} must be calibrated first"))?;
-        calibration.validate_for_motor_specs(&robot.spec.motors).map_err(|error| {
-            format!(
-                "robot {id:?} has calibration that does not match its configured motors: {error}"
-            )
-        })?;
-        Ok(calibration)
+            .ok_or_else(|| format!("robot {id:?} must be calibrated first"))
     }
 
     fn start_calibration(&mut self, id: &str) -> Result<(), String> {
@@ -2684,7 +2636,7 @@ impl Controller {
             .map_err(|error| error.to_string())?;
         robot
             .spec
-            .motors
+            .motors()
             .validate_read_keys(&positions, "calibration position read")?;
         robot.motion.positions = positions.clone();
         robot.follow_measured_positions();
@@ -2693,7 +2645,7 @@ impl Controller {
         Ok(())
     }
 
-    fn calibration_input(&self, id: &str) -> Result<CalibrationInput, String> {
+    fn calibration_ranges(&self, id: &str) -> Result<BTreeMap<String, MotorRange>, String> {
         let robot = self
             .robots
             .get(id)
@@ -2714,23 +2666,20 @@ impl Controller {
 
         sweep
             .clone()
-            .into_input()
+            .into_ranges()
             .map_err(|error| error.to_string())
     }
 
-    fn apply_calibration(&mut self, id: &str, calibration: Calibration) -> Result<(), String> {
+    fn apply_calibration(
+        &mut self,
+        id: &str,
+        ranges: BTreeMap<String, MotorRange>,
+    ) -> Result<(), String> {
         let robot = self
             .robots
             .get_mut(id)
             .ok_or_else(|| format!("robot {id:?} is not connected"))?;
-        calibration
-            .validate_for_motor_specs(&robot.spec.motors)
-            .map_err(|error| {
-                format!(
-                    "calibration for robot {id:?} does not match its configured motors: {error}"
-                )
-            })?;
-        robot.spec.calibration = Some(calibration);
+        robot.spec = robot.spec.clone().with_calibration(ranges)?;
         Ok(())
     }
 
@@ -2759,7 +2708,7 @@ impl Controller {
             Ok(samples) => {
                 if let Err(error) = robot
                     .spec
-                    .motors
+                    .motors()
                     .validate_read_keys(&samples, "telemetry read")
                 {
                     robot.health.failures += 1;
@@ -2869,7 +2818,7 @@ impl Controller {
                 .filter_map(|(name, raw)| {
                     let source = leader_calibration.motors().get(name)?;
                     let destination = follower_calibration.motors().get(name)?;
-                    let normalized = source.normalize_raw(*raw).ok()?;
+                    let normalized = source.normalize_raw(*raw);
                     let target = destination.denormalize(normalized).ok()?;
                     Some((name.clone(), target))
                 })
@@ -2943,9 +2892,7 @@ impl Controller {
                         robot.motion.positions.get(joint).copied().ok_or_else(|| {
                             format!("robot stopped reporting replay joint {joint:?}")
                         })?;
-                    let actual = motor.normalize_raw(measured).map_err(|error| {
-                        format!("could not normalize replay joint {joint:?}: {error}")
-                    })?;
+                    let actual = motor.normalize_raw(measured);
                     Ok::<bool, String>(arrived && (actual - wanted).abs() <= REPLAY_SEEK_TOLERANCE)
                 });
             let arrived = match arrived {
@@ -3262,7 +3209,7 @@ impl Controller {
     }
 }
 
-trait MotorSpecMapExt {
+trait MotorConfigMapExt {
     fn validate_read_keys<T>(
         &self,
         readings: &BTreeMap<String, T>,
@@ -3270,7 +3217,7 @@ trait MotorSpecMapExt {
     ) -> Result<(), String>;
 }
 
-impl MotorSpecMapExt for BTreeMap<String, MotorSpec> {
+impl MotorConfigMapExt for BTreeMap<String, MotorConfig> {
     fn validate_read_keys<T>(
         &self,
         readings: &BTreeMap<String, T>,
@@ -3293,51 +3240,35 @@ impl MotorSpecMapExt for BTreeMap<String, MotorSpec> {
 mod tests {
     use std::sync::Arc;
 
-    use crate::bus::{BusError, MotorElectricalSample, MotorMechanicalSample};
-    use crate::calibration::MotorReading;
-
     use super::*;
+    use crate::bus::{BusError, MotorElectricalSample, MotorMechanicalSample};
 
-    fn motors() -> BTreeMap<String, MotorSpec> {
-        crate::calibration::MotorSpec::so101_arm()
+    fn motors() -> BTreeMap<String, MotorConfig> {
+        MotorConfig::so101_arm()
     }
 
-    fn calibration(center: i64, span: i64) -> Calibration {
-        let motors = motors();
-        calibration_for(&motors, center, span)
+    /// The same measured range for every SO-101 motor.
+    fn calibration(center: i64, span: i64) -> BTreeMap<String, MotorRange> {
+        motors()
+            .into_keys()
+            .map(|name| {
+                let range = MotorRange::new(center - span, center, center + span).expect("range");
+                (name, range)
+            })
+            .collect()
     }
 
-    fn calibration_for(
-        motors: &BTreeMap<String, MotorSpec>,
-        center: i64,
-        span: i64,
-    ) -> Calibration {
-        let input = CalibrationInput::Direct {
-            motors: motors
-                .keys()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        MotorReading::new(center, center - span, center + span),
-                    )
-                })
-                .collect(),
+    fn spec(id: &str, calibration: Option<BTreeMap<String, MotorRange>>) -> RobotSpec {
+        let config = RobotConfig::so101(id, "so101_follower")
+            .and_then(|config| config.with_port(PortSettings::new(format!("/dev/{id}"), 1_000_000)))
+            .expect("robot configuration");
+        let config = match calibration {
+            Some(ranges) => config
+                .with_calibration(ranges)
+                .expect("matching calibration"),
+            None => config,
         };
-        input.build(motors).expect("calibration")
-    }
-
-    fn spec(id: &str, calibration: Option<Calibration>) -> RobotSpec {
-        let specification = RobotSpec::new(
-            id.to_owned(),
-            PortSettings::try_new(format!("/dev/{id}"), 1_000_000).expect("port settings"),
-            motors(),
-        )
-        .expect("robot specification");
-        calibration.map_or(specification.clone(), |calibration| {
-            specification
-                .with_calibration(calibration)
-                .expect("matching calibration")
-        })
+        RobotSpec::try_from(config).expect("robot specification")
     }
 
     fn timeline_replay(
@@ -3959,42 +3890,25 @@ mod tests {
     }
 
     #[test]
-    fn hardware_rejects_calibration_for_a_different_motor_definition() {
+    fn a_live_calibration_must_measure_exactly_the_connected_motors() {
         let mut controller = controller();
-        let mut stale_motors = motors();
-        stale_motors.insert(
-            "gripper".to_owned(),
-            MotorSpec::new(99, MotorDirection::Normal).with_model("sts3215"),
-        );
-        let stale = calibration_for(&stale_motors, 2048, 500);
-
-        let stale_specification = RobotSpec::new(
-            "stale".to_owned(),
-            PortSettings::try_new("/dev/stale", 1_000_000).expect("port"),
-            motors(),
-        )
-        .expect("robot definition");
-        let error = stale_specification
-            .with_calibration(stale.clone())
-            .expect_err("stale calibration must not become a robot specification");
-        assert!(error.to_string().contains("does not match"), "{error}");
-        assert!(controller.robots.is_empty());
-
         controller
             .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect with matching calibration");
+            .expect("connect");
         let original = controller.robots["arm"].spec.calibration.clone();
+
+        let mut partial = calibration(1500, 400);
+        partial.remove("gripper");
         let error = controller
-            .apply_calibration("arm", stale.clone())
-            .expect_err("live replacement must also be checked");
-        assert!(error.contains("does not match"), "{error}");
+            .apply_calibration("arm", partial)
+            .expect_err("a partial sweep must not replace the calibration");
+        assert!(error.contains("exactly the configured motors"), "{error}");
         assert_eq!(controller.robots["arm"].spec.calibration, original);
 
-        controller.robots.get_mut("arm").unwrap().spec.calibration = Some(stale);
-        let error = controller
-            .require_calibrated("arm")
-            .expect_err("command guard must revalidate the binding");
-        assert!(error.contains("does not match"), "{error}");
+        controller
+            .apply_calibration("arm", calibration(1500, 400))
+            .expect("a complete sweep replaces the calibration");
+        assert_ne!(controller.robots["arm"].spec.calibration, original);
     }
 
     #[test]
@@ -4175,7 +4089,7 @@ mod tests {
         let robot = controller.robots.get_mut("arm").unwrap();
         robot.motion.positions = robot
             .spec
-            .motors
+            .motors()
             .keys()
             .map(|name| (name.clone(), 2048))
             .collect();
@@ -4248,7 +4162,7 @@ mod tests {
         let robot = controller.robots.get_mut("arm").unwrap();
         robot.motion.positions = robot
             .spec
-            .motors
+            .motors()
             .keys()
             .map(|name| (name.clone(), 2048))
             .collect();
@@ -4497,14 +4411,14 @@ mod tests {
     }
 
     #[test]
-    fn a_sweep_becomes_calibration_input_once_every_joint_has_moved() {
+    fn a_sweep_becomes_calibration_ranges_once_every_joint_has_moved() {
         let mut controller = controller();
         controller.connect(spec("arm", None)).expect("connect");
         controller.start_calibration("arm").expect("start");
 
         assert!(
             controller
-                .calibration_input("arm")
+                .calibration_ranges("arm")
                 .expect_err("nothing has moved yet")
                 .contains("did not move far enough")
         );
@@ -4517,16 +4431,8 @@ mod tests {
             controller.poll_robots();
         }
 
-        let input = controller.calibration_input("arm").expect("finish");
-        let CalibrationInput::Direct { motors } = input else {
-            panic!("a sweep produces direct readings");
-        };
-        assert_eq!(motors.len(), 6);
-        assert!(
-            motors
-                .values()
-                .all(|reading| reading.range_max() > reading.range_min())
-        );
+        let ranges = controller.calibration_ranges("arm").expect("finish");
+        assert_eq!(ranges.len(), 6);
 
         // Reading the ranges must not end the sweep: the caller still has to
         // build and store a calibration, and either can fail.
@@ -4535,8 +4441,8 @@ mod tests {
             "the sweep survives until the caller clears it"
         );
         assert_eq!(
-            controller.calibration_input("arm").expect("read again"),
-            CalibrationInput::Direct { motors },
+            controller.calibration_ranges("arm").expect("read again"),
+            ranges,
             "reading twice gives the same answer"
         );
     }
@@ -4552,7 +4458,7 @@ mod tests {
         for robot in controller.robots.values_mut() {
             robot.motion.positions = robot
                 .spec
-                .motors
+                .motors()
                 .keys()
                 .map(|name| (name.clone(), 2048))
                 .collect();
@@ -4576,7 +4482,7 @@ mod tests {
         assert_eq!(calibrated.joints()[0].normalized(), Some(0.0));
         assert_eq!(
             calibrated.joints()[0].range(),
-            Some(JointRange::new(1024, 2048, 3072))
+            Some(MotorRange::new(1024, 2048, 3072).unwrap())
         );
         assert!(raw.joints().iter().all(|joint| joint.degrees().is_none()));
         assert!(raw.joints().iter().all(|joint| joint.goal_raw().is_none()));

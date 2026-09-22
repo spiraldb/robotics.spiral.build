@@ -22,7 +22,7 @@ pub(super) fn CalibrationSection(
     let recalibrate_id = id.clone();
     let calibration_title = if !connected {
         "Connect the arm first"
-    } else if robot.calibrated() {
+    } else if robot.config().calibrated() {
         "Every joint already has a recorded range. Recalibrate after rebuilding the arm or moving a horn."
     } else {
         ""
@@ -52,13 +52,13 @@ pub(super) fn CalibrationSection(
                                 result
                             });
                         },
-                        {if command() == Some("start") { "Starting…" } else if robot.calibrated() { "Recalibrate" } else { "Calibrate" }}
+                        {if command() == Some("start") { "Starting…" } else if robot.config().calibrated() { "Recalibrate" } else { "Calibrate" }}
                     }
                 }
                 // Instructions only where there is still work to do. On a
                 // calibrated arm the paragraph said nothing the button did not,
                 // and it said it once per arm, forever.
-                if !robot.calibrated() {
+                if !robot.config().calibrated() {
                     p { class: "device-section-note",
                         "Record each joint's travel so the studio can command it safely."
                     }

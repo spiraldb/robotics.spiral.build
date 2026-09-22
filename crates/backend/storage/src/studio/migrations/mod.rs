@@ -13,6 +13,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateBuildDocuments),
             Box::new(RenameToExplorations),
             Box::new(KeepRolloutSessions),
+            Box::new(TypedRobotConfigs),
         ]
     }
 }
@@ -165,6 +166,29 @@ impl MigrationTrait for KeepRolloutSessions {
         manager
             .get_connection()
             .execute_unprepared(include_str!("m20260922_000007_rollout_sessions.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+/// Robot rows move to the typed configuration shape and gain a save revision.
+struct TypedRobotConfigs;
+impl MigrationName for TypedRobotConfigs {
+    fn name(&self) -> &str {
+        "m20260922_000008_typed_robot_configs"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for TypedRobotConfigs {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260922_000008_typed_robot_configs.sql"))
             .await?;
         Ok(())
     }

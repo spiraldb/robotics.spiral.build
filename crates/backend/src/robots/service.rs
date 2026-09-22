@@ -104,22 +104,26 @@ impl AutoConnectOutcome {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     use super::*;
 
     fn specification(id: &str) -> RobotSpec {
-        RobotSpec::new(
-            id.to_owned(),
-            spiral_robotics_hardware::PortSettings::try_new(format!("/dev/{id}"), 1_000_000)
-                .unwrap(),
-            spiral_robotics_hardware::MotorSpec::so101_arm(),
-        )
-        .unwrap()
+        let config =
+            spiral_robotics_common::robots::config::RobotConfig::so101(id, "so101_follower")
+                .and_then(|config| {
+                    config.with_port(spiral_robotics_common::robots::PortSettings::new(
+                        format!("/dev/{id}"),
+                        1_000_000,
+                    ))
+                })
+                .unwrap();
+        RobotSpec::try_from(config).unwrap()
     }
 
     struct Store {
-        events: Arc<Mutex<Vec<String>>>,
+        events: Rc<RefCell<Vec<String>>>,
         ids: Vec<String>,
         invalid: Option<String>,
         fail_delete: bool,
@@ -127,12 +131,12 @@ mod tests {
 
     impl RobotStore for Store {
         async fn ensure_exists(&self, robot: &str) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push(format!("exists:{robot}"));
+            self.events.borrow_mut().push(format!("exists:{robot}"));
             Ok(())
         }
 
         async fn delete(&self, robot: &str) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push(format!("delete:{robot}"));
+            self.events.borrow_mut().push(format!("delete:{robot}"));
             if self.fail_delete {
                 Err(OperationError::Internal(
                     "storage refused deletion".to_owned(),
@@ -147,7 +151,7 @@ mod tests {
         }
 
         async fn connection_spec(&self, robot: &str) -> Result<RobotSpec, OperationError> {
-            self.events.lock().unwrap().push(format!("spec:{robot}"));
+            self.events.borrow_mut().push(format!("spec:{robot}"));
             if self.invalid.as_deref() == Some(robot) {
                 Err(OperationError::InvalidInput("missing port".to_owned()))
             } else {
@@ -157,7 +161,7 @@ mod tests {
     }
 
     struct Control {
-        events: Arc<Mutex<Vec<String>>>,
+        events: Rc<RefCell<Vec<String>>>,
         fail_connect: Option<String>,
         fail_forget: bool,
     }
@@ -165,8 +169,7 @@ mod tests {
     impl RobotConnectionPort for Control {
         async fn connect(&self, specification: RobotSpec) -> Result<(), OperationError> {
             self.events
-                .lock()
-                .unwrap()
+                .borrow_mut()
                 .push(format!("connect:{}", specification.id()));
             if self.fail_connect.as_deref() == Some(specification.id()) {
                 Err(OperationError::Conflict("arm absent".to_owned()))
@@ -176,7 +179,7 @@ mod tests {
         }
 
         async fn forget(&self, robot: &str) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push(format!("forget:{robot}"));
+            self.events.borrow_mut().push(format!("forget:{robot}"));
             if self.fail_forget {
                 Err(OperationError::Internal(
                     "control thread stopped".to_owned(),
@@ -187,8 +190,8 @@ mod tests {
         }
     }
 
-    fn setup() -> (Store, Control, Arc<Mutex<Vec<String>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
+    fn setup() -> (Store, Control, Rc<RefCell<Vec<String>>>) {
+        let events = Rc::<RefCell<Vec<String>>>::default();
         (
             Store {
                 events: events.clone(),
@@ -215,7 +218,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            *events.lock().unwrap(),
+            *events.borrow_mut(),
             ["exists:arm", "forget:arm", "delete:arm"]
         );
     }
@@ -230,7 +233,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(*events.lock().unwrap(), ["exists:arm", "forget:arm"]);
+        assert_eq!(*events.borrow_mut(), ["exists:arm", "forget:arm"]);
     }
 
     #[tokio::test]
@@ -244,7 +247,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(
-            *events.lock().unwrap(),
+            *events.borrow_mut(),
             ["exists:arm", "forget:arm", "delete:arm"]
         );
     }
@@ -266,7 +269,7 @@ mod tests {
         assert!(matches!(outcomes[1].status, AutoConnectStatus::Failed(_)));
         assert_eq!(outcomes[2].status, AutoConnectStatus::Connected);
         assert_eq!(
-            *events.lock().unwrap(),
+            *events.borrow_mut(),
             [
                 "spec:invalid",
                 "spec:absent",
@@ -288,7 +291,7 @@ mod tests {
 
         assert!(matches!(outcome.status, AutoConnectStatus::Skipped(_)));
         assert_eq!(outcome.robot, "arm");
-        assert_eq!(*events.lock().unwrap(), ["spec:arm"]);
+        assert_eq!(*events.borrow_mut(), ["spec:arm"]);
     }
 
     #[tokio::test]
@@ -299,6 +302,6 @@ mod tests {
             .connect("arm")
             .await
             .unwrap();
-        assert_eq!(*events.lock().unwrap(), ["spec:arm", "connect:arm"]);
+        assert_eq!(*events.borrow_mut(), ["spec:arm", "connect:arm"]);
     }
 }

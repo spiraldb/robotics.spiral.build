@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::projects::context::ProjectContext;
 use crate::robots::calibration::{
-    CalibrationActions, CalibrationControlPort, CalibrationUpdate, RobotCalibrationStore,
+    CalibrationActions, CalibrationControlPort, RobotCalibrationStore,
 };
 use crate::robots::control::{RobotControlActions, RobotControlCommand};
 use crate::robots::discovery::SerialPortDiscovery;
@@ -14,10 +14,11 @@ use crate::robots::service::{
 };
 use crate::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
 use crate::{BackendCommandError, OperationError};
+use spiral_robotics_common::robots::config::{MotorRange, RobotConfigSave};
 use spiral_robotics_common::robots::{
     CameraStatus, ModeSelection, RobotSummary, SerialPortSummary,
 };
-use spiral_robotics_hardware::{MotorSpec, RobotSpec};
+use spiral_robotics_hardware::RobotSpec;
 
 /// Loads saved configurations for hardware lifecycle actions. Startup prefetches
 /// the catalog once so unavailable arms can be reported independently.
@@ -121,22 +122,12 @@ impl RobotConnectionPort for RobotAdapter<'_> {
 }
 
 impl RobotCalibrationStore for RobotWorkspace {
-    async fn motor_specs(
-        &self,
-        robot: &str,
-    ) -> Result<BTreeMap<String, MotorSpec>, OperationError> {
-        self.get(robot)
-            .await
-            .and_then(|record| record.motors())
-            .map_err(OperationError::from)
-    }
-
     async fn save_calibration(
         &self,
         robot: &str,
-        update: CalibrationUpdate<'_>,
+        ranges: BTreeMap<String, MotorRange>,
     ) -> Result<(), OperationError> {
-        RobotWorkspace::save_calibration(self, robot, update)
+        RobotWorkspace::save_calibration(self, robot, ranges)
             .await
             .map(|_| ())
             .map_err(OperationError::from)
@@ -222,36 +213,36 @@ impl DeviceCommands {
             .await
     }
 
-    pub(super) async fn save_document(
+    pub(super) async fn save_robot(
         &self,
-        request: spiral_robotics_common::robots::document::RobotDocumentSave,
+        request: RobotConfigSave,
     ) -> Result<RobotSummary, BackendCommandError> {
         self.state
             .execute(move |state| async move {
-                request
-                    .document()
-                    .validate()
-                    .map_err(OperationError::InvalidInput)?;
-                let id = request
-                    .document()
-                    .id()
-                    .map_err(OperationError::InvalidInput)?;
+                let config = request.config().clone();
                 let connected = state
                     .hardware()
                     .state()
                     .connections()
-                    .get(id)
+                    .get(config.id())
                     .is_some_and(|status| status.connected());
-                if connected && request.changes_control_configuration() {
-                    return Err(OperationError::Conflict(
-                        "Disconnect the robot before changing its port, motors, or calibration"
-                            .into(),
-                    )
-                    .into());
+                if connected {
+                    let saved = state
+                        .workspace()
+                        .get(config.id())
+                        .await
+                        .map_err(OperationError::from)?;
+                    if config.changes_control_configuration(saved.config()) {
+                        return Err(OperationError::Conflict(
+                            "Disconnect the robot before changing its port, motors, or calibration"
+                                .into(),
+                        )
+                        .into());
+                    }
                 }
                 let record = state
                     .workspace()
-                    .save_document(&request)
+                    .save(config, request.expected_revision())
                     .await
                     .map_err(OperationError::from)?;
                 Ok(record.live_summary(&state.hardware().state()))
@@ -356,13 +347,13 @@ impl DeviceCommands {
         id: String,
     ) -> Result<RobotSummary, BackendCommandError> {
         self.state.execute(move |state| async move {
-                let output = CalibrationActions::new(
+                let warning = CalibrationActions::new(
                     state.workspace().as_ref(),
                     state.hardware().as_ref(),
                 )
                 .finish(&id)
                 .await?;
-                if let Some(warning) = output.live_warning() {
+                if let Some(warning) = warning {
                     tracing::warn!(robot = %id, "saved calibration but live refresh was incomplete: {warning}");
                 }
                 Self::from(state).present_robot(&id).await

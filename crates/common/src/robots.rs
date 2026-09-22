@@ -1,169 +1,64 @@
 //! Robot configuration, operation, calibration, and telemetry contracts.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::recording::{RecordingProgress, ReplayProgress};
 
 pub mod visualization;
 
-/// One robot instance: exactly one arm, stored in SpiralDB.
+/// A saved robot as the Studio sees it: its configuration and live connection.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RobotSummary {
-    id: String,
-    robot_type: Option<String>,
-    port: Option<PortSettings>,
-    motors: Vec<MotorSummary>,
-    cameras: Vec<CameraBinding>,
-    #[serde(flatten)]
-    availability: RobotAvailability,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    document: Option<document::RobotDocument>,
-}
-
-/// Whether a robot is calibrated, structurally valid, and connected.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RobotAvailability {
-    calibrated: bool,
-    problem: Option<String>,
+    config: config::RobotConfig,
+    /// Storage revision the configuration was read at; a save names it to detect conflicts.
+    revision: u64,
     connection: ConnectionStatus,
-}
-
-impl RobotAvailability {
-    pub fn new(calibrated: bool, problem: Option<String>, connection: ConnectionStatus) -> Self {
-        Self {
-            calibrated,
-            problem,
-            connection,
-        }
-    }
-}
-
-impl RobotSummary {
-    pub fn new(
-        id: impl Into<String>,
-        robot_type: Option<String>,
-        availability: RobotAvailability,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            robot_type,
-            port: None,
-            motors: Vec::new(),
-            cameras: Vec::new(),
-            availability,
-            document: None,
-        }
-    }
-
-    pub fn with_document(mut self, document: document::RobotDocument) -> Self {
-        self.document = Some(document);
-        self
-    }
-    pub fn document(&self) -> Option<&document::RobotDocument> {
-        self.document.as_ref()
-    }
-
-    pub fn with_port(mut self, port: Option<PortSettings>) -> Self {
-        self.port = port;
-        self
-    }
-
-    pub fn with_motors(mut self, motors: Vec<MotorSummary>) -> Self {
-        self.motors = motors;
-        self
-    }
-
-    pub fn with_cameras(mut self, cameras: Vec<CameraBinding>) -> Self {
-        self.cameras = cameras;
-        self
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn robot_type(&self) -> Option<&str> {
-        self.robot_type.as_deref()
-    }
-
-    pub const fn port(&self) -> Option<&PortSettings> {
-        self.port.as_ref()
-    }
-
-    pub fn motors(&self) -> &[MotorSummary] {
-        &self.motors
-    }
-
-    pub fn cameras(&self) -> &[CameraBinding] {
-        &self.cameras
-    }
-
-    pub const fn calibrated(&self) -> bool {
-        self.availability.calibrated
-    }
-
-    pub fn problem(&self) -> Option<&str> {
-        self.availability.problem.as_deref()
-    }
-
-    pub const fn connection(&self) -> &ConnectionStatus {
-        &self.availability.connection
-    }
-}
-
-/// A motor as configured.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct MotorSummary {
-    name: String,
-    id: u32,
-    model: Option<String>,
-    /// What this motor will fault at, read from its EEPROM when it connected.
+    /// What each motor will fault at, read from its EEPROM when it connected.
     ///
     /// Lives on the snapshot rather than the telemetry frame because it does
     /// not change while an arm is running; resending it twenty times a second
     /// would be resending a constant.
-    #[serde(default)]
-    limits: MotorLimits,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    motor_limits: BTreeMap<String, MotorLimits>,
 }
 
-impl MotorSummary {
-    pub fn new(name: impl Into<String>, id: u32) -> Self {
+impl RobotSummary {
+    pub fn new(config: config::RobotConfig, revision: u64, connection: ConnectionStatus) -> Self {
         Self {
-            name: name.into(),
-            id,
-            model: None,
-            limits: MotorLimits::default(),
+            config,
+            revision,
+            connection,
+            motor_limits: BTreeMap::new(),
         }
     }
 
-    pub fn with_model(mut self, model: Option<String>) -> Self {
-        self.model = model;
+    pub fn with_motor_limits(mut self, motor_limits: BTreeMap<String, MotorLimits>) -> Self {
+        self.motor_limits = motor_limits;
         self
     }
 
-    pub const fn with_limits(mut self, limits: MotorLimits) -> Self {
-        self.limits = limits;
-        self
+    pub fn id(&self) -> &str {
+        self.config.id()
     }
 
-    pub const fn set_limits(&mut self, limits: MotorLimits) {
-        self.limits = limits;
+    pub const fn config(&self) -> &config::RobotConfig {
+        &self.config
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
-    pub const fn id(&self) -> u32 {
-        self.id
+
+    pub const fn connection(&self) -> &ConnectionStatus {
+        &self.connection
     }
-    pub fn model(&self) -> Option<&str> {
-        self.model.as_deref()
-    }
-    pub const fn limits(&self) -> MotorLimits {
-        self.limits
+
+    /// The limits `motor` reported when it connected, or none while disconnected.
+    pub fn motor_limits(&self, motor: &str) -> MotorLimits {
+        self.motor_limits.get(motor).copied().unwrap_or_default()
     }
 }
 
@@ -240,15 +135,14 @@ impl PortSettings {
         }
     }
 
-    pub fn try_new(path: impl Into<String>, baud_rate: u32) -> Result<Self, &'static str> {
-        let path = path.into();
-        if path.trim().is_empty() {
-            return Err("serial port path must not be empty");
+    fn validate(&self) -> Result<(), String> {
+        if self.path.trim().is_empty() || self.path.contains('\0') {
+            return Err("Serial port path must be nonempty without NUL bytes".into());
         }
-        if baud_rate == 0 {
-            return Err("serial port baud rate must be greater than zero");
+        if self.baud_rate == 0 {
+            return Err("Serial port baud rate must be greater than zero".into());
         }
-        Ok(Self { path, baud_rate })
+        Ok(())
     }
 
     pub fn path(&self) -> &str {
@@ -257,39 +151,6 @@ impl PortSettings {
 
     pub const fn baud_rate(&self) -> u32 {
         self.baud_rate
-    }
-}
-
-/// A camera assigned to a robot.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct CameraBinding {
-    /// Role the camera plays for this robot, such as `wrist` or `top`.
-    name: String,
-    /// Stable device identifier reported by camera discovery.
-    id: String,
-    /// Where the camera is bolted, when the robot's file says.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    mount: Option<CameraMount>,
-}
-
-impl CameraBinding {
-    pub fn new(name: impl Into<String>, id: impl Into<String>, mount: Option<CameraMount>) -> Self {
-        Self {
-            name: name.into(),
-            id: id.into(),
-            mount,
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    pub const fn mount(&self) -> Option<&CameraMount> {
-        self.mount.as_ref()
     }
 }
 
@@ -730,7 +591,7 @@ pub struct JointKinematics {
     goal_raw: Option<i64>,
     target_raw: Option<i64>,
     target_degrees: Option<f64>,
-    range: Option<JointRange>,
+    range: Option<config::MotorRange>,
 }
 
 impl JointKinematics {
@@ -757,7 +618,7 @@ impl JointKinematics {
     pub const fn with_calibrated_target(
         mut self,
         target_degrees: Option<f64>,
-        range: Option<JointRange>,
+        range: Option<config::MotorRange>,
     ) -> Self {
         self.target_degrees = target_degrees;
         self.range = range;
@@ -927,7 +788,7 @@ impl JointTelemetry {
     pub const fn target_degrees(&self) -> Option<f64> {
         self.kinematics.target_degrees
     }
-    pub const fn range(&self) -> Option<JointRange> {
+    pub const fn range(&self) -> Option<config::MotorRange> {
         self.kinematics.range
     }
     pub const fn temperature_celsius(&self) -> Option<f64> {
@@ -997,21 +858,6 @@ pub enum MotorCondition {
 impl JointTelemetry {
     pub const fn condition(&self) -> MotorCondition {
         self.condition
-    }
-}
-
-/// The calibrated travel of one joint.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct JointRange {
-    min: i64,
-    center: i64,
-    max: i64,
-}
-
-impl JointRange {
-    pub const fn new(min: i64, center: i64, max: i64) -> Self {
-        Self { min, center, max }
     }
 }
 
@@ -1135,21 +981,6 @@ mod tests {
     }
 
     #[test]
-    fn motor_summary_wire_excludes_hardware_configuration_details() {
-        let summary = MotorSummary::new("joint", 7).with_model(Some("sts3215".to_owned()));
-
-        let json = serde_json::to_string(&summary).unwrap();
-        assert_eq!(
-            json,
-            r#"{"name":"joint","id":7,"model":"sts3215","limits":{"max_temperature_celsius":null,"min_voltage_volts":null,"max_voltage_volts":null,"max_load":null}}"#
-        );
-        assert_eq!(
-            serde_json::from_str::<MotorSummary>(&json).unwrap(),
-            summary
-        );
-    }
-
-    #[test]
     fn mode_selection_round_trips_through_its_tag() {
         let cases = [
             (ModeSelection::Idle, r#"{"mode":"idle"}"#),
@@ -1260,7 +1091,7 @@ mod tests {
 mod requests;
 pub use requests::RobotGoal;
 
-pub mod document;
+pub mod config;
 
 /// Current native hardware observations, independent of saved robot configuration.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]

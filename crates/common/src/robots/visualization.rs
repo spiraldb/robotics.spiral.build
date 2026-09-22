@@ -1,7 +1,8 @@
-//! Geometry and telemetry coordinates owned by a project's robot document.
+//! Geometry and telemetry coordinates owned by a robot configuration.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RobotVisualization {
     urdf: String,
@@ -11,6 +12,7 @@ pub struct RobotVisualization {
     tool_link: Option<String>,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct JointCoordinate {
     input: TelemetryCoordinate,
@@ -19,6 +21,7 @@ struct JointCoordinate {
     rest: f64,
 }
 
+#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TelemetryCoordinate {

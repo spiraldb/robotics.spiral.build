@@ -73,24 +73,24 @@ impl<'a, P: RobotControlPort + ?Sized> RobotControlActions<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::cell::RefCell;
 
     use super::*;
 
     #[derive(Default)]
     struct FakeControl {
-        calls: Mutex<Vec<String>>,
+        calls: RefCell<Vec<String>>,
         failure: Option<String>,
     }
 
     impl RobotControlPort for FakeControl {
         async fn hold(&self, robot: &str) -> Result<(), String> {
-            self.calls.lock().unwrap().push(format!("hold:{robot}"));
+            self.calls.borrow_mut().push(format!("hold:{robot}"));
             self.failure.clone().map_or(Ok(()), Err)
         }
 
         async fn release(&self, robot: &str) -> Result<(), String> {
-            self.calls.lock().unwrap().push(format!("release:{robot}"));
+            self.calls.borrow_mut().push(format!("release:{robot}"));
             self.failure.clone().map_or(Ok(()), Err)
         }
 
@@ -99,7 +99,7 @@ mod tests {
             robot: &str,
             _normalized: BTreeMap<String, NormalizedPosition>,
         ) -> Result<(), String> {
-            self.calls.lock().unwrap().push(format!("move:{robot}"));
+            self.calls.borrow_mut().push(format!("move:{robot}"));
             self.failure.clone().map_or(Ok(()), Err)
         }
     }
@@ -113,7 +113,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(*control.calls.lock().unwrap(), ["hold:leader"]);
+        assert_eq!(*control.calls.borrow_mut(), ["hold:leader"]);
     }
 
     #[tokio::test]
@@ -156,7 +156,7 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(error, OperationError::InvalidInput(_)));
         }
-        assert!(control.calls.lock().unwrap().is_empty());
+        assert!(control.calls.borrow_mut().is_empty());
     }
 
     #[tokio::test]
@@ -171,6 +171,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert_eq!(*control.calls.lock().unwrap(), ["move:arm", "move:arm"]);
+        assert_eq!(*control.calls.borrow_mut(), ["move:arm", "move:arm"]);
     }
 }

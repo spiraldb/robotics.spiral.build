@@ -3,7 +3,7 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
-use spiral_robotics_common::robots::document::RobotDocumentSave;
+use spiral_robotics_common::robots::config::RobotConfigSave;
 use spiral_robotics_common::robots::{
     CameraStatus, ModeSelection, RobotGoal, RobotSummary, SerialPortSummary,
 };
@@ -56,9 +56,9 @@ impl RobotClient {
         )
     }
 
-    pub(crate) fn save_document(
+    pub(crate) fn save_robot(
         &self,
-        request: RobotDocumentSave,
+        request: RobotConfigSave,
     ) -> impl Future<Output = Result<RobotSummary, CommandError>> + use<> {
         self.project.mutate(
             &[RobotSetup, Catalog],

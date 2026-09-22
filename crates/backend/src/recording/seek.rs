@@ -42,7 +42,6 @@ pub(crate) struct SeekTarget {
     robot_type: Option<String>,
     connected: bool,
     calibrated: bool,
-    problem: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -146,13 +145,11 @@ impl SeekTarget {
             robot_type,
             connected,
             calibrated: false,
-            problem: None,
         }
     }
 
-    pub(super) fn with_readiness(mut self, calibrated: bool, problem: Option<String>) -> Self {
+    pub(super) const fn with_calibration(mut self, calibrated: bool) -> Self {
         self.calibrated = calibrated;
-        self.problem = problem;
         self
     }
 
@@ -335,12 +332,6 @@ impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
         if !target.calibrated {
             return Err(OperationError::Conflict(format!(
                 "calibrate follower {:?} before seeking",
-                command.robot
-            )));
-        }
-        if let Some(problem) = target.problem {
-            return Err(OperationError::Conflict(format!(
-                "follower {:?} cannot be driven: {problem}",
                 command.robot
             )));
         }

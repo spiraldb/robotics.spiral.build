@@ -3,6 +3,8 @@ use crate::rollout_runs::RolloutSessionPersistence;
 use crate::settings::{StoredStudioPreferences, StudioPreferencePersistence};
 use crate::workflows::{WorkflowJson, WorkflowPersistence};
 use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, QueryFilter, Statement};
+use spiral_robotics_common::robots::PortSettings;
+use spiral_robotics_common::robots::config::RobotConfig;
 use spiral_robotics_common::rollout::{RolloutPhase, RolloutSnapshot};
 use spiral_robotics_common::workflow::WorkflowSpec;
 
@@ -16,6 +18,11 @@ impl Fixture {
         .unwrap()
         .with_project(project)
         .unwrap()
+    }
+    fn robot(id: &str) -> RobotConfig {
+        RobotConfig::so101(id, "so101_follower")
+            .and_then(|config| config.with_port(PortSettings::new("/dev/arm", 1_000_000)))
+            .unwrap()
     }
     fn graph(workflow: &WorkflowSpec) -> WorkflowJson {
         WorkflowJson::new(4, serde_json::json!({"workflow":workflow}).to_string())
@@ -84,15 +91,12 @@ async fn local_state_survives_reopening_and_credentials_do_not_change_project_id
     let store = StudioStore::at(path.clone());
     let connection = Fixture::connection("bench");
     let project = store.project(&connection);
-    assert!(
+    assert_eq!(
         project
-            .save_robot_document(RobotDocumentWrite::new(
-                "arm".into(),
-                serde_json::json!({"calibration": [1,2]}),
-                None
-            ))
+            .save_robot_config(&Fixture::robot("arm"), None)
             .await
-            .unwrap()
+            .unwrap(),
+        Some(1)
     );
     StudioPreferencePersistence::new(&project)
         .save(&StoredStudioPreferences::from_settings("http://localhost:9", false).unwrap())
@@ -114,8 +118,8 @@ async fn local_state_survives_reopening_and_credentials_do_not_change_project_id
     let reopened = StudioStore::at(path);
     let recovered = reopened.project(&changed_credentials);
     assert_eq!(
-        recovered.robot_document("arm").await.unwrap(),
-        project.robot_document("arm").await.unwrap()
+        recovered.robot_config("arm").await.unwrap(),
+        project.robot_config("arm").await.unwrap()
     );
     assert_eq!(
         StudioPreferencePersistence::new(&recovered)
@@ -137,7 +141,7 @@ async fn local_state_survives_reopening_and_credentials_do_not_change_project_id
         [Some("run"), Some("second_run")]
     );
     let other = reopened.project(&Fixture::connection("other"));
-    assert!(other.robot_documents().await.unwrap().is_empty());
+    assert!(other.robot_configs().await.unwrap().is_empty());
     assert!(
         RolloutSessionPersistence::new(&other)
             .load()
@@ -173,46 +177,40 @@ async fn local_state_survives_reopening_and_credentials_do_not_change_project_id
 async fn concurrent_creations_and_stale_robot_updates_do_not_overwrite() {
     let store = StudioStore::in_memory();
     let project = store.project(&Fixture::connection("bench"));
-    let original = serde_json::json!({"port":"original"});
-    let write = || RobotDocumentWrite::new("arm".into(), original.clone(), None);
+    let original = Fixture::robot("arm");
     let (first, second) = tokio::join!(
-        project.save_robot_document(write()),
-        project.save_robot_document(write())
+        project.save_robot_config(&original, None),
+        project.save_robot_config(&original, None)
     );
     assert_ne!(first.unwrap(), second.unwrap());
-    let changed = serde_json::json!({"port":"changed"});
-    assert!(
-        project
-            .save_robot_document(RobotDocumentWrite::new(
-                "arm".into(),
-                changed.clone(),
-                Some(original.clone())
-            ))
-            .await
-            .unwrap()
+    let port = |path: &str| {
+        original
+            .clone()
+            .with_port(PortSettings::new(path, 1_000_000))
+    };
+    let changed = port("/dev/changed").unwrap();
+    assert_eq!(
+        project.save_robot_config(&changed, Some(1)).await.unwrap(),
+        Some(2)
     );
-    assert!(
-        !project
-            .save_robot_document(RobotDocumentWrite::new(
-                "arm".into(),
-                serde_json::json!({"port":"stale"}),
-                Some(original)
-            ))
+    assert_eq!(
+        project
+            .save_robot_config(&port("/dev/stale").unwrap(), Some(1))
             .await
-            .unwrap()
+            .unwrap(),
+        None
     );
     Fixture::sql(&store, "CREATE TRIGGER reject_robot BEFORE UPDATE ON robots BEGIN SELECT RAISE(ABORT, 'test failure'); END;").await.unwrap();
     assert!(
         project
-            .save_robot_document(RobotDocumentWrite::new(
-                "arm".into(),
-                serde_json::json!({"port":"failed"}),
-                Some(changed.clone())
-            ))
+            .save_robot_config(&port("/dev/failed").unwrap(), Some(2))
             .await
             .is_err()
     );
-    assert_eq!(project.robot_document("arm").await.unwrap(), Some(changed));
+    assert_eq!(
+        project.robot_config("arm").await.unwrap(),
+        Some((changed, 2))
+    );
 }
 
 #[tokio::test]
@@ -272,7 +270,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 7);
+    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 8);
     // A conflict halfway through the actual initial migration must undo both
     // earlier CREATE TABLE statements and the migration journal itself.
     let directory = tempfile::tempdir().unwrap();
@@ -304,15 +302,8 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
     let store = StudioStore::in_memory();
     let source = store.project(&Fixture::connection("source"));
     let target = store.project(&Fixture::connection("target"));
-    let document = serde_json::json!({"schema_version":1, "robot_id":"arm", "motors":{"joint":{"id":1}}, "port":{"path":"/dev/arm","baud_rate":1000000}});
-    source
-        .save_robot_document(RobotDocumentWrite::new(
-            "arm".into(),
-            document.clone(),
-            None,
-        ))
-        .await
-        .unwrap();
+    let document = (Fixture::robot("arm"), 1);
+    source.save_robot_config(&document.0, None).await.unwrap();
     StudioPreferencePersistence::new(&source)
         .save(&StoredStudioPreferences::default())
         .await
@@ -329,7 +320,7 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
         .await
         .unwrap();
     assert_eq!(
-        target.robot_document("arm").await.unwrap(),
+        target.robot_config("arm").await.unwrap(),
         Some(document.clone())
     );
     // A later feature failure must undo earlier robot deletion/insertion too.
@@ -337,10 +328,10 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
     let failed = imported.stage(&target).await;
     assert!(failed.is_err());
     assert_eq!(
-        target.robot_document("arm").await.unwrap(),
+        target.robot_config("arm").await.unwrap(),
         Some(document.clone())
     );
-    assert_eq!(source.robot_document("arm").await.unwrap(), Some(document));
+    assert_eq!(source.robot_config("arm").await.unwrap(), Some(document));
     assert_eq!(
         robots::Entity::find()
             .filter(robots::Column::Project.eq(target.key()))
@@ -405,4 +396,59 @@ async fn the_latest_rollout_session_carries_over_under_its_identity() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id(), Some("rollout-1"));
     assert_eq!(sessions[0].run_id(), Some("run"));
+}
+
+#[tokio::test]
+async fn migration_moves_each_measured_range_into_its_motor() {
+    let mut options = sea_orm::ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1).sqlx_logging(false);
+    let database = sea_orm::Database::connect(options).await.unwrap();
+    migrations::Migrator::up(&database, Some(7)).await.unwrap();
+    database
+        .execute_unprepared(
+            r#"INSERT INTO robots VALUES ('bench', 'arm', '{
+                "schema_version": 1, "robot_id": "arm", "robot_type": "so101_follower",
+                "extension": {"kept": false},
+                "port": {"path": "/dev/arm"},
+                "motors": {
+                    "shoulder": {"id": 1, "model": "sts3215"},
+                    "elbow": {"id": 2, "direction": "reversed"}
+                },
+                "calibration": {
+                    "format_version": 1, "units": "raw", "coordinate_space": "unhomed_raw",
+                    "motors": {
+                        "shoulder": {"id": 1, "direction": "normal", "range_min": 900, "center": 2100, "range_max": 3300},
+                        "elbow": {"id": 2, "direction": "normal", "range_min": 100, "center": 500, "range_max": 800}
+                    }
+                },
+                "cameras": {"wrist": {"id": "0", "type": "opencv", "width": 640, "mount": {"frame": "gripper_link"}}}
+            }', 0)"#,
+        )
+        .await
+        .unwrap();
+    migrations::Migrator::up(&database, None).await.unwrap();
+
+    let row = robots::Entity::find()
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap();
+    let (config, revision) = row.into_config().unwrap();
+    assert_eq!(revision, 1);
+    assert_eq!(
+        config.motors()["shoulder"].calibration(),
+        Some(spiral_robotics_common::robots::config::MotorRange::new(900, 2100, 3300).unwrap())
+    );
+    assert_eq!(
+        config.motors()["elbow"].calibration(),
+        None,
+        "a range measured under another direction was never usable"
+    );
+    assert_eq!(config.port().map(PortSettings::baud_rate), Some(1_000_000));
+    assert_eq!(
+        config.cameras()["wrist"]
+            .mount()
+            .and_then(|mount| mount.frame()),
+        Some("gripper_link")
+    );
 }

@@ -212,10 +212,6 @@ fn target_must_be_healthy_exactly_typed_and_joint_compatible() {
         ..target()
     });
     variants.push(TargetRobotContract {
-        problem: Some("invalid calibration".to_owned()),
-        ..target()
-    });
-    variants.push(TargetRobotContract {
         robot_type: Some("so101_leader".to_owned()),
         ..target()
     });

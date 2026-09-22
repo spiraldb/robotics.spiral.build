@@ -55,17 +55,16 @@ impl DefaultRobotSelection for [RobotSummary] {
             Some(Selection::Joint {
                 robot: selected,
                 joint,
-            }) if selected == robot.id()
-                && robot.motors().iter().any(|motor| motor.name() == joint) =>
-            {
+            }) if selected == robot.id() && robot.config().motors().contains_key(joint) => {
                 return None;
             }
             _ => {}
         }
 
-        robot.motors().first().map(|motor| Selection::Joint {
+        let (joint, _) = robot.config().motors_in_bus_order().into_iter().next()?;
+        Some(Selection::Joint {
             robot: robot.id().to_owned(),
-            joint: motor.name().to_owned(),
+            joint: joint.clone(),
         })
     }
 }
@@ -119,25 +118,20 @@ impl RobotSelection {
 }
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_common::robots::{
-        ConnectionStatus, MotorSummary, RobotAvailability, RobotSummary,
-    };
+    use spiral_robotics_common::robots::RobotSummary;
 
     use super::{DefaultRobotSelection, Selection};
 
+    /// Motors take bus IDs in the order given, whatever their names sort to.
     fn robot(id: &str, motors: &[&str]) -> RobotSummary {
-        RobotSummary::new(
-            id,
-            None,
-            RobotAvailability::new(false, None, ConnectionStatus::default()),
-        )
-        .with_motors(
-            motors
-                .iter()
-                .enumerate()
-                .map(|(index, name)| MotorSummary::new(*name, index as u32 + 1))
-                .collect(),
-        )
+        let motors = motors
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ((*name).to_owned(), serde_json::json!({"id": index + 1})))
+            .collect::<serde_json::Map<_, _>>();
+        let config =
+            serde_json::from_value(serde_json::json!({"robot_id": id, "motors": motors})).unwrap();
+        RobotSummary::new(config, 1, Default::default())
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

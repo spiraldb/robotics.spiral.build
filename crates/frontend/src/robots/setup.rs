@@ -137,15 +137,20 @@ mod tests {
             let active = use_signal(|| true);
             let setup = RobotSetupState::use_empty_state();
             setup.use_activity(active.into());
-            let request =
-                use_resource(move || {
-                    let phase = phase();
-                    async move {
-                        match phase {
+            let request = use_resource(move || {
+                let phase = phase();
+                async move {
+                    match phase {
                         0 => std::future::pending().await,
                         1 => Ok(RobotSetupSnapshot::default().with_robots(vec![
                             spiral_robotics_common::robots::RobotSummary::new(
-                                "follower", None, Default::default(),
+                                spiral_robotics_common::robots::config::RobotConfig::so101(
+                                    "follower",
+                                    "so101_follower",
+                                )
+                                .unwrap(),
+                                1,
+                                Default::default(),
                             ),
                         ])),
                         _ => Err(crate::client::CommandError::new(
@@ -153,8 +158,8 @@ mod tests {
                             "Robot catalog is unavailable",
                         )),
                     }
-                    }
-                });
+                }
+            });
             setup.use_response(request);
             *self.0.borrow_mut() = Some(SetupInputs {
                 setup,

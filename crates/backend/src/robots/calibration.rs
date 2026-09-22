@@ -2,41 +2,17 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_hardware::{Calibration, CalibrationInput, MotorSpec};
+use spiral_robotics_common::robots::config::MotorRange;
 
 use crate::OperationError;
 
-pub(crate) struct CalibrationUpdate<'a> {
-    motors: &'a BTreeMap<String, MotorSpec>,
-    calibration: &'a Calibration,
-}
-
-impl<'a> CalibrationUpdate<'a> {
-    fn new(motors: &'a BTreeMap<String, MotorSpec>, calibration: &'a Calibration) -> Self {
-        Self {
-            motors,
-            calibration,
-        }
-    }
-
-    pub(super) fn motors(&self) -> &BTreeMap<String, MotorSpec> {
-        self.motors
-    }
-
-    pub(super) fn calibration(&self) -> &Calibration {
-        self.calibration
-    }
-}
-
 /// Saved robot configuration required by the calibration action.
 pub(crate) trait RobotCalibrationStore {
-    async fn motor_specs(&self, robot: &str)
-    -> Result<BTreeMap<String, MotorSpec>, OperationError>;
-
+    /// Record a sweep's ranges, which must cover exactly the saved motors.
     async fn save_calibration(
         &self,
         robot: &str,
-        update: CalibrationUpdate<'_>,
+        ranges: BTreeMap<String, MotorRange>,
     ) -> Result<(), OperationError>;
 }
 
@@ -44,28 +20,18 @@ pub(crate) trait RobotCalibrationStore {
 pub(crate) trait CalibrationControlPort {
     async fn start_calibration(&self, robot: &str) -> Result<(), OperationError>;
 
-    async fn calibration_input(&self, robot: &str) -> Result<CalibrationInput, OperationError>;
+    async fn calibration_ranges(
+        &self,
+        robot: &str,
+    ) -> Result<BTreeMap<String, MotorRange>, OperationError>;
 
     async fn cancel_calibration(&self, robot: &str) -> Result<(), OperationError>;
 
     async fn apply_calibration(
         &self,
         robot: &str,
-        calibration: Calibration,
+        ranges: BTreeMap<String, MotorRange>,
     ) -> Result<(), OperationError>;
-}
-
-/// A calibration was durably saved. Any warning concerns only its live refresh.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct FinishCalibrationOutput {
-    calibration: Calibration,
-    live_warning: Option<String>,
-}
-
-impl FinishCalibrationOutput {
-    pub(super) fn live_warning(&self) -> Option<&str> {
-        self.live_warning.as_deref()
-    }
 }
 
 pub(crate) struct CalibrationActions<
@@ -86,24 +52,15 @@ where
         Self { store, control }
     }
 
-    /// Finish a sweep, validate its domain result, persist it, then refresh live control.
+    /// Finish a sweep, persist its ranges, then refresh live control.
     ///
-    /// The ordering is part of the product contract: a read/build/write failure
-    /// keeps the sweep alive so the operator does not lose collected motion. Once
-    /// persistence succeeds, later adapter failures become warnings because the
-    /// next connection can load the already-correct SpiralDB row.
-    pub(super) async fn finish(
-        &self,
-        robot: &str,
-    ) -> Result<FinishCalibrationOutput, OperationError> {
-        let motors = self.store.motor_specs(robot).await?;
-        let input = self.control.calibration_input(robot).await?;
-        let calibration = input
-            .build(&motors)
-            .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
-        self.store
-            .save_calibration(robot, CalibrationUpdate::new(&motors, &calibration))
-            .await?;
+    /// The ordering is part of the product contract: a read or write failure
+    /// keeps the sweep alive so the operator does not lose collected motion.
+    /// Once persistence succeeds, later adapter failures come back as a warning
+    /// because the next connection loads the already-correct saved robot.
+    pub(super) async fn finish(&self, robot: &str) -> Result<Option<String>, OperationError> {
+        let ranges = self.control.calibration_ranges(robot).await?;
+        self.store.save_calibration(robot, ranges.clone()).await?;
 
         let cancel_warning = self
             .control
@@ -113,66 +70,38 @@ where
             .map(|error| format!("could not close the completed sweep: {error}"));
         let apply_warning = self
             .control
-            .apply_calibration(robot, calibration.clone())
+            .apply_calibration(robot, ranges)
             .await
             .err()
             .map(|error| format!("could not refresh the live robot: {error}"));
-        let live_warning = match (cancel_warning, apply_warning) {
+        Ok(match (cancel_warning, apply_warning) {
             (None, None) => None,
             (Some(warning), None) | (None, Some(warning)) => Some(warning),
             (Some(first), Some(second)) => Some(format!("{first}; {second}")),
-        };
-
-        Ok(FinishCalibrationOutput {
-            calibration,
-            live_warning,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
-    use spiral_robotics_hardware::{CalibrationError, MotorDirection, MotorReading};
+    use std::cell::RefCell;
 
     use super::*;
 
-    fn motors() -> BTreeMap<String, MotorSpec> {
-        BTreeMap::from([(
-            "shoulder".to_owned(),
-            MotorSpec::new(1, MotorDirection::Normal),
-        )])
-    }
-
-    fn input() -> CalibrationInput {
-        CalibrationInput::Direct {
-            motors: BTreeMap::from([("shoulder".to_owned(), MotorReading::new(500, 100, 900))]),
-        }
-    }
-
     struct Store {
-        events: Mutex<Vec<&'static str>>,
+        events: RefCell<Vec<&'static str>>,
         fail_save: bool,
     }
 
     impl RobotCalibrationStore for Store {
-        async fn motor_specs(
-            &self,
-            _robot: &str,
-        ) -> Result<BTreeMap<String, MotorSpec>, OperationError> {
-            self.events.lock().unwrap().push("specs");
-            Ok(motors())
-        }
-
         async fn save_calibration(
             &self,
             _robot: &str,
-            _update: CalibrationUpdate<'_>,
+            _ranges: BTreeMap<String, MotorRange>,
         ) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push("save");
+            self.events.borrow_mut().push("save");
             if self.fail_save {
-                Err(OperationError::Internal("Spiral is busy".to_owned()))
+                Err(OperationError::Internal("storage is busy".to_owned()))
             } else {
                 Ok(())
             }
@@ -180,33 +109,30 @@ mod tests {
     }
 
     struct Control {
-        events: Mutex<Vec<&'static str>>,
-        input: Result<CalibrationInput, OperationError>,
-        fail_start: bool,
+        events: RefCell<Vec<&'static str>>,
         fail_cancel: bool,
         fail_apply: bool,
     }
 
     impl CalibrationControlPort for Control {
         async fn start_calibration(&self, _robot: &str) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push("start");
-            if self.fail_start {
-                Err(OperationError::Conflict("robot is busy".to_owned()))
-            } else {
-                Ok(())
-            }
+            self.events.borrow_mut().push("start");
+            Ok(())
         }
 
-        async fn calibration_input(
+        async fn calibration_ranges(
             &self,
             _robot: &str,
-        ) -> Result<CalibrationInput, OperationError> {
-            self.events.lock().unwrap().push("input");
-            self.input.clone()
+        ) -> Result<BTreeMap<String, MotorRange>, OperationError> {
+            self.events.borrow_mut().push("ranges");
+            Ok(BTreeMap::from([(
+                "shoulder".to_owned(),
+                MotorRange::new(100, 500, 900).unwrap(),
+            )]))
         }
 
         async fn cancel_calibration(&self, _robot: &str) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push("cancel");
+            self.events.borrow_mut().push("cancel");
             if self.fail_cancel {
                 Err(OperationError::Conflict("control stopped".to_owned()))
             } else {
@@ -217,9 +143,9 @@ mod tests {
         async fn apply_calibration(
             &self,
             _robot: &str,
-            _calibration: Calibration,
+            _ranges: BTreeMap<String, MotorRange>,
         ) -> Result<(), OperationError> {
-            self.events.lock().unwrap().push("apply");
+            self.events.borrow_mut().push("apply");
             if self.fail_apply {
                 Err(OperationError::Conflict("robot left".to_owned()))
             } else {
@@ -228,16 +154,14 @@ mod tests {
         }
     }
 
-    fn setup(fail_save: bool, input: Result<CalibrationInput, OperationError>) -> (Store, Control) {
+    fn setup(fail_save: bool) -> (Store, Control) {
         (
             Store {
-                events: Mutex::new(Vec::new()),
+                events: RefCell::default(),
                 fail_save,
             },
             Control {
-                events: Mutex::new(Vec::new()),
-                input,
-                fail_start: false,
+                events: RefCell::default(),
                 fail_cancel: false,
                 fail_apply: false,
             },
@@ -246,59 +170,32 @@ mod tests {
 
     #[tokio::test]
     async fn persistence_failure_keeps_the_sweep_alive() {
-        let (store, control) = setup(true, Ok(input()));
+        let (store, control) = setup(true);
         let error = CalibrationActions::new(&store, &control)
             .finish("arm")
             .await
             .unwrap_err();
-        assert_eq!(error, OperationError::Internal("Spiral is busy".to_owned()));
-        assert_eq!(*store.events.lock().unwrap(), ["specs", "save"]);
-        assert_eq!(*control.events.lock().unwrap(), ["input"]);
-    }
-
-    #[tokio::test]
-    async fn invalid_input_never_reaches_storage_or_cleanup() {
-        let mut incomplete = input();
-        let CalibrationInput::Direct { motors } = &mut incomplete else {
-            unreachable!()
-        };
-        motors.clear();
-        let (store, control) = setup(false, Ok(incomplete));
-        let error = CalibrationActions::new(&store, &control)
-            .finish("arm")
-            .await
-            .unwrap_err();
-        assert!(matches!(error, OperationError::InvalidInput(_)));
-        assert_eq!(*store.events.lock().unwrap(), ["specs"]);
-        assert_eq!(*control.events.lock().unwrap(), ["input"]);
+        assert_eq!(
+            error,
+            OperationError::Internal("storage is busy".to_owned())
+        );
+        assert_eq!(*store.events.borrow(), ["save"]);
+        assert_eq!(*control.events.borrow(), ["ranges"]);
     }
 
     #[tokio::test]
     async fn a_saved_calibration_survives_live_refresh_failures() {
-        let (store, mut control) = setup(false, Ok(input()));
+        let (store, mut control) = setup(false);
         control.fail_cancel = true;
         control.fail_apply = true;
-        let output = CalibrationActions::new(&store, &control)
+        let warning = CalibrationActions::new(&store, &control)
             .finish("arm")
             .await
             .unwrap();
-        assert!(output.live_warning.as_deref().is_some_and(|warning| {
+        assert!(warning.is_some_and(|warning| {
             warning.contains("control stopped") && warning.contains("robot left")
         }));
-        assert_eq!(*store.events.lock().unwrap(), ["specs", "save"]);
-        assert_eq!(
-            *control.events.lock().unwrap(),
-            ["input", "cancel", "apply"]
-        );
-    }
-
-    #[test]
-    fn calibration_error_remains_a_domain_error_until_the_use_case_boundary() {
-        let error = CalibrationInput::Direct {
-            motors: BTreeMap::new(),
-        }
-        .build(&motors())
-        .unwrap_err();
-        assert!(matches!(error, CalibrationError::KeyMismatch { .. }));
+        assert_eq!(*store.events.borrow(), ["save"]);
+        assert_eq!(*control.events.borrow(), ["ranges", "cancel", "apply"]);
     }
 }

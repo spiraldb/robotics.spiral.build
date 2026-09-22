@@ -2,9 +2,11 @@ use super::*;
 use crate::explorations::ExplorationPersistence;
 use crate::rollout_runs::RolloutSessionPersistence;
 use crate::settings::StudioPreferencePersistence;
-use crate::studio::{RobotDocumentWrite, StudioStore};
+use crate::studio::StudioStore;
 use crate::training::TrainingHistoryPersistence;
 use crate::workflows::{WorkflowJson, WorkflowPersistence};
+use spiral_robotics_common::robots::PortSettings;
+use spiral_robotics_common::robots::config::RobotConfig;
 use spiral_robotics_common::rollout::{RolloutPhase, RolloutSnapshot};
 use spiral_robotics_common::training::{
     TrainingConfig, TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingSnapshot,
@@ -24,8 +26,10 @@ impl Fixture {
             .unwrap(),
         )
     }
-    fn robot(id: &str) -> serde_json::Value {
-        serde_json::json!({"schema_version":1, "robot_id":id, "motors":{"joint":{"id":1}}, "port":{"path":"/dev/arm","baud_rate":1000000}})
+    fn robot(id: &str) -> RobotConfig {
+        RobotConfig::so101(id, "so101_follower")
+            .and_then(|config| config.with_port(PortSettings::new("/dev/arm", 1_000_000)))
+            .unwrap()
     }
 }
 
@@ -42,7 +46,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         .unwrap();
     for (project, id) in [(&source, "arm"), (&other, "excluded-other-robot-456789")] {
         project
-            .save_robot_document(RobotDocumentWrite::new(id.into(), Fixture::robot(id), None))
+            .save_robot_config(&Fixture::robot(id), None)
             .await
             .unwrap();
     }
@@ -105,7 +109,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         );
     }
     // Later source mutations cannot change an already captured snapshot.
-    source.delete_robot_document("arm").await.unwrap();
+    source.delete_robot_config("arm").await.unwrap();
     let imported = StudioSnapshot::open(&bytes, &target).await.unwrap();
     imported
         .stage(&target)
@@ -115,13 +119,13 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         .await
         .unwrap();
     assert_eq!(
-        target.robot_document("arm").await.unwrap(),
-        Some(Fixture::robot("arm"))
+        target.robot_config("arm").await.unwrap(),
+        Some((Fixture::robot("arm"), 1))
     );
-    assert!(source.robot_document("arm").await.unwrap().is_none());
+    assert!(source.robot_config("arm").await.unwrap().is_none());
     assert!(
         other
-            .robot_document("excluded-other-robot-456789")
+            .robot_config("excluded-other-robot-456789")
             .await
             .unwrap()
             .is_some()
@@ -171,8 +175,8 @@ async fn imported_sqlite_rejects_extra_schema_secrets_and_invalid_documents() {
     for corruption in [
         "CREATE TRIGGER injected AFTER INSERT ON robots BEGIN SELECT 1; END",
         "INSERT INTO backend_settings VALUES (1, '{}')",
-        "INSERT INTO robots VALUES ('', 'arm', '{}', 1)",
-        "INSERT INTO robots VALUES ('other', 'arm', '{}', 1)",
+        "INSERT INTO robots VALUES ('', 'arm', '{}', 1, 1)",
+        "INSERT INTO robots VALUES ('other', 'arm', '{}', 1, 1)",
         "INSERT INTO explorations VALUES ('', 'folding', '   ', 1, 1, '{}', 0)",
     ] {
         let snapshot = StudioSnapshot::capture(&project).await.unwrap();

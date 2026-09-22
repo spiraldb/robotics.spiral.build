@@ -17,7 +17,7 @@ impl RobotEndpoints {
         routes.get("/hardware/status", Self::fetch_hardware_status);
         routes.get("/robots/telemetry", Self::fetch_telemetry);
         routes.get("/robots", Self::list_robots);
-        routes.post("/robots/save", Self::save_document);
+        routes.post("/robots/save", Self::save_robot);
         routes.get("/robots/{id}", Self::get_robot);
         routes.delete("/robots/{id}", Self::delete_robot);
         routes.post("/robots/{id}/connect", Self::connect_robot);
@@ -60,11 +60,11 @@ impl RobotEndpoints {
         let result = commands.list_robots().await?;
         Ok(Json(result))
     }
-    async fn save_document(
+    async fn save_robot(
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,
-        ApiJson(request): ApiJson<spiral_robotics_common::robots::document::RobotDocumentSave>,
+        ApiJson(request): ApiJson<spiral_robotics_common::robots::config::RobotConfigSave>,
     ) -> Result<Json<RobotSummary>, HttpFailure> {
-        Ok(Json(commands.save_document(request).await?))
+        Ok(Json(commands.save_robot(request).await?))
     }
     async fn get_robot(
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,

@@ -24,7 +24,6 @@ impl Default for FakePort {
                 robot_type: Some("so101_follower".to_owned()),
                 connected: true,
                 calibrated: true,
-                problem: None,
             }),
             episode: SeekableEpisode {
                 id: "episode_000001".to_owned(),
@@ -209,13 +208,6 @@ async fn follower_must_be_connected_calibrated_and_problem_free() {
     uncalibrated.target.as_mut().unwrap().calibrated = false;
     assert!(matches!(
         invalid(&uncalibrated).await,
-        OperationError::Conflict(_)
-    ));
-
-    let mut broken = FakePort::default();
-    broken.target.as_mut().unwrap().problem = Some("motor missing".to_owned());
-    assert!(matches!(
-        invalid(&broken).await,
         OperationError::Conflict(_)
     ));
 }

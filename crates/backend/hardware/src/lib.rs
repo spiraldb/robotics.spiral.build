@@ -26,11 +26,7 @@ mod feetech;
 mod serial_ports;
 mod state;
 
-pub use calibration::{
-    CALIBRATION_COORDINATE_SPACE, CALIBRATION_FORMAT_VERSION, CALIBRATION_UNITS, Calibration,
-    CalibrationError, CalibrationFormat, CalibrationInput, MotorCalibration, MotorDirection,
-    MotorReading, MotorSpec, NormalizedPosition,
-};
+pub use calibration::{CalibrationError, NormalizedPosition};
 pub use cameras::{
     CameraRuntime, DEFAULT_JPEG_QUALITY, DetectedCamera, JpegFrame, JpegStreamConfig, ProbeOutcome,
 };
@@ -45,8 +41,8 @@ pub use spiral_robotics_common::recording::{
     EpisodeArm, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress, ReplayPurpose,
 };
 pub use spiral_robotics_common::robots::{
-    CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointRange, JointTelemetry,
-    ModeSelection, MotorCondition, MotorFault, MotorLimits, PortSettings, RobotTelemetry,
+    CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointTelemetry, ModeSelection,
+    MotorCondition, MotorFault, MotorLimits, PortSettings, RobotTelemetry,
 };
 pub use state::CompletedRecording;
 

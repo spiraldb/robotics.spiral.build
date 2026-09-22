@@ -26,7 +26,8 @@ use crate::bus::{
     BusError, MotorBus, MotorElectricalSample, MotorMechanicalSample, MotorVoltageLimits,
 };
 use crate::bus::{MotorFaults, MotorLimits, MotorSample};
-use crate::calibration::MotorSpec;
+use crate::calibration::EncoderCounts;
+use spiral_robotics_common::robots::config::MotorConfig;
 
 const BROADCAST_ID: u8 = 0xfe;
 const INSTRUCTION_READ: u8 = 0x02;
@@ -294,7 +295,7 @@ impl FeetechError {
 }
 
 impl Motor {
-    fn from_specs(specs: &BTreeMap<String, MotorSpec>) -> Result<Vec<Self>, FeetechError> {
+    fn from_specs(specs: &BTreeMap<String, MotorConfig>) -> Result<Vec<Self>, FeetechError> {
         if specs.len() > MAX_SYNC_WRITE_MOTORS {
             return Err(FeetechError::TooManyMotors {
                 count: specs.len(),
@@ -346,7 +347,7 @@ impl FeetechBus {
     pub(crate) fn connect(
         path: &str,
         baud_rate: u32,
-        specs: &BTreeMap<String, MotorSpec>,
+        specs: &BTreeMap<String, MotorConfig>,
     ) -> Result<Self, FeetechError> {
         let motors = Motor::from_specs(specs)?;
         let port = serialport::new(path, baud_rate)
@@ -881,9 +882,8 @@ impl<'a> RegisterValues<'a> {
     /// substitutes a zero for a byte that never arrived.
     fn sample(&self) -> MotorSample {
         let mechanical = MotorMechanicalSample::new(
-            self.word(OFFSET_SPEED).map(|speed| {
-                MotorSpec::degrees_from_encoder_counts(i64::from(Self::sign_magnitude(speed)))
-            }),
+            self.word(OFFSET_SPEED)
+                .map(|speed| EncoderCounts::degrees(i64::from(Self::sign_magnitude(speed)))),
             self.word(OFFSET_LOAD).map(|load| {
                 f64::from(Self::sign_magnitude_at(load, LOAD_SIGN_BIT)) / LOAD_FULL_SCALE
             }),
@@ -1006,7 +1006,7 @@ mod tests {
 
     use super::*;
     use crate::bus::MotorFault;
-    use crate::calibration::MotorDirection;
+    use spiral_robotics_common::robots::config::MotorDirection;
 
     /// Build a well-formed status packet carrying `parameters` from `id`.
     fn status_packet(id: u8, parameters: &[u8]) -> Vec<u8> {
@@ -1017,8 +1017,8 @@ mod tests {
         packet
     }
 
-    fn spec(id: u32, model: Option<&str>) -> MotorSpec {
-        let specification = MotorSpec::new(id, MotorDirection::Normal);
+    fn spec(id: u32, model: Option<&str>) -> MotorConfig {
+        let specification = MotorConfig::new(id, MotorDirection::Normal);
         match model {
             Some(model) => specification.with_model(model),
             None => specification,

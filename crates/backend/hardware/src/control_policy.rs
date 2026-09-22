@@ -42,7 +42,6 @@ impl ControlMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CalibrationAdmission {
     Missing,
-    Invalid(String),
     Ready(BTreeSet<String>),
 }
 
@@ -136,7 +135,6 @@ pub(crate) enum AdmissionError {
     CalibrationInProgress(Vec<String>),
     NotConnected(String),
     MissingCalibration(String),
-    InvalidCalibration { robot: String, reason: String },
     SameTeleoperationRobot,
     NoSharedCalibratedJoints { leader: String, follower: String },
     ManualCommandNotOwned(String),
@@ -155,10 +153,6 @@ impl fmt::Display for AdmissionError {
             Self::MissingCalibration(robot) => {
                 write!(formatter, "robot {robot:?} must be calibrated first")
             }
-            Self::InvalidCalibration { robot, reason } => write!(
-                formatter,
-                "robot {robot:?} has calibration that does not match its configured motors: {reason}"
-            ),
             Self::SameTeleoperationRobot => {
                 formatter.write_str("teleoperation needs two different robots")
             }
@@ -382,10 +376,6 @@ impl ControlState {
             CalibrationAdmission::Missing => {
                 Err(AdmissionError::MissingCalibration(robot.to_owned()))
             }
-            CalibrationAdmission::Invalid(reason) => Err(AdmissionError::InvalidCalibration {
-                robot: robot.to_owned(),
-                reason: reason.clone(),
-            }),
         }
     }
 }
@@ -699,14 +689,6 @@ mod tests {
                 robot: "leader".to_owned()
             })),
             Err(AdmissionError::MissingCalibration(_))
-        ));
-        state.robots.get_mut("leader").unwrap().calibration =
-            CalibrationAdmission::Invalid("motor mismatch".to_owned());
-        assert!(matches!(
-            state.decide(Intent::Select(ControlMode::Manual {
-                robot: "leader".to_owned()
-            })),
-            Err(AdmissionError::InvalidCalibration { .. })
         ));
     }
 

@@ -167,14 +167,12 @@ fn RobotRoster(
                 {
                     let id = robot.id().to_owned();
                     let selected = focused.as_deref() == Some(robot.id());
-                    let ready = robot.connection().connected() && robot.calibrated() && robot.problem().is_none();
-                    let role = robot.robot_type().map(str::role_label).unwrap_or("arm");
+                    let ready = robot.connection().connected() && robot.config().calibrated();
+                    let role = robot.config().robot_type().map(str::role_label).unwrap_or("arm");
                     let show_role = !robot.id().eq_ignore_ascii_case(role);
-                    let state = if robot.problem().is_some() {
-                        "Needs attention"
-                    } else if !robot.connection().connected() {
+                    let state = if !robot.connection().connected() {
                         "Disconnected"
-                    } else if !robot.calibrated() {
+                    } else if !robot.config().calibrated() {
                         "Calibration needed"
                     } else {
                         "Connected and calibrated"

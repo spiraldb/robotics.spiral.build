@@ -69,7 +69,12 @@ impl SerialPortDiscovery {
                     .get(record.id())
                     .is_some_and(|connection| connection.connected())
             })
-            .filter_map(|record| Some((record.port()?.path().to_owned(), record.id().to_owned())))
+            .filter_map(|record| {
+                Some((
+                    record.config().port()?.path().to_owned(),
+                    record.id().to_owned(),
+                ))
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
         Ok(ports
             .into_ports()

@@ -652,7 +652,6 @@ impl RolloutManager {
             .get(config.robot())
             .cloned()
             .unwrap_or_default();
-        let summary = record.summary(connection);
         let contract = manifest
             .data_contract
             .into_policy_contract(spiral_robotics_storage::SCHEMA_VERSION)
@@ -671,23 +670,19 @@ impl RolloutManager {
                     specification.recommended_action_steps(),
                 ),
                 &TargetRobotContract::new(
-                    summary.id(),
-                    summary.robot_type().map(str::to_owned),
-                    summary
-                        .motors()
-                        .iter()
-                        .map(|motor| motor.name().to_owned())
-                        .collect(),
+                    record.id(),
+                    record.config().robot_type().map(str::to_owned),
+                    record.config().motors().keys().cloned().collect(),
                 )
                 .with_cameras(
-                    summary
+                    record
+                        .config()
                         .cameras()
                         .iter()
-                        .map(|binding| CameraBindingContract::new(binding.name(), binding.id()))
+                        .map(|(role, camera)| CameraBindingContract::new(role, camera.id()))
                         .collect(),
                 )
-                .with_availability(summary.connection().connected(), summary.calibrated())
-                .with_problem(summary.problem().map(str::to_owned)),
+                .with_availability(connection.connected(), record.config().calibrated()),
             )
             .map_err(|error| error.to_string())?;
         let joint_names = contract.joint_names().to_vec();

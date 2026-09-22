@@ -60,9 +60,7 @@ impl RobotSetupSnapshot {
         let ready = self
             .robots
             .iter()
-            .filter(|robot| {
-                robot.connection().connected() && robot.calibrated() && robot.problem().is_none()
-            })
+            .filter(|robot| robot.connection().connected() && robot.config().calibrated())
             .collect::<Vec<_>>();
         ready
             .iter()
@@ -73,18 +71,19 @@ impl RobotSetupSnapshot {
                     .enumerate()
                     .filter(move |(follower_index, follower)| {
                         leader_index != *follower_index
-                            && leader.motors().iter().any(|leader_motor| {
-                                follower
-                                    .motors()
-                                    .iter()
-                                    .any(|motor| motor.name() == leader_motor.name())
-                            })
+                            && leader
+                                .config()
+                                .motors()
+                                .keys()
+                                .any(|name| follower.config().motors().contains_key(name))
                     })
                     .map(move |(follower_index, follower)| {
                         let leader_has_role = leader
+                            .config()
                             .robot_type()
                             .is_some_and(|kind| kind.to_ascii_lowercase().contains("leader"));
                         let follower_has_role = follower
+                            .config()
                             .robot_type()
                             .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"));
                         (
@@ -105,18 +104,28 @@ impl RobotSetupSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::robots::{ConnectionStatus, MotorSummary, RobotAvailability};
+    use spiral_robotics_common::robots::ConnectionStatus;
+    use spiral_robotics_common::robots::config::RobotConfig;
 
     struct RobotSetupSnapshotTest;
 
     impl RobotSetupSnapshotTest {
+        /// A one-motor arm, calibrated, of an optional type.
+        fn config(id: &str, robot_type: Option<&str>, motor: &str) -> RobotConfig {
+            serde_json::from_value(serde_json::json!({
+                "robot_id": id,
+                "robot_type": robot_type,
+                "motors": {motor: {"id": 1, "calibration": {"range_min": 0, "center": 1, "range_max": 2}}},
+            }))
+            .unwrap()
+        }
+
         fn robot(id: &str, robot_type: Option<&str>) -> RobotSummary {
             RobotSummary::new(
-                id,
-                robot_type.map(str::to_owned),
-                RobotAvailability::new(true, None, ConnectionStatus::new(true, None)),
+                Self::config(id, robot_type, "shoulder"),
+                1,
+                ConnectionStatus::new(true, None),
             )
-            .with_motors(vec![MotorSummary::new("shoulder", 1)])
         }
     }
 
@@ -156,13 +165,15 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn teleoperation_pair_ignores_unready_and_incompatible_arms() {
         let disconnected = RobotSummary::new(
-            "disconnected-leader",
-            Some("leader".to_owned()),
-            RobotAvailability::new(true, None, ConnectionStatus::new(false, None)),
-        )
-        .with_motors(vec![MotorSummary::new("shoulder", 1)]);
-        let incompatible = RobotSetupSnapshotTest::robot("incompatible-leader", Some("leader"))
-            .with_motors(vec![MotorSummary::new("elbow", 1)]);
+            RobotSetupSnapshotTest::config("disconnected-leader", Some("leader"), "shoulder"),
+            1,
+            ConnectionStatus::new(false, None),
+        );
+        let incompatible = RobotSummary::new(
+            RobotSetupSnapshotTest::config("incompatible-leader", Some("leader"), "elbow"),
+            1,
+            ConnectionStatus::new(true, None),
+        );
         let follower = RobotSetupSnapshotTest::robot("follower", Some("follower"));
         let fallback = RobotSetupSnapshotTest::robot("fallback", None);
         let studio = RobotSetupSnapshot {

@@ -62,7 +62,7 @@ pub(crate) struct ScenePalette;
 
 impl ScenePalette {
     pub(crate) fn robot_index(robot: &RobotSummary) -> usize {
-        match robot.robot_type() {
+        match robot.config().robot_type() {
             Some(kind) if kind.contains("follower") => 0,
             Some(kind) if kind.contains("leader") => 1,
             _ => {
@@ -194,15 +194,11 @@ pub(crate) fn Viewport(
                     .robots()
                     .iter()
                     .filter_map(|robot| {
-                        let document = robot.document()?;
-                        match document.visualization() {
-                            Ok(None) => None,
-                            Ok(Some(configuration)) => Some(
-                                ConfiguredModel::new(configuration)
-                                    .map(|model| (robot.id().to_owned(), model)),
-                            ),
-                            Err(error) => Some(Err(error)),
-                        }
+                        let configuration = robot.config().visualization()?;
+                        Some(
+                            ConfiguredModel::new(configuration.clone())
+                                .map(|model| (robot.id().to_owned(), model)),
+                        )
                     })
                     .collect::<Result<BTreeMap<_, _>, String>>()
             })
@@ -738,7 +734,7 @@ impl SceneBuildRequest<'_> {
                 .is_live()
                 .then_some(robot.telemetry.as_ref())
                 .flatten()
-                .filter(|_| arm.calibrated());
+                .filter(|_| arm.config().calibrated());
             let tracked = recorded.is_some() || telemetry.is_some();
             let positions = recorded.unwrap_or_else(|| {
                 model.measured_positions(telemetry.map(|robot| robot.joints()).unwrap_or_default())
@@ -748,8 +744,8 @@ impl SceneBuildRequest<'_> {
                 spiral_robotics_viewport::ArmPresentation::new(model.model.clone(), positions)
                     .with_appearance(ACCENTS[robot.accent % ACCENTS.len()].0, tracked),
             )?;
-            for camera in arm.cameras() {
-                camera.add_to(frame, arm.id())?;
+            for (role, camera) in arm.config().cameras() {
+                camera.add_to(frame, (arm.id(), role))?;
             }
         }
         Ok(())
@@ -886,12 +882,16 @@ impl RecordedTimePresentation for f64 {
 }
 
 /// Where a bound camera sits, for the ones whose file says.
-trait CameraBindingPresentation {
-    fn add_to(&self, frame: &mut BenchFrame, robot: &str) -> Result<(), FrameError>;
+trait CameraMountPresentation {
+    fn add_to(&self, frame: &mut BenchFrame, role: (&str, &str)) -> Result<(), FrameError>;
 }
 
-impl CameraBindingPresentation for spiral_robotics_common::robots::CameraBinding {
-    fn add_to(&self, frame: &mut BenchFrame, robot: &str) -> Result<(), FrameError> {
+impl CameraMountPresentation for spiral_robotics_common::robots::config::CameraConfig {
+    fn add_to(
+        &self,
+        frame: &mut BenchFrame,
+        (robot, role): (&str, &str),
+    ) -> Result<(), FrameError> {
         let camera_mount = self.mount();
         let Some(mount) = camera_mount.as_ref() else {
             return Ok(());
@@ -900,7 +900,7 @@ impl CameraBindingPresentation for spiral_robotics_common::robots::CameraBinding
             .mount_camera(
                 robot,
                 spiral_robotics_viewport::CameraMount::new(
-                    self.name().to_owned(),
+                    role.to_owned(),
                     spiral_robotics_viewport::CameraAttachment::new(
                         mount.frame(),
                         mount.xyz(),

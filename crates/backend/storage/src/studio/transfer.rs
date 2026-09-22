@@ -210,12 +210,7 @@ impl StudioSnapshot {
             .await
             .map_err(|error| error.to_string())?
         {
-            let robot: spiral_robotics_common::robots::document::RobotDocument =
-                serde_json::from_value(row.document).map_err(|error| error.to_string())?;
-            robot.validate()?;
-            if robot.id()? != row.id {
-                return Err("Robot document identity disagrees with its row".into());
-            }
+            row.into_config()?;
         }
         for row in workflows::Entity::find()
             .all(&self.database)

@@ -8,9 +8,8 @@
 //! mixing setup work into the operating surface.
 
 use dioxus::prelude::*;
-use spiral_robotics_common::robots::{
-    CameraBinding, PortSettings, RobotSummary, SerialPortSummary,
-};
+use spiral_robotics_common::robots::config::{RobotConfig, RobotConfigSave};
+use spiral_robotics_common::robots::{PortSettings, RobotSummary, SerialPortSummary};
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonVariant, ChevronIcon, Disclosure, FileButton, FileInput, Select,
     TextInput, UnassignIcon,
@@ -24,11 +23,9 @@ use crate::shell::state::StudioProjectState;
 mod calibration;
 mod delete;
 mod discovery;
-mod document;
 use calibration::CalibrationSection;
 use delete::DeleteRobotAction;
 use discovery::IdentifiedSerialPort;
-use document::RobotDraft;
 
 /// Robot types offered when creating an instance.
 const ROBOT_TYPES: [(&str, &str); 2] = [
@@ -107,15 +104,13 @@ fn RobotEntry(
     // calibrated has nothing to do here, so it starts folded; anything else
     // opens on the work. Only the initial state is derived — an arm becoming
     // ready while the operator is reading it must not fold itself away.
-    let ready = robot.problem().is_none() && robot.port().is_some() && robot.calibrated();
+    let ready = robot.config().port().is_some() && robot.config().calibrated();
     let mut open = use_signal(|| !ready || !robot.connection().connected());
     let id = robot.id().to_owned();
-    let role = robot.robot_type().robot_role();
-    let state = if robot.problem().is_some() {
-        "Needs attention"
-    } else if robot.port().is_none() {
+    let role = robot.config().robot_type().robot_role();
+    let state = if robot.config().port().is_none() {
         "Port needed"
-    } else if !robot.calibrated() {
+    } else if !robot.config().calibrated() {
         "Calibration needed"
     } else if robot.connection().connected() {
         "Connected"
@@ -195,11 +190,12 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
     let mut open = use_signal(|| false);
     let mut id = use_signal(String::new);
     let mut robot_type = use_signal(|| ROBOT_TYPES[0].0.to_owned());
-    let mut create_robot = use_action(move |name: String, request: RobotDraft| async move {
+    let mut create_robot = use_action(move |name: String, robot_type: String| async move {
         project
             .execute_utility(format!("Created {name}."), async move {
+                let config = RobotConfig::so101(&name, &robot_type)?;
                 RobotClient::current()
-                    .save_document(request.save()?)
+                    .save_robot(RobotConfigSave::new(config, None))
                     .await
                     .map_err(|error| error.to_string())?;
                 // Keep the form intact until the server accepts the new robot.
@@ -216,8 +212,7 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
             project.report("Give the arm a name first.");
             return;
         }
-        let request = RobotDraft::new(&name, &robot_type());
-        create_robot.call(name, request);
+        create_robot.call(name, robot_type());
     };
 
     if !open() {
@@ -283,7 +278,7 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
     }
 }
 
-/// Import a complete robot JSON document as a new instance.
+/// Import a complete robot JSON configuration as a new instance.
 #[component]
 fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelection) -> Element {
     let mut chosen = selection.selected();
@@ -294,13 +289,16 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
                     .read_bytes()
                     .await
                     .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
+                let config = serde_json::from_slice::<RobotConfig>(&bytes).map_err(|error| {
+                    format!("{} is not a robot configuration: {error}", file.name())
+                })?;
                 let robot = RobotClient::current()
-                    .save_document(RobotDraft::import(&bytes)?.save()?)
+                    .save_robot(RobotConfigSave::new(config, None))
                     .await
                     .map_err(|error| error.to_string())?;
                 chosen.set(Some(Selection::Robot(robot.id().to_owned())));
                 project.report_success(format!("Imported {}.", robot.id()));
-                if robot.port().is_some() {
+                if robot.config().port().is_some() {
                     RobotClient::current()
                         .connect_robot(robot.id().to_owned())
                         .await
@@ -351,14 +349,6 @@ fn RobotSetup(
             // its readiness label and its connection dot. Connect now sits
             // beside the port it opens, which is also the order the work happens
             // in.
-            if let Some(problem) = &robot.problem() {
-                div { class: "device-setup-alarm",
-                    p { "This arm's configuration needs attention before it can connect." }
-                    Disclosure { summary: rsx! { "Technical details" },
-                        code { "{problem}" }
-                    }
-                }
-            }
             if let Some(error) = &robot.connection().error() {
                 {
                     let message = error.friendly_connection_error();
@@ -471,11 +461,9 @@ fn ConnectionAction(
     });
     // Disconnecting mid-sweep throws the sweep away, so make the operator
     // finish or cancel deliberately rather than lose it to one click.
-    let blocked = robot.port().is_none() || robot.problem().is_some() || (connected && sweeping);
-    let reason = if robot.port().is_none() {
+    let blocked = robot.config().port().is_none() || (connected && sweeping);
+    let reason = if robot.config().port().is_none() {
         "Assign a serial port first"
-    } else if robot.problem().is_some() {
-        "Fix this arm's configuration first"
     } else if connected && sweeping {
         "Finish or cancel calibration first"
     } else {
@@ -543,13 +531,14 @@ fn PortSection(
             .await
     });
     let current = robot
+        .config()
         .port()
         .map(|port| port.path().to_owned())
         .unwrap_or_default();
     let baud = robot
+        .config()
         .port()
-        .as_ref()
-        .map_or(1_000_000, |port| port.baud_rate());
+        .map_or(1_000_000, PortSettings::baud_rate);
     // The port belongs to the open bus once connected; changing it would make
     // the durable configuration disagree with the hardware, so the server refuses it too.
     let locked = robot.connection().connected();
@@ -668,16 +657,17 @@ fn PortOption(port: SerialPortSummary, owner: String, selected: bool) -> Element
 /// Record a serial port on a robot, keeping its existing baud rate.
 impl HardwareCommands {
     fn assign_port(self, assignment: PortAssignment) {
-        let request = RobotDraft::from_robot(&assignment.robot).map(|draft| {
-            draft.with_port(PortSettings::new(
-                assignment.path.clone(),
-                assignment.baud_rate,
-            ))
-        });
+        let port = PortSettings::new(assignment.path.trim(), assignment.baud_rate);
+        let request = assignment
+            .robot
+            .config()
+            .clone()
+            .with_port(port)
+            .map(|config| RobotConfigSave::new(config, Some(assignment.robot.revision())));
         self.run(format!("Assigned {}.", assignment.path), async move {
             let client = RobotClient::current();
             let saved = client
-                .save_document(request?.save()?)
+                .save_robot(request?)
                 .await
                 .map_err(|error| error.to_string())?;
             client
@@ -797,9 +787,15 @@ fn CameraSection(
     let available = telemetry.snapshot().read().cameras().to_owned();
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);
-    let mut save_cameras = use_action(move |assignments: CameraAssignments| async move {
+    let mut save_cameras = use_action(move |request: RobotConfigSave| async move {
         HardwareCommands::new(project, telemetry)
-            .execute("", assignments.save())
+            .execute("", async move {
+                RobotClient::current()
+                    .save_robot(request)
+                    .await
+                    .map_err(|error| error.to_string())
+                    .map(|_| ())
+            })
             .await
     });
     let chosen = available
@@ -818,10 +814,7 @@ fn CameraSection(
             })
             .await
     });
-    let taken = robot
-        .cameras()
-        .iter()
-        .any(|camera| camera.name() == role.read().trim());
+    let taken = robot.config().cameras().contains_key(role.read().trim());
     let replaces = if taken {
         format!(
             "Point the {} role at this camera instead",
@@ -849,11 +842,11 @@ fn CameraSection(
             // does not hold a permanent word on every row the way it used to —
             // the same treatment an episode card already gives its delete.
             ul { class: "mb-1 flex flex-col gap-0.5",
-                for binding in robot.cameras().to_owned() {
-                    li { key: "{binding.name()}", class: "device-camera-row ui-hover-action-host",
-                        span { class: "shrink-0", "{binding.name()}" }
+                for (camera_role, camera) in robot.config().cameras().clone() {
+                    li { key: "{camera_role}", class: "device-camera-row ui-hover-action-host",
+                        span { class: "shrink-0", "{camera_role}" }
                         span { class: "min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint",
-                            "{binding.id()}"
+                            "{camera.id()}"
                         }
                         Button {
                             purpose: ActionPurpose::Remove,
@@ -861,21 +854,14 @@ fn CameraSection(
                             class: "device-camera-remove ui-hover-action",
                             disabled: save_cameras.pending(),
                             aria_busy: save_cameras.pending(),
-                            aria_label: "Unassign the {binding.name()} camera",
-                            title: "Unassign the {binding.name()} camera",
+                            aria_label: "Unassign the {camera_role} camera",
+                            title: "Unassign the {camera_role} camera",
                             onclick: {
-                                let robot = robot.clone();
-                                let discovered = available.clone();
-                                let remaining = robot.cameras().iter()
-                                    .filter(|camera| camera.name() != binding.name())
-                                    .cloned()
-                                    .collect::<Vec<_>>();
-                                move |_| {
-                                    save_cameras.call(CameraAssignments::new(
-                                        robot.clone(),
-                                        remaining.clone(),
-                                    ).with_discovered(discovered.clone()));
-                                }
+                                let request = RobotConfigSave::new(
+                                    robot.config().clone().without_camera(&camera_role),
+                                    Some(robot.revision()),
+                                );
+                                move |_| save_cameras.call(request.clone())
                             },
                             UnassignIcon {}
                         }
@@ -938,23 +924,21 @@ fn CameraSection(
                             title: "{replaces}",
                             onclick: {
                                 let robot = robot.clone();
-                                let discovered = available.clone();
-                                let existing = robot.cameras().to_owned();
                                 move |_| {
-                                    let (name, device_id) = (role.read().trim().to_owned(), device());
+                                    let name = role.read().trim().to_owned();
                                     if name.is_empty() {
                                         project.report("Give the camera a role name.");
                                         return;
                                     }
-                                    let mut bindings = existing.iter()
-                                        .filter(|camera| camera.name() != name)
-                                        .cloned()
-                                        .collect::<Vec<_>>();
-                                    bindings.push(CameraBinding::new(name, device_id, None));
-                                    save_cameras.call(CameraAssignments::new(
-                                        robot.clone(),
-                                        bindings,
-                                    ).with_discovered(discovered.clone()));
+                                    match robot.config().clone().with_camera(&name, &device()) {
+                                        Ok(config) => {
+                                            save_cameras.call(RobotConfigSave::new(
+                                                config,
+                                                Some(robot.revision()),
+                                            ));
+                                        }
+                                        Err(error) => project.report(error),
+                                    }
                                 }
                             },
                             {if save_cameras.pending() { "Saving…" } else if taken { "Reassign" } else { "Assign" }}
@@ -963,40 +947,6 @@ fn CameraSection(
                 }
             }
         }
-    }
-}
-
-struct CameraAssignments {
-    robot: RobotSummary,
-    bindings: Vec<CameraBinding>,
-    discovered: Vec<spiral_robotics_common::robots::CameraStatus>,
-}
-
-impl CameraAssignments {
-    fn new(robot: RobotSummary, bindings: Vec<CameraBinding>) -> Self {
-        Self {
-            robot,
-            bindings,
-            discovered: Vec::new(),
-        }
-    }
-    async fn save(self) -> Result<(), String> {
-        let request = RobotDraft::from_robot(&self.robot)?
-            .with_cameras(&self.bindings, &self.discovered)?
-            .save()?;
-        RobotClient::current()
-            .save_document(request)
-            .await
-            .map_err(|error| error.to_string())
-            .map(|_| ())
-    }
-
-    fn with_discovered(
-        mut self,
-        discovered: Vec<spiral_robotics_common::robots::CameraStatus>,
-    ) -> Self {
-        self.discovered = discovered;
-        self
     }
 }
 

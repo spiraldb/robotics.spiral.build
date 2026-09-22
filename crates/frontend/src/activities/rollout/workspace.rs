@@ -65,6 +65,7 @@ impl RobotFleet for [RobotSummary] {
         self.iter()
             .find(|robot| {
                 robot
+                    .config()
                     .robot_type()
                     .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
             })
@@ -98,9 +99,9 @@ pub(super) fn RolloutWorkbench(
             .find(|choice| &choice.identity.key == key)
     });
     let follower = snapshot.robots().follower();
-    let arm_ready = follower.as_ref().is_some_and(|robot| {
-        robot.connection().connected() && robot.calibrated() && robot.problem().is_none()
-    });
+    let arm_ready = follower
+        .as_ref()
+        .is_some_and(|robot| robot.connection().connected() && robot.config().calibrated());
     let camera_summary = RolloutCameraSummary::inspect(
         follower.as_ref(),
         selected.map(|choice| choice.policy.camera_roles.as_slice()),
@@ -113,7 +114,7 @@ pub(super) fn RolloutWorkbench(
         } else {
             "disconnected"
         };
-        let calibration = if robot.calibrated() {
+        let calibration = if robot.config().calibrated() {
             "calibrated"
         } else {
             "needs calibration"
@@ -399,13 +400,7 @@ impl RolloutCameraSummary {
         let camera_roles = expected_roles
             .filter(|roles| !roles.is_empty())
             .map(|roles| roles.to_vec())
-            .unwrap_or_else(|| {
-                follower
-                    .cameras()
-                    .iter()
-                    .map(|binding| binding.name().to_owned())
-                    .collect()
-            });
+            .unwrap_or_else(|| follower.config().cameras().keys().cloned().collect());
         let total = camera_roles.len();
         if total == 0 {
             return Self {
@@ -418,13 +413,13 @@ impl RolloutCameraSummary {
             .iter()
             .filter(|role| {
                 follower
+                    .config()
                     .cameras()
-                    .iter()
-                    .find(|binding| binding.name() == role.as_str())
-                    .is_some_and(|binding| {
+                    .get(role.as_str())
+                    .is_some_and(|camera| {
                         camera_statuses
                             .iter()
-                            .any(|status| status.id() == binding.id() && status.error().is_none())
+                            .any(|status| status.id() == camera.id() && status.error().is_none())
                     })
             })
             .count();
@@ -569,13 +564,10 @@ impl RolloutPreconditions<'_> {
         let Some(follower) = self.follower else {
             return Some("Configure a follower in Settings.".to_owned());
         };
-        if follower.problem().is_some() {
-            return Some("Fix the follower in Settings.".to_owned());
-        }
         if !follower.connection().connected() {
             return Some("Connect the follower.".to_owned());
         }
-        if !follower.calibrated() {
+        if !follower.config().calibrated() {
             return Some("Calibrate the follower.".to_owned());
         }
         if !self.cameras_ready {
@@ -668,9 +660,9 @@ impl RolloutPresentation for RolloutSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use spiral_robotics_common::robots::config::{MotorRange, RobotConfig};
     use spiral_robotics_common::robots::{
-        CameraBinding, CameraStatus, CameraStreamFormat, CameraStreamState, ConnectionStatus,
-        RobotAvailability, RobotSummary,
+        CameraStatus, CameraStreamFormat, CameraStreamState, ConnectionStatus, RobotSummary,
     };
     use spiral_robotics_common::rollout::{RolloutPhase, RolloutSnapshot};
     use spiral_robotics_common::training::{
@@ -682,12 +674,20 @@ mod tests {
         RolloutPreconditions, RolloutPresentation,
     };
 
+    /// A connected, calibrated SO-101 of the given role.
+    fn config(id: &str, role: &str) -> RobotConfig {
+        let config = RobotConfig::so101(id, role).unwrap();
+        let range = MotorRange::new(0, 1, 2).unwrap();
+        let ranges = config
+            .motors()
+            .keys()
+            .map(|name| (name.clone(), range))
+            .collect();
+        config.with_calibration(ranges).unwrap()
+    }
+
     fn robot(id: &str, role: &str) -> RobotSummary {
-        RobotSummary::new(
-            id,
-            Some(role.to_owned()),
-            RobotAvailability::new(true, None, ConnectionStatus::new(true, None)),
-        )
+        RobotSummary::new(config(id, role), 1, ConnectionStatus::new(true, None))
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -726,11 +726,11 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_requires_every_assigned_camera() {
-        let mut follower = robot("follower", "so101_follower");
-        follower = follower.with_cameras(vec![
-            CameraBinding::new("gripper", "camera-1", None),
-            CameraBinding::new("top", "camera-2", None),
-        ]);
+        let cameras = config("follower", "so101_follower")
+            .with_camera("gripper", "camera-1")
+            .and_then(|config| config.with_camera("top", "camera-2"))
+            .unwrap();
+        let follower = RobotSummary::new(cameras, 1, ConnectionStatus::new(true, None));
         let camera = |id: &str, error: Option<&str>| {
             CameraStatus::new(id, id, CameraStreamFormat::new(640, 360, 30))
                 .with_state(CameraStreamState::new(true, 1, error.map(str::to_owned)))

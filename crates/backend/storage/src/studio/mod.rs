@@ -22,8 +22,7 @@ pub(crate) mod workflows;
 pub(crate) use transfer::StudioSnapshot;
 #[allow(unreachable_pub)]
 mod dataset_robots;
-mod robot_documents;
-pub use robot_documents::RobotDocumentWrite;
+mod robot_configs;
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection, EntityTrait, Set, TransactionTrait};

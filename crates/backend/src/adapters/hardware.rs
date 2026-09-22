@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use crate::OperationError;
+use spiral_robotics_common::robots::config::MotorRange;
 use spiral_robotics_hardware as hardware;
-use spiral_robotics_hardware::{Calibration, CalibrationInput, NormalizedPosition};
+use spiral_robotics_hardware::NormalizedPosition;
 
 use crate::robots::calibration::CalibrationControlPort;
 use crate::robots::control::RobotControlPort;
@@ -51,8 +52,11 @@ impl CalibrationControlPort for hardware::HardwareHandle {
             .map_err(OperationError::conflict)
     }
 
-    async fn calibration_input(&self, robot: &str) -> Result<CalibrationInput, OperationError> {
-        hardware::HardwareHandle::calibration_input(self, robot)
+    async fn calibration_ranges(
+        &self,
+        robot: &str,
+    ) -> Result<BTreeMap<String, MotorRange>, OperationError> {
+        hardware::HardwareHandle::calibration_ranges(self, robot)
             .await
             .map_err(OperationError::conflict)
     }
@@ -66,9 +70,9 @@ impl CalibrationControlPort for hardware::HardwareHandle {
     async fn apply_calibration(
         &self,
         robot: &str,
-        calibration: Calibration,
+        ranges: BTreeMap<String, MotorRange>,
     ) -> Result<(), OperationError> {
-        hardware::HardwareHandle::apply_calibration(self, robot, calibration)
+        hardware::HardwareHandle::apply_calibration(self, robot, ranges)
             .await
             .map_err(OperationError::conflict)
     }

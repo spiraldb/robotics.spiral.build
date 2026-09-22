@@ -357,8 +357,8 @@ impl<'a> TakeOperations<'a> {
                 let robot_type = saved_robots
                     .iter()
                     .find(|robot| robot.id() == arm.id())
-                    .cloned()
-                    .and_then(|robot| robot.robot_type());
+                    .and_then(|robot| robot.config().robot_type())
+                    .map(str::to_owned);
                 EpisodeArm::new(arm.id(), robot_type, arm.joints().to_vec())
             })
             .collect::<Vec<_>>();
@@ -457,7 +457,7 @@ impl<'a> TakeOperations<'a> {
             .iter()
             .filter(|robot| arms.iter().any(|id| id == robot.id()))
         {
-            for camera in robot.cameras() {
+            for (role, camera) in robot.config().cameras() {
                 if !seen.insert(camera.id().to_owned()) {
                     continue;
                 }
@@ -465,7 +465,7 @@ impl<'a> TakeOperations<'a> {
                     continue;
                 };
                 cameras.push(CameraCaptureSpec::new(
-                    format!("{}.camera.{}", robot.id(), camera.name()),
+                    format!("{}.camera.{role}", robot.id()),
                     camera.id(),
                     (status.width(), status.height(), status.fps()),
                 ));

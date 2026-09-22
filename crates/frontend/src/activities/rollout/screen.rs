@@ -33,20 +33,16 @@ impl RolloutCameras {
     ) -> Vec<AssignedCamera> {
         if roles.is_empty() {
             follower
+                .config()
                 .cameras()
                 .iter()
-                .map(|binding| AssignedCamera::from((follower, binding)))
+                .map(|camera| AssignedCamera::from((follower, camera)))
                 .collect()
         } else {
             roles
                 .iter()
-                .filter_map(|role| {
-                    follower
-                        .cameras()
-                        .iter()
-                        .find(|binding| binding.name() == role.as_str())
-                })
-                .map(|binding| AssignedCamera::from((follower, binding)))
+                .filter_map(|role| follower.config().cameras().get_key_value(role))
+                .map(|camera| AssignedCamera::from((follower, camera)))
                 .collect()
         }
     }
@@ -118,20 +114,17 @@ fn RolloutPanels(
 mod tests {
     use super::*;
     use dioxus_workbench::PanelId;
-    use spiral_robotics_common::robots::{CameraBinding, RobotAvailability, RobotSummary};
+    use spiral_robotics_common::robots::RobotSummary;
+    use spiral_robotics_common::robots::config::RobotConfig;
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn rollout_camera_panels_follow_checkpoint_order_and_keep_robot_identity() {
-        let follower = RobotSummary::new(
-            "follower",
-            Some("so101_follower".to_owned()),
-            RobotAvailability::default(),
-        )
-        .with_cameras(vec![
-            CameraBinding::new("wrist", "camera-1", None),
-            CameraBinding::new("top", "camera-2", None),
-            CameraBinding::new("extra", "camera-3", None),
-        ]);
+        let config = RobotConfig::so101("follower", "so101_follower")
+            .and_then(|config| config.with_camera("wrist", "camera-1"))
+            .and_then(|config| config.with_camera("top", "camera-2"))
+            .and_then(|config| config.with_camera("extra", "camera-3"))
+            .unwrap();
+        let follower = RobotSummary::new(config, 1, Default::default());
         let cameras = RolloutCameras::for_follower(
             &follower,
             &["top".to_owned(), "missing".to_owned(), "wrist".to_owned()],

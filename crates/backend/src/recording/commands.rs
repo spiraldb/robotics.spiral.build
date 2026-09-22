@@ -92,14 +92,13 @@ impl PhysicalSeekPort for SeekAdapter<'_> {
             .get(robot)
             .cloned()
             .unwrap_or_default();
-        let target = record.summary(connection);
         Ok(Some(
             SeekTarget::new(
-                target.id(),
-                target.robot_type().map(str::to_owned),
-                target.connection().connected(),
+                record.id(),
+                record.config().robot_type().map(str::to_owned),
+                connection.connected(),
             )
-            .with_readiness(target.calibrated(), target.problem().map(str::to_owned)),
+            .with_calibration(record.config().calibrated()),
         ))
     }
 

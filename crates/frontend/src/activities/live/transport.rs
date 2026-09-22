@@ -717,8 +717,9 @@ impl LiveSession {
             .connected_robots()
             .into_iter()
             .find(|robot| {
-                robot.calibrated()
+                robot.config().calibrated()
                     && robot
+                        .config()
                         .robot_type()
                         .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
             })?;

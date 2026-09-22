@@ -126,7 +126,6 @@ pub(crate) struct TargetRobotContract {
     camera_bindings: Vec<CameraBindingContract>,
     connected: bool,
     calibrated: bool,
-    problem: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -231,7 +230,6 @@ impl TargetRobotContract {
             camera_bindings: Vec::new(),
             connected: false,
             calibrated: false,
-            problem: None,
         }
     }
     pub(super) fn with_cameras(mut self, camera_bindings: Vec<CameraBindingContract>) -> Self {
@@ -241,10 +239,6 @@ impl TargetRobotContract {
     pub(super) fn with_availability(mut self, connected: bool, calibrated: bool) -> Self {
         self.connected = connected;
         self.calibrated = calibrated;
-        self
-    }
-    pub(super) fn with_problem(mut self, problem: Option<String>) -> Self {
-        self.problem = problem;
         self
     }
 }
@@ -349,9 +343,9 @@ impl PolicyDataContract {
                 "checkpoint camera order does not match its configuration",
             ));
         }
-        if target.problem.is_some() || !target.connected || !target.calibrated {
+        if !target.connected || !target.calibrated {
             return Err(OperationError::invalid_input(format!(
-                "robot {:?} must be valid, connected, and calibrated before rollout",
+                "robot {:?} must be connected and calibrated before rollout",
                 target.id
             )));
         }

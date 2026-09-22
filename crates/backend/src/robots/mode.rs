@@ -55,16 +55,16 @@ impl<'a, P: ModeControlPort + ?Sized> ModeActions<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::cell::RefCell;
 
     use super::*;
 
     #[derive(Default)]
-    struct FakeControl(Mutex<Vec<OperatorMode>>);
+    struct FakeControl(RefCell<Vec<OperatorMode>>);
 
     impl ModeControlPort for FakeControl {
         async fn set_operator_mode(&self, mode: OperatorMode) -> Result<(), OperationError> {
-            self.0.lock().unwrap().push(mode);
+            self.0.borrow_mut().push(mode);
             Ok(())
         }
     }
@@ -77,7 +77,7 @@ mod tests {
             follower: "follower".to_owned(),
         };
         ModeActions::new(&control).set(mode.clone()).await.unwrap();
-        assert_eq!(*control.0.lock().unwrap(), [mode]);
+        assert_eq!(*control.0.borrow_mut(), [mode]);
     }
 
     #[tokio::test]
@@ -91,6 +91,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, OperationError::InvalidInput(_)));
-        assert!(control.0.lock().unwrap().is_empty());
+        assert!(control.0.borrow_mut().is_empty());
     }
 }

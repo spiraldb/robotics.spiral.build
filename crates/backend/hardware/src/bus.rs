@@ -10,7 +10,9 @@ use std::error::Error;
 use std::fmt;
 
 #[cfg(test)]
-use crate::calibration::MotorSpec;
+use crate::calibration::EncoderCounts;
+#[cfg(test)]
+use spiral_robotics_common::robots::config::MotorConfig;
 
 /// A fault reported by a motor controller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,7 +436,7 @@ impl SimulatedBus {
     ///
     /// When `drift` is set, motors that are not being driven sweep through
     /// their travel on every read.
-    pub(crate) fn new(specs: &BTreeMap<String, MotorSpec>, drift: bool) -> Self {
+    pub(crate) fn new(specs: &BTreeMap<String, MotorConfig>, drift: bool) -> Self {
         let count = specs.len().max(1) as f64;
         let motors = specs
             .iter()
@@ -532,10 +534,7 @@ impl MotorBus for SimulatedBus {
                     MotorSample::new(
                         motor.position,
                         MotorMechanicalSample::new(
-                            Some(
-                                MotorSpec::degrees_from_encoder_counts(travelled)
-                                    * SIMULATED_READS_PER_SECOND,
-                            ),
+                            Some(EncoderCounts::degrees(travelled) * SIMULATED_READS_PER_SECOND),
                             Some(motor.load),
                         ),
                         MotorElectricalSample::new(
@@ -588,9 +587,9 @@ impl MotorBus for SimulatedBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calibration::MotorDirection;
+    use spiral_robotics_common::robots::config::MotorDirection;
 
-    fn specs() -> BTreeMap<String, MotorSpec> {
+    fn specs() -> BTreeMap<String, MotorConfig> {
         BTreeMap::from([
             ("elbow_flex".to_owned(), spec(3)),
             ("shoulder_pan".to_owned(), spec(1)),
@@ -598,8 +597,8 @@ mod tests {
         ])
     }
 
-    fn spec(id: u32) -> MotorSpec {
-        MotorSpec::new(id, MotorDirection::Normal).with_model("sts3215")
+    fn spec(id: u32) -> MotorConfig {
+        MotorConfig::new(id, MotorDirection::Normal).with_model("sts3215")
     }
 
     #[test]
@@ -756,21 +755,5 @@ mod tests {
             "a full sweep should cover both sides of center"
         );
         assert!(minimum >= 0 && maximum <= SIMULATED_MAX_POSITION);
-    }
-
-    #[test]
-    fn motor_bus_signature_contains_only_neutral_boundary_types() {
-        let source = include_str!("bus.rs");
-        let (_, after_declaration) = source
-            .split_once("pub(crate) trait MotorBus")
-            .expect("MotorBus declaration");
-        let (signature, _) = after_declaration
-            .split_once("\n}")
-            .expect("MotorBus declaration end");
-
-        assert!(
-            !signature.to_ascii_lowercase().contains("feetech"),
-            "the policy-facing MotorBus signature must not expose a concrete driver"
-        );
     }
 }

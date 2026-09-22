@@ -9,7 +9,7 @@ mod manager;
 mod rollout_runs;
 mod settings;
 mod studio;
-pub use studio::{RobotDocumentWrite, StudioProject, StudioStore};
+pub use studio::{StudioProject, StudioStore};
 mod training;
 mod transfer;
 pub mod workflow_assistant;

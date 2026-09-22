@@ -126,12 +126,13 @@ impl LiveSession {
             .telemetry()
             .connected_robots()
             .into_iter()
-            .filter(|robot| robot.calibrated())
+            .filter(|robot| robot.config().calibrated())
             .collect::<Vec<_>>();
         let target = ready
             .iter()
             .find(|robot| {
                 robot
+                    .config()
                     .robot_type()
                     .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
             })

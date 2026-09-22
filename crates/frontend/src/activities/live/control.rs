@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::robots::visualization::ConfiguredModel;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{
-    JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
+    JointTelemetry, MotorCondition, RobotSummary, RobotTelemetry,
 };
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonAuxiliaryHandlers, ButtonVariant};
 use spiral_robotics_viewport as viewport;
@@ -113,14 +113,14 @@ fn ToolReadout(arm: ConnectedArm) -> Element {
     let robot = arm.robot().clone();
     let configured = use_memo(use_reactive(&robot, |robot| {
         robot
-            .document()?
+            .config()
             .visualization()
-            .ok()?
-            .and_then(|configuration| ConfiguredModel::new(configuration).ok())
+            .and_then(|configuration| ConfiguredModel::new(configuration.clone()).ok())
     }));
     let telemetry = arm.telemetry();
     let pose = arm
         .robot()
+        .config()
         .calibrated()
         .then(|| {
             let configured = configured.read();
@@ -184,21 +184,6 @@ fn ToolReadout(arm: ConnectedArm) -> Element {
                     .with_caution(lagging),
             }
         }
-    }
-}
-
-/// The limits the named motor reported for itself when it connected.
-trait RobotMotorLimits {
-    fn motor_limits(&self, joint: &str) -> MotorLimits;
-}
-
-impl RobotMotorLimits for RobotSummary {
-    fn motor_limits(&self, joint: &str) -> MotorLimits {
-        self.motors()
-            .iter()
-            .find(|motor| motor.name() == joint)
-            .map(|motor| motor.limits())
-            .unwrap_or_default()
     }
 }
 
@@ -323,10 +308,10 @@ fn MotorDetail(selection: Signal<Option<Selection>>, arm: ConnectedArm) -> Eleme
     let label = viewport::Joint::named(joint.name())
         .map_or(joint.name().to_owned(), |named| named.label().to_owned());
     let model = robot
+        .config()
         .motors()
-        .iter()
-        .find(|motor| motor.name() == joint.name())
-        .and_then(|motor| motor.model().to_owned());
+        .get(joint.name())
+        .and_then(|motor| motor.model().map(str::to_owned));
     let limits = robot.motor_limits(joint.name());
     let condition = joint.condition();
 
@@ -466,8 +451,9 @@ fn JointControls(
         on_select,
         on_point,
     } = behavior;
-    let drivable =
-        hardware.is_manual_target(robot.id()) && arm.telemetry().torque() && robot.calibrated();
+    let drivable = hardware.is_manual_target(robot.id())
+        && arm.telemetry().torque()
+        && robot.config().calibrated();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
     // is only meaningful for as long as this arm is actually being driven, so
@@ -555,7 +541,7 @@ fn JointControls(
             // uncalibrated arm refuses every command, and the control that fixes
             // it lives in the robot explorer. Mode and torque transitions belong
             // to the workbench Control section rather than this detail panel.
-            if !robot.calibrated() {
+            if !robot.config().calibrated() {
                 p { class: "joint-blocked joint-list-wide",
                     "Calibrate this arm in the robot explorer to command its joints."
                 }

@@ -427,15 +427,10 @@ async fn spiral_failure_rolls_back_staged_sqlite_replacements() {
     let project = store.project(&settings);
     let snapshot = StudioSnapshot::capture(&project).await.unwrap();
     let bytes = ProjectBundle::zip(&snapshot.bytes().unwrap(), &Fixture::data()).unwrap();
-    let original = serde_json::json!({"schema_version":1,"robot_id":"keep","motors":{"joint":{"id":1}},"port":{"path":"/dev/keep","baud_rate":1000000}});
-    project
-        .save_robot_document(crate::RobotDocumentWrite::new(
-            "keep".into(),
-            original.clone(),
-            None,
-        ))
-        .await
-        .unwrap();
+    let original =
+        spiral_robotics_common::robots::config::RobotConfig::so101("keep", "so101_follower")
+            .unwrap();
+    project.save_robot_config(&original, None).await.unwrap();
     let source = ProjectBundleImport::new("studio", &project, &bytes).unwrap();
     let database = Arc::new(FailingSpiral::default());
     let spiral = crate::ProjectStore::new(settings, "studio".into(), database.clone()).unwrap();
@@ -451,7 +446,7 @@ async fn spiral_failure_rolls_back_staged_sqlite_replacements() {
             .load(std::sync::atomic::Ordering::SeqCst)
     );
     assert_eq!(
-        project.robot_document("keep").await.unwrap(),
-        Some(original)
+        project.robot_config("keep").await.unwrap(),
+        Some((original, 1))
     );
 }

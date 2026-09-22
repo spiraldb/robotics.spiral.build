@@ -30,9 +30,10 @@ fn LivePanels(session: LiveSession) -> Element {
         .focused(session.telemetry().snapshot().read().robots())
         .map(|robot| {
             robot
+                .config()
                 .cameras()
                 .iter()
-                .map(|binding| AssignedCamera::from((&robot, binding)))
+                .map(|camera| AssignedCamera::from((&robot, camera)))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();

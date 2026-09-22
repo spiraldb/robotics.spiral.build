@@ -1,8 +1,6 @@
 //! Serial-port discovery helpers.
 
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
 
 use serialport::SerialPortInfo;
 
@@ -39,20 +37,6 @@ impl SerialPortCatalog {
     /// Consume the catalog and return the underlying serial-port records.
     pub fn into_ports(self) -> Vec<SerialPortInfo> {
         self.0
-    }
-
-    /// Return the ports that were present in `before` but not in `after`.
-    ///
-    /// Results are sorted and duplicate input entries are ignored.
-    #[cfg(test)]
-    fn disconnected_names(before: &[String], after: &[String]) -> Vec<String> {
-        let before = before.iter().collect::<BTreeSet<_>>();
-        let after = after.iter().collect::<BTreeSet<_>>();
-
-        before
-            .difference(&after)
-            .map(|port| (*port).clone())
-            .collect()
     }
 
     /// Collapse macOS's paired `/dev/tty.*` and `/dev/cu.*` names.
@@ -105,46 +89,6 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn finds_one_disconnected_port() {
-        let before = strings(&["/dev/ttyACM1", "/dev/ttyACM0"]);
-        let after = strings(&["/dev/ttyACM0"]);
-
-        assert_eq!(
-            SerialPortCatalog::disconnected_names(&before, &after),
-            ["/dev/ttyACM1"]
-        );
-    }
-
-    #[test]
-    fn ignores_new_ports_and_duplicates() {
-        let before = strings(&["COM2", "COM2", "COM1"]);
-        let after = strings(&["COM1", "COM3"]);
-
-        assert_eq!(
-            SerialPortCatalog::disconnected_names(&before, &after),
-            ["COM2"]
-        );
-    }
-
-    #[test]
-    fn returns_multiple_ports_in_stable_order() {
-        let before = strings(&["COM9", "COM2", "COM4"]);
-        let after = strings(&["COM4"]);
-
-        assert_eq!(
-            SerialPortCatalog::disconnected_names(&before, &after),
-            ["COM2", "COM9"]
-        );
-    }
-
-    #[test]
-    fn reports_no_difference() {
-        let ports = strings(&["/dev/ttyUSB0"]);
-
-        assert!(SerialPortCatalog::disconnected_names(&ports, &ports).is_empty());
     }
 
     #[test]

@@ -1,55 +1,52 @@
 use super::{StudioProject, robots};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
-
-/// Validated by the robot feature before persistence; SQLite owns identity and CAS.
-pub struct RobotDocumentWrite {
-    id: String,
-    document: serde_json::Value,
-    expected: Option<serde_json::Value>,
-}
-
-impl RobotDocumentWrite {
-    pub fn new(
-        id: String,
-        document: serde_json::Value,
-        expected: Option<serde_json::Value>,
-    ) -> Self {
-        Self {
-            id,
-            document,
-            expected,
-        }
-    }
-}
+use spiral_robotics_common::robots::config::RobotConfig;
 
 impl StudioProject {
-    pub async fn robot_documents(&self) -> Result<Vec<(String, serde_json::Value)>, String> {
+    /// Every saved robot with the revision it was read at.
+    pub async fn robot_configs(&self) -> Result<Vec<(RobotConfig, u64)>, String> {
         robots::Entity::find()
             .filter(robots::Column::Project.eq(self.key()))
             .order_by_asc(robots::Column::Id)
             .all(self.connection().await?)
             .await
-            .map(|rows| rows.into_iter().map(|row| (row.id, row.document)).collect())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(robots::Model::into_config)
+            .collect()
     }
 
-    pub async fn robot_document(&self, id: &str) -> Result<Option<serde_json::Value>, String> {
+    pub async fn robot_config(&self, id: &str) -> Result<Option<(RobotConfig, u64)>, String> {
         robots::Entity::find_by_id((self.key().to_owned(), id.to_owned()))
             .one(self.connection().await?)
             .await
-            .map(|row| row.map(|row| row.document))
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?
+            .map(robots::Model::into_config)
+            .transpose()
     }
 
-    pub async fn save_robot_document(&self, write: RobotDocumentWrite) -> Result<bool, String> {
+    /// Write `config` over `expected_revision`, where `None` creates the robot.
+    ///
+    /// Returns the new revision, or `None` when another write landed first.
+    pub async fn save_robot_config(
+        &self,
+        config: &RobotConfig,
+        expected_revision: Option<u64>,
+    ) -> Result<Option<u64>, String> {
         let database = self.connection().await?;
+        let expected = expected_revision
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| "Robot revision is out of range")?;
+        let revision = expected.map_or(1, |expected| expected + 1);
         let model = robots::ActiveModel {
             project: Set(self.key().to_owned()),
-            id: Set(write.id.clone()),
-            document: Set(write.document),
+            id: Set(config.id().to_owned()),
+            document: Set(serde_json::to_value(config).map_err(|error| error.to_string())?),
+            revision: Set(revision),
             updated_ms: Set(crate::db::StorageClock::unix_millis()),
         };
-        match write.expected {
+        let written = match expected {
             None => {
                 let result = robots::Entity::insert(model)
                     .on_conflict(
@@ -64,23 +61,24 @@ impl StudioProject {
                     .exec(database)
                     .await
                     .map_err(|error| error.to_string())?;
-                Ok(matches!(result, sea_orm::TryInsertResult::Inserted(_)))
+                matches!(result, sea_orm::TryInsertResult::Inserted(_))
             }
             Some(expected) => {
                 let result = robots::Entity::update_many()
                     .set(model)
                     .filter(robots::Column::Project.eq(self.key()))
-                    .filter(robots::Column::Id.eq(write.id))
-                    .filter(robots::Column::Document.eq(expected))
+                    .filter(robots::Column::Id.eq(config.id()))
+                    .filter(robots::Column::Revision.eq(expected))
                     .exec(database)
                     .await
                     .map_err(|error| error.to_string())?;
-                Ok(result.rows_affected == 1)
+                result.rows_affected == 1
             }
-        }
+        };
+        Ok(written.then_some(revision.unsigned_abs()))
     }
 
-    pub async fn delete_robot_document(&self, id: &str) -> Result<bool, String> {
+    pub async fn delete_robot_config(&self, id: &str) -> Result<bool, String> {
         robots::Entity::delete_by_id((self.key().to_owned(), id.to_owned()))
             .exec(self.connection().await?)
             .await

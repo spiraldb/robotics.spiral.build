@@ -4,7 +4,8 @@ use super::camera::{CameraEditor, CameraEditorSource, RecordedCameraSourceReques
 use crate::robots::Selection;
 use dioxus::prelude::*;
 use dioxus_workbench::{DockZone, LayoutNode, Panel, PanelId, PanelLayout, SplitAxis};
-use spiral_robotics_common::robots::{CameraBinding, RobotSummary};
+use spiral_robotics_common::robots::RobotSummary;
+use spiral_robotics_common::robots::config::CameraConfig;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AssignedCamera {
@@ -13,11 +14,11 @@ pub(crate) struct AssignedCamera {
     device: String,
 }
 
-impl From<(&RobotSummary, &CameraBinding)> for AssignedCamera {
-    fn from((robot, camera): (&RobotSummary, &CameraBinding)) -> Self {
+impl From<(&RobotSummary, (&String, &CameraConfig))> for AssignedCamera {
+    fn from((robot, (role, camera)): (&RobotSummary, (&String, &CameraConfig))) -> Self {
         Self {
             robot: robot.id().to_owned(),
-            role: camera.name().to_owned(),
+            role: role.clone(),
             device: camera.id().to_owned(),
         }
     }
