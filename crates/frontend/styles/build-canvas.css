@@ -1,3 +1,219 @@
 /* Build › canvas styles. Prefix every class with `build-canvas-`. Use @layer components
    like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
    must be unlayered too. */
+
+@layer components {
+  /* The graph pane borrows the Workflow canvas wrap (pale dotted viewport,
+     zoom controls at the bottom left) and the stage card's anatomy, so a
+     Build node and a Workflow stage read as one vocabulary. What is Build's
+     alone is the + on a node's bottom edge, the menu it opens, and the line a
+     running measurement writes. */
+  .build-canvas-graph {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .build-canvas-notice {
+    margin: 8px 8px 0;
+  }
+
+  .build-canvas-flow {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    flex: 1;
+  }
+
+  .build-canvas-node-dot {
+    width: 5px;
+    height: 5px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: var(--tone-accent);
+    animation: build-canvas-pulse 1.6s ease-in-out infinite;
+  }
+
+  @keyframes build-canvas-pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* One small + centred on the bottom edge, where the next node would go. */
+  .build-canvas-add {
+    position: absolute;
+    bottom: -11px;
+    left: 50%;
+    z-index: 2;
+    translate: -50% 0;
+    display: flex;
+  }
+
+  /* The menu hangs from the + in the gap the layout leaves under the card. */
+  .build-canvas-menu {
+    position: absolute;
+    top: calc(100% + 14px);
+    left: 50%;
+    z-index: 3;
+    translate: -50% 0;
+    display: flex;
+    min-width: 208px;
+    flex-direction: column;
+    gap: 1px;
+    padding: 3px;
+    border: 1px solid var(--tone-line);
+    border-radius: 4px;
+    background: var(--tone-surface);
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  }
+
+  .build-canvas-remove {
+    position: absolute;
+    top: calc(100% + 10px);
+    left: 0;
+    z-index: 4;
+    width: 264px;
+  }
+
+  /* The workspace beside the graph: one column, its own scroll, so video and
+     tables never push the canvas around. */
+  .build-canvas-workspace {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .build-canvas-dataset,
+  .build-canvas-dataset-choice {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 12px 12px;
+  }
+
+  .build-canvas-dataset-field {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding-top: 4px;
+  }
+
+  .build-canvas-dataset-head {
+    display: flex;
+    min-height: 28px;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid var(--tone-line);
+    padding-bottom: 8px;
+  }
+
+  .build-canvas-episode-picker {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* Both panes fill their tile; the workspace scrolls, the canvas clips. */
+  .build-canvas-graph-editor,
+  .build-canvas-workspace-editor {
+    min-width: 0;
+    min-height: 0;
+  }
+}
+
+/* Unlayered from here down. This file is imported at the head of
+   tailwind.css, so a layered rule of mine loses to every later rule in the same
+   layer — `.workflow-stage-card`'s own animation and footer among them — and to
+   the kit stylesheet, which is unlayered and loads later still. Node rules that
+   adjust a stage card, and every override of a kit control, therefore sit here,
+   one class more specific than what they override. */
+
+/* A column of cards reads downwards, so the entrance follows the data down
+   rather than across the pane. */
+.build-canvas-node.workflow-stage-card {
+  cursor: pointer;
+  animation-name: build-canvas-node-enter;
+}
+
+@keyframes build-canvas-node-enter {
+  from {
+    opacity: 0;
+    translate: 0 -6px;
+  }
+}
+
+/* A measurement Studio cannot run yet keeps its place and says so quietly. */
+.build-canvas-node.is-planned {
+  border-style: dashed;
+  background: var(--tone-sunken);
+}
+
+.build-canvas-node.is-planned .workflow-stage-title,
+.build-canvas-node.is-planned .workflow-stage-summary {
+  color: var(--tone-ink-faint);
+}
+
+/* The slot a running measurement fills: one dot and one line, never a bar. */
+.build-canvas-node .build-canvas-node-status {
+  gap: 5px;
+  color: var(--tone-ink-soft);
+}
+
+/* The + itself: a hairline disc on the card's edge, quiet until it is used. */
+.build-canvas-node .build-canvas-add-action {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--tone-line-strong);
+  background: var(--tone-surface);
+  color: var(--tone-ink-soft);
+}
+
+.build-canvas-node .build-canvas-add-action:hover {
+  border-color: var(--tone-accent);
+  color: var(--tone-accent);
+  background: var(--tone-surface);
+}
+
+.build-canvas-node .build-canvas-add-action .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* Removing a node is a quiet control the card reveals, not a standing one. */
+.build-canvas-node .build-canvas-node-remove {
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.build-canvas-node:is(:hover, :focus-within, .is-selected) .build-canvas-node-remove {
+  opacity: 1;
+}
+
+.build-canvas-episode-picker .ui-select {
+  min-width: 8.5rem;
+}
+
+/* A node whose menu or confirmation is open is always the selected one —
+   opening either selects it — and dioxus-flow already lifts the selected node
+   above its neighbours through an inline z-index, so nothing is needed here. */
+
+/* Edges carry no details in a Build graph, so their hit area stays out of the
+   way of the nodes and the canvas. */
+.build-canvas-flow .df-edge-hit {
+  cursor: default;
+  pointer-events: none;
+}

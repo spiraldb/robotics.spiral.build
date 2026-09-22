@@ -12,9 +12,6 @@ mod plan_display;
 
 mod assistant_content;
 
-// Build compiles without a caller until the canvas wires it into the
-// document bar; that wiring removes this allow.
-#[allow(dead_code)]
 mod build;
 
 mod function_discovery;

@@ -10,6 +10,7 @@ use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_common::rollout::RolloutSnapshot;
 use spiral_robotics_common::training::{TrainingRun, TrainingSnapshot};
 
+use crate::build_documents::BuildDocumentPersistence;
 use crate::curations::{CurationPersistence, StoredCurationDocument};
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
@@ -154,6 +155,31 @@ impl StorageManager {
     /// Persist one saved recipe revision; false when another save won.
     pub async fn save_curation(&self, document: &StoredCurationDocument) -> Result<bool, String> {
         CurationPersistence::new(&self.studio).save(document).await
+    }
+
+    pub async fn build_documents(
+        &self,
+    ) -> Result<Vec<spiral_robotics_common::build::BuildDocumentSummary>, String> {
+        BuildDocumentPersistence::new(&self.studio).list().await
+    }
+
+    pub async fn load_build_document(
+        &self,
+        document_id: &str,
+    ) -> Result<Option<spiral_robotics_common::build::BuildDocument>, String> {
+        BuildDocumentPersistence::new(&self.studio)
+            .load(document_id)
+            .await
+    }
+
+    /// Persist one Build document revision; false when another save won.
+    pub async fn save_build_document(
+        &self,
+        document: &spiral_robotics_common::build::BuildDocument,
+    ) -> Result<bool, String> {
+        BuildDocumentPersistence::new(&self.studio)
+            .save(document)
+            .await
     }
 
     pub async fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {

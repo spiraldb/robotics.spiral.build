@@ -1,3 +1,108 @@
 /* Build › explore styles. Prefix every class with `build-explore-`. Use @layer components
    like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
    must be unlayered too. */
+
+@layer components {
+  .build-explore-workspace {
+    @apply flex min-h-0 min-w-0 flex-col gap-2 overflow-y-auto p-3;
+  }
+
+  /* The query row keeps the field wide and its two actions at their own
+     width, so a long query never squeezes the buttons out of reach. */
+  .build-explore-query {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .build-explore-query-input {
+    @apply min-w-48 flex-1;
+  }
+
+  .build-explore-note {
+    @apply m-0 text-[11px] text-ink-soft;
+  }
+
+  .build-explore-results {
+    @apply m-0 flex list-none flex-col gap-1.5 p-0;
+  }
+
+  .build-explore-result {
+    @apply min-w-0;
+  }
+
+  .build-explore-slice {
+    @apply flex min-w-0 flex-col gap-1 rounded border border-line bg-surface p-2;
+  }
+
+  .build-explore-slice[data-selected="true"] {
+    border-color: var(--tone-accent);
+    background: var(--tone-selected);
+  }
+
+  /* The whole head is the hit target: a result is selected by its text, not
+     by a control beside it. */
+  .build-explore-slice-head {
+    @apply flex min-w-0 cursor-pointer items-baseline gap-2 border-0 bg-transparent p-0 text-left;
+  }
+
+  /* One column for every probability, so the ranking reads as a column of
+     numbers rather than a ragged edge. */
+  .build-explore-slice-score {
+    @apply w-14 shrink-0 text-right font-mono text-[11px] tabular-nums text-ink;
+  }
+
+  .build-explore-slice-score[data-answered="false"] {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .build-explore-slice-description {
+    @apply min-w-0 flex-1 text-[12px] leading-5 text-ink;
+  }
+
+  .build-explore-slice-facts {
+    @apply flex flex-wrap items-center gap-2 pl-16 font-mono text-[10px] text-ink-faint;
+  }
+
+  .build-explore-slice-camera {
+    @apply mt-1 border-t border-line pt-2;
+  }
+
+  .build-explore-categories {
+    @apply grid gap-2;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr));
+  }
+
+  .build-explore-category {
+    @apply flex cursor-pointer flex-col items-start gap-1 rounded border border-line bg-surface p-2 text-left;
+  }
+
+  .build-explore-category[data-selected="true"] {
+    border-color: var(--tone-accent);
+    background: var(--tone-selected);
+  }
+
+  .build-explore-category-name {
+    @apply text-[12px] font-medium text-ink;
+  }
+
+  .build-explore-category-count {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .build-explore-category-definition {
+    @apply text-[11px] leading-4 text-ink-soft;
+  }
+
+  /* The representatives are evidence for the definition above them, so they
+     stay quiet and never grow past three lines. */
+  .build-explore-category-examples {
+    @apply m-0 flex list-none flex-col gap-0.5 p-0 text-[10px] text-ink-faint;
+  }
+
+  .build-explore-category-examples li {
+    @apply truncate;
+  }
+
+  .build-explore-editor {
+    @apply flex flex-wrap items-end gap-2 rounded border border-line bg-sunken p-2;
+  }
+}

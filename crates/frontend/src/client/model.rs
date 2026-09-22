@@ -19,6 +19,8 @@ pub(crate) struct ModelRequest {
     messages: Vec<ProviderMessage>,
     tools: Vec<Value>,
     model: Option<String>,
+    response_format: Option<Value>,
+    reasoning: ReasoningEffort,
 }
 impl ModelRequest {
     pub(crate) fn new(messages: Vec<ProviderMessage>, tools: Vec<Value>) -> Self {
@@ -26,11 +28,45 @@ impl ModelRequest {
             messages,
             tools,
             model: None,
+            response_format: None,
+            reasoning: ReasoningEffort::default(),
         }
     }
     pub(crate) fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
+    }
+    pub(crate) fn with_reasoning(mut self, reasoning: ReasoningEffort) -> Self {
+        self.reasoning = reasoning;
+        self
+    }
+    /// Ask the provider to answer in a fixed JSON shape, as a chat-completions
+    /// `response_format` value. A provider that ignores it still answers as
+    /// text, so callers validate what comes back either way.
+    pub(crate) fn with_response_format(mut self, response_format: Value) -> Self {
+        self.response_format = Some(response_format);
+        self
+    }
+}
+
+/// How much a provider may think before answering. The chat agent plans SQL
+/// and keeps the default; a fixed-schema annotation over pictures does not
+/// need it, and Gemini bills thinking as output: on one ABC-130k episode,
+/// medium cost $0.059 and 33 s, low $0.0066 and 2.5 s, for comparable
+/// subtasks. Providers reject disabling reasoning outright, so there is no
+/// "none".
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ReasoningEffort {
+    Low,
+    #[default]
+    Medium,
+}
+impl ReasoningEffort {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+        }
     }
 }
 
@@ -53,8 +89,6 @@ impl DecisionResponse {
         .then_some(answer.choice.as_deref()?)
     }
     /// A Noul answer: the probability, 0 to 1, that the question is true.
-    // Read by Build's explorations; the allow goes away when they land.
-    #[allow(dead_code)]
     pub(crate) fn noul(&self, question: &str) -> Option<f64> {
         let answer = self.answers.get(question)?;
         (answer.kind == "noul")
@@ -62,7 +96,6 @@ impl DecisionResponse {
             .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
     }
     /// A Choice answer's whole distribution, ungated.
-    #[allow(dead_code)]
     pub(crate) fn choice_distribution(&self, question: &str) -> Option<ChoiceDistribution<'_>> {
         let answer = self.answers.get(question)?;
         if answer.kind != "choice" || answer.probabilities.is_empty() {
@@ -92,7 +125,6 @@ pub(crate) struct ChoiceDistribution<'a> {
     probabilities: &'a BTreeMap<String, f64>,
     confidence: Option<f64>,
 }
-#[allow(dead_code)]
 impl ChoiceDistribution<'_> {
     pub(crate) fn choice(&self) -> &str {
         self.choice
@@ -100,6 +132,9 @@ impl ChoiceDistribution<'_> {
     pub(crate) fn probability(&self, option: &str) -> f64 {
         self.probabilities.get(option).copied().unwrap_or(0.0)
     }
+    /// Every option's probability. Build's explorations read one option at
+    /// a time; the allow goes away when a caller needs the whole map.
+    #[allow(dead_code)]
     pub(crate) fn probabilities(&self) -> &BTreeMap<String, f64> {
         self.probabilities
     }
@@ -188,7 +223,17 @@ impl ModelClient {
             .as_deref()
             .map(|model| Self::provider_model(llm, model))
             .unwrap_or_else(|| llm.default_model().to_owned());
-        let body = serde_json::to_string(&json!({"model":model,"reasoning_effort":"medium","service_tier":"priority","messages":request.messages,"tools":request.tools,"tool_choice":"auto","stream":true})).map_err(|error| error.to_string())?;
+        let mut payload = json!({"model":model,"reasoning_effort":request.reasoning.as_str(),"service_tier":"priority","messages":request.messages,"stream":true});
+        // A request without tools omits the tool fields: providers that accept
+        // images and a response schema reject `tool_choice` with no tools.
+        if !request.tools.is_empty() {
+            payload["tools"] = Value::Array(request.tools);
+            payload["tool_choice"] = json!("auto");
+        }
+        if let Some(response_format) = request.response_format {
+            payload["response_format"] = response_format;
+        }
+        let body = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
         for attempt in 0..MAX_ATTEMPTS {
             self.project.require_current()?;
             let (response, _cancel) = ProxyClient::request("POST", &endpoint)

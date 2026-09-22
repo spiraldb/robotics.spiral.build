@@ -1,5 +1,6 @@
 //! Resources and admission for one immutable project identity, independent of delivery.
 use super::ProjectReadiness;
+use crate::build::manager::BuildDocumentManager;
 use crate::curation::manager::CurationManager;
 use crate::data::catalog_lease::CatalogMutationLease;
 use crate::recording_session::RecordingSessionManager;
@@ -125,6 +126,11 @@ impl ProjectContext {
     }
     pub(crate) fn curation(&self) -> &Arc<CurationManager> {
         self.project.curation()
+    }
+    /// Build documents are stored opaquely and keep no runtime state, so each
+    /// caller gets a manager over this project's storage rather than a shared one.
+    pub(crate) fn build_documents(&self) -> BuildDocumentManager {
+        BuildDocumentManager::new(self.storage().clone())
     }
     pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
         self.project.rollout()

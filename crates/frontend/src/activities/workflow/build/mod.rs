@@ -1,11 +1,10 @@
 //! Build: a dataset → measurement → exploration graph beside the selected
 //! node's workspace, next to the Agent view of the same Workflow activity.
 //!
-//! Ownership while the streams run in parallel (remove this note on merge):
-//! `document`, `client`, and `state` are the shared contract; extend them,
-//! never change existing signatures. `graph` is the canvas and workspace shell.
-//! `annotate` is the Break down subtasks measurement. `explore` is Find
-//! similar subtasks and Group similar subtasks.
+//! `document`, `client`, and `state` are the shared contract every view reads
+//! and edits through. `graph` is the canvas and workspace shell, `annotate`
+//! the Break down subtasks measurement, and `explore` the Find similar and
+//! Group similar subtasks explorations.
 pub(super) mod annotate;
 pub(super) mod client;
 pub(super) mod document;

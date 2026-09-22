@@ -17,12 +17,15 @@ impl TimelineSample {
 enum IntervalKind {
     Excluded,
     Unknown,
+    /// A named span the operator reads and clicks, drawn by `IntervalTrackRow`.
+    Labeled,
 }
 impl IntervalKind {
     fn key(self) -> &'static str {
         match self {
             Self::Excluded => "excluded",
             Self::Unknown => "unknown",
+            Self::Labeled => "labeled",
         }
     }
 }
@@ -48,10 +51,25 @@ impl TimelineInterval {
             kind: IntervalKind::Unknown,
         }
     }
+    /// A span the operator reads by its own name, such as an annotated
+    /// subtask. `IntervalTrackRow` draws these; numeric tracks do not.
+    pub(crate) fn labeled(start: f64, end: f64, label: impl Into<String>) -> Self {
+        Self {
+            span: (start, end),
+            label: label.into(),
+            kind: IntervalKind::Labeled,
+        }
+    }
     pub(crate) fn span(&self) -> (f64, f64) {
         self.span
     }
-    fn valid(&self) -> bool {
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+    pub(super) fn kind_key(&self) -> &'static str {
+        self.kind.key()
+    }
+    pub(super) fn valid(&self) -> bool {
         self.span.0.is_finite() && self.span.1.is_finite() && self.span.1 > self.span.0
     }
 }

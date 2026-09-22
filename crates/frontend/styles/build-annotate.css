@@ -1,3 +1,152 @@
 /* Build › annotate styles. Prefix every class with `build-annotate-`. Use @layer components
    like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
    must be unlayered too. */
+
+@layer components {
+  /* The workspace reads top to bottom: what a run uses, what it has reached,
+     what it produced, and the recording that produced it. */
+  .build-annotate-workspace {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    padding: 12px;
+    overflow-y: auto;
+    background: var(--tone-surface);
+    color: var(--tone-ink);
+    font-size: 12px;
+  }
+
+  .build-annotate-settings {
+    display: grid;
+    grid-template-columns: minmax(12rem, 2fr) minmax(10rem, 2fr) minmax(7rem, 1fr);
+    gap: 8px 12px;
+    align-items: end;
+  }
+
+  .build-annotate-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .build-annotate-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--tone-ink-soft);
+  }
+
+  .build-annotate-failures summary {
+    cursor: pointer;
+    color: var(--tone-danger);
+  }
+
+  .build-annotate-failures ul {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .build-annotate-failures li {
+    display: grid;
+    grid-template-columns: minmax(6rem, auto) 1fr;
+    gap: 8px;
+    padding: 2px 0;
+    border-top: 1px solid var(--tone-line);
+  }
+
+  .build-annotate-failures li span {
+    color: var(--tone-ink-soft);
+  }
+
+  .build-annotate-failure {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+    padding: 8px;
+    border: 1px solid var(--tone-danger);
+    @apply rounded-sm;
+    background: var(--tone-danger-soft);
+  }
+
+  .build-annotate-empty {
+    padding: 12px;
+    border: 1px dashed var(--tone-line);
+    @apply rounded-sm;
+    color: var(--tone-ink-soft);
+    text-align: center;
+  }
+
+  /* One table for the whole node: an episode heading row, then its intervals.
+     The times are tabular so boundaries line up down the column. */
+  .build-annotate-table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+  }
+
+  .build-annotate-table th,
+  .build-annotate-table td {
+    padding: 2px 6px;
+    border-bottom: 1px solid var(--tone-line);
+    vertical-align: top;
+  }
+
+  .build-annotate-table thead th {
+    color: var(--tone-ink-soft);
+    font-weight: 500;
+  }
+
+  .build-annotate-table td:nth-child(1),
+  .build-annotate-table td:nth-child(2) {
+    width: 5rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--tone-ink-soft);
+  }
+
+  .build-annotate-group > tr:first-child th {
+    background: var(--tone-sunken);
+    border-top: 1px solid var(--tone-line);
+  }
+
+  .build-annotate-group[aria-current="true"] > tr:first-child th {
+    background: var(--tone-selected);
+  }
+
+  .build-annotate-count {
+    margin-left: 8px;
+    color: var(--tone-ink-soft);
+    font-weight: 400;
+  }
+
+  .build-annotate-episode-name,
+  .build-annotate-row {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .build-annotate-episode-name:hover,
+  .build-annotate-row:hover {
+    color: var(--tone-accent);
+    text-decoration: underline;
+  }
+
+  .build-annotate-episode {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    border: 1px solid var(--tone-line);
+    @apply rounded-sm;
+  }
+}

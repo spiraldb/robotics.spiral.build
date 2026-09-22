@@ -1,4 +1,5 @@
 use super::*;
+use crate::build_documents::BuildDocumentPersistence;
 use crate::rollout_runs::RolloutSessionPersistence;
 use crate::settings::StudioPreferencePersistence;
 use crate::studio::{RobotDocumentWrite, StudioStore};
@@ -53,6 +54,18 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
     assert!(
         WorkflowPersistence::new(&source)
             .save(&workflow, (&graph, &conversation))
+            .await
+            .unwrap()
+    );
+    let build = spiral_robotics_common::build::BuildDocument::new(
+        "folding",
+        "Cloth folding",
+        1,
+        r#"{"nodes":[]}"#,
+    );
+    assert!(
+        BuildDocumentPersistence::new(&source)
+            .save(&build)
             .await
             .unwrap()
     );
@@ -120,6 +133,13 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         .unwrap();
     assert_eq!(workflow.graph(), &graph);
     assert_eq!(workflow.conversation(), Some(&conversation));
+    assert_eq!(
+        BuildDocumentPersistence::new(&target)
+            .load("folding")
+            .await
+            .unwrap(),
+        Some(build.with_revision(1))
+    );
     let restored = TrainingHistoryPersistence::new(&target)
         .load()
         .await
@@ -153,6 +173,7 @@ async fn imported_sqlite_rejects_extra_schema_secrets_and_invalid_documents() {
         "INSERT INTO backend_settings VALUES (1, '{}')",
         "INSERT INTO robots VALUES ('', 'arm', '{}', 1)",
         "INSERT INTO robots VALUES ('other', 'arm', '{}', 1)",
+        "INSERT INTO build_documents VALUES ('', 'folding', '   ', 1, 1, '{}', 0)",
     ] {
         let snapshot = StudioSnapshot::capture(&project).await.unwrap();
         snapshot

@@ -7,6 +7,7 @@
 #![allow(async_fn_in_trait)]
 
 mod adapters;
+mod build;
 mod clock;
 mod curation;
 mod data;

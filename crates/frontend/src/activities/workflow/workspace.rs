@@ -29,6 +29,7 @@ use spiral_robotics_ui::{
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
+use crate::activities::workflow::build::graph::WorkflowView;
 use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, RESULTS_PANEL_ID,
 };
@@ -42,6 +43,11 @@ const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-agent-v14";
 
 #[component]
 fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
+    // Build keeps its own document, graph, and selection while the Agent is on
+    // screen, so its controller lives beside Workflow's rather than inside the
+    // view that draws it.
+    let build_controller = super::build::state::BuildController::use_controller();
+    let view = use_signal(|| WorkflowView::Agent);
     let panels = vec![
         Panel::new(
             RESULTS_PANEL_ID,
@@ -71,14 +77,18 @@ fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
 
     rsx! {
         div { class: "workflow-workspace",
-            super::document_controls::WorkflowDocumentControls { controller }
+            super::document_controls::WorkflowDocumentControls { controller, build_controller, view }
             div { class: "workflow-panels",
-                PanelWorkspace {
-                    panels,
-                    initial_layout: WorkflowWorkspaceLayout::initial(),
-                    layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
-                    active_panel: controller.active_panel(),
-                    on_panel_activate: move |id: PanelId| controller.activate_panel(id),
+                if view() == WorkflowView::Build {
+                    super::build::graph::BuildPanels { controller: build_controller }
+                } else {
+                    PanelWorkspace {
+                        panels,
+                        initial_layout: WorkflowWorkspaceLayout::initial(),
+                        layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
+                        active_panel: controller.active_panel(),
+                        on_panel_activate: move |id: PanelId| controller.activate_panel(id),
+                    }
                 }
             }
         }

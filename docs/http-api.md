@@ -334,6 +334,22 @@ transforms) compiled to one read-only query; see [curation](curation.md).
 Runs are in-memory and polled like workflow runs; Save is the only write and
 uses optimistic revisions.
 
+### Build documents
+
+| Method | Path | Body or query | Response |
+| --- | --- | --- | --- |
+| GET | `/build-documents` | — | BuildDocumentSummary[] |
+| GET | `/build-documents/{id}` | — | BuildDocument |
+| POST | `/build-documents/save` | BuildDocument (loaded revision) | BuildDocument (next revision) |
+
+A Build document is one opaque, versioned JSON payload per Build graph: the
+frontend owns its schema and `encoding` version, and the backend stores, lists,
+and loads it by identity without reading it. Save carries the revision the
+document was loaded at, 0 for one never saved, and returns the stored copy one
+revision higher; a mismatch fails with `conflict`. A payload over 32 MiB fails
+with `invalid_input`. This is the only JSON route with a raised request-body
+bound, twice the payload limit so a document's JSON framing always fits.
+
 ## Files and media
 
 - `POST /project/import`: raw `.spiral-project` bytes with

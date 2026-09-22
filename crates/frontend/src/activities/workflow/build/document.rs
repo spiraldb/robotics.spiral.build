@@ -12,9 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const BUILD_ENCODING_VERSION: u32 = 1;
 /// The root node every Build graph starts with.
 pub(crate) const DATASET_NODE_ID: &str = "dataset";
-/// OpenRouter id of the annotation model candidate. Verify it against the
-/// provider's catalog before relying on it.
-pub(crate) const DEFAULT_ANNOTATION_MODEL: &str = "google/gemini-2.5-flash";
+/// OpenRouter id of the newest Gemini Flash as of 2026-09-21; it accepts image
+/// input and structured output. Re-check the catalog when a newer one ships.
+pub(crate) const DEFAULT_ANNOTATION_MODEL: &str = "google/gemini-3.8-flash";
 pub(crate) const DEFAULT_SAMPLE_INTERVAL_SECONDS: f64 = 0.5;
 const MAX_NODE_ID_LEN: usize = 64;
 
@@ -97,18 +97,6 @@ impl BuildNodeKind {
             Self::FindSimilarSubtasks(_) => "Find similar subtasks",
             Self::GroupSimilarSubtasks => "Group similar subtasks",
         }
-    }
-    pub(crate) fn is_measurement(&self) -> bool {
-        matches!(
-            self,
-            Self::BreakDownSubtasks(_) | Self::FindUnproductiveMoments
-        )
-    }
-    pub(crate) fn is_exploration(&self) -> bool {
-        matches!(
-            self,
-            Self::FindSimilarSubtasks(_) | Self::GroupSimilarSubtasks
-        )
     }
     /// Whether Studio can run this node today.
     pub(crate) fn executable(&self) -> bool {
@@ -299,6 +287,7 @@ impl SubtaskRow {
         row.validate()?;
         Ok(row)
     }
+    #[cfg(test)]
     pub(crate) fn node(&self) -> &str {
         &self.node
     }
@@ -311,6 +300,7 @@ impl SubtaskRow {
     pub(crate) fn end_time(&self) -> f64 {
         self.end_time
     }
+    #[cfg(test)]
     pub(crate) fn duration(&self) -> f64 {
         self.end_time - self.start_time
     }
@@ -406,12 +396,14 @@ impl SubtaskAssignment {
     pub(crate) fn start_time(&self) -> f64 {
         self.start_time
     }
+    #[cfg(test)]
     pub(crate) fn category(&self) -> &str {
         &self.category
     }
     pub(crate) fn probability(&self) -> f64 {
         self.probability
     }
+    #[cfg(test)]
     pub(crate) fn confidence(&self) -> f64 {
         self.confidence
     }
@@ -454,17 +446,8 @@ impl SubtaskGrouping {
         grouping.validate()?;
         Ok(grouping)
     }
-    pub(crate) fn node(&self) -> &str {
-        &self.node
-    }
-    pub(crate) fn source(&self) -> &str {
-        &self.source
-    }
     pub(crate) fn categories(&self) -> &[SubtaskCategory] {
         &self.categories
-    }
-    pub(crate) fn assignments(&self) -> &[SubtaskAssignment] {
-        &self.assignments
     }
     /// A category's rows, most typical first.
     pub(crate) fn members(&self, category: &str) -> Vec<&SubtaskAssignment> {
@@ -604,24 +587,12 @@ impl BuildPayload {
             .retain(|grouping| !doomed.contains(&grouping.node));
         Ok(())
     }
-    pub(crate) fn subtasks(&self) -> &[SubtaskRow] {
-        &self.subtasks
-    }
     /// An annotation node's rows, in episode order then time order as stored.
     pub(crate) fn subtasks_for<'a>(
         &'a self,
         node: &'a str,
     ) -> impl Iterator<Item = &'a SubtaskRow> + 'a {
         self.subtasks.iter().filter(move |row| row.node == node)
-    }
-    pub(crate) fn episode_subtasks<'a>(
-        &'a self,
-        node: &'a str,
-        episode: &'a str,
-    ) -> impl Iterator<Item = &'a SubtaskRow> + 'a {
-        self.subtasks
-            .iter()
-            .filter(move |row| row.node == node && row.episode == episode)
     }
     /// Replace one episode's rows for an annotation node and record the
     /// episode as completed. Rows may arrive in any order; they must not
@@ -696,9 +667,6 @@ impl BuildPayload {
             .retain(|existing| existing.node != grouping.node);
         self.groupings.push(grouping);
         Ok(())
-    }
-    pub(crate) fn clear_grouping(&mut self, node: &str) {
-        self.groupings.retain(|grouping| grouping.node != node);
     }
     /// The annotation node an exploration reads: its parent, when that parent
     /// is a Break down subtasks node.
@@ -940,7 +908,8 @@ mod tests {
     fn episode_rows_are_sorted_trimmed_and_recorded_as_completed() {
         let (payload, annotate) = annotated_graph();
         let rows = payload
-            .episode_subtasks(&annotate, "ep-1")
+            .subtasks_for(&annotate)
+            .filter(|row| row.episode() == "ep-1")
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].description(), "grasp the corners");
@@ -1064,8 +1033,6 @@ mod tests {
         );
         assert!(SubtaskAssignment::new("ep-1", 0.0, "Grasp", 1.2, 0.5).is_err());
         assert_eq!(payload.validate(), Ok(()));
-        payload.clear_grouping(&group);
-        assert!(payload.grouping_for(&group).is_none());
     }
 
     #[test]
@@ -1089,7 +1056,7 @@ mod tests {
         payload.remove_node(&annotate).unwrap();
         assert_eq!(payload.nodes().len(), 1);
         assert!(payload.edges().is_empty());
-        assert!(payload.subtasks().is_empty());
+        assert!(payload.subtasks_for(&annotate).next().is_none());
         assert!(payload.grouping_for(&group).is_none());
         assert_eq!(payload.validate(), Ok(()));
     }

@@ -3,8 +3,9 @@
 The backend owns two persistence boundaries:
 
 - **SQLite / SeaORM:** connection settings, robot documents and calibration,
-  project preferences, saved workflows and conversations, training history
-  (including metrics and checkpoint references), and rollout state.
+  project preferences, saved workflows and conversations, saved curation
+  recipes, Build documents, training history (including metrics and checkpoint
+  references), and rollout state.
 - **Spiral / ADBC:** datasets, recordings, MCAP payloads, query outputs and
   feature-cache values, and model checkpoint artifacts. The training worker
   continues to publish checkpoint bytes directly to Spiral.
@@ -47,6 +48,11 @@ workflow edits use conditional writes to preserve conflict detection. Training
 history is stored per run, with storage-owned versioned JSON for its nested
 configuration, metrics, checkpoint references, and logs. Non-finite metrics have
 an explicit JSON encoding, so diverged losses survive a restart.
+
+A Build document is stored as its own row: identity, name, revision, the
+frontend's encoding version, and the payload as opaque TEXT. Storage never
+parses that payload, so a change to the Build graph's schema needs no migration.
+Saves are conditional on the revision the document was loaded at.
 
 Checked-in migration scripts live in `studio/migrations`. Add a new, uniquely
 named migration and register it in `Migrator`; do not edit an applied migration.

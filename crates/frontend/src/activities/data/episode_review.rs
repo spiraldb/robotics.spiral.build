@@ -2,8 +2,8 @@
 //! Shared by Curation's evidence panels and Build's subtask views.
 use super::{DatasetClient, EpisodeCamera, EpisodeTransport, OpenedEpisode, StreamCatalog};
 use crate::components::timeline::{
-    NumericTrackRow, Timeline, TimelineAction, TimelineContent, TimelineEvent, TimelineInteraction,
-    TimelineInterval, TimelineTrack,
+    IntervalTrack, IntervalTrackRow, NumericTrackRow, Timeline, TimelineAction, TimelineContent,
+    TimelineEvent, TimelineInteraction, TimelineInterval, TimelineTrack,
 };
 use dioxus::prelude::*;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
@@ -13,6 +13,10 @@ pub(in crate::activities) fn EpisodeReview(
     episode: OpenedEpisode,
     transport: EpisodeTransport,
     #[props(default)] tracks: Vec<TimelineTrack>,
+    /// Rows of named spans drawn below the numeric tracks, such as a
+    /// measurement's subtask intervals. Activating one reaches `on_interval`.
+    #[props(default)]
+    span_tracks: Vec<IntervalTrack>,
     #[props(default)] on_interval: EventHandler<TimelineInterval>,
 ) -> Element {
     let selection = episode.selection();
@@ -37,7 +41,10 @@ pub(in crate::activities) fn EpisodeReview(
             }
         }),
     );
-    let rows = rsx! { for track in tracks { NumericTrackRow { key: "{track.id()}", track, interaction: interaction.clone() } } };
+    let rows = rsx! {
+        for track in tracks { NumericTrackRow { key: "{track.id()}", track, interaction: interaction.clone() } }
+        for track in span_tracks { IntervalTrackRow { key: "{track.id()}", track, interaction: interaction.clone() } }
+    };
     let content = TimelineContent::new(rows).with_identity(rsx! { strong { "{episode.title()}" } });
     rsx! {
         section { class: "episode-review", "aria-label": "Recorded episode review",

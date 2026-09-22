@@ -14,6 +14,7 @@
 //! Components neither fetch data nor know about cameras, datasets, or robots.
 mod density;
 mod interaction;
+mod intervals;
 mod playback;
 #[allow(clippy::module_inception)]
 mod timeline;
@@ -23,6 +24,7 @@ pub(crate) use interaction::{
     KeyboardFocus, SeekPhase, TimelineAction, TimelineEvent, TimelineInteraction, TimelineState,
     TransportKey,
 };
+pub(crate) use intervals::{IntervalTrack, IntervalTrackRow};
 pub(crate) use playback::{PlaybackClock, ViewWindow};
 pub(crate) use timeline::{Timeline, TimelineContent, TimelineScrubber};
 pub(crate) use tracks::{

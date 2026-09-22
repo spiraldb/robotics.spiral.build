@@ -10,6 +10,7 @@ impl MigratorTrait for Migrator {
             Box::new(RemoveLegacyRegistry),
             Box::new(CreateCurations),
             Box::new(CreateDatasetRobots),
+            Box::new(CreateBuildDocuments),
         ]
     }
 }
@@ -94,6 +95,28 @@ impl MigrationTrait for CreateCurations {
         manager
             .get_connection()
             .execute_unprepared(include_str!("m20260916_000003_curations.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+struct CreateBuildDocuments;
+impl MigrationName for CreateBuildDocuments {
+    fn name(&self) -> &str {
+        "m20260921_000005_build_documents"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for CreateBuildDocuments {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260921_000005_build_documents.sql"))
             .await?;
         Ok(())
     }

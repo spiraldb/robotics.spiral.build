@@ -6,6 +6,8 @@
 
 use dioxus::prelude::*;
 
+use super::build::graph::{BuildDocumentBar, WorkflowView};
+use super::build::state::BuildController;
 use super::state::{WorkflowController, WorkflowPendingCommand};
 use crate::activities::data::DatasetClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
@@ -20,8 +22,48 @@ use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, ModeButton, ModeG
 const SWITCHER_ID: &str = "workflow-switcher";
 const TITLE_ID: &str = "workflow-document-title";
 
+/// The bar both views share: which view is open, then that view's document.
 #[component]
-pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Element {
+pub(super) fn WorkflowDocumentControls(
+    controller: WorkflowController,
+    build_controller: BuildController,
+    /// Which view the bar names and the workspace mounts. The two views share
+    /// this bar and nothing else.
+    view: Signal<WorkflowView>,
+) -> Element {
+    let mut view = view;
+    rsx! {
+        header { class: "document-bar",
+            span { class: "document-glyph", "aria-hidden": "true", WorkflowIcon {} }
+            ModeGroup { label: "Workflow view".to_owned(), class: "workflow-mode-switch".to_owned(),
+                ModeButton {
+                    purpose: ActionPurpose::Select,
+                    checked: view() == WorkflowView::Build,
+                    title: "Assemble a measurement graph over one dataset",
+                    onclick: move |_| view.set(WorkflowView::Build),
+                    "Build"
+                }
+                ModeButton {
+                    purpose: ActionPurpose::Select,
+                    checked: view() == WorkflowView::Agent,
+                    title: "Author SQL with the Workflow assistant",
+                    onclick: move |_| view.set(WorkflowView::Agent),
+                    "Agent"
+                }
+            }
+            if view() == WorkflowView::Build {
+                BuildDocumentBar { controller: build_controller }
+            } else {
+                WorkflowAgentDocument { controller }
+            }
+        }
+    }
+}
+
+/// The Agent view's half of the bar: the workflow's identity, its saved
+/// state, and what Save, Discard, and Run may do.
+#[component]
+fn WorkflowAgentDocument(controller: WorkflowController) -> Element {
     let studio = StudioProjectState::current();
     let workflow = controller.spec();
     let reason = controller.workflow_selection_reason();
@@ -39,56 +81,43 @@ pub(super) fn WorkflowDocumentControls(controller: WorkflowController) -> Elemen
         .collect::<Vec<_>>();
 
     rsx! {
-        header { class: "document-bar",
-            span { class: "document-glyph", "aria-hidden": "true", WorkflowIcon {} }
-            ModeGroup { label: "Workflow view".to_owned(), class: "workflow-mode-switch".to_owned(),
-                ModeButton {
-                    purpose: ActionPurpose::Select,
-                    checked: false,
-                    disabled: true,
-                    title: "Build is planned",
-                    "Build"
+        div { class: "document-identity",
+            if renaming() {
+                DocumentRenameForm {
+                    title_id: TITLE_ID.to_owned(),
+                    label: "Workflow name".to_owned(),
+                    initial: workflow.name().to_owned(),
+                    disabled: rename_disabled,
+                    on_apply: move |name| { controller.set_name(name); renaming.set(false); },
+                    on_cancel: move |_| renaming.set(false),
                 }
-                ModeButton { purpose: ActionPurpose::Select, checked: true, "Agent" }
-            }
-            div { class: "document-identity",
-                if renaming() {
-                    DocumentRenameForm {
-                        title_id: TITLE_ID.to_owned(),
-                        label: "Workflow name".to_owned(),
-                        initial: workflow.name().to_owned(),
-                        disabled: rename_disabled,
-                        on_apply: move |name| { controller.set_name(name); renaming.set(false); },
-                        on_cancel: move |_| renaming.set(false),
-                    }
-                } else {
-                    DocumentTitle {
-                        id: TITLE_ID.to_owned(),
-                        name: workflow.name().to_owned(),
-                        hint: title_hint.clone(),
-                        expanded: switching(),
-                        on_toggle: move |_| switching.toggle(),
-                    }
-                }
-                // The switcher hangs from the title it belongs to, wherever
-                // the title sits in the bar.
-                if switching() {
-                    DocumentSwitcher {
-                        id: SWITCHER_ID.to_owned(),
-                        title_id: TITLE_ID.to_owned(),
-                        entries,
-                        current: DocumentEntry::new(workflow.id(), workflow.name()),
-                        copy: SwitcherCopy::new("Saved workflows", "No saved workflows yet.", "New blank workflow", "Rename this workflow"),
-                        gate: SwitcherGate::new(reason.clone(), rename_disabled),
-                        on_select: move |id: Option<String>| controller.select_workflow(id, studio),
-                        on_rename: move |_| { switching.set(false); renaming.set(true); },
-                        on_close: move |_| switching.set(false),
-                        WorkflowDatasetCreation { controller, oncreated: move |_| switching.set(false) }
-                    }
+            } else {
+                DocumentTitle {
+                    id: TITLE_ID.to_owned(),
+                    name: workflow.name().to_owned(),
+                    hint: title_hint.clone(),
+                    expanded: switching(),
+                    on_toggle: move |_| switching.toggle(),
                 }
             }
-            WorkflowDocumentActions { controller, state }
+            // The switcher hangs from the title it belongs to, wherever
+            // the title sits in the bar.
+            if switching() {
+                DocumentSwitcher {
+                    id: SWITCHER_ID.to_owned(),
+                    title_id: TITLE_ID.to_owned(),
+                    entries,
+                    current: DocumentEntry::new(workflow.id(), workflow.name()),
+                    copy: SwitcherCopy::new("Saved workflows", "No saved workflows yet.", "New blank workflow", "Rename this workflow"),
+                    gate: SwitcherGate::new(reason.clone(), rename_disabled),
+                    on_select: move |id: Option<String>| controller.select_workflow(id, studio),
+                    on_rename: move |_| { switching.set(false); renaming.set(true); },
+                    on_close: move |_| switching.set(false),
+                    WorkflowDatasetCreation { controller, oncreated: move |_| switching.set(false) }
+                }
+            }
         }
+        WorkflowDocumentActions { controller, state }
     }
 }
 

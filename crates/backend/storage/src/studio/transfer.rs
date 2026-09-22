@@ -1,7 +1,7 @@
 //! Native SQLite snapshots contain one project's records and no backend secrets.
 use super::{
-    StudioProject, curations, dataset_robots, robots, rollout_runs, studio_settings, training_runs,
-    workflows,
+    StudioProject, build_documents, curations, dataset_robots, robots, rollout_runs,
+    studio_settings, training_runs, workflows,
 };
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -15,11 +15,12 @@ pub(crate) struct StudioSnapshot {
 }
 
 impl StudioSnapshot {
-    const TABLES: [&str; 7] = [
+    const TABLES: [&str; 8] = [
         "dataset_robots",
         "robots",
         "workflows",
         "curations",
+        "build_documents",
         "training_runs",
         "studio_settings",
         "rollout_runs",
@@ -234,6 +235,13 @@ impl StudioSnapshot {
                 serde_json::from_value(row.document.clone()).map_err(|error| error.to_string())?;
             document.validate(&row)?;
         }
+        for row in build_documents::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            crate::build_documents::BuildDocumentPersistence::document(row)?;
+        }
         for row in training_runs::Entity::find()
             .all(&self.database)
             .await
@@ -318,6 +326,17 @@ impl StudioSnapshot {
                 .map_err(|error| error.to_string())?;
         }
         for mut row in curations::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            row.project = project.key().to_owned();
+            row.into_active_model()
+                .insert(&transaction)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        for mut row in build_documents::Entity::find()
             .all(&self.database)
             .await
             .map_err(|error| error.to_string())?

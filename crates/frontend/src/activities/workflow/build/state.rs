@@ -108,9 +108,6 @@ impl BuildController {
     pub(crate) fn name(&self) -> String {
         self.document.read().name().to_owned()
     }
-    pub(crate) fn revision(&self) -> u64 {
-        self.document.read().revision()
-    }
     pub(crate) fn set_name(mut self, name: String) {
         self.document.write().set_name(name);
     }

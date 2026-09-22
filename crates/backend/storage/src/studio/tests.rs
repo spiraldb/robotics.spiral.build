@@ -269,7 +269,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 4);
+    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 5);
     // A conflict halfway through the actual initial migration must undo both
     // earlier CREATE TABLE statements and the migration journal itself.
     let directory = tempfile::tempdir().unwrap();
