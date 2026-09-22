@@ -1,4 +1,4 @@
-//! Storage-owned JSON for the latest durable rollout session.
+//! Storage-owned JSON for every durable rollout session.
 
 use spiral_robotics_common::rollout::{RolloutMetrics, RolloutPhase, RolloutSnapshot};
 
@@ -12,46 +12,45 @@ impl<'a> RolloutSessionPersistence<'a> {
         Self { project_store }
     }
 
-    pub(crate) async fn load(&self) -> Result<Option<RolloutSnapshot>, String> {
+    /// Every recorded session, in identity order.
+    pub(crate) async fn load(&self) -> Result<Vec<RolloutSnapshot>, String> {
         use crate::studio::rollout_runs as table;
-        use sea_orm::EntityTrait;
-        let row = table::Entity::find_by_id(self.project_store.key().to_owned())
-            .one(self.project_store.connection().await?)
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+        let rows = table::Entity::find()
+            .filter(table::Column::Project.eq(self.project_store.key()))
+            .order_by_asc(table::Column::Id)
+            .all(self.project_store.connection().await?)
             .await
             .map_err(|error| error.to_string())?;
-        row.map(|row| {
-            crate::studio::StoredDocument::decode::<StoredRolloutSession>(row.document)
-                .map(|session| session.restored())
-        })
-        .transpose()
+        rows.into_iter()
+            .map(|row| {
+                crate::studio::StoredDocument::decode::<StoredRolloutSession>(row.document)
+                    .map(|session| session.restored())
+            })
+            .collect()
     }
 
+    /// Write `snapshot` under its session. A snapshot that never named a
+    /// session has nothing durable to say.
     pub(crate) async fn save(&self, snapshot: &RolloutSnapshot) -> Result<(), String> {
         use crate::studio::rollout_runs as table;
         use sea_orm::{EntityTrait, Set};
-        let database = self.project_store.connection().await?;
-        match StoredRolloutSession::stored(snapshot) {
-            Some(session) => {
-                table::Entity::insert(table::ActiveModel {
-                    project: Set(self.project_store.key().to_owned()),
-                    document: Set(crate::studio::StoredDocument::encode(&session)?),
-                })
-                .on_conflict(
-                    sea_orm::sea_query::OnConflict::column(table::Column::Project)
-                        .update_column(table::Column::Document)
-                        .to_owned(),
-                )
-                .exec(database)
-                .await
-                .map_err(|error| error.to_string())?;
-            }
-            None => {
-                table::Entity::delete_by_id(self.project_store.key().to_owned())
-                    .exec(database)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
-        }
+        let Some(session) = StoredRolloutSession::stored(snapshot) else {
+            return Ok(());
+        };
+        table::Entity::insert(table::ActiveModel {
+            project: Set(self.project_store.key().to_owned()),
+            id: Set(session.session_id.clone()),
+            document: Set(crate::studio::StoredDocument::encode(&session)?),
+        })
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::columns([table::Column::Project, table::Column::Id])
+                .update_column(table::Column::Document)
+                .to_owned(),
+        )
+        .exec(self.project_store.connection().await?)
+        .await
+        .map_err(|error| error.to_string())?;
         Ok(())
     }
 }
@@ -129,7 +128,7 @@ struct StoredRolloutMetrics {
     max_latency_ms: Option<f64>,
 }
 
-/// The one durable rollout row, keyed by its session identity.
+/// One durable rollout row, keyed by its session identity.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct StoredRolloutSession {
     session_id: String,
@@ -139,8 +138,7 @@ struct StoredRolloutSession {
 }
 
 impl StoredRolloutSession {
-    /// A snapshot that never named a session has nothing durable to say, so it
-    /// clears the relation instead of writing an identity-free row.
+    /// A snapshot that never named a session has nothing durable to say.
     fn stored(snapshot: &RolloutSnapshot) -> Option<Self> {
         let metrics = snapshot.metrics();
         Some(Self {
@@ -190,12 +188,11 @@ impl StoredRolloutSession {
     }
 }
 
-/// Arrow schema for the managed `rollout_runs` relation.
 impl RolloutSessionPersistence<'_> {
-    pub(crate) fn validate_document(document: serde_json::Value) -> Result<(), String> {
+    pub(crate) fn validate_record(id: &str, document: serde_json::Value) -> Result<(), String> {
         let session: StoredRolloutSession = crate::studio::StoredDocument::decode(document)?;
-        if session.session_id.is_empty() {
-            return Err("Rollout session identity is empty".into());
+        if session.session_id.is_empty() || session.session_id != id {
+            return Err("Rollout session identity disagrees with its row".into());
         }
         Ok(())
     }

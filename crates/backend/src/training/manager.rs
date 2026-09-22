@@ -36,97 +36,85 @@ pub(crate) struct TrainingManager {
     inner: Arc<TrainingRuntime>,
 }
 
+/// Runs live in SQLite; only what a running process owns lives here.
 struct TrainingRuntime {
     storage: Arc<StorageManager>,
     clock: Arc<dyn Clock>,
     run_ids: StableIdSequence,
-    history: TrainingHistory,
+    /// The last probe of the training runtime and Spiral, a live service
+    /// state rather than history.
+    readiness: Mutex<Option<TrainingReadiness>>,
+    /// Keeps read-modify-write of stored runs from interleaving.
+    writes: tokio::sync::Mutex<()>,
     /// One stop flag per run whose monitor task is alive.
     stops: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
 }
 
-/// The retained runs. Every durable change is written before it becomes
-/// visible, and `writes` keeps changes from interleaving with a write.
-struct TrainingHistory {
-    loaded: tokio::sync::OnceCell<()>,
-    current: Mutex<TrainingSnapshot>,
-    writes: tokio::sync::Mutex<()>,
-}
-
 impl TrainingManager {
-    /// Construct the in-memory manager without touching external services.
+    /// Construct the manager without touching external services.
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
         Self {
             inner: Arc::new(TrainingRuntime {
                 storage,
                 clock: Arc::new(SystemClock),
                 run_ids: StableIdSequence::new("train", 0),
-                history: TrainingHistory {
-                    loaded: tokio::sync::OnceCell::new(),
-                    current: Mutex::new(TrainingSnapshot::default()),
-                    writes: tokio::sync::Mutex::new(()),
-                },
+                readiness: Mutex::new(None),
+                writes: tokio::sync::Mutex::new(()),
                 stops: Mutex::new(BTreeMap::new()),
             }),
         }
     }
 
-    /// Load history once on the first Training or Rollout request, and resume
-    /// monitoring the runs it left active. Remote jobs own execution, so a
-    /// restarted Studio reattaches to them.
-    pub(crate) async fn ensure_loaded(&self) -> Result<(), String> {
-        let history = &self.inner.history;
-        history
-            .loaded
-            .get_or_try_init(|| async {
-                let runs = self.inner.storage.load_training_history().await?;
-                {
-                    let _write = history.writes.lock().await;
-                    let mut current = history.current.recover_lock();
-                    // Readiness is live service state, not durable history.
-                    *current = TrainingSnapshot::new(current.readiness().clone(), runs);
-                }
-                for run in self
-                    .snapshot()
-                    .runs()
-                    .iter()
-                    .filter(|run| run.phase().active())
-                {
-                    self.monitor(run.id(), run.config().clone());
-                }
-                self.refresh_readiness().await;
-                Ok::<(), String>(())
-            })
+    /// The retained runs, read from storage. A run an earlier process left
+    /// active gets its monitor back: remote jobs own execution, so a restarted
+    /// Studio reattaches to them.
+    async fn runs(&self) -> Result<Vec<TrainingRun>, OperationError> {
+        let runs = self
+            .inner
+            .storage
+            .load_training_history()
             .await
-            .map(|_| ())
+            .map_err(OperationError::External)?;
+        for run in runs.iter().filter(|run| run.phase().active()) {
+            self.monitor(run);
+        }
+        Ok(runs)
     }
 
-    pub(crate) fn snapshot(&self) -> TrainingSnapshot {
-        self.inner.history.current.recover_lock().clone()
+    pub(crate) async fn snapshot(&self) -> Result<TrainingSnapshot, OperationError> {
+        let runs = self.runs().await?;
+        Ok(TrainingSnapshot::new(self.readiness().await, runs))
     }
 
-    pub(super) fn catalog(&self) -> TrainingSnapshot {
-        self.inner.history.current.recover_lock().catalog()
+    pub(super) async fn catalog(&self) -> Result<TrainingSnapshot, OperationError> {
+        Ok(self.snapshot().await?.catalog())
     }
 
-    pub(super) fn run(&self, id: &str) -> Result<TrainingRun, OperationError> {
-        self.inner
-            .history
-            .current
-            .recover_lock()
-            .runs()
-            .iter()
+    pub(super) async fn run(&self, id: &str) -> Result<TrainingRun, OperationError> {
+        self.runs()
+            .await?
+            .into_iter()
             .find(|run| run.id() == id)
-            .cloned()
             .ok_or_else(|| OperationError::NotFound(format!("Training run {id:?} was not found")))
     }
 
+    /// Whether a stored run is still active.
+    pub(crate) async fn active(&self) -> Result<bool, OperationError> {
+        Ok(self.runs().await?.iter().any(|run| run.phase().active()))
+    }
+
+    /// The last probe, or a first one.
+    async fn readiness(&self) -> TrainingReadiness {
+        let known = self.inner.readiness.recover_lock().clone();
+        match known {
+            Some(readiness) => readiness,
+            None => self.refresh_readiness().await,
+        }
+    }
+
     pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
-        let next = self.readiness().await;
-        self.record(TrainingUpdate::Readiness {
-            readiness: next.clone(),
-        })
-        .await;
+        let next = self.probe_readiness().await;
+        *self.inner.readiness.recover_lock() = Some(next.clone());
         next
     }
 
@@ -137,7 +125,8 @@ impl TrainingManager {
         }
     }
 
-    /// Admit one run and launch its monitor.
+    /// Admit one run on the runtime Settings selects now, and launch its
+    /// monitor. The run keeps that runtime for its whole life.
     pub(super) async fn start(
         &self,
         config: TrainingConfig,
@@ -150,6 +139,10 @@ impl TrainingManager {
         if !readiness.ready() {
             return Err(OperationError::Conflict(readiness.summary().to_owned()));
         }
+        let endpoint = self
+            .runtime_endpoint()
+            .await
+            .map_err(OperationError::External)?;
         let (id, created_ms) = self
             .inner
             .run_ids
@@ -157,29 +150,30 @@ impl TrainingManager {
             .into_parts();
         let run = TrainingRun::starting(id, config.clone())
             .with_source(TrainingSource::new(config.dataset_id()))
+            .with_runtime_endpoint(endpoint)
             .with_started_ms(created_ms)
             .with_completion(None, Some(STARTING_MESSAGE.to_owned()));
         let admitted = run.clone();
-        self.persist(|snapshot| {
-            if let Some(active) = snapshot.active_run() {
+        self.update_history(|history| {
+            if let Some(active) = history.active_run() {
                 return Err(format!(
                     "training run {:?} is already active; stop it before starting another",
                     active.id()
                 ));
             }
-            snapshot.apply(TrainingUpdate::RunAdded {
+            history.apply(TrainingUpdate::RunAdded {
                 run: Box::new(admitted),
             });
             Ok(())
         })
         .await
         .map_err(OperationError::Conflict)?;
-        self.monitor(run.id(), config);
+        self.monitor(&run);
         Ok(run)
     }
 
     /// Ask the run's worker to stop. The monitor is signalled even when the
-    /// Stopping phase cannot be persisted.
+    /// Stopping phase cannot be written.
     pub(super) async fn stop(&self, run_id: &str) -> Result<(), OperationError> {
         let Some(stop) = self.inner.stops.recover_lock().get(run_id).cloned() else {
             return Err(OperationError::Conflict(format!(
@@ -187,8 +181,8 @@ impl TrainingManager {
             )));
         };
         let stopping = self
-            .persist(|snapshot| {
-                snapshot.enter_active_phase(
+            .update_run(run_id, |history| {
+                history.enter_active_phase(
                     run_id,
                     TrainingRunPhase::Stopping,
                     Some(STOPPING_MESSAGE.to_owned()),
@@ -196,10 +190,7 @@ impl TrainingManager {
             })
             .await;
         stop.store(true, Ordering::Release);
-        stopping.map_err(|error| {
-            self.fail_unpersisted(run_id, &error);
-            OperationError::Conflict(error)
-        })
+        stopping.map_err(OperationError::Conflict)
     }
 
     /// Remove checkpoint rows before the run itself, so a failed checkpoint
@@ -210,14 +201,15 @@ impl TrainingManager {
         run_id: &str,
         active_rollout: Option<&str>,
     ) -> Result<(), OperationError> {
-        let run_id = Self::admitted_deletion(&self.snapshot(), active_rollout, run_id)?;
+        let history = TrainingSnapshot::new(TrainingReadiness::default(), self.runs().await?);
+        let run_id = Self::admitted_deletion(&history, active_rollout, run_id)?;
         self.inner
             .storage
             .delete_run_checkpoints(run_id.clone())
             .await
             .map_err(OperationError::External)?;
-        self.persist(|snapshot| {
-            snapshot.apply(TrainingUpdate::RunRemoved { run_id });
+        self.update_history(|history| {
+            history.apply(TrainingUpdate::RunRemoved { run_id });
             Ok(())
         })
         .await
@@ -230,56 +222,65 @@ impl TrainingManager {
         self.inner.stops.recover_lock().clear();
     }
 
-    fn monitor(&self, run_id: &str, config: TrainingConfig) {
+    /// Follow `run`'s job, unless a monitor already does.
+    fn monitor(&self, run: &TrainingRun) {
         let stop = Arc::new(AtomicBool::new(false));
         {
             let mut stops = self.inner.stops.recover_lock();
-            if stops.contains_key(run_id) {
+            if stops.contains_key(run.id()) {
                 return;
             }
-            stops.insert(run_id.to_owned(), stop.clone());
+            stops.insert(run.id().to_owned(), stop.clone());
         }
         let monitor = RemoteJobMonitor {
             manager: self.clone(),
-            run_id: run_id.to_owned(),
-            config,
+            run_id: run.id().to_owned(),
+            config: run.config().clone(),
+            endpoint: run.runtime_endpoint().to_owned(),
             stop,
             stop_sent: false,
+            mirrored: MirroredHistory::new(run),
         };
         tokio::spawn(async move { monitor.follow().await });
     }
 
-    /// Change the history in memory only; the next durable change writes it.
-    async fn record(&self, update: TrainingUpdate) {
-        let _write = self.inner.history.writes.lock().await;
-        self.inner.history.current.recover_lock().apply(update);
-    }
-
-    /// Change the history, and write it before the change becomes visible.
-    async fn persist(
+    /// Change the retained runs as a whole: adding and removing runs keeps
+    /// their order and bound.
+    async fn update_history(
         &self,
         change: impl FnOnce(&mut TrainingSnapshot) -> Result<(), String>,
     ) -> Result<(), String> {
-        let _write = self.inner.history.writes.lock().await;
-        let mut candidate = self.snapshot();
-        change(&mut candidate)?;
-        self.inner.storage.save_training_history(&candidate).await?;
-        *self.inner.history.current.recover_lock() = candidate;
-        Ok(())
+        let _write = self.inner.writes.lock().await;
+        let runs = self.inner.storage.load_training_history().await?;
+        let mut history = TrainingSnapshot::new(TrainingReadiness::default(), runs);
+        change(&mut history)?;
+        self.inner.storage.save_training_history(&history).await
     }
 
-    /// The history can no longer be written, so stop the run and keep the
-    /// failure visible in memory. Retrying the same failed write here would
-    /// hide the failure behind recursion.
-    fn fail_unpersisted(&self, run_id: &str, error: &str) {
-        if let Some(stop) = self.inner.stops.recover_lock().get(run_id) {
-            stop.store(true, Ordering::Release);
-        }
-        PersistenceFailure::new(run_id, self.inner.clock.now_ms(), error)
-            .apply_to(&mut self.inner.history.current.recover_lock());
+    /// Change one stored run. Updates name their run, so they apply to a
+    /// history holding only that run.
+    async fn update_run(
+        &self,
+        run_id: &str,
+        change: impl FnOnce(&mut TrainingSnapshot) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let _write = self.inner.writes.lock().await;
+        let run = self
+            .inner
+            .storage
+            .load_training_run(run_id)
+            .await?
+            .ok_or_else(|| format!("training run {run_id:?} is not in history"))?;
+        let mut history = TrainingSnapshot::new(TrainingReadiness::default(), vec![run]);
+        change(&mut history)?;
+        let run = history
+            .runs()
+            .first()
+            .ok_or_else(|| format!("training run {run_id:?} was removed"))?;
+        self.inner.storage.update_training_run(run).await
     }
 
-    async fn readiness(&self) -> TrainingReadiness {
+    async fn probe_readiness(&self) -> TrainingReadiness {
         let backend_probe = self.probe_backend();
         let spiral_probe = async {
             tokio::time::timeout(Duration::from_secs(8), self.inner.storage.test_spiral())
@@ -313,9 +314,9 @@ impl TrainingManager {
         TrainingReadiness::new(ready, spiral_ready, summary).with_runtime(runtime)
     }
 
-    /// The runtime endpoint Settings selects now. Every probe and poll reads
-    /// it, so a run is followed wherever the endpoint points. The blocking
-    /// HTTP client is built inside the blocking task that uses it.
+    /// The runtime endpoint Settings selects now: what probes check and new
+    /// runs start on. The blocking HTTP client is built inside the blocking
+    /// task that uses it.
     async fn runtime_endpoint(&self) -> Result<String, String> {
         let preferences = self.inner.storage.load_studio_preferences().await?;
         Ok(preferences.training().endpoint().to_owned())
@@ -347,8 +348,11 @@ struct RemoteJobMonitor {
     manager: TrainingManager,
     run_id: String,
     config: TrainingConfig,
+    /// Empty for a run recorded before runs kept their runtime.
+    endpoint: String,
     stop: Arc<AtomicBool>,
     stop_sent: bool,
+    mirrored: MirroredHistory,
 }
 
 /// What the stored run already holds of its job's history. A reattached job
@@ -358,11 +362,13 @@ struct MirroredHistory {
     checkpoint_step: u64,
     stored_logs: BTreeSet<String>,
     configured: bool,
+    running: bool,
 }
 
 impl RemoteJobMonitor {
     /// Follow the job until it ends, mirroring its history into the run, then
-    /// record how it ended.
+    /// record how it ended. A run whose end cannot be written keeps its stop
+    /// flag, so this process does not reattach to a run it cannot record.
     async fn follow(mut self) {
         let (phase, current_step, message) = match self.mirror_until_terminal().await {
             Ok(snapshot) => (
@@ -388,25 +394,35 @@ impl RemoteJobMonitor {
             finished_ms: (!phase.active()).then(|| manager.inner.clock.now_ms()),
             message: (!message.is_empty()).then_some(message),
         };
-        if let Err(error) = manager
-            .persist(|snapshot| {
-                snapshot.apply(ended);
+        let recorded = manager
+            .update_run(&self.run_id, |history| {
+                history.apply(ended);
                 Ok(())
             })
-            .await
-        {
-            manager.fail_unpersisted(&self.run_id, &error);
+            .await;
+        match recorded {
+            Ok(()) => {
+                manager.inner.stops.recover_lock().remove(&self.run_id);
+            }
+            Err(error) => {
+                self.stop.store(true, Ordering::Release);
+                tracing::error!(run = %self.run_id, "could not record how the training run ended: {error}");
+            }
         }
-        manager.inner.stops.recover_lock().remove(&self.run_id);
     }
 
     /// The job's terminal snapshot, or the step it reached and why it failed.
     async fn mirror_until_terminal(&mut self) -> Result<TrainingJobSnapshot, (u64, String)> {
+        if self.endpoint.is_empty() {
+            self.endpoint = self
+                .manager
+                .runtime_endpoint()
+                .await
+                .map_err(|error| (0, error))?;
+        }
         let mut snapshot = self.open().await.map_err(|error| (0, error))?;
-        let stored = self.manager.run(&self.run_id).ok();
-        let mut mirrored = MirroredHistory::new(stored.as_ref());
         loop {
-            self.mirror(&snapshot, &mut mirrored)
+            self.mirror(&snapshot)
                 .await
                 .map_err(|error| (snapshot.current_step(), error))?;
             if snapshot.phase().is_terminal() {
@@ -422,7 +438,7 @@ impl RemoteJobMonitor {
     /// Reattach to the run's job, or create it when the worker has none.
     async fn open(&self) -> Result<TrainingJobSnapshot, String> {
         let (endpoint, run_id, request) = (
-            self.manager.runtime_endpoint().await?,
+            self.endpoint.clone(),
             self.run_id.clone(),
             self.job_request(),
         );
@@ -445,23 +461,17 @@ impl RemoteJobMonitor {
         loop {
             tokio::time::sleep(RemotePollBackoff::for_failures(failures)).await;
             let stopping = self.stop.load(Ordering::Acquire) && !self.stop_sent;
-            let polled = match self.manager.runtime_endpoint().await {
-                Ok(endpoint) => {
-                    let run_id = self.run_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let backend = HttpTrainingBackend::new(endpoint);
-                        if stopping {
-                            backend.stop_job(&run_id, cursor)
-                        } else {
-                            backend.job_snapshot(&run_id, cursor)
-                        }
-                    })
-                    .await
-                    .map_err(|error| format!("training job poll task stopped: {error}"))?
-                    .map_err(|error| error.to_string())
+            let (endpoint, run_id) = (self.endpoint.clone(), self.run_id.clone());
+            let polled = tokio::task::spawn_blocking(move || {
+                let backend = HttpTrainingBackend::new(endpoint);
+                if stopping {
+                    backend.stop_job(&run_id, cursor)
+                } else {
+                    backend.job_snapshot(&run_id, cursor)
                 }
-                Err(error) => Err(error),
-            };
+            })
+            .await
+            .map_err(|error| format!("training job poll task stopped: {error}"))?;
             match polled {
                 Ok(snapshot) => {
                     self.stop_sent |= stopping;
@@ -484,88 +494,63 @@ impl RemoteJobMonitor {
         }
     }
 
-    /// Mirror what `snapshot` adds to the run: the resolved configuration once,
-    /// the first Running phase, and newer metrics, checkpoints, and logs.
-    async fn mirror(
-        &self,
-        snapshot: &TrainingJobSnapshot,
-        mirrored: &mut MirroredHistory,
-    ) -> Result<(), String> {
-        let (manager, run_id) = (&self.manager, self.run_id.as_str());
+    /// Write what `snapshot` adds to the run in one change: the resolved
+    /// configuration once, the first Running phase, and newer metrics,
+    /// checkpoints, and logs.
+    async fn mirror(&mut self, snapshot: &TrainingJobSnapshot) -> Result<(), String> {
+        let run_id = self.run_id.as_str();
         if snapshot.job_id() != run_id {
             return Err("training runtime returned the wrong job ID".to_owned());
         }
-        if !mirrored.configured
-            && let Some(resolved) = snapshot.resolved()
-        {
+        let mut updates = Vec::new();
+        let configure = !self.mirrored.configured && snapshot.resolved().is_some();
+        if let Some(resolved) = snapshot.resolved().filter(|_| configure) {
             let mut config = self.config.clone();
             config
                 .act_mut()
                 .set_camera_streams(resolved.camera_streams().to_vec());
-            manager
-                .persist(|history| {
-                    history.apply(TrainingUpdate::RunConfigured {
-                        run_id: run_id.to_owned(),
-                        config: Box::new(config),
-                    });
-                    Ok(())
-                })
-                .await?;
-            mirrored.configured = true;
-        }
-        if snapshot.phase() == TrainingJobPhase::Running
-            && manager
-                .run(run_id)
-                .is_ok_and(|run| run.phase() == TrainingRunPhase::Starting)
-        {
-            manager
-                .persist(|history| {
-                    history.enter_active_phase(
-                        run_id,
-                        TrainingRunPhase::Running,
-                        snapshot.message().map(str::to_owned),
-                    )
-                })
-                .await?;
+            updates.push(TrainingUpdate::RunConfigured {
+                run_id: run_id.to_owned(),
+                config: Box::new(config),
+            });
         }
         if let Some(gap) = snapshot.history_gap() {
-            self.log(format!("Training worker history was compacted: {gap}"))
-                .await;
+            updates.push(TrainingUpdate::Log {
+                run_id: run_id.to_owned(),
+                line: format!("Training worker history was compacted: {gap}"),
+            });
         }
-        let metric_floor = mirrored.metric_step;
+        let metric_floor = self.mirrored.metric_step;
+        let mut metric_step = metric_floor;
         for metric in snapshot
             .metrics()
             .iter()
             .filter(|metric| metric.step() > metric_floor)
         {
-            manager
-                .record(TrainingUpdate::Metric {
-                    run_id: run_id.to_owned(),
-                    point: Box::new(
-                        TrainingMetricPoint::new(metric.step(), metric.train_loss())
-                            .with_learning_rate(metric.learning_rate())
-                            .with_validation_loss(metric.validation_loss())
-                            .with_timeline(
-                                metric.elapsed_seconds(),
-                                metric.event().map(str::to_owned),
-                            )
-                            .with_throughput(0.0, metric.examples_per_second())
-                            .with_utilization(metric.cpu_percent(), metric.gpu_percent())
-                            .with_memory_bytes(metric.memory_bytes())
-                            .with_loader_ms(metric.loader_ms())
-                            .with_runtime_timings(metric.device_copy_ms(), metric.model_ms()),
-                    ),
-                })
-                .await;
-            mirrored.metric_step = metric.step();
+            updates.push(TrainingUpdate::Metric {
+                run_id: run_id.to_owned(),
+                point: Box::new(
+                    TrainingMetricPoint::new(metric.step(), metric.train_loss())
+                        .with_learning_rate(metric.learning_rate())
+                        .with_validation_loss(metric.validation_loss())
+                        .with_timeline(metric.elapsed_seconds(), metric.event().map(str::to_owned))
+                        .with_throughput(0.0, metric.examples_per_second())
+                        .with_utilization(metric.cpu_percent(), metric.gpu_percent())
+                        .with_memory_bytes(metric.memory_bytes())
+                        .with_loader_ms(metric.loader_ms())
+                        .with_runtime_timings(metric.device_copy_ms(), metric.model_ms()),
+                ),
+            });
+            metric_step = metric.step();
         }
-        let checkpoint_floor = mirrored.checkpoint_step;
+        let checkpoint_floor = self.mirrored.checkpoint_step;
+        let mut checkpoint_step = checkpoint_floor;
         for checkpoint in snapshot
             .checkpoints()
             .iter()
             .filter(|checkpoint| checkpoint.step() > checkpoint_floor)
         {
-            let checkpoint_update = TrainingUpdate::Checkpoint {
+            updates.push(TrainingUpdate::Checkpoint {
                 run_id: run_id.to_owned(),
                 checkpoint: TrainingCheckpoint::new(checkpoint.step(), checkpoint.created_ms())
                     .with_validation_loss(checkpoint.validation_loss())
@@ -574,32 +559,61 @@ impl RemoteJobMonitor {
                         checkpoint.recommended_action_steps(),
                         checkpoint.sample_hz(),
                     ),
-            };
-            manager
-                .persist(|history| {
-                    history.apply(checkpoint_update);
+            });
+            checkpoint_step = checkpoint.step();
+        }
+        for log in snapshot.logs() {
+            if !self.mirrored.stored_logs.contains(log.line()) {
+                updates.push(TrainingUpdate::Log {
+                    run_id: run_id.to_owned(),
+                    line: log.line().to_owned(),
+                });
+            }
+        }
+        let running = snapshot.phase() == TrainingJobPhase::Running && !self.mirrored.running;
+        if running || !updates.is_empty() {
+            let message = snapshot.message().map(str::to_owned);
+            self.manager
+                .update_run(run_id, |history| {
+                    // A run already asked to stop stays Stopping.
+                    if running
+                        && history
+                            .runs()
+                            .first()
+                            .is_some_and(|run| run.phase() == TrainingRunPhase::Starting)
+                    {
+                        history.enter_active_phase(run_id, TrainingRunPhase::Running, message)?;
+                    }
+                    for update in updates {
+                        history.apply(update);
+                    }
                     Ok(())
                 })
                 .await?;
-            mirrored.checkpoint_step = checkpoint.step();
         }
-        for log in snapshot.logs() {
-            if !mirrored.stored_logs.contains(log.line()) {
-                self.log(log.line().to_owned()).await;
-            }
-        }
+        self.mirrored.configured |= configure;
+        self.mirrored.running |= running;
+        self.mirrored.metric_step = metric_step;
+        self.mirrored.checkpoint_step = checkpoint_step;
         // Only the first, full replay can repeat what was already stored.
-        mirrored.stored_logs.clear();
+        self.mirrored.stored_logs.clear();
         Ok(())
     }
 
+    /// A log line on its own, such as a reconnect. A line that cannot be
+    /// written is only traced; the next mirror write reports storage failure.
     async fn log(&self, line: String) {
-        self.manager
-            .record(TrainingUpdate::Log {
-                run_id: self.run_id.clone(),
-                line,
+        let run_id = self.run_id.clone();
+        if let Err(error) = self
+            .manager
+            .update_run(&self.run_id, |history| {
+                history.apply(TrainingUpdate::Log { run_id, line });
+                Ok(())
             })
-            .await;
+            .await
+        {
+            tracing::warn!(run = %self.run_id, "could not record a training log line: {error}");
+        }
     }
 
     fn job_request(&self) -> TrainingJobRequest {
@@ -677,23 +691,23 @@ impl RemoteJobMonitor {
 }
 
 impl MirroredHistory {
-    fn new(stored: Option<&TrainingRun>) -> Self {
+    fn new(stored: &TrainingRun) -> Self {
         Self {
             metric_step: stored
-                .and_then(|run| run.metrics().iter().map(|metric| metric.step()).max())
+                .metrics()
+                .iter()
+                .map(|metric| metric.step())
+                .max()
                 .unwrap_or(0),
             checkpoint_step: stored
-                .and_then(|run| {
-                    run.checkpoints()
-                        .iter()
-                        .map(|checkpoint| checkpoint.step())
-                        .max()
-                })
+                .checkpoints()
+                .iter()
+                .map(|checkpoint| checkpoint.step())
+                .max()
                 .unwrap_or(0),
-            stored_logs: stored
-                .map(|run| run.logs().iter().cloned().collect())
-                .unwrap_or_default(),
+            stored_logs: stored.logs().iter().cloned().collect(),
             configured: false,
+            running: stored.phase() != TrainingRunPhase::Starting,
         }
     }
 }
@@ -737,48 +751,6 @@ impl ActiveRunPhase for TrainingSnapshot {
     }
 }
 
-struct PersistenceFailure<'a> {
-    run_id: &'a str,
-    finished_ms: i64,
-    error: &'a str,
-}
-
-impl<'a> PersistenceFailure<'a> {
-    fn new(run_id: &'a str, finished_ms: i64, error: &'a str) -> Self {
-        Self {
-            run_id,
-            finished_ms,
-            error,
-        }
-    }
-
-    fn apply_to(self, snapshot: &mut TrainingSnapshot) {
-        let Some(current_step) = snapshot
-            .runs()
-            .iter()
-            .find(|run| run.id() == self.run_id)
-            .map(TrainingRun::current_step)
-        else {
-            return;
-        };
-        let message = format!(
-            "Training history could not be persisted, so execution was stopped: {}",
-            self.error
-        );
-        snapshot.apply(TrainingUpdate::Log {
-            run_id: self.run_id.to_owned(),
-            line: message.clone(),
-        });
-        snapshot.apply(TrainingUpdate::RunState {
-            run_id: self.run_id.to_owned(),
-            phase: TrainingRunPhase::Failed,
-            current_step,
-            finished_ms: Some(self.finished_ms),
-            message: Some(message),
-        });
-    }
-}
-
 struct RemotePollBackoff;
 
 impl RemotePollBackoff {
@@ -816,25 +788,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runtime_persistence_failure_becomes_a_visible_failed_run_and_log() {
-        let active = run("active", TrainingRunPhase::Running, 12);
-        let mut snapshot = TrainingSnapshot::new(TrainingReadiness::default(), vec![active]);
-
-        PersistenceFailure::new("active", 99, "Spiral unavailable").apply_to(&mut snapshot);
-
-        let failed = &snapshot.runs()[0];
-        assert_eq!(failed.phase(), TrainingRunPhase::Failed);
-        assert_eq!(failed.current_step(), 12);
-        assert_eq!(failed.finished_ms(), Some(99));
-        assert!(failed.message().unwrap().contains("Spiral unavailable"));
-        assert!(
-            failed
-                .logs()
-                .last()
-                .unwrap()
-                .contains("execution was stopped")
-        );
+    #[tokio::test]
+    async fn every_change_is_stored_before_it_is_read() {
+        let store = Arc::new(spiral_robotics_storage::ProjectStore::workflow_test());
+        let studio =
+            spiral_robotics_storage::StudioStore::in_memory().project(&store.connection_settings());
+        let manager = TrainingManager::new(Arc::new(StorageManager::new(store, studio)));
+        let ended = run("ended", TrainingRunPhase::Completed, 5)
+            .with_runtime_endpoint("http://runtime.test");
+        manager
+            .update_history(|history| {
+                history.apply(TrainingUpdate::RunAdded {
+                    run: Box::new(ended),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        manager
+            .update_run("ended", |history| {
+                history.apply(TrainingUpdate::Log {
+                    run_id: "ended".to_owned(),
+                    line: "kept".to_owned(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let stored = manager.run("ended").await.unwrap();
+        assert_eq!(stored.logs(), ["kept"]);
+        assert_eq!(stored.runtime_endpoint(), "http://runtime.test");
+        assert!(!manager.active().await.unwrap());
+        assert!(manager.update_run("missing", |_| Ok(())).await.is_err());
     }
 
     #[test]

@@ -13,15 +13,11 @@ pub(crate) struct TrainingCommands {
 impl TrainingCommands {
     pub(crate) async fn snapshot(&self) -> Result<TrainingSnapshot, BackendCommandError> {
         self.state
-            .execute(move |state| async move {
-                state.training().ensure_loaded().await?;
-                Ok(state.training().catalog())
-            })
+            .execute(move |state| async move { Ok(state.training().catalog().await?) })
             .await
     }
     pub(super) async fn run(&self, id: String) -> Result<TrainingRun, BackendCommandError> {
-        self.state.training().ensure_loaded().await?;
-        self.state.training().run(&id).map_err(Into::into)
+        self.state.training().run(&id).await.map_err(Into::into)
     }
 
     pub(super) async fn start_training_run(
@@ -30,7 +26,6 @@ impl TrainingCommands {
     ) -> Result<TrainingRun, BackendCommandError> {
         self.state
             .execute(move |state| async move {
-                state.training().ensure_loaded().await?;
                 state.training().start(config).await.map_err(Into::into)
             })
             .await
@@ -38,17 +33,15 @@ impl TrainingCommands {
 
     pub(super) async fn stop_training_run(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
-            .execute(move |state| async move {
-                state.training().ensure_loaded().await?;
-                state.training().stop(&id).await.map_err(Into::into)
-            })
+            .execute(
+                move |state| async move { state.training().stop(&id).await.map_err(Into::into) },
+            )
             .await
     }
 
     pub(super) async fn delete_training_run(&self, id: String) -> Result<(), BackendCommandError> {
         self.state
             .execute(move |state| async move {
-                state.training().ensure_loaded().await?;
                 let rollout = state.rollout().snapshot();
                 let active_rollout = rollout
                     .phase()

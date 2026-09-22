@@ -151,7 +151,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
             .load()
             .await
             .unwrap(),
-        Some(rollout)
+        [rollout]
     );
     assert!(
         !StudioPreferencePersistence::new(&target)

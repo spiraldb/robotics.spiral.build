@@ -278,10 +278,11 @@ Robot configuration is read by the project-scoped robot workspace when needed by
 the hardware views, robot commands, and saved-device auto-connect. The discarded startup
 validation read is gone; auto-connect runs for the saved project at startup and
 for a project once a settings save switches to it.
-Rollout history loads once per open project on the first Rollout snapshot or
-start command. Concurrent callers share initialization, failed or cancelled reads
-leave it available for a later request, and a restored active snapshot becomes
-failed without resuming motion. The Rollout view owns loading/error feedback and
+Every rollout session is stored under its own ID when it starts and when it
+ends, and the rollout list is read from storage on each request, with the
+running session shown live. A stored session still marked active outlived the
+process that ran it; it reads as failed and motion is never resumed. The Rollout
+view owns loading/error feedback and
 retains its last successful snapshot if polling fails. Its execution and
 persistence remain owned by the backend after navigating away. Stop does not wait
 for history I/O.
@@ -299,12 +300,15 @@ settings remain readable without database access; a connection-only update
 validates and switches the project without overwriting unread preferences.
 
 Runtime preferences are read from SQLite whenever a feature needs them; the
-backend keeps no copy. The training manager reads the endpoint before each call
-to the training runtime, so a Settings change reaches the next probe or poll.
-The endpoint can change only while no run is active.
+backend keeps no copy. A training run records the runtime endpoint it starts on
+and is followed there for its whole life, so a Settings change applies to the
+next run and readiness probe.
 
-Training history, Workflow, Assistant history, and the full relation catalog also
-load on feature access rather than when a project opens.
+Training history is read from SQLite on each request. A run's monitor writes
+each poll's new metrics, checkpoints, and logs to that run before the next read;
+a run an earlier process left active gets its monitor back when history is read.
+Workflow, Assistant history, and the full relation catalog also load on feature
+access rather than when a project opens.
 
 Managed-table verification and relation discovery read schemas concurrently on
 up to eight independent ADBC connections. The reads retain their parent project

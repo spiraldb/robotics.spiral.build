@@ -86,6 +86,19 @@ impl StorageManager {
         TrainingHistoryPersistence::new(&self.studio).load().await
     }
 
+    pub async fn load_training_run(&self, id: &str) -> Result<Option<TrainingRun>, String> {
+        TrainingHistoryPersistence::new(&self.studio)
+            .load_run(id)
+            .await
+    }
+
+    /// Rewrite one run's history; faster than saving every retained run.
+    pub async fn update_training_run(&self, run: &TrainingRun) -> Result<(), String> {
+        TrainingHistoryPersistence::new(&self.studio)
+            .update_run(run)
+            .await
+    }
+
     /// Persist retained runs and their histories in one SQLite transaction.
     pub async fn save_training_history(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
         TrainingHistoryPersistence::new(&self.studio)
@@ -93,14 +106,13 @@ impl StorageManager {
             .await
     }
 
-    /// Read the one durable rollout session.
-    pub async fn load_rollout_session(&self) -> Result<Option<RolloutSnapshot>, String> {
+    /// Read every durable rollout session, in identity order.
+    pub async fn load_rollout_sessions(&self) -> Result<Vec<RolloutSnapshot>, String> {
         RolloutSessionPersistence::new(&self.studio).load().await
     }
 
-    /// Replace the durable rollout session. A snapshot that never named a
-    /// session clears the relation, so a project that has never run a policy
-    /// and a project whose history was cleared read back identically.
+    /// Write one rollout session under its identity. A snapshot that never
+    /// named a session writes nothing.
     pub async fn save_rollout_session(&self, snapshot: &RolloutSnapshot) -> Result<(), String> {
         RolloutSessionPersistence::new(&self.studio)
             .save(snapshot)

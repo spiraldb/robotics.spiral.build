@@ -46,11 +46,11 @@ impl ActTrainingResourceEstimate {
 }
 
 impl TrainingManager {
-    pub(crate) fn admit_rollout(
+    pub(crate) async fn admit_rollout(
         &self,
         command: RolloutConfig,
     ) -> Result<RolloutConfig, OperationError> {
-        Self::admitted_rollout(&self.snapshot(), command)
+        Self::admitted_rollout(&self.snapshot().await?, command)
     }
 
     pub(super) fn admitted_deletion(

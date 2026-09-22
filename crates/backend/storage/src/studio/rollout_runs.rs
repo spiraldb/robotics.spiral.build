@@ -5,6 +5,8 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub(super) project: String,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub(super) id: String,
     pub(crate) document: Json,
 }
 

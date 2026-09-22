@@ -258,9 +258,8 @@ impl OpenProject {
         }
     }
 
-    /// Runs are followed through the current endpoint, so it changes only
-    /// between runs. History loads first: after a restart the runs it left
-    /// active are not known until then.
+    /// Runs keep the runtime they started on, so the endpoint applies to the
+    /// next run and probe.
     async fn apply_preferences(
         &self,
         preferences: StoredStudioPreferences,
@@ -273,17 +272,6 @@ impl OpenProject {
             .training()
             .endpoint()
             != preferences.training().endpoint();
-        if endpoint_changed {
-            self.training()
-                .ensure_loaded()
-                .await
-                .map_err(OperationError::External)?;
-            if self.training_active() {
-                return Err(OperationError::conflict(
-                    "Wait for training runs to finish before changing the training endpoint.",
-                ));
-            }
-        }
         self.storage()
             .save_studio_preferences(&preferences)
             .await
@@ -294,17 +282,11 @@ impl OpenProject {
         Ok(())
     }
 
-    fn training_active(&self) -> bool {
-        self.training()
-            .snapshot()
-            .runs()
-            .iter()
-            .any(|run| run.phase().active())
-    }
-
     /// Whether recording, training, or rollout is active.
-    pub(crate) fn busy(&self) -> bool {
-        self.recording().active() || self.training_active() || self.rollout().is_active()
+    pub(crate) async fn busy(&self) -> Result<bool, OperationError> {
+        Ok(self.recording().active()
+            || self.rollout().is_active()
+            || self.training().active().await?)
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -453,7 +435,7 @@ impl ProjectRegistry {
         OperationError,
     > {
         let hardware = self.hardware().state();
-        if origin.busy()
+        if origin.busy().await?
             || hardware.recording().is_some()
             || !matches!(hardware.mode(), HardwareModeSelection::Idle)
         {
@@ -503,14 +485,13 @@ impl ProjectRegistry {
             self.release_robots(origin).await?;
         }
         let account = connection.clone().without_project();
-        {
-            let opened = self.opened.recover_lock();
-            if opened.saved.clone().without_project() != account
-                && opened.projects.iter().any(|project| project.busy())
-            {
-                return Err(OperationError::conflict(
-                    "Stop recording, rollout, and training before changing the Spiral connection.",
-                ));
+        if self.saved_connection().without_project() != account {
+            for project in self.opened() {
+                if project.busy().await? {
+                    return Err(OperationError::conflict(
+                        "Stop recording, rollout, and training before changing the Spiral connection.",
+                    ));
+                }
             }
         }
         self.backend_state

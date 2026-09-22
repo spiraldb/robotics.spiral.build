@@ -210,8 +210,8 @@ their existing project APIs.
 
 Training selection and assembly of catalog/detail responses are frontend state.
 Rollout IDs are execution `session_id` values, distinct from their training `run_id`.
-The rollout collection retains observations for this backend project session;
-only the latest rollout is persisted and restored after restart. Stop targets an exact ID.
+Every rollout is persisted under its ID and survives a restart; one still running
+when Studio stopped reads as failed. Stop targets an exact ID.
 
 ### Recording sessions
 

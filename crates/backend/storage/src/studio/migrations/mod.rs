@@ -12,6 +12,7 @@ impl MigratorTrait for Migrator {
             Box::new(CreateDatasetRobots),
             Box::new(CreateBuildDocuments),
             Box::new(RenameToExplorations),
+            Box::new(KeepRolloutSessions),
         ]
     }
 }
@@ -142,6 +143,28 @@ impl MigrationTrait for RenameToExplorations {
         manager
             .get_connection()
             .execute_unprepared(include_str!("m20260921_000006_explorations.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+struct KeepRolloutSessions;
+impl MigrationName for KeepRolloutSessions {
+    fn name(&self) -> &str {
+        "m20260922_000007_rollout_sessions"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for KeepRolloutSessions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260922_000007_rollout_sessions.sql"))
             .await?;
         Ok(())
     }

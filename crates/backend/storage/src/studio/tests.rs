@@ -98,13 +98,15 @@ async fn local_state_survives_reopening_and_credentials_do_not_change_project_id
         .save(&StoredStudioPreferences::from_settings("http://localhost:9", false).unwrap())
         .await
         .unwrap();
-    RolloutSessionPersistence::new(&project)
-        .save(
-            &RolloutSnapshot::new(Some("run".into()), None)
-                .with_lifecycle(RolloutPhase::Failed, Some(123)),
-        )
-        .await
-        .unwrap();
+    for session in ["run", "second_run"] {
+        RolloutSessionPersistence::new(&project)
+            .save(
+                &RolloutSnapshot::new(Some(session.into()), None)
+                    .with_lifecycle(RolloutPhase::Failed, Some(123)),
+            )
+            .await
+            .unwrap();
+    }
     let changed_credentials = connection.with_credentials(Some(crate::SpiralCredentials::new(
         "new".into(),
         "secret".into(),
@@ -129,9 +131,10 @@ async fn local_state_survives_reopening_and_credentials_do_not_change_project_id
             .load()
             .await
             .unwrap()
-            .unwrap()
-            .session_id(),
-        Some("run")
+            .iter()
+            .map(RolloutSnapshot::session_id)
+            .collect::<Vec<_>>(),
+        [Some("run"), Some("second_run")]
     );
     let other = reopened.project(&Fixture::connection("other"));
     assert!(other.robot_documents().await.unwrap().is_empty());
@@ -140,7 +143,7 @@ async fn local_state_survives_reopening_and_credentials_do_not_change_project_id
             .load()
             .await
             .unwrap()
-            .is_none()
+            .is_empty()
     );
     let db = reopened.connection().await.unwrap();
     let journal = db
@@ -269,7 +272,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 6);
+    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 7);
     // A conflict halfway through the actual initial migration must undo both
     // earlier CREATE TABLE statements and the migration journal itself.
     let directory = tempfile::tempdir().unwrap();
@@ -347,4 +350,59 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn the_latest_rollout_session_carries_over_under_its_identity() {
+    use sea_orm_migration::MigratorTrait as _;
+    let current = StudioStore::in_memory();
+    let bench = current.project(&Fixture::connection("bench"));
+    RolloutSessionPersistence::new(&bench)
+        .save(
+            &RolloutSnapshot::new(Some("rollout-1".into()), Some("run".into()))
+                .with_lifecycle(RolloutPhase::Failed, Some(123)),
+        )
+        .await
+        .unwrap();
+    let row = current
+        .connection()
+        .await
+        .unwrap()
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT project, document FROM rollout_runs",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let (project, document) = (
+        row.try_get::<String>("", "project").unwrap(),
+        row.try_get::<String>("", "document").unwrap(),
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rollouts.sqlite3");
+    let raw = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
+        .await
+        .unwrap();
+    super::migrations::Migrator::up(&raw, Some(6))
+        .await
+        .unwrap();
+    raw.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "INSERT INTO rollout_runs (project, document) VALUES (?, ?)",
+        [project.into(), document.into()],
+    ))
+    .await
+    .unwrap();
+    super::migrations::Migrator::up(&raw, None).await.unwrap();
+
+    let migrated = StudioStore::at(path).project(&Fixture::connection("bench"));
+    let sessions = RolloutSessionPersistence::new(&migrated)
+        .load()
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id(), Some("rollout-1"));
+    assert_eq!(sessions[0].run_id(), Some("run"));
 }

@@ -33,6 +33,39 @@ impl<'a> TrainingHistoryPersistence<'a> {
             .collect()
     }
 
+    pub(crate) async fn load_run(&self, id: &str) -> Result<Option<TrainingRun>, String> {
+        use crate::studio::training_runs as table;
+        use sea_orm::EntityTrait;
+        let row = table::Entity::find_by_id((self.project_store.key().to_owned(), id.to_owned()))
+            .one(self.project_store.connection().await?)
+            .await
+            .map_err(|error| error.to_string())?;
+        row.map(|row| {
+            crate::studio::StoredDocument::decode::<StoredTrainingRun>(row.document)
+                .map(|run| run.restored())
+        })
+        .transpose()
+    }
+
+    /// Rewrite one retained run in place, keeping its position.
+    pub(crate) async fn update_run(&self, run: &TrainingRun) -> Result<(), String> {
+        use crate::studio::training_runs as table;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, sea_query::Expr};
+        let document = crate::studio::StoredDocument::encode(&StoredTrainingRun::stored(run))?;
+        let result = table::Entity::update_many()
+            .col_expr(table::Column::Document, Expr::value(document))
+            .filter(table::Column::Project.eq(self.project_store.key()))
+            .filter(table::Column::Id.eq(run.id()))
+            .exec(self.project_store.connection().await?)
+            .await
+            .map_err(|error| error.to_string())?;
+        if result.rows_affected == 1 {
+            Ok(())
+        } else {
+            Err(format!("training run {:?} is not in history", run.id()))
+        }
+    }
+
     pub(crate) async fn save(&self, snapshot: &TrainingSnapshot) -> Result<(), String> {
         use crate::studio::training_runs as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
@@ -150,6 +183,9 @@ struct StoredTrainingIdentity {
     run_name: String,
     /// Dataset the run actually drew episodes from, captured at start.
     source_dataset_id: String,
+    /// Training runtime the run's job lives on; empty for older runs.
+    #[serde(default)]
+    runtime_endpoint: String,
 }
 
 /// Operator-chosen training set and execution target.
@@ -447,6 +483,7 @@ impl StoredTrainingRun {
                 run_id: run.id().to_owned(),
                 run_name: config.run_name().to_owned(),
                 source_dataset_id: run.source().dataset_id().to_owned(),
+                runtime_endpoint: run.runtime_endpoint().to_owned(),
             },
             selection: StoredTrainingSelection {
                 dataset_id: config.dataset_id().to_owned(),
@@ -492,6 +529,7 @@ impl StoredTrainingRun {
     fn restored(&self) -> TrainingRun {
         TrainingRun::starting(&self.identity.run_id, self.restored_config())
             .with_source(TrainingSource::new(&self.identity.source_dataset_id))
+            .with_runtime_endpoint(&self.identity.runtime_endpoint)
             .with_phase(self.lifecycle.phase.restored(), self.lifecycle.current_step)
             .with_started_ms(self.lifecycle.started_ms)
             .with_completion(self.lifecycle.finished_ms, self.lifecycle.message.clone())

@@ -956,6 +956,9 @@ struct TrainingRunIdentity {
     config: TrainingConfig,
     #[serde(default)]
     source: TrainingSource,
+    /// The training runtime the run's job lives on, fixed when it starts.
+    #[serde(default)]
+    runtime_endpoint: String,
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
@@ -983,6 +986,7 @@ impl TrainingRun {
                 id: id.into(),
                 config,
                 source: TrainingSource::default(),
+                runtime_endpoint: String::new(),
             },
             lifecycle: TrainingRunLifecycle {
                 phase: TrainingRunPhase::Starting,
@@ -998,6 +1002,16 @@ impl TrainingRun {
     pub fn with_source(mut self, source: TrainingSource) -> Self {
         self.identity.source = source;
         self
+    }
+
+    pub fn with_runtime_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.identity.runtime_endpoint = endpoint.into();
+        self
+    }
+
+    /// Empty for runs recorded before the endpoint was kept with the run.
+    pub fn runtime_endpoint(&self) -> &str {
+        &self.identity.runtime_endpoint
     }
 
     pub const fn with_phase(mut self, phase: TrainingRunPhase, current_step: u64) -> Self {

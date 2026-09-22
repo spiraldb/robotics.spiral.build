@@ -421,11 +421,9 @@ impl RolloutHardwareResources {
     }
 }
 
-/// The current rollout lives in `state`, written by its task; finished and
-/// restored rollouts live in `history`.
+/// The current rollout lives in `state`, written by its task; every rollout
+/// is recorded in storage when it starts and when it ends.
 struct RolloutLifecycle {
-    history: Mutex<std::collections::BTreeMap<String, RolloutSnapshot>>,
-    loaded: tokio::sync::OnceCell<()>,
     state: watch::Sender<RolloutSnapshot>,
     active: Mutex<Option<ActiveRollout>>,
     session_ids: StableIdSequence,
@@ -449,15 +447,12 @@ impl RolloutManager {
         storage: Arc<StorageManager>,
         hardware: RolloutHardwareResources,
     ) -> Arc<Self> {
-        // Persisted state loads on the first Rollout read or start command.
         // The project owns execution even while its views are unmounted.
         Arc::new(Self {
             storage,
             hardware,
             clock: Arc::new(SystemClock),
             lifecycle: RolloutLifecycle {
-                history: Mutex::new(std::collections::BTreeMap::new()),
-                loaded: tokio::sync::OnceCell::new(),
                 state: watch::Sender::new(RolloutSnapshot::default()),
                 active: Mutex::new(None),
                 session_ids: StableIdSequence::new("rollout", 1),
@@ -469,53 +464,39 @@ impl RolloutManager {
         self.lifecycle.active.recover_lock().is_some() || self.snapshot().phase().active()
     }
 
-    /// Initialization is shared by reads and starts. A failed or cancelled read
-    /// leaves the cell empty; a later request may load it again. No command can
-    /// start execution until the previous session has been restored.
-    async fn ensure_loaded(&self) -> Result<(), String> {
-        self.lifecycle
-            .loaded
-            .get_or_try_init(|| async {
-                let snapshot = self
-                    .storage
-                    .load_rollout_session()
-                    .await?
-                    .unwrap_or_default()
-                    .restored_after_restart();
-                if let Some(id) = snapshot.session_id() {
-                    self.lifecycle
-                        .history
-                        .recover_lock()
-                        .insert(id.to_owned(), snapshot.clone());
-                }
-                self.lifecycle.state.send_replace(snapshot);
-                Ok::<(), String>(())
-            })
-            .await
-            .map(|_| ())
-    }
-
-    /// Every rollout this project knows, the current one as it is right now.
-    fn known_runs(&self) -> std::collections::BTreeMap<String, RolloutSnapshot> {
-        let mut runs = self.lifecycle.history.recover_lock().clone();
-        let current = self.snapshot();
-        if let Some(id) = current.session_id() {
-            runs.insert(id.to_owned(), current);
-        }
-        runs
-    }
-
+    /// Every rollout this project recorded, the current one as it is right
+    /// now. A stored rollout still marked active outlived the process that
+    /// ran it, and reads as interrupted.
     pub(crate) async fn runs(&self) -> Result<Vec<RolloutSnapshot>, String> {
-        self.ensure_loaded().await?;
-        Ok(self.known_runs().into_values().collect())
+        let current = self.snapshot();
+        let mut runs = self
+            .storage
+            .load_rollout_sessions()
+            .await?
+            .into_iter()
+            .map(|stored| {
+                if stored.session_id().is_some() && stored.session_id() == current.session_id() {
+                    current.clone()
+                } else {
+                    stored.restored_after_restart()
+                }
+            })
+            .collect::<Vec<_>>();
+        if current
+            .session_id()
+            .is_some_and(|id| !runs.iter().any(|run| run.session_id() == Some(id)))
+        {
+            runs.push(current);
+        }
+        Ok(runs)
     }
 
     pub(super) async fn run(&self, id: &str) -> Result<RolloutSnapshot, crate::OperationError> {
-        self.ensure_loaded()
+        self.runs()
             .await
-            .map_err(crate::OperationError::Internal)?;
-        self.known_runs()
-            .remove(id)
+            .map_err(crate::OperationError::Internal)?
+            .into_iter()
+            .find(|run| run.session_id() == Some(id))
             .ok_or_else(|| crate::OperationError::NotFound(format!("Rollout {id:?} was not found")))
     }
 
@@ -527,7 +508,6 @@ impl RolloutManager {
         self: &Arc<Self>,
         config: RolloutConfig,
     ) -> Result<RolloutSnapshot, String> {
-        self.ensure_loaded().await?;
         let mut active = self.lifecycle.active.recover_lock();
         if let Some(active) = active.as_ref() {
             return Err(format!(
@@ -614,11 +594,7 @@ impl RolloutManager {
             .hardware
             .stop_policy_session(&run.session)
             .await;
-        let terminal = progress.finish(outcome, CleanupResult::new(self.clock.now_ms(), cleanup));
-        self.lifecycle
-            .history
-            .recover_lock()
-            .insert(run.session.clone(), terminal);
+        progress.finish(outcome, CleanupResult::new(self.clock.now_ms(), cleanup));
         self.persist_current().await;
         let mut active = self.lifecycle.active.recover_lock();
         if active

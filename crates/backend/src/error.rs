@@ -84,10 +84,6 @@ impl BackendCommandError {
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self(OperationError::invalid_input(message))
     }
-
-    pub(crate) fn conflict(message: impl Into<String>) -> Self {
-        Self(OperationError::conflict(message))
-    }
 }
 
 impl std::fmt::Display for BackendCommandError {

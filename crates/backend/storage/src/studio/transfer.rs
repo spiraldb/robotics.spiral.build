@@ -266,7 +266,7 @@ impl StudioSnapshot {
             .await
             .map_err(|error| error.to_string())?
         {
-            crate::rollout_runs::RolloutSessionPersistence::validate_document(row.document)?;
+            crate::rollout_runs::RolloutSessionPersistence::validate_record(&row.id, row.document)?;
         }
         Ok(())
     }

@@ -11,7 +11,6 @@ use spiral_robotics_common::relations::{RelationCatalog, SpiralQuerySnapshot};
 use spiral_robotics_common::settings::{
     ConnectionTest, DataSettings, SettingsUpdate, SpiralSettings,
 };
-use spiral_robotics_hardware::{HardwareState, ModeSelection as HardwareModeSelection};
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
 use crate::BackendCommandError;
@@ -426,7 +425,6 @@ impl DataCommands {
         let inspection = HuggingFaceDatasetInspection::discover(request)
             .await
             .map_err(BackendCommandError::from)?;
-        self.require_import_idle("a dataset")?;
         self.state
             .storage()
             .import_huggingface_dataset(inspection)
@@ -477,26 +475,6 @@ impl DataCommands {
             .await?;
         self.spawn_auto_connect_saved_robots(imported);
         Ok(summary)
-    }
-
-    fn require_import_idle(&self, subject: &str) -> Result<(), BackendCommandError> {
-        let hardware = self.state.hardware().state();
-        let connected = hardware
-            .connections()
-            .values()
-            .any(|connection| connection.connected());
-        if self.import_activity_is_busy(&hardware) || connected {
-            return Err(BackendCommandError::conflict(format!(
-                "Disconnect robots and stop recording, replay, rollout, or training before importing {subject}"
-            )));
-        }
-        Ok(())
-    }
-
-    fn import_activity_is_busy(&self, hardware: &HardwareState) -> bool {
-        hardware.recording().is_some()
-            || !matches!(hardware.mode(), HardwareModeSelection::Idle)
-            || self.state.project().busy()
     }
 
     fn spawn_auto_connect_saved_robots(&self, project: Arc<OpenProject>) {
