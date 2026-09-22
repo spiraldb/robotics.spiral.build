@@ -44,7 +44,7 @@ impl WorkflowAssistant {
         self.configured.read().is_some()
     }
     pub(super) async fn connect(mut self) {
-        let configured = ModelClient::current().configured().await.unwrap_or(false);
+        let configured = ModelClient::configured().await.unwrap_or(false);
         self.configured.set(Some(configured));
     }
     pub(super) fn install(mut self, mut conversation: WorkflowConversation) {
@@ -165,7 +165,6 @@ impl WorkflowAssistant {
     async fn run(self, controller: WorkflowController, turn: &str) -> Result<(), String> {
         let mut context = tools::ToolContext::new(controller.spec());
         let workflow_client = WorkflowClient::current();
-        let model_client = ModelClient::current();
         let capabilities = match workflow_client.capabilities().await {
             Ok(catalog) => {
                 serde_json::json!({"functions": catalog.rows(), "complete": !catalog.truncated()})
@@ -212,23 +211,21 @@ impl WorkflowAssistant {
                 messages.push(ProviderMessage::text("system", feedback));
             }
             messages.append(&mut context.evidence);
-            let response = model_client
-                .complete(
-                    ModelRequest::new(
-                        messages,
-                        WorkflowToolCatalog::for_workflow(&context.expected),
-                    ),
-                    |delta| {
-                        self.update(|conversation| {
-                            if let Some(message) =
-                                conversation.session_mut().messages_mut().last_mut()
-                            {
-                                message.set_text(format!("{}{delta}", message.text()));
-                            }
-                        });
-                    },
-                )
-                .await?;
+            let response = ModelClient::complete(
+                ModelRequest::new(
+                    messages,
+                    WorkflowToolCatalog::for_workflow(&context.expected),
+                ),
+                |delta| {
+                    self.update(|conversation| {
+                        if let Some(message) = conversation.session_mut().messages_mut().last_mut()
+                        {
+                            message.set_text(format!("{}{delta}", message.text()));
+                        }
+                    });
+                },
+            )
+            .await?;
             self.update(|conversation| {
                 conversation.provider_messages_mut().push(response.clone());
                 if let Some(message) = conversation.session_mut().messages_mut().last_mut() {

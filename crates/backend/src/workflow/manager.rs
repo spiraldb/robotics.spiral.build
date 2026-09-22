@@ -56,9 +56,8 @@ pub(crate) struct WorkflowManager {
 }
 struct WorkflowRuntime {
     storage: Arc<StorageManager>,
-    /// Queries in flight; recording and project changes wait for them.
+    /// Queries in flight; shutdown waits for them.
     queries: tokio_util::task::TaskTracker,
-    saves: tokio::sync::Mutex<()>,
 }
 impl WorkflowManager {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
@@ -66,7 +65,6 @@ impl WorkflowManager {
             inner: Arc::new(WorkflowRuntime {
                 storage,
                 queries: tokio_util::task::TaskTracker::new(),
-                saves: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -78,7 +76,6 @@ impl WorkflowManager {
             .map_err(OperationError::External)
     }
     pub(super) async fn load(&self, id: &str) -> Result<WorkflowDocument, OperationError> {
-        let _save = self.inner.saves.lock().await;
         self.load_document(id).await
     }
     async fn load_document(&self, id: &str) -> Result<WorkflowDocument, OperationError> {
@@ -115,7 +112,6 @@ impl WorkflowManager {
         mut document: WorkflowDocument,
     ) -> Result<WorkflowDocument, OperationError> {
         document.validate().map_err(OperationError::InvalidInput)?;
-        let _save = self.inner.saves.lock().await;
         let id = document.workflow().id();
         let previous = self
             .inner
@@ -169,9 +165,6 @@ impl WorkflowManager {
             Ok(plan) => plan,
             Err(error) => WorkflowPlan::failed(error),
         }
-    }
-    pub(crate) fn is_active(&self) -> bool {
-        !self.inner.queries.is_empty()
     }
     /// Execute the submitted SQL to completion. A failed query is a failed
     /// run; only an invalid submission is an error.

@@ -197,7 +197,6 @@ impl RecordingCommands {
         let (dataset_id, (leader, follower)) = request.into_parts();
         self.state
             .execute(move |state| async move {
-                state.preferences().load().await?;
                 state
                     .storage()
                     .validate_mcap_destination(&dataset_id)

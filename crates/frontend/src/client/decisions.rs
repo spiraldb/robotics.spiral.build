@@ -48,13 +48,10 @@ impl From<DecisionQuestion> for Value {
 impl ModelClient {
     /// Judge `state` against `questions`, keyed by question id.
     pub(crate) async fn decide(
-        &self,
         state: Value,
         questions: Value,
     ) -> Result<DecisionResponse, CommandError> {
-        self.project().require_current()?;
         let credentials = ProxyClient::credentials().await?;
-        self.project().require_current()?;
         let llm = credentials.llm().ok_or_else(|| {
             CommandError::new(
                 CommandFailureCode::InvalidInput,
@@ -72,7 +69,6 @@ impl ModelClient {
             .json(&json!({"model":DECISION_MODEL, "state":state, "questions":questions}))
             .timeout(30_000);
         let text = ProxyClient::text(request, 128 * 1024).await?;
-        self.project().require_current()?;
         serde_json::from_str(&text).map_err(|_| {
             CommandError::transport("OpenRouter returned an invalid Decisions response.")
         })

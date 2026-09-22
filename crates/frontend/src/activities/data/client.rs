@@ -10,9 +10,6 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
-    pub(super) fn model_client(&self) -> crate::client::completions::ModelClient {
-        crate::client::completions::ModelClient::new(self.project.clone())
-    }
     pub(super) fn robot(
         &self,
         selection: &DatasetSelection,
@@ -59,9 +56,7 @@ impl DatasetClient {
     }
 
     pub(super) async fn read_robot_description(&self, url: &str) -> Result<String, CommandError> {
-        self.project.require_current()?;
         let credentials = crate::client::proxy::ProxyClient::credentials().await?;
-        self.project.require_current()?;
         let mut request = crate::client::proxy::ProxyClient::request("GET", url).header(
             "accept",
             "text/plain, application/json, application/xml, text/xml",
@@ -71,9 +66,7 @@ impl DatasetClient {
         {
             request = request.header("authorization", format!("Bearer {}", credentials.token()));
         }
-        let response =
-            crate::client::proxy::ProxyClient::text(request.timeout(30_000), 512 * 1024).await;
-        self.project.accept_response(response)
+        crate::client::proxy::ProxyClient::text(request.timeout(30_000), 512 * 1024).await
     }
 
     pub(super) async fn inspect_robot_stream(

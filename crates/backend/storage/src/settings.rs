@@ -4,7 +4,6 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
@@ -423,39 +422,6 @@ impl Default for StoredVideoPreference {
 impl StoredVideoPreference {
     pub const fn enabled(&self) -> bool {
         self.enabled
-    }
-}
-
-pub struct StudioPreferencesStore {
-    current: Mutex<StoredStudioPreferences>,
-}
-
-impl StudioPreferencesStore {
-    pub fn new(current: StoredStudioPreferences) -> Self {
-        Self {
-            current: Mutex::new(current),
-        }
-    }
-
-    pub fn get(&self) -> StoredStudioPreferences {
-        self.current.lock_unpoisoned().clone()
-    }
-
-    pub fn replace(&self, preferences: StoredStudioPreferences) -> StoredStudioPreferences {
-        let mut current = self.current.lock_unpoisoned();
-        *current = preferences;
-        current.clone()
-    }
-}
-
-trait UnpoisonedMutex<T> {
-    fn lock_unpoisoned(&self) -> MutexGuard<'_, T>;
-}
-
-impl<T> UnpoisonedMutex<T> for Mutex<T> {
-    fn lock_unpoisoned(&self) -> MutexGuard<'_, T> {
-        self.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

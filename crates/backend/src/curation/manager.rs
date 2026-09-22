@@ -27,7 +27,6 @@ struct CurationRuntime {
     storage: Arc<StorageManager>,
     /// Judging runs in flight; shutdown waits for the relations they write.
     queries: tokio_util::task::TaskTracker,
-    saves: tokio::sync::Mutex<()>,
     episode_progress: super::episode_progress::EpisodeProgress,
 }
 
@@ -38,7 +37,6 @@ impl CurationManager {
                 episode_progress: super::episode_progress::EpisodeProgress::new(storage.clone()),
                 storage,
                 queries: tokio_util::task::TaskTracker::new(),
-                saves: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -141,7 +139,6 @@ impl CurationManager {
             .map_err(OperationError::External)
     }
     pub(super) async fn load(&self, id: &str) -> Result<CurationSpec, OperationError> {
-        let _save = self.inner.saves.lock().await;
         let stored = self
             .inner
             .storage
@@ -183,7 +180,6 @@ impl CurationManager {
                 "Name the curation before saving.".into(),
             ));
         }
-        let _save = self.inner.saves.lock().await;
         let stored_revision = self
             .inner
             .storage

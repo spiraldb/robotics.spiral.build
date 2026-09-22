@@ -19,7 +19,6 @@ use super::rerun::ConfirmedRerun;
 use super::review::{EpisodeNames, NoSubtaskChosen, SubtaskContext, SubtaskReview};
 use super::state::ExplorationController;
 use crate::activities::data::DatasetClient;
-use crate::client::completions::ModelClient;
 use crate::components::icons::SettingsIcon;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
@@ -187,9 +186,8 @@ pub(super) fn AnnotationWorkspace(controller: ExplorationController, node: Strin
         chosen.focus(focus.episode(), focus.interval());
     });
 
-    let model = ModelClient::current();
-    // Both clients belong to this mount, and a pass outlives the click that
-    // started it, so they are captured here rather than read inside its task.
+    // The client belongs to this mount, and a pass outlives the click that
+    // started it, so it is captured here rather than read inside its task.
     let datasets = DatasetClient::current();
     // `running` is what the pass is actually doing; `wanted` is what the
     // operator asked for. Pressing Stop clears `wanted`, which stops the next
@@ -218,7 +216,6 @@ pub(super) fn AnnotationWorkspace(controller: ExplorationController, node: Strin
             let interval = settings.sample_interval_seconds();
             let node = annotation.id.clone();
             let model_name = settings.model().to_owned();
-            let model = model.clone();
             let datasets = datasets.clone();
             running.set(true);
             spawn(async move {
@@ -231,7 +228,7 @@ pub(super) fn AnnotationWorkspace(controller: ExplorationController, node: Strin
                 AnnotationPass::new(
                     PassSettings::new(node.clone(), model_name, interval).with_task(task),
                     NativeSheets::new(datasets, camera, interval),
-                    ProviderAnnotator::new(model),
+                    ProviderAnnotator,
                     ExplorationJournal::new(node.clone(), controller, studio, wanted),
                 )
                 .run(chosen)

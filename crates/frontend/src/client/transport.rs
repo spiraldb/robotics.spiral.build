@@ -33,13 +33,6 @@ impl CommandError {
             }
         }
     }
-
-    pub(super) fn stale_project() -> Self {
-        Self::new(
-            CommandFailureCode::StaleProject,
-            "Another project was selected before this request completed.",
-        )
-    }
 }
 
 impl std::fmt::Display for CommandError {

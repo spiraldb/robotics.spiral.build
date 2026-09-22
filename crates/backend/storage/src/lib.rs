@@ -55,5 +55,5 @@ pub use manager::StorageManager;
 pub use settings::{
     BackendStateStore, SavedConnection, ServiceEndpoint, SpiralConnectionSettings,
     SpiralCredentials, StoredStudioPreferences, StoredTrainingRuntimePreference,
-    StoredVideoPreference, StudioPreferencesStore,
+    StoredVideoPreference,
 };

@@ -1,7 +1,6 @@
 //! One place to add the next step: describe it for the browser-owned interpreter,
 //! or pick a kind and fill in the row that appears.
 use super::{pipeline::PipelineSelection, state::CurationController};
-use crate::client::completions::ModelClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::{
     facts::TopicRef,
@@ -17,7 +16,6 @@ use spiral_robotics_ui::{
 
 #[component]
 pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<String>) -> Element {
-    let model = use_hook(ModelClient::current);
     let mut prompt = use_signal(String::new);
     let mut proposal = use_signal(|| None::<RuleProposal>);
     let mut pending = use_signal(|| false);
@@ -27,7 +25,6 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
     let can_add = !pending() && !prompt().trim().is_empty();
     let interpret = {
         let topics = camera_topics.clone();
-        let model = model.clone();
         move |_| {
             if pending() {
                 return;
@@ -37,10 +34,8 @@ pub(super) fn RuleComposer(controller: CurationController, camera_topics: Vec<St
             proposal.set(None);
             let request = InterpretationRequest::new(prompt(), topics.clone());
             let original = controller.spec();
-            let model = model.clone();
             spawn(async move {
-                let result =
-                    super::interpretation::RuleInterpreter::interpret(model, request).await;
+                let result = super::interpretation::RuleInterpreter::interpret(request).await;
                 pending.set(false);
                 let current = controller.spec();
                 if current.id() != original.id() || current.source() != original.source() {

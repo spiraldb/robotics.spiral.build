@@ -1,6 +1,6 @@
 //! Browser-owned chat completions: one streamed provider request, decoded
 //! into the assistant message and tool calls it carried.
-use super::{CommandError, project::ProjectClient, proxy::ProxyClient};
+use super::{CommandError, proxy::ProxyClient};
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
 use serde::Deserialize;
@@ -68,38 +68,20 @@ impl ReasoningEffort {
     }
 }
 
-/// The provider the operator configured, as this project reaches it: chat
-/// completions here, jev Decisions in `client::decisions`.
-#[derive(Clone)]
-pub(crate) struct ModelClient {
-    project: ProjectClient,
-}
+/// The provider the operator configured: chat completions here, jev
+/// Decisions in `client::decisions`. Its requests go through `/proxy`, so they
+/// name no project; a view that stops caring cancels them by unmounting.
+pub(crate) struct ModelClient;
 impl ModelClient {
-    pub(crate) fn new(project: ProjectClient) -> Self {
-        Self { project }
-    }
-    pub(crate) fn current() -> Self {
-        Self::new(ProjectClient::current())
-    }
-    /// The project every request is checked against, so a sibling transport
-    /// abandons its answer when the session moves on.
-    pub(in crate::client) const fn project(&self) -> &ProjectClient {
-        &self.project
-    }
-
-    pub(crate) async fn configured(&self) -> Result<bool, CommandError> {
-        self.project.require_current()?;
+    pub(crate) async fn configured() -> Result<bool, CommandError> {
         let credentials = ProxyClient::credentials().await?;
-        self.project.require_current()?;
         Ok(credentials.llm().is_some())
     }
 
     pub(crate) async fn complete(
-        &self,
         request: ModelRequest,
         mut on_text: impl FnMut(&str),
     ) -> Result<ProviderMessage, String> {
-        self.project.require_current()?;
         let credentials = ProxyClient::credentials().await?;
         let llm = credentials
             .llm()
@@ -121,7 +103,6 @@ impl ModelClient {
             payload["response_format"] = response_format;
         }
         let body = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
-        self.project.require_current()?;
         let (response, _cancel) = ProxyClient::request("POST", &endpoint)
             .header("authorization", format!("Bearer {}", llm.api_key()))
             .header("content-type", "application/json")
@@ -133,11 +114,9 @@ impl ModelClient {
         if !(200..300).contains(&response.status()) {
             return Err(format!("LLM provider returned HTTP {}.", response.status()));
         }
-        let message = ProviderStream::read(response, &self.project, &mut on_text)
+        ProviderStream::read(response, &mut on_text)
             .await
-            .map_err(|error| Self::public_error(&error, llm.api_key()))?;
-        self.project.require_current()?;
-        Ok(message)
+            .map_err(|error| Self::public_error(&error, llm.api_key()))
     }
     fn provider_model(credentials: &LlmCredentials, model: &str) -> String {
         if credentials.base_url().starts_with("https://openrouter.ai/") && !model.contains('/') {
@@ -203,7 +182,6 @@ struct ProviderStream;
 impl ProviderStream {
     async fn read(
         response: gloo_net::http::Response,
-        project: &ProjectClient,
         on_text: &mut impl FnMut(&str),
     ) -> Result<ProviderMessage, String> {
         let body = response.body().ok_or("Missing model response body")?;
@@ -226,7 +204,6 @@ impl ProviderStream {
         let mut calls = Vec::<PendingToolCall>::new();
         let mut completed = false;
         while let Some(event) = stream.next().await {
-            project.require_current()?;
             let event = event
                 .map_err(|error| format!("The LLM provider returned invalid SSE data: {error}"))?;
             let data = event.data.trim();

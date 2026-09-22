@@ -32,14 +32,12 @@ use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::{RolloutHardwareResources, RolloutManager};
 use crate::sync::MutexRecovery;
 use crate::training::manager::TrainingManager;
-use crate::training::remote::ConfiguredHttpTrainingBackend;
 use crate::workflow::manager::WorkflowManager;
 
 /// The storage and running work of one project. Its connection never changes.
 pub(crate) struct OpenProject {
     catalog: ProjectCatalog,
     activities: ProjectActivities,
-    preferences: Arc<crate::data::preferences::RuntimePreferences>,
     recording: Arc<RecordingSession>,
 }
 
@@ -114,13 +112,7 @@ impl ProjectFactory {
         let workspace = Arc::new(RobotWorkspace::new(studio.clone()));
         let recording_buffer = Arc::new(RecordingBuffer::new());
         let storage = Arc::new(StorageManager::new(store, studio));
-        let preferences = Arc::new(crate::data::preferences::RuntimePreferences::new(
-            storage.clone(),
-        ));
-        let training = Arc::new(TrainingManager::new(
-            storage.clone(),
-            Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
-        ));
+        let training = Arc::new(TrainingManager::new(storage.clone()));
         let workflow = Arc::new(WorkflowManager::new(storage.clone()));
         let curation = Arc::new(CurationManager::new(storage.clone()));
         let rollout = RolloutManager::new(
@@ -130,7 +122,6 @@ impl ProjectFactory {
                 self.hardware.cameras.clone(),
                 workspace.clone(),
             ),
-            preferences.clone(),
         );
         Arc::new(OpenProject {
             catalog: ProjectCatalog {
@@ -144,7 +135,6 @@ impl ProjectFactory {
                 workflow,
                 curation,
             },
-            preferences,
             recording: Arc::new(RecordingSession::default()),
         })
     }
@@ -229,9 +219,6 @@ impl OpenProject {
     fn storage(&self) -> &Arc<StorageManager> {
         &self.catalog.storage
     }
-    fn preferences(&self) -> &Arc<crate::data::preferences::RuntimePreferences> {
-        &self.preferences
-    }
     fn recording(&self) -> &Arc<RecordingSession> {
         &self.recording
     }
@@ -250,8 +237,8 @@ impl OpenProject {
 
     pub(crate) async fn settings(&self) -> Result<DataSettings, OperationError> {
         let preferences = self
-            .preferences
-            .load()
+            .storage()
+            .load_studio_preferences()
             .await
             .map_err(OperationError::External)?;
         Ok(DataSettings::new(
@@ -271,30 +258,36 @@ impl OpenProject {
         }
     }
 
-    /// Runs monitor the endpoint they started on, so it can change only
-    /// between runs.
+    /// Runs are followed through the current endpoint, so it changes only
+    /// between runs. History loads first: after a restart the runs it left
+    /// active are not known until then.
     async fn apply_preferences(
         &self,
         preferences: StoredStudioPreferences,
     ) -> Result<(), OperationError> {
         let endpoint_changed = self
-            .preferences
-            .load()
+            .storage()
+            .load_studio_preferences()
             .await
             .map_err(OperationError::External)?
             .training()
             .endpoint()
             != preferences.training().endpoint();
-        if endpoint_changed && self.training_active() {
-            return Err(OperationError::conflict(
-                "Wait for training runs to finish before changing the training endpoint.",
-            ));
+        if endpoint_changed {
+            self.training()
+                .ensure_loaded()
+                .await
+                .map_err(OperationError::External)?;
+            if self.training_active() {
+                return Err(OperationError::conflict(
+                    "Wait for training runs to finish before changing the training endpoint.",
+                ));
+            }
         }
         self.storage()
             .save_studio_preferences(&preferences)
             .await
             .map_err(OperationError::External)?;
-        self.preferences.replace(preferences).await;
         if endpoint_changed {
             self.training().refresh_readiness().await;
         }
@@ -309,12 +302,9 @@ impl OpenProject {
             .any(|run| run.phase().active())
     }
 
-    /// Whether recording, training, rollout, or a Workflow run is active.
+    /// Whether recording, training, or rollout is active.
     pub(crate) fn busy(&self) -> bool {
-        self.recording().active()
-            || self.training_active()
-            || self.rollout().is_active()
-            || self.workflow().is_active()
+        self.recording().active() || self.training_active() || self.rollout().is_active()
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -468,7 +458,7 @@ impl ProjectRegistry {
             || !matches!(hardware.mode(), HardwareModeSelection::Idle)
         {
             return Err(OperationError::conflict(
-                "Stop recording, replay, rollout, training, and Workflow runs before importing a project.",
+                "Stop recording, replay, rollout, and training before importing a project.",
             ));
         }
         // The import replaces the robot configurations connected robots use.
@@ -519,7 +509,7 @@ impl ProjectRegistry {
                 && opened.projects.iter().any(|project| project.busy())
             {
                 return Err(OperationError::conflict(
-                    "Stop recording, rollout, training, and Workflow runs before changing the Spiral connection.",
+                    "Stop recording, rollout, and training before changing the Spiral connection.",
                 ));
             }
         }
@@ -823,7 +813,11 @@ pub(crate) mod tests {
         let project = fixture.projects.factory.create(connection).unwrap();
         let preferences =
             StoredStudioPreferences::from_settings("http://127.0.0.1:5050", false).unwrap();
-        project.preferences().replace(preferences).await;
+        project
+            .storage()
+            .save_studio_preferences(&preferences)
+            .await
+            .unwrap();
         let settings = project.settings().await.unwrap();
         assert_eq!(settings.spiral().project_id(), "configured_project");
         assert_eq!(settings.spiral().endpoint(), "https://api.spiraldb.dev");

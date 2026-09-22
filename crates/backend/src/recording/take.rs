@@ -84,11 +84,6 @@ impl<'a> TakeOperations<'a> {
                 "a take is already recording; stop it first",
             ));
         }
-        if self.state.workflow().is_active() {
-            return Err(OperationError::conflict(
-                "Wait for the active Workflow run to finish before recording a new take.",
-            ));
-        }
         let request = request.validated()?;
         let sample_hz = self.admitted_sample_hz(&request)?;
         self.set_mode(request.teleoperation()).await?;
@@ -436,8 +431,8 @@ impl<'a> TakeOperations<'a> {
     ) -> Result<Option<VideoCapture>, OperationError> {
         let video_enabled = self
             .state
-            .preferences()
-            .load()
+            .storage()
+            .load_studio_preferences()
             .await
             .map_err(OperationError::External)?
             .video()

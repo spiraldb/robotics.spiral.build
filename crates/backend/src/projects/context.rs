@@ -135,7 +135,4 @@ impl ProjectContext {
     pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
         self.project.rollout()
     }
-    pub(crate) fn preferences(&self) -> &Arc<crate::data::preferences::RuntimePreferences> {
-        self.project.preferences()
-    }
 }

@@ -17,7 +17,6 @@ use crate::activities::workflow::explore::review::{
     NoSubtaskChosen, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
 };
 use crate::activities::workflow::explore::state::{EpisodeFocus, ExplorationController};
-use crate::client::completions::ModelClient;
 use crate::client::decisions::DecisionResponse;
 use dioxus::prelude::*;
 use spiral_robotics_ui::{
@@ -196,7 +195,7 @@ pub(in crate::activities::workflow::explore) fn SearchWorkspace(
             )));
             running.set(true);
             spawn(async move {
-                let result = DecisionRun::new(ModelClient::current(), batches)
+                let result = DecisionRun::new(batches)
                     .run(|batch, answers| {
                         if let Some(outcome) = outcome.write().as_mut() {
                             outcome.absorb(batch, &answers);

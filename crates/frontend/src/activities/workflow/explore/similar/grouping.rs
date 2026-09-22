@@ -45,7 +45,6 @@ struct GroupingPass {
     node: String,
     annotation: String,
     rows: Vec<SubtaskRow>,
-    model: ModelClient,
     /// The model the parent annotation used; grouping asks the same one.
     annotation_model: String,
 }
@@ -64,7 +63,7 @@ impl GroupingPass {
             Vec::new(),
         )
         .with_model(self.annotation_model.clone());
-        let reply = self.model.complete(request, |_| {}).await?;
+        let reply = ModelClient::complete(request, |_| {}).await?;
         let text = reply
             .content()
             .ok_or("The model answered the category prompt without any text.")?;
@@ -76,10 +75,8 @@ impl GroupingPass {
         categories: Vec<SubtaskCategory>,
         mut progress: impl FnMut(usize, usize),
     ) -> Result<SubtaskGrouping, String> {
-        let run = DecisionRun::new(
-            self.model.clone(),
-            AssignmentQuestions::new(&categories)?.batches(&self.descriptions()),
-        );
+        let run =
+            DecisionRun::new(AssignmentQuestions::new(&categories)?.batches(&self.descriptions()));
         let requests = run.batches();
         let reader = AssignmentReader::new(&self.rows, &categories);
         let mut assignments = Vec::with_capacity(self.rows.len());
@@ -264,7 +261,6 @@ pub(in crate::activities::workflow::explore) fn GroupingWorkspace(
             }),
             annotation,
             rows,
-            model: ModelClient::current(),
         };
         stage.set(Some(match categories {
             Some(_) => GroupingStage::Assigning {

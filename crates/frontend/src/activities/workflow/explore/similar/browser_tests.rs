@@ -6,12 +6,8 @@ use super::ranking::{RankedRow, SearchRanking};
 use crate::activities::workflow::explore::document::{
     DATASET_NODE_ID, ExplorationNodeKind, ExplorationPayload, SubtaskAnnotation, SubtaskRow,
 };
-use crate::client::completions::ModelClient;
-use crate::client::project::ProjectClient;
-use crate::client::queries::QueryRefresh;
 use dioxus::prelude::*;
 use serde_json::Value;
-use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
@@ -91,16 +87,9 @@ fn annotated() -> (ExplorationPayload, Vec<SubtaskRow>) {
 #[derive(Clone, Default)]
 struct SearchHarness {
     ranking: Rc<RefCell<Option<Result<SearchRanking, String>>>>,
-    model: Rc<RefCell<Option<ModelClient>>>,
 }
 impl SearchHarness {
     fn render(self) -> Element {
-        let refresh = QueryRefresh::use_provider();
-        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
-        let current = project.clone();
-        let state = use_signal(move || Some(current));
-        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
-        *self.model.borrow_mut() = Some(ModelClient::current());
         rsx! {}
     }
     fn start(&self, dom: &VirtualDom, query: &str, rows: Vec<SubtaskRow>) {
@@ -112,11 +101,10 @@ impl SearchHarness {
             .unwrap()
             .batches(&descriptions.iter().map(String::as_str).collect::<Vec<_>>());
         let ranking = self.ranking.clone();
-        let model = self.model.borrow().as_ref().unwrap().clone();
         dom.in_scope(ScopeId::ROOT, || {
             spawn(async move {
                 let mut ranked = SearchRanking::of(descriptions.len());
-                let result = DecisionRun::new(model, batches)
+                let result = DecisionRun::new(batches)
                     .run(|batch, answers| ranked.absorb(batch, &answers))
                     .await;
                 *ranking.borrow_mut() = Some(result.map(|()| ranked));

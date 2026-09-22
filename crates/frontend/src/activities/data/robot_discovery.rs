@@ -56,14 +56,12 @@ impl RobotDiscoveryAgent {
             ),
         ];
         let tools = Self::tools();
-        let model = self.data.model_client();
         for _ in 0..10 {
-            let response = model
-                .complete(
-                    ModelRequest::new(messages.clone(), tools.clone()).with_model("gpt-5.6-terra"),
-                    |_| {},
-                )
-                .await?;
+            let response = crate::client::completions::ModelClient::complete(
+                ModelRequest::new(messages.clone(), tools.clone()).with_model("gpt-5.6-terra"),
+                |_| {},
+            )
+            .await?;
             if response.tool_calls().is_empty() {
                 return Err("Robot discovery did not produce a result".into());
             }

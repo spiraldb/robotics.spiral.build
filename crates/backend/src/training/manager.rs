@@ -21,6 +21,7 @@ use spiral_robotics_training::{
 
 use crate::OperationError;
 use crate::adapters::clock::SystemClock;
+use crate::adapters::compute_runtime::HttpTrainingBackend;
 use crate::clock::{Clock, StableIdSequence};
 use crate::sync::MutexRecovery;
 use crate::training::service::StartTrainingAdmission as _;
@@ -37,7 +38,6 @@ pub(crate) struct TrainingManager {
 
 struct TrainingRuntime {
     storage: Arc<StorageManager>,
-    backend: Arc<dyn TrainingBackend>,
     clock: Arc<dyn Clock>,
     run_ids: StableIdSequence,
     history: TrainingHistory,
@@ -55,11 +55,10 @@ struct TrainingHistory {
 
 impl TrainingManager {
     /// Construct the in-memory manager without touching external services.
-    pub(crate) fn new(storage: Arc<StorageManager>, backend: Arc<dyn TrainingBackend>) -> Self {
+    pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
         Self {
             inner: Arc::new(TrainingRuntime {
                 storage,
-                backend,
                 clock: Arc::new(SystemClock),
                 run_ids: StableIdSequence::new("train", 0),
                 history: TrainingHistory {
@@ -314,11 +313,19 @@ impl TrainingManager {
         TrainingReadiness::new(ready, spiral_ready, summary).with_runtime(runtime)
     }
 
+    /// The runtime endpoint Settings selects now. Every probe and poll reads
+    /// it, so a run is followed wherever the endpoint points. The blocking
+    /// HTTP client is built inside the blocking task that uses it.
+    async fn runtime_endpoint(&self) -> Result<String, String> {
+        let preferences = self.inner.storage.load_studio_preferences().await?;
+        Ok(preferences.training().endpoint().to_owned())
+    }
+
     async fn probe_backend(&self) -> Result<spiral_robotics_training::TrainingBackendInfo, String> {
-        let backend = self.inner.backend.clone();
+        let endpoint = self.runtime_endpoint().await?;
         tokio::time::timeout(
             Duration::from_secs(8),
-            tokio::task::spawn_blocking(move || backend.health()),
+            tokio::task::spawn_blocking(move || HttpTrainingBackend::new(endpoint).health()),
         )
         .await
         .map_err(|_| "training backend health probe timed out after 8 seconds".to_owned())
@@ -414,12 +421,13 @@ impl RemoteJobMonitor {
 
     /// Reattach to the run's job, or create it when the worker has none.
     async fn open(&self) -> Result<TrainingJobSnapshot, String> {
-        let (backend, run_id, request) = (
-            self.manager.inner.backend.clone(),
+        let (endpoint, run_id, request) = (
+            self.manager.runtime_endpoint().await?,
             self.run_id.clone(),
             self.job_request(),
         );
         tokio::task::spawn_blocking(move || {
+            let backend = HttpTrainingBackend::new(endpoint);
             backend
                 .job_snapshot(&run_id, TrainingJobCursor::default())
                 .or_else(|_| backend.create_job(request))
@@ -437,16 +445,23 @@ impl RemoteJobMonitor {
         loop {
             tokio::time::sleep(RemotePollBackoff::for_failures(failures)).await;
             let stopping = self.stop.load(Ordering::Acquire) && !self.stop_sent;
-            let (backend, run_id) = (self.manager.inner.backend.clone(), self.run_id.clone());
-            let polled = tokio::task::spawn_blocking(move || {
-                if stopping {
-                    backend.stop_job(&run_id, cursor)
-                } else {
-                    backend.job_snapshot(&run_id, cursor)
+            let polled = match self.manager.runtime_endpoint().await {
+                Ok(endpoint) => {
+                    let run_id = self.run_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let backend = HttpTrainingBackend::new(endpoint);
+                        if stopping {
+                            backend.stop_job(&run_id, cursor)
+                        } else {
+                            backend.job_snapshot(&run_id, cursor)
+                        }
+                    })
+                    .await
+                    .map_err(|error| format!("training job poll task stopped: {error}"))?
+                    .map_err(|error| error.to_string())
                 }
-            })
-            .await
-            .map_err(|error| format!("training job poll task stopped: {error}"))?;
+                Err(error) => Err(error),
+            };
             match polled {
                 Ok(snapshot) => {
                     self.stop_sent |= stopping;

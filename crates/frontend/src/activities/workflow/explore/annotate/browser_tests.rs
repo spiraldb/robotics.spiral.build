@@ -22,7 +22,7 @@ use crate::activities::workflow::explore::poster::{
 use crate::activities::workflow::explore::review::{EpisodeNames, SubtaskContext};
 use crate::activities::workflow::explore::state::ExplorationController;
 use crate::client::documents::DocumentClient;
-use crate::client::{completions::ModelClient, project::ProjectClient, queries::QueryRefresh};
+use crate::client::{project::ProjectClient, queries::QueryRefresh};
 use crate::components::document_session::StudioDocument as _;
 use dioxus::prelude::*;
 use serde_json::Value;
@@ -193,7 +193,7 @@ impl AnnotationRecorder for TestJournal {
 #[derive(Clone, Default)]
 struct AnnotationHarness {
     controller: Rc<RefCell<Option<ExplorationController>>>,
-    clients: Rc<RefCell<Option<(ModelClient, ExplorationDocuments, DatasetClient)>>>,
+    clients: Rc<RefCell<Option<(ExplorationDocuments, DatasetClient)>>>,
     finished: Rc<RefCell<bool>>,
 }
 
@@ -201,12 +201,9 @@ impl AnnotationHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
         let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
-        let current = project.clone();
-        let state = use_signal(move || Some(current));
-        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
+        use_context_provider(|| ProjectClient::new(project, refresh));
         *self.controller.borrow_mut() = Some(ExplorationController::use_controller());
         *self.clients.borrow_mut() = Some((
-            ModelClient::current(),
             DocumentClient::current(ExplorationDocument::COLLECTION),
             DatasetClient::current(),
         ));
@@ -234,8 +231,7 @@ impl AnnotationHarness {
         })
     }
     fn start(&self, dom: &VirtualDom, node: String) {
-        let (model, documents, datasets) =
-            self.clients.borrow().clone().expect("the harness rendered");
+        let (documents, datasets) = self.clients.borrow().clone().expect("the harness rendered");
         let controller = self.controller();
         let finished = self.finished.clone();
         dom.in_scope(ScopeId::ROOT, || {
@@ -243,7 +239,7 @@ impl AnnotationHarness {
                 AnnotationPass::new(
                     PassSettings::new(node.clone(), "google/gemini-2.5-flash", 0.5),
                     NativeSheets::new(datasets, "/top-camera", 0.5),
-                    ProviderAnnotator::new(model),
+                    ProviderAnnotator,
                     TestJournal {
                         node,
                         controller,
@@ -416,7 +412,7 @@ async fn native_frames_are_composed_into_sheets_in_the_browser() {
     let harness = AnnotationHarness::default();
     let mut dom = VirtualDom::new_with_props(AnnotationHarness::render, harness.clone());
     dom.rebuild_in_place();
-    let (_, _, datasets) = harness
+    let (_, datasets) = harness
         .clients
         .borrow()
         .clone()
@@ -501,9 +497,7 @@ impl PosterHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
         let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
-        let current = project.clone();
-        let state = use_signal(move || Some(current));
-        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
+        use_context_provider(|| ProjectClient::new(project, refresh));
         // The controller provides the exploration's one poster cache.
         ExplorationController::use_controller();
         let rows = self.rows.borrow().clone();

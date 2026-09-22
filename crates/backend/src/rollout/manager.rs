@@ -440,7 +440,6 @@ impl RolloutLifecycle {
 pub(crate) struct RolloutManager {
     storage: Arc<StorageManager>,
     hardware: RolloutHardwareResources,
-    preferences: Arc<crate::data::preferences::RuntimePreferences>,
     clock: Arc<dyn Clock>,
     lifecycle: RolloutLifecycle,
 }
@@ -449,14 +448,12 @@ impl RolloutManager {
     pub(crate) fn new(
         storage: Arc<StorageManager>,
         hardware: RolloutHardwareResources,
-        preferences: Arc<crate::data::preferences::RuntimePreferences>,
     ) -> Arc<Self> {
         // Persisted state loads on the first Rollout read or start command.
         // The project owns execution even while its views are unmounted.
         Arc::new(Self {
             storage,
             hardware,
-            preferences,
             clock: Arc::new(SystemClock),
             lifecycle: RolloutLifecycle {
                 history: Mutex::new(std::collections::BTreeMap::new()),
@@ -531,7 +528,6 @@ impl RolloutManager {
         config: RolloutConfig,
     ) -> Result<RolloutSnapshot, String> {
         self.ensure_loaded().await?;
-        self.preferences.load().await?;
         let mut active = self.lifecycle.active.recover_lock();
         if let Some(active) = active.as_ref() {
             return Err(format!(
@@ -656,8 +652,13 @@ impl RolloutManager {
         let model_artifact =
             spiral_robotics_inference::ModelArtifact::from_bytes(config_json, payload)
                 .map_err(|error| format!("checkpoint identity is invalid: {error}"))?;
-        let policy_loader =
-            HttpPolicyLoader::new(self.preferences.load().await?.training().endpoint());
+        let policy_loader = HttpPolicyLoader::new(
+            self.storage
+                .load_studio_preferences()
+                .await?
+                .training()
+                .endpoint(),
+        );
         let policy = tokio::task::spawn_blocking(move || policy_loader.load(model_artifact))
             .await
             .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?

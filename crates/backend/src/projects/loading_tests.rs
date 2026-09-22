@@ -73,8 +73,8 @@ async fn studio_loads_and_saves_without_opening_spiral() {
     assert_eq!(
         fixture
             .session
-            .preferences()
-            .load()
+            .storage()
+            .load_studio_preferences()
             .await
             .unwrap()
             .training()

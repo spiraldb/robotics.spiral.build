@@ -9,23 +9,20 @@ use spiral_robotics_common::project::ProjectKey;
 use super::transport::{CommandError, HttpRequest};
 use serde::de::DeserializeOwned;
 
+/// Every request names `project`, so a request made just before another
+/// project is selected still acts on the project its view belongs to. Tasks
+/// end with the view's mount.
 #[derive(Clone)]
 pub(crate) struct ProjectClient {
     project: ProjectKey,
-    selection: ReadSignal<Option<ProjectKey>>,
     owner: ScopeId,
     refresh: QueryRefresh,
 }
 
 impl ProjectClient {
-    pub(crate) fn new(
-        project: ProjectKey,
-        selection: ReadSignal<Option<ProjectKey>>,
-        refresh: QueryRefresh,
-    ) -> Self {
+    pub(crate) fn new(project: ProjectKey, refresh: QueryRefresh) -> Self {
         Self {
             project,
-            selection,
             refresh,
             owner: dioxus::dioxus_core::current_scope_id(),
         }
@@ -46,17 +43,14 @@ impl ProjectClient {
         dioxus::dioxus_core::Runtime::current().in_scope(self.owner, || spawn(task))
     }
 
-    /// Capture the mount before returning a future, then guard both transport
-    /// dispatch and response delivery against a later project selection.
     pub(crate) fn request<T: DeserializeOwned + 'static>(
         &self,
         request: HttpRequest,
     ) -> impl Future<Output = Result<T, CommandError>> + use<T> {
         let client = self.clone();
         async move {
-            client.require_current()?;
             let response = request.for_project(client.project.clone()).send().await;
-            client.accept_response(response)
+            client.observe(response)
         }
     }
     pub(crate) fn request_bytes(
@@ -65,9 +59,8 @@ impl ProjectClient {
     ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
         let client = self.clone();
         async move {
-            client.require_current()?;
             let response = request.for_project(client.project.clone()).bytes().await;
-            client.accept_response(response)
+            client.observe(response)
         }
     }
 
@@ -90,21 +83,9 @@ impl ProjectClient {
         &self.project
     }
 
-    pub(crate) fn require_current(&self) -> Result<(), CommandError> {
-        if self.selection.peek().as_ref() == Some(&self.project) {
-            Ok(())
-        } else {
-            Err(CommandError::stale_project())
-        }
-    }
-
     /// A stale project means the saved endpoint changed; rereading the saved
     /// connection selects the project again.
-    pub(crate) fn accept_response<T>(
-        &self,
-        response: Result<T, CommandError>,
-    ) -> Result<T, CommandError> {
-        self.require_current()?;
+    fn observe<T>(&self, response: Result<T, CommandError>) -> Result<T, CommandError> {
         if response.as_ref().err().is_some_and(|error| {
             error.code()
                 == spiral_robotics_common::command_failure::CommandFailureCode::StaleProject

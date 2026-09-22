@@ -298,11 +298,10 @@ lists. Settings preferences are fetched only by the Settings view. Its connectio
 settings remain readable without database access; a connection-only update
 validates and switches the project without overwriting unread preferences.
 
-Backend runtime preferences are shared by an open project and loaded
-once on first Settings, Training, Rollout start, or recording-video access.
-Concurrent readers share initialization; errors and cancellation leave it
-retryable. A preference write wins over an in-flight first read. Training workers
-reject uninitialized preferences instead of choosing a default endpoint.
+Runtime preferences are read from SQLite whenever a feature needs them; the
+backend keeps no copy. The training manager reads the endpoint before each call
+to the training runtime, so a Settings change reaches the next probe or poll.
+The endpoint can change only while no run is active.
 
 Training history, Workflow, Assistant history, and the full relation catalog also
 load on feature access rather than when a project opens.

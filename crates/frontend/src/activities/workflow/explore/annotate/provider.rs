@@ -8,15 +8,7 @@ use crate::client::completions::{ModelClient, ModelRequest, ReasoningEffort};
 use spiral_robotics_common::workflow::conversation::ProviderMessage;
 
 /// Annotation over the Studio-wide LLM credential.
-pub(super) struct ProviderAnnotator {
-    model: ModelClient,
-}
-
-impl ProviderAnnotator {
-    pub(super) fn new(model: ModelClient) -> Self {
-        Self { model }
-    }
-}
+pub(super) struct ProviderAnnotator;
 
 impl SubtaskAnnotator for ProviderAnnotator {
     async fn annotate(&self, call: AnnotationCall) -> Result<String, String> {
@@ -38,7 +30,7 @@ impl SubtaskAnnotator for ProviderAnnotator {
             .with_model(call.model())
             .with_reasoning(ReasoningEffort::Low)
             .with_response_format(AnnotationPrompt::response_format());
-        let answer = self.model.complete(request, |_| {}).await?;
+        let answer = ModelClient::complete(request, |_| {}).await?;
         answer
             .content()
             .map(str::to_owned)

@@ -16,12 +16,11 @@ use spiral_robotics_common::command_failure::CommandFailureCode;
 const REQUESTS_IN_FLIGHT: usize = 4;
 
 pub(super) struct DecisionRun {
-    model: ModelClient,
     batches: Vec<QuestionBatch>,
 }
 impl DecisionRun {
-    pub(super) fn new(model: ModelClient, batches: Vec<QuestionBatch>) -> Self {
-        Self { model, batches }
+    pub(super) fn new(batches: Vec<QuestionBatch>) -> Self {
+        Self { batches }
     }
     pub(super) fn batches(&self) -> usize {
         self.batches.len()
@@ -32,12 +31,10 @@ impl DecisionRun {
         &self,
         mut absorb: impl FnMut(&QuestionBatch, DecisionResponse),
     ) -> Result<(), String> {
-        let model = &self.model;
         let mut answers = futures_util::stream::iter(self.batches.iter())
             .map(|batch| async move {
-                let answers = model
-                    .decide(batch.state().clone(), batch.questions().clone())
-                    .await;
+                let answers =
+                    ModelClient::decide(batch.state().clone(), batch.questions().clone()).await;
                 (batch, answers)
             })
             .buffer_unordered(REQUESTS_IN_FLIGHT);

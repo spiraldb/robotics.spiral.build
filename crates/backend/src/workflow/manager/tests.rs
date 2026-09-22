@@ -120,7 +120,6 @@ async fn invalid_sql_never_becomes_a_run_and_failed_sql_is_a_failed_run() {
         .await;
     assert_eq!(failed.snapshot().phase(), WorkflowRunPhase::Failed);
     assert!(failed.snapshot().error().is_some());
-    assert!(!fixture.manager.is_active());
 }
 
 #[tokio::test]
@@ -133,7 +132,6 @@ async fn independent_workflows_run_concurrently() {
         assert_eq!(run.snapshot().result().unwrap().rows()[0]["answer"], answer);
     }
     fixture.manager.shutdown().await;
-    assert!(!fixture.manager.is_active());
 }
 
 #[tokio::test]

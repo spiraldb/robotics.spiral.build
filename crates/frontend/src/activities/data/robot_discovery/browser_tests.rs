@@ -95,9 +95,7 @@ impl DiscoveryHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
         let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
-        let current = project.clone();
-        let state = use_signal(move || Some(current));
-        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
+        use_context_provider(|| ProjectClient::new(project, refresh));
         *self.client.borrow_mut() = Some(DatasetClient::current());
         rsx! {}
     }

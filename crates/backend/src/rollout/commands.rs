@@ -28,7 +28,6 @@ impl RolloutCommands {
     ) -> Result<RolloutSnapshot, BackendCommandError> {
         self.state
             .execute(move |state| async move {
-                state.preferences().load().await?;
                 state.training().ensure_loaded().await?;
                 let config = state.training().admit_rollout(config)?;
                 state.rollout().start(config).await.map_err(Into::into)

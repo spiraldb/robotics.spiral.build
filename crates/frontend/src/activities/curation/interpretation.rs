@@ -13,19 +13,15 @@ use std::collections::BTreeMap;
 
 pub(super) struct RuleInterpreter;
 impl RuleInterpreter {
-    pub(super) async fn interpret(
-        model: ModelClient,
-        request: InterpretationRequest,
-    ) -> Result<RuleProposal, String> {
+    pub(super) async fn interpret(request: InterpretationRequest) -> Result<RuleProposal, String> {
         request.validate()?;
         let quantities = QuantityCandidate::extract(request.prompt());
-        let answers = model
-            .decide(
-                json!({"request": request.prompt(), "quantities": quantities}),
-                Self::questions(&request, &quantities),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        let answers = ModelClient::decide(
+            json!({"request": request.prompt(), "quantities": quantities}),
+            Self::questions(&request, &quantities),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         Ok(Self::bind(&request, &quantities, answers))
     }
     /// A choice among `criteria` with the escape every interpretation needs:

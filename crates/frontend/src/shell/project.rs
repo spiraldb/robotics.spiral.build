@@ -47,7 +47,7 @@ impl ProjectSelection {
                 .is_some_and(ProjectKey::is_chosen)
     }
     pub(super) fn client(self, project: ProjectKey) -> ProjectClient {
-        ProjectClient::new(project, self.selected.into(), self.refresh)
+        ProjectClient::new(project, self.refresh)
     }
     /// Work on `project` from now on, once this browser has saved it.
     pub(crate) fn select(mut self, project: ProjectKey) {
@@ -92,7 +92,6 @@ impl ProjectSelection {
 
 #[cfg(test)]
 mod tests {
-    use futures_util::FutureExt as _;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
@@ -234,29 +233,11 @@ mod tests {
             });
         });
         dom.render_immediate_to_vec();
-        assert!(old_client.accept_response(Ok(7)).is_ok());
-        let request_created_in_old_project = old_client
-            .request::<spiral_robotics_common::settings::ConnectionTest>(
-            crate::client::transport::HttpRequest::new("POST", "/api/settings/training/test"),
-        );
-
         dom.in_runtime(|| {
             harness
                 .selection()
                 .select(ProjectKey::new(ENDPOINT, "second"))
         });
-        // Reject completion as soon as another project is selected, even before
-        // Dioxus has committed disposal of the previous keyed subtree.
-        assert!(old_client.accept_response(Ok(7)).is_err());
-        assert_eq!(
-            request_created_in_old_project
-                .now_or_never()
-                .unwrap()
-                .unwrap_err()
-                .code(),
-            spiral_robotics_common::command_failure::CommandFailureCode::StaleProject,
-            "a delayed request must reject before transport instead of adopting the new project"
-        );
         dom.render_immediate_to_vec();
         let observed = harness.0.borrow();
         assert_eq!(observed.mounts.len(), 2);

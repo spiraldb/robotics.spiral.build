@@ -308,7 +308,6 @@ impl DataCommands {
     async fn test_training_runtime_in_project(
         &self,
     ) -> Result<ConnectionTest, BackendCommandError> {
-        self.state.preferences().load().await?;
         Ok(ConnectionTest::from(
             self.state.training().test_runtime().await,
         ))
@@ -488,7 +487,7 @@ impl DataCommands {
             .any(|connection| connection.connected());
         if self.import_activity_is_busy(&hardware) || connected {
             return Err(BackendCommandError::conflict(format!(
-                "Disconnect robots and stop recording, replay, rollout, training, Workflow, or the Workflow Assistant before importing {subject}"
+                "Disconnect robots and stop recording, replay, rollout, or training before importing {subject}"
             )));
         }
         Ok(())

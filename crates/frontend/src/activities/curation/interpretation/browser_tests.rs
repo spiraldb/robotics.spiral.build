@@ -1,8 +1,6 @@
 //! Exercise prompt construction, provider transport, and binding together in the browser.
 use super::*;
-use crate::client::{project::ProjectClient, queries::QueryRefresh};
 use dioxus::prelude::*;
-use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
@@ -50,24 +48,16 @@ impl Drop for InterpretationFetch {
 #[derive(Clone, Default)]
 struct InterpretationHarness {
     result: Rc<RefCell<Option<Result<RuleProposal, String>>>>,
-    model: Rc<RefCell<Option<ModelClient>>>,
 }
 impl InterpretationHarness {
     fn render(self) -> Element {
-        let refresh = QueryRefresh::use_provider();
-        let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
-        let current = project.clone();
-        let state = use_signal(move || Some(current));
-        use_context_provider(|| ProjectClient::new(project, state.into(), refresh));
-        *self.model.borrow_mut() = Some(ModelClient::current());
         rsx! {}
     }
     fn start(&self, dom: &VirtualDom, request: InterpretationRequest) {
         let result = self.result.clone();
-        let model = self.model.borrow().as_ref().unwrap().clone();
         dom.in_scope(ScopeId::ROOT, || {
             spawn(async move {
-                *result.borrow_mut() = Some(RuleInterpreter::interpret(model, request).await);
+                *result.borrow_mut() = Some(RuleInterpreter::interpret(request).await);
             });
         });
     }
