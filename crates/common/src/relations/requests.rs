@@ -2,7 +2,6 @@
 use super::*;
 
 /// A read-only SQL statement and its explicit result row bound.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRequest {
@@ -24,7 +23,6 @@ impl QueryRequest {
 /// A read-only statement scoped to one exact dataset member: `$1` binds the
 /// episode's UUID as an Arrow parameter, since Spiral compares member ids
 /// only against bound UUIDs, never against text literals.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeQueryRequest {

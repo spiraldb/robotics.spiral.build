@@ -1,34 +1,33 @@
-use crate::http::{
-    contract::{ApiRoutes, OperationSchema, RequestSchema, ResponseSchema},
-    delivery::HttpFailure,
-};
+use crate::http::delivery::HttpFailure;
 use crate::projects::context::StudioContext;
 use axum::{
-    Json,
+    Json, Router,
     body::Body,
     extract::{FromRequest, State},
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     response::{IntoResponse, Response},
+    routing::{MethodFilter, get, on},
 };
 use futures_util::TryStreamExt as _;
 use http_body::Body as _;
 use reqwest::Url;
-use serde_json::{Value, json};
 use spiral_robotics_common::credentials::StudioCredentials;
 use std::{str::FromStr, time::Duration};
 
 pub(crate) struct TransportEndpoints;
 
 impl TransportEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/credentials", Self::credentials);
-        routes.get("/proxy", Self::proxy);
-        routes.post("/proxy", Self::proxy);
-        routes.put("/proxy", Self::proxy);
-        routes.patch("/proxy", Self::proxy);
-        routes.delete("/proxy", Self::proxy);
-        routes.head("/proxy", Self::proxy);
-        routes.options("/proxy", Self::proxy);
+    pub(crate) fn router() -> Router<StudioContext> {
+        let relayed = MethodFilter::GET
+            .or(MethodFilter::POST)
+            .or(MethodFilter::PUT)
+            .or(MethodFilter::PATCH)
+            .or(MethodFilter::DELETE)
+            .or(MethodFilter::HEAD)
+            .or(MethodFilter::OPTIONS);
+        Router::new()
+            .route("/credentials", get(Self::credentials))
+            .route("/proxy", on(relayed, Self::proxy))
     }
 
     async fn credentials(
@@ -162,12 +161,6 @@ fn forbidden_request_header(name: &HeaderName) -> bool {
         || name.as_str().starts_with("x-forwarded-")
 }
 
-impl RequestSchema for ProxyRequest {
-    fn describe(operation: &mut OperationSchema, _: &mut schemars::SchemaGenerator) {
-        operation.proxy();
-    }
-}
-
 struct ProxyResponse {
     status: StatusCode,
     headers: HeaderMap,
@@ -208,13 +201,6 @@ fn connection_headers(headers: &HeaderMap) -> Vec<HeaderName> {
         .flat_map(|value| value.split(','))
         .filter_map(|name| HeaderName::from_str(name.trim()).ok())
         .collect()
-}
-impl ResponseSchema for Result<ProxyResponse, HttpFailure> {
-    fn responses(_: &mut schemars::SchemaGenerator) -> Value {
-        json!({
-            "default": {"description":"Raw upstream response preserving status, end-to-end headers, and streaming body. Relay failures use a JSON CommandFailure when no upstream response exists."}
-        })
-    }
 }
 
 #[cfg(test)]

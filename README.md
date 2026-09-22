@@ -12,9 +12,8 @@ Studio stores its control-plane state in persistent backend-local SQLite
 Settings can transfer project data and local Studio state as one `.spiral-project`
 file. See [SQLite storage and project bundles](docs/studio-sqlite.md).
 
-The backend HTTP contract and independent-client examples are documented in
-[Studio HTTP API](docs/http-api.md). A running backend serves its schemas at
-`/api/openapi.json`.
+The backend HTTP API and curl examples are documented in
+[Studio HTTP API](docs/http-api.md).
 
 ## Development
 

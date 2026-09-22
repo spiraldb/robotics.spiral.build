@@ -1,7 +1,6 @@
 //! Spiral dataset discovery and bounded topic inspection.
 use serde::{Deserialize, Serialize};
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetSelection {
     path: Vec<String>,
@@ -33,7 +32,6 @@ impl DatasetSelection {
 }
 
 /// One native recording within a dataset.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeSelection {
@@ -56,7 +54,6 @@ impl EpisodeSelection {
 }
 
 /// One topic scoped to a native recording ID.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeTopicRequest {
@@ -83,7 +80,6 @@ impl EpisodeTopicRequest {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetSummary {
     selection: DatasetSelection,
@@ -109,7 +105,6 @@ impl DatasetSummary {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetTopic {
     name: String,
@@ -155,7 +150,6 @@ impl DatasetTopic {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetInspection {
     dataset: DatasetSummary,
@@ -195,7 +189,6 @@ mod tests {
 }
 
 /// A real resource at its catalog path; parentage comes from Spiral's namespace.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectResource {
     selection: DatasetSelection,
@@ -226,7 +219,6 @@ impl ProjectResource {
 }
 
 /// Encoded Annex B packets; nanoseconds travel as strings to preserve integer precision in JS.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeVideo {
     codec: String,
@@ -244,7 +236,6 @@ impl EpisodeVideo {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct VideoPacket {
     timestamp_ns: String,

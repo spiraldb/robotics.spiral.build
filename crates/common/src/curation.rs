@@ -18,7 +18,6 @@ const MAX_RULES: usize = 32;
 
 /// The complete authored recipe. Runs execute the compiled SQL; Save persists
 /// this document with optimistic revisions.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CurationSpec {
@@ -373,7 +372,6 @@ impl std::fmt::Display for Named<'_> {
 }
 
 /// Validation reads as a list of problems, each with the way out.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CurationValidationReport {
     #[serde(default)]
@@ -390,7 +388,6 @@ impl CurationValidationReport {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CurationIssue {
     code: String,
@@ -418,7 +415,6 @@ impl CurationIssue {
 }
 
 /// One saved curation in the switcher.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CurationSummary {

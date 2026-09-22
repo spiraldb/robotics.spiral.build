@@ -2,7 +2,6 @@
 use crate::datasets::TopicRevision;
 use serde::{Deserialize, Serialize};
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CameraBinding {

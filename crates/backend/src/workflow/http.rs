@@ -1,10 +1,11 @@
 //! Documents and runs; no remote editor session.
 use super::commands::WorkflowCommands;
-use crate::http::{
-    contract::ApiRoutes,
-    delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject},
+use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
+use crate::projects::context::StudioContext;
+use axum::{
+    Json, Router,
+    routing::{get, post},
 };
-use axum::Json;
 use spiral_robotics_common::{
     datasets::DatasetSelection,
     workflow::{
@@ -14,12 +15,13 @@ use spiral_robotics_common::{
 };
 pub(crate) struct WorkflowEndpoints;
 impl WorkflowEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/workflows", Self::list);
-        routes.get("/workflows/{id}", Self::load);
-        routes.post("/workflows/save", Self::save);
-        routes.post("/workflow-runs", Self::run);
-        routes.post("/datasets/cameras", Self::cameras);
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new()
+            .route("/workflows", get(Self::list))
+            .route("/workflows/{id}", get(Self::load))
+            .route("/workflows/save", post(Self::save))
+            .route("/workflow-runs", post(Self::run))
+            .route("/datasets/cameras", post(Self::cameras))
     }
     async fn list(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,

@@ -4,7 +4,6 @@ use crate::runs::RunPhase;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct RunExecution {
     phase: RunPhase,
@@ -21,7 +20,6 @@ struct RunExecution {
 }
 
 /// One judged run: submitted by the browser, answered by the backend.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct CurationRunSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,7 +97,6 @@ impl CurationRunSnapshot {
 
 /// Exact counts over the whole population, even when the listed roster is
 /// bounded.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CurationTotals {
     episodes: u64,
@@ -136,7 +133,6 @@ impl CurationTotals {
 }
 
 /// The episode statistics every verdict carries, straight from the roster.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeFacts {
     id: String,
@@ -191,7 +187,6 @@ impl EpisodeFacts {
 
 /// One episode's judgement: its facts, the rules that fired, and the
 /// transforms it would receive.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct CurationVerdict {
     episode: EpisodeFacts,
@@ -249,7 +244,6 @@ impl CurationVerdict {
 }
 
 /// Everything a completed run produced.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct CurationOutcome {
     totals: CurationTotals,
@@ -317,7 +311,6 @@ impl CurationOutcome {
 }
 
 /// The exact judged recipe travels with its run.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CurationRun {
     curation: CurationSpec,
@@ -340,7 +333,6 @@ impl CurationRun {
 }
 
 /// Exact sequential impact, measured over the population entering this node.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CurationStageImpact {
     id: String,
@@ -353,7 +345,6 @@ pub struct CurationStageImpact {
     #[serde(default)]
     scored_episode_ids: Option<Vec<String>>,
 }
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct StageTimeImpact {
     retained_ns: u64,

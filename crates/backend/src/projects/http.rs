@@ -1,17 +1,16 @@
 //! HTTP endpoints for project.
 
-use crate::http::contract::ApiRoutes;
 use crate::http::delivery::{HttpFailure, ScopedProject};
 use crate::projects::context::StudioContext;
 
-use axum::Json;
+use axum::{Json, Router, routing::post};
 use spiral_robotics_common::datasets::ProjectImportSummary;
 
 pub(crate) struct ProjectEndpoints;
 
 impl ProjectEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.post("/project/import", Self::import_project);
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new().route("/project/import", post(Self::import_project))
     }
 
     async fn import_project(
@@ -79,14 +78,6 @@ impl axum::extract::FromRequest<StudioContext> for ProjectUpload {
         _: &StudioContext,
     ) -> Result<Self, Self::Rejection> {
         Ok(Self(request))
-    }
-}
-impl crate::http::contract::RequestSchema for ProjectUpload {
-    fn describe(
-        operation: &mut crate::http::contract::OperationSchema,
-        _: &mut schemars::SchemaGenerator,
-    ) {
-        operation.upload("application/vnd.spiral-robotics.project");
     }
 }
 

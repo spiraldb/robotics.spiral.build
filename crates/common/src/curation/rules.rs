@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 /// How a fact is compared. Text facts use the text operators; numbers use
 /// the ordering operators; either may test for presence.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConditionOp {
@@ -90,7 +89,6 @@ impl ConditionOp {
 }
 
 /// The right-hand side of a comparison.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ConditionValue {
@@ -123,7 +121,6 @@ impl ConditionValue {
 }
 
 /// `fact op value`, judged per episode.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleCondition {
@@ -199,7 +196,6 @@ impl RuleCondition {
 }
 
 /// When the condition holds, the episode is excluded and this rule is why.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CurationRule {
@@ -268,7 +264,6 @@ impl CurationRule {
 }
 
 /// What a transform does to the episodes it applies to.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransformOperation {
@@ -406,7 +401,6 @@ impl TransformOperation {
 
 /// A transform in the recipe, applied to every kept episode or only to the
 /// kept episodes that satisfy its condition.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CurationTransform {

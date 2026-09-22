@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowPlan {
     report: Option<SpiralPlanReport>,
@@ -59,7 +58,6 @@ impl WorkflowPlan {
 }
 
 /// The native report is preserved, including text views and optional diagnostics.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SpiralPlanReport {
     explain_schema_version: u32,
@@ -90,7 +88,6 @@ impl SpiralPlanReport {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DiagnosticPlan {
     schema_version: u32,
@@ -131,7 +128,6 @@ impl DiagnosticPlan {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DiagnosticNode {
     id: u64,

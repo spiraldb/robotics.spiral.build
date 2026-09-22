@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
 use image::imageops::FilterType;
@@ -935,14 +935,11 @@ trait RestoredRolloutSnapshot {
 }
 
 impl RestoredRolloutSnapshot for RolloutSnapshot {
+    /// A running rollout is stored only when it starts, so when its process
+    /// stopped is unknown: the restored run has no finish time. Deriving the
+    /// restore from stored state alone keeps every read of it identical.
     fn restored_after_restart(self) -> Self {
         if self.phase().active() {
-            let finished_ms = Some(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
-                    .unwrap_or(0),
-            );
             return Self::new(
                 self.session_id().map(str::to_owned),
                 self.run_id().map(str::to_owned),
@@ -952,7 +949,7 @@ impl RestoredRolloutSnapshot for RolloutSnapshot {
             .with_duration(self.duration_seconds())
             .with_lifecycle(RolloutPhase::Failed, self.started_ms())
             .with_completion(
-                finished_ms,
+                None,
                 Some("Studio stopped before this rollout completed.".to_owned()),
             )
             .with_warning(Some(

@@ -9,7 +9,6 @@ use crate::recording::RecordingProgress;
 pub mod visualization;
 
 /// A saved robot as the Studio sees it: its configuration and live connection.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RobotSummary {
     config: config::RobotConfig,
@@ -68,7 +67,6 @@ impl RobotSummary {
 /// already knows the temperature and voltage it will fault at, and a threshold
 /// copied out of a datasheet is a threshold that can disagree with the motor in
 /// front of the operator.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct MotorLimits {
     max_temperature_celsius: Option<f64>,
@@ -120,7 +118,6 @@ impl MotorLimits {
 }
 
 /// Serial settings for a robot's motor bus.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PortSettings {
     path: String,
@@ -160,7 +157,6 @@ impl PortSettings {
 /// position nobody has told the studio, and the honest thing to do with an
 /// unknown position is not to draw one — a frustum at the origin would be a
 /// claim about the hardware rather than a picture of it.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CameraMount {
     /// Link in the robot description the camera rides, or `None` for one fixed
@@ -199,7 +195,6 @@ impl CameraMount {
 }
 
 /// Whether a robot's motor bus is currently open.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConnectionStatus {
     connected: bool,
@@ -222,7 +217,6 @@ impl ConnectionStatus {
 }
 
 /// A camera the server knows about.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CameraStatus {
     /// Stable device identifier, also used in stream URLs.
@@ -234,7 +228,6 @@ pub struct CameraStatus {
     state: CameraStreamState,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CameraStreamFormat {
     width: u32,
@@ -248,7 +241,6 @@ impl CameraStreamFormat {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CameraStreamState {
     streaming: bool,
@@ -308,7 +300,6 @@ impl CameraStatus {
 }
 
 /// A serial port offered as a candidate motor bus.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SerialPortSummary {
     path: String,
@@ -348,7 +339,6 @@ impl SerialPortSummary {
 }
 
 /// The operating mode the studio is in.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ModeSelection {
@@ -376,7 +366,6 @@ impl ModeSelection {
 }
 
 /// The selected mode plus whatever went wrong entering or running it.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModeStatus {
     selection: ModeSelection,
@@ -413,7 +402,6 @@ impl ModeStatus {
 }
 
 /// A live sample of every connected robot.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TelemetryFrame {
     sequence: u64,
@@ -466,7 +454,6 @@ impl TelemetryFrame {
 }
 
 /// One robot's live state.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RobotTelemetry {
     id: String,
@@ -532,7 +519,6 @@ impl RobotTelemetry {
 }
 
 /// One joint's live state.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct JointTelemetry {
     #[serde(flatten)]
@@ -546,7 +532,6 @@ pub struct JointTelemetry {
     condition: MotorCondition,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct JointIdentity {
     name: String,
@@ -562,7 +547,6 @@ impl JointIdentity {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct JointKinematics {
     raw: i64,
@@ -606,7 +590,6 @@ impl JointKinematics {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct MotorElectricalReadings {
     #[serde(default)]
@@ -631,7 +614,6 @@ impl MotorElectricalReadings {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct JointDiagnostics {
     #[serde(flatten)]
@@ -795,7 +777,6 @@ impl JointTelemetry {
 }
 
 /// A fault a motor reports about itself.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MotorFault {
@@ -825,7 +806,6 @@ impl MotorFault {
 /// How a motor is doing against its own limits.
 ///
 /// Ordered worst-last so an arm's condition is the maximum of its motors'.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MotorCondition {
@@ -842,7 +822,6 @@ impl JointTelemetry {
 }
 
 /// Live progress of a calibration sweep.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CalibrationProgress {
     joints: Vec<CalibrationJointProgress>,
@@ -866,7 +845,6 @@ impl CalibrationProgress {
 ///
 /// Carries its own name rather than relying on position, so the UI never has
 /// to assume two independently built lists are in the same order.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CalibrationJointProgress {
     name: String,
@@ -1067,7 +1045,6 @@ pub use requests::RobotGoal;
 pub mod config;
 
 /// Current native hardware observations, independent of saved robot configuration.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HardwareStatus {
     mode: ModeStatus,

@@ -1,15 +1,21 @@
 //! Rollout endpoints.
-use crate::http::contract::ApiRoutes;
 use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
-use axum::Json;
+use crate::projects::context::StudioContext;
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
 use spiral_robotics_common::rollout::{RolloutConfig, RolloutSnapshot};
 pub(crate) struct RolloutEndpoints;
 impl RolloutEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/rollout-runs", Self::fetch_rollout);
-        routes.get("/rollout-runs/{id}", Self::fetch_run);
-        routes.post("/rollout-runs", Self::start_rollout);
-        routes.post("/rollout-runs/{id}/stop", Self::stop_rollout);
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new()
+            .route(
+                "/rollout-runs",
+                get(Self::fetch_rollout).post(Self::start_rollout),
+            )
+            .route("/rollout-runs/{id}", get(Self::fetch_run))
+            .route("/rollout-runs/{id}/stop", post(Self::stop_rollout))
     }
     async fn start_rollout(
         ScopedProject(commands): ScopedProject<crate::rollout::commands::RolloutCommands>,

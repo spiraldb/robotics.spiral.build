@@ -2,7 +2,6 @@
 use super::*;
 
 /// Updates project connection and compute/video preferences together.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsUpdate {
@@ -34,7 +33,6 @@ impl SettingsUpdate {
 }
 
 /// Named HTTP response fields for ConnectionTest.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionTest {
     connected: bool,

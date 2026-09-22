@@ -1,28 +1,35 @@
 //! Compose the feature-owned HTTP endpoints. No application behavior lives here.
-use super::contract::ApiRoutes;
+use super::delivery::HttpFailure;
 use crate::projects::context::StudioContext;
-use axum::Router;
+use axum::{
+    Router,
+    http::{HeaderValue, header},
+};
+use tower_http::set_header::SetResponseHeaderLayer;
 pub(super) struct StudioApi;
 impl StudioApi {
     pub(super) fn router(studio: StudioContext) -> Router {
-        Self::routes().into_router(studio)
-    }
-    pub(super) fn routes() -> ApiRoutes {
-        let mut routes = ApiRoutes::new();
-        crate::projects::http::ProjectEndpoints::register(&mut routes);
-        crate::transport::http::TransportEndpoints::register(&mut routes);
-        crate::recording::http::RecordingEndpoints::register(&mut routes);
-        crate::training::http::TrainingEndpoints::register(&mut routes);
-        crate::workflow::http::WorkflowEndpoints::register(&mut routes);
-        crate::curation::http::CurationEndpoints::register(&mut routes);
-        crate::exploration::http::ExplorationEndpoints::register(&mut routes);
-        crate::robots::http::RobotEndpoints::register(&mut routes);
-        crate::data::settings_http::SettingsEndpoints::register(&mut routes);
-        crate::data::http::DatasetQueryEndpoints::register(&mut routes);
-        crate::data::project_download::ProjectDownload::register(&mut routes);
-        crate::robots::camera_preview::CameraPreview::register(&mut routes);
-        crate::rollout::http::RolloutEndpoints::register(&mut routes);
-        routes
+        Router::new()
+            .merge(crate::projects::http::ProjectEndpoints::router())
+            .merge(crate::transport::http::TransportEndpoints::router())
+            .merge(crate::recording::http::RecordingEndpoints::router())
+            .merge(crate::training::http::TrainingEndpoints::router())
+            .merge(crate::workflow::http::WorkflowEndpoints::router())
+            .merge(crate::curation::http::CurationEndpoints::router())
+            .merge(crate::exploration::http::ExplorationEndpoints::router())
+            .merge(crate::robots::http::RobotEndpoints::router())
+            .merge(crate::data::settings_http::SettingsEndpoints::router())
+            .merge(crate::data::http::DatasetQueryEndpoints::router())
+            .merge(crate::data::project_download::ProjectDownload::router())
+            .merge(crate::robots::camera_preview::CameraPreview::router())
+            .merge(crate::rollout::http::RolloutEndpoints::router())
+            .fallback(HttpFailure::not_found)
+            .method_not_allowed_fallback(HttpFailure::method_not_allowed)
+            .layer(SetResponseHeaderLayer::overriding(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            ))
+            .with_state(studio)
     }
 }
 #[cfg(test)]

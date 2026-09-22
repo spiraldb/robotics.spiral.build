@@ -1,88 +1,41 @@
 use super::*;
-use axum::{body::Body, response::IntoResponse};
+use crate::projects::tests::{ENDPOINT, ProjectFixture};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode, header},
+};
+use spiral_robotics_common::project::ProjectKey;
+use tower::ServiceExt;
 
-fn submitted(content_type: Option<&str>, body: Body) -> Request {
-    let mut request = Request::builder().method("POST").uri("/explorations/save");
-    if let Some(content_type) = content_type {
-        request = request.header(header::CONTENT_TYPE, content_type);
-    }
-    request.body(body).unwrap()
-}
-
-async fn read(request: Request, limit: usize) -> Result<ExplorationDocument, StatusCode> {
-    SubmittedExploration::read(request, limit)
-        .await
-        .map(|SubmittedExploration(document)| document)
-        .map_err(|failure| failure.into_response().status())
-}
-
-#[tokio::test]
-async fn a_document_is_accepted_and_malformed_bodies_keep_their_own_failure() {
-    let document = ExplorationDocument::new("folding", "Cloth folding", 1, r#"{"nodes":[]}"#);
-    let body = serde_json::to_string(&document).unwrap();
-    assert_eq!(
-        read(
-            submitted(Some("application/json"), Body::from(body.clone())),
-            MAX_SAVE_BODY_BYTES
-        )
-        .await
-        .unwrap(),
-        document
-    );
-    for (content_type, body, expected) in [
-        (None, body.clone(), StatusCode::UNSUPPORTED_MEDIA_TYPE),
-        (
-            Some("text/plain"),
-            body.clone(),
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        ),
-        (
-            Some("application/json"),
-            "{".into(),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            Some("application/json"),
-            r#"{"id":"folding"}"#.into(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
-    ] {
-        assert_eq!(
-            read(
-                submitted(content_type, Body::from(body)),
-                MAX_SAVE_BODY_BYTES
-            )
-            .await
-            .unwrap_err(),
-            expected
-        );
-    }
-}
-
-#[tokio::test]
-async fn the_request_bound_holds_against_the_advertised_and_the_streamed_length() {
-    let advertised = Request::builder()
+async fn save_status(fixture: &ProjectFixture, body: String) -> StatusCode {
+    let request = Request::builder()
         .method("POST")
+        .uri("/explorations/save")
+        .header(ProjectKey::ENDPOINT_HEADER, ENDPOINT)
+        .header(ProjectKey::PROJECT_HEADER, "exploration_project")
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CONTENT_LENGTH, "9")
-        .body(Body::empty())
+        .body(Body::from(body))
         .unwrap();
-    assert_eq!(
-        read(advertised, 8).await.unwrap_err(),
-        StatusCode::PAYLOAD_TOO_LARGE
-    );
-    // A chunked body that never advertises a length is cut off just as firmly.
-    let chunks = futures_util::stream::iter([
-        Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"1234")),
-        Ok(bytes::Bytes::from_static(b"5678")),
-    ]);
-    assert_eq!(
-        read(
-            submitted(Some("application/json"), Body::from_stream(chunks)),
-            7
-        )
+    ExplorationEndpoints::router()
+        .with_state(StudioContext::new(fixture.projects.clone()))
+        .oneshot(request)
         .await
-        .unwrap_err(),
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn a_save_may_exceed_the_default_json_bound_but_not_its_own() {
+    let fixture = ProjectFixture::new();
+    let document =
+        ExplorationDocument::new("folding", "Cloth folding", 1, "x".repeat(4 * 1024 * 1024));
+    assert_eq!(
+        save_status(&fixture, serde_json::to_string(&document).unwrap()).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        save_status(&fixture, " ".repeat(MAX_SAVE_BODY_BYTES + 1)).await,
         StatusCode::PAYLOAD_TOO_LARGE
     );
+    fixture.projects.hardware().shutdown().await.unwrap();
 }

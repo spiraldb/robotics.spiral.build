@@ -9,7 +9,6 @@ use crate::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_WORKFLOW_ID: &str = "default";
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowSpec {
@@ -85,7 +84,6 @@ impl WorkflowSpec {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowValidationReport {
     #[serde(default)]
@@ -105,7 +103,6 @@ impl WorkflowValidationIssue {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowValidationIssue {
     code: String,
@@ -123,7 +120,6 @@ impl WorkflowValidationIssue {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct RunExecution {
     phase: WorkflowRunPhase,
@@ -135,7 +131,6 @@ struct RunExecution {
     result_stale: bool,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowRunSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,7 +199,6 @@ impl WorkflowRunSnapshot {
 /// Workflow runs share the one native run lifecycle.
 pub use crate::runs::RunPhase as WorkflowRunPhase;
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowAgentRole {
@@ -213,7 +207,6 @@ pub enum WorkflowAgentRole {
     Synthetic,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowAgentMessagePhase {
@@ -223,7 +216,6 @@ pub enum WorkflowAgentMessagePhase {
     Cancelled,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowAgentToolPhase {
@@ -232,7 +224,6 @@ pub enum WorkflowAgentToolPhase {
     Failed,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentArtifactReceipt {
@@ -240,7 +231,6 @@ pub struct WorkflowAgentArtifactReceipt {
     revision: u64,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentToolSummary {
@@ -254,7 +244,6 @@ pub struct WorkflowAgentToolSummary {
     receipt: Option<WorkflowAgentArtifactReceipt>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct MessageIdentity {
     id: String,
@@ -263,7 +252,6 @@ struct MessageIdentity {
     created_ms: u64,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct MessageContent {
     phase: WorkflowAgentMessagePhase,
@@ -273,7 +261,6 @@ struct MessageContent {
     run_id: Option<String>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentMessage {
@@ -347,7 +334,6 @@ impl WorkflowAgentMessage {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowAgentPhase {
@@ -366,7 +352,6 @@ impl WorkflowAgentPhase {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct SessionIdentity {
     workflow_id: String,
@@ -375,7 +360,6 @@ struct SessionIdentity {
     updated_ms: u64,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct SessionActivity {
     phase: WorkflowAgentPhase,
@@ -386,7 +370,6 @@ struct SessionActivity {
     error: Option<String>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowAgentSession {
@@ -461,7 +444,6 @@ impl WorkflowAgentSession {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowSummary {
     id: String,

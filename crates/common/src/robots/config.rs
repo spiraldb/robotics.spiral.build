@@ -11,12 +11,10 @@ use super::visualization::RobotVisualization;
 use super::{CameraMount, PortSettings};
 
 /// One robot instance: exactly one arm, its motor bus, and its cameras.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RobotConfigFields")]
 pub struct RobotConfig(RobotConfigFields);
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RobotConfigFields {
@@ -208,7 +206,6 @@ impl RobotConfig {
 }
 
 /// One motor on the robot's bus.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MotorConfig {
@@ -278,7 +275,6 @@ impl MotorConfig {
 }
 
 /// Whether increasing raw readings move the joint in its normal or reversed direction.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MotorDirection {
@@ -288,7 +284,6 @@ pub enum MotorDirection {
 }
 
 /// Raw, unhomed encoder travel of one motor, with its center strictly inside.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MotorRange {
@@ -331,7 +326,6 @@ impl MotorRange {
 }
 
 /// A camera assigned to one of the robot's roles, such as `wrist` or `top`.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CameraConfig {
@@ -352,7 +346,6 @@ impl CameraConfig {
 }
 
 /// Save a complete configuration over the revision its editor started from.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RobotConfigSave {

@@ -3,7 +3,6 @@ use super::*;
 use std::collections::BTreeMap;
 
 /// Normalized joint targets, keyed by motor name.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RobotGoal {

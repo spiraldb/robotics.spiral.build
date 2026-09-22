@@ -17,7 +17,6 @@ pub use robot::{DatasetRobot, DatasetRobotSave, JointBinding, JointSelector};
 use serde::{Deserialize, Serialize};
 
 /// Data-plane relation counts and warnings from restoring a project bundle.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectImportSummary {
     relations: u64,
@@ -48,7 +47,6 @@ impl ProjectImportSummary {
 }
 
 /// Source and destination shared by inspection and the eventual import.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HuggingFaceDatasetSource {
@@ -86,7 +84,6 @@ impl HuggingFaceDatasetSource {
 }
 
 /// One immutable repository file selected for import.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceDatasetFile {
     path: String,
@@ -110,7 +107,6 @@ impl HuggingFaceDatasetFile {
 }
 
 /// Read-only source inspection shown before Studio changes the Spiral catalog.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceDatasetInspection {
     #[serde(flatten)]
@@ -121,7 +117,6 @@ pub struct HuggingFaceDatasetInspection {
     warnings: Vec<String>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceInspectionSource {
     dataset_id: String,
@@ -130,7 +125,6 @@ pub struct HuggingFaceInspectionSource {
     resolved_revision: String,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceInspectionContents {
     files: Vec<HuggingFaceDatasetFile>,
@@ -139,7 +133,6 @@ pub struct HuggingFaceInspectionContents {
 }
 
 /// Durable result of materializing one inspected Hugging Face snapshot.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceDatasetImportSummary {
     #[serde(flatten)]
@@ -150,7 +143,6 @@ pub struct HuggingFaceDatasetImportSummary {
     warnings: Vec<String>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceResolvedSource {
     dataset_id: String,
@@ -158,7 +150,6 @@ pub struct HuggingFaceResolvedSource {
     resolved_revision: String,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceImportOutcome {
     files: u64,

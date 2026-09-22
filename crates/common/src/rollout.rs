@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_ROLLOUT_DURATION_SECONDS: u32 = 30;
 pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RolloutConfig {
     run_id: String,
@@ -49,7 +48,6 @@ impl RolloutConfig {
 }
 
 /// Authoritative lifecycle of the native inference and motor-control task.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RolloutPhase {
@@ -72,7 +70,6 @@ impl RolloutPhase {
 }
 
 /// Measurements accumulated by the active native rollout session.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RolloutMetrics {
     inference_count: u64,
@@ -138,7 +135,6 @@ impl RolloutMetrics {
 }
 
 /// Browser-safe state for rollout. Model bytes and device handles stay server-side.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RolloutSnapshot {
     #[serde(flatten)]
@@ -148,7 +144,6 @@ pub struct RolloutSnapshot {
     metrics: RolloutMetrics,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct RolloutIdentity {
     session_id: Option<String>,
@@ -159,7 +154,6 @@ struct RolloutIdentity {
     duration_seconds: Option<u32>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct RolloutLifecycle {
     phase: RolloutPhase,

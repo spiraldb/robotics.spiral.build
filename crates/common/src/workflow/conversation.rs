@@ -8,7 +8,6 @@ use std::collections::BTreeSet;
 const CONVERSATION_VERSION: u32 = 4;
 const MAX_CONVERSATION_BYTES: usize = 16 * 1024 * 1024;
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowConversation {
@@ -147,7 +146,6 @@ impl WorkflowConversation {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderMessage {
@@ -225,28 +223,24 @@ impl ProviderMessage {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 enum ProviderContent {
     Text(String),
     Parts(Vec<ProviderPart>),
 }
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum ProviderPart {
     Text { text: String },
     ImageUrl { image_url: ProviderImageUrl },
 }
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProviderImageUrl {
     url: String,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderToolCall {
@@ -256,7 +250,6 @@ pub struct ProviderToolCall {
     function: ProviderFunctionCall,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderFunctionCall {

@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 const MESSAGE_POSITION: &str =
     "log_time, publish_time, channel_id, chunk_start_offset, sample_ordinal";
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicRevision {
     variant: String,
@@ -24,7 +23,6 @@ impl TopicRevision {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageRead {
@@ -89,7 +87,6 @@ impl MessageRead {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageCursor {
@@ -120,7 +117,6 @@ impl MessageCursor {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageWindow {

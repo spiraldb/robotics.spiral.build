@@ -1,9 +1,12 @@
 //! HTTP endpoints for queries.
 
-use crate::http::contract::ApiRoutes;
-use crate::http::delivery::{ApiJson, HttpFailure, ScopedProject};
+use crate::http::delivery::{ApiJson, ArrowResponse, HttpFailure, ScopedProject};
+use crate::projects::context::StudioContext;
 
-use axum::Json;
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
 use spiral_robotics_common::datasets::{
     DatasetInspection, DatasetSelection, DatasetSummary, ProjectResource,
 };
@@ -15,26 +18,30 @@ use spiral_robotics_common::relations::{QueryRequest, RelationCatalog, SpiralQue
 pub(crate) struct DatasetQueryEndpoints;
 
 impl DatasetQueryEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/datasets", Self::datasets);
-        routes.get("/data-catalog", Self::project_resources);
-        routes.post("/datasets/inspect", Self::inspect_dataset);
-        routes.post("/datasets/robot", Self::dataset_robot);
-        routes.post("/datasets/robot/save", Self::save_dataset_robot);
-        routes.post("/datasets/episode-topics", Self::episode_topics);
-        routes.post("/datasets/episode-coverage", Self::episode_coverage);
-        routes.get("/relations", Self::relation_catalog);
-        routes.post("/queries", Self::run_spiral_query);
-        routes.post("/queries/episode", Self::run_episode_query);
-        routes.post("/queries/episode/arrow", Self::run_episode_arrow_query);
-        routes.post(
-            "/datasets/hugging-face/inspect",
-            Self::inspect_hugging_face_dataset,
-        );
-        routes.post(
-            "/datasets/hugging-face/import",
-            Self::import_hugging_face_dataset,
-        );
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new()
+            .route("/datasets", get(Self::datasets))
+            .route("/data-catalog", get(Self::project_resources))
+            .route("/datasets/inspect", post(Self::inspect_dataset))
+            .route("/datasets/robot", post(Self::dataset_robot))
+            .route("/datasets/robot/save", post(Self::save_dataset_robot))
+            .route("/datasets/episode-topics", post(Self::episode_topics))
+            .route("/datasets/episode-coverage", post(Self::episode_coverage))
+            .route("/relations", get(Self::relation_catalog))
+            .route("/queries", post(Self::run_spiral_query))
+            .route("/queries/episode", post(Self::run_episode_query))
+            .route(
+                "/queries/episode/arrow",
+                post(Self::run_episode_arrow_query),
+            )
+            .route(
+                "/datasets/hugging-face/inspect",
+                post(Self::inspect_hugging_face_dataset),
+            )
+            .route(
+                "/datasets/hugging-face/import",
+                post(Self::import_hugging_face_dataset),
+            )
     }
     async fn project_resources(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
@@ -102,8 +109,8 @@ impl DatasetQueryEndpoints {
     async fn run_episode_arrow_query(
         ScopedProject(commands): ScopedProject<crate::data::commands::DataCommands>,
         ApiJson(request): ApiJson<spiral_robotics_common::relations::EpisodeQueryRequest>,
-    ) -> Result<crate::http::contract::ArrowResponse, HttpFailure> {
-        Ok(crate::http::contract::ArrowResponse(
+    ) -> Result<ArrowResponse, HttpFailure> {
+        Ok(ArrowResponse(
             commands.query_for_episode_arrow(request).await?,
         ))
     }

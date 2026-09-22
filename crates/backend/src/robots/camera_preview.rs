@@ -1,9 +1,9 @@
 //! Browser-native camera preview delivery.
 
-use crate::http::contract::{ApiRoutes, MediaEndpoint};
 use crate::projects::context::StudioContext;
 use crate::robotics::cameras::Frame;
 use axum::{
+    Router,
     body::Body,
     extract::{Query, State},
     http::{StatusCode, header},
@@ -20,11 +20,8 @@ pub(crate) struct CameraPreview;
 
 impl CameraPreview {
     /// Camera previews stay HTTP because browser image elements consume MJPEG URLs.
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.media("/cameras/stream.mjpeg", MediaEndpoint::new(get(Self::camera_stream), serde_json::json!({"get": {
-            "operationId": "camera_stream", "parameters": [{"name": "id", "in": "query", "required": true, "schema": {"type": "string"}}],
-            "responses": {"200": {"description": "Live JPEG frames", "content": {"multipart/x-mixed-replace": {"schema": {"type": "string", "format": "binary"}}}}}
-        }})["get"].take()));
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new().route("/cameras/stream.mjpeg", get(Self::camera_stream))
     }
 }
 

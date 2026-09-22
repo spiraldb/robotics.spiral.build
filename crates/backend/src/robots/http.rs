@@ -1,9 +1,12 @@
 //! HTTP endpoints for robots.
 
-use crate::http::contract::ApiRoutes;
 use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
+use crate::projects::context::StudioContext;
 
-use axum::Json;
+use axum::{
+    Json, Router,
+    routing::{get, post, put},
+};
 use spiral_robotics_common::robots::{
     CameraStatus, ModeSelection, RobotGoal, RobotSummary, SerialPortSummary,
 };
@@ -11,24 +14,36 @@ use spiral_robotics_common::robots::{
 pub(crate) struct RobotEndpoints;
 
 impl RobotEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/serial-ports", Self::list_serial_ports);
-        routes.post("/cameras/refresh", Self::refresh_cameras);
-        routes.get("/hardware/status", Self::fetch_hardware_status);
-        routes.get("/robots/telemetry", Self::fetch_telemetry);
-        routes.get("/robots", Self::list_robots);
-        routes.post("/robots/save", Self::save_robot);
-        routes.get("/robots/{id}", Self::get_robot);
-        routes.delete("/robots/{id}", Self::delete_robot);
-        routes.post("/robots/{id}/connect", Self::connect_robot);
-        routes.post("/robots/{id}/disconnect", Self::disconnect_robot);
-        routes.post("/robots/{id}/hold", Self::hold_robot);
-        routes.post("/robots/{id}/release", Self::release_robot);
-        routes.post("/robots/{id}/goal", Self::set_robot_goal);
-        routes.post("/robots/{id}/calibration/start", Self::start_calibration);
-        routes.post("/robots/{id}/calibration/finish", Self::finish_calibration);
-        routes.post("/robots/{id}/calibration/cancel", Self::cancel_calibration);
-        routes.put("/mode", Self::set_mode);
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new()
+            .route("/serial-ports", get(Self::list_serial_ports))
+            .route("/cameras/refresh", post(Self::refresh_cameras))
+            .route("/hardware/status", get(Self::fetch_hardware_status))
+            .route("/robots/telemetry", get(Self::fetch_telemetry))
+            .route("/robots", get(Self::list_robots))
+            .route("/robots/save", post(Self::save_robot))
+            .route(
+                "/robots/{id}",
+                get(Self::get_robot).delete(Self::delete_robot),
+            )
+            .route("/robots/{id}/connect", post(Self::connect_robot))
+            .route("/robots/{id}/disconnect", post(Self::disconnect_robot))
+            .route("/robots/{id}/hold", post(Self::hold_robot))
+            .route("/robots/{id}/release", post(Self::release_robot))
+            .route("/robots/{id}/goal", post(Self::set_robot_goal))
+            .route(
+                "/robots/{id}/calibration/start",
+                post(Self::start_calibration),
+            )
+            .route(
+                "/robots/{id}/calibration/finish",
+                post(Self::finish_calibration),
+            )
+            .route(
+                "/robots/{id}/calibration/cancel",
+                post(Self::cancel_calibration),
+            )
+            .route("/mode", put(Self::set_mode))
     }
     async fn list_serial_ports(
         ScopedProject(commands): ScopedProject<crate::robots::commands::DeviceCommands>,

@@ -12,7 +12,6 @@ pub const MAX_EXPLORATION_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ID_LEN: usize = 128;
 const MAX_NAME_LEN: usize = 200;
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExplorationSummary {
@@ -39,7 +38,6 @@ impl ExplorationSummary {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExplorationDocument {

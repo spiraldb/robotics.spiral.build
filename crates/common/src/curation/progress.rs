@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 /// The released, task-specific WARP checkpoint. Its velocity is progress per
 /// unit time relative to expert demonstrations; progress is normalized within
 /// one episode, never a completion probability.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProgressScorer {
@@ -30,7 +29,6 @@ impl ProgressScorer {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressSelection {
@@ -126,7 +124,6 @@ impl ProgressSelection {
 }
 
 /// A review request scores only this recording, independently of other rows.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressScoreRequest {
@@ -147,7 +144,6 @@ impl ProgressScoreRequest {
         &self.selection
     }
 }
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProgressScoreResult {
     episode: crate::datasets::EpisodeSelection,
@@ -165,7 +161,6 @@ impl ProgressScoreResult {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProgressFrame {
     frame_index: u32,

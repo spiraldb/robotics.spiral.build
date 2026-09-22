@@ -5244,7 +5244,6 @@ dependencies = [
  "image",
  "reqwest",
  "safetensors",
- "schemars 1.2.2",
  "serde",
  "serde_json",
  "serde_urlencoded",

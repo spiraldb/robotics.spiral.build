@@ -1,8 +1,8 @@
 //! Browser-native project bundle download.
 
-use crate::http::contract::{ApiRoutes, MediaEndpoint};
 use crate::projects::context::StudioContext;
 use axum::{
+    Router,
     body::Body,
     extract::{Query, State},
     http::{StatusCode, header},
@@ -17,11 +17,8 @@ pub(crate) struct ProjectDownload;
 
 impl ProjectDownload {
     /// Downloads stay HTTP so the browser can stream bytes to a native file.
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.media("/project/export", MediaEndpoint::new(get(Self::export_project), serde_json::json!({"get": {
-            "operationId": "export_project", "parameters": [{"name": "endpoint", "in": "query", "required": true, "schema": {"type": "string"}}, {"name": "project_id", "in": "query", "required": true, "schema": {"type": "string"}}],
-            "responses": {"200": {"description": "Project bundle download", "content": {"application/vnd.spiral-robotics.project": {"schema": {"type": "string", "format": "binary"}}}}}
-        }})["get"].take()));
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new().route("/project/export", get(Self::export_project))
     }
 
     async fn export_project(

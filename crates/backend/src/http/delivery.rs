@@ -4,10 +4,10 @@ use crate::{BackendCommandError, OperationError};
 use axum::{
     Json,
     extract::{FromRequest, FromRequestParts, Path, Query, Request},
-    http::{StatusCode, request::Parts},
+    http::{StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use spiral_robotics_common::command_failure::{CommandFailure, CommandFailureCode};
 use spiral_robotics_common::project::ProjectKey;
 
@@ -134,5 +134,25 @@ impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for ApiPath
             .await
             .map(|Path(value)| Self(value))
             .map_err(|error| HttpFailure::rejection(error.status(), error.body_text()))
+    }
+}
+
+/// A 201 JSON response.
+pub(crate) struct Created<T>(pub(crate) T);
+impl<T: Serialize> IntoResponse for Created<T> {
+    fn into_response(self) -> Response {
+        (StatusCode::CREATED, Json(self.0)).into_response()
+    }
+}
+
+/// A bounded IPC stream with its native schema and record batches.
+pub(crate) struct ArrowResponse(pub(crate) Vec<u8>);
+impl IntoResponse for ArrowResponse {
+    fn into_response(self) -> Response {
+        (
+            [(header::CONTENT_TYPE, "application/vnd.apache.arrow.stream")],
+            self.0,
+        )
+            .into_response()
     }
 }

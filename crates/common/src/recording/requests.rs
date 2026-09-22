@@ -2,7 +2,6 @@
 use super::*;
 
 /// Selects the dataset for a new recording.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingStart {
@@ -24,7 +23,6 @@ impl RecordingStart {
 }
 
 /// Chooses whether stopping a recording retains its episode.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingFinish {
@@ -40,7 +38,6 @@ impl RecordingFinish {
 }
 
 /// Sets the paused state of the current recording.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PauseUpdate {
@@ -55,7 +52,6 @@ impl PauseUpdate {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingCameraRequest {

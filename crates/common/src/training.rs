@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 
 /// The policy family executed by the native training runtime.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingPolicy {
@@ -29,7 +28,6 @@ impl TrainingPolicy {
 
 /// Model-specific ACT settings kept together so checkpoints remain
 /// self-describing as the training UI grows.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActTrainingConfig {
     #[serde(flatten)]
@@ -40,7 +38,6 @@ pub struct ActTrainingConfig {
     attention: ActAttentionConfig,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActInputConfig {
     /// Camera stream IDs that must be present for every sampled anchor.
@@ -62,7 +59,6 @@ pub struct ActInputConfig {
     pretrained_backbone: bool,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActArchitectureConfig {
     #[serde(default = "ActArchitectureConfig::default_hidden_dim")]
@@ -77,7 +73,6 @@ pub struct ActArchitectureConfig {
     decoder_layers: usize,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActLayerCounts {
     encoder: usize,
@@ -85,7 +80,6 @@ pub struct ActLayerCounts {
     decoder: usize,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActAttentionConfig {
     #[serde(default = "ActAttentionConfig::default_heads")]
@@ -275,7 +269,6 @@ impl ActTrainingConfig {
 }
 
 /// Authoritative lifecycle of one backend-owned native training run.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingRunPhase {
@@ -306,7 +299,6 @@ impl TrainingRunPhase {
 }
 
 /// Everything needed to reproduce one run. Spiral is the only sample source.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TrainingConfig {
     #[serde(flatten)]
@@ -317,7 +309,6 @@ pub struct TrainingConfig {
     act: ActTrainingConfig,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct TrainingDataSelection {
     run_name: String,
@@ -336,7 +327,6 @@ pub(crate) struct TrainingDataSelection {
     device: String,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TrainingOptimizationConfig {
     #[serde(default = "TrainingOptimizationConfig::default_steps")]
@@ -552,7 +542,6 @@ impl TrainingOptimizationConfig {
 }
 
 /// One sample on the shared training-step axis used by every Studio plot.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingMetricPoint {
     #[serde(flatten)]
@@ -563,7 +552,6 @@ pub struct TrainingMetricPoint {
     timings: TrainingStageTimings,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingMetricProgress {
     step: u64,
@@ -575,7 +563,6 @@ struct TrainingMetricProgress {
     event: Option<String>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingResourceMetrics {
     /// Latest requested video payload bytes divided by total sample preparation time.
@@ -592,7 +579,6 @@ struct TrainingResourceMetrics {
     memory_bytes: Option<u64>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingStageTimings {
     /// Spiral query, frame decode, normalization, and batch assembly time.
@@ -757,7 +743,6 @@ impl TrainingMetricPoint {
 }
 
 /// An inference checkpoint durably ingested into Spiral.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingCheckpoint {
     step: u64,
@@ -826,7 +811,6 @@ impl TrainingCheckpoint {
 
 /// Dataset selection captured when a run starts. Project and namespace come
 /// from Studio's one process-owned Spiral destination.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingSource {
     /// Relational dataset row whose episodes supplied this run.
@@ -851,7 +835,6 @@ impl TrainingSource {
 }
 
 /// Result of checking every dependency needed before a native run can start.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingReadiness {
     ready: bool,
@@ -861,7 +844,6 @@ pub struct TrainingReadiness {
     summary: String,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingRuntimeInfo {
     id: String,
@@ -938,7 +920,6 @@ impl TrainingRuntimeInfo {
 
 /// Browser-safe run state. Checkpoint bytes and task handles never cross the
 /// wire; only their durable Spiral identity does.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingRun {
     #[serde(flatten)]
@@ -949,7 +930,6 @@ pub struct TrainingRun {
     history: TrainingRunHistory,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingRunIdentity {
     id: String,
@@ -961,7 +941,6 @@ struct TrainingRunIdentity {
     runtime_endpoint: String,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingRunLifecycle {
     phase: TrainingRunPhase,
@@ -971,7 +950,6 @@ struct TrainingRunLifecycle {
     message: Option<String>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingRunHistory {
     metrics: Vec<TrainingMetricPoint>,
@@ -1082,7 +1060,6 @@ impl TrainingRun {
 }
 
 /// Backend training state and its query projection.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingSnapshot {
     #[serde(default)]

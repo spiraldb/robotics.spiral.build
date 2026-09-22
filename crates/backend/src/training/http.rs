@@ -1,20 +1,28 @@
 //! HTTP endpoints for training.
 
-use crate::http::contract::{ApiRoutes, Created};
-use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
+use crate::http::delivery::{ApiJson, ApiPath, Created, HttpFailure, ScopedProject};
+use crate::projects::context::StudioContext;
 
-use axum::Json;
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
 use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
 
 pub(crate) struct TrainingEndpoints;
 
 impl TrainingEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.post("/training/runs", Self::start_training_run);
-        routes.post("/training/runs/{id}/stop", Self::stop_training_run);
-        routes.delete("/training/runs/{id}", Self::delete_training_run);
-        routes.get("/training/runs", Self::fetch_training);
-        routes.get("/training/runs/{id}", Self::fetch_run);
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new()
+            .route(
+                "/training/runs",
+                get(Self::fetch_training).post(Self::start_training_run),
+            )
+            .route(
+                "/training/runs/{id}",
+                get(Self::fetch_run).delete(Self::delete_training_run),
+            )
+            .route("/training/runs/{id}/stop", post(Self::stop_training_run))
     }
     async fn start_training_run(
         ScopedProject(commands): ScopedProject<crate::training::commands::TrainingCommands>,

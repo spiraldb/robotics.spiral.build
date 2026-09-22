@@ -1,10 +1,13 @@
 //! HTTP endpoints for episodes.
 use spiral_robotics_common::recording_signals::{RecordingCursor, RecordingWindow};
 
-use crate::http::contract::{ApiRoutes, Created};
-use crate::http::delivery::{ApiJson, ApiPath, ApiQuery, HttpFailure, ScopedProject};
+use crate::http::delivery::{ApiJson, ApiPath, ApiQuery, Created, HttpFailure, ScopedProject};
+use crate::projects::context::StudioContext;
 
-use axum::Json;
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
 use spiral_robotics_common::recording::{
     EpisodeInfo, EpisodeInspectionSnapshot, PauseUpdate, RecordingFinish, RecordingStart,
 };
@@ -19,14 +22,19 @@ impl RecordingEndpoints {
         let result = commands.recording_signals(cursor)?;
         Ok(Json(result))
     }
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/recording/signals", Self::fetch_recording_signals);
-        routes.post("/recording", Self::start_recording);
-        routes.patch("/recording", Self::set_recording_paused);
-        routes.post("/recording/stop", Self::stop_recording);
-        routes.delete("/recording/takes/{id}", Self::delete_episode);
-        routes.get("/recording/takes/{id}", Self::inspect_episode);
-        routes.post("/recording/takes/{id}/camera", Self::camera_preview);
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new()
+            .route("/recording/signals", get(Self::fetch_recording_signals))
+            .route(
+                "/recording",
+                post(Self::start_recording).patch(Self::set_recording_paused),
+            )
+            .route("/recording/stop", post(Self::stop_recording))
+            .route(
+                "/recording/takes/{id}",
+                get(Self::inspect_episode).delete(Self::delete_episode),
+            )
+            .route("/recording/takes/{id}/camera", post(Self::camera_preview))
     }
 
     async fn camera_preview(

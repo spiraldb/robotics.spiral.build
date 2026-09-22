@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 const MAX_SAMPLE_FRAMES: usize = 16;
 
 /// Whether a fact compares as a quantity or as text.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactKind {
@@ -24,7 +23,6 @@ impl FactKind {
 }
 
 /// One recorded MCAP topic, optionally pinned to a schema variant.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TopicRef {
@@ -72,7 +70,6 @@ impl TopicRef {
 }
 
 /// Which decoded frames of a camera stand for the episode.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CameraSample {
@@ -124,7 +121,6 @@ impl CameraSample {
 }
 
 /// How a per-episode value is folded from a topic's messages.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldAggregate {
@@ -148,7 +144,6 @@ impl FieldAggregate {
 }
 
 /// The measurement behind a declared fact.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FactMeasure {
@@ -241,7 +236,6 @@ impl CameraSample {
 }
 
 /// A declared measurement with the key rules refer to.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CurationFact {
@@ -287,7 +281,6 @@ impl CurationFact {
 }
 
 /// Facts every episode row already carries; no extra read needed.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinFact {

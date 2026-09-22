@@ -1,10 +1,13 @@
 //! HTTP endpoints for settings.
 
-use crate::http::contract::ApiRoutes;
 use crate::http::delivery::{ApiJson, HttpFailure, ScopedProject};
 use crate::projects::context::StudioContext;
 
-use axum::{Json, extract::State};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use spiral_robotics_common::settings::{
     ConnectionTest, DataSettings, SettingsUpdate, SpiralSettings,
 };
@@ -12,13 +15,18 @@ use spiral_robotics_common::settings::{
 pub(crate) struct SettingsEndpoints;
 
 impl SettingsEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/settings/connection", Self::connection_settings);
-        routes.put("/settings/connection", Self::update_connection);
-        routes.get("/settings", Self::data_settings);
-        routes.put("/settings", Self::update_data_settings);
-        routes.post("/settings/spiral/test", Self::test_spiral_connection);
-        routes.post("/settings/training/test", Self::test_training_runtime);
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new()
+            .route(
+                "/settings/connection",
+                get(Self::connection_settings).put(Self::update_connection),
+            )
+            .route(
+                "/settings",
+                get(Self::data_settings).put(Self::update_data_settings),
+            )
+            .route("/settings/spiral/test", post(Self::test_spiral_connection))
+            .route("/settings/training/test", post(Self::test_training_runtime))
     }
     /// The saved connection names the project a browser starts on.
     async fn connection_settings(

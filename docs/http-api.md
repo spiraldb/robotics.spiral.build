@@ -1,35 +1,9 @@
 # Studio HTTP API
 
-The backend owns the HTTP contract. The Dioxus frontend is an HTTP client with no
-backend crate dependency or server-function bindings. A Qt client, script, or test
-uses the same requests and receives the same policy checks.
-
-`GET /api/openapi.json` provides the OpenAPI 3.1 document, including request,
-response, enum, and error schemas generated from the shared Serde message types.
-It works before project storage is ready. Its paths are relative to `/api`.
-The document's version identifies the API contract; Rust symbol names and Dioxus
-builds do not determine endpoint URLs. Breaking wire changes require an explicit
-contract revision and client migration. This migration removes the former
-`/api/server-functions/*` endpoints.
-
-Version 5.0.0 removes robot replay and physical seek (`POST`/`PATCH /replay`,
-`POST /recording/takes/{id}/seek`, the `replay` mode and telemetry field), the
-robot-discovery context, stream-inspection, and save endpoints (replaced by
-`POST /datasets/robot/save`), `/datasets/episode-messages` (replaced by
-`POST /queries/episode/arrow`), and `/workflows/plan` and `/models/capabilities`
-(both are `/queries` reads). `TopicRevision` no longer carries a dataset version.
-
-Version 4.0.0 removes `/project/status`, the `X-Project-Session` header, and the
-`project_transition` and `project_unavailable` failure codes. The backend no
-longer has a current project: each request names its project with
-`X-Spiral-Endpoint` and `X-Spiral-Project`, and `GET /settings/connection` names
-the project a client starts on.
-
-Version 3.0.0 replaces `/models/status`, `/models/complete`, `/models/decide`, and
-`/datasets/robot-discovery/read-description` with Studio-wide `/credentials` and
-`/proxy`. Provider requests and responses are handled by the frontend. The
-version 2 settings field `spiral.table_prefix` and flat Studio resource names
-remain in use.
+The backend owns the HTTP API. Its only client is the Dioxus frontend, which has no
+backend crate dependency or server-function bindings; the two share request and
+response types through `crates/common` and ship together. There is no generated
+schema or versioned contract.
 
 ## Request and response conventions
 
@@ -38,7 +12,7 @@ remain in use.
 2. Send `X-Spiral-Endpoint: <endpoint>` and `X-Spiral-Project: <project_id>` on
    project reads and commands. Omit the project header before a project is chosen;
    Studio-only features such as robot setup still work. Studio-wide `/credentials`
-   and `/proxy`, `GET /settings/connection`, and OpenAPI need neither header.
+   and `/proxy` and `GET /settings/connection` need neither header.
 3. The backend keeps no current project. A request may name any project on the
    saved endpoint, which the backend reaches with the saved credentials. A request
    naming another endpoint fails with `stale_project`; read the saved connection
@@ -163,8 +137,8 @@ conversation history, and tool execution. Disconnecting cancels the proxied requ
 
 ## Endpoint inventory
 
-All paths below are relative to `/api`. Request and response names refer to the
-schemas served by `/api/openapi.json`. `—` means no request body.
+All paths below are relative to `/api`. Request and response names refer to types
+in `crates/common`. `—` means no request body.
 
 ### External HTTP and credentials
 
@@ -391,18 +365,16 @@ executor. `projects/tasks.rs` owns cancellation versus command completion, and
 `recording/take.rs` opens, pauses, and closes a take, including one the control
 loop stops on its own.
 
-An endpoint registers its method, path, and handler once. `http/contract.rs` derives
-request/response schemas from that handler's extractors and return type, then
-builds both the Axum router and OpenAPI document. `ScopedProject<Capability>`
-declares the required project-bound operation owner; `Created<T>` declares a 201
-JSON response. Native media handlers register their binary response description
-alongside the handler. No separate global operation inventory needs updating.
+Each feature's HTTP adapter returns a plain Axum `Router` of its routes, and
+`http/routes.rs` merges them. `ScopedProject<Capability>` declares the required
+project-bound operation owner; `Created<T>` declares a 201 JSON response. A route
+that needs its own request bound sets it with Axum's `DefaultBodyLimit` layer, as
+`/explorations/save` does.
 
-Shared message schemas live in the corresponding features of `crates/common`;
-the backend enables their optional `http-schema` feature. Named responses stay
-named through application operations and UI presentation. Contract tests send
-ordinary HTTP requests through the real router and resolve every schema reference.
-Update this human-readable inventory when changing an endpoint.
+Shared message types live in the corresponding features of `crates/common`.
+Named responses stay named through application operations and UI presentation.
+Router tests send ordinary HTTP requests through the real router. Update this
+human-readable inventory when changing an endpoint.
 
 The frontend's feature clients live beside their consuming features, for example
 `activities/training/client.rs` and `settings/robots/client.rs`. Each owns request

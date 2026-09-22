@@ -9,7 +9,6 @@ use super::MessageRead;
 use serde::{Deserialize, Serialize};
 
 /// Every stream of one episode, each with its own window and bucket count.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeCoverageRequest {
@@ -38,7 +37,6 @@ impl EpisodeCoverageRequest {
 
 /// One stream's answer, in request order. A stream that cannot be counted
 /// reports why in its place and never fails the others.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum StreamCoverage {
@@ -46,7 +44,6 @@ pub enum StreamCoverage {
     Failed { error: String },
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TopicCoverageRequest {
@@ -85,7 +82,6 @@ impl TopicCoverageRequest {
     }
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicCoverage {
     messages: u64,

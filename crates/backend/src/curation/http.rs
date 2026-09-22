@@ -1,20 +1,22 @@
 //! Saved recipes and judged runs; a run is one request the browser awaits.
 use super::commands::CurationCommands;
-use crate::http::{
-    contract::ApiRoutes,
-    delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject},
+use crate::http::delivery::{ApiJson, ApiPath, HttpFailure, ScopedProject};
+use crate::projects::context::StudioContext;
+use axum::{
+    Json, Router,
+    routing::{get, post},
 };
-use axum::Json;
 use spiral_robotics_common::curation::{CurationSpec, CurationSummary, run::CurationRun};
 pub(crate) struct CurationEndpoints;
 impl CurationEndpoints {
-    pub(crate) fn register(routes: &mut ApiRoutes) {
-        routes.get("/curations", Self::list);
-        routes.post("/curations/preview", Self::preview);
-        routes.post("/curations/progress-score", Self::score_episode);
-        routes.get("/curations/{id}", Self::load);
-        routes.post("/curations/save", Self::save);
-        routes.post("/curation-runs", Self::run);
+    pub(crate) fn router() -> Router<StudioContext> {
+        Router::new()
+            .route("/curations", get(Self::list))
+            .route("/curations/preview", post(Self::preview))
+            .route("/curations/progress-score", post(Self::score_episode))
+            .route("/curations/{id}", get(Self::load))
+            .route("/curations/save", post(Self::save))
+            .route("/curation-runs", post(Self::run))
     }
     async fn score_episode(
         ScopedProject(commands): ScopedProject<CurationCommands>,

@@ -3,7 +3,6 @@ use super::WorkflowSpec;
 use super::conversation::WorkflowConversation;
 use serde::{Deserialize, Serialize};
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowDocument {
@@ -59,7 +58,6 @@ impl WorkflowDocument {
 }
 
 /// A display snapshot tied to the exact SQL that Spiral planned.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowSqlPlan {
@@ -102,7 +100,6 @@ impl WorkflowJson {
 }
 
 /// The exact submitted SQL travels with its execution observations.
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowRun {
     workflow: WorkflowSpec,
