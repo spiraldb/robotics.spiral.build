@@ -299,10 +299,6 @@ impl ServerStartup {
             crate::project_session::bootstrap::ProjectBootstrap::new(state.clone())
                 .run(!arguments.video.no_cameras),
         );
-        let video_monitor = tokio::spawn(
-            crate::recording::supervisor::RecordingSupervisor::new(state.clone())
-                .monitor_video_recording(),
-        );
         let cleanup_state = state.clone();
         let app = super::web_assets::StudioWebAssets::new(public)
             .router(super::routes::StudioApi::router(state.clone()))
@@ -357,7 +353,6 @@ impl ServerStartup {
         {
             tracing::warn!("resource cleanup timed out; the operating system will release devices");
         }
-        video_monitor.abort();
         bootstrap.abort();
         signal_task.abort();
         if let Some(result) = server_result {

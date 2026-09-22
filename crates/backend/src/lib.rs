@@ -20,7 +20,6 @@ mod recording_session;
 mod robotics;
 mod robots;
 mod rollout;
-mod run_registry;
 mod sync;
 mod training;
 mod transport;

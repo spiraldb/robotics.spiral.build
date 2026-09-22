@@ -36,36 +36,6 @@ pub(in crate::activities::workflow) enum WorkflowView {
     Explore,
 }
 
-impl WorkflowView {
-    /// How often the Workflow activity re-reads its runs while this view is
-    /// open. A run in flight is worth watching twice a second; a graph with
-    /// nothing in flight is worth a glance; and Explore schedules no runs at
-    /// all, so it reads none.
-    pub(in crate::activities::workflow) const fn run_poll_interval_ms(
-        self,
-        run_active: bool,
-    ) -> Option<u32> {
-        match (self, run_active) {
-            (Self::Explore, _) => None,
-            (Self::Agent, true) => Some(500),
-            (Self::Agent, false) => Some(5_000),
-        }
-    }
-}
-
-#[cfg(test)]
-mod poll_tests {
-    use super::WorkflowView;
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn runs_are_watched_closely_only_while_one_is_in_flight_and_never_in_explore() {
-        assert_eq!(WorkflowView::Agent.run_poll_interval_ms(true), Some(500));
-        assert_eq!(WorkflowView::Agent.run_poll_interval_ms(false), Some(5_000));
-        assert_eq!(WorkflowView::Explore.run_poll_interval_ms(true), None);
-        assert_eq!(WorkflowView::Explore.run_poll_interval_ms(false), None);
-    }
-}
-
 const GRAPH_PANEL_ID: &str = "explore-graph";
 const WORKSPACE_PANEL_ID: &str = "explore-workspace";
 /// Bumped with the default split below, so a layout saved at the old third

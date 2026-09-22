@@ -1,10 +1,10 @@
 //! Saved documents and independent native query executions. No selected workflow or editor draft.
 use super::query::WorkflowQuery;
-use crate::run_registry::{RunAdmission, RunRegistry};
+use crate::data::catalog_lease::CatalogLeaseReservation;
 use crate::{OperationError, clock::SystemTimeMillis};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::workflow::{
-    WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec, WorkflowSummary,
+    WorkflowRunSnapshot, WorkflowSpec, WorkflowSummary,
     conversation::WorkflowConversation,
     document::{WorkflowDocument, WorkflowPlan, WorkflowRun, WorkflowSqlPlan},
 };
@@ -57,7 +57,8 @@ pub(crate) struct WorkflowManager {
 }
 struct WorkflowRuntime {
     storage: Arc<StorageManager>,
-    runs: RunRegistry<WorkflowRun>,
+    /// Queries in flight; recording and project changes wait for them.
+    queries: tokio_util::task::TaskTracker,
     saves: tokio::sync::Mutex<()>,
 }
 impl WorkflowManager {
@@ -65,7 +66,7 @@ impl WorkflowManager {
         Self {
             inner: Arc::new(WorkflowRuntime {
                 storage,
-                runs: RunRegistry::new(),
+                queries: tokio_util::task::TaskTracker::new(),
                 saves: tokio::sync::Mutex::new(()),
             }),
         }
@@ -171,72 +172,36 @@ impl WorkflowManager {
         }
     }
     pub(crate) fn is_active(&self) -> bool {
-        self.inner.runs.is_active()
+        !self.inner.queries.is_empty()
     }
-    pub(super) fn runs(&self) -> Vec<WorkflowRun> {
-        self.inner.runs.all()
-    }
-    pub(super) fn run(&self, id: &str) -> Result<WorkflowRun, OperationError> {
-        self.inner
-            .runs
-            .get(id)
-            .ok_or_else(|| OperationError::InvalidInput("Unknown workflow run.".into()))
-    }
-    pub(super) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, OperationError> {
+    /// Execute the submitted SQL to completion. A failed query is a failed
+    /// run; only an invalid submission is an error. The run counts as active
+    /// before the catalog reservation that admitted it is released, so a
+    /// recording can never start in between.
+    pub(super) async fn run(
+        &self,
+        workflow: WorkflowSpec,
+        admission: CatalogLeaseReservation,
+    ) -> Result<WorkflowRun, OperationError> {
         if !workflow.validate().valid() {
             return Err(OperationError::InvalidInput(
                 "Fix SQL validation errors before running.".into(),
             ));
         }
-        let id = format!("run-{}", uuid::Uuid::new_v4());
-        let snapshot = WorkflowRunSnapshot::started(&workflow, id.clone())
+        let _query = self.inner.queries.token();
+        drop(admission);
+        let mut snapshot = WorkflowRunSnapshot::started(format!("run-{}", uuid::Uuid::new_v4()))
             .with_started_ms(SystemTime::now().unix_millis());
-        let record = WorkflowRun::new(workflow.clone(), snapshot);
-        let manager = self.clone();
-        let task_id = id.clone();
-        let submitted = workflow.clone();
-        self.inner
-            .runs
-            .admit(
-                RunAdmission::new(id, workflow.id().to_owned(), record.clone()),
-                move || tokio::spawn(async move { manager.execute(task_id, submitted).await }),
-            )
-            .map_err(|existing| {
-                OperationError::Conflict(format!(
-                    "Workflow '{}' already has an active run: {existing}.",
-                    workflow.name()
-                ))
-            })?;
-        Ok(record)
+        snapshot.finish(
+            WorkflowQuery::new(self.inner.storage.workflow_store())
+                .run(&workflow)
+                .await,
+        );
+        Ok(WorkflowRun::new(workflow, snapshot))
     }
     pub(crate) async fn shutdown(&self) {
-        self.inner.runs.shutdown().await;
-    }
-    async fn execute(&self, id: String, workflow: WorkflowSpec) {
-        self.inner.runs.update(&id, |record| {
-            let snapshot = record.snapshot_mut();
-            snapshot.set_phase(WorkflowRunPhase::Running);
-            snapshot.set_updated_ms(SystemTime::now().unix_millis());
-        });
-        let result = WorkflowQuery::new(self.inner.storage.workflow_store())
-            .run(&workflow)
-            .await;
-        self.inner.runs.finish(&id, |record| {
-            let snapshot = record.snapshot_mut();
-            match result {
-                Ok(result) => {
-                    snapshot.set_phase(WorkflowRunPhase::Completed);
-                    snapshot.set_result(Some(result));
-                }
-                Err(error) => {
-                    snapshot.set_phase(WorkflowRunPhase::Failed);
-                    snapshot.set_error(Some(error));
-                }
-            }
-            let now = SystemTime::now().unix_millis();
-            snapshot.set_finished_ms(now);
-            snapshot.set_updated_ms(now);
-        });
+        self.inner.queries.close();
+        self.inner.queries.wait().await;
     }
 }
 

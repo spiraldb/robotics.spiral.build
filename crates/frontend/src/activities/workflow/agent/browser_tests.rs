@@ -9,10 +9,10 @@ use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
-let originalFetch, calls, mode, releaseResponse, aborted, runs;
+let originalFetch, calls, mode, releaseResponse, aborted;
 export function installWorkflowFetch(nextMode) {
     originalFetch = globalThis.fetch;
-    calls = []; mode = nextMode; aborted = false; runs = [];
+    calls = []; mode = nextMode; aborted = false;
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const path = new URL(request.url).pathname;
@@ -31,24 +31,15 @@ export function installWorkflowFetch(nextMode) {
             return Response.json({report:{explain_schema_version:2,logical_plan:graph,optimized_logical_plan:graph,physical_plan:graph,physical_lowering_error:null},error:null});
         }
         if (url === '/api/workflow-runs' && request.method === 'POST') {
-            const run = {workflow:body,snapshot:{workflow_id:body.id,workflow_revision:body.revision,run_id:'run-'+(runs.length+1),phase:'running',started_ms:runs.length+1,updated_ms:runs.length+1}};
-            runs.push(run);
-            return Response.json(run);
-        }
-        if (url === '/api/workflow-runs') return Response.json(runs);
-        if (url.startsWith('/api/workflow-runs/')) {
-            const run = runs.find(run => url.endsWith('/'+run.snapshot.run_id));
-            if (!run) throw new Error('Unknown run');
-            if (mode !== 'running') {
-                run.snapshot.updated_ms = 100 + run.snapshot.started_ms;
-                if (run.snapshot.run_id === 'run-1' && mode !== 'missing-presentation') {
-                    run.snapshot.phase = 'failed'; run.snapshot.error = 'Native evaluation failed';
-                } else {
-                    run.snapshot.phase = 'completed';
-                    run.snapshot.result = {columns:[{name:'answer',data_type:'Int32',nullable:false},{name:'frame',data_type:'Utf8',nullable:false,semantic_type:'spql.image.Image'}],rows:[{answer:43,frame:'data:image/png;base64,aW1hZ2U='}],truncated:true,elapsed_ms:1};
-                }
+            if (mode === 'running') await new Promise(() => {});
+            const number = calls.filter(call => call.url === '/api/workflow-runs').length;
+            const snapshot = {run_id:'run-'+number,phase:'completed',started_ms:number};
+            if (number === 1 && mode !== 'missing-presentation') {
+                snapshot.phase = 'failed'; snapshot.error = 'Native evaluation failed';
+            } else {
+                snapshot.result = {columns:[{name:'answer',data_type:'Int32',nullable:false},{name:'frame',data_type:'Utf8',nullable:false,semantic_type:'spql.image.Image'}],rows:[{answer:43,frame:'data:image/png;base64,aW1hZ2U='}],truncated:true,elapsed_ms:1};
             }
-            return Response.json(run);
+            return Response.json({workflow:body,snapshot});
         }
         if (path !== '/api/proxy') throw new Error('Unexpected request ' + path);
         if (mode === 'pending') {
@@ -328,24 +319,18 @@ async fn a_user_edit_while_the_model_responds_prevents_a_stale_tool_from_overwri
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test]
-async fn empty_run_id_recovers_the_workflows_run_list() {
+async fn empty_run_id_lists_the_workflows_runs_without_a_request() {
     let fetch = FetchFixture::new("empty-id");
     let harness = AgentHarness::default();
     let mut dom = VirtualDom::new_with_props(AgentHarness::render, harness.clone());
     dom.rebuild_in_place();
     harness.start(&dom);
     harness.finished(&mut dom).await;
-    let calls = fetch.calls();
-    assert!(
-        calls
-            .iter()
-            .any(|call| call["url"] == "/api/workflow-runs" && call["body"].is_null())
-    );
-    assert!(!calls.iter().any(|call| {
+    assert!(!fetch.calls().iter().any(|call| {
         call["url"]
             .as_str()
             .unwrap()
-            .starts_with("/api/workflow-runs/")
+            .starts_with("/api/workflow-runs")
     }));
     assert_eq!(
         harness.assistant().conversation().session().phase(),
@@ -381,8 +366,11 @@ async fn agent_recovers_from_execution_failure_inspects_images_and_presents_the_
         .filter(|tool| tool.name() == "run_workflow")
         .collect::<Vec<_>>();
     assert_eq!(submissions.len(), 3);
+    // A submission answers when its query ends, so the native failure of the
+    // first query is the first submission's own outcome.
+    assert_eq!(submissions[0].phase(), WorkflowAgentToolPhase::Failed);
     assert!(
-        submissions
+        submissions[1..]
             .iter()
             .all(|tool| tool.summary() == "Query submitted")
     );
@@ -497,8 +485,8 @@ async fn rejected_pilot_blocks_submission_and_success_presentation_in_the_real_l
             .iter()
             .filter(|tool| tool.phase() == WorkflowAgentToolPhase::Failed)
             .count(),
-        5,
-        "native failure, premature assessment, blocked execution, blocked success presentation, and assessment overwrite"
+        6,
+        "native failure at submission and inspection, premature assessment, blocked execution, blocked success presentation, and assessment overwrite"
     );
     assert_eq!(
         tools.last().unwrap().summary(),
@@ -559,7 +547,7 @@ async fn an_execution_turn_cannot_finish_with_only_a_narrative() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test]
-async fn stopping_during_result_inspection_preserves_the_admitted_run() {
+async fn stopping_while_a_query_runs_preserves_the_submitted_run() {
     let fetch = FetchFixture::new("running");
     let harness = AgentHarness::default();
     let mut dom = VirtualDom::new_with_props(AgentHarness::render, harness.clone());
@@ -570,29 +558,29 @@ async fn stopping_during_result_inspection_preserves_the_admitted_run() {
         if fetch
             .calls()
             .iter()
-            .any(|call| call["url"] == "/api/workflow-runs/run-1")
+            .any(|call| call["url"] == "/api/workflow-runs")
         {
             break;
         }
     }
-    assert_eq!(harness.editor().snapshot().run_id(), Some("run-1"));
+    assert!(harness.editor().snapshot().phase().active());
     dom.in_scope(ScopeId::ROOT, || harness.assistant().cancel());
     harness.pump(&mut dom).await;
     assert!(harness.editor().snapshot().phase().active());
     let conversation = harness.assistant().conversation();
-    let inspection = conversation
+    let submission = conversation
         .session()
         .messages()
         .iter()
         .flat_map(WorkflowAgentMessage::tools)
-        .find(|tool| tool.name() == "inspect_run")
+        .find(|tool| tool.name() == "run_workflow")
         .unwrap();
     assert_eq!(
-        inspection.summary(),
+        submission.summary(),
         "Assistant stopped before this action completed"
     );
     assert!(
-        inspection
+        submission
             .error()
             .unwrap()
             .contains("query continues independently")

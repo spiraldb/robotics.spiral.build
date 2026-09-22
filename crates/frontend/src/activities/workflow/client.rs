@@ -2,7 +2,6 @@
 //! workflow document itself is listed, loaded, and saved by
 //! `client::documents`.
 use crate::client::{
-    http::UrlComponent,
     project::ProjectClient,
     transport::{CommandError, HttpRequest},
 };
@@ -25,19 +24,6 @@ impl WorkflowClient {
     pub(super) async fn plan(&self, workflow: &WorkflowSpec) -> Result<WorkflowPlan, CommandError> {
         self.project
             .request(HttpRequest::new("POST", "/api/workflows/plan").json(workflow))
-            .await
-    }
-    pub(super) async fn runs(&self) -> Result<Vec<WorkflowRun>, CommandError> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/workflow-runs"))
-            .await
-    }
-    pub(super) async fn run(&self, id: &str) -> Result<WorkflowRun, CommandError> {
-        self.project
-            .request(HttpRequest::new(
-                "GET",
-                format!("/api/workflow-runs/{}", id.url_component()),
-            ))
             .await
     }
     pub(super) async fn start(&self, workflow: &WorkflowSpec) -> Result<WorkflowRun, CommandError> {

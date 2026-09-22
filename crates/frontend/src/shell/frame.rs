@@ -560,11 +560,9 @@ impl WorkflowStatusContext<'_> {
         };
         let phase = match agent.snapshot().phase() {
             WorkflowRunPhase::Idle => "Idle",
-            WorkflowRunPhase::Validating => "Validating",
             WorkflowRunPhase::Running => "Running",
             WorkflowRunPhase::Completed => "Complete",
             WorkflowRunPhase::Failed => "Failed",
-            WorkflowRunPhase::Interrupted => "Interrupted",
         };
         WorkflowStatusProjection {
             domain: "Spiral relations".to_owned(),
@@ -582,7 +580,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn workflow_status_projects_authoritative_graph_and_run_phase() {
         let graph = spiral_robotics_common::workflow::WorkflowSpec::default().with_revision(7);
-        let mut run = spiral_robotics_common::workflow::WorkflowRunSnapshot::idle_for(&graph);
+        let mut run = spiral_robotics_common::workflow::WorkflowRunSnapshot::default();
         run.set_phase(WorkflowRunPhase::Running);
         let state = WorkflowViewStatus::Agent(Box::new(WorkflowEditorStatus::new(graph, run)));
 
@@ -614,7 +612,7 @@ mod tests {
         let graph = spiral_robotics_common::workflow::WorkflowSpec::default();
         let state = WorkflowViewStatus::Agent(Box::new(WorkflowEditorStatus::new(
             graph.clone(),
-            spiral_robotics_common::workflow::WorkflowRunSnapshot::idle_for(&graph),
+            spiral_robotics_common::workflow::WorkflowRunSnapshot::default(),
         )));
         let unavailable = WorkflowStatusContext {
             state: Some(&state),

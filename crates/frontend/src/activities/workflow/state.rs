@@ -1,7 +1,6 @@
-//! Browser-owned workflow document, authoring state, and run observations.
+//! Browser-owned workflow document, authoring state, and submitted runs.
 use crate::activities::workflow::WorkflowClient;
-use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
-use crate::client::runs::RunLedger;
+use crate::client::runs::{PENDING_RUN_ID, RunAnswer, RunHistory, SubmittedRun};
 use crate::components::document_session::{
     DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
 };
@@ -14,7 +13,6 @@ use spiral_robotics_common::workflow::{
 };
 
 use super::agent::{WorkflowAgentState, WorkflowAssistant};
-use super::explore::graph::WorkflowView;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use spiral_robotics_common::workflow::document::{
@@ -75,7 +73,7 @@ impl AgentDraftKey {
 pub(crate) struct WorkflowController {
     session: DocumentSession<WorkflowDocument>,
     active_panel: Signal<Option<PanelId>>,
-    runs: WorkflowRunSignals,
+    runs: RunHistory<WorkflowRun>,
     assistant: WorkflowAssistant,
     agent_drafts: Signal<BTreeMap<AgentDraftKey, String>>,
     /// The plan Spiral last returned for some SQL. A derivation of the draft,
@@ -83,12 +81,19 @@ pub(crate) struct WorkflowController {
     planned_sql: Signal<Option<WorkflowSqlPlan>>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct WorkflowRunSignals {
-    runs: Signal<Vec<WorkflowRun>>,
-    selected_run: Signal<Option<String>>,
-    /// A run Studio has accepted but not yet reported back.
-    starting: Signal<bool>,
+impl SubmittedRun for WorkflowRun {
+    fn document_id(&self) -> &str {
+        self.workflow().id()
+    }
+    fn run_id(&self) -> Option<&str> {
+        self.snapshot().run_id()
+    }
+    fn phase(&self) -> spiral_robotics_common::runs::RunPhase {
+        self.snapshot().phase()
+    }
+    fn started_ms(&self) -> u64 {
+        self.snapshot().started_ms()
+    }
 }
 
 impl WorkflowController {
@@ -101,11 +106,7 @@ impl WorkflowController {
                 &session.with_draft(|document| document.id().to_owned()),
             ),
             agent_drafts: Signal::new(BTreeMap::new()),
-            runs: WorkflowRunSignals {
-                runs: Signal::new(Vec::new()),
-                selected_run: Signal::new(None),
-                starting: Signal::new(false),
-            },
+            runs: RunHistory::new(),
             planned_sql: Signal::new(None),
         });
         // The conversation is part of the document, and the assistant owns it
@@ -129,72 +130,53 @@ impl WorkflowController {
     }
 
     pub(super) fn snapshot(&self) -> WorkflowRunSnapshot {
-        let runs = self.visible_run().into_iter().collect::<Vec<_>>();
-        Self::project_run(&self.spec(), &runs)
+        Self::project_run(&self.spec(), self.visible_run().as_ref())
     }
-    fn project_run(draft: &WorkflowSpec, runs: &[WorkflowRun]) -> WorkflowRunSnapshot {
-        let Some(run) = runs
-            .iter()
-            .filter(|run| run.workflow().id() == draft.id())
-            .max_by_key(|run| run.snapshot().started_ms())
-        else {
-            return WorkflowRunSnapshot::idle_for(draft);
+    fn project_run(draft: &WorkflowSpec, run: Option<&WorkflowRun>) -> WorkflowRunSnapshot {
+        let Some(run) = run else {
+            return WorkflowRunSnapshot::default();
         };
         let mut snapshot = run.snapshot().clone();
         snapshot.set_result_stale(!draft.accepts_output_from(run.workflow()));
         snapshot
     }
     fn visible_run(&self) -> Option<WorkflowRun> {
-        let runs = self.workflow_runs();
-        let selected = self.runs.selected_run.read();
-        selected
-            .as_ref()
-            .and_then(|id| {
-                runs.iter()
-                    .find(|run| run.snapshot().run_id() == Some(id.as_str()))
-            })
-            .or_else(|| runs.last())
-            .cloned()
+        self.runs.visible(&self.document_id())
+    }
+    fn document_id(&self) -> String {
+        self.session.with_draft(|document| document.id().to_owned())
     }
     pub(super) fn workflow_runs(&self) -> Vec<WorkflowRun> {
-        let id = self.session.with_draft(|document| document.id().to_owned());
-        let mut runs = self
-            .runs
-            .runs
-            .read()
-            .iter()
-            .filter(|run| run.workflow().id() == id)
-            .cloned()
-            .collect::<Vec<_>>();
-        runs.sort_by_key(|run| run.snapshot().started_ms());
-        runs
+        self.runs.for_document(&self.document_id())
     }
-    pub(super) fn select_run(mut self, id: String) {
-        if self
-            .workflow_runs()
-            .iter()
-            .any(|run| run.snapshot().run_id() == Some(id.as_str()))
-        {
-            self.runs.selected_run.set(Some(id));
-        }
+    pub(super) fn select_run(self, id: String) {
+        self.runs.select(&self.document_id(), id);
     }
-    pub(super) fn observe_run(mut self, run: WorkflowRun) {
-        self.runs.runs.accept_runs(vec![run]);
+    pub(super) fn find_run(&self, id: &str) -> Result<WorkflowRun, String> {
+        self.runs
+            .find(id)
+            .ok_or_else(|| "Unknown workflow run.".to_owned())
     }
-    pub(super) async fn submit_query(
-        mut self,
-        expected: &WorkflowSpec,
-    ) -> Result<WorkflowRun, String> {
+    /// Run the draft the Assistant expects. The answer arrives when the query
+    /// ends, and the run is recorded even if the Assistant stops waiting.
+    pub(super) async fn submit_query(self, expected: &WorkflowSpec) -> Result<WorkflowRun, String> {
         if self.spec() != *expected || self.command().is_some() {
             return Err("The draft changed or a document operation is in progress.".into());
         }
-        let run = WorkflowClient::current().start(expected).await.map_err(|error| {
-            format!("{error}. Do not blindly retry a submission: inspect this workflow's runs to check whether it was admitted.")
-        })?;
-        self.runs.selected_run.set(None);
-        self.observe_run(run.clone());
-        QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
-        Ok(run)
+        self.start_run(expected.clone()).await
+    }
+    fn start_run(self, workflow: WorkflowSpec) -> RunAnswer<WorkflowRun> {
+        let placeholder = WorkflowRun::new(
+            workflow.clone(),
+            WorkflowRunSnapshot::started(PENDING_RUN_ID)
+                .with_started_ms(js_sys::Date::now() as u64),
+        );
+        self.runs.submit(placeholder, async move {
+            WorkflowClient::current()
+                .start(&workflow)
+                .await
+                .map_err(|error| error.to_string())
+        })
     }
     pub(super) fn editor_status(&self) -> Option<WorkflowEditorStatus> {
         self.loaded()
@@ -218,10 +200,8 @@ impl WorkflowController {
         self.session.command()
     }
 
-    /// A run is under way, or Studio has accepted a start it has not yet
-    /// reported back.
     pub(super) fn running(&self) -> bool {
-        self.snapshot().phase().active() || *self.runs.starting.read()
+        self.snapshot().phase().active()
     }
 
     pub(super) fn agent_state(&self) -> WorkflowAgentState {
@@ -244,17 +224,19 @@ impl WorkflowController {
     /// never stored: a run's query is openable even though it was never saved.
     pub(super) fn workflows(&self) -> Vec<DocumentSummary> {
         let mut workflows = self.session.summaries();
-        for run in self.runs.runs.read().iter() {
-            if !workflows
-                .iter()
-                .any(|workflow| workflow.id() == run.workflow().id())
-            {
-                workflows.push(DocumentSummary::new(
-                    run.workflow().id(),
-                    format!("{} (run)", run.workflow().name()),
-                ));
+        self.runs.with_runs(|runs| {
+            for run in runs {
+                if !workflows
+                    .iter()
+                    .any(|workflow| workflow.id() == run.workflow().id())
+                {
+                    workflows.push(DocumentSummary::new(
+                        run.workflow().id(),
+                        format!("{} (run)", run.workflow().name()),
+                    ));
+                }
             }
-        }
+        });
         workflows
     }
 
@@ -343,13 +325,7 @@ impl WorkflowController {
         if self.agent_state().session().phase().active() || self.agent_command().is_some() {
             return Some("The Workflow Assistant is using this query.".to_owned());
         }
-        if self
-            .runs
-            .runs
-            .read()
-            .iter()
-            .any(|run| run.snapshot().phase().active())
-        {
+        if self.runs.any_active() {
             return Some("A workflow is already running. Open its query to inspect it.".to_owned());
         }
         if self.spec().sql().trim().is_empty() {
@@ -392,7 +368,7 @@ impl WorkflowController {
         self.assistant.install(document.conversation().clone());
         self.planned_sql.set(document.planned_sql().cloned());
         self.active_panel.set(None);
-        self.runs.selected_run.set(None);
+        self.runs.clear_selection();
         Ok(())
     }
 
@@ -431,23 +407,16 @@ impl WorkflowController {
     pub(super) fn discard(self, _studio: StudioProjectState) {
         self.session.discard(move |baseline| self.adopt(baseline));
     }
-    pub(super) fn run(mut self, studio: StudioProjectState) {
+    pub(super) fn run(self, studio: StudioProjectState) {
         if let Some(reason) = self.run_disabled_reason() {
             studio.report_warning_from(MessageSource::Workflow, reason);
             return;
         }
-        let workflow = self.spec();
-        self.runs.starting.set(true);
+        let answer = self.start_run(self.spec());
         self.session.spawn(async move {
-            match WorkflowClient::current().start(&workflow).await {
-                Ok(run) => {
-                    self.runs.selected_run.set(None);
-                    self.observe_run(run);
-                }
-                Err(error) => studio.report_from(MessageSource::Workflow, error.to_string()),
+            if let Err(error) = answer.await {
+                studio.report_from(MessageSource::Workflow, error);
             }
-            self.runs.starting.set(false);
-            QueryRefresh::current().invalidate(&[QueryDomain::Workflow]);
         });
     }
     pub(super) fn select_workflow(self, workflow_id: Option<String>, _studio: StudioProjectState) {
@@ -467,11 +436,8 @@ impl WorkflowController {
             .all(|workflow| workflow.id() != id)
             .then(|| {
                 self.runs
-                    .runs
-                    .peek()
-                    .iter()
-                    .filter(|run| run.workflow().id() == id)
-                    .max_by_key(|run| run.snapshot().started_ms())
+                    .for_document(&id)
+                    .pop()
                     .map(|run| WorkflowDocument::new(run.workflow().clone().with_revision(0)))
             })
             .flatten();
@@ -516,7 +482,7 @@ impl WorkflowController {
             self.send_agent(message.text().to_owned(), studio);
         }
     }
-    pub(super) fn use_polling(self, is_active: ReadSignal<bool>, view: Signal<WorkflowView>) {
+    pub(super) fn use_loading(self) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         use_effect(move || {
             if sessions.studio_available()
@@ -532,45 +498,6 @@ impl WorkflowController {
                 self.assistant.connect().await;
             });
         });
-        // The open view decides whether the run list is worth re-reading, and
-        // how often; `None` is the whole answer for a view that runs nothing.
-        let cadence = use_memo(move || {
-            let run_active = self
-                .runs
-                .runs
-                .read()
-                .iter()
-                .any(|run| run.snapshot().phase().active());
-            view().run_poll_interval_ms(run_active)
-        });
-        let runs = QueryPolicy::measured(QueryDomain::Workflow, cadence.into()).use_when(
-            move || cadence().is_some() && is_active() && sessions.studio_available(),
-            move || {
-                let active = self
-                    .runs
-                    .runs
-                    .peek()
-                    .iter()
-                    .find(|run| run.snapshot().phase().active())
-                    .and_then(|run| run.snapshot().run_id())
-                    .map(str::to_owned);
-                async move {
-                    let client = WorkflowClient::current();
-                    match active {
-                        Some(id) => client.run(&id).await.map(|run| vec![run]),
-                        None => client.runs().await,
-                    }
-                }
-            },
-        );
-        self.use_run_observations(runs);
-    }
-
-    fn use_run_observations(
-        self,
-        runs: Resource<Result<Vec<WorkflowRun>, crate::client::CommandError>>,
-    ) {
-        self.runs.runs.observe(runs);
     }
 }
 
@@ -631,7 +558,7 @@ impl WorkflowEditorStatus {
 }
 
 #[cfg(test)]
-mod run_observation_tests;
+mod plan_reuse_tests;
 
 #[cfg(test)]
 mod tests {
@@ -655,15 +582,15 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn renaming_or_saving_keeps_results_current_but_sql_changes_do_not() {
         let workflow = WorkflowSpec::new("result", "Original").with_sql("SELECT 1");
-        let mut snapshot = WorkflowRunSnapshot::started(&workflow, "run");
+        let mut snapshot = WorkflowRunSnapshot::started("run");
         snapshot.set_phase(WorkflowRunPhase::Completed);
-        let runs = [WorkflowRun::new(workflow.clone(), snapshot)];
+        let run = WorkflowRun::new(workflow.clone(), snapshot);
         let mut draft = workflow;
         draft.set_name("Renamed");
         draft.set_revision(2);
-        assert!(!WorkflowController::project_run(&draft, &runs).result_stale());
+        assert!(!WorkflowController::project_run(&draft, Some(&run)).result_stale());
         draft.set_sql("SELECT 2");
-        assert!(WorkflowController::project_run(&draft, &runs).result_stale());
+        assert!(WorkflowController::project_run(&draft, Some(&run)).result_stale());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

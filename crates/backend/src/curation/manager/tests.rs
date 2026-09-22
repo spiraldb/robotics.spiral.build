@@ -1,4 +1,5 @@
 use super::*;
+use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 use spiral_robotics_common::curation::facts::{CurationFact, FactKind, FactMeasure};
 use spiral_robotics_common::curation::rules::{
     ConditionOp, ConditionValue, CurationRule, RuleCondition,
@@ -20,6 +21,11 @@ impl CurationFixture {
                     .project(&store.connection_settings()),
             ))),
         }
+    }
+    fn admission() -> CatalogLeaseReservation {
+        Arc::new(CatalogMutationLease::default())
+            .try_reserve(CatalogLeaseOwner::CurationStart)
+            .unwrap()
     }
     fn recipe() -> CurationSpec {
         CurationSpec::new("cur", "Long episodes")
@@ -76,12 +82,12 @@ async fn saving_advances_the_revision_and_rejects_stale_or_nameless_recipes() {
 }
 
 #[tokio::test]
-async fn an_invalid_recipe_never_becomes_a_run_and_duplicates_are_refused() {
+async fn an_invalid_recipe_never_becomes_a_run() {
     let fixture = CurationFixture::new();
     let mut no_source = CurationFixture::recipe();
     no_source.set_source(None);
     assert!(matches!(
-        fixture.manager.start(no_source),
+        fixture.manager.run(no_source, CurationFixture::admission()).await,
         Err(OperationError::InvalidInput(message)) if message.contains("dataset")
     ));
     let mut unsafe_fact = CurationFixture::recipe();
@@ -94,33 +100,26 @@ async fn an_invalid_recipe_never_becomes_a_run_and_duplicates_are_refused() {
         },
     ));
     assert!(matches!(
-        fixture.manager.start(unsafe_fact),
+        fixture
+            .manager
+            .run(unsafe_fact, CurationFixture::admission())
+            .await,
         Err(OperationError::InvalidInput(_))
     ));
-    let run = fixture.manager.start(CurationFixture::recipe()).unwrap();
-    assert_eq!(run.snapshot().phase(), RunPhase::Validating);
+    let finished = fixture
+        .manager
+        .run(CurationFixture::recipe(), CurationFixture::admission())
+        .await
+        .unwrap();
     assert!(
-        run.snapshot()
+        finished
+            .snapshot()
             .sql()
             .unwrap()
             .contains("spql.mcap.episodes('dataset_default')")
     );
-    assert!(matches!(
-        fixture.manager.start(CurationFixture::recipe()),
-        Err(OperationError::Conflict(_))
-    ));
-    fixture.manager.shutdown().await;
-    let finished = fixture
-        .manager
-        .run(run.snapshot().run_id().unwrap())
-        .unwrap();
     // The in-memory test database has no MCAP reader, so the run fails
     // honestly instead of pretending to judge episodes.
-    assert!(finished.snapshot().phase().terminal());
-    assert_eq!(finished.curation(), run.curation());
-    assert!(fixture.manager.runs().len() == 1);
-    assert!(matches!(
-        fixture.manager.run("nope"),
-        Err(OperationError::InvalidInput(_))
-    ));
+    assert_eq!(finished.snapshot().phase(), RunPhase::Failed);
+    assert_eq!(finished.curation().id(), "cur");
 }

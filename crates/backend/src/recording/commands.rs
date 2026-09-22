@@ -543,6 +543,10 @@ impl RecordingCommands {
                         TeleoperationPair::new(leader, follower),
                     ))
                     .await?;
+                tokio::spawn(
+                    crate::recording::supervisor::RecordingSupervisor::new(state.clone())
+                        .finalize_when_the_control_loop_ends(result.episode().to_owned()),
+                );
                 adapter.present_recording(result).map_err(Into::into)
             })
             .await

@@ -1,17 +1,8 @@
 //! One judged pass over a dataset: which episodes stayed, which left, and why.
 use super::CurationSpec;
-use crate::runs::{ObservedRun, RunObservation, RunPhase};
+use crate::runs::RunPhase;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-struct RunIdentity {
-    curation_id: String,
-    curation_revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    run_id: Option<String>,
-}
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -29,55 +20,35 @@ struct RunExecution {
     derived_relations: Vec<String>,
 }
 
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-struct RunTiming {
-    #[serde(default)]
-    started_ms: u64,
-    #[serde(default)]
-    finished_ms: u64,
-    #[serde(default)]
-    updated_ms: u64,
-}
-
-/// The authoritative state of one run, published by the backend.
+/// One judged run: submitted by the browser, answered by the backend.
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct CurationRunSnapshot {
-    #[serde(flatten)]
-    identity: RunIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
     #[serde(flatten)]
     execution: RunExecution,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     outcome: Option<CurationOutcome>,
-    #[serde(flatten)]
-    timing: RunTiming,
+    #[serde(default)]
+    started_ms: u64,
 }
 
 impl CurationRunSnapshot {
-    pub fn idle_for(curation: &CurationSpec) -> Self {
-        Self {
-            identity: RunIdentity {
-                curation_id: curation.id().to_owned(),
-                curation_revision: curation.revision(),
-                run_id: None,
-            },
+    pub fn started(run_id: impl Into<String>) -> Self {
+        let mut snapshot = Self {
+            run_id: Some(run_id.into()),
             ..Self::default()
-        }
-    }
-    pub fn started(curation: &CurationSpec, run_id: impl Into<String>) -> Self {
-        let mut snapshot = Self::idle_for(curation);
-        snapshot.identity.run_id = Some(run_id.into());
-        snapshot.execution.phase = RunPhase::Validating;
+        };
+        snapshot.execution.phase = RunPhase::Running;
         snapshot
     }
     pub const fn with_started_ms(mut self, started_ms: u64) -> Self {
-        self.timing.started_ms = started_ms;
-        self.timing.updated_ms = started_ms;
+        self.started_ms = started_ms;
         self
     }
     pub fn run_id(&self) -> Option<&str> {
-        self.identity.run_id.as_deref()
+        self.run_id.as_deref()
     }
     pub const fn phase(&self) -> RunPhase {
         self.execution.phase
@@ -107,7 +78,7 @@ impl CurationRunSnapshot {
         self.outcome.as_ref()
     }
     pub const fn started_ms(&self) -> u64 {
-        self.timing.started_ms
+        self.started_ms
     }
     pub const fn set_phase(&mut self, phase: RunPhase) {
         self.execution.phase = phase;
@@ -123,30 +94,6 @@ impl CurationRunSnapshot {
     }
     pub const fn set_result_stale(&mut self, stale: bool) {
         self.execution.result_stale = stale;
-    }
-    pub const fn set_finished_ms(&mut self, finished_ms: u64) {
-        self.timing.finished_ms = finished_ms;
-    }
-    pub const fn set_updated_ms(&mut self, updated_ms: u64) {
-        self.timing.updated_ms = updated_ms;
-    }
-}
-
-impl RunObservation for CurationRunSnapshot {
-    fn document(&self) -> (&str, u64) {
-        (&self.identity.curation_id, self.identity.curation_revision)
-    }
-    fn run_id(&self) -> Option<&str> {
-        self.identity.run_id.as_deref()
-    }
-    fn phase(&self) -> RunPhase {
-        self.execution.phase
-    }
-    fn started_ms(&self) -> u64 {
-        self.timing.started_ms
-    }
-    fn updated_ms(&self) -> u64 {
-        self.timing.updated_ms
     }
 }
 
@@ -389,13 +336,6 @@ impl CurationRun {
     }
     pub fn snapshot_mut(&mut self) -> &mut CurationRunSnapshot {
         &mut self.snapshot
-    }
-}
-
-impl ObservedRun for CurationRun {
-    type Snapshot = CurationRunSnapshot;
-    fn snapshot(&self) -> &CurationRunSnapshot {
-        &self.snapshot
     }
 }
 

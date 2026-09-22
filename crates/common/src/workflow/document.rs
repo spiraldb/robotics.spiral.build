@@ -122,9 +122,3 @@ impl WorkflowRun {
         &mut self.snapshot
     }
 }
-impl crate::runs::ObservedRun for WorkflowRun {
-    type Snapshot = super::WorkflowRunSnapshot;
-    fn snapshot(&self) -> &super::WorkflowRunSnapshot {
-        &self.snapshot
-    }
-}

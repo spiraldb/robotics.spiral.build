@@ -92,7 +92,7 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
             }
         }
     }
-    assert_eq!(count, 78);
+    assert_eq!(count, 74);
     for retired in [
         "/robots/setup",
         "/serial-ports/identify",
@@ -114,7 +114,8 @@ async fn every_documented_scoped_endpoint_is_registered_and_rejects_missing_or_s
     assert!(contract["paths"].get("/workflow/assistant").is_none());
     assert!(contract["paths"]["/hardware/status"]["get"].is_object());
     assert!(contract["paths"]["/curations/save"]["post"].is_object());
-    assert!(contract["paths"]["/curation-runs/{id}"]["get"].is_object());
+    assert!(contract["paths"]["/curation-runs"]["post"].is_object());
+    assert!(contract["paths"].get("/curation-runs/{id}").is_none());
     assert!(contract["paths"]["/explorations"]["get"].is_object());
     assert!(contract["paths"]["/explorations/{id}"]["get"].is_object());
     assert_eq!(

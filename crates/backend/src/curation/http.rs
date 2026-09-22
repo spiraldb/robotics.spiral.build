@@ -1,4 +1,4 @@
-//! Saved recipes and judged runs; the browser polls runs like Workflow's.
+//! Saved recipes and judged runs; a run is one request the browser awaits.
 use super::commands::CurationCommands;
 use crate::http::{
     contract::ApiRoutes,
@@ -14,9 +14,7 @@ impl CurationEndpoints {
         routes.post("/curations/progress-score", Self::score_episode);
         routes.get("/curations/{id}", Self::load);
         routes.post("/curations/save", Self::save);
-        routes.get("/curation-runs", Self::runs);
-        routes.post("/curation-runs", Self::start);
-        routes.get("/curation-runs/{id}", Self::run);
+        routes.post("/curation-runs", Self::run);
     }
     async fn score_episode(
         ScopedProject(commands): ScopedProject<CurationCommands>,
@@ -48,21 +46,10 @@ impl CurationEndpoints {
     ) -> Result<Json<CurationSpec>, HttpFailure> {
         Ok(Json(commands.save(curation).await?))
     }
-    async fn runs(
-        ScopedProject(commands): ScopedProject<CurationCommands>,
-    ) -> Result<Json<Vec<CurationRun>>, HttpFailure> {
-        Ok(Json(commands.runs()?))
-    }
-    async fn start(
+    async fn run(
         ScopedProject(commands): ScopedProject<CurationCommands>,
         ApiJson(curation): ApiJson<CurationSpec>,
     ) -> Result<Json<CurationRun>, HttpFailure> {
-        Ok(Json(commands.start(curation)?))
-    }
-    async fn run(
-        ScopedProject(commands): ScopedProject<CurationCommands>,
-        ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<CurationRun>, HttpFailure> {
-        Ok(Json(commands.run(&id)?))
+        Ok(Json(commands.run(curation).await?))
     }
 }

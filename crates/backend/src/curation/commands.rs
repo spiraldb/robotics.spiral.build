@@ -50,25 +50,28 @@ impl CurationCommands {
             })
             .await
     }
-    pub(super) fn runs(&self) -> Result<Vec<CurationRun>, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        Ok(self.state.curation().runs())
-    }
-    pub(super) fn run(&self, id: &str) -> Result<CurationRun, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        self.state.curation().run(id).map_err(Into::into)
-    }
-    pub(super) fn start(&self, curation: CurationSpec) -> Result<CurationRun, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        let lease = self.state.catalog_lease();
-        let _reservation = lease
+    pub(super) async fn run(
+        &self,
+        curation: CurationSpec,
+    ) -> Result<CurationRun, BackendCommandError> {
+        let admission = self
+            .state
+            .catalog_lease()
             .try_reserve(CatalogLeaseOwner::CurationStart)
             .ok_or_else(|| {
                 BackendCommandError::conflict(
                     "Wait for recording or catalog changes before running a curation.",
                 )
             })?;
-        self.state.curation().start(curation).map_err(Into::into)
+        self.state
+            .execute(move |state, _activity| async move {
+                state
+                    .curation()
+                    .run(curation, admission)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await
     }
 }
 impl From<ProjectContext> for CurationCommands {

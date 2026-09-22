@@ -1,6 +1,6 @@
 //! Saved recipes and independent judged runs. No selected curation or editor draft.
 use super::sql::CurationSql;
-use crate::run_registry::{RunAdmission, RunRegistry};
+use crate::data::catalog_lease::CatalogLeaseReservation;
 use crate::{OperationError, clock::SystemTimeMillis};
 use spiral_robotics_common::curation::{
     CurationSpec, CurationSummary,
@@ -26,7 +26,8 @@ struct JudgedRun {
 }
 struct CurationRuntime {
     storage: Arc<StorageManager>,
-    runs: RunRegistry<CurationRun>,
+    /// Judging runs in flight; shutdown waits for the relations they write.
+    queries: tokio_util::task::TaskTracker,
     saves: tokio::sync::Mutex<()>,
     episode_progress: super::episode_progress::EpisodeProgress,
 }
@@ -37,7 +38,7 @@ impl CurationManager {
             inner: Arc::new(CurationRuntime {
                 episode_progress: super::episode_progress::EpisodeProgress::new(storage.clone()),
                 storage,
-                runs: RunRegistry::new(),
+                queries: tokio_util::task::TaskTracker::new(),
                 saves: tokio::sync::Mutex::new(()),
             }),
         }
@@ -215,76 +216,42 @@ impl CurationManager {
         }
         Ok(curation)
     }
-    pub(super) fn runs(&self) -> Vec<CurationRun> {
-        self.inner.runs.all()
-    }
-    pub(super) fn run(&self, id: &str) -> Result<CurationRun, OperationError> {
-        self.inner
-            .runs
-            .get(id)
-            .ok_or_else(|| OperationError::InvalidInput("Unknown curation run.".into()))
-    }
-    /// Admit one run of the submitted recipe, unsaved edits included. The
-    /// recipe is compiled up front so an invalid one never becomes a run.
-    pub(super) fn start(&self, mut curation: CurationSpec) -> Result<CurationRun, OperationError> {
+    /// Judge the submitted recipe, unsaved edits included, to completion. The
+    /// recipe is compiled up front so an invalid one never becomes a run; a
+    /// failed judgement is a failed run.
+    pub(super) async fn run(
+        &self,
+        mut curation: CurationSpec,
+        admission: CatalogLeaseReservation,
+    ) -> Result<CurationRun, OperationError> {
         curation.set_source(curation.source().cloned());
         let compiled = CurationSql::new(&curation)
             .compile()
             .map_err(OperationError::InvalidInput)?;
-        let id = format!("curation-run-{}", uuid::Uuid::new_v4());
-        let mut snapshot = CurationRunSnapshot::started(&curation, id.clone())
+        let _query = self.inner.queries.token();
+        drop(admission);
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let mut snapshot = CurationRunSnapshot::started(format!("curation-run-{id}"))
             .with_started_ms(SystemTime::now().unix_millis());
         snapshot.set_sql(Some(compiled.roster_sql().to_owned()));
-        let record = CurationRun::new(curation.clone(), snapshot);
-        let manager = self.clone();
-        let task_id = id.clone();
-        let judged = curation.clone();
-        self.inner
-            .runs
-            .admit(
-                RunAdmission::new(id, curation.id().to_owned(), record.clone()),
-                move || tokio::spawn(async move { manager.execute(task_id, judged).await }),
-            )
-            .map_err(|existing| {
-                OperationError::Conflict(format!(
-                    "Curation '{}' already has an active run: {existing}.",
-                    curation.name()
-                ))
-            })?;
-        Ok(record)
+        let output_relation = format!("curation_{id}");
+        match self.judge(&curation, &output_relation).await {
+            Ok(judged) => {
+                snapshot.set_phase(RunPhase::Completed);
+                snapshot.set_outcome(Some(judged.outcome));
+                snapshot.set_derived_relations(judged.derived_relations);
+                snapshot.set_output_relation(output_relation);
+            }
+            Err(error) => {
+                snapshot.set_phase(RunPhase::Failed);
+                snapshot.set_error(Some(error));
+            }
+        }
+        Ok(CurationRun::new(curation, snapshot))
     }
     pub(crate) async fn shutdown(&self) {
-        self.inner.runs.shutdown().await;
-    }
-    async fn execute(&self, id: String, curation: CurationSpec) {
-        self.inner.runs.update(&id, |record| {
-            let snapshot = record.snapshot_mut();
-            snapshot.set_phase(RunPhase::Running);
-            snapshot.set_updated_ms(SystemTime::now().unix_millis());
-        });
-        let output_relation = format!(
-            "curation_{}",
-            id.trim_start_matches("curation-run-").replace('-', "")
-        );
-        let result = self.judge(&curation, &output_relation).await;
-        self.inner.runs.finish(&id, |record| {
-            let snapshot = record.snapshot_mut();
-            match result {
-                Ok(result) => {
-                    snapshot.set_phase(RunPhase::Completed);
-                    snapshot.set_outcome(Some(result.outcome));
-                    snapshot.set_derived_relations(result.derived_relations);
-                    snapshot.set_output_relation(output_relation);
-                }
-                Err(error) => {
-                    snapshot.set_phase(RunPhase::Failed);
-                    snapshot.set_error(Some(error));
-                }
-            }
-            let now = SystemTime::now().unix_millis();
-            snapshot.set_finished_ms(now);
-            snapshot.set_updated_ms(now);
-        });
+        self.inner.queries.close();
+        self.inner.queries.wait().await;
     }
     /// Run the roster query; when Spiral bounded it, run the exact totals too.
     async fn judge(&self, curation: &CurationSpec, output: &str) -> Result<JudgedRun, String> {

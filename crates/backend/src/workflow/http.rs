@@ -19,9 +19,7 @@ impl WorkflowEndpoints {
         routes.get("/workflows/{id}", Self::load);
         routes.post("/workflows/save", Self::save);
         routes.post("/workflows/plan", Self::plan);
-        routes.get("/workflow-runs", Self::runs);
-        routes.post("/workflow-runs", Self::start);
-        routes.get("/workflow-runs/{id}", Self::run);
+        routes.post("/workflow-runs", Self::run);
         routes.get("/models/capabilities", Self::capabilities);
         routes.post("/datasets/cameras", Self::cameras);
     }
@@ -48,22 +46,11 @@ impl WorkflowEndpoints {
     ) -> Result<Json<WorkflowPlan>, HttpFailure> {
         Ok(Json(commands.plan(workflow).await?))
     }
-    async fn runs(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
-    ) -> Result<Json<Vec<WorkflowRun>>, HttpFailure> {
-        Ok(Json(commands.runs()?))
-    }
-    async fn start(
+    async fn run(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,
         ApiJson(workflow): ApiJson<WorkflowSpec>,
     ) -> Result<Json<WorkflowRun>, HttpFailure> {
-        Ok(Json(commands.start(workflow)?))
-    }
-    async fn run(
-        ScopedProject(commands): ScopedProject<WorkflowCommands>,
-        ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<WorkflowRun>, HttpFailure> {
-        Ok(Json(commands.run(&id)?))
+        Ok(Json(commands.run(workflow).await?))
     }
     async fn capabilities(
         ScopedProject(commands): ScopedProject<WorkflowCommands>,

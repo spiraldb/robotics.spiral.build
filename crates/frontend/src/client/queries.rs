@@ -12,17 +12,15 @@ pub(crate) enum QueryDomain {
     Recording,
     Training,
     Rollout,
-    Workflow,
     Assistant,
     Settings,
     Catalog,
     Data,
-    Curation,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct QueryRefresh {
-    revisions: [Signal<u64>; 12],
+    revisions: [Signal<u64>; 10],
 }
 impl QueryRefresh {
     pub(crate) fn use_provider() -> Self {
@@ -46,15 +44,10 @@ impl QueryRefresh {
 }
 
 /// How long a policy waits before reading again.
-///
-/// A fixed interval never changes. A measured one is consulted after every
-/// completed request, so a read can slow down — or stop entirely — when what
-/// it watches is idle or off screen, without its caller rebuilding the policy.
 #[derive(Clone, Copy)]
 enum QueryInterval {
     OnDemand,
     Fixed(u32),
-    Measured(ReadSignal<Option<u32>>),
 }
 
 impl QueryInterval {
@@ -63,12 +56,11 @@ impl QueryInterval {
     const fn repeats(self) -> bool {
         !matches!(self, Self::OnDemand)
     }
-    /// How long to wait before the next read, read reactively.
+    /// How long to wait before the next read.
     fn milliseconds(self) -> Option<u32> {
         match self {
             Self::OnDemand => None,
             Self::Fixed(interval_ms) => Some(interval_ms),
-            Self::Measured(interval_ms) => interval_ms(),
         }
     }
 }
@@ -83,19 +75,6 @@ impl QueryPolicy {
         Self {
             domain,
             interval: QueryInterval::Fixed(interval_ms),
-        }
-    }
-
-    /// A read whose cadence answers what it finds: the signal is read after
-    /// every completed request, and `None` parks the read until it names an
-    /// interval again.
-    pub(crate) const fn measured(
-        domain: QueryDomain,
-        interval_ms: ReadSignal<Option<u32>>,
-    ) -> Self {
-        Self {
-            domain,
-            interval: QueryInterval::Measured(interval_ms),
         }
     }
 
@@ -250,7 +229,7 @@ mod tests {
             let refresh = QueryRefresh::use_provider();
             let available = use_signal(|| true);
             let observations = self.0.clone();
-            let resource = QueryPolicy::new(QueryDomain::Workflow, 20).use_when(
+            let resource = QueryPolicy::new(QueryDomain::Data, 20).use_when(
                 move || *available.read(),
                 move || {
                     let read = Rc::new(ControlledRead::default());
@@ -271,7 +250,7 @@ mod tests {
                 .borrow()
                 .refresh
                 .unwrap()
-                .invalidate(&[QueryDomain::Workflow]);
+                .invalidate(&[QueryDomain::Data]);
         }
         fn result(&self) -> Option<Result<u32, CommandError>> {
             self.0.borrow().resource.unwrap().peek().clone()

@@ -121,15 +121,6 @@ impl WorkflowValidationIssue {
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-struct RunIdentity {
-    workflow_id: String,
-    workflow_revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    run_id: Option<String>,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct RunExecution {
     phase: WorkflowRunPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,57 +132,47 @@ struct RunExecution {
 }
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-struct RunTiming {
-    #[serde(default)]
-    started_ms: u64,
-    #[serde(default)]
-    finished_ms: u64,
-    #[serde(default)]
-    updated_ms: u64,
-}
-
-#[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowRunSnapshot {
-    #[serde(flatten)]
-    identity: RunIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
     #[serde(flatten)]
     execution: RunExecution,
-    #[serde(flatten)]
-    timing: RunTiming,
+    #[serde(default)]
+    started_ms: u64,
 }
 
 impl WorkflowRunSnapshot {
-    pub fn idle_for(workflow: &WorkflowSpec) -> Self {
-        Self {
-            identity: RunIdentity {
-                workflow_id: workflow.id.clone(),
-                workflow_revision: workflow.revision,
-                run_id: None,
-            },
+    /// Begin one submitted run; it runs until `finish` records how it ended.
+    pub fn started(run_id: impl Into<String>) -> Self {
+        let mut snapshot = Self {
+            run_id: Some(run_id.into()),
             ..Self::default()
-        }
-    }
-
-    /// Begin one admitted run. Runtime mutation remains behind focused
-    /// transition methods instead of exposing independently constructible
-    /// identity, execution, and timing fragments.
-    pub fn started(workflow: &WorkflowSpec, run_id: impl Into<String>) -> Self {
-        let mut snapshot = Self::idle_for(workflow);
-        snapshot.identity.run_id = Some(run_id.into());
-        snapshot.execution.phase = WorkflowRunPhase::Validating;
+        };
+        snapshot.execution.phase = WorkflowRunPhase::Running;
         snapshot
     }
 
     pub const fn with_started_ms(mut self, started_ms: u64) -> Self {
-        self.timing.started_ms = started_ms;
-        self.timing.updated_ms = started_ms;
+        self.started_ms = started_ms;
         self
     }
 
+    pub fn finish(&mut self, result: Result<SpiralQuerySnapshot, String>) {
+        match result {
+            Ok(result) => {
+                self.execution.phase = WorkflowRunPhase::Completed;
+                self.execution.result = Some(result);
+            }
+            Err(error) => {
+                self.execution.phase = WorkflowRunPhase::Failed;
+                self.execution.error = Some(error);
+            }
+        }
+    }
+
     pub fn run_id(&self) -> Option<&str> {
-        self.identity.run_id.as_deref()
+        self.run_id.as_deref()
     }
     pub const fn phase(&self) -> WorkflowRunPhase {
         self.execution.phase
@@ -206,48 +187,18 @@ impl WorkflowRunSnapshot {
         self.execution.result_stale
     }
     pub const fn started_ms(&self) -> u64 {
-        self.timing.started_ms
+        self.started_ms
     }
     pub const fn set_phase(&mut self, phase: WorkflowRunPhase) {
         self.execution.phase = phase;
     }
-    pub fn set_result(&mut self, result: Option<SpiralQuerySnapshot>) {
-        self.execution.result = result;
-    }
-    pub fn set_error(&mut self, error: Option<String>) {
-        self.execution.error = error;
-    }
     pub const fn set_result_stale(&mut self, result_stale: bool) {
         self.execution.result_stale = result_stale;
-    }
-    pub const fn set_finished_ms(&mut self, finished_ms: u64) {
-        self.timing.finished_ms = finished_ms;
-    }
-    pub const fn set_updated_ms(&mut self, updated_ms: u64) {
-        self.timing.updated_ms = updated_ms;
     }
 }
 
 /// Workflow runs share the one native run lifecycle.
 pub use crate::runs::RunPhase as WorkflowRunPhase;
-
-impl crate::runs::RunObservation for WorkflowRunSnapshot {
-    fn document(&self) -> (&str, u64) {
-        (&self.identity.workflow_id, self.identity.workflow_revision)
-    }
-    fn run_id(&self) -> Option<&str> {
-        self.identity.run_id.as_deref()
-    }
-    fn phase(&self) -> WorkflowRunPhase {
-        self.execution.phase
-    }
-    fn started_ms(&self) -> u64 {
-        self.timing.started_ms
-    }
-    fn updated_ms(&self) -> u64 {
-        self.timing.updated_ms
-    }
-}
 
 #[cfg_attr(feature = "http-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

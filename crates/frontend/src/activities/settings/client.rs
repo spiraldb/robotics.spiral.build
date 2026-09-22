@@ -74,9 +74,7 @@ impl SettingsClient {
         document: FileData,
     ) -> impl Future<Output = Result<ProjectImportSummary, CommandError>> + use<> {
         self.project.mutate(
-            &[
-                Project, Settings, Catalog, Data, Training, Workflow, Assistant,
-            ],
+            &[Project, Settings, Catalog, Data, Training, Assistant],
             HttpRequest::new("POST", "/api/project/import").upload(document),
         )
     }

@@ -9,7 +9,7 @@ impl WorkflowTool for RunWorkflow {
         "run_workflow"
     }
     fn description(&self) -> &'static str {
-        "Execute the current SQL once in Spiral and return a run ID; use inspect_run for results. Pending image evidence must first receive assess_evidence=pass. Fail/inconclusive evidence blocks further execution for this turn. Preview limits do not limit execution. Does not save."
+        "Execute the current SQL once in Spiral, wait for it to end, and return its run ID; use inspect_run for results. Pending image evidence must first receive assess_evidence=pass. Fail/inconclusive evidence blocks further execution for this turn. Preview limits do not limit execution. Does not save."
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{},"additionalProperties":false})
@@ -54,7 +54,7 @@ impl WorkflowTool for InspectRun {
         "inspect_run"
     }
     fn description(&self) -> &'static str {
-        "Without run_id, list this workflow's admitted runs to recover IDs. With run_id, wait for completion and inspect a page of its stored preview (default 100, maximum 100 rows). Returns exact SQL, phase, errors and preview truncation. Image cells are references; use inspect_images to see them. When preview_truncated=false the retained rows are the entire result; summarize them without rerunning inference. Use SQL for evidence beyond a truncated preview. Request fewer rows for very wide results. No query is executed or retried by this tool."
+        "Without run_id, list this workflow's runs to recover IDs. With run_id, inspect a page of that run's stored preview (default 100, maximum 100 rows). Returns exact SQL, phase, errors and preview truncation. Image cells are references; use inspect_images to see them. When preview_truncated=false the retained rows are the entire result; summarize them without rerunning inference. Use SQL for evidence beyond a truncated preview. Request fewer rows for very wide results. No query is executed or retried by this tool."
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"run_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false})
@@ -77,36 +77,23 @@ impl WorkflowTool for InspectRun {
                 return Err("Request 1–100 preview rows.".into());
             }
             let Some(id) = arguments.run_id.filter(|id| !id.trim().is_empty()) else {
-                let runs = WorkflowClient::current()
-                    .runs()
-                    .await
-                    .map_err(String::from)?;
-                let runs = runs
+                let runs = invocation
+                    .controller
+                    .workflow_runs()
                     .iter()
-                    .filter(|run| run.workflow().id() == invocation.expected.id())
-                    .map(|run| {
-                        invocation.controller.observe_run(run.clone());
-                        RunEvidence::new(run).summary()
-                    })
+                    .map(|run| RunEvidence::new(run).summary())
                     .collect::<Vec<_>>();
                 return Ok(json!({"runs":runs}).to_string());
             };
-            let client = WorkflowClient::current();
-            loop {
-                let run = client.run(&id).await.map_err(String::from)?;
-                RunEvidence::new(&run).require_workflow(invocation.expected)?;
-                invocation.review.require_result();
-                invocation.controller.observe_run(run.clone());
-                if !run.snapshot().phase().active() {
-                    return Ok(RunEvidence::new(&run)
-                        .page(arguments.offset, limit)
-                        .to_string());
-                }
-                if invocation.controller.spec() != *invocation.expected {
-                    return Err("The SQL changed while waiting. The submitted run continues with its original SQL; inspect its run ID to recover results.".into());
-                }
-                gloo_timers::future::TimeoutFuture::new(500).await;
+            let run = invocation.controller.find_run(&id)?;
+            RunEvidence::new(&run).require_workflow(invocation.expected)?;
+            invocation.review.require_result();
+            if run.snapshot().phase().active() {
+                return Err("This run is still executing. Inspect it again after it ends.".into());
             }
+            Ok(RunEvidence::new(&run)
+                .page(arguments.offset, limit)
+                .to_string())
         })
     }
 }
@@ -145,10 +132,7 @@ impl WorkflowTool for InspectImages {
             if !invocation.evidence.is_empty() {
                 return Err("Inspect one batch of images per response; describe those observations before requesting more.".into());
             }
-            let run = WorkflowClient::current()
-                .run(&arguments.run_id)
-                .await
-                .map_err(String::from)?;
+            let run = invocation.controller.find_run(&arguments.run_id)?;
             let evidence = RunEvidence::new(&run);
             evidence.require_workflow(invocation.expected)?;
             let images = evidence.images(&arguments)?;
@@ -197,10 +181,7 @@ impl WorkflowTool for ShowResults {
     ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let arguments: ShowResultsArguments = invocation.arguments()?;
-            let run = WorkflowClient::current()
-                .run(&arguments.run_id)
-                .await
-                .map_err(String::from)?;
+            let run = invocation.controller.find_run(&arguments.run_id)?;
             let evidence = RunEvidence::new(&run);
             evidence.require_workflow(invocation.expected)?;
             evidence.require_completed()?;
@@ -214,7 +195,6 @@ impl WorkflowTool for ShowResults {
                 .controller
                 .replace_authored_query(invocation.expected, workflow.clone())?;
             *invocation.expected = workflow;
-            invocation.controller.observe_run(run.clone());
             invocation.controller.select_run(arguments.run_id);
             invocation
                 .controller
@@ -255,7 +235,7 @@ impl<'a> RunEvidence<'a> {
         let count_notice = result.filter(|result| result.truncated()).map(|result| format!(
             "Only {} preview rows are retained. The total matching row count and total matching episode count are unknown. Report this as a partial preview or compute SQL aggregates; never present preview_rows as the total. Visual inspection validates only the specifically inspected rows.", result.rows().len()
         ));
-        json!({"ok":!matches!(snapshot.phase(), WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted),"run_id":snapshot.run_id(),"workflow":self.0.workflow(),"executed_sql":self.0.workflow().execution_sql().ok(),"phase":snapshot.phase(),"error":snapshot.error(),"started_ms":snapshot.started_ms(),"preview_rows":result.map(|result| result.rows().len()),"preview_truncated":result.map(|result| result.truncated()),"total_result_rows":total_rows,"result_notice":count_notice})
+        json!({"ok":snapshot.phase() != WorkflowRunPhase::Failed,"run_id":snapshot.run_id(),"workflow":self.0.workflow(),"executed_sql":self.0.workflow().execution_sql().ok(),"phase":snapshot.phase(),"error":snapshot.error(),"started_ms":snapshot.started_ms(),"preview_rows":result.map(|result| result.rows().len()),"preview_truncated":result.map(|result| result.truncated()),"total_result_rows":total_rows,"result_notice":count_notice})
     }
     fn page(&self, offset: usize, limit: usize) -> Value {
         let mut output = self.summary();
@@ -339,9 +319,8 @@ mod tests {
     fn fixture() -> WorkflowRun {
         let workflow = WorkflowSpec::new("evidence", "Evidence")
             .with_sql("SELECT frame, episode FROM evidence");
-        let mut snapshot = WorkflowRunSnapshot::started(&workflow, "run-1");
-        snapshot.set_phase(WorkflowRunPhase::Completed);
-        snapshot.set_result(Some(SpiralQuerySnapshot::new(
+        let mut snapshot = WorkflowRunSnapshot::started("run-1");
+        snapshot.finish(Ok(SpiralQuerySnapshot::new(
             vec![QueryColumn::new("frame", "Utf8", false).with_semantic_type(Some("spql.image.Image".into()))],
             vec![serde_json::from_value(json!({"frame":"data:image/png;base64,aW1hZ2U=","episode":"episode-7","nested":{"bytes":"data:application/octet-stream;base64,AAAA"}})).unwrap()],
             true,
@@ -351,8 +330,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn complete_cohort_can_be_inspected_without_another_query() {
         let workflow = WorkflowSpec::new("cohort", "Cohort");
-        let mut snapshot = WorkflowRunSnapshot::started(&workflow, "cohort-run");
-        snapshot.set_phase(WorkflowRunPhase::Completed);
+        let mut snapshot = WorkflowRunSnapshot::started("cohort-run");
         let rows = (0..52)
             .map(|index| {
                 serde_json::from_value(
@@ -361,7 +339,7 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        snapshot.set_result(Some(SpiralQuerySnapshot::new(Vec::new(), rows, false)));
+        snapshot.finish(Ok(SpiralQuerySnapshot::new(Vec::new(), rows, false)));
         let run = WorkflowRun::new(workflow, snapshot);
         let page = RunEvidence::new(&run).page(0, 100);
         let rows = page["rows"].as_array().unwrap();

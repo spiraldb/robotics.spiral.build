@@ -312,9 +312,7 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
 | GET | `/workflows/{id}` | — | WorkflowDocument |
 | POST | `/workflows/save` | WorkflowDocument | WorkflowDocument (new saved revision) |
 | POST | `/workflows/plan` | WorkflowSpec | WorkflowPlan |
-| GET | `/workflow-runs` | — | WorkflowRun[] |
-| POST | `/workflow-runs` | WorkflowSpec | WorkflowRun |
-| GET | `/workflow-runs/{id}` | — | WorkflowRun |
+| POST | `/workflow-runs` | WorkflowSpec | WorkflowRun (completed or failed) |
 | POST | `/datasets/cameras` | DatasetSelection | Dataset and camera inspection |
 | GET | `/models/capabilities` | — | SpiralQuerySnapshot (native AI catalog) |
 
@@ -325,14 +323,12 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
 | GET | `/curations` | — | CurationSummary[] |
 | GET | `/curations/{id}` | — | CurationSpec |
 | POST | `/curations/save` | CurationSpec (stored revision) | CurationSpec (next revision) |
-| GET | `/curation-runs` | — | CurationRun[] |
-| POST | `/curation-runs` | CurationSpec | CurationRun (validating) |
-| GET | `/curation-runs/{id}` | — | CurationRun |
+| POST | `/curation-runs` | CurationSpec | CurationRun (completed or failed) |
 
 A curation is a typed recipe over one dataset (measurements, exclusion rules,
 transforms) compiled to one read-only query; see [curation](curation.md).
-Runs are in-memory and polled like workflow runs; Save is the only write and
-uses optimistic revisions.
+A run is one request that answers when the run ends, like a workflow run; the
+browser keeps the run list. Save is the only write and uses optimistic revisions.
 
 ### Explorations
 
@@ -412,8 +408,9 @@ central component knows the set of feature operations.
 Dioxus renders the UI and serves the application shell; it does not define or
 implement the wire protocol.
 
-Workflow Assistant execution uses the existing `/workflow-runs` endpoints. Runs retain
-exact submitted SQL and bounded previews. The browser agent can page those previews,
+Workflow Assistant execution uses the same `POST /workflow-runs` as the Run button;
+the request answers when the query ends, and the browser keeps each run's exact
+submitted SQL and bounded preview. The browser agent can page those previews,
 attach selected native image previews to the next model request, and select a completed
 run for presentation. The frontend model client sends text or standard text/image
 content parts through `/proxy`; transient image messages are not allowed in persisted

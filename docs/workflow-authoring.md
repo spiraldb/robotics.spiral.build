@@ -13,7 +13,8 @@ checking. Run submits an immutable copy of the visible SQL, including an unsaved
 draft, without saving it. Editing
 or saving during execution cannot change the submitted query or its results.
 Save or Discard before switching documents. Unsent chat text stays local to its
-workflow. Page reload loses unsaved edits; submitted backend runs continue.
+workflow. Page reload loses unsaved edits and the run list; a submitted query
+still finishes on the backend.
 
 The existing Spiral `workflows` relation keeps its column names (`graph_version`
 and `graph_json`), but encoding version 4 contains a `workflow` with `id`,
@@ -56,10 +57,10 @@ including signatures, metadata, and descriptions. Metadata tools remain
 The investigation loop is inspect → `set_workflow` → `run_workflow` → `inspect_run`
 → evaluate → revise → `show_results`. `set_workflow` plans candidates before changing
 the draft; errors leave it unchanged. `run_workflow` submits the visible SQL once
-through the same native runner as manual Run and returns an immutable run ID.
-`inspect_run` waits for that ID and returns paged preview rows, exact internal SQL, errors,
-and truncation. Without an ID it lists this workflow's admitted runs, including
-runs whose submission response was lost. It never reruns a query.
+through the same native runner as manual Run, waits for it to end, and returns an
+immutable run ID. `inspect_run` returns that run's paged preview rows, exact internal
+SQL, errors, and truncation. Without an ID it lists this workflow's runs. It never
+reruns a query.
 
 `inspect_images` selects 1–4 actual image preview cells by run, column, and zero-based
 row index. Native image/tensor preview conversion is shared with the Results viewer.
@@ -151,15 +152,16 @@ Planning does not execute inference. Graphviz and its server process are removed
 ## Native execution
 
 Run submits the exact SQL once through the existing ADBC query connection.
-Studio retains one active workflow run, mutual exclusion with recording, and
-session-owned immutable observations. It shows whole-query phase, elapsed time,
+Run is one request that answers when the query ends; the browser keeps the
+answered runs, allows one active run at a time, and the backend keeps mutual
+exclusion with recording. It shows whole-query phase, elapsed time,
 and a bounded final preview (100 rows plus transport byte limits). It drains the
 remaining result stream, so a preview limit does not stop inference or hide a
 late failure. Use SQL selection or LIMIT to bound requested computation.
 
 There is no workflow Cancel action in this cutover, as agreed while upstream
 ADBC cancellation is unavailable. Backend/project shutdown waits for an admitted
-workflow run to finish. The Assistant's Stop action aborts its current investigation (model request or result wait), but an admitted query continues and remains observable. The UI states this while a query is active.
+workflow run to finish. The Assistant's Stop action aborts its current investigation (model request or result wait), but a submitted query continues and its run still lands in the run list. The UI states this while a query is active.
 Studio does not invent per-operator progress or persist previews as training inputs.
 Native reuse and durable completed outputs remain milestones 3.2 and 3.3.
 

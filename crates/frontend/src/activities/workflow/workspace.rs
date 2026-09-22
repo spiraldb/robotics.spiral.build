@@ -528,10 +528,8 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
         .map(|result| QueryExecutionPresentation::new(QueryState::Ready(result)));
     let transient_model = if result_model.is_none() {
         match snapshot.phase() {
-            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => {
-                Some(QueryExecutionPresentation::new(QueryState::Running))
-            }
-            WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted => snapshot
+            WorkflowRunPhase::Running => Some(QueryExecutionPresentation::new(QueryState::Running)),
+            WorkflowRunPhase::Failed => snapshot
                 .error()
                 .map(str::to_owned)
                 .map(|error| QueryExecutionPresentation::new(QueryState::Failed(error))),
@@ -617,28 +615,20 @@ impl WorkflowRunPresentation for WorkflowRunPhase {
         match self {
             WorkflowRunPhase::Idle if configured => "Run the workflow to see its rows here.",
             WorkflowRunPhase::Idle => "Fix the SQL issues, then run the workflow.",
-            WorkflowRunPhase::Interrupted => {
-                "The run was interrupted before it produced rows. Run the workflow again."
-            }
             WorkflowRunPhase::Failed => {
                 "The run failed before it produced rows. Run the workflow again."
             }
             WorkflowRunPhase::Completed => "The run completed without publishing rows.",
-            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => {
-                "Rows appear when the run completes."
-            }
+            WorkflowRunPhase::Running => "Rows appear when the run completes.",
         }
     }
 
     fn stale_result_copy(self) -> &'static str {
         match self {
-            WorkflowRunPhase::Interrupted => {
-                "The latest run was interrupted. These rows remain evidence from the previous completed run."
-            }
             WorkflowRunPhase::Failed => {
                 "The latest run failed. These rows remain evidence from the previous completed run."
             }
-            WorkflowRunPhase::Validating | WorkflowRunPhase::Running => {
+            WorkflowRunPhase::Running => {
                 "These rows belong to earlier SQL. A submitted query is still running."
             }
             _ => {
@@ -685,7 +675,7 @@ pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
     // whichever view is open, reads both from here.
     let exploration_controller = super::explore::state::ExplorationController::use_controller();
     let view = use_signal(|| WorkflowView::Agent);
-    controller.use_polling(is_active, view);
+    controller.use_loading();
     let status = use_memo(move || match view() {
         WorkflowView::Agent => controller
             .editor_status()

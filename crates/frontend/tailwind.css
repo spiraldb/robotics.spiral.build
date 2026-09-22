@@ -1769,18 +1769,13 @@
     background: var(--tone-good);
   }
 
-  .run-phase.is-running .run-phase-dot,
-  .run-phase.is-validating .run-phase-dot {
+  .run-phase.is-running .run-phase-dot {
     background: var(--tone-accent);
     animation: workflow-pulse 900ms ease-in-out infinite;
   }
 
   .run-phase.is-failed .run-phase-dot {
     background: var(--tone-danger);
-  }
-
-  .run-phase.is-interrupted .run-phase-dot {
-    background: var(--tone-caution);
   }
 
   .run-select {

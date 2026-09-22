@@ -587,11 +587,6 @@ impl ProjectCoordinator {
         let transition = self.begin_change(origin, "Checking the project connection")?;
         self.require_idle(origin, ProjectChangeKind::Destination)
             .await?;
-        origin
-            .rollout()
-            .flush_persistence()
-            .await
-            .map_err(OperationError::External)?;
         let candidate = self
             .factory
             .prepare(connection.clone(), ProjectPreparation::Validate)
@@ -649,13 +644,6 @@ impl ProjectCoordinator {
             },
         )
         .await?;
-        if connection.project_id() == previous.project_id() {
-            origin
-                .rollout()
-                .flush_persistence()
-                .await
-                .map_err(OperationError::External)?;
-        }
         let candidate = self
             .factory
             .prepare(connection.clone(), ProjectPreparation::Validate)
@@ -695,11 +683,6 @@ impl ProjectCoordinator {
         self.resolve(origin.info().id())?;
         let transition = self.begin_change(origin, "Loading Studio project")?;
         self.require_idle(origin, ProjectChangeKind::Reload).await?;
-        origin
-            .rollout()
-            .flush_persistence()
-            .await
-            .map_err(OperationError::External)?;
         let candidate = self
             .factory
             .prepare(origin.storage().connection_settings(), preparation)
@@ -719,11 +702,6 @@ impl ProjectCoordinator {
         self.require_idle(origin, ProjectChangeKind::Import).await?;
         // Import uses a separate store at the same immutable destination. Its
         // importer coordinates the Spiral data and local SQLite transactions.
-        origin
-            .rollout()
-            .flush_persistence()
-            .await
-            .map_err(OperationError::External)?;
         let candidate = self
             .factory
             .create(origin.storage().connection_settings())?;

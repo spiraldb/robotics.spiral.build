@@ -1,7 +1,7 @@
 //! The line above a result: which run produced it, how that run ended, and
 //! what it measured.
 //!
-//! Workflow and Curation poll the same run lifecycle and print the same strip
+//! Workflow and Curation submit the same run lifecycle and print the same strip
 //! over their results; Rollout and Training say the same thing about their own
 //! jobs. The phase dot, the run list, and their wording live here once, and each
 //! activity supplies only the facts that are its own — rows, judged episodes,
@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 use spiral_robotics_common::runs::RunPhase;
 use spiral_robotics_ui::Select;
 
-/// How a run's phase is spoken, the same in every activity that polls one —
+/// How a run's phase is spoken, the same in every activity that runs one —
 /// in the strip, and wherever else a phase is reported on its own.
 pub(crate) trait RunPhasePresentation {
     fn run_label(self) -> &'static str;
@@ -21,11 +21,9 @@ impl RunPhasePresentation for RunPhase {
     fn run_label(self) -> &'static str {
         match self {
             Self::Idle => "Ready",
-            Self::Validating => "Validating",
             Self::Running => "Running",
             Self::Completed => "Complete",
             Self::Failed => "Failed",
-            Self::Interrupted => "Interrupted",
         }
     }
 }
@@ -84,11 +82,9 @@ impl RunChoice {
     const fn phase_class(&self) -> &'static str {
         match self.phase {
             RunPhase::Idle => "is-idle",
-            RunPhase::Validating => "is-validating",
             RunPhase::Running => "is-running",
             RunPhase::Completed => "is-complete",
             RunPhase::Failed => "is-failed",
-            RunPhase::Interrupted => "is-interrupted",
         }
     }
 
@@ -164,8 +160,8 @@ mod tests {
         assert_eq!(completed.phase_label(), "Complete");
         let running = RunChoice::new("b", (5, 5), RunPhase::Running);
         assert_eq!(running.option_label(), "Run 5 of 5 · running");
-        let interrupted = RunChoice::new("c", (1, 5), RunPhase::Interrupted);
-        assert_eq!(interrupted.option_label(), "Run 1 of 5 · interrupted");
+        let failed = RunChoice::new("c", (1, 5), RunPhase::Failed);
+        assert_eq!(failed.option_label(), "Run 1 of 5 · failed");
     }
 
     #[test]

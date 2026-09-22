@@ -28,8 +28,8 @@ use crate::rollout::policy::{
     PreparedActionGoals, TargetRobotContract,
 };
 use crate::rollout::service::{
-    CleanupResult, CompletionReason, ControlDecision, ControlObservation, ExecutionOutcome,
-    InferenceTiming, PolicyCadence, RolloutAdmission, RolloutCoordinator, RolloutEventPort,
+    CleanupResult, CompletionReason, ExecutionOutcome, InferenceTiming, PolicyCadence,
+    RolloutAdmission, RolloutPhaseChange as _, RolloutProgress,
 };
 use crate::sync::MutexRecovery;
 use spiral_robotics_hardware::{
@@ -117,16 +117,20 @@ struct ActiveRollout {
 struct RolloutRun {
     session: String,
     config: RolloutConfig,
-    stop: watch::Receiver<bool>,
 }
 
 impl RolloutRun {
-    fn new(session: String, config: RolloutConfig, stop: watch::Receiver<bool>) -> Self {
-        Self {
-            session,
-            config,
-            stop,
-        }
+    fn new(session: String, config: RolloutConfig) -> Self {
+        Self { session, config }
+    }
+
+    /// How the rollout ends once `hardware` no longer shows it in control.
+    fn control_outcome(&self, hardware: &HardwareState) -> Option<ExecutionOutcome> {
+        ExecutionOutcome::after_control_change(
+            &hardware.mode().control_owner(),
+            hardware.mode_error(),
+            ExpectedPolicyOwner::new(self.config.robot(), &self.session),
+        )
     }
 }
 
@@ -142,24 +146,6 @@ impl ActiveRollout {
     async fn stop_and_join(self) {
         let _ = self.stop.send(true);
         let _ = self.task.await;
-    }
-}
-
-struct WatchRolloutEvents {
-    runs: Arc<Mutex<std::collections::BTreeMap<String, RolloutSnapshot>>>,
-    state: watch::Sender<RolloutSnapshot>,
-    persistence: watch::Sender<RolloutSnapshot>,
-}
-
-impl RolloutEventPort for WatchRolloutEvents {
-    fn publish(&self, snapshot: &RolloutSnapshot) {
-        if let Some(id) = snapshot.session_id() {
-            self.runs
-                .recover_lock()
-                .insert(id.to_owned(), snapshot.clone());
-        }
-        self.state.send_replace(snapshot.clone());
-        self.persistence.send_replace(snapshot.clone());
     }
 }
 
@@ -435,102 +421,14 @@ impl RolloutHardwareResources {
     }
 }
 
-type RolloutFlushRequest = tokio::sync::oneshot::Sender<Result<(), String>>;
-
-struct RolloutPersistence {
-    changes: Mutex<Option<watch::Receiver<RolloutSnapshot>>>,
-    task: Mutex<Option<JoinHandle<()>>>,
-    stop: watch::Sender<bool>,
-    flush: tokio::sync::mpsc::UnboundedSender<RolloutFlushRequest>,
-    requests: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<RolloutFlushRequest>>>,
-}
-
-impl RolloutPersistence {
-    fn new(changes: watch::Receiver<RolloutSnapshot>) -> Self {
-        let (stop, receiver) = watch::channel(false);
-        drop(receiver);
-        let (flush, requests) = tokio::sync::mpsc::unbounded_channel();
-        Self {
-            changes: Mutex::new(Some(changes)),
-            task: Mutex::new(None),
-            stop,
-            flush,
-            requests: Mutex::new(Some(requests)),
-        }
-    }
-
-    fn start<Write, Pending>(&self, persist: Write)
-    where
-        Write: Fn(RolloutSnapshot) -> Pending + Send + 'static,
-        Pending: std::future::Future<Output = Result<(), String>> + Send,
-    {
-        let Some(mut changes) = self.changes.recover_lock().take() else {
-            return;
-        };
-        let Some(mut requests) = self.requests.recover_lock().take() else {
-            return;
-        };
-        let mut stop = self.stop.subscribe();
-        let task = tokio::spawn(async move {
-            let mut last_error = None;
-            loop {
-                let (reply, stopping, dirty) = tokio::select! {
-                    biased;
-                    _ = stop.changed() => (None, true, changes.has_changed().unwrap_or(false)),
-                    request = requests.recv() => (request, false, changes.has_changed().unwrap_or(false)),
-                    changed = changes.changed() => {
-                        if changed.is_err() { break; }
-                        (None, false, true)
-                    }
-                };
-                if dirty || last_error.is_some() {
-                    let snapshot = changes.borrow_and_update().clone();
-                    last_error = persist(snapshot).await.err();
-                    if let Some(error) = &last_error {
-                        tracing::error!("could not persist rollout state: {error}");
-                    }
-                }
-                if let Some(reply) = reply {
-                    let _ = reply.send(last_error.clone().map_or(Ok(()), Err));
-                }
-                if stopping {
-                    break;
-                }
-            }
-        });
-        *self.task.recover_lock() = Some(task);
-    }
-
-    async fn flush(&self) -> Result<(), String> {
-        if self.task.recover_lock().is_none() {
-            return Ok(());
-        }
-        let (reply, received) = tokio::sync::oneshot::channel();
-        self.flush
-            .send(reply)
-            .map_err(|_| "rollout persistence stopped before its writes were drained".to_owned())?;
-        received
-            .await
-            .map_err(|_| "rollout persistence stopped before acknowledging its writes".to_owned())?
-    }
-
-    async fn shutdown(&self) {
-        self.stop.send_replace(true);
-        let task = self.task.recover_lock().take();
-        if let Some(task) = task {
-            let _ = task.await;
-        }
-    }
-}
-
+/// The current rollout lives in `state`, written by its task; finished and
+/// restored rollouts live in `history`.
 struct RolloutLifecycle {
-    runs: Arc<Mutex<std::collections::BTreeMap<String, RolloutSnapshot>>>,
+    history: Mutex<std::collections::BTreeMap<String, RolloutSnapshot>>,
     loaded: tokio::sync::OnceCell<()>,
     state: watch::Sender<RolloutSnapshot>,
-    coordinator: Mutex<RolloutCoordinator>,
     active: Mutex<Option<ActiveRollout>>,
     session_ids: StableIdSequence,
-    persistence: RolloutPersistence,
 }
 
 impl RolloutLifecycle {
@@ -555,44 +453,19 @@ impl RolloutManager {
     ) -> Arc<Self> {
         // Persisted state loads on the first Rollout read or start command.
         // The project owns execution even while its views are unmounted.
-        let initial = RolloutSnapshot::default();
-        let (persistence, changes) = watch::channel(initial.clone());
-        let persistence_worker = RolloutPersistence::new(changes);
-        let (state, receiver) = watch::channel(initial);
-        drop(receiver);
-        let runs = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
-        let events = Arc::new(WatchRolloutEvents {
-            runs: runs.clone(),
-            state: state.clone(),
-            persistence,
-        });
         Arc::new(Self {
             storage,
             hardware,
             preferences,
             clock: Arc::new(SystemClock),
             lifecycle: RolloutLifecycle {
-                runs,
+                history: Mutex::new(std::collections::BTreeMap::new()),
                 loaded: tokio::sync::OnceCell::new(),
-                state,
-                coordinator: Mutex::new(RolloutCoordinator::new(events)),
+                state: watch::Sender::new(RolloutSnapshot::default()),
                 active: Mutex::new(None),
                 session_ids: StableIdSequence::new("rollout", 1),
-                persistence: persistence_worker,
             },
         })
-    }
-
-    fn activate(&self) {
-        let storage = self.storage.clone();
-        self.lifecycle.persistence.start(move |snapshot| {
-            let storage = storage.clone();
-            async move { storage.save_rollout_session(&snapshot).await }
-        });
-    }
-
-    pub(crate) async fn flush_persistence(&self) -> Result<(), String> {
-        self.lifecycle.persistence.flush().await
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -610,42 +483,42 @@ impl RolloutManager {
                     .storage
                     .load_rollout_session()
                     .await?
-                    .unwrap_or_default();
-                let snapshot = snapshot.restored_after_restart();
+                    .unwrap_or_default()
+                    .restored_after_restart();
                 if let Some(id) = snapshot.session_id() {
                     self.lifecycle
-                        .runs
+                        .history
                         .recover_lock()
                         .insert(id.to_owned(), snapshot.clone());
                 }
                 self.lifecycle.state.send_replace(snapshot);
-                self.activate();
                 Ok::<(), String>(())
             })
             .await
             .map(|_| ())
     }
 
+    /// Every rollout this project knows, the current one as it is right now.
+    fn known_runs(&self) -> std::collections::BTreeMap<String, RolloutSnapshot> {
+        let mut runs = self.lifecycle.history.recover_lock().clone();
+        let current = self.snapshot();
+        if let Some(id) = current.session_id() {
+            runs.insert(id.to_owned(), current);
+        }
+        runs
+    }
+
     pub(crate) async fn runs(&self) -> Result<Vec<RolloutSnapshot>, String> {
         self.ensure_loaded().await?;
-        Ok(self
-            .lifecycle
-            .runs
-            .recover_lock()
-            .values()
-            .cloned()
-            .collect())
+        Ok(self.known_runs().into_values().collect())
     }
 
     pub(super) async fn run(&self, id: &str) -> Result<RolloutSnapshot, crate::OperationError> {
         self.ensure_loaded()
             .await
             .map_err(crate::OperationError::Internal)?;
-        self.lifecycle
-            .runs
-            .recover_lock()
-            .get(id)
-            .cloned()
+        self.known_runs()
+            .remove(id)
             .ok_or_else(|| crate::OperationError::NotFound(format!("Rollout {id:?} was not found")))
     }
 
@@ -660,32 +533,32 @@ impl RolloutManager {
         self.ensure_loaded().await?;
         self.preferences.load().await?;
         let mut active = self.lifecycle.active.recover_lock();
+        if let Some(active) = active.as_ref() {
+            return Err(format!(
+                "policy session {:?} is already active",
+                active.session
+            ));
+        }
         let (session, created_ms) = self
             .lifecycle
             .session_ids
             .next(self.clock.as_ref())
             .into_parts();
-        let (stop, stop_receiver) = watch::channel(false);
-        self.lifecycle
-            .coordinator
-            .recover_lock()
-            .admit(RolloutAdmission::new(
-                session.clone(),
-                created_ms,
-                config.clone(),
-            ))?;
+        let admitted =
+            RolloutAdmission::new(session.clone(), created_ms, config.clone()).into_snapshot()?;
+        self.lifecycle.state.send_replace(admitted.clone());
         // Spawn and publish the task handle while holding the same mutex used
         // by shutdown. Once an active session is observable its cleanup task
         // is therefore always joinable; there is no `active + task=None`
         // window for graceful shutdown to miss.
+        let (stop, stop_receiver) = watch::channel(false);
         let manager = self.clone();
-        let run = RolloutRun::new(session.clone(), config, stop_receiver);
+        let run = RolloutRun::new(session.clone(), config);
         let task = tokio::spawn(async move {
-            manager.run_and_finish(run).await;
+            manager.run_and_finish(run, stop_receiver).await;
         });
-        debug_assert!(active.is_none(), "rollout admission is exclusive");
         *active = Some(ActiveRollout::new(session, stop, task));
-        Ok(self.snapshot())
+        Ok(admitted)
     }
 
     pub(super) async fn stop(&self, id: &str) -> Result<(), String> {
@@ -696,28 +569,40 @@ impl RolloutManager {
         if active.session != id {
             return Err(format!("Rollout {id:?} is not the active execution"));
         }
-        self.lifecycle.coordinator.recover_lock().request_stop(id)?;
+        // Signal first: the task refuses every phase change once stop is set,
+        // so the Stopping phase published next is never overwritten.
         active
             .stop
             .send(true)
-            .map_err(|_| "the rollout task already stopped".to_owned())
+            .map_err(|_| "the rollout task already stopped".to_owned())?;
+        self.lifecycle.state.send_modify(|snapshot| {
+            snapshot.enter(
+                RolloutPhase::Stopping,
+                "Stopping after the current control cycle…".to_owned(),
+            );
+        });
+        Ok(())
     }
 
     pub(crate) async fn shutdown(&self) {
         if let Some(active) = self.lifecycle.take_active() {
-            let _ = self
-                .lifecycle
-                .coordinator
-                .recover_lock()
-                .request_stop(&active.session);
             active.stop_and_join().await;
         }
-        self.lifecycle.persistence.shutdown().await;
     }
 
-    async fn run_and_finish(self: Arc<Self>, run: RolloutRun) {
-        let session = run.session.clone();
-        let outcome = match std::panic::AssertUnwindSafe(self.run_session(run))
+    async fn persist_current(&self) {
+        if let Err(error) = self.storage.save_rollout_session(&self.snapshot()).await {
+            tracing::error!("could not persist rollout state: {error}");
+        }
+    }
+
+    /// Storage sees a rollout when it starts and when it ends. The terminal
+    /// write lands before the rollout stops counting as active, so an idle
+    /// rollout is always durable.
+    async fn run_and_finish(self: Arc<Self>, run: RolloutRun, stop: watch::Receiver<bool>) {
+        self.persist_current().await;
+        let mut progress = RolloutProgress::new(&self.lifecycle.state, stop);
+        let outcome = match std::panic::AssertUnwindSafe(self.run_session(&run, &mut progress))
             .catch_unwind()
             .await
         {
@@ -725,56 +610,48 @@ impl RolloutManager {
             Ok(Err(error)) => ExecutionOutcome::Failed(error),
             Err(_) => ExecutionOutcome::Failed("policy executor panicked unexpectedly".to_owned()),
         };
-        let ticket = self
-            .lifecycle
-            .coordinator
-            .recover_lock()
-            .begin_cleanup(&session, outcome);
+        progress.cleaning_up();
         // Hardware cleanup is unconditional. Even an internal lifecycle bug
         // must not strand the arm under policy ownership.
-        let cleanup = self.hardware.hardware.stop_policy_session(&session).await;
+        let cleanup = self
+            .hardware
+            .hardware
+            .stop_policy_session(&run.session)
+            .await;
+        let terminal = progress.finish(outcome, CleanupResult::new(self.clock.now_ms(), cleanup));
+        self.lifecycle
+            .history
+            .recover_lock()
+            .insert(run.session.clone(), terminal);
+        self.persist_current().await;
         let mut active = self.lifecycle.active.recover_lock();
-        match ticket {
-            Ok(ticket) => {
-                if let Err(error) = self
-                    .lifecycle
-                    .coordinator
-                    .recover_lock()
-                    .finish_cleanup(ticket, CleanupResult::new(self.clock.now_ms(), cleanup))
-                {
-                    tracing::error!(session, "rollout cleanup could not be finalized: {error}");
-                }
-            }
-            Err(error) => {
-                tracing::error!(session, "rollout cleanup was not admitted: {error}");
-                if let Err(cleanup) = cleanup {
-                    tracing::error!(session, "emergency hardware cleanup also failed: {cleanup}");
-                }
-            }
-        }
-        if active.as_ref().is_some_and(|item| item.session == session) {
+        if active
+            .as_ref()
+            .is_some_and(|item| item.session == run.session)
+        {
             active.take();
         }
     }
 
-    async fn run_session(&self, run: RolloutRun) -> Result<ExecutionOutcome, String> {
-        let RolloutRun {
-            session,
-            config,
-            mut stop,
-        } = run;
-        let session = session.as_str();
+    async fn run_session(
+        &self,
+        run: &RolloutRun,
+        progress: &mut RolloutProgress<'_>,
+    ) -> Result<ExecutionOutcome, String> {
+        const BEFORE_MODEL: ExecutionOutcome =
+            ExecutionOutcome::Completed(CompletionReason::StoppedBeforeModel);
+        const BEFORE_CONTROL: ExecutionOutcome =
+            ExecutionOutcome::Completed(CompletionReason::StoppedBeforeControl);
+        const SAFELY: ExecutionOutcome =
+            ExecutionOutcome::Completed(CompletionReason::StoppedSafely);
+        let (session, config) = (run.session.as_str(), &run.config);
         let artifact = config.load_checkpoint(self.storage.as_ref()).await;
-        if *stop.borrow() {
-            return self
-                .lifecycle
-                .coordinator
-                .recover_lock()
-                .stopped_outcome(session);
+        if progress.stop_requested() {
+            return Ok(BEFORE_MODEL);
         }
         let artifact = artifact?;
         let manifest = artifact.manifest()?;
-        manifest.validate_for(&config, artifact.config_json())?;
+        manifest.validate_for(config, artifact.config_json())?;
         let (config_json, payload) = artifact.into_parts();
         let model_artifact =
             spiral_robotics_inference::ModelArtifact::from_bytes(config_json, payload)
@@ -850,17 +727,8 @@ impl RolloutManager {
             });
         }
 
-        if !self
-            .lifecycle
-            .coordinator
-            .recover_lock()
-            .warming_up(session)?
-        {
-            return self
-                .lifecycle
-                .coordinator
-                .recover_lock()
-                .stopped_outcome(session);
+        if !progress.warming_up() {
+            return Ok(BEFORE_MODEL);
         }
         let (policy, warmup) = tokio::task::spawn_blocking(move || {
             let mut policy = policy;
@@ -870,29 +738,13 @@ impl RolloutManager {
         .await
         .map_err(|error| format!("policy warm-up stopped unexpectedly: {error}"))?;
         let warmup = warmup.map_err(|error| format!("policy setup failed: {error}"))?;
-        self.lifecycle.coordinator.recover_lock().record_warmup(
-            session,
-            InferenceTiming::new(warmup.total().milliseconds(), warmup.model().milliseconds()),
-        )?;
-        cameras.wait_until_fresh(&mut stop).await?;
-        if *stop.borrow() {
-            return self
-                .lifecycle
-                .coordinator
-                .recover_lock()
-                .stopped_outcome(session);
-        }
-        if !self
-            .lifecycle
-            .coordinator
-            .recover_lock()
-            .awaiting_control(session)?
-        {
-            return self
-                .lifecycle
-                .coordinator
-                .recover_lock()
-                .stopped_outcome(session);
+        progress.record_warmup(InferenceTiming::new(
+            warmup.total().milliseconds(),
+            warmup.model().milliseconds(),
+        ));
+        cameras.wait_until_fresh(progress.stop_signal()).await?;
+        if progress.stop_requested() || !progress.awaiting_control() {
+            return Ok(BEFORE_CONTROL);
         }
 
         self.hardware
@@ -905,38 +757,25 @@ impl RolloutManager {
         let mut hardware_updates = self.hardware.hardware.subscribe();
         match PolicyAdmissionWait::new(
             &mut hardware_updates,
-            &mut stop,
+            progress.stop_signal(),
             ExpectedPolicyOwner::new(config.robot(), session),
         )
         .wait()
         .await?
         {
             PolicyAdmission::Admitted => {}
-            PolicyAdmission::Stopped => {
-                return self
-                    .lifecycle
-                    .coordinator
-                    .recover_lock()
-                    .stopped_outcome(session);
-            }
+            PolicyAdmission::Stopped => return Ok(BEFORE_CONTROL),
             PolicyAdmission::Replaced(mode) => {
-                if let Some(outcome) = self.classify_control(session, &mode)? {
-                    return Ok(outcome);
-                }
-                return Err("policy admission ended without a control transition".to_owned());
+                return run.control_outcome(&mode).ok_or_else(|| {
+                    "policy admission ended without a control transition".to_owned()
+                });
             }
         }
-        if !self
-            .lifecycle
-            .coordinator
-            .recover_lock()
-            .running(session, PolicyCadence::new(sample_hz, reobservation_steps))?
-        {
-            return self
-                .lifecycle
-                .coordinator
-                .recover_lock()
-                .stopped_outcome(session);
+        if !progress.running(
+            PolicyCadence::new(sample_hz, reobservation_steps),
+            config.duration_seconds(),
+        ) {
+            return Ok(BEFORE_CONTROL);
         }
 
         // The first chunk is prepared after policy admission but before the
@@ -944,7 +783,7 @@ impl RolloutManager {
         // this one-time fill; once actions start, every later inference runs
         // concurrently with dispatch from the current action queue.
         let initial_hardware = self.hardware.hardware.state();
-        if let Some(outcome) = self.classify_control(session, &initial_hardware)? {
+        if let Some(outcome) = run.control_outcome(&initial_hardware) {
             return Ok(outcome);
         }
         let initial_robot = initial_hardware.policy_robot(config.robot())?;
@@ -958,25 +797,15 @@ impl RolloutManager {
             )?;
         let mut last_processed_similarity_state = initial_observation.similarity_state.clone();
         let mut initial_task = initial_observation.spawn_inference(policy);
-        let initial_output = loop {
-            tokio::select! {
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() {
-                        return self.lifecycle.coordinator.recover_lock().stopped_outcome(session);
-                    }
-                }
-                output = &mut initial_task => break output,
-            }
+        let initial_output = tokio::select! {
+            () = progress.stop_asked() => return Ok(SAFELY),
+            output = &mut initial_task => output,
         };
         let (initial_policy, initial) = InferenceTaskOutput::resolve_joined(initial_output)?;
-        let initial_latency = initial.age();
-        self.lifecycle.coordinator.recover_lock().record_inference(
-            session,
-            InferenceTiming::new(
-                initial_latency.milliseconds(),
-                initial.chunk.stats().model().milliseconds(),
-            ),
-        )?;
+        progress.record_inference(InferenceTiming::new(
+            initial.age().milliseconds(),
+            initial.chunk.stats().model().milliseconds(),
+        ))?;
 
         let mut policy = Some(initial_policy);
         let mut actions = TimedActionQueue::from_initial_chunk(&initial.chunk)?;
@@ -1000,11 +829,7 @@ impl RolloutManager {
 
         loop {
             tokio::select! {
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() {
-                        return self.lifecycle.coordinator.recover_lock().stopped_outcome(session);
-                    }
-                }
+                () = progress.stop_asked() => return Ok(SAFELY),
                 _ = tokio::time::sleep_until(deadline) => {
                     return Ok(ExecutionOutcome::Completed(CompletionReason::DurationReached {
                         duration_seconds: config.duration_seconds(),
@@ -1020,7 +845,7 @@ impl RolloutManager {
             } else if hardware_changed_at.elapsed() > INPUT_STALE_AFTER {
                 return Err("stopped policy: hardware telemetry became stale".to_owned());
             }
-            if let Some(outcome) = self.classify_control(session, &hardware)? {
+            if let Some(outcome) = run.control_outcome(&hardware) {
                 return Ok(outcome);
             }
             let robot = hardware.policy_robot(config.robot())?;
@@ -1036,14 +861,10 @@ impl RolloutManager {
                     .expect("a finished inference task is present")
                     .await;
                 let (returned_policy, completed) = InferenceTaskOutput::resolve_joined(output)?;
-                let latency = completed.age();
-                self.lifecycle.coordinator.recover_lock().record_inference(
-                    session,
-                    InferenceTiming::new(
-                        latency.milliseconds(),
-                        completed.chunk.stats().model().milliseconds(),
-                    ),
-                )?;
+                progress.record_inference(InferenceTiming::new(
+                    completed.age().milliseconds(),
+                    completed.chunk.stats().model().milliseconds(),
+                ))?;
                 actions.merge(completed.requested_timestep, &completed.chunk)?;
                 must_go_when_empty = true;
                 policy = Some(returned_policy);
@@ -1067,12 +888,7 @@ impl RolloutManager {
                             if additional == 1 { "" } else { "s" }
                         )
                     };
-                    if self
-                        .lifecycle
-                        .coordinator
-                        .recover_lock()
-                        .record_action_clamp_warning(session, warning)?
-                    {
+                    if progress.record_action_clamp_warning(warning) {
                         tracing::warn!(
                             joint = %clamp.joint(),
                             index = clamp.index(),
@@ -1090,10 +906,7 @@ impl RolloutManager {
                 let goals = PolicyGoals::new(config.robot().to_owned(), session.to_owned(), goals)
                     .map_err(|error| error.to_string())?;
                 self.hardware.hardware.set_policy_goals(goals).await?;
-                self.lifecycle
-                    .coordinator
-                    .recover_lock()
-                    .record_command(session, cycle_started.elapsed() > period)?;
+                progress.record_command(cycle_started.elapsed() > period);
                 true
             } else {
                 // The independent hardware loop continues ramping toward the
@@ -1108,7 +921,7 @@ impl RolloutManager {
             let must_go = actions.remaining() == 0 && must_go_when_empty;
             if must_go || (action_executed && actions.remaining() <= refill_threshold) {
                 let refreshed = self.hardware.hardware.state();
-                if let Some(outcome) = self.classify_control(session, &refreshed)? {
+                if let Some(outcome) = run.control_outcome(&refreshed) {
                     return Ok(outcome);
                 }
                 let refreshed_robot = refreshed.policy_robot(config.robot())?;
@@ -1141,22 +954,6 @@ impl RolloutManager {
                 debug_assert!(inference.is_none());
                 inference = Some(observation.spawn_inference(next_policy));
             }
-        }
-    }
-
-    fn classify_control(
-        &self,
-        session: &str,
-        hardware: &HardwareState,
-    ) -> Result<Option<ExecutionOutcome>, String> {
-        let owner = hardware.mode().control_owner();
-        match self.lifecycle.coordinator.recover_lock().observe_control(
-            session,
-            ControlObservation::new(&owner, hardware.mode_error()),
-        )? {
-            ControlDecision::Continue => Ok(None),
-            ControlDecision::Finish(reason) => Ok(Some(ExecutionOutcome::Completed(reason))),
-            ControlDecision::Fail(error) => Ok(Some(ExecutionOutcome::Failed(error))),
         }
     }
 }
@@ -2014,183 +1811,5 @@ mod tests {
             receiver,
         }];
         assert!(cameras.require_fresh().unwrap_err().contains("stale"));
-    }
-}
-
-#[cfg(test)]
-mod persistence_tests {
-    use std::sync::{Arc, Mutex};
-
-    use futures_util::FutureExt as _;
-    use spiral_robotics_common::rollout::RolloutSnapshot;
-    use tokio::sync::{mpsc, oneshot, watch};
-
-    use super::RolloutPersistence;
-
-    #[derive(Debug)]
-    struct PendingRolloutWrite {
-        snapshot: RolloutSnapshot,
-        completion: oneshot::Sender<Result<(), String>>,
-    }
-
-    impl PendingRolloutWrite {
-        fn complete(self, result: Result<(), String>) {
-            self.completion.send(result).unwrap();
-        }
-    }
-
-    struct PersistenceHarness {
-        persistence: Arc<RolloutPersistence>,
-        updates: watch::Sender<RolloutSnapshot>,
-        writes: mpsc::UnboundedReceiver<PendingRolloutWrite>,
-        durable: Arc<Mutex<RolloutSnapshot>>,
-    }
-
-    impl PersistenceHarness {
-        fn new() -> Self {
-            let (updates, changes) = watch::channel(RolloutSnapshot::default());
-            let persistence = Arc::new(RolloutPersistence::new(changes));
-            let (attempted, writes) = mpsc::unbounded_channel();
-            let durable = Arc::new(Mutex::new(RolloutSnapshot::default()));
-            let destination = durable.clone();
-            persistence.start(move |snapshot| {
-                let (completion, completed) = oneshot::channel();
-                attempted
-                    .send(PendingRolloutWrite {
-                        snapshot: snapshot.clone(),
-                        completion,
-                    })
-                    .unwrap();
-                let destination = destination.clone();
-                async move {
-                    let result = completed.await.unwrap();
-                    if result.is_ok() {
-                        *destination.lock().unwrap() = snapshot;
-                    }
-                    result
-                }
-            });
-            Self {
-                persistence,
-                updates,
-                writes,
-                durable,
-            }
-        }
-
-        fn snapshot(session_id: &str) -> RolloutSnapshot {
-            RolloutSnapshot::new(Some(session_id.to_owned()), Some("training-run".to_owned()))
-        }
-
-        fn publish(&self, session_id: &str) {
-            self.updates.send_replace(Self::snapshot(session_id));
-        }
-
-        async fn next_write(&mut self) -> PendingRolloutWrite {
-            self.writes
-                .recv()
-                .await
-                .expect("the persistence worker must attempt a write")
-        }
-    }
-
-    #[tokio::test]
-    async fn flush_waits_for_inflight_write_and_drains_a_newer_snapshot() {
-        let mut harness = PersistenceHarness::new();
-        harness.publish("running");
-        let running = harness.next_write().await;
-        assert_eq!(running.snapshot.session_id(), Some("running"));
-
-        let persistence = harness.persistence.clone();
-        let mut flush = Box::pin(persistence.flush());
-        assert!(flush.as_mut().now_or_never().is_none());
-        harness.publish("completed");
-        running.complete(Ok(()));
-
-        let terminal = harness.next_write().await;
-        assert_eq!(terminal.snapshot.session_id(), Some("completed"));
-        assert!(
-            flush.as_mut().now_or_never().is_none(),
-            "the flush must include the queued terminal snapshot"
-        );
-        terminal.complete(Ok(()));
-        flush.await.unwrap();
-        assert_eq!(
-            harness.durable.lock().unwrap().session_id(),
-            Some("completed")
-        );
-        persistence.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn failed_flush_is_reported_and_a_later_flush_retries_the_same_snapshot() {
-        let mut harness = PersistenceHarness::new();
-        harness.publish("completed");
-        let persistence = harness.persistence.clone();
-        // Queue the barrier before yielding to the worker, so this write is
-        // the one the first flush must acknowledge.
-        let mut first_flush = Box::pin(persistence.flush());
-        assert!(first_flush.as_mut().now_or_never().is_none());
-        harness
-            .next_write()
-            .await
-            .complete(Err("storage unavailable".to_owned()));
-        assert_eq!(first_flush.await.unwrap_err(), "storage unavailable");
-
-        let mut retry = Box::pin(persistence.flush());
-        assert!(retry.as_mut().now_or_never().is_none());
-        let retried = harness.next_write().await;
-        assert_eq!(retried.snapshot.session_id(), Some("completed"));
-        retried.complete(Ok(()));
-        retry.await.unwrap();
-        assert_eq!(
-            harness.durable.lock().unwrap().session_id(),
-            Some("completed")
-        );
-        persistence.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn shutdown_after_flush_does_not_overwrite_replacement_project_data() {
-        let mut harness = PersistenceHarness::new();
-        harness.publish("old-project-run");
-        let persistence = harness.persistence.clone();
-        let mut flush = Box::pin(persistence.flush());
-        assert!(flush.as_mut().now_or_never().is_none());
-        harness.next_write().await.complete(Ok(()));
-        flush.await.unwrap();
-
-        *harness.durable.lock().unwrap() = PersistenceHarness::snapshot("imported-run");
-        tokio::select! {
-            () = persistence.shutdown() => {}
-            Some(write) = harness.writes.recv() => panic!("retirement attempted another write: {write:?}"),
-        }
-        assert_eq!(
-            harness.durable.lock().unwrap().session_id(),
-            Some("imported-run")
-        );
-    }
-}
-
-#[cfg(test)]
-mod observation_tests {
-    use super::*;
-    #[test]
-    fn new_execution_observations_do_not_replace_earlier_run_records() {
-        let (state, _) = watch::channel(RolloutSnapshot::default());
-        let (persistence, _) = watch::channel(RolloutSnapshot::default());
-        let runs = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
-        let events = WatchRolloutEvents {
-            state,
-            persistence,
-            runs: runs.clone(),
-        };
-        let first = RolloutSnapshot::new(Some("first".into()), Some("training".into()));
-        let second = RolloutSnapshot::new(Some("second".into()), Some("training".into()));
-        events.publish(&first);
-        events.publish(&second);
-        assert_eq!(runs.recover_lock().get("first"), Some(&first));
-        assert_eq!(runs.recover_lock().get("second"), Some(&second));
-        assert_eq!(*events.state.borrow(), second);
     }
 }

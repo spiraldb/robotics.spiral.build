@@ -38,25 +38,28 @@ impl WorkflowCommands {
         let _activity = self.state.admit()?;
         Ok(self.state.workflow().plan(&workflow).await)
     }
-    pub(super) fn runs(&self) -> Result<Vec<WorkflowRun>, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        Ok(self.state.workflow().runs())
-    }
-    pub(super) fn run(&self, id: &str) -> Result<WorkflowRun, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        self.state.workflow().run(id).map_err(Into::into)
-    }
-    pub(super) fn start(&self, workflow: WorkflowSpec) -> Result<WorkflowRun, BackendCommandError> {
-        let _activity = self.state.admit()?;
-        let lease = self.state.catalog_lease();
-        let _reservation = lease
+    pub(super) async fn run(
+        &self,
+        workflow: WorkflowSpec,
+    ) -> Result<WorkflowRun, BackendCommandError> {
+        let admission = self
+            .state
+            .catalog_lease()
             .try_reserve(CatalogLeaseOwner::WorkflowStart)
             .ok_or_else(|| {
                 BackendCommandError::conflict(
                     "Wait for recording or catalog changes before running a workflow.",
                 )
             })?;
-        self.state.workflow().start(workflow).map_err(Into::into)
+        self.state
+            .execute(move |state, _activity| async move {
+                state
+                    .workflow()
+                    .run(workflow, admission)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await
     }
     pub(super) async fn capabilities(
         &self,

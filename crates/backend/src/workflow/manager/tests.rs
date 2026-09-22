@@ -1,6 +1,7 @@
 use super::*;
+use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
+use spiral_robotics_common::workflow::WorkflowRunPhase;
 use spiral_robotics_storage::ProjectStore;
-use std::time::Duration;
 struct WorkflowFixture {
     manager: WorkflowManager,
     store: Arc<ProjectStore>,
@@ -27,18 +28,13 @@ impl WorkflowFixture {
             planned_sql: None,
         }
     }
-    async fn finished(&self, id: &str) -> WorkflowRun {
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                let run = self.manager.run(id).unwrap();
-                if !run.snapshot().phase().active() {
-                    return run;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("query terminates")
+    fn admission() -> CatalogLeaseReservation {
+        Arc::new(CatalogMutationLease::default())
+            .try_reserve(CatalogLeaseOwner::WorkflowStart)
+            .unwrap()
+    }
+    async fn run(&self, workflow: WorkflowSpec) -> WorkflowRun {
+        self.manager.run(workflow, Self::admission()).await.unwrap()
     }
 }
 #[test]
@@ -89,15 +85,8 @@ fn saved_workflow_rejects_extra_fields_and_legacy_snapshots() {
 async fn execute_accepts_unsaved_sql_and_keeps_its_exact_input() {
     let fixture = WorkflowFixture::new();
     let mut graph = WorkflowFixture::query();
-    let submitted = graph.clone();
-    let run = fixture.manager.start(graph.clone()).unwrap();
-    graph.set_name("Next draft");
-    assert!(
-        fixture.manager.start(graph.clone()).is_err(),
-        "a workflow cannot start a duplicate run"
-    );
-    let finished = fixture.finished(run.snapshot().run_id().unwrap()).await;
-    assert_eq!(finished.workflow(), &submitted);
+    let finished = fixture.run(graph.clone()).await;
+    assert_eq!(finished.workflow(), &graph);
     assert_eq!(
         finished.snapshot().phase(),
         WorkflowRunPhase::Completed,
@@ -109,6 +98,7 @@ async fn execute_accepts_unsaved_sql_and_keeps_its_exact_input() {
         42
     );
     // Saving local state is independent of the Spiral query database.
+    graph.set_name("Next draft");
     assert!(
         fixture
             .manager
@@ -116,65 +106,53 @@ async fn execute_accepts_unsaved_sql_and_keeps_its_exact_input() {
             .await
             .is_ok()
     );
-    assert_eq!(graph.name(), "Next draft");
-    assert_eq!(
-        fixture
-            .manager
-            .run(run.snapshot().run_id().unwrap())
-            .unwrap(),
-        finished
-    );
-    let second = fixture.manager.start(graph.clone()).unwrap();
-    let second = fixture.finished(second.snapshot().run_id().unwrap()).await;
+    let second = fixture.run(graph.clone()).await;
     assert_eq!(second.workflow(), &graph);
-    assert_eq!(
-        fixture
-            .manager
-            .run(run.snapshot().run_id().unwrap())
-            .unwrap(),
-        finished
-    );
+    assert_ne!(second.snapshot().run_id(), finished.snapshot().run_id());
 }
 
 #[tokio::test]
-async fn independent_workflows_run_concurrently_and_shutdown_waits_for_both() {
+async fn invalid_sql_never_becomes_a_run_and_failed_sql_is_a_failed_run() {
     let fixture = WorkflowFixture::new();
-    let first = fixture.manager.start(WorkflowFixture::query()).unwrap();
-    let second = fixture
-        .manager
-        .start(WorkflowSpec::new("second", "Second query").with_sql("SELECT 43 AS answer"))
-        .unwrap();
-    assert_eq!(fixture.manager.inner.runs.active_count(), 2);
-    let duplicate = fixture.manager.start(WorkflowFixture::query()).unwrap_err();
-    assert!(
-        duplicate
-            .to_string()
-            .contains(first.snapshot().run_id().unwrap())
-    );
+    assert!(matches!(
+        fixture
+            .manager
+            .run(
+                WorkflowFixture::query().with_sql("DELETE FROM episodes"),
+                WorkflowFixture::admission()
+            )
+            .await,
+        Err(OperationError::InvalidInput(_))
+    ));
+    let failed = fixture
+        .run(WorkflowFixture::query().with_sql("SELECT answer FROM no_such_relation"))
+        .await;
+    assert_eq!(failed.snapshot().phase(), WorkflowRunPhase::Failed);
+    assert!(failed.snapshot().error().is_some());
+    assert!(!fixture.manager.is_active());
+}
+
+#[tokio::test]
+async fn independent_workflows_run_concurrently() {
+    let fixture = WorkflowFixture::new();
+    let second = WorkflowSpec::new("second", "Second query").with_sql("SELECT 43 AS answer");
+    let (first, second) = tokio::join!(fixture.run(WorkflowFixture::query()), fixture.run(second));
+    for (run, answer) in [(first, 42), (second, 43)] {
+        assert_eq!(run.snapshot().phase(), WorkflowRunPhase::Completed);
+        assert_eq!(run.snapshot().result().unwrap().rows()[0]["answer"], answer);
+    }
     fixture.manager.shutdown().await;
     assert!(!fixture.manager.is_active());
-    for (run, answer) in [(first, 42), (second, 43)] {
-        let finished = fixture
-            .manager
-            .run(run.snapshot().run_id().unwrap())
-            .unwrap();
-        assert_eq!(finished.snapshot().phase(), WorkflowRunPhase::Completed);
-        assert_eq!(
-            finished.snapshot().result().unwrap().rows()[0]["answer"],
-            answer
-        );
-    }
 }
 
 #[tokio::test]
-async fn planning_checks_native_sql_without_creating_a_run() {
+async fn planning_checks_native_sql() {
     let fixture = WorkflowFixture::new();
     let mut graph = WorkflowFixture::query();
     let plan = fixture.manager.plan(&graph).await;
     assert!(plan.error().is_none(), "{:?}", plan.error());
     graph.set_sql("SELECT missing_column");
     assert!(fixture.manager.plan(&graph).await.error().is_some());
-    assert!(fixture.manager.runs().is_empty());
 }
 
 #[tokio::test]
@@ -267,5 +245,4 @@ async fn native_capabilities_and_plan_do_not_execute_inference() {
     );
     let result = query.run(&workflow).await.unwrap();
     assert!(result.rows()[0]["score"].is_null());
-    assert!(fixture.manager.runs().is_empty());
 }

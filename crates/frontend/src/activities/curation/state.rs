@@ -1,9 +1,8 @@
-//! Browser-owned recipe draft, saved baseline, run observations, and the
+//! Browser-owned recipe draft, saved baseline, submitted runs, and the
 //! sheet's selection state.
 use super::CurationClient;
 use super::pipeline::PipelineSelection;
-use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
-use crate::client::runs::RunLedger;
+use crate::client::runs::{PENDING_RUN_ID, RunHistory, SubmittedRun};
 use crate::components::document_session::{
     DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
 };
@@ -100,16 +99,23 @@ impl SheetOrder {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct CurationController {
     session: DocumentSession<CurationSpec>,
-    runs: CurationRunSignals,
+    runs: RunHistory<CurationRun>,
     view: CurationViewSignals,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct CurationRunSignals {
-    runs: Signal<Vec<CurationRun>>,
-    selected_run: Signal<Option<String>>,
-    /// A judging run Studio has accepted but not yet reported back.
-    starting: Signal<bool>,
+impl SubmittedRun for CurationRun {
+    fn document_id(&self) -> &str {
+        self.curation().id()
+    }
+    fn run_id(&self) -> Option<&str> {
+        self.snapshot().run_id()
+    }
+    fn phase(&self) -> RunPhase {
+        self.snapshot().phase()
+    }
+    fn started_ms(&self) -> u64 {
+        self.snapshot().started_ms()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -129,11 +135,7 @@ impl CurationController {
         let session = DocumentSession::use_session();
         use_hook(|| Self {
             session,
-            runs: CurationRunSignals {
-                runs: Signal::new(Vec::new()),
-                selected_run: Signal::new(None),
-                starting: Signal::new(false),
-            },
+            runs: RunHistory::new(),
             view: CurationViewSignals {
                 active_panel: Signal::new(None),
                 selected_episode: Signal::new(None),
@@ -179,7 +181,7 @@ impl CurationController {
                 snapshot.set_result_stale(!draft.accepts_output_from(run.curation()));
                 snapshot
             }
-            None => CurationRunSnapshot::idle_for(draft),
+            None => CurationRunSnapshot::default(),
         })
     }
     pub(super) fn outcome(&self) -> Option<CurationOutcome> {
@@ -191,37 +193,16 @@ impl CurationController {
         self.visible_run().map(|run| run.curation().clone())
     }
     fn visible_run(&self) -> Option<CurationRun> {
-        let runs = self.curation_runs();
-        let selected = self.runs.selected_run.read();
-        selected
-            .as_ref()
-            .and_then(|id| {
-                runs.iter()
-                    .find(|run| run.snapshot().run_id() == Some(id.as_str()))
-            })
-            .or_else(|| runs.last())
-            .cloned()
+        self.runs.visible(&self.document_id())
+    }
+    fn document_id(&self) -> String {
+        self.session.with_draft(|draft| draft.id().to_owned())
     }
     pub(super) fn curation_runs(&self) -> Vec<CurationRun> {
-        let id = self.session.with_draft(|draft| draft.id().to_owned());
-        let mut runs = self
-            .runs
-            .runs
-            .read()
-            .iter()
-            .filter(|run| run.curation().id() == id)
-            .cloned()
-            .collect::<Vec<_>>();
-        runs.sort_by_key(|run| run.snapshot().started_ms());
-        runs
+        self.runs.for_document(&self.document_id())
     }
     pub(super) fn select_run(mut self, id: String) {
-        if self
-            .curation_runs()
-            .iter()
-            .any(|run| run.snapshot().run_id() == Some(id.as_str()))
-        {
-            self.runs.selected_run.set(Some(id));
+        if self.runs.select(&self.document_id(), id) {
             self.view.selected_episode.set(None);
         }
     }
@@ -244,10 +225,8 @@ impl CurationController {
     pub(super) fn set_name(self, name: String) {
         self.session.set_name(name);
     }
-    /// Judging is under way, or Studio has accepted a start it has not yet
-    /// reported back.
     pub(super) fn judging(&self) -> bool {
-        self.snapshot().phase().active() || *self.runs.starting.read()
+        self.snapshot().phase().active()
     }
 
     pub(super) fn active_panel(&self) -> Option<PanelId> {
@@ -322,13 +301,7 @@ impl CurationController {
         if self.command().is_some() {
             return Some("A curation command is in progress.".to_owned());
         }
-        if self
-            .runs
-            .runs
-            .read()
-            .iter()
-            .any(|run| run.snapshot().phase().active())
-        {
+        if self.runs.any_active() {
             return Some("A curation is already running.".to_owned());
         }
         None
@@ -380,8 +353,7 @@ impl CurationController {
     /// episode open, no hover, and the pipeline at its source.
     fn adopt(self, _curation: &CurationSpec) -> Result<(), String> {
         let mut view = self.view;
-        let mut runs = self.runs;
-        runs.selected_run.set(None);
+        self.runs.clear_selection();
         view.selected_episode.set(None);
         view.hovered_rule.set(None);
         view.filter.set(SheetFilter::All);
@@ -409,18 +381,22 @@ impl CurationController {
             return;
         }
         let curation = self.spec();
-        self.runs.starting.set(true);
+        self.view.selected_episode.set(None);
+        let placeholder = CurationRun::new(
+            curation.clone(),
+            CurationRunSnapshot::started(PENDING_RUN_ID)
+                .with_started_ms(js_sys::Date::now() as u64),
+        );
+        let answer = self.runs.submit(placeholder, async move {
+            CurationClient::current()
+                .start(&curation)
+                .await
+                .map_err(|error| error.to_string())
+        });
         self.session.spawn(async move {
-            match CurationClient::current().start(&curation).await {
-                Ok(run) => {
-                    self.runs.selected_run.set(None);
-                    self.view.selected_episode.set(None);
-                    self.runs.runs.accept_runs(vec![run]);
-                }
-                Err(error) => studio.report_from(MessageSource::Curation, error.to_string()),
+            if let Err(error) = answer.await {
+                studio.report_from(MessageSource::Curation, error);
             }
-            self.runs.starting.set(false);
-            QueryRefresh::current().invalidate(&[QueryDomain::Curation]);
         });
     }
     pub(super) fn select_curation(self, id: Option<String>) {
@@ -448,7 +424,7 @@ impl CurationController {
             .open(known.then_some(id), move |curation| self.adopt(curation));
     }
 
-    pub(super) fn use_polling(self, is_active: ReadSignal<bool>) {
+    pub(super) fn use_loading(self) {
         let sessions = crate::shell::project::ProjectSessionSignals::current();
         use_effect(move || {
             if sessions.studio_available()
@@ -460,27 +436,6 @@ impl CurationController {
                     .load_initial(move |curation| self.adopt(curation));
             }
         });
-        let runs = QueryPolicy::new(QueryDomain::Curation, 500).use_when(
-            move || is_active() && sessions.studio_available(),
-            move || {
-                let active = self
-                    .runs
-                    .runs
-                    .peek()
-                    .iter()
-                    .find(|run| run.snapshot().phase().active())
-                    .and_then(|run| run.snapshot().run_id())
-                    .map(str::to_owned);
-                async move {
-                    let client = CurationClient::current();
-                    match active {
-                        Some(id) => client.run(&id).await.map(|run| vec![run]),
-                        None => client.runs().await,
-                    }
-                }
-            },
-        );
-        self.runs.runs.observe(runs);
     }
 
     pub(super) fn editor_status(&self) -> Option<CurationEditorStatus> {
@@ -550,11 +505,11 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn the_status_bar_reads_dataset_rules_and_the_verdict_count() {
         let spec = recipe();
-        let idle = CurationEditorStatus::new(spec.clone(), CurationRunSnapshot::idle_for(&spec));
+        let idle = CurationEditorStatus::new(spec.clone(), CurationRunSnapshot::default());
         assert_eq!(idle.dataset_label(), "dataset_x");
         assert_eq!(idle.phase_label(), "");
         assert_eq!(idle.verdict_label(), "Bright");
-        let mut snapshot = CurationRunSnapshot::started(&spec, "run");
+        let mut snapshot = CurationRunSnapshot::started("run");
         snapshot.set_phase(RunPhase::Completed);
         snapshot.set_outcome(Some(CurationOutcome::new(
             spiral_robotics_common::curation::run::CurationTotals::new(40, 31, (40, false)),
@@ -563,7 +518,7 @@ mod tests {
         let complete = CurationEditorStatus::new(spec.clone(), snapshot);
         assert_eq!(complete.phase_label(), "");
         assert_eq!(complete.verdict_label(), "31 of 40 kept");
-        let mut running = CurationRunSnapshot::started(&spec, "run");
+        let mut running = CurationRunSnapshot::started("run");
         running.set_phase(RunPhase::Running);
         assert_eq!(
             CurationEditorStatus::new(spec, running).phase_label(),

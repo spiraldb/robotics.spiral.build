@@ -104,7 +104,7 @@ pub(crate) fn CurationWorkspace(is_active: ReadSignal<bool>) -> Element {
         is_active,
     );
     let controller = CurationController::use_controller();
-    controller.use_polling(is_active);
+    controller.use_loading();
     let status = use_memo(move || controller.editor_status());
     rsx! {
         crate::shell::frame::WorkspaceFrame {

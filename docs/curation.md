@@ -10,7 +10,7 @@ dimmed under the rule that removed them.
 Curation is a specialization of Workflow. Workflow authors arbitrary SQL over
 relations; Curation compiles a typed recipe to SQL whose input and output are
 episodes. Both run through the same native executor, the same read-only
-policy, the same document revisions, and the same run polling.
+policy, the same document revisions, and the same awaited runs.
 
 ## The recipe
 
@@ -66,15 +66,14 @@ The sheet then says it is truncated while the counts stay whole.
 ## Runs
 
 `POST /api/curation-runs` compiles the submitted recipe, unsaved edits
-included, and admits one in-memory run per curation. The run holds the exact
-recipe, the compiled SQL, a phase (validating, judging, complete, failed,
-interrupted), and on completion an outcome: totals, per-rule and
-per-transform counts, and one verdict per listed episode with its statistics,
-fact values, the rules that fired, and the transforms it would receive.
-Runs are not persisted; the browser polls `GET /api/curation-runs` every
-500 ms while a run is active, narrowing to `GET /api/curation-runs/{id}`, and
-refuses stale observations. Starting a run takes the catalog lease so it
-cannot overlap recording or import.
+included, judges it, and answers when the run ends. The run holds the exact
+recipe, the compiled SQL, a phase (running, complete, failed), and on
+completion an outcome: totals, per-rule and per-transform counts, and one
+verdict per listed episode with its statistics, fact values, the rules that
+fired, and the transforms it would receive. Runs are not persisted: the
+browser shows a running placeholder while it awaits the request and keeps the
+answered runs until the page reloads. Starting a run takes the catalog lease
+so it cannot overlap recording or import.
 
 Verdicts stay current while the judged recipe definition is unchanged;
 renaming or saving does not invalidate them, any recipe edit marks them as a

@@ -1,8 +1,6 @@
-//! Finalize automatically stopped recordings and retain catalog exclusion through media commit.
+//! Finalize takes the control loop ended on its own and retain catalog exclusion through media commit.
 use crate::project_session::context::ProjectContext;
-use std::time::Duration;
-const VIDEO_RECORDING_MONITOR_INTERVAL: Duration = Duration::from_millis(200);
-const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
+use spiral_robotics_hardware::HardwareState;
 pub(crate) struct RecordingSupervisor {
     project: ProjectContext,
 }
@@ -11,46 +9,39 @@ impl RecordingSupervisor {
         Self { project }
     }
 
-    pub(crate) async fn monitor_video_recording(self) {
-        let mut ticker = tokio::time::interval(VIDEO_RECORDING_MONITOR_INTERVAL);
-        let mut missing_episode = String::new();
-        let mut missing_ticks = 0_u8;
-        loop {
-            ticker.tick().await;
-            let state = self.project.current();
-            let Some(capture_episode) = state.recording_session().episode() else {
-                missing_episode.clear();
-                missing_ticks = 0;
-                continue;
-            };
-            let hardware = self.project.hardware().state();
-            let hardware_episode = hardware
+    /// Watch one take the control loop accepted. When the loop ends it on its
+    /// own (a robot detaches, the writer fails), close and commit its media.
+    /// An explicit stop claims the take before stopping it, which makes this
+    /// a no-op.
+    pub(crate) async fn finalize_when_the_control_loop_ends(self, episode: String) {
+        let shown = |state: &HardwareState| {
+            state
                 .recording()
-                .as_ref()
-                .map(|recording| recording.episode().to_owned());
-            if hardware_episode.as_deref() == Some(&capture_episode) {
-                missing_episode.clear();
-                missing_ticks = 0;
-                continue;
+                .is_some_and(|recording| recording.episode() == episode)
+        };
+        let mut hardware = self.project.hardware().subscribe();
+        // The loop publishes an accepted take at the end of its cycle, so the
+        // first publish after this subscription shows it unless it has ended.
+        if !shown(&hardware.borrow_and_update()) && hardware.changed().await.is_err() {
+            return;
+        }
+        loop {
+            if hardware.wait_for(|state| !shown(state)).await.is_err()
+                || self.finish_stale_video_capture().await
+            {
+                return;
             }
-            if missing_episode == capture_episode {
-                missing_ticks = missing_ticks.saturating_add(1);
-            } else {
-                missing_episode = capture_episode;
-                missing_ticks = 1;
+            // A pause change holds the take; retry once the loop publishes again.
+            if hardware.changed().await.is_err() {
+                return;
             }
-            if missing_ticks < VIDEO_RECORDING_STOP_TICKS {
-                continue;
-            }
-            Self::new(state).finish_stale_video_capture().await;
-            missing_episode.clear();
-            missing_ticks = 0;
         }
     }
 
     /// Close and commit any capture whose corresponding control-loop recording
-    /// has already ended. Also used during graceful backend shutdown.
-    pub(crate) async fn finish_stale_video_capture(&self) {
+    /// has already ended. Also used during graceful backend shutdown. `false`
+    /// while another operation holds the take and finalization must wait.
+    pub(crate) async fn finish_stale_video_capture(&self) -> bool {
         let state = &self.project;
         // Claim the recording exactly once, but retain catalog exclusion until the
         // episode and finalized media have both been committed. This exists
@@ -58,10 +49,10 @@ impl RecordingSupervisor {
         // allocate catalog identities.
         let mut operation = match state.recording_session().claim_finalization() {
             Ok(Some(operation)) => operation,
-            Ok(None) => return,
+            Ok(None) => return true,
             Err(error) => {
                 tracing::warn!("could not claim stale recording finalization: {error}");
-                return;
+                return false;
             }
         };
         let (videos, failures) = operation.finish_media().await;
@@ -83,5 +74,6 @@ impl RecordingSupervisor {
                 "episode media could not be committed to SpiralDB: {error}"
             ));
         }
+        true
     }
 }
