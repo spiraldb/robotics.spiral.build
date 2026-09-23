@@ -1,0 +1,259 @@
+/* Curation › canvas styles. Prefix every class with `curation-canvas-`. Use
+   @layer components like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
+   must be unlayered too. */
+
+@layer components {
+  /* The graph pane borrows the Workflow canvas wrap (pale dotted viewport,
+     zoom controls at the bottom left) and the stage card's anatomy, so a
+     graph node and a Workflow stage read as one vocabulary. What is
+     Curation's alone is the + on a node's bottom edge, the menu it opens,
+     and the line a running measurement writes. */
+  .curation-canvas-graph {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .curation-canvas-notice {
+    margin: 8px 8px 0;
+  }
+
+  .curation-canvas-flow {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    flex: 1;
+  }
+
+  .curation-canvas-node-dot {
+    width: 5px;
+    height: 5px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: var(--tone-info);
+    animation: curation-canvas-pulse 1.6s ease-in-out infinite;
+  }
+
+  @keyframes curation-canvas-pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* One small + centred on the bottom edge, where the next node would go. */
+  .curation-canvas-add {
+    position: absolute;
+    bottom: -12px;
+    left: 50%;
+    z-index: 2;
+    translate: -50% 0;
+    display: flex;
+  }
+
+  /* Both popovers live in the flow's world layer, not in the node, because a
+     node sits inside a tile and a tile carries `content-visibility: auto` —
+     whose paint containment clips anything hanging past the tile's own box.
+     The layer shares the viewport transform, so a popover stays fixed to its
+     card through pan and zoom without being clipped by it. The layer itself
+     takes no presses; its contents do. */
+  .curation-canvas-overlay {
+    pointer-events: none;
+  }
+
+  .curation-canvas-overlay > * {
+    pointer-events: auto;
+  }
+
+  /* The menu hangs from the + in the gap the layout leaves under the card.
+     `left` and `top` are the card's own flow coordinates, set inline. */
+  .curation-canvas-menu {
+    position: absolute;
+    z-index: 3;
+    translate: -50% 0;
+    display: flex;
+    min-width: 208px;
+    flex-direction: column;
+    gap: 1px;
+    padding: 3px;
+    border: 1px solid var(--tone-line);
+    border-radius: 4px;
+    background: var(--tone-surface);
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  }
+
+  .curation-canvas-remove {
+    position: absolute;
+    z-index: 4;
+    width: 264px;
+  }
+
+  /* The workspace beside the graph is one column that fills its tile and does
+     not scroll. Each measurement's own index scrolls inside it, so the
+     recording it drives is never pushed off the bottom. */
+  .curation-canvas-workspace {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .curation-canvas-dataset,
+  .curation-canvas-dataset-choice {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 12px 12px;
+  }
+
+  /* The recording runs edge to edge under its heading, as it does in Data;
+     only the heading keeps the pane's inset. */
+  .curation-canvas-dataset {
+    gap: 0;
+    padding: 0;
+    overflow-y: auto;
+  }
+
+  .curation-canvas-dataset-field {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding-top: 4px;
+  }
+
+  .curation-canvas-dataset-head {
+    display: flex;
+    min-height: 28px;
+    flex: none;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid var(--tone-line);
+    padding: 6px 12px;
+  }
+
+  /* The document bar over the panels, as every document activity stacks. */
+  .curation-activity {
+    @apply flex h-full min-h-0 min-w-0 flex-col;
+  }
+
+  .curation-panels {
+    @apply min-h-0 min-w-0 flex-1;
+  }
+
+  /* Both panes fill their tile; the workspace scrolls, the canvas clips. */
+  .curation-canvas-graph-editor,
+  .curation-canvas-workspace-editor {
+    min-width: 0;
+    min-height: 0;
+  }
+}
+
+/* Unlayered from here down. This file is imported at the head of
+   tailwind.css, so a layered rule of mine loses to every later rule in the same
+   layer — `.workflow-stage-card`'s own animation and footer among them — and to
+   the kit stylesheet, which is unlayered and loads later still. Node rules that
+   adjust a stage card, and every override of a kit control, therefore sit here,
+   one class more specific than what they override. */
+
+/* A column of cards reads downwards, so the entrance follows the data down
+   rather than across the pane. */
+.curation-canvas-node.workflow-stage-card {
+  position: relative;
+  cursor: pointer;
+  animation-name: curation-canvas-node-enter;
+}
+
+/* Selecting a node is the way into every workspace, so the card is the button
+   and it shows where the keyboard is. */
+.curation-canvas-node.workflow-stage-card:focus-visible {
+  outline: 2px solid var(--tone-focus);
+  outline-offset: 1px;
+}
+
+@keyframes curation-canvas-node-enter {
+  from {
+    opacity: 0;
+    translate: 0 -6px;
+  }
+}
+
+/* The slot a running measurement fills: one dot and one line, never a bar. */
+.curation-canvas-node .curation-canvas-node-status {
+  gap: 5px;
+  color: var(--tone-ink-soft);
+}
+
+/* The + itself: a hairline disc on the card's edge, quiet until it is used,
+   and a full 24px target like every other Studio control. */
+.curation-canvas-node .curation-canvas-add-action {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--tone-line-strong);
+  background: var(--tone-surface);
+  color: var(--tone-ink-soft);
+}
+
+.curation-canvas-node .curation-canvas-add-action:hover {
+  border-color: var(--tone-line-strong);
+  color: var(--tone-ink);
+  background: var(--tone-surface);
+}
+
+.curation-canvas-node .curation-canvas-add-action .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* Removing a node is a quiet control the card reveals, not a standing one. It
+   is last in the card's markup — a keyboard user reaches Add a step before the
+   trash — and drawn back in the corner the eye expects it. */
+.curation-canvas-node .curation-canvas-node-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.curation-canvas-node:is(:hover, :focus-within, .is-selected) .curation-canvas-node-remove {
+  opacity: 1;
+}
+
+
+/* A node whose menu or confirmation is open is always the selected one —
+   opening either selects it — and dioxus-flow already lifts the selected node
+   above its neighbours through an inline z-index, so nothing is needed here. */
+
+/* Edges carry no details in a curation, so their hit area stays out of the
+   way of the nodes and the canvas. */
+.curation-canvas-flow .df-edge-hit {
+  cursor: default;
+  pointer-events: none;
+}
+
+/* Under reduce, a node appears where it belongs, a running measurement is a
+   steady dot rather than a breathing one, and Remove is simply there on hover.
+   Nothing that carries meaning is removed — only the movement is. */
+@media (prefers-reduced-motion: reduce) {
+  .curation-canvas-node.workflow-stage-card {
+    animation: none;
+  }
+
+  .curation-canvas-node .curation-canvas-node-dot {
+    animation: none;
+  }
+
+  .curation-canvas-node .curation-canvas-node-remove {
+    transition: none;
+  }
+}

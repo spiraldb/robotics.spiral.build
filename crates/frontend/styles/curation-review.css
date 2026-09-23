@@ -1,0 +1,538 @@
+/* Curation › review styles: the proportion every measurement's output is read in,
+   and the row it is read as. Prefix every class with `curation-review-`,
+   `curation-entries-`, `curation-entry-` or `curation-poster`. Use @layer components
+   like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
+   must be unlayered too. */
+
+@layer components {
+  /* A measurement's status: one line, 28px. It used to be four bands and
+     121px — a phase word, a count, a remainder, a chip, a settings summary
+     and a failures list, all saying the same two numbers before the operator
+     reached a single row. */
+  .curation-review-status {
+    display: flex;
+    min-height: 28px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 12px;
+    border-bottom: 1px solid var(--tone-line);
+  }
+
+  /* The camera topic and the model id are exactly what an operator pastes
+     into a bug report, so they select. The kit's disclosure summary — where
+     they used to live — forbids it. */
+  .curation-review-status-facts {
+    margin: 0;
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    user-select: text;
+  }
+
+  /* Why the action beside it will not run, on the page rather than in a
+     tooltip a disabled button never fires. */
+  .curation-review-status-note {
+    margin: 0;
+    color: var(--tone-caution);
+    font-size: 11px;
+  }
+
+  /* The actions sit at the strip's far end, away from the numbers they change. */
+  .curation-review-status-actions {
+    display: flex;
+    margin-left: auto;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* An index that scrolls beside a recording that holds still. The index is
+     given the smaller share because a row is one line of words; the recording
+     needs the width to be worth watching. Neither column may collapse, and
+     only the index scrolls — the whole point is that the video stays put. */
+  .curation-review {
+    display: grid;
+    min-height: 0;
+    flex: 1;
+    grid-template-columns: minmax(16rem, 0.85fr) minmax(19rem, 1fr);
+    border-top: 1px solid var(--tone-line);
+  }
+
+  /* The index answers to its own width, not the window's: the same 1024px
+     window gives it 300px or 420px depending on where the graph split sits,
+     and it is the column that decides whether a description fits. */
+  .curation-review-index {
+    container: curation-index / inline-size;
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* Two ways into three hundred rows. It sits above the scroll, so it stays
+     reachable at row 280. */
+  .curation-entries-search {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: grid;
+    align-items: center;
+    gap: 6px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--tone-line);
+    background: var(--tone-surface);
+  }
+
+  .curation-entries-jump {
+    max-width: 9rem;
+  }
+
+  .curation-review-evidence {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+    border-left: 1px solid var(--tone-line);
+    background: var(--tone-surface);
+  }
+
+  /* What the evidence column is showing, above the picture rather than in it. */
+  .curation-review-head {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--tone-line);
+  }
+
+  .curation-review-subject {
+    margin: 0;
+    color: var(--tone-ink);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+  }
+
+  .curation-review-facts {
+    display: flex;
+    margin: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The episode's identifier, as text somebody can select and paste. It was a
+     `title` tooltip, which is none of those things. */
+  .curation-review-id {
+    overflow: hidden;
+    max-width: 18ch;
+    color: var(--tone-ink-faint);
+    font: inherit;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    user-select: text;
+  }
+
+  .curation-review-id:hover,
+  .curation-review-id:focus-within {
+    max-width: none;
+  }
+
+  /* The evidence column takes about a second to open a recording. A short
+     fade on arrival says the wait ended; a hard cut said the pane broke. */
+  /* A column shorter than the inspection needs scrolls it rather than
+     shrinking its pictures. */
+  .curation-review-player {
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    overflow: auto;
+    animation: curation-review-arrive 120ms ease-out;
+  }
+
+  @keyframes curation-review-arrive {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .curation-review-note {
+    margin: 0;
+    padding: 8px 12px;
+    color: var(--tone-ink-soft);
+    font-size: 11px;
+  }
+
+  /* One index. Rows are a fixed height so a picture arriving never moves the
+     row under the pointer, and so the list reads as a column rather than a
+     stack of cards. */
+  .curation-entries {
+    display: flex;
+    margin: 0;
+    flex-direction: column;
+    padding: 0;
+    list-style: none;
+  }
+
+  .curation-entries-group {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Three hundred rows are three hundred pictures the engine would otherwise
+     lay out and paint whether or not they are on screen. The reserved height
+     is one row's, so the scrollbar is right before anything is drawn. */
+  .curation-entry-item {
+    position: relative;
+    contain-intrinsic-size: 0 63px;
+    content-visibility: auto;
+  }
+
+  /* Find similar sits over the row's right edge, beside the row rather than
+     in it, in space the row leaves for it. It shows on hover and focus, and
+     always on the row the evidence column is showing. */
+  .curation-entry-item[data-findable="true"] .curation-entry {
+    padding-right: 40px;
+  }
+
+  .curation-entry-find {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    display: grid;
+    width: 26px;
+    height: 26px;
+    place-items: center;
+    border: 1px solid var(--tone-line);
+    border-radius: 6px;
+    background: var(--tone-surface);
+    color: var(--tone-ink-soft);
+    cursor: pointer;
+    opacity: 0;
+    translate: 0 -50%;
+    transition: opacity 100ms ease-out, color 100ms ease-out, border-color 100ms ease-out;
+  }
+
+  .curation-entry-item:hover .curation-entry-find,
+  .curation-entry-find:focus-visible,
+  .curation-entry-item:has(.curation-entry[aria-current="true"]) .curation-entry-find {
+    opacity: 1;
+  }
+
+  .curation-entry-find:hover {
+    border-color: var(--tone-ink-faint);
+    color: var(--tone-ink);
+  }
+
+  @media (hover: none) {
+    .curation-entry-find {
+      opacity: 1;
+    }
+  }
+
+  /* The heading element carries the outline; the button inside it carries the
+     press and the sticky box, so neither semantics nor behaviour gives way. */
+  .curation-entries-heading-slot {
+    margin: 0;
+    font: inherit;
+  }
+
+  /* An episode heading stays put while its own subtasks scroll under it, so
+     the row on screen always has its episode named above it. */
+  .curation-entries-heading {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    width: 100%;
+    min-height: 24px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 12px;
+    border: 0;
+    border-bottom: 1px solid var(--tone-line);
+    background: var(--tone-sunken);
+    color: var(--tone-ink);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 100ms ease-out, color 100ms ease-out;
+  }
+
+  .curation-entries-heading:hover {
+    background: var(--tone-hover);
+  }
+
+  /* An episode nobody could annotate keeps its place in the list rather than
+     living in a band above it: the same heading, saying what is missing. */
+  .curation-entries-heading-failed {
+    cursor: default;
+  }
+
+  .curation-entries-failed .curation-entries-heading-name {
+    color: var(--tone-ink-soft);
+  }
+
+  .curation-entry-failure {
+    display: flex;
+    margin: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--tone-line);
+    color: var(--tone-ink-soft);
+    font-size: 11px;
+    user-select: text;
+  }
+
+  .curation-entries-group[aria-current="true"] .curation-entries-heading {
+    background: var(--tone-selected);
+    color: var(--tone-accent-ink);
+  }
+
+  .curation-entries-heading-name {
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .curation-entries-heading-count {
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .curation-entries-group[aria-current="true"] .curation-entries-heading-count {
+    color: var(--tone-accent-ink);
+  }
+
+  /* The whole row is the target. Reaching only the description text meant a
+     click anywhere else in a 900px row was swallowed in silence.
+
+     It is not a `<button>`, and that is deliberate: Chromium refuses caret
+     selection inside one, and the product of this whole view is three hundred
+     generated sentences an operator has to be able to copy. It is a pressable
+     element with its own keys instead. */
+  .curation-entry {
+    display: grid;
+    width: 100%;
+    min-height: 62px;
+    align-items: center;
+    gap: 8px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    padding: 4px 12px;
+    border: 0;
+    border-bottom: 1px solid var(--tone-line);
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 100ms ease-out, box-shadow 100ms ease-out;
+  }
+
+  .curation-entry:hover {
+    background: var(--tone-hover);
+  }
+
+  .curation-entry[aria-current="true"] {
+    background: var(--tone-selected);
+  }
+
+  .curation-entry-words {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 1px;
+    user-select: text;
+  }
+
+  /* Two lines, because at 1024px four descriptions in five did not fit on
+     one — in the index whose entire job is reading and comparing them. */
+  .curation-entry-description {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--tone-ink);
+    font-size: 12px;
+    line-height: 1.35;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .curation-entry-facts {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 8px;
+    overflow: hidden;
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* Every probability holds the same column, so a ranking reads as a column of
+     numbers rather than a ragged edge. */
+  /* A posterless row's place in its episode: a hairline the width of a
+     poster, filled where the slice runs. */
+  .curation-entry-span {
+    position: relative;
+    display: block;
+    width: 64px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--tone-sunken);
+    box-shadow: inset 0 0 0 1px var(--tone-line);
+  }
+  .curation-entry-span-fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    min-width: 2px;
+    border-radius: 3px;
+    background: var(--tone-ink-soft);
+  }
+  .curation-entry[aria-current="true"] .curation-entry-span-fill {
+    background: var(--tone-accent-strong);
+  }
+
+  .curation-entry-score {
+    width: 3.25rem;
+    flex-shrink: 0;
+    color: var(--tone-ink);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  .curation-entry-score[data-answered="false"] {
+    color: var(--tone-ink-faint);
+  }
+
+  /* The still. It holds its box from the first render so a list filling with
+     pictures never reflows. A row waiting for its frame rests on the sunken
+     surface — a screenful of black rectangles read as failure rather than as a
+     list still arriving — and the camera mat comes with the picture. */
+  .curation-poster {
+    position: relative;
+    width: 96px;
+    height: 54px;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-radius: 4px;
+    background: var(--tone-sunken);
+  }
+
+  .curation-poster:is([data-state="ready"], [data-state="failed"]) {
+    background: var(--tone-camera);
+  }
+
+  .curation-poster img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .curation-poster[data-state="ready"] img {
+    animation: curation-poster-arrive 160ms ease-out;
+  }
+
+  @keyframes curation-poster-arrive {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .curation-poster-empty {
+    position: absolute;
+    inset: 0;
+  }
+
+  /* A frame still being cut says so, because a grey box that means "waiting"
+     and a grey box that means "this failed" are the same box otherwise. */
+  .curation-poster[data-state="waiting"] .curation-poster-empty {
+    background: linear-gradient(
+      100deg,
+      transparent 20%,
+      rgb(255 255 255 / 0.07) 40%,
+      transparent 60%
+    );
+    background-size: 300% 100%;
+    animation: curation-poster-cutting 1.4s linear infinite;
+  }
+
+  @keyframes curation-poster-cutting {
+    from {
+      background-position: 150% 0;
+    }
+    to {
+      background-position: -150% 0;
+    }
+  }
+
+  .curation-poster[data-state="failed"] .curation-poster-empty {
+    display: flex;
+    align-items: flex-end;
+    overflow: hidden;
+    padding: 3px 4px;
+    color: var(--tone-ink-soft);
+    font-size: 10px;
+    line-height: 1.2;
+    background: repeating-linear-gradient(
+      135deg,
+      transparent 0 5px,
+      rgb(255 255 255 / 0.08) 5px 10px
+    );
+  }
+
+  /* Facts are read as a sentence of fields, so they are separated the way
+     every other Curation fact line is rather than by a gap alone. */
+  .curation-review-facts > * + *::before {
+    content: "·";
+    margin-right: 8px;
+  }
+
+  /* A narrow index spends its width on the words. The picture and the score
+     are the two things that read at any size, so they give first. */
+  @container curation-index (max-width: 22rem) {
+    .curation-poster {
+      width: 72px;
+      height: 40px;
+    }
+
+    .curation-entry {
+      min-height: 52px;
+      gap: 6px;
+      padding: 4px 8px;
+    }
+
+    .curation-entry-score {
+      width: 2.75rem;
+    }
+  }
+
+  /* Under reduce, a picture and a pane still arrive — they just arrive rather
+     than fade in. The selection transitions stay: they are 100ms of colour,
+     which is feedback, not movement. */
+  @media (prefers-reduced-motion: reduce) {
+    .curation-poster[data-state="ready"] img,
+    .curation-poster[data-state="waiting"] .curation-poster-empty,
+    .curation-review-player {
+      animation: none;
+    }
+  }
+}
