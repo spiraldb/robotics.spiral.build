@@ -2,6 +2,7 @@
 mod tools;
 use super::{WorkflowClient, state::WorkflowController};
 use crate::client::completions::{ModelClient, ModelRequest};
+use crate::components::scoped_task::ScopedTask;
 use dioxus::dioxus_core::Task;
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -108,14 +109,11 @@ impl WorkflowAssistant {
                 .provider_messages_mut()
                 .push(ProviderMessage::text("user", text));
         });
-        let task = dioxus::dioxus_core::Runtime::current().spawn(
-            self.conversation.origin_scope(),
-            async move {
-                let result = self.run(controller, &id).await;
-                self.finish(result.err(), false);
-                self.task.set(None);
-            },
-        );
+        let task = ScopedTask::spawn(self.conversation.origin_scope(), async move {
+            let result = self.run(controller, &id).await;
+            self.finish(result.err(), false);
+            self.task.set(None);
+        });
         self.task.set(Some(task));
     }
     pub(super) fn cancel(mut self) {

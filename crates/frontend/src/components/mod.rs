@@ -18,4 +18,6 @@ pub(crate) mod dataset_picker;
 
 pub(crate) mod run_strip;
 
+pub(crate) mod scoped_task;
+
 pub(crate) mod flow_canvas;

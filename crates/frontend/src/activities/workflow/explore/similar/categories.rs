@@ -263,20 +263,34 @@ impl<'a> AssignmentReader<'a> {
             .categories
             .iter()
             .find(|category| category.name() == distribution.choice())?;
-        SubtaskAssignment::new(
+        let assignment = SubtaskAssignment::new(
             subtask.episode().clone(),
             subtask.start_time(),
             category.name(),
             distribution.probability(category.name()),
             distribution.confidence().unwrap_or(0.0),
         )
-        .ok()
+        .ok()?;
+        // A runner-up jev named that is not one of these categories is a
+        // stray option, not a second choice worth keeping.
+        let runner_up = distribution.runner_up().and_then(|(name, probability)| {
+            let known = self
+                .categories
+                .iter()
+                .find(|category| category.name() == name)?;
+            Some((known.name(), probability))
+        });
+        match runner_up {
+            Some((name, probability)) => assignment.with_runner_up(name, probability).ok(),
+            None => Some(assignment),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activities::workflow::explore::document::RunnerUp;
     use crate::activities::workflow::explore::similar::questions::AssignmentQuestions;
     use spiral_robotics_common::datasets::EpisodeId;
 
@@ -442,6 +456,10 @@ mod tests {
         // Low confidence still assigns; the doc keeps confidence to show
         // ambiguity, not to withhold a row.
         assert_eq!(assignments[0].confidence(), 0.2);
+        assert_eq!(
+            assignments[0].runner_up().map(RunnerUp::category),
+            Some("grasp")
+        );
         assert_eq!(assignments[1].category(), "grasp");
         assert_eq!(assignments[1].confidence(), 0.0);
     }

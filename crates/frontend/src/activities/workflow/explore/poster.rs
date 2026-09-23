@@ -20,6 +20,7 @@ use super::document::SubtaskRow;
 use super::frames::{FrameMoments, MAX_FRAMES_PER_QUERY, NativeFrame};
 use super::review::SubtaskContext;
 use crate::activities::data::DatasetClient;
+use crate::components::scoped_task::ScopedTask;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
@@ -268,7 +269,7 @@ impl PosterCache {
     /// it, so selecting another node while an episode is still decoding
     /// finishes the cut instead of abandoning it half held.
     fn cut_in_background(&self, task: impl std::future::Future<Output = ()> + 'static) {
-        dioxus::dioxus_core::Runtime::current().spawn(self.episodes.origin_scope(), task);
+        ScopedTask::spawn(self.episodes.origin_scope(), task);
     }
 }
 

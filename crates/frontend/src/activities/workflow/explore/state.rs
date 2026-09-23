@@ -4,6 +4,7 @@
 //! it. Shared contract: extend it, never change what is here.
 use super::document::{
     DATASET_NODE_ID, EXPLORATION_ENCODING_VERSION, ExplorationNodeKind, ExplorationPayload,
+    SubtaskRow,
 };
 use super::poster::PosterCache;
 use super::review::Counted;
@@ -15,6 +16,7 @@ use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_common::exploration::ExplorationDocument;
+use spiral_robotics_ui::Place;
 use std::collections::BTreeMap;
 
 const UNTITLED: &str = "Untitled exploration";
@@ -146,6 +148,9 @@ pub(crate) struct ExplorationController {
     /// the canvas reads it: a node the operator has scrolled away from still
     /// shows that it is working.
     activity: Signal<ExplorationActivity>,
+    /// Where on screen the last Find similar was asked from, until the search
+    /// it opened has carried its query card in from there.
+    launch: Signal<Option<Place>>,
 }
 
 impl ExplorationController {
@@ -163,6 +168,7 @@ impl ExplorationController {
             selected_node: Signal::new(Some(DATASET_NODE_ID.to_owned())),
             focus: Signal::new(None),
             activity: Signal::new(ExplorationActivity::new()),
+            launch: Signal::new(None),
         })
     }
 
@@ -259,6 +265,19 @@ impl ExplorationController {
     }
     pub(crate) fn take_focus(mut self) -> Option<EpisodeFocus> {
         self.focus.write().take()
+    }
+    /// Ask the annotation's Find similar node about one of its rows and show
+    /// that node, which runs the question as soon as it reads it. `from` is
+    /// where the row was on screen, so the question can be seen arriving.
+    pub(crate) fn find_similar(mut self, annotation: &str, row: &SubtaskRow, from: Option<Place>) {
+        if let Ok(node) = self.edit(|payload| payload.search_for(annotation, row)) {
+            self.launch.set(from);
+            self.selected_node.set(Some(node));
+        }
+    }
+    /// Where the last Find similar was asked from, once.
+    pub(crate) fn take_launch(mut self) -> Option<Place> {
+        self.launch.write().take()
     }
 
     pub(crate) fn command(&self) -> Option<DocumentCommand> {

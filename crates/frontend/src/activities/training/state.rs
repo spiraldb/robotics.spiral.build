@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use dioxus::prelude::*;
 use spiral_robotics_common::training::TrainingConfig;
 
+use crate::components::scoped_task::ScopedTask;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 
@@ -154,41 +155,38 @@ impl TrainingController {
         let mut config_signal = self.draft.config;
         let mut automatic_run_name = self.draft.automatic_run_name;
         let training = history.snapshot();
-        dioxus::dioxus_core::Runtime::current().spawn(
-            self.draft.config.origin_scope(),
-            async move {
-                let result = TrainingClient::current()
-                    .start_training_run(config)
-                    .await
-                    .map_err(|error| error.to_string());
-                starting.set(false);
-                match result {
-                    Ok(run) => {
-                        let mut existing_names = training
-                            .read()
-                            .runs()
-                            .iter()
-                            .map(|existing| existing.config().run_name().to_owned())
-                            .collect::<Vec<_>>();
-                        if !existing_names
-                            .iter()
-                            .any(|name| name == run.config().run_name())
-                        {
-                            existing_names.push(run.config().run_name().to_owned());
-                        }
-                        config_signal
-                            .write()
-                            .set_run_name(existing_names.next_default_run_name());
-                        automatic_run_name.set(true);
-                        if !opened_runs.peek().iter().any(|id| id == run.id()) {
-                            opened_runs.write().push(run.id().to_owned());
-                        }
-                        selected_run.set(Some(run.id().to_owned()));
+        ScopedTask::spawn(self.draft.config.origin_scope(), async move {
+            let result = TrainingClient::current()
+                .start_training_run(config)
+                .await
+                .map_err(|error| error.to_string());
+            starting.set(false);
+            match result {
+                Ok(run) => {
+                    let mut existing_names = training
+                        .read()
+                        .runs()
+                        .iter()
+                        .map(|existing| existing.config().run_name().to_owned())
+                        .collect::<Vec<_>>();
+                    if !existing_names
+                        .iter()
+                        .any(|name| name == run.config().run_name())
+                    {
+                        existing_names.push(run.config().run_name().to_owned());
                     }
-                    Err(error) => studio.report_from(MessageSource::Training, error),
+                    config_signal
+                        .write()
+                        .set_run_name(existing_names.next_default_run_name());
+                    automatic_run_name.set(true);
+                    if !opened_runs.peek().iter().any(|id| id == run.id()) {
+                        opened_runs.write().push(run.id().to_owned());
+                    }
+                    selected_run.set(Some(run.id().to_owned()));
                 }
-            },
-        );
+                Err(error) => studio.report_from(MessageSource::Training, error),
+            }
+        });
     }
 
     pub(super) fn stop(mut self, studio: StudioProjectState, id: String) {

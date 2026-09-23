@@ -43,55 +43,215 @@
     @apply ml-auto;
   }
 
-  /* Which episodes the answer reached: one cell per episode the annotation
-     measured, in the order it measured them. A status line rather than a
-     chart — one 24px row, the count in real text beside it, and the tint only
-     ever repeating what that count already says. The surface sets `--hue`:
-     the search has none and falls back to the accent, an open category lends
-     the strip its own. */
-  .explore-similar-coverage {
-    @apply flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-3 py-1;
+  /* The dataset at a glance, between the question and the rows: the episode
+     map, and under a search the strip of every answer. Both paint with the
+     same two ends, "nothing asked" and "surely the same operation". */
+  .explore-similar-overview {
+    @apply flex flex-col gap-1.5 border-b border-line px-3 py-2;
+    --explore-map-unasked: color-mix(in srgb, var(--tone-ink-faint) 26%, var(--tone-surface));
+    --explore-map-match: var(--tone-category-1);
   }
 
-  .explore-similar-open .explore-similar-coverage {
-    @apply border-0 p-0;
+  .explore-map {
+    @apply flex flex-col gap-1.5;
   }
 
-  .explore-similar-coverage-count {
-    @apply m-0 shrink-0 text-[11px] text-ink-soft;
+  .explore-map-summary {
+    @apply m-0 text-[11px] text-ink-soft;
   }
 
-  /* The cells take the rest of the line and wrap under the count when the
-     column is too narrow for both, so a 16rem index shows the same strip a
-     900px workspace does. */
-  .explore-similar-coverage-cells {
-    @apply flex min-w-32 flex-1 basis-48 items-stretch gap-px;
+  /* One thin lane per episode, flowing into as many columns as the pane
+     holds, so forty episodes cost a hundred pixels rather than three hundred. */
+  .explore-map-lanes {
+    @apply relative grid gap-x-4 gap-y-1;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr));
   }
 
-  /* A 24px target painting a 16px bar, so the row stays a status line while
-     the cell stays clickable. */
-  .explore-similar-coverage-cell {
-    @apply h-6 min-w-1 max-w-3 flex-1 cursor-pointer border-0;
-    padding: 4px 0;
-    background-color: color-mix(in srgb, var(--hue, var(--tone-accent)) var(--fill, 0%), var(--tone-line));
-    background-clip: content-box;
+  .explore-map-lane {
+    @apply relative h-1.5 rounded-sm bg-sunken;
+  }
+
+  .explore-map-segment {
+    @apply absolute inset-y-0 min-w-0.5 cursor-pointer rounded-[1.5px] border-0 p-0;
+    background-color: var(--paint);
     transition:
-      padding 100ms ease-out,
-      background-color 100ms ease-out;
+      opacity 160ms ease-out,
+      background-color 160ms ease-out,
+      transform 100ms ease-out;
   }
 
-  .explore-similar-coverage-cell:hover:not(:disabled) {
-    padding: 2px 0;
+  /* A taller target than the bar it draws. */
+  .explore-map-segment::before {
+    @apply absolute inset-x-0 -inset-y-0.5 content-[''];
   }
 
-  /* The episode the evidence column is showing stands to full height, so the
-     strip says where the recording came from without a second colour. */
-  .explore-similar-coverage-cell[aria-pressed="true"] {
-    padding: 0;
+  .explore-map-segment:hover {
+    @apply z-[1];
+    transform: scaleY(1.8);
   }
 
-  .explore-similar-coverage-cell:disabled {
-    @apply cursor-default;
+  /* The row the evidence column plays: ringed, not enlarged, so it marks a
+     place without covering its neighbours. */
+  .explore-map-segment[aria-current="true"] {
+    @apply z-[2];
+    outline: 1.5px solid var(--tone-ink);
+    outline-offset: 1px;
+  }
+
+  .explore-map-segment[data-faded="true"] {
+    opacity: 0.2;
+  }
+
+  /* jev was torn over this row, and the segment says so for as long as the
+     grouping stands. */
+  .explore-map-segment[data-hesitant="true"] {
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0 2px,
+      rgb(255 255 255 / 0.65) 2px 3.5px
+    );
+  }
+
+  /* The row a search asked about is its question, drawn in ink. */
+  .explore-map-segment[data-source="true"] {
+    @apply z-[2];
+    background-color: var(--tone-ink);
+  }
+
+  /* An answer arriving: each segment lights from grey to its paint after its
+     own delay — spreading from the question for a search, running down the
+     lanes for a grouping — with a brief swell as it lands. Backwards fill
+     only, so a finished reveal never pins the hover or chosen transforms. */
+  .explore-map-lanes:is([data-reveal="ripple"], [data-reveal="pour"]) .explore-map-segment {
+    animation: explore-map-light 560ms var(--delay, 0ms) backwards cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  @keyframes explore-map-light {
+    from {
+      background-color: var(--explore-map-unasked);
+    }
+    45% {
+      transform: scaleY(2.4);
+    }
+  }
+
+  /* A model reading the rows: a soft light sweeps down the lanes, and the
+     row asked about pulses. */
+  .explore-map-lanes[data-reveal="reading"]::after {
+    @apply pointer-events-none absolute -inset-y-1 inset-x-0 content-[''];
+    background: linear-gradient(
+        180deg,
+        transparent,
+        color-mix(in srgb, var(--tone-focus) 16%, transparent),
+        transparent
+      )
+      0 -60px / 100% 60px no-repeat;
+    animation: explore-map-read 1.4s linear infinite;
+  }
+
+  @keyframes explore-map-read {
+    to {
+      background-position: 0 calc(100% + 60px);
+    }
+  }
+
+  .explore-map-lanes[data-reveal="reading"] .explore-map-segment[data-source="true"] {
+    animation: explore-map-pulse 900ms ease-in-out infinite;
+  }
+
+  @keyframes explore-map-pulse {
+    50% {
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--tone-ink) 22%, transparent);
+    }
+  }
+
+  /* Every answer as a dot from 0 to 100%, best first to arrive. The tick at
+     the half is the line the episode count uses. */
+  .explore-match-strip {
+    @apply relative h-9;
+  }
+
+  .explore-match-strip::before {
+    @apply absolute inset-x-0 top-3.5 h-px bg-line content-[''];
+  }
+
+  .explore-match-threshold {
+    @apply absolute top-0.5 h-6 w-px;
+    background: var(--tone-ink-faint);
+    opacity: 0.5;
+  }
+
+  .explore-match-dot {
+    @apply absolute size-[7px] -ml-[3.5px] cursor-pointer rounded-full border-0 p-0;
+    top: calc(4px + var(--lift) * 3px);
+    background: color-mix(in srgb, var(--explore-map-match) var(--match), var(--explore-map-unasked));
+    transition: transform 100ms ease-out;
+    animation: explore-match-drop 420ms var(--delay, 0ms) backwards cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .explore-match-dot:hover {
+    transform: scale(1.5);
+  }
+
+  .explore-match-dot[aria-current="true"] {
+    @apply z-[1];
+    box-shadow:
+      0 0 0 1.5px var(--tone-surface),
+      0 0 0 2.5px var(--tone-ink);
+  }
+
+  @keyframes explore-match-drop {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+  }
+
+  .explore-match-axis {
+    @apply pointer-events-none absolute inset-x-0 bottom-0 flex justify-between font-mono text-[9px] tabular-nums;
+    color: var(--tone-ink-faint);
+  }
+
+  /* The row a search asks about: its still, where it came from. Its words
+     are already in the box above. */
+  .explore-similar-asked {
+    @apply flex items-center gap-2 border-b border-line px-3 py-1.5;
+  }
+
+  .explore-similar-asked .explore-poster {
+    width: 64px;
+    height: 36px;
+  }
+
+  .explore-similar-asked-words {
+    @apply m-0 flex flex-col gap-0.5;
+  }
+
+  .explore-similar-asked-label {
+    @apply text-[10px] font-medium uppercase tracking-wide text-ink-soft;
+  }
+
+  .explore-similar-asked-facts {
+    @apply font-mono text-[10px] tabular-nums text-ink-soft;
+  }
+
+  /* The grouping workspace is the frame tokens fly across, from the map up
+     into the band. */
+  .explore-similar-grouping {
+    @apply relative;
+  }
+
+  .explore-flights {
+    @apply pointer-events-none absolute inset-0 z-[5] overflow-visible;
+  }
+
+  .explore-flight-token {
+    @apply size-[9px] rounded-full;
+    background: var(--hue, var(--tone-ink-faint));
+    box-shadow:
+      0 0 0 1.5px var(--tone-surface),
+      0 1px 3px rgb(16 16 16 / 0.25);
+    will-change: transform, opacity;
   }
 
   /* Six cards at most, so they sit in one band above the members rather than a
@@ -126,6 +286,20 @@
     transition:
       background-color 100ms ease-out,
       border-color 100ms ease-out;
+  }
+
+  /* A bin the model named and jev has not filled yet: dashed, quiet, and
+     arriving one after another. */
+  .explore-similar-chip[data-pending="true"] {
+    @apply cursor-default border-dashed;
+    animation: explore-bin-arrive 320ms calc(var(--order, 0) * 70ms) backwards ease-out;
+  }
+
+  @keyframes explore-bin-arrive {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
   }
 
   .explore-similar-chip[data-selected="true"] {
@@ -203,6 +377,178 @@
     @apply min-w-0 flex-1 basis-40 text-[11px] font-normal leading-4 text-ink-soft;
   }
 
+  .explore-similar-open-category {
+    @apply flex flex-col;
+  }
+
+  /* A member revealed from the map lands clear of the sticky header that
+     names its category. */
+  .explore-similar-open-category .explore-entry-item {
+    scroll-margin-top: 6rem;
+  }
+
+  .explore-similar-members-heading {
+    @apply m-0 border-b border-line px-3 pb-1.5 pt-3 text-[10px] font-medium uppercase tracking-wide text-ink-soft;
+  }
+
+  /* How the open category differs from every other subtask: three sentences,
+     then the evidence for them, then its neighbours. */
+  .explore-profile {
+    @apply flex flex-col gap-3 border-b border-line px-3 py-3;
+    animation: explore-profile-arrive 200ms ease-out;
+  }
+
+  @keyframes explore-profile-arrive {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .explore-profile-headlines {
+    @apply m-0 flex list-none flex-col gap-1 p-0;
+  }
+
+  .explore-profile-headlines li {
+    @apply relative pl-3 text-[12px] leading-[1.4] text-ink;
+  }
+
+  .explore-profile-headlines li::before {
+    @apply absolute left-0 top-[0.5em] size-1.5 rounded-full content-[''];
+    background: var(--hue);
+  }
+
+  .explore-profile-facts {
+    @apply m-0 font-mono text-[10px] tabular-nums text-ink-soft;
+  }
+
+  .explore-profile-metric {
+    @apply flex flex-col gap-1;
+  }
+
+  .explore-profile-metric-head {
+    @apply m-0 flex items-baseline justify-between gap-2 text-[11px];
+  }
+
+  .explore-profile-metric-label {
+    @apply font-medium text-ink-soft;
+  }
+
+  .explore-profile-metric-medians {
+    @apply font-mono text-[10px] tabular-nums text-ink-soft;
+  }
+
+  .explore-profile-members-median {
+    @apply font-semibold;
+    color: color-mix(in srgb, var(--hue) 70%, var(--tone-ink));
+  }
+
+  .explore-profile-strip {
+    @apply flex flex-col gap-0.5;
+  }
+
+  .explore-profile-lane {
+    @apply relative;
+  }
+
+  .explore-profile-lane[data-side="members"] {
+    @apply h-[22px];
+  }
+
+  .explore-profile-lane[data-side="rest"] {
+    @apply h-3.5;
+  }
+
+  .explore-profile-lane::before {
+    @apply absolute inset-x-0 top-1/2 h-px bg-line content-[''];
+  }
+
+  .explore-profile-dot {
+    @apply absolute rounded-full border-0 p-0;
+  }
+
+  .explore-profile-lane[data-side="members"] .explore-profile-dot {
+    @apply size-1.5 -ml-[3px] cursor-pointer;
+    top: calc(2px + var(--lift) * 3.6px);
+    background: var(--hue);
+    opacity: 0.85;
+    transition: transform 100ms ease-out;
+    animation: explore-profile-dot 360ms calc(var(--lift) * 40ms) backwards cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .explore-profile-lane[data-side="members"] .explore-profile-dot:hover {
+    transform: scale(1.6);
+  }
+
+  .explore-profile-lane[data-side="rest"] .explore-profile-dot {
+    @apply size-1 -ml-0.5;
+    top: calc(1px + var(--lift) * 2.4px);
+    background: var(--tone-ink-faint);
+    opacity: 0.35;
+  }
+
+  .explore-profile-dot[aria-current="true"] {
+    @apply z-[1];
+    opacity: 1;
+    transform: scale(1.5);
+    box-shadow:
+      0 0 0 1px var(--tone-surface),
+      0 0 0 2px var(--tone-ink);
+  }
+
+  @keyframes explore-profile-dot {
+    from {
+      opacity: 0;
+      transform: translateY(-6px);
+    }
+  }
+
+  .explore-profile-median {
+    @apply absolute -inset-y-px -ml-px w-0.5 rounded-sm;
+  }
+
+  .explore-profile-lane[data-side="members"] .explore-profile-median {
+    background: var(--tone-ink);
+  }
+
+  .explore-profile-lane[data-side="rest"] .explore-profile-median {
+    background: var(--tone-ink-faint);
+  }
+
+  .explore-profile-flows {
+    @apply flex flex-col gap-1.5;
+  }
+
+  .explore-profile-flow {
+    @apply grid items-center gap-x-2 gap-y-0.5;
+    grid-template-columns: 3.25rem minmax(0, 1fr);
+  }
+
+  .explore-profile-flow-label {
+    @apply text-[11px] font-medium text-ink-soft;
+  }
+
+  .explore-profile-flow-bar {
+    @apply flex h-2 gap-px overflow-hidden rounded-[3px] bg-sunken;
+  }
+
+  .explore-profile-flow-share {
+    @apply h-full;
+    background: var(--hue, var(--tone-ink-faint));
+  }
+
+  /* Where the episode starts or ends: no category, so no colour. */
+  .explore-profile-flow-share[data-edge="true"] {
+    background: repeating-linear-gradient(
+      135deg,
+      var(--tone-line) 0 3px,
+      transparent 3px 6px
+    );
+  }
+
+  .explore-profile-flow-legend {
+    @apply col-start-2 m-0 truncate font-mono text-[10px] text-ink-soft;
+  }
+
   /* A definition is a sentence, so it gets a row of its own rather than a
      149px box showing twenty of its hundred characters. */
   .explore-similar-editor {
@@ -214,13 +560,21 @@
     grid-column: 1 / -1;
   }
 
-  /* Nothing here reports work in progress, so under `reduce` every one of
-     these transitions becomes the state change it was decorating. */
+  /* Under `reduce` every answer arrives painted: no sweep, no ripple, no
+     drop, and the transitions become the state changes they decorated. */
   @media (prefers-reduced-motion: reduce) {
-    .explore-similar-coverage-cell,
+    .explore-map-segment,
+    .explore-match-dot,
     .explore-similar-category,
-    .explore-similar-chip {
+    .explore-similar-chip,
+    .explore-profile,
+    .explore-profile-dot {
       transition: none;
+      animation: none;
+    }
+
+    .explore-map-lanes[data-reveal="reading"]::after {
+      animation: none;
     }
   }
 }

@@ -30,8 +30,8 @@ use pipeline::{AnnotationPass, EPISODES_IN_FLIGHT, PassSettings};
 use provider::ProviderAnnotator;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{
-    ActionPurpose, BrowserFocus, Button, ButtonVariant, Field, FieldLayout, Select, TextInput,
-    TextInputKind,
+    ActionPurpose, BrowserFocus, Button, ButtonVariant, Field, FieldLayout, Place, Select,
+    TextInput, TextInputKind,
 };
 use std::fmt::{Display, Formatter, Result as FormatResult};
 
@@ -380,6 +380,12 @@ pub(super) fn AnnotationWorkspace(controller: ExplorationController, node: Strin
                         frames,
                         chosen,
                         on_retry: retry,
+                        on_find_similar: {
+                            let annotation = node.clone();
+                            move |(row, from): (SubtaskRow, Option<Place>)| {
+                                controller.find_similar(&annotation, &row, from);
+                            }
+                        },
                     }
                 },
                 evidence: match shown {

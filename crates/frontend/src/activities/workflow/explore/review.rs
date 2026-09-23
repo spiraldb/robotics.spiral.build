@@ -10,12 +10,13 @@
 use super::document::SubtaskRow;
 use super::poster::{PosterFrame, PosterFrames};
 use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
+use crate::components::icons::FindSimilarIcon;
 use crate::components::timeline::{IntervalTrack, TimelineInterval};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonSize, ButtonVariant, EmptyState, Notice, NoticeTone,
+    ActionPurpose, Button, ButtonSize, ButtonVariant, EmptyState, Notice, NoticeTone, Place,
 };
 use std::fmt::{Display, Formatter, Result as FormatResult};
 
@@ -236,7 +237,7 @@ impl IndexFocus {
 }
 
 /// One row of an index: its poster, what jev made of it, its words, and where
-/// in the dataset it happened.
+/// in the dataset it happened, with the action that asks for more like it.
 ///
 /// The same row in all three views, because it is the same thing in all three.
 #[component]
@@ -248,14 +249,26 @@ pub(super) fn SubtaskEntry(
     episode: Option<String>,
     frames: PosterFrames,
     on_select: EventHandler<()>,
+    /// Ask for subtasks like this one, handing over where its poster sits on
+    /// screen so the question can be seen leaving it.
+    #[props(default)]
+    on_find_similar: Option<EventHandler<Option<Place>>>,
 ) -> Element {
+    let mut item = use_signal(|| None::<web_sys::Element>);
     let span = format!(
         "{} – {}",
         row.start_time().clock_label(),
         row.end_time().clock_label()
     );
+    let motion_key = format!("{}-{}", row.episode(), row.start_time());
     rsx! {
-        li { class: "explore-entry-item",
+        li {
+            class: "explore-entry-item",
+            "data-motion-key": "{motion_key}",
+            "data-findable": on_find_similar.is_some().then_some("true"),
+            onmounted: move |event: Event<MountedData>| {
+                item.set(event.data().downcast::<web_sys::Element>().cloned());
+            },
             div {
                 class: "explore-entry",
                 role: "button",
@@ -281,6 +294,28 @@ pub(super) fn SubtaskEntry(
                                else { "This row came back without an answer" },
                         "{score}"
                     }
+                }
+            }
+            // Beside the row rather than in it: the row is itself a button,
+            // and a button inside a button is one nobody can reach.
+            if let Some(find) = on_find_similar {
+                button {
+                    r#type: "button",
+                    class: "explore-entry-find",
+                    // A tab stop only beside the row that is one, so the
+                    // action does not bring back three hundred presses of Tab.
+                    tabindex: if standing.tab_stop { "0" } else { "-1" },
+                    title: "Find subtasks like this one",
+                    "aria-label": "Find subtasks like “{row.description()}”",
+                    onclick: move |_| {
+                        let poster = item
+                            .peek()
+                            .as_ref()
+                            .and_then(|item| item.query_selector(".explore-poster").ok().flatten())
+                            .map(|poster| Place::of(&poster));
+                        find.call(poster);
+                    },
+                    FindSimilarIcon {}
                 }
             }
         }
@@ -311,6 +346,10 @@ pub(super) fn SubtaskEvidence(
     context: SubtaskContext,
     /// Send the operator to this interval in the annotation it came from.
     on_open: EventHandler<()>,
+    /// Ask for subtasks like this one; a search already about it leaves this
+    /// out.
+    #[props(default)]
+    on_find_similar: Option<EventHandler<()>>,
     /// Every row the measurement wrote for this row's episode, drawn as one
     /// track under the recording so a ranked result is read in the context of
     /// what came before and after it. A caller that has only the one row
@@ -342,6 +381,16 @@ pub(super) fn SubtaskEvidence(
                     title: "Show this interval in the annotation it came from",
                     onclick: move |_| on_open.call(()),
                     "Open in context"
+                }
+                if let Some(find) = on_find_similar {
+                    Button {
+                        purpose: ActionPurpose::Navigate,
+                        variant: ButtonVariant::Link,
+                        size: ButtonSize::Compact,
+                        title: "Rank every other subtask by how likely it is the same operation",
+                        onclick: move |_| find.call(()),
+                        "Find similar"
+                    }
                 }
             }
         }

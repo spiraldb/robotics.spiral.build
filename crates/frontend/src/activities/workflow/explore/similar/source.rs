@@ -5,7 +5,8 @@
 //! recorded in — is all either of them needs from the payload.
 use super::coverage::MeasuredEpisodes;
 use crate::activities::workflow::explore::document::{
-    ExplorationNode, ExplorationNodeKind, ExplorationPayload, SubtaskAssignment, SubtaskRow,
+    ExplorationNode, ExplorationNodeKind, ExplorationPayload, SubtaskAssignment, SubtaskGrouping,
+    SubtaskRow, SubtaskSearch,
 };
 use crate::activities::workflow::explore::review::{EpisodeOrder, SubtaskContext};
 use crate::activities::workflow::explore::state::ExplorationController;
@@ -24,6 +25,9 @@ pub(super) struct ExplorationSource {
     measured: Vec<EpisodeId>,
     /// The query a search node remembers; a grouping node has none.
     query: String,
+    /// The row that query was taken from, when it came from one the table
+    /// still holds.
+    asked_about: Option<usize>,
 }
 impl ExplorationSource {
     pub(super) fn of(controller: ExplorationController, node: &str) -> Self {
@@ -33,16 +37,24 @@ impl ExplorationSource {
                 .as_deref()
                 .map(|source| Self::measurement(payload, source))
                 .unwrap_or_default();
+            let rows = annotation
+                .iter()
+                .flat_map(|source| payload.subtasks_for(source).cloned())
+                .collect::<Vec<SubtaskRow>>();
+            let search = Self::saved_search(payload, node);
+            let asked_about = search
+                .and_then(SubtaskSearch::source)
+                .and_then(|key| rows.iter().position(|row| &row.key() == key));
             Self {
-                rows: annotation
-                    .iter()
-                    .flat_map(|source| payload.subtasks_for(source).cloned())
-                    .collect(),
+                rows,
                 camera,
                 measured,
                 annotation,
                 dataset: payload.dataset().cloned(),
-                query: Self::saved_query(payload, node),
+                query: search
+                    .map(|search| search.query().to_owned())
+                    .unwrap_or_default(),
+                asked_about,
             }
         })
     }
@@ -60,10 +72,10 @@ impl ExplorationSource {
             _ => (None, Vec::new()),
         }
     }
-    fn saved_query(payload: &ExplorationPayload, node: &str) -> String {
+    fn saved_search<'a>(payload: &'a ExplorationPayload, node: &str) -> Option<&'a SubtaskSearch> {
         match payload.node(node).map(|node| node.kind()) {
-            Some(ExplorationNodeKind::FindSimilarSubtasks(search)) => search.query().to_owned(),
-            _ => String::new(),
+            Some(ExplorationNodeKind::FindSimilarSubtasks(search)) => Some(search),
+            _ => None,
         }
     }
     /// The annotation node whose rows this exploration reads, when its
@@ -76,6 +88,10 @@ impl ExplorationSource {
     }
     pub(super) fn query(&self) -> &str {
         &self.query
+    }
+    /// Which row the saved query was taken from.
+    pub(super) fn asked_about(&self) -> Option<usize> {
+        self.asked_about
     }
     /// Everything a view needs to show these rows: the recordings, the camera
     /// they were read from, and the order the episodes list in — the order the
@@ -104,6 +120,31 @@ impl ExplorationSource {
         self.rows
             .iter()
             .position(|row| row.is(assignment.episode(), assignment.start_time()))
+    }
+    /// Each row's assignment in `grouping`, in table order; `None` for a row
+    /// the grouping has not placed.
+    pub(super) fn assignments<'a>(
+        &self,
+        grouping: &'a SubtaskGrouping,
+    ) -> Vec<Option<&'a SubtaskAssignment>> {
+        let placed = grouping
+            .assignments()
+            .iter()
+            .map(|assignment| {
+                (
+                    (assignment.episode(), assignment.start_time().to_bits()),
+                    assignment,
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        self.rows
+            .iter()
+            .map(|row| {
+                placed
+                    .get(&(row.episode(), row.start_time().to_bits()))
+                    .copied()
+            })
+            .collect()
     }
     /// One category's members as an index lists them: in the order given, each
     /// with the row it is and the probability that put it there. An assignment

@@ -16,6 +16,7 @@ use spiral_robotics_common::recording::{
 use spiral_robotics_viewport::SO101_JOINTS;
 
 use crate::activities::live::signals::SignalNamePresentation;
+use crate::components::scoped_task::ScopedTask;
 use crate::components::time_series::{
     TimelineSignalLane, TimelineSignalPoint, TimelineSignalSeries,
 };
@@ -297,7 +298,7 @@ impl EpisodePreviewSignals {
                 previous: previous.clone(),
             },
         )));
-        dioxus::dioxus_core::Runtime::current().spawn(state.origin_scope(), async move {
+        ScopedTask::spawn(state.origin_scope(), async move {
             let loaded = EpisodeData::load(&episode).await;
             if !revision.peek().eq(&ticket) {
                 return;

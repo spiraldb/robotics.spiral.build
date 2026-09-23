@@ -273,3 +273,15 @@ pub(super) fn FitTimeIcon() -> Element {
         }
     }
 }
+
+/// Find subtasks like this one: a source and the echoes it sends out, the
+/// way a match lights up across the episode map.
+#[component]
+pub(crate) fn FindSimilarIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            circle { cx: "4.5", cy: "8", r: "1.5" }
+            path { d: "M8 4.5a5 5 0 0 1 0 7M10.5 2.5a8 8 0 0 1 0 11" }
+        }
+    }
+}

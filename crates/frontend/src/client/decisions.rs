@@ -136,6 +136,14 @@ impl ChoiceDistribution<'_> {
     pub(crate) fn probability(&self, option: &str) -> f64 {
         self.probabilities.get(option).copied().unwrap_or(0.0)
     }
+    /// The most probable option other than the winner, when there is one.
+    pub(crate) fn runner_up(&self) -> Option<(&str, f64)> {
+        self.probabilities
+            .iter()
+            .filter(|(option, _)| option.as_str() != self.choice)
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .map(|(option, probability)| (option.as_str(), *probability))
+    }
     pub(crate) fn confidence(&self) -> Option<f64> {
         self.confidence
     }
@@ -173,6 +181,7 @@ mod tests {
         assert_eq!(distribution.probability("grasp"), 0.35);
         assert_eq!(distribution.probability("missing"), 0.0);
         assert_eq!(distribution.confidence(), Some(0.2));
+        assert_eq!(distribution.runner_up(), Some(("grasp", 0.35)));
     }
 
     #[test]

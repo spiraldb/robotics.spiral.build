@@ -23,6 +23,7 @@ use serde::de::DeserializeOwned;
 pub(crate) use crate::client::documents::DocumentSummary;
 
 use crate::client::documents::DocumentClient;
+use crate::components::scoped_task::ScopedTask;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 
@@ -216,7 +217,7 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
     /// Run `task` on the scope that owns this session, so a command outlives the
     /// view that started it but is cancelled with the workspace.
     pub(crate) fn spawn(&self, task: impl std::future::Future<Output = ()> + 'static) {
-        dioxus::dioxus_core::Runtime::current().spawn(self.draft.origin_scope(), task);
+        ScopedTask::spawn(self.draft.origin_scope(), task);
     }
 
     /// Make `document` the open one. `on_install` runs first and may refuse it:

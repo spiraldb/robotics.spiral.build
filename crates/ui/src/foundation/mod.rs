@@ -1,8 +1,10 @@
 //! What every primitive stands on: the stylesheet and class composition,
-//! focus movement, and the handful of glyphs the primitives draw themselves.
+//! focus movement, choreographed motion, and the handful of glyphs the
+//! primitives draw themselves.
 
 mod focus;
 mod icons;
+mod motion;
 mod styles;
 
 pub use focus::BrowserFocus;
@@ -12,5 +14,6 @@ pub use icons::{
     GripIcon, PauseIcon, PlayIcon, RefreshIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon,
     StepBackIcon, StepForwardIcon, StopIcon, UnassignIcon, ZoomInIcon, ZoomOutIcon,
 };
+pub use motion::{Arrangement, Flight, Motion, Place};
 pub use styles::UiStyles;
 pub(crate) use styles::{AttributeClass, ClassNames};

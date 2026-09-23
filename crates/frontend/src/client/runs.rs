@@ -1,6 +1,7 @@
 //! The runs this browser submitted. A run is one request that answers when the
 //! run ends; until then a placeholder stands in for it, so every view reads one
 //! list and nothing reconciles observations.
+use crate::components::scoped_task::ScopedTask;
 use dioxus::prelude::*;
 use futures_util::future::{FutureExt, LocalBoxFuture, Shared};
 use spiral_robotics_common::runs::RunPhase;
@@ -113,7 +114,7 @@ impl<Run: SubmittedRun> RunHistory<Run> {
         self.runs.write().push(placeholder);
         let answer = request.boxed_local().shared();
         let settled = answer.clone();
-        dioxus::dioxus_core::Runtime::current().spawn(self.runs.origin_scope(), async move {
+        ScopedTask::spawn(self.runs.origin_scope(), async move {
             let answered = settled.await;
             let mut runs = self.runs.write();
             runs.retain(|run| run.run_id() != placeholder_id.as_deref());

@@ -11,7 +11,7 @@ use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{
-    ActionPurpose, BrowserFocus, Button, ButtonSize, ButtonVariant, Select, TextInput,
+    ActionPurpose, BrowserFocus, Button, ButtonSize, ButtonVariant, Place, Select, TextInput,
     TextInputKind,
 };
 
@@ -248,6 +248,8 @@ pub(super) fn SubtaskIndex(
     chosen: ChosenSubtask,
     /// Annotate one failed episode again.
     on_retry: EventHandler<EpisodeId>,
+    /// Ask for subtasks like one row, from where its poster sits.
+    on_find_similar: EventHandler<(SubtaskRow, Option<Place>)>,
 ) -> Element {
     let mut wanted = use_signal(String::new);
     let filter = wanted();
@@ -310,6 +312,10 @@ pub(super) fn SubtaskIndex(
                                         on_select: {
                                             let row = row.clone();
                                             move |()| chosen.play_row(&row)
+                                        },
+                                        on_find_similar: {
+                                            let row = row.clone();
+                                            move |from| on_find_similar.call((row.clone(), from))
                                         },
                                     }
                                 }

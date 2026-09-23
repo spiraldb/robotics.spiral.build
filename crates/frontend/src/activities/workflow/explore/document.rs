@@ -231,14 +231,41 @@ impl EpisodeFailure {
 pub(crate) struct SubtaskSearch {
     #[serde(default)]
     query: String,
+    /// The row the query was taken from, when it came from one rather than
+    /// being typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<SubtaskKey>,
 }
 impl SubtaskSearch {
     pub(crate) fn query(&self) -> &str {
         &self.query
     }
-    pub(crate) fn set_query(&mut self, query: impl Into<String>) {
-        self.query = query.into();
+    pub(crate) fn source(&self) -> Option<&SubtaskKey> {
+        self.source.as_ref()
     }
+    /// Typed text. Text that is no longer the source row's own words is no
+    /// longer a question about that row.
+    pub(crate) fn set_query(&mut self, query: impl Into<String>) {
+        let query = query.into();
+        if query != self.query {
+            self.source = None;
+        }
+        self.query = query;
+    }
+    /// Ask about one row, in its own words.
+    fn ask_about(&mut self, row: &SubtaskRow) {
+        self.query = row.description.clone();
+        self.source = Some(row.key());
+    }
+}
+
+/// Which row something refers to: its episode and where it starts, which no
+/// two rows of one annotation share.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubtaskKey {
+    episode: EpisodeId,
+    start_time: f64,
 }
 
 /// One subtask interval of one episode, produced by one annotation node.
@@ -322,6 +349,12 @@ impl SubtaskRow {
     pub(crate) fn is(&self, episode: &EpisodeId, start_time: f64) -> bool {
         &self.episode == episode && self.start_time == start_time
     }
+    pub(crate) fn key(&self) -> SubtaskKey {
+        SubtaskKey {
+            episode: self.episode.clone(),
+            start_time: self.start_time,
+        }
+    }
     fn validate(&self) -> Result<(), String> {
         if self.node.is_empty() {
             return Err("A subtask row needs its node.".into());
@@ -373,7 +406,8 @@ impl SubtaskCategory {
 }
 
 /// jev's Choice answer for one subtask row: the winning category, its
-/// probability, and the distribution's confidence.
+/// probability, the distribution's confidence, and the category it would
+/// otherwise have joined.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskAssignment {
@@ -382,6 +416,23 @@ pub(crate) struct SubtaskAssignment {
     category: String,
     probability: f64,
     confidence: f64,
+    /// Absent for groupings assigned before runner-ups were kept, and for a
+    /// grouping of one category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runner_up: Option<RunnerUp>,
+}
+
+/// The second most probable category of one row.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RunnerUp {
+    category: String,
+    probability: f64,
+}
+impl RunnerUp {
+    pub(crate) fn category(&self) -> &str {
+        &self.category
+    }
 }
 impl SubtaskAssignment {
     pub(crate) fn new(
@@ -397,9 +448,23 @@ impl SubtaskAssignment {
             category: category.into(),
             probability,
             confidence,
+            runner_up: None,
         };
         assignment.validate()?;
         Ok(assignment)
+    }
+    /// The category this row came second in.
+    pub(crate) fn with_runner_up(
+        mut self,
+        category: impl Into<String>,
+        probability: f64,
+    ) -> Result<Self, String> {
+        self.runner_up = Some(RunnerUp {
+            category: category.into(),
+            probability,
+        });
+        self.validate()?;
+        Ok(self)
     }
     pub(crate) fn episode(&self) -> &EpisodeId {
         &self.episode
@@ -407,16 +472,17 @@ impl SubtaskAssignment {
     pub(crate) fn start_time(&self) -> f64 {
         self.start_time
     }
-    #[cfg(test)]
     pub(crate) fn category(&self) -> &str {
         &self.category
     }
     pub(crate) fn probability(&self) -> f64 {
         self.probability
     }
-    #[cfg(test)]
     pub(crate) fn confidence(&self) -> f64 {
         self.confidence
+    }
+    pub(crate) fn runner_up(&self) -> Option<&RunnerUp> {
+        self.runner_up.as_ref()
     }
     fn validate(&self) -> Result<(), String> {
         let unit = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
@@ -425,6 +491,14 @@ impl SubtaskAssignment {
         }
         if !unit(self.probability) || !unit(self.confidence) {
             return Err("Assignment probability and confidence must be between 0 and 1.".into());
+        }
+        if let Some(runner_up) = &self.runner_up {
+            if runner_up.category.is_empty() || runner_up.category == self.category {
+                return Err("A runner-up must be a different category.".into());
+            }
+            if !unit(runner_up.probability) {
+                return Err("A runner-up probability must be between 0 and 1.".into());
+            }
         }
         Ok(())
     }
@@ -460,6 +534,9 @@ impl SubtaskGrouping {
     pub(crate) fn categories(&self) -> &[SubtaskCategory] {
         &self.categories
     }
+    pub(crate) fn assignments(&self) -> &[SubtaskAssignment] {
+        &self.assignments
+    }
     /// A category's rows, most typical first.
     pub(crate) fn members(&self, category: &str) -> Vec<&SubtaskAssignment> {
         let mut members = self
@@ -488,11 +565,13 @@ impl SubtaskGrouping {
         }
         for assignment in &self.assignments {
             assignment.validate()?;
-            if !names.contains(assignment.category.as_str()) {
-                return Err(format!(
-                    "Assignment refers to unknown category “{}”.",
-                    assignment.category
-                ));
+            let runner_up = assignment.runner_up.as_ref().map(RunnerUp::category);
+            for category in std::iter::once(assignment.category.as_str()).chain(runner_up) {
+                if !names.contains(category) {
+                    return Err(format!(
+                        "Assignment refers to unknown category “{category}”."
+                    ));
+                }
             }
         }
         Ok(())
@@ -582,6 +661,36 @@ impl ExplorationPayload {
             to: id.clone(),
         });
         Ok(id)
+    }
+    /// Point the annotation's Find similar node at one of its rows, adding the
+    /// node if the annotation has none, and return the node's id. The first
+    /// search node is reused, so asking about row after row does not grow the
+    /// graph by a node each time.
+    pub(crate) fn search_for(
+        &mut self,
+        annotation: &str,
+        row: &SubtaskRow,
+    ) -> Result<String, String> {
+        if row.node != annotation {
+            return Err("That subtask belongs to another annotation.".into());
+        }
+        let existing = self
+            .children_of(annotation)
+            .into_iter()
+            .find(|child| matches!(child.kind, ExplorationNodeKind::FindSimilarSubtasks(_)))
+            .map(|child| child.id.clone());
+        let node = match existing {
+            Some(node) => node,
+            None => self.add_child(
+                annotation,
+                ExplorationNodeKind::FindSimilarSubtasks(SubtaskSearch::default()),
+            )?,
+        };
+        match self.node_mut(&node).map(|node| &mut node.kind) {
+            Some(ExplorationNodeKind::FindSimilarSubtasks(search)) => search.ask_about(row),
+            _ => return Err("That node no longer searches subtasks.".into()),
+        }
+        Ok(node)
     }
     /// Remove a node, its descendants, and everything they produced.
     pub(crate) fn remove_node(&mut self, id: &str) -> Result<(), String> {
@@ -1158,6 +1267,75 @@ mod tests {
                 .is_err()
         );
         assert!(SubtaskAssignment::new(EpisodeId::fixture(1), 0.0, "Grasp", 1.2, 0.5).is_err());
+        assert_eq!(payload.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_runner_up_must_be_another_known_category_and_older_assignments_have_none() {
+        let (mut payload, annotate) = annotated_graph();
+        let group = payload
+            .add_child(&annotate, ExplorationNodeKind::GroupSimilarSubtasks)
+            .unwrap();
+        let categories = vec![
+            SubtaskCategory::new("Grasp", "Take hold of the cloth").unwrap(),
+            SubtaskCategory::new("Fold", "Bring one part over another").unwrap(),
+        ];
+        let assigned = SubtaskAssignment::new(EpisodeId::fixture(1), 8.0, "Fold", 0.6, 0.3)
+            .unwrap()
+            .with_runner_up("Grasp", 0.35)
+            .unwrap();
+        assert_eq!(assigned.runner_up().map(RunnerUp::category), Some("Grasp"));
+        let unknown = SubtaskAssignment::new(EpisodeId::fixture(1), 8.0, "Fold", 0.6, 0.3)
+            .unwrap()
+            .with_runner_up("Smooth", 0.35)
+            .unwrap();
+        assert!(
+            SubtaskGrouping::new(&group, &annotate, categories.clone(), vec![unknown]).is_err()
+        );
+        assert!(
+            SubtaskAssignment::new(EpisodeId::fixture(1), 8.0, "Fold", 0.6, 0.3)
+                .unwrap()
+                .with_runner_up("Fold", 0.35)
+                .is_err()
+        );
+        payload
+            .set_grouping(
+                SubtaskGrouping::new(&group, &annotate, categories, vec![assigned]).unwrap(),
+            )
+            .unwrap();
+
+        let older: SubtaskAssignment = serde_json::from_str(
+            r#"{"episode":"00000000000000000000000000000001","start_time":0,
+                "category":"Grasp","probability":0.9,"confidence":0.8}"#,
+        )
+        .unwrap();
+        assert!(older.runner_up().is_none());
+        assert!(!serde_json::to_string(&older).unwrap().contains("runner_up"));
+    }
+
+    #[test]
+    fn asking_about_a_row_reuses_the_first_search_node_and_remembers_the_row() {
+        let (mut payload, annotate) = annotated_graph();
+        let rows = payload.subtasks_for(&annotate).cloned().collect::<Vec<_>>();
+        let first = payload.search_for(&annotate, &rows[0]).unwrap();
+        let again = payload.search_for(&annotate, &rows[1]).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(payload.children_of(&annotate).len(), 1);
+        let ExplorationNodeKind::FindSimilarSubtasks(search) = payload.node(&first).unwrap().kind()
+        else {
+            panic!("a search node");
+        };
+        assert_eq!(search.query(), "make the first fold");
+        assert_eq!(search.source(), Some(&rows[1].key()));
+
+        let mut typed = search.clone();
+        typed.set_query("make the first fold");
+        assert_eq!(typed.source(), Some(&rows[1].key()));
+        typed.set_query("smooth the cloth");
+        assert_eq!(typed.source(), None);
+
+        let elsewhere = SubtaskRow::new("other", EpisodeId::fixture(1), 0.0, 1.0, "grasp").unwrap();
+        assert!(payload.search_for(&annotate, &elsewhere).is_err());
         assert_eq!(payload.validate(), Ok(()));
     }
 

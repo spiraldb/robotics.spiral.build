@@ -152,8 +152,51 @@
      lay out and paint whether or not they are on screen. The reserved height
      is one row's, so the scrollbar is right before anything is drawn. */
   .explore-entry-item {
+    position: relative;
     contain-intrinsic-size: 0 63px;
     content-visibility: auto;
+  }
+
+  /* Find similar sits over the row's right edge, beside the row rather than
+     in it, in space the row leaves for it. It shows on hover and focus, and
+     always on the row the evidence column is showing. */
+  .explore-entry-item[data-findable="true"] .explore-entry {
+    padding-right: 40px;
+  }
+
+  .explore-entry-find {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    display: grid;
+    width: 26px;
+    height: 26px;
+    place-items: center;
+    border: 1px solid var(--tone-line);
+    border-radius: 6px;
+    background: var(--tone-surface);
+    color: var(--tone-ink-soft);
+    cursor: pointer;
+    opacity: 0;
+    translate: 0 -50%;
+    transition: opacity 100ms ease-out, color 100ms ease-out, border-color 100ms ease-out;
+  }
+
+  .explore-entry-item:hover .explore-entry-find,
+  .explore-entry-find:focus-visible,
+  .explore-entry-item:has(.explore-entry[aria-current="true"]) .explore-entry-find {
+    opacity: 1;
+  }
+
+  .explore-entry-find:hover {
+    border-color: var(--tone-ink-faint);
+    color: var(--tone-ink);
+  }
+
+  @media (hover: none) {
+    .explore-entry-find {
+      opacity: 1;
+    }
   }
 
   /* The heading element carries the outline; the button inside it carries the

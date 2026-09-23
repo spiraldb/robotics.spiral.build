@@ -7,6 +7,7 @@ use super::{
     transport::EpisodeTimeRange,
 };
 use crate::activities::data::DatasetClient;
+use crate::components::scoped_task::ScopedTask;
 use dioxus::prelude::*;
 use futures_util::StreamExt as _;
 use spiral_robotics_common::datasets::{
@@ -164,7 +165,7 @@ impl StreamChoices {
     }
 
     fn spawn<F: Future<Output = ()> + 'static>(&self, future: F) {
-        dioxus::dioxus_core::Runtime::current().spawn(self.scope, future);
+        ScopedTask::spawn(self.scope, future);
     }
 
     pub(super) fn plotted_fields(&self, key: &str) -> Vec<MessageField> {

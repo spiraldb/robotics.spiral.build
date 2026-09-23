@@ -38,10 +38,10 @@ pub use display::{
     FactListProps, FactProps, KindMark, KindMarkProps, Notice, NoticeProps, NoticeTone,
 };
 pub use foundation::{
-    ArrowDownIcon, ArrowUpIcon, BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon,
-    DeleteIcon, GripIcon, PauseIcon, PlayIcon, RefreshIcon, SkipToEndIcon, SkipToStartIcon,
-    SpinnerIcon, StepBackIcon, StepForwardIcon, StopIcon, UiStyles, UnassignIcon, ZoomInIcon,
-    ZoomOutIcon,
+    Arrangement, ArrowDownIcon, ArrowUpIcon, BrowserFocus, CheckIcon, ChevronIcon,
+    ChevronIconProps, CloseIcon, DeleteIcon, Flight, GripIcon, Motion, PauseIcon, Place, PlayIcon,
+    RefreshIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon,
+    StopIcon, UiStyles, UnassignIcon, ZoomInIcon, ZoomOutIcon,
 };
 
 /// Everything a surface typically needs.
