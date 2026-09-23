@@ -255,6 +255,7 @@ impl MotorConfig {
         self
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn with_calibration(mut self, range: MotorRange) -> Self {
         self.calibration = Some(range);
         self

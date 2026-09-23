@@ -83,6 +83,7 @@ impl SpiralPlanReport {
     pub fn logical(&self) -> &DiagnosticPlan {
         &self.logical_plan
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn physical(&self) -> Option<&DiagnosticPlan> {
         self.physical_plan.as_ref()
     }
@@ -123,6 +124,7 @@ impl DiagnosticPlan {
     pub fn nodes(&self) -> &[DiagnosticNode] {
         &self.nodes
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn node(&self, id: u64) -> Option<&DiagnosticNode> {
         self.nodes.iter().find(|node| node.id == id)
     }

@@ -297,9 +297,11 @@ impl CurationOutcome {
     pub const fn totals(&self) -> &CurationTotals {
         &self.totals
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn rule_count(&self, rule_id: &str) -> u64 {
         self.rule_counts.get(rule_id).copied().unwrap_or(0)
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn transform_count(&self, transform_id: &str) -> u64 {
         self.transform_counts
             .get(transform_id)
@@ -330,9 +332,6 @@ impl CurationRun {
     }
     pub const fn snapshot(&self) -> &CurationRunSnapshot {
         &self.snapshot
-    }
-    pub fn snapshot_mut(&mut self) -> &mut CurationRunSnapshot {
-        &mut self.snapshot
     }
 }
 

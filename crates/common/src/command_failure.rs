@@ -48,6 +48,7 @@ impl CommandFailure {
         self.code
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn message(&self) -> &str {
         &self.message
     }

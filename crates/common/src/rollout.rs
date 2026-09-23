@@ -225,12 +225,6 @@ impl RolloutSnapshot {
     pub fn run_id(&self) -> Option<&str> {
         self.identity.run_id.as_deref()
     }
-    pub const fn checkpoint_step(&self) -> Option<u64> {
-        self.identity.checkpoint_step
-    }
-    pub fn robot(&self) -> Option<&str> {
-        self.identity.robot.as_deref()
-    }
     pub const fn duration_seconds(&self) -> Option<u32> {
         self.identity.duration_seconds
     }

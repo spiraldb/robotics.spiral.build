@@ -115,6 +115,7 @@ impl WorkflowRun {
     pub fn snapshot(&self) -> &super::WorkflowRunSnapshot {
         &self.snapshot
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn snapshot_mut(&mut self) -> &mut super::WorkflowRunSnapshot {
         &mut self.snapshot
     }

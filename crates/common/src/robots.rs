@@ -741,9 +741,11 @@ impl JointTelemetry {
     pub const fn normalized(&self) -> Option<f64> {
         self.kinematics.normalized
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn goal_raw(&self) -> Option<i64> {
         self.kinematics.goal_raw
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn target_raw(&self) -> Option<i64> {
         self.kinematics.target_raw
     }

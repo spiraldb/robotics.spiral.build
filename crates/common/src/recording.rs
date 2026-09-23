@@ -141,27 +141,8 @@ impl EpisodeInfo {
         self.timeline.frames
     }
 
-    /// True when the take is complete enough to review or export.
-    pub fn usable(&self) -> bool {
-        self.timeline.frames > 0 && self.assessment.problem.is_none()
-    }
-
-    /// The joints of the arm named, when this take sampled it.
-    pub fn arm(&self, id: &str) -> Option<&EpisodeArm> {
-        self.identity.arms.iter().find(|arm| arm.id == id)
-    }
-
     pub fn dataset_id(&self) -> &str {
         &self.identity.dataset_id
-    }
-    pub const fn duration_seconds(&self) -> f64 {
-        self.timeline.duration_seconds
-    }
-    pub const fn sample_hz(&self) -> f64 {
-        self.timeline.sample_hz
-    }
-    pub fn problem(&self) -> Option<&str> {
-        self.assessment.problem.as_deref()
     }
 }
 
@@ -459,9 +440,6 @@ impl RecordingProgress {
     pub fn dataset_id(&self) -> &str {
         &self.identity.dataset_id
     }
-    pub fn arms(&self) -> &[String] {
-        &self.identity.arms
-    }
     pub const fn frames(&self) -> u64 {
         self.clock.frames
     }
@@ -501,44 +479,6 @@ impl RecordingGap {
 
     pub const fn duration_seconds(self) -> f64 {
         self.duration_seconds
-    }
-}
-
-#[cfg(test)]
-mod progress_tests {
-    use super::*;
-
-    #[test]
-    fn an_unfinished_take_is_listed_but_not_offered() {
-        struct EpisodeTest;
-
-        impl EpisodeTest {
-            fn episode(frames: u64, problem: Option<String>) -> EpisodeInfo {
-                let mut episode = EpisodeInfo::new("episode_000001", "default")
-                    .with_arms(vec![EpisodeArm::new(
-                        "follower",
-                        Some("so101_follower".to_owned()),
-                        vec!["shoulder_pan".to_owned()],
-                    )])
-                    .with_source("Teleoperation")
-                    .with_timeline(frames, 2.0)
-                    .with_sample_hz(60.0)
-                    .with_started_ms(1_770_000_000_000)
-                    .with_assessment(false, Some(3.5));
-                episode.assessment.problem = problem;
-                episode
-            }
-        }
-
-        let episode = EpisodeTest::episode(120, None);
-        assert!(episode.usable());
-        assert_eq!(
-            episode.arm("follower").map(|arm| arm.joints().len()),
-            Some(1)
-        );
-        assert_eq!(episode.arm("leader"), None);
-        assert!(!EpisodeTest::episode(120, Some("recording did not finish".to_owned())).usable());
-        assert!(!EpisodeTest::episode(0, None).usable());
     }
 }
 

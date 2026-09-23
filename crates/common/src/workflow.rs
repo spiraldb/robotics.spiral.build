@@ -31,6 +31,7 @@ impl WorkflowSpec {
             sql: String::new(),
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_sql(mut self, sql: impl Into<String>) -> Self {
         self.sql = sql.into();
         self
@@ -188,6 +189,7 @@ impl WorkflowRunSnapshot {
     pub const fn started_ms(&self) -> u64 {
         self.started_ms
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn set_phase(&mut self, phase: WorkflowRunPhase) {
         self.execution.phase = phase;
     }
@@ -457,9 +459,7 @@ impl WorkflowSummary {
             name: name.into(),
         }
     }
-    pub fn id(&self) -> &str {
-        &self.id
-    }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn name(&self) -> &str {
         &self.name
     }

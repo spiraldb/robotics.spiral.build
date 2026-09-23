@@ -27,15 +27,6 @@ impl ExplorationSummary {
             revision,
         }
     }
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -90,6 +81,7 @@ impl ExplorationDocument {
         self.revision = revision;
         self
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn summary(&self) -> ExplorationSummary {
         ExplorationSummary::new(&self.id, &self.name, self.revision)
     }

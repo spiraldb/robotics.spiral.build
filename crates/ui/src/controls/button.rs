@@ -147,13 +147,6 @@ pub struct ButtonAuxiliaryHandlers {
 }
 
 impl ButtonAuxiliaryHandlers {
-    pub fn keydown(handler: impl FnMut(KeyboardEvent) + 'static) -> Self {
-        Self {
-            onkeydown: Some(EventHandler::new(handler)),
-            ..Self::default()
-        }
-    }
-
     pub fn with_focus(
         mut self,
         onfocus: impl FnMut(FocusEvent) + 'static,

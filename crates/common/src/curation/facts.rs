@@ -132,17 +132,6 @@ pub enum FieldAggregate {
     Count,
 }
 
-impl FieldAggregate {
-    pub const ALL: [Self; 6] = [
-        Self::First,
-        Self::Last,
-        Self::Min,
-        Self::Max,
-        Self::Avg,
-        Self::Count,
-    ];
-}
-
 /// The measurement behind a declared fact.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

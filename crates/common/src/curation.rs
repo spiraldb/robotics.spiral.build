@@ -55,6 +55,7 @@ impl CurationSpec {
         self.facts.push(fact);
         self
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_rule(mut self, rule: CurationRule) -> Self {
         self.add_rule(rule);
         self
@@ -403,6 +404,7 @@ impl CurationIssue {
             recovery: recovery.to_owned(),
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn code(&self) -> &str {
         &self.code
     }
@@ -429,9 +431,7 @@ impl CurationSummary {
             name: name.into(),
         }
     }
-    pub fn id(&self) -> &str {
-        &self.id
-    }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn name(&self) -> &str {
         &self.name
     }

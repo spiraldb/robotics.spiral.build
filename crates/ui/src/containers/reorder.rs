@@ -55,20 +55,16 @@ struct ReorderState {
     reduced_motion: bool,
 }
 
-/// One committed move: the item left `from` for `to` in the caller's order.
+/// One committed move: the item now belongs at `to` in the caller's order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReorderMove {
     id: String,
-    from: usize,
     to: usize,
 }
 
 impl ReorderMove {
     pub fn id(&self) -> &str {
         &self.id
-    }
-    pub const fn from(&self) -> usize {
-        self.from
     }
     pub const fn to(&self) -> usize {
         self.to
@@ -458,7 +454,6 @@ impl Reorder {
         if commit && origin != gesture.destination {
             self.on_move.call(ReorderMove {
                 id: gesture.id.clone(),
-                from: origin,
                 to: gesture.destination,
             });
             spawn(async move {
