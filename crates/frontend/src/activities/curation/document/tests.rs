@@ -105,8 +105,7 @@ fn episode_rows_are_sorted_trimmed_and_recorded_as_completed() {
     assert_eq!(rows[0].description(), "grasp the corners");
     assert_eq!(rows[1].start_time(), 8.0);
     assert_eq!(rows[1].duration(), 5.0);
-    let CurationNodeKind::BreakDownSubtasks(annotation) =
-        payload.node(&annotate).unwrap().kind()
+    let CurationNodeKind::BreakDownSubtasks(annotation) = payload.node(&annotate).unwrap().kind()
     else {
         panic!("annotation node");
     };
@@ -153,8 +152,7 @@ fn an_empty_episode_and_a_failure_both_record_progress() {
     payload
         .record_episode_failure(&annotate, &EpisodeId::fixture(3), "timed out")
         .unwrap();
-    let CurationNodeKind::BreakDownSubtasks(annotation) =
-        payload.node(&annotate).unwrap().kind()
+    let CurationNodeKind::BreakDownSubtasks(annotation) = payload.node(&annotate).unwrap().kind()
     else {
         panic!("annotation node");
     };
@@ -170,8 +168,7 @@ fn an_empty_episode_and_a_failure_both_record_progress() {
     payload
         .replace_episode_subtasks(&annotate, &EpisodeId::fixture(3), Vec::new())
         .unwrap();
-    let CurationNodeKind::BreakDownSubtasks(annotation) =
-        payload.node(&annotate).unwrap().kind()
+    let CurationNodeKind::BreakDownSubtasks(annotation) = payload.node(&annotate).unwrap().kind()
     else {
         panic!("annotation node");
     };
@@ -271,8 +268,7 @@ fn groupings_read_their_parent_and_order_members_by_probability() {
         SubtaskAssignment::new(EpisodeId::fixture(9), 1.0, "Fold", 0.95, 0.9).unwrap(),
     ];
     let grouping =
-        SubtaskGrouping::new(&group, &annotate, categories.clone(), assignments.clone())
-            .unwrap();
+        SubtaskGrouping::new(&group, &annotate, categories.clone(), assignments.clone()).unwrap();
     payload.set_grouping(grouping).unwrap();
     let members = payload.grouping_for(&group).unwrap().members("Fold");
     assert_eq!(
@@ -287,9 +283,7 @@ fn groupings_read_their_parent_and_order_members_by_probability() {
             &group,
             &annotate,
             categories.clone(),
-            vec![
-                SubtaskAssignment::new(EpisodeId::fixture(1), 0.0, "Smooth", 0.5, 0.5).unwrap()
-            ]
+            vec![SubtaskAssignment::new(EpisodeId::fixture(1), 0.0, "Smooth", 0.5, 0.5).unwrap()]
         )
         .is_err()
     );
@@ -297,8 +291,7 @@ fn groupings_read_their_parent_and_order_members_by_probability() {
     assert!(
         payload
             .set_grouping(
-                SubtaskGrouping::new(&group, "elsewhere", categories.clone(), Vec::new())
-                    .unwrap()
+                SubtaskGrouping::new(&group, "elsewhere", categories.clone(), Vec::new()).unwrap()
             )
             .is_err()
     );
@@ -332,9 +325,7 @@ fn a_runner_up_must_be_another_known_category_and_older_assignments_have_none() 
         .unwrap()
         .with_runner_up("Smooth", 0.35)
         .unwrap();
-    assert!(
-        SubtaskGrouping::new(&group, &annotate, categories.clone(), vec![unknown]).is_err()
-    );
+    assert!(SubtaskGrouping::new(&group, &annotate, categories.clone(), vec![unknown]).is_err());
     assert!(
         SubtaskAssignment::new(EpisodeId::fixture(1), 8.0, "Fold", 0.6, 0.3)
             .unwrap()
@@ -342,9 +333,7 @@ fn a_runner_up_must_be_another_known_category_and_older_assignments_have_none() 
             .is_err()
     );
     payload
-        .set_grouping(
-            SubtaskGrouping::new(&group, &annotate, categories, vec![assigned]).unwrap(),
-        )
+        .set_grouping(SubtaskGrouping::new(&group, &annotate, categories, vec![assigned]).unwrap())
         .unwrap();
 
     let older: SubtaskAssignment = serde_json::from_str(
@@ -364,8 +353,7 @@ fn asking_about_a_row_reuses_the_first_search_node_and_remembers_the_row() {
     let again = payload.search_for(&annotate, &rows[1]).unwrap();
     assert_eq!(first, again);
     assert_eq!(payload.children_of(&annotate).len(), 1);
-    let CurationNodeKind::FindSimilarSubtasks(search) = payload.node(&first).unwrap().kind()
-    else {
+    let CurationNodeKind::FindSimilarSubtasks(search) = payload.node(&first).unwrap().kind() else {
         panic!("a search node");
     };
     assert_eq!(search.query(), "make the first fold");
@@ -432,12 +420,9 @@ fn encoding_round_trips_and_rejects_other_versions_and_broken_graphs() {
         payload
     );
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION + 1, &encoded).is_err());
-    assert!(
-        CurationGraph::decode(CURATION_ENCODING_VERSION, r#"{"nodes":[]}"#).is_err()
-    );
+    assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, r#"{"nodes":[]}"#).is_err());
     let two_parents = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}},{"id":"b","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}}],"edges":[{"from":"dataset","to":"a"},{"from":"dataset","to":"b"},{"from":"a","to":"b"}]}"#;
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, two_parents).is_err());
-    let unknown_field =
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"colour":"blue"}"#;
+    let unknown_field = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"colour":"blue"}"#;
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, unknown_field).is_err());
 }

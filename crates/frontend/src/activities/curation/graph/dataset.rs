@@ -1,6 +1,6 @@
 //! The dataset node's workspace: name the dataset the graph reads, then walk
-//! its episodes and watch one with the Data view's own player, so an
-//! curation starts from the recording rather than from a table.
+//! the episodes it is interpreted over and watch one with the Data view's own
+//! player, so a curation starts from the recording rather than from a table.
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, DatasetSummary};
 use spiral_robotics_ui::{
@@ -14,10 +14,6 @@ use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels, Feat
 use crate::components::dataset_picker::DatasetPicker;
 use crate::components::icons::SpinnerIcon;
 
-/// One page of a dataset's recordings; a curation is authored against the
-/// first few of them, not the whole catalog.
-const EPISODE_LIMIT: usize = 200;
-
 /// The name a graph carries until it has a dataset to take one from.
 const UNTITLED: &str = "Untitled curation";
 
@@ -30,7 +26,7 @@ pub(super) fn DatasetWorkspace(controller: CurationController) -> Element {
     match dataset {
         None => rsx! { DatasetChoice { controller } },
         Some(dataset) => rsx! {
-            DatasetEpisodes { key: "{dataset.label()}", dataset, featured }
+            DatasetEpisodes { key: "{dataset.label()}", controller, dataset, featured }
         },
     }
 }
@@ -88,28 +84,34 @@ fn DatasetChoice(controller: CurationController) -> Element {
     }
 }
 
-/// The dataset's recordings, one at a time: the list is a page of episodes in
-/// recording order, and the opened one plays on the shared timeline.
+/// The episodes the curation is interpreted over, one at a time, playing on
+/// the shared timeline.
 #[component]
-fn DatasetEpisodes(dataset: DatasetSelection, featured: FeaturedCamera) -> Element {
-    let episodes = use_resource(use_reactive(&dataset, |dataset| async move {
-        Episode::page(&dataset, 0, EPISODE_LIMIT)
-            .await
-            .map(|page| page.into_episodes())
-    }));
-    let listing = episodes.read().clone();
+fn DatasetEpisodes(
+    controller: CurationController,
+    dataset: DatasetSelection,
+    featured: FeaturedCamera,
+) -> Element {
+    let sample = controller.sample();
     rsx! {
         div { class: "curation-canvas-dataset",
-            match listing {
-                Some(Ok(episodes)) => rsx! {
-                    DatasetEpisodeList { dataset: dataset.clone(), episodes, featured: featured.clone() }
-                },
-                Some(Err(error)) => rsx! {
-                    EmptyState { tone: NoticeTone::Danger, title: "The episodes could not be listed",
-                        p { "{error}" }
+            match (sample, controller.sample_error()) {
+                (Some(sample), _) => rsx! {
+                    DatasetEpisodeList {
+                        dataset: dataset.clone(),
+                        episodes: sample.episodes().to_vec(),
+                        partial: sample.is_partial(),
+                        featured: featured.clone(),
                     }
                 },
-                None => rsx! { EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Reading episodes…" } } },
+                (None, Some(error)) => rsx! {
+                    EmptyState { tone: NoticeTone::Danger, title: "The episodes could not be listed",
+                        p { "{error}" }
+                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
+                            onclick: move |_| controller.reload_sample(), "Try again" }
+                    }
+                },
+                (None, None) => rsx! { EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Reading episodes…" } } },
             }
         }
     }
@@ -121,6 +123,8 @@ fn DatasetEpisodes(dataset: DatasetSelection, featured: FeaturedCamera) -> Eleme
 fn DatasetEpisodeList(
     dataset: DatasetSelection,
     episodes: Vec<Episode>,
+    /// Whether the dataset holds more episodes than the curation reads.
+    partial: bool,
     featured: FeaturedCamera,
 ) -> Element {
     let mut opened = use_signal(|| 0_usize);
@@ -139,7 +143,9 @@ fn DatasetEpisodeList(
         header { class: "curation-canvas-dataset-head",
             FactList { mono: true,
                 Fact { label: "Dataset", "{dataset.display_name()}" }
-                Fact { label: "Episodes", "{count}" }
+                Fact { label: "Episodes",
+                    if partial { "First {count}" } else { "{count}" }
+                }
             }
             if count > 1 {
                 // The same stepper Curation steps its episodes with: ↑ and ↓

@@ -1,11 +1,5 @@
 use super::*;
-use spiral_robotics_common::curation::facts::{CurationFact, FactKind, FactMeasure};
-use spiral_robotics_common::curation::rules::{
-    ConditionOp, ConditionValue, CurationRule, RuleCondition,
-};
-use spiral_robotics_common::datasets::DatasetSelection;
-use spiral_robotics_common::runs::RunPhase;
-use spiral_robotics_storage::ProjectStore;
+use spiral_robotics_storage::{ProjectStore, StudioStore};
 
 struct CurationFixture {
     manager: CurationManager,
@@ -13,104 +7,65 @@ struct CurationFixture {
 impl CurationFixture {
     fn new() -> Self {
         let store = Arc::new(ProjectStore::workflow_test());
+        let studio = StudioStore::in_memory().project(&store.connection_settings());
         Self {
-            manager: CurationManager::new(Arc::new(StorageManager::new(
-                store.clone(),
-                spiral_robotics_storage::StudioStore::in_memory()
-                    .project(&store.connection_settings()),
-            ))),
+            manager: CurationManager::new(Arc::new(StorageManager::new(store, studio))),
         }
     }
-    fn recipe() -> CurationSpec {
-        CurationSpec::new("cur", "Long episodes")
-            .with_source(DatasetSelection::new(vec!["dataset_default".into()]).unwrap())
-            .with_rule(CurationRule::new(
-                "short",
-                "Too short",
-                RuleCondition::new(
-                    "duration_s",
-                    ConditionOp::Below,
-                    ConditionValue::Number(5.0),
-                ),
-            ))
+    fn document() -> CurationDocument {
+        CurationDocument::new("folding", "Cloth folding", 1, r#"{"nodes":[]}"#)
     }
 }
 
 #[tokio::test]
-async fn saving_advances_the_revision_and_rejects_stale_or_nameless_recipes() {
+async fn an_unknown_document_is_not_found_and_an_invalid_one_is_never_stored() {
+    let fixture = CurationFixture::new();
+    assert!(fixture.manager.list().await.unwrap().is_empty());
+    assert!(matches!(
+        fixture.manager.load("folding").await,
+        Err(OperationError::NotFound(_))
+    ));
+    for invalid in [
+        CurationDocument::new("", "Unnamed identity", 1, "{}"),
+        CurationDocument::new("folding", "   ", 1, "{}"),
+        CurationDocument::new("folding", "Unversioned encoding", 0, "{}"),
+        CurationDocument::new(
+            "folding",
+            "Oversized payload",
+            1,
+            "x".repeat(spiral_robotics_common::curation::MAX_CURATION_PAYLOAD_BYTES + 1),
+        ),
+    ] {
+        assert!(matches!(
+            fixture.manager.save(invalid).await,
+            Err(OperationError::InvalidInput(_))
+        ));
+    }
+    assert!(fixture.manager.list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn each_save_returns_the_next_revision_and_a_stale_one_conflicts() {
     let fixture = CurationFixture::new();
     let saved = fixture
         .manager
-        .save(CurationFixture::recipe())
+        .save(CurationFixture::document())
         .await
         .unwrap();
     assert_eq!(saved.revision(), 1);
-    assert_eq!(
-        fixture.manager.list().await.unwrap()[0].name(),
-        "Long episodes"
-    );
-    assert_eq!(fixture.manager.load("cur").await.unwrap(), saved);
-    let stale = CurationFixture::recipe();
-    assert!(matches!(
-        fixture.manager.save(stale).await,
-        Err(OperationError::Conflict(_))
-    ));
-    let mut renamed = saved.clone();
-    renamed.set_name("   ");
-    assert!(matches!(
-        fixture.manager.save(renamed).await,
-        Err(OperationError::InvalidInput(_))
-    ));
-    let mut second = saved;
-    second.set_name("Long episodes, bright camera");
-    let second = fixture.manager.save(second).await.unwrap();
-    assert_eq!(second.revision(), 2);
-    assert_eq!(
-        fixture.manager.load("cur").await.unwrap().name(),
-        "Long episodes, bright camera"
-    );
-    assert!(matches!(
-        fixture.manager.load("missing").await,
-        Err(OperationError::InvalidInput(_))
-    ));
-}
+    assert_eq!(fixture.manager.load("folding").await.unwrap(), saved);
+    assert_eq!(fixture.manager.list().await.unwrap(), vec![saved.summary()]);
 
-#[tokio::test]
-async fn an_invalid_recipe_never_becomes_a_run() {
-    let fixture = CurationFixture::new();
-    let mut no_source = CurationFixture::recipe();
-    no_source.set_source(None);
-    assert!(matches!(
-        fixture.manager.run(no_source).await,
-        Err(OperationError::InvalidInput(message)) if message.contains("dataset")
-    ));
-    let mut unsafe_fact = CurationFixture::recipe();
-    unsafe_fact.add_fact(CurationFact::new(
-        "bad",
-        "Bad",
-        FactMeasure::Sql {
-            sql: "DROP TABLE dataset_source".into(),
-            value: FactKind::Number,
-        },
-    ));
-    assert!(matches!(
-        fixture.manager.run(unsafe_fact).await,
-        Err(OperationError::InvalidInput(_))
-    ));
-    let finished = fixture
-        .manager
-        .run(CurationFixture::recipe())
-        .await
-        .unwrap();
-    assert!(
-        finished
-            .snapshot()
-            .sql()
-            .unwrap()
-            .contains("spql.mcap.episodes('dataset_default')")
-    );
-    // The in-memory test database has no MCAP reader, so the run fails
-    // honestly instead of pretending to judge episodes.
-    assert_eq!(finished.snapshot().phase(), RunPhase::Failed);
-    assert_eq!(finished.curation().id(), "cur");
+    let next = fixture.manager.save(saved.clone()).await.unwrap();
+    assert_eq!(next.revision(), 2);
+    assert_eq!(next.payload(), saved.payload());
+
+    // The revision the caller loaded is gone, and the stored copy is untouched.
+    for stale in [CurationFixture::document(), saved] {
+        assert_eq!(
+            fixture.manager.save(stale).await,
+            Err(OperationError::Conflict(SAVED_ELSEWHERE.into()))
+        );
+    }
+    assert_eq!(fixture.manager.load("folding").await.unwrap(), next);
 }

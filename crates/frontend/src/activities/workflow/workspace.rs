@@ -29,7 +29,6 @@ use spiral_robotics_ui::{
 };
 
 use crate::activities::data::query_result::{QueryExecutionPresentation, QueryState};
-use crate::activities::workflow::explore::graph::WorkflowView;
 use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AgentDraftKey, AgentPendingCommand, CANVAS_PANEL_ID, RESULTS_PANEL_ID,
 };
@@ -42,11 +41,7 @@ use crate::shell::state::StudioProjectState;
 const WORKFLOW_LAYOUT_SCOPE: &str = "workflow-agent-v14";
 
 #[component]
-fn WorkflowPanels(
-    controller: super::state::WorkflowController,
-    exploration_controller: super::explore::state::ExplorationController,
-    view: Signal<WorkflowView>,
-) -> Element {
+fn WorkflowPanels(controller: super::state::WorkflowController) -> Element {
     let panels = vec![
         Panel::new(
             RESULTS_PANEL_ID,
@@ -83,25 +78,20 @@ fn WorkflowPanels(
                 let modifiers = event.modifiers();
                 if event.key() == Key::Enter
                     && (modifiers.contains(Modifiers::META) || modifiers.contains(Modifiers::CONTROL))
-                    && view() == WorkflowView::Agent
                     && !crate::components::timeline::KeyboardFocus::editing()
                 {
                     event.prevent_default();
                     controller.run(studio);
                 }
             },
-            super::document_controls::WorkflowDocumentControls { controller, exploration_controller, view }
+            super::document_controls::WorkflowDocumentControls { controller }
             div { class: "workflow-panels",
-                if view() == WorkflowView::Explore {
-                    super::explore::graph::ExplorePanels { controller: exploration_controller }
-                } else {
-                    PanelWorkspace {
-                        panels,
-                        initial_layout: WorkflowWorkspaceLayout::initial(),
-                        layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
-                        active_panel: controller.active_panel(),
-                        on_panel_activate: move |id: PanelId| controller.activate_panel(id),
-                    }
+                PanelWorkspace {
+                    panels,
+                    initial_layout: WorkflowWorkspaceLayout::initial(),
+                    layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
+                    active_panel: controller.active_panel(),
+                    on_panel_activate: move |id: PanelId| controller.activate_panel(id),
                 }
             }
         }
@@ -682,20 +672,7 @@ pub(crate) fn WorkflowWorkspace(is_active: ReadSignal<bool>) -> Element {
         is_active,
     );
     let controller = super::state::WorkflowController::use_controller();
-    // Explore keeps its own document, graph, and selection while the Agent
-    // is on screen, so its controller lives beside Workflow's rather than
-    // inside the view that draws it — and the status bar, which speaks for
-    // whichever view is open, reads both from here.
-    let exploration_controller = super::explore::state::ExplorationController::use_controller();
-    let view = use_signal(|| WorkflowView::Agent);
     controller.use_loading();
-    let status = use_memo(move || match view() {
-        WorkflowView::Agent => controller
-            .editor_status()
-            .map(|status| super::state::WorkflowViewStatus::Agent(Box::new(status))),
-        WorkflowView::Explore => Some(super::state::WorkflowViewStatus::Exploration(
-            exploration_controller.measure(),
-        )),
-    });
-    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(status), WorkflowPanels { controller, exploration_controller, view } } }
+    let status = use_memo(move || controller.editor_status());
+    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Workflow(status), WorkflowPanels { controller } } }
 }

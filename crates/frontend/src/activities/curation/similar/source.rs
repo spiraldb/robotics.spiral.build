@@ -5,8 +5,8 @@
 //! them, the dataset they were recorded in — is all either of them needs.
 use super::coverage::MeasuredEpisodes;
 use crate::activities::curation::document::{
-    CurationNode, CurationNodeKind, CurationGraph, SubtaskAssignment, SubtaskGrouping,
-    SubtaskRow, SubtaskSearch,
+    CurationGraph, CurationNode, CurationNodeKind, SubtaskAssignment, SubtaskGrouping, SubtaskRow,
+    SubtaskSearch,
 };
 use crate::activities::curation::review::{EpisodeOrder, SubtaskContext};
 use crate::activities::curation::state::CurationController;
@@ -70,10 +70,7 @@ impl SubtaskSource {
     }
     /// What the annotation says about its own run: the camera it
     /// sampled and the episodes it completed.
-    fn measurement(
-        payload: &CurationGraph,
-        annotation: &str,
-    ) -> (Option<String>, Vec<EpisodeId>) {
+    fn measurement(payload: &CurationGraph, annotation: &str) -> (Option<String>, Vec<EpisodeId>) {
         match payload.node(annotation).map(CurationNode::kind) {
             Some(CurationNodeKind::BreakDownSubtasks(settings)) => (
                 settings.camera().map(str::to_owned),

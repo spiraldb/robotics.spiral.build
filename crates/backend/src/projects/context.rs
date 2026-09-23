@@ -1,7 +1,6 @@
 //! What a request can reach: Studio-wide services, and the project it names.
 use crate::account::SpiralAccount;
 use crate::curation::manager::CurationManager;
-use crate::exploration::manager::ExplorationManager;
 use crate::projects::{OpenProject, ProjectRegistry};
 use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
@@ -110,11 +109,6 @@ impl ProjectContext {
     }
     pub(crate) fn curation(&self) -> &Arc<CurationManager> {
         self.project.curation()
-    }
-    /// Explorations are stored opaquely and keep no runtime state, so each
-    /// caller gets a manager over this project's storage rather than a shared one.
-    pub(crate) fn explorations(&self) -> ExplorationManager {
-        ExplorationManager::new(self.storage().clone())
     }
     pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
         self.project.rollout()

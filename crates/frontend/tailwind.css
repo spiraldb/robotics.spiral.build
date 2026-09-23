@@ -10,13 +10,14 @@
    backend code, and viewport math cannot add unrelated CSS utilities. */
 @source "./src/**/*.rs";
 
-/* Explore (the Workflow › Explore view) styles live in one file per owner.
-   Each file adds only classes carrying its own prefix; nothing here is edited
-   for Explore. */
-@import "./styles/explore-canvas.css";
-@import "./styles/explore-annotate.css";
-@import "./styles/explore-review.css";
-@import "./styles/explore-similar.css";
+/* Curation styles live in one file per owner. Each file adds only classes
+   carrying the `curation-` prefix; nothing here is edited for Curation. */
+@import "./styles/curation-canvas.css";
+@import "./styles/curation-annotate.css";
+@import "./styles/curation-review.css";
+@import "./styles/curation-similar.css";
+@import "./styles/curation-select.css";
+@import "./styles/curation-moments.css";
 
 /*
   One palette, named by role rather than by hue. A colour is only ever spelled
@@ -1267,9 +1268,6 @@ button.studio-status-fact:hover {
     width: calc(100% - 1.5rem);
   }
 
-
-
-
   .training-history-panel {
     @apply bg-surface p-1;
   }
@@ -1318,9 +1316,6 @@ button.studio-status-fact:hover {
   .training-history-delete-confirmation {
     @apply col-span-2 px-2;
   }
-
-
-
 
   .training-run-detail {
     @apply flex h-full min-h-0 flex-col overflow-hidden bg-surface;
@@ -1894,7 +1889,7 @@ button.studio-status-fact:hover {
     }
   }
 
-  /* The Workflow graph's cards are narrower than Explore's column, so a
+  /* The Workflow graph's cards are narrower than Curation's column, so a
      five-stage query fits a 1440px window at a readable zoom. */
   .workflow-flow .workflow-stage-card {
     width: 192px;
@@ -2193,14 +2188,12 @@ button.studio-status-fact:hover {
     @apply font-medium;
   }
 
-  /* Side sheet (shared by Data's row inspector and Curation's episode
-     sheet): a 320px docked inspector beside a table or grid, at most 45% of
-     its tile. A sticky heading carries the position and the step / close
-     controls; Escape closes, ↑ and ↓ step. */
+  /* Side sheet (Data's row inspector): a 320px docked inspector beside a
+     table or grid, at most 45% of its tile. A sticky heading carries the
+     position and the step / close controls; Escape closes, ↑ and ↓ step. */
   .workflow-result-body {
     @apply flex min-h-0 flex-1 flex-col overflow-hidden;
   }
-
 
   /* Assistant console ------------------------------------------------------ */
   .workflow-assistant {
@@ -2487,7 +2480,6 @@ button.studio-status-fact:hover {
   .workflow-composer-send .ui-icon {
     @apply size-3.5;
   }
-
 
   .workflow-inspector-rule {
     @apply mt-2 rounded bg-sunken px-2 py-1.5 text-[11px] leading-4;
@@ -3773,8 +3765,6 @@ button.studio-status-fact:hover {
     color: inherit;
   }
 
-
-
   .device-accent,
   .device-connection-dot {
     @apply h-1.5 w-1.5 shrink-0 self-center rounded-full;
@@ -3914,8 +3904,7 @@ button.studio-status-fact:hover {
    The graph library injects its own unlayered stylesheet, so these overrides
    must be unlayered too or the library's entrance animation, grey edges, and
    default handle sizes win however specific the selector. */
-.workflow-flow-wrap .dioxus-flow,
-.curation-pipeline-canvas .dioxus-flow {
+.workflow-flow-wrap .dioxus-flow {
   --df-bg: var(--tone-viewport);
   --df-node-bg: var(--tone-surface);
   --df-node-color: var(--tone-ink);
@@ -3997,27 +3986,6 @@ button.studio-status-fact:hover {
   .workflow-stage-card .df-handle {
     transition: none;
   }
-}
-
-.curation-sheet-filter {
-  flex-shrink: 0;
-  grid-auto-flow: column;
-  grid-auto-columns: max-content;
-}
-.workflow-mode-switch {
-  flex-shrink: 0;
-  grid-auto-flow: column;
-  grid-auto-columns: max-content;
-}
-.workflow-mode-switch .ui-button--segment {
-  min-height: 22px;
-  padding-inline: 9px;
-  font-size: 11px;
-}
-.curation-sheet-filter .ui-button--segment {
-  min-height: 22px;
-  padding-inline: 9px;
-  font-size: 11px;
 }
 
 /* Data: the catalog rows, the streams ledger, quiet text actions, and the
@@ -4423,7 +4391,6 @@ button.studio-status-fact:hover {
   .data-subject-separator {
     @apply text-ink-faint;
   }
-
 
   .data-subject-facts {
     @apply flex shrink-0 items-center gap-x-2 whitespace-nowrap font-mono text-[11.5px] tabular-nums text-ink-faint;
@@ -4967,569 +4934,11 @@ button.studio-status-fact:hover {
 
 }
 
-@layer components {
-  /* Curation ------------------------------------------------------------
-     A contact sheet. The recipe stands in a tall column at the left; every
-     episode is a tile on the sheet; the selected episode's evidence docks
-     beside the tiles in the shared side sheet. Document chrome (bar,
-     switcher, run strip, empty states) reuses Workflow's classes so both
-     activities keep one document language in the same place. Rule identity
-     is one of the six category washes, dealt in recipe order, and it is
-     never the only carrier: every reason chip prints the rule's words. */
-  .curation-workspace {
-    @apply flex h-full min-h-0 min-w-0 flex-col;
-  }
 
-  .curation-panels {
-    @apply min-h-0 min-w-0 flex-1;
-  }
-
-  .curation-recipe-editor,
-  .curation-sheet-editor {
-    min-width: 0;
-    min-height: 0;
-  }
-
-  /* Recipe column ------------------------------------------------------- */
-  .curation-recipe {
-    @apply flex h-full min-h-0 flex-col overflow-y-auto bg-surface text-[12px] text-ink;
-  }
-
-  .curation-section {
-    @apply flex flex-col gap-1.5 border-b border-line px-3 pb-3 pt-2.5;
-  }
-
-  .curation-section-title {
-    @apply flex items-baseline justify-between text-[11px] font-medium text-ink-soft;
-  }
-
-  .curation-section-note {
-    @apply text-[11px] leading-4 text-ink-faint;
-  }
-
-  .curation-section-note.is-alert {
-    @apply text-danger;
-  }
-
-  .curation-source-facts {
-    @apply font-mono text-[10px] text-ink-soft tabular-nums;
-  }
-
-  .curation-inline-form {
-    @apply flex items-center gap-1;
-  }
-
-  .curation-dimension {
-    @apply w-16;
-  }
-
-  .curation-source-caution {
-    @apply truncate text-[10px] leading-4 text-caution;
-  }
-
-  .curation-field-grid {
-    @apply grid items-center gap-x-2 gap-y-1 text-[11px] text-ink-soft;
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .curation-field-grid > label {
-    @apply whitespace-nowrap;
-  }
-
-  .curation-rule-dot {
-    @apply block size-1.5 shrink-0 rounded-full;
-    background: var(--rule-tone, var(--tone-ink-faint));
-    box-shadow: 0 0 0 1px var(--rule-tone, var(--tone-ink-faint));
-    transition: background-color 120ms var(--ease-out-expo), scale 120ms var(--ease-out-expo);
-  }
-
-  .curation-rule-word {
-    @apply text-[11px] text-ink-faint;
-  }
-
-  .curation-condition-fact {
-    @apply min-w-[5.5rem] flex-1;
-  }
-
-  .curation-condition-test {
-    @apply inline-flex shrink-0 items-center gap-1.5;
-  }
-
-  .curation-condition-op {
-    @apply w-auto max-w-[7.5rem];
-  }
-
-  .curation-condition-value {
-    @apply w-[3.5rem] flex-none;
-  }
-  .curation-rule-invalid {
-    @apply text-[10px] leading-4 text-caution;
-  }
-
-  /* Sheet --------------------------------------------------------------- */
-  .curation-sheet {
-    @apply flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface text-ink;
-  }
-
-  /* The filter segments carry the totals, so the strip needs no count line. */
-  .curation-sheet-filter strong {
-    @apply ml-0.5 font-mono font-semibold tabular-nums;
-  }
-
-  /* Which measurement the tiles print, and the order the sheet reads in. */
-  .curation-lens {
-    @apply inline-flex items-center gap-1;
-  }
-
-  .curation-lens-word {
-    @apply text-ink-faint;
-  }
-
-  .curation-order {
-    @apply min-h-6 px-1.5 text-[11px] text-ink-soft;
-  }
-
-  .curation-sheet-stage {
-    @apply flex min-h-0 min-w-0 flex-1 flex-col;
-  }
-
-  /* Under the strip: the stage's own evidence, with the selected episode
-     docked beside it (or, for the curated output, sharing the stage in
-     half), so the strip above never changes width. */
-  .curation-stage-area {
-    @apply flex min-h-0 min-w-0 flex-1;
-  }
-
-  .curation-stage-area[data-split="half"] > .curation-sheet-body {
-    flex: 1 1 50%;
-  }
-
-  .curation-output-detail {
-    @apply flex min-w-0 flex-col overflow-y-auto border-l border-line bg-surface;
-    flex: 0 0 50%;
-  }
-
-  .curation-sheet-body {
-    @apply flex min-h-0 min-w-0 flex-1 flex-col overflow-auto p-3;
-  }
-
-  .curation-error-detail {
-    @apply max-w-[48rem] font-mono text-[10px] leading-4;
-    overflow-wrap: anywhere;
-  }
-
-  .curation-sheet-grid {
-    @apply m-0 grid list-none gap-1.5 p-0;
-    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
-    align-content: start;
-  }
-
-  /* One tile per episode. Kept tiles sit on paper in full ink; excluded
-     tiles recede onto the sunken recess and carry their reason. A struck
-     tile keeps its name legible: exclusion is a decision, not an error. */
-  .curation-tile {
-    @apply relative min-w-0 overflow-hidden rounded-lg border border-line bg-surface;
-    animation: curation-tile-enter 260ms var(--ease-out-expo) both;
-    animation-delay: min(calc(var(--tile, 0) * 12ms), 240ms);
-    transition: opacity 160ms var(--ease-out-expo), box-shadow 160ms var(--ease-out-expo),
-      border-color 160ms var(--ease-out-expo);
-  }
-
-  @keyframes curation-tile-enter {
-    from {
-      opacity: 0;
-      translate: 0 3px;
-    }
-  }
-
-  .curation-tile:hover {
-    border-color: var(--tone-line-strong);
-  }
-
-  /* Struck: the recess behind it, faint ink on its name and clock, its
-     hairline tinted by the removing rule, and the reason given a whole line. */
-  .curation-tile[data-kept="false"] {
-    background: var(--tone-sunken);
-    border-color: var(--tone-line-soft);
-  }
-
-  .curation-tile[data-kept="false"] .curation-tile-clock,
-  .curation-tile[data-kept="false"] .curation-tile-fact {
-    @apply text-ink-faint;
-  }
-
-  .curation-tile[data-selected="true"] {
-    border-color: var(--tone-accent-strong);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-accent) 45%, transparent);
-  }
-
-  /* The rule under the pointer: its tiles rise in its tint, the rest fall
-     back, and the sheet itself becomes the rule's answer. */
-  .curation-tile[data-highlight="lit"] {
-    border-color: var(--tile-tone);
-    box-shadow: inset 0 0 0 1px var(--tile-tone);
-  }
-
-  .curation-tile[data-highlight="faded"] {
-    opacity: 0.32;
-  }
-
-  .curation-tile-head {
-    @apply flex min-w-0 items-baseline gap-1.5;
-  }
-
-  /* The id is the tile's one certain identity on a sheet where task names
-     repeat, so it reads in ink, not in the margin. */
-  .curation-tile-id {
-    @apply shrink-0 font-mono text-[11px] font-medium text-ink-soft tabular-nums;
-  }
-
-  .curation-tile-name {
-    @apply min-w-0 text-[12px] font-medium leading-4 text-ink;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    overflow: hidden;
-    overflow-wrap: anywhere;
-  }
-
-  .curation-tile[data-kept="false"] .curation-tile-name {
-    @apply font-normal text-ink-faint;
-  }
-
-  .curation-tile-line {
-    @apply flex min-w-0 items-baseline justify-between gap-1.5 font-mono text-[10px] text-ink-soft tabular-nums;
-  }
-
-  .curation-tile-clock {
-    @apply shrink-0;
-  }
-
-  .curation-tile-fact {
-    @apply min-w-0 max-w-[62%] truncate text-right leading-4;
-  }
-
-  .curation-tile-reasons {
-    @apply flex min-w-0 items-start gap-1;
-  }
-
-  /* The rule's words in the rule's wash, the same recipe as a result chip:
-     text mixed 55% toward ink so it clears 4.5:1 on its 13% wash. */
-  /* The removing rule's words beside a dot of the rule's own tint: the
-     sheet of struck tiles stays quiet, and the tint still says which rule. */
-  .curation-reason {
-    @apply inline-flex min-w-0 flex-1 items-baseline gap-1.5 text-[10.5px] leading-4 text-ink-soft;
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-
-  .curation-reason::before {
-    content: "";
-    width: 6px;
-    height: 6px;
-    flex: 0 0 6px;
-    translate: 0 -1px;
-    border-radius: 50%;
-    background: var(--hue);
-  }
-
-  .curation-reason-more {
-    @apply shrink-0 font-mono text-[10px] text-ink-faint tabular-nums;
-  }
-
-  .curation-tile.is-skeleton {
-    @apply min-h-[3.5rem] border-line;
-    background: linear-gradient(90deg, var(--tone-sunken) 0%, var(--tone-hover) 50%, var(--tone-sunken) 100%);
-    background-size: 200% 100%;
-    animation: curation-tile-enter 260ms var(--ease-out-expo) both,
-      curation-shimmer 1.4s ease-in-out infinite;
-    animation-delay: calc(var(--tile, 0) * 40ms), 0s;
-  }
-
-  @keyframes curation-shimmer {
-    from {
-      background-position: 100% 0;
-    }
-    to {
-      background-position: -100% 0;
-    }
-  }
-
-  /* Episode evidence, inside the shared side sheet ---------------------- */
-  .curation-episode {
-    @apply flex flex-col gap-3 p-3 text-[12px] text-ink;
-  }
-
-  .curation-episode-head {
-    @apply flex min-w-0 flex-col gap-0.5;
-  }
-
-  .curation-episode-title {
-    @apply m-0 min-w-0 text-[12px] font-semibold leading-4 tracking-[-0.01em] text-ink;
-    overflow-wrap: anywhere;
-  }
-
-  .curation-episode-status {
-    @apply inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-ink-soft;
-  }
-
-  .curation-episode-dot {
-    @apply size-1.5 rounded-full;
-    background: var(--tone-ink-faint);
-  }
-
-  .curation-episode-status[data-kept="true"] .curation-episode-dot {
-    background: var(--tone-good-dot);
-  }
-
-  .curation-episode-path {
-    @apply m-0 font-mono text-[10px] leading-4 text-ink-faint;
-    overflow-wrap: anywhere;
-  }
-
-  .curation-evidence {
-    @apply flex min-w-0 flex-col gap-1.5;
-  }
-
-  .curation-evidence-title {
-    @apply m-0 text-[11px] font-medium text-ink-soft;
-  }
-
-  /* The measurement's name is never the thing that gives way: a long text
-     value truncates at the right, the key stays whole. */
-  .curation-kv dd {
-    @apply truncate text-right;
-  }
-
-  .curation-verdict-list {
-    @apply m-0 flex list-none flex-col gap-1 p-0 text-[11px];
-  }
-
-  .curation-verdict-row {
-    @apply flex items-center gap-1.5 text-ink-faint;
-  }
-
-  .curation-verdict-row[data-fired="true"] {
-    @apply text-ink;
-  }
-
-  .curation-verdict-text {
-    @apply min-w-0 flex-1 truncate;
-  }
-
-  .curation-verdict-word {
-    @apply shrink-0 font-mono text-[10px] text-ink-faint;
-  }
-
-  .curation-verdict-row[data-fired="true"] .curation-verdict-word {
-    @apply text-ink-soft;
-  }
-
-  .curation-frames {
-    @apply flex flex-col gap-2;
-  }
-
-  .curation-frames-loading {
-    @apply inline-flex items-center gap-1.5;
-  }
-
-  .curation-frames-loading .ui-icon {
-    @apply size-3;
-  }
-
-  /* Camera pixels alone keep the dark mat. */
-  .curation-frame {
-    @apply m-0 flex w-full flex-col gap-0.5;
-  }
-
-  .curation-frame img {
-    @apply block aspect-video w-full rounded object-contain;
-    background: var(--tone-camera);
-  }
-
-  .curation-frame figcaption {
-    @apply font-mono text-[10px] text-ink-faint tabular-nums;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .curation-tile,
-    .curation-tile.is-skeleton {
-      animation: none;
-    }
-
-    .curation-rule-dot {
-      transition: none;
-    }
-  }
-}
-
-/* A tile is a whole small document, not a button label: it drops the shared
-   action's inline-flex centring and nowrap. */
-.curation-tile .curation-tile-face {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: flex-start;
-  width: 100%;
-  min-width: 0;
-  gap: 5px;
-  padding: 8px 10px 9px;
-  border-radius: 0;
-  text-align: left;
-  white-space: normal;
-}
-
-/* Duration drawn as the tile's own baseline against the longest episode on
-   the sheet, so length is read across tiles without spending a line. */
-.curation-tile[data-kept="true"] .curation-tile-face::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  height: 3px;
-  width: var(--fill, 0%);
-  border-radius: 0 2px 0 0;
-  background: color-mix(in srgb, var(--tone-ink) 28%, transparent);
-  transition: width 260ms var(--ease-out-expo);
-}
-
-.curation-inline-form .ui-button {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.curation-proposal { @apply flex flex-col gap-2; }
-.curation-proposal label { @apply flex flex-col gap-1 text-[11px] text-ink-soft; }
-.curation-proposal input,
-.curation-proposal select { @apply w-full; }
-
-.curation-output-note { @apply border-b border-line px-4 py-2 text-xs text-ink-soft; overflow-wrap: anywhere; }
-.curation-output-note p { @apply mt-2; }
-
-/* Recipe steps: each row mirrors its pipeline card (kind mark, "n · Kind"),
-   then reads as one sentence or one named operation. Tools appear on hover
-   and focus; selection is the same role blue the stage cards wear. */
-.curation-steps { padding-inline: 0; padding-bottom: 0; gap: 0; }
-.curation-steps > .curation-section-title { padding: 0 12px 6px; }
-.curation-steps > .curation-section-note { padding: 0 12px 10px; }
-.curation-step { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 10px 14px 12px; background: var(--tone-surface); border-top: 1px solid var(--tone-line-soft); transition: background-color 120ms ease-out; }
-.curation-step[data-hovered="true"] { background: var(--tone-hover); }
-.curation-step[data-selected="true"] { background: var(--tone-selected); }
-.curation-step[data-dragging="true"] { z-index: 3; border-radius: 4px; box-shadow: 0 8px 20px rgb(0 0 0 / 0.12); }
-.curation-step-head { display: flex; min-height: 24px; align-items: center; gap: 8px; }
-.curation-step-title { margin: 0; font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; color: var(--tone-ink); }
-.curation-step-count { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--tone-ink-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.curation-step-tools { display: flex; align-items: center; gap: 1px; margin-left: auto; opacity: 0; transition: opacity 100ms ease-out; }
-.curation-step-count + .curation-step-tools { margin-left: 0; }
-.curation-step:hover .curation-step-tools,
-.curation-step:focus-within .curation-step-tools,
-.curation-step[data-dragging="true"] .curation-step-tools { opacity: 1; }
-.curation-step-body { display: flex; flex-direction: column; gap: 4px; padding-left: 26px; }
-.curation-sentence { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.curation-transform-summary.ui-button { display: flex; min-width: 0; justify-content: flex-start; gap: 6px; margin-inline: -6px; padding: 2px 6px 2px 4px; text-align: left; white-space: normal; }
-.curation-transform-summary .ui-icon { flex-shrink: 0; width: 0.75rem; height: 0.75rem; color: var(--tone-ink-faint); }
-.curation-transform-copy { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
-.curation-transform-name { font-size: 12px; font-weight: 500; line-height: 16px; color: var(--tone-ink); overflow-wrap: anywhere; }
-.curation-transform-detail { font-size: 11px; line-height: 15px; color: var(--tone-ink-soft); overflow-wrap: anywhere; }
-.curation-transform-fields { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
-
-/* Add a step: one composer whose footer holds the kind picker and Add. */
-.curation-composer-box { display: flex; flex-direction: column; border: 1px solid var(--tone-line); border-radius: 8px; background: var(--tone-surface); transition: border-color 100ms ease-out, box-shadow 100ms ease-out; }
-.curation-composer-box:focus-within { border-color: var(--tone-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-focus) 18%, transparent); }
-.curation-composer-input { display: block; width: 100%; min-height: 3.5rem; resize: none; border: 0; background: transparent; padding: 8px 10px; font: inherit; font-size: 13px; line-height: 18px; color: var(--tone-ink); outline: none; }
-.curation-composer-input::placeholder { color: var(--tone-ink-faint); }
-.curation-composer-actions { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-top: 1px solid var(--tone-line); }
-.curation-composer-actions .ui-button--solid { margin-left: auto; padding-inline: 10px; }
-.curation-step-picker { max-width: 11rem; color: var(--tone-ink-soft); }
-
-/* Pipeline ---------------------------------------------------------------
-   The recipe as a strip of stage cards on the Workflow canvas: the same
-   224×92 anatomy (kind mark, title, one summary line, a footer naming what
-   executes) with the measured episode count at the footer's right. A filter
-   wears its rule's tint on the mark and on the branch chip that holds the
-   episodes it excluded, the same wash its reason chips wear on the tiles. */
-.curation-pipeline { @apply shrink-0 px-3 pt-3; }
-.curation-pipeline-canvas { @apply relative w-full overflow-hidden rounded border border-line; height: 200px; background: var(--tone-viewport); }
-.curation-flow { width: 100%; height: 100%; }
-.curation-flow .df-node { padding: 0; border: none; background: transparent; box-shadow: none; animation: none; cursor: pointer; }
-.curation-flow .df-node:focus-visible { border-radius: 4px; outline: 2px solid var(--tone-focus); outline-offset: 2px; }
-.curation-flow .df-edge { animation: none; }
-.curation-flow .df-edge-path { stroke-width: 1.25; }
-.curation-flow .df-edge:hover .df-edge-path { stroke: var(--df-edge); }
-.curation-flow .df-edge.curation-flow-pending .df-edge-path { stroke-dasharray: 3 3; }
-.curation-flow .df-edge-hit { cursor: default; pointer-events: none; }
-.curation-flow .workflow-canvas-controls { bottom: 8px; left: 8px; }
-.curation-stage-card { cursor: pointer; width: 180px; height: 108px; }
-.curation-stage-card .workflow-stage-summary { -webkit-line-clamp: 3; }
-.curation-stage-filter { --stage-tone: var(--tone-category-2); }
-.curation-stage-count { @apply ml-auto shrink-0 whitespace-nowrap font-mono text-[10px] text-ink-faint tabular-nums; }
-.curation-stage-count strong { @apply text-[12px] font-semibold text-ink; }
-.curation-stage-incomplete { color: var(--tone-caution); font-weight: 500; }
-.curation-flow-branch {
-  position: relative;
-  display: flex;
-  width: 100%;
-  height: 100%;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  border: 1px solid color-mix(in srgb, var(--stage-tone) 38%, var(--tone-line));
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 1;
-  color: color-mix(in srgb, var(--stage-tone) 55%, var(--tone-ink));
-  background: color-mix(in srgb, var(--stage-tone) 13%, var(--tone-surface));
-  cursor: pointer;
-  transition: border-color 120ms ease-out;
-}
-.curation-flow-branch:hover { border-color: var(--stage-tone); }
-.curation-flow-branch-count { font-family: var(--font-mono); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.curation-flow-branch .df-handle { opacity: 0; pointer-events: none; }
-
-/* Stage heading: one line under the strip that names the selected stage the
-   way its card does, then the controls for the list beneath it. */
-.curation-stage-heading { @apply mb-2 flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line pb-2; }
-.curation-stage-title { @apply m-0 shrink-0 text-[12px] font-semibold leading-4 tracking-[-0.01em] text-ink; }
-.curation-stage-summary { @apply min-w-0 flex-1 truncate text-[11px] text-ink-soft; }
-.curation-stage-tools { @apply flex shrink-0 flex-wrap items-center gap-2; }
-.curation-stage-tools:empty { display: none; }
-.curation-stage-empty { @apply py-3; }
 /* One episode stepper wherever a surface walks a list of episodes. */
 .episode-stepper { @apply flex items-center gap-1; }
 .episode-steps { @apply flex items-center gap-px; }
 .episode-select { @apply max-w-[22rem]; text-overflow: ellipsis; }
-
-/* Histogram: how the incoming episodes measured against a numeric filter.
-   Kept in graphite, excluded in the rule's tint, the threshold as a rule
-   across the plot. Plain boxes, so the type never scales with the width. */
-.curation-histogram { @apply m-0 mb-3 shrink-0 border-b border-line pb-2; }
-.curation-histogram-plot { position: relative; display: flex; align-items: flex-end; gap: 2px; height: 72px; padding-top: 16px; }
-.curation-histogram-bin { display: flex; flex: 1 1 0; flex-direction: column-reverse; height: 100%; min-width: 0; }
-.curation-histogram-bin i { display: block; width: 100%; }
-.curation-histogram-bin i.is-kept { background: color-mix(in srgb, var(--tone-ink-faint) 38%, transparent); border-radius: 1px 1px 0 0; }
-.curation-histogram-bin i.is-excluded { background: var(--stage-tone); border-radius: 1px 1px 0 0; }
-.curation-histogram-threshold { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--tone-ink); pointer-events: none; }
-.curation-histogram-threshold span { position: absolute; top: -1px; padding: 1px 3px; border-radius: 2px; font-family: var(--font-mono); font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; color: var(--tone-ink); background: var(--tone-surface); }
-.curation-histogram-threshold[data-side="right"] span { left: 4px; }
-.curation-histogram-threshold[data-side="left"] span { right: 4px; }
-.curation-histogram-axis { @apply mt-0 flex items-baseline justify-between gap-3 pt-1 font-mono text-[10px] text-ink-faint tabular-nums; border-top: 1px solid var(--tone-line-strong); }
-.curation-histogram-legend { @apply flex flex-wrap gap-x-3 font-sans text-ink-soft; }
-.curation-histogram-legend span { @apply inline-flex items-center gap-1; }
-.curation-histogram-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 1px; }
-.curation-histogram-legend i.is-kept { background: color-mix(in srgb, var(--tone-ink-faint) 38%, transparent); }
-.curation-histogram-legend i.is-excluded { background: var(--stage-tone); }
-
-/* An identifier is not a task name: one mono line, cut at the right. */
-
-.curation-source-section[data-selected="true"] { background: var(--tone-sidebar); }
-
-#curation-ordered-rules { position: relative; }
-
-.curation-stage-preview { @apply min-w-0; }
-.curation-preview-status { @apply flex items-center gap-2 py-4 text-[11px] text-ink-soft; }
-.curation-preview-status svg { @apply h-4 w-4; }
 
 /* Derived series extend the existing episode ruler and stream grid. */
 .data-numeric-track .data-numeric-name { height: auto; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 12px; gap: 4px; }
@@ -5549,11 +4958,6 @@ button.studio-status-fact:hover {
 .data-numeric-interval { position: absolute; bottom: 0; height: 12px; padding: 0; border: 0; border-top: 1px solid var(--tone-danger); background: var(--tone-danger-soft); cursor: pointer; }
 .data-numeric-interval[data-kind="unknown"] { border-color: var(--tone-caution); background: var(--tone-caution-soft); }
 .data-numeric-interval:hover, .data-numeric-interval:focus-visible { height: 18px; outline: 1px solid var(--tone-ink); outline-offset: -1px; }
-.data-numeric-status { margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
-.data-numeric-status[role="alert"] { color: var(--tone-danger); }
-
-.curation-stage-preview > .curation-episode { padding: 0; }
-.curation-progress-evidence { gap: 8px; }
 
 /* One recording seen whole: its panels docked in a workbench of their own,
    arranged for the room the surface gives it. Below a readable size the
@@ -5583,17 +4987,3 @@ button.studio-status-fact:hover {
   .data-plots-tick:nth-child(even) span { visibility: hidden; }
 }
 
-/* Before and after frames sit side by side at a bounded width, so one
-   sampled frame never stretches to half the sheet. */
-.curation-stage-preview .curation-frames { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 24rem)); gap: 12px; }
-.curation-stage-preview .curation-frame img { height: clamp(140px, 22vh, 224px); aspect-ratio: auto; }
-
-/* A transform's review is the inspected episode: it takes the stage's height
-   under the heading, and the sheet scrolls when that is less than the
-   inspection needs. */
-.curation-stage-preview:has(.episode-inspection) { display: flex; flex: 1 0 auto; flex-direction: column; }
-.curation-stage-preview:has(.episode-inspection) > .curation-stage-heading { flex: none; }
-.curation-stage-preview:has(.episode-inspection) > .curation-episode { display: flex; flex: 1 0 auto; flex-direction: column; gap: 4px; }
-.curation-episode > .episode-inspection,
-.curation-progress-evidence { flex: 1 0 auto; }
-.curation-progress-evidence { display: flex; flex-direction: column; }

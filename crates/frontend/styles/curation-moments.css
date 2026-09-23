@@ -1,0 +1,11 @@
+/* Curation › moments styles. Prefix every class with `curation-moments-`.
+   Use @layer components like tailwind.css. */
+
+@layer components {
+  /* A measurement's workspace: its status line over the index and the
+     recording, as Break down subtasks lays its own out. */
+  .curation-moments-workspace {
+    @apply flex h-full min-h-0 min-w-0 flex-col;
+    background: var(--tone-surface);
+  }
+}

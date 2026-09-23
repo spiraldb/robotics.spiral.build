@@ -148,28 +148,21 @@ impl NumericTrack {
 }
 
 #[derive(Clone, PartialEq)]
-pub(crate) enum TimelineTrackState {
-    Loading(String),
-    Failed(String),
-    Ready(NumericTrack),
-}
-
-#[derive(Clone, PartialEq)]
 pub(crate) struct TimelineTrack {
     id: String,
     label: String,
-    state: TimelineTrackState,
+    series: NumericTrack,
 }
 impl TimelineTrack {
     pub(crate) fn new(
         id: impl Into<String>,
         label: impl Into<String>,
-        state: TimelineTrackState,
+        series: NumericTrack,
     ) -> Self {
         Self {
             id: id.into(),
             label: label.into(),
-            state,
+            series,
         }
     }
     pub(crate) fn id(&self) -> &str {
@@ -180,28 +173,21 @@ impl TimelineTrack {
 #[component]
 pub(crate) fn NumericTrackRow(track: TimelineTrack, interaction: TimelineInteraction) -> Element {
     let view = interaction.state().window();
-    let value = match &track.state {
-        TimelineTrackState::Ready(series) => series.at(interaction.state().clock().seconds()),
-        _ => None,
-    };
-    let path = use_memo(use_reactive((&track.state,), move |(state,)| match state {
-        TimelineTrackState::Ready(series) => series.path(),
-        _ => String::new(),
+    let value = track.series.at(interaction.state().clock().seconds());
+    let path = use_memo(use_reactive((&track.series,), move |(series,)| {
+        series.path()
     }));
+    let series = track.series.clone();
     rsx! {
         div { class: "data-stream data-numeric-track", "aria-label": track.label.clone(),
             div { class: "data-stream-name data-numeric-name",
                 strong { "{track.label}" }
                 if let Some(value) = value { output { "{value:.3}" } }
-                if let TimelineTrackState::Ready(series) = &track.state {
-                    if let Some(cutoff) = series.cutoff { span { "Cutoff {cutoff}" } }
-                }
+                if let Some(cutoff) = series.cutoff { span { "Cutoff {cutoff}" } }
             }
             div { class: "data-stream-track data-numeric-plot",
-                match track.state {
-                    TimelineTrackState::Loading(message) => rsx! { p { class: "data-numeric-status", role: "status", "{message}" } },
-                    TimelineTrackState::Failed(message) => rsx! { p { class: "data-numeric-status", role: "alert", "{message}" } },
-                    TimelineTrackState::Ready(series) => rsx! {
+                {
+                    rsx! {
                         svg { view_box: "{view.start()} 0 {view.span()} 100", preserve_aspect_ratio: "none", role: "img", "aria-label": "{track.label} over episode time",
                             for interval in &series.intervals {
                                 rect { x: "{interval.span.0}", width: "{interval.span.1 - interval.span.0}", y: "0", height: "100", class: "data-numeric-overlay", "data-kind": interval.kind.key() }
@@ -219,7 +205,7 @@ pub(crate) fn NumericTrackRow(track: TimelineTrack, interaction: TimelineInterac
                                 onclick: { let interaction = interaction.clone(); let interval = interval.clone(); move |_| interaction.emit(TimelineAction::ActivateInterval(interval.clone())) },
                             }
                         }
-                    },
+                    }
                 }
             }
         }

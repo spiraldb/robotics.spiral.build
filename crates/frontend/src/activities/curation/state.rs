@@ -1,29 +1,72 @@
-//! Browser-owned recipe draft, saved baseline, submitted runs, and the
-//! sheet's selection state.
-use super::CurationClient;
-use super::pipeline::PipelineSelection;
-use crate::client::runs::{PENDING_RUN_ID, RunHistory, SubmittedRun};
+//! Browser-owned curation: the loaded graph, its decoded payload,
+//! node selection, episode focus, and saves. The controller is passed as a
+//! prop like `WorkflowController`; every Curation view reads and edits through
+//! it. Shared contract: extend it, never change what is here.
+use super::document::{
+    CURATION_ENCODING_VERSION, CurationGraph, CurationNodeKind, DATASET_NODE_ID, SubtaskRow,
+};
+use super::population::{EpisodeSample, Population, PopulationReader};
+use super::poster::PosterCache;
+use super::review::Counted;
 use crate::components::document_session::{
     DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
 };
-use crate::components::run_strip::RunPhasePresentation;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
-use dioxus_workbench::PanelId;
-use spiral_robotics_common::curation::facts::CurationFact;
-use spiral_robotics_common::curation::interpretation::RuleProposal;
-use spiral_robotics_common::curation::run::{CurationOutcome, CurationRun, CurationRunSnapshot};
-use spiral_robotics_common::curation::{
-    CurationSpec, CurationValidationReport, DEFAULT_CURATION_NAME,
-};
-use spiral_robotics_common::datasets::EpisodeId;
-use spiral_robotics_common::runs::RunPhase;
+use spiral_robotics_common::curation::CurationDocument;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_ui::Place;
+use std::collections::BTreeMap;
 
-pub(crate) const RECIPE_PANEL_ID: &str = "curation-recipe";
-pub(crate) const SHEET_PANEL_ID: &str = "curation-sheet";
+const UNTITLED: &str = "Untitled curation";
 
-impl StudioDocument for CurationSpec {
+/// A save is refused while the document has another command in flight, so a
+/// measurement's save waits for it rather than dropping what it measured.
+const SAVE_WAIT_MS: u32 = 50;
+const SAVE_WAIT_ROUNDS: usize = 200;
+
+/// One quiet line per node that is measuring something right now.
+pub(crate) type NodeActivity = BTreeMap<String, String>;
+
+/// What a curation's annotation nodes have measured so far, as the top
+/// bar reports it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CurationMeasure {
+    episodes: usize,
+    subtasks: usize,
+}
+
+impl CurationMeasure {
+    fn of(payload: &CurationGraph) -> Self {
+        let mut episodes = 0;
+        let mut subtasks = 0;
+        for node in payload.nodes() {
+            if let CurationNodeKind::BreakDownSubtasks(annotation) = node.kind() {
+                episodes += annotation.completed_episodes().len();
+                subtasks += payload.subtasks_for(node.id()).count();
+            }
+        }
+        Self { episodes, subtasks }
+    }
+    pub(crate) fn has_measured(&self) -> bool {
+        self.episodes > 0
+    }
+    /// The measurement state in the operator's words. A graph that has
+    /// measured nothing says so rather than counting zeroes.
+    pub(crate) fn measured(&self) -> String {
+        if self.episodes == 0 {
+            return "Nothing measured yet".to_owned();
+        }
+        format!(
+            "{} annotated · {}",
+            Counted::episodes(self.episodes),
+            Counted::subtasks(self.subtasks),
+        )
+    }
+}
+
+impl StudioDocument for CurationDocument {
     const NOUN: &'static str = "curation";
     const COLLECTION: &'static str = "curations";
     const REPORTS_AS: MessageSource = MessageSource::Curation;
@@ -35,7 +78,7 @@ impl StudioDocument for CurationSpec {
         self.set_name(name);
     }
     fn fresh(id: String) -> Self {
-        Self::new(id, DEFAULT_CURATION_NAME)
+        Self::new(id, UNTITLED, CURATION_ENCODING_VERSION, "{}").carrying(&CurationGraph::new(None))
     }
     fn acknowledge_save(&mut self, saved: &Self) {
         if self.id() == saved.id() {
@@ -44,472 +87,321 @@ impl StudioDocument for CurationSpec {
     }
 }
 
-/// Which verdicts the sheet lays out.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum SheetFilter {
-    #[default]
-    All,
-    Kept,
-    Excluded,
+/// The graph travels inside the document as opaque text. Replacing that text
+/// keeps the document's identity, name, and revision, so one encoded payload
+/// is all that separates a draft from what Studio stored.
+trait CurationDraft {
+    fn carrying(&self, payload: &CurationGraph) -> Self;
 }
 
-impl SheetFilter {
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Kept => "Kept",
-            Self::Excluded => "Excluded",
-        }
-    }
-    pub(super) const fn admits(self, kept: bool) -> bool {
-        match self {
-            Self::All => true,
-            Self::Kept => kept,
-            Self::Excluded => !kept,
-        }
+impl CurationDraft for CurationDocument {
+    fn carrying(&self, payload: &CurationGraph) -> Self {
+        CurationDocument::new(
+            self.id(),
+            self.name(),
+            CURATION_ENCODING_VERSION,
+            payload
+                .encode()
+                .unwrap_or_else(|_| self.payload().to_owned()),
+        )
+        .with_revision(self.revision())
     }
 }
 
-/// How the sheet orders its tiles: as the dataset recorded them, or by the
-/// measurement the tiles print, so the episodes near a threshold sit together.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum SheetOrder {
-    #[default]
-    Recorded,
-    Ascending,
-    Descending,
+/// Where a curation asks the annotation view to look: one episode of one
+/// annotation node, and optionally one interval within it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EpisodeFocus {
+    node: String,
+    episode: EpisodeId,
+    interval: Option<(f64, f64)>,
 }
-
-impl SheetOrder {
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Recorded => "Dataset order",
-            Self::Ascending => "Lowest first",
-            Self::Descending => "Highest first",
+impl EpisodeFocus {
+    pub(crate) fn new(
+        node: impl Into<String>,
+        episode: EpisodeId,
+        interval: Option<(f64, f64)>,
+    ) -> Self {
+        Self {
+            node: node.into(),
+            episode,
+            interval,
         }
     }
-    const fn next(self) -> Self {
-        match self {
-            Self::Recorded => Self::Ascending,
-            Self::Ascending => Self::Descending,
-            Self::Descending => Self::Recorded,
-        }
+    pub(crate) fn node(&self) -> &str {
+        &self.node
+    }
+    pub(crate) fn episode(&self) -> &EpisodeId {
+        &self.episode
+    }
+    pub(crate) fn interval(&self) -> Option<(f64, f64)> {
+        self.interval
     }
 }
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct CurationController {
-    session: DocumentSession<CurationSpec>,
-    runs: RunHistory<CurationRun>,
-    view: CurationViewSignals,
-}
-
-impl SubmittedRun for CurationRun {
-    fn document_id(&self) -> &str {
-        self.curation().id()
-    }
-    fn run_id(&self) -> Option<&str> {
-        self.snapshot().run_id()
-    }
-    fn phase(&self) -> RunPhase {
-        self.snapshot().phase()
-    }
-    fn started_ms(&self) -> u64 {
-        self.snapshot().started_ms()
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct CurationViewSignals {
-    active_panel: Signal<Option<PanelId>>,
-    selected_episode: Signal<Option<EpisodeId>>,
-    hovered_rule: Signal<Option<String>>,
-    filter: Signal<SheetFilter>,
-    /// The measurement every tile prints; `None` means the first declared one.
-    lens: Signal<Option<String>>,
-    order: Signal<SheetOrder>,
-    pipeline_selection: Signal<PipelineSelection>,
+    session: DocumentSession<CurationDocument>,
+    /// The graph as the views read and edit it. Every accepted edit is encoded
+    /// back into the session's draft, so "Unsaved changes" is one comparison.
+    payload: Signal<CurationGraph>,
+    selected_node: Signal<Option<String>>,
+    focus: Signal<Option<EpisodeFocus>>,
+    /// One line per node that is measuring something right now. A run in
+    /// flight is not in the payload, so the view that runs it says so here and
+    /// the canvas reads it: a node the operator has scrolled away from still
+    /// shows that it is working.
+    activity: Signal<NodeActivity>,
+    /// Where on screen the last Find similar was asked from, until the search
+    /// it opened has carried its query card in from there.
+    launch: Signal<Option<Place>>,
+    /// The episodes every node is interpreted over, read once per dataset.
+    sample: Resource<Result<Option<EpisodeSample>, String>>,
 }
 
 impl CurationController {
-    pub(super) fn use_controller() -> Self {
+    pub(crate) fn use_controller() -> Self {
+        // A subtask's poster is the same picture whichever of the curation's
+        // nodes is selected, so the cache the backfilled ones are cut into
+        // belongs to the curation, not to the view that first asked. It is
+        // provided here, beside the payload, and read by the poster frames
+        // themselves; nothing in it ever reaches the saved document.
+        use_context_provider(PosterCache::new);
         let session = DocumentSession::use_session();
+        let payload = use_signal(|| CurationGraph::new(None));
+        // Only a new dataset reads a new sample; editing the graph never does.
+        let dataset = use_memo(move || payload.read().dataset().cloned());
+        let sample = use_resource(move || async move {
+            match dataset() {
+                Some(dataset) => EpisodeSample::load(&dataset).await.map(Some),
+                None => Ok(None),
+            }
+        });
         use_hook(|| Self {
             session,
-            runs: RunHistory::new(),
-            view: CurationViewSignals {
-                active_panel: Signal::new(None),
-                selected_episode: Signal::new(None),
-                hovered_rule: Signal::new(None),
-                filter: Signal::new(SheetFilter::All),
-                lens: Signal::new(None),
-                order: Signal::new(SheetOrder::Recorded),
-                pipeline_selection: Signal::new(PipelineSelection::Source),
-            },
+            payload,
+            selected_node: Signal::new(Some(DATASET_NODE_ID.to_owned())),
+            focus: Signal::new(None),
+            activity: Signal::new(NodeActivity::new()),
+            launch: Signal::new(None),
+            sample,
         })
     }
 
-    pub(super) fn spec(&self) -> CurationSpec {
-        self.session.draft()
+    /// The episodes this curation is interpreted over: `None` while they are
+    /// read, and for a graph without a dataset.
+    pub(super) fn sample(&self) -> Option<EpisodeSample> {
+        self.sample
+            .read()
+            .as_ref()
+            .and_then(|loaded| loaded.as_ref().ok())
+            .cloned()
+            .flatten()
     }
-    /// Every recipe edit goes through here so the draft stays one value.
-    pub(super) fn edit(self, change: impl FnOnce(&mut CurationSpec)) {
-        self.session.edit(change);
-    }
-    pub(super) fn add_proposal(self, proposal: &RuleProposal) -> Result<(), String> {
-        let identity = format!(
-            "rule-{}-{:x}",
-            js_sys::Date::now() as u64,
-            (js_sys::Math::random() * u32::MAX as f64) as u64
-        );
-        let mut next = self.spec();
-        proposal.apply(&mut next, &identity)?;
-        self.edit(|spec| *spec = next);
-        self.select_pipeline(PipelineSelection::Step(identity));
-        Ok(())
-    }
-    fn validation(&self) -> CurationValidationReport {
-        self.session.with_draft(CurationSpec::validate)
-    }
-
-    /// The run the sheet shows: the selected one, else the latest for this
-    /// recipe, with staleness judged against the current draft.
-    pub(super) fn snapshot(&self) -> CurationRunSnapshot {
-        let visible = self.visible_run();
-        self.session.with_draft(|draft| match visible {
-            Some(run) => {
-                let mut snapshot = run.snapshot().clone();
-                snapshot.set_result_stale(!draft.accepts_output_from(run.curation()));
-                snapshot
-            }
-            None => CurationRunSnapshot::default(),
-        })
-    }
-    pub(super) fn outcome(&self) -> Option<CurationOutcome> {
-        self.visible_run()
-            .and_then(|run| run.snapshot().outcome().cloned())
-    }
-    /// The recipe that produced the visible verdicts.
-    pub(super) fn judged_spec(&self) -> Option<CurationSpec> {
-        self.visible_run().map(|run| run.curation().clone())
-    }
-    fn visible_run(&self) -> Option<CurationRun> {
-        self.runs.visible(&self.document_id())
-    }
-    fn document_id(&self) -> String {
-        self.session.with_draft(|draft| draft.id().to_owned())
-    }
-    pub(super) fn curation_runs(&self) -> Vec<CurationRun> {
-        self.runs.for_document(&self.document_id())
-    }
-    pub(super) fn select_run(mut self, id: String) {
-        if self.runs.select(&self.document_id(), id) {
-            self.view.selected_episode.set(None);
-        }
-    }
-
-    pub(super) fn loaded(&self) -> bool {
-        self.session.loaded()
-    }
-    pub(super) fn load_error(&self) -> Option<String> {
-        self.session.load_error()
-    }
-    pub(super) fn command(&self) -> Option<DocumentCommand> {
-        self.session.command()
-    }
-    pub(super) fn unsaved_changes(&self) -> bool {
-        self.session.unsaved_changes()
-    }
-    pub(super) fn curations(&self) -> Vec<DocumentSummary> {
-        self.session.summaries()
-    }
-    pub(super) fn set_name(self, name: String) {
-        self.session.set_name(name);
-    }
-    pub(super) fn judging(&self) -> bool {
-        self.snapshot().phase().active()
-    }
-
-    pub(super) fn active_panel(&self) -> Option<PanelId> {
-        self.view.active_panel.read().clone()
-    }
-    pub(super) fn activate_panel(mut self, id: PanelId) {
-        self.view.active_panel.set(Some(id));
-    }
-    pub(super) fn selected_episode(&self) -> Option<EpisodeId> {
-        self.view.selected_episode.read().clone()
-    }
-    /// The episode whose evidence the side sheet shows; `None` closes it.
-    pub(super) fn select_episode(mut self, id: Option<EpisodeId>) {
-        if *self.view.selected_episode.peek() != id {
-            self.view.selected_episode.set(id);
-        }
-    }
-    /// The measurement the tiles print: the chosen one while the judged
-    /// recipe still declares it, else the first declared measurement.
-    pub(super) fn lens(&self, judged: &CurationSpec) -> Option<CurationFact> {
-        let chosen = self.view.lens.read();
-        chosen
-            .as_deref()
-            .and_then(|key| judged.facts().iter().find(|fact| fact.key() == key))
-            .or_else(|| judged.facts().first())
+    /// Why the sample could not be read, when it could not.
+    pub(super) fn sample_error(&self) -> Option<String> {
+        self.sample
+            .read()
+            .as_ref()
+            .and_then(|loaded| loaded.as_ref().err())
             .cloned()
     }
-    pub(super) fn set_lens(mut self, key: String) {
-        self.view.lens.set(Some(key));
+    pub(super) fn reload_sample(mut self) {
+        self.sample.restart();
     }
-    pub(super) fn order(&self) -> SheetOrder {
-        *self.view.order.read()
-    }
-    pub(super) fn cycle_order(mut self) {
-        let next = self.view.order.peek().next();
-        self.view.order.set(next);
-    }
-    pub(super) fn hovered_rule(&self) -> Option<String> {
-        self.view.hovered_rule.read().clone()
-    }
-    pub(super) fn set_hovered_rule(mut self, id: Option<String>) {
-        if *self.view.hovered_rule.peek() != id {
-            self.view.hovered_rule.set(id);
-        }
-    }
-    pub(super) fn pipeline_selection(&self) -> PipelineSelection {
-        self.view.pipeline_selection.read().clone()
-    }
-    /// Opening a stage lays out its own episodes: the filter and the open
-    /// episode belong to the stage that was left, so both reset.
-    pub(super) fn select_pipeline(mut self, selection: PipelineSelection) {
-        if *self.view.pipeline_selection.peek() != selection {
-            self.view.pipeline_selection.set(selection);
-            self.view.filter.set(SheetFilter::All);
-            self.view.selected_episode.set(None);
-        }
-    }
-    pub(super) fn filter(&self) -> SheetFilter {
-        *self.view.filter.read()
-    }
-    pub(super) fn set_filter(mut self, filter: SheetFilter) {
-        self.view.filter.set(filter);
+    /// What `node` hands on, and what reaches it, once the sample is read.
+    pub(super) fn populations(&self, node: &str) -> Option<(Population, Population)> {
+        let sample = self.sample()?;
+        self.with_payload(|payload| {
+            let reader = PopulationReader::new(payload, &sample);
+            Some((reader.input(node), reader.of(node)))
+        })
     }
 
-    pub(super) fn run_disabled_reason(&self) -> Option<String> {
-        if let Some(error) = self.load_error() {
-            return Some(format!("Could not load the saved curation: {error}"));
-        }
-        if !self.loaded() {
-            return Some("Loading the saved curation…".to_owned());
-        }
-        if self.command().is_some() {
-            return Some("A curation command is in progress.".to_owned());
-        }
-        if self.runs.any_active() {
-            return Some("A curation is already running.".to_owned());
-        }
-        None
+    pub(crate) fn id(&self) -> String {
+        self.session.with_draft(|document| document.id().to_owned())
     }
-    /// What the recipe still lacks before it can run. Run stays enabled so
-    /// the answer is one click away instead of hidden in a tooltip.
-    pub(super) fn run_problem(&self) -> Option<String> {
-        self.validation()
-            .errors()
-            .first()
-            .map(|issue| format!("{} {}", issue.message(), issue.recovery()))
+    pub(crate) fn name(&self) -> String {
+        self.session
+            .with_draft(|document| document.name().to_owned())
     }
-    pub(super) fn save_disabled_reason(&self) -> Option<String> {
-        if !self.loaded() {
-            return Some("Loading curation…".into());
-        }
-        if let Some(error) = self.load_error() {
-            return Some(format!("Could not load the saved curation: {error}"));
-        }
-        if self.command().is_some() {
-            return Some("Wait for the current document operation.".to_owned());
-        }
-        if self.spec().name().trim().is_empty() {
-            return Some("Name the curation before saving.".to_owned());
-        }
-        if !self.unsaved_changes() && self.spec().revision() > 0 {
-            return Some("Everything is saved.".to_owned());
-        }
-        None
+    pub(crate) fn set_name(self, name: String) {
+        self.session.set_name(name);
     }
-    pub(super) fn selection_reason(&self) -> Option<String> {
-        if !self.loaded() {
-            return Some("Loading curations…".to_owned());
-        }
-        if self.command().is_some() {
-            return Some("Wait for the current action to finish.".to_owned());
-        }
-        if self.unsaved_changes() {
-            return Some("Save or discard your changes before switching curations.".to_owned());
-        }
-        if !crate::shell::project::ProjectSelection::current().live() {
-            return Some("Reconnect to Studio before switching curations.".to_owned());
-        }
-        None
+    /// How much of its dataset this curation has measured, which is all
+    /// the top bar wants from it.
+    pub(crate) fn measure(&self) -> CurationMeasure {
+        self.with_payload(CurationMeasure::of)
     }
 
-    /// Everything the sheet shows besides the recipe belongs to the recipe
-    /// that was open: a newly installed one starts with no run selected, no
-    /// episode open, no hover, and the pipeline at its source.
-    fn adopt(self, _curation: &CurationSpec) -> Result<(), String> {
-        let mut view = self.view;
-        self.runs.clear_selection();
-        view.selected_episode.set(None);
-        view.hovered_rule.set(None);
-        view.filter.set(SheetFilter::All);
-        view.lens.set(None);
-        view.order.set(SheetOrder::Recorded);
-        view.pipeline_selection.set(PipelineSelection::Source);
+    /// Read the payload without cloning it.
+    pub(crate) fn with_payload<R>(&self, read: impl FnOnce(&CurationGraph) -> R) -> R {
+        read(&self.payload.read())
+    }
+    /// Apply one edit. An edit that fails, or leaves the graph invalid, is
+    /// rolled back and its message returned. A removed selected node falls
+    /// back to the dataset node.
+    pub(crate) fn edit<R>(
+        mut self,
+        edit: impl FnOnce(&mut CurationGraph) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let outcome = {
+            let mut payload = self.payload.write();
+            let previous = payload.clone();
+            match edit(&mut payload).and_then(|value| payload.validate().map(|()| value)) {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    *payload = previous;
+                    Err(error)
+                }
+            }
+        };
+        if outcome.is_ok() {
+            self.record_payload();
+            let selection_gone = self
+                .selected_node
+                .peek()
+                .as_deref()
+                .is_some_and(|id| self.payload.peek().node(id).is_none());
+            if selection_gone {
+                self.selected_node.set(Some(DATASET_NODE_ID.to_owned()));
+            }
+        }
+        outcome
+    }
+    /// Carry the edited graph into the draft document, which is what a save
+    /// sends and what "Unsaved changes" is measured against.
+    fn record_payload(self) {
+        let payload = self.payload.peek().clone();
+        self.session.edit(|document| {
+            let carried = document.carrying(&payload);
+            *document = carried;
+        });
+    }
+    pub(crate) fn unsaved_changes(&self) -> bool {
+        self.session.unsaved_changes()
+    }
+
+    pub(crate) fn selected_node(&self) -> Option<String> {
+        self.selected_node.read().clone()
+    }
+    pub(crate) fn select_node(mut self, node: Option<String>) {
+        self.selected_node.set(node);
+    }
+    /// What every node that is measuring right now has to say for itself.
+    pub(crate) fn activity(&self) -> NodeActivity {
+        self.activity.read().clone()
+    }
+    /// One node's line while it runs; `None` once it has stopped.
+    pub(crate) fn report_activity(mut self, node: &str, line: Option<String>) {
+        let mut activity = self.activity.write();
+        match line {
+            Some(line) => activity.insert(node.to_owned(), line),
+            None => activity.remove(node),
+        };
+    }
+    pub(crate) fn focus(&self) -> Option<EpisodeFocus> {
+        self.focus.read().clone()
+    }
+    /// Select the focus's annotation node and ask its view to show the
+    /// episode. The view calls `take_focus` once it has done so.
+    pub(crate) fn focus_episode(mut self, focus: EpisodeFocus) {
+        self.selected_node.set(Some(focus.node.clone()));
+        self.focus.set(Some(focus));
+    }
+    pub(crate) fn take_focus(mut self) -> Option<EpisodeFocus> {
+        self.focus.write().take()
+    }
+    /// Ask the annotation's Find similar node about one of its rows and show
+    /// that node, which runs the question as soon as it reads it. `from` is
+    /// where the row was on screen, so the question can be seen arriving.
+    pub(crate) fn find_similar(mut self, annotation: &str, row: &SubtaskRow, from: Option<Place>) {
+        if let Ok(node) = self.edit(|payload| payload.search_for(annotation, row)) {
+            self.launch.set(from);
+            self.selected_node.set(Some(node));
+        }
+    }
+    /// Where the last Find similar was asked from, once.
+    pub(crate) fn take_launch(mut self) -> Option<Place> {
+        self.launch.write().take()
+    }
+
+    pub(crate) fn command(&self) -> Option<DocumentCommand> {
+        self.session.command()
+    }
+    /// The last load or list failure, cleared by the next success.
+    pub(crate) fn error(&self) -> Option<String> {
+        self.session.load_error()
+    }
+    pub(crate) fn documents(&self) -> Vec<DocumentSummary> {
+        self.session.summaries()
+    }
+    /// Curation opens on a blank graph, so the first read lists what is saved
+    /// without opening any of it.
+    pub(crate) fn refresh_documents(self) {
+        self.session.refresh_summaries();
+    }
+
+    /// Start a new, unsaved graph over `dataset`.
+    pub(crate) fn create(self, name: impl Into<String>, dataset: Option<DatasetSelection>) {
+        let name = name.into();
+        let mut document = DocumentSession::<CurationDocument>::fresh();
+        if !name.trim().is_empty() {
+            document.set_name(name);
+        }
+        self.session.install(
+            document.carrying(&CurationGraph::new(dataset)),
+            move |opened| self.adopt(opened),
+        );
+    }
+    pub(crate) fn open(self, id: String) {
+        if self.session.command().is_some() {
+            return;
+        }
+        self.session
+            .open(Some(id), move |opened| self.adopt(opened));
+    }
+    /// Take the document's graph as the one on screen. A payload this Studio
+    /// cannot read refuses the document rather than emptying the canvas.
+    fn adopt(mut self, document: &CurationDocument) -> Result<(), String> {
+        self.payload.set(Self::graph_of(document)?);
+        self.selected_node.set(Some(DATASET_NODE_ID.to_owned()));
+        self.focus.set(None);
         Ok(())
     }
-
-    pub(super) fn save(self, studio: StudioProjectState) {
-        if self.save_disabled_reason().is_some() {
-            return;
-        }
+    fn graph_of(document: &CurationDocument) -> Result<CurationGraph, String> {
+        CurationGraph::decode(document.encoding(), document.payload())
+    }
+    /// Save the current payload at the loaded revision. Edits made while the
+    /// save is in flight stay local and unsaved.
+    pub(crate) fn save(self, studio: StudioProjectState) {
         self.session.save(studio);
     }
-    pub(super) fn discard(self) {
-        self.session.discard(move |curation| self.adopt(curation));
-    }
-    pub(super) fn run(mut self, studio: StudioProjectState) {
-        if self.run_disabled_reason().is_some() {
-            return;
-        }
-        if let Some(problem) = self.run_problem() {
-            studio.report_warning_from(MessageSource::Curation, problem);
-            return;
-        }
-        let curation = self.spec();
-        self.view.selected_episode.set(None);
-        let placeholder = CurationRun::new(
-            curation.clone(),
-            CurationRunSnapshot::started(PENDING_RUN_ID)
-                .with_started_ms(js_sys::Date::now() as u64),
-        );
-        let answer = self.runs.submit(placeholder, async move {
-            CurationClient::current()
-                .start(&curation)
-                .await
-                .map_err(|error| error.to_string())
-        });
-        self.session.spawn(async move {
-            if let Err(error) = answer.await {
-                studio.report_from(MessageSource::Curation, error);
+    /// Save once the document has no other command in flight, so what a
+    /// measurement just wrote reaches Studio even while a save is running.
+    pub(super) async fn save_when_idle(self, studio: StudioProjectState) {
+        for _ in 0..SAVE_WAIT_ROUNDS {
+            if self.command().is_none() {
+                break;
             }
-        });
-    }
-    pub(super) fn select_curation(self, id: Option<String>) {
-        if self.selection_reason().is_some() {
-            return;
+            gloo_timers::future::TimeoutFuture::new(SAVE_WAIT_MS).await;
         }
-        self.session.open(id, move |curation| self.adopt(curation));
+        self.save(studio);
     }
-    /// Read the open curation again after a failed load: the saved one when
-    /// Studio still lists it, the first saved one when nothing is open yet,
-    /// and a blank recipe when what was open is gone.
-    pub(super) fn reload_current(self) {
-        if !self.loaded() {
-            self.session
-                .load_initial(move |curation| self.adopt(curation));
-            return;
-        }
-        let id = self.spec().id().to_owned();
-        let known = self
-            .session
-            .summaries()
-            .iter()
-            .any(|summary| summary.id() == id);
-        self.session
-            .open(known.then_some(id), move |curation| self.adopt(curation));
-    }
-
-    pub(super) fn use_loading(self) {
-        let selection = crate::shell::project::ProjectSelection::current();
-        use_effect(move || {
-            if selection.live()
-                && !self.loaded()
-                && self.command().is_none()
-                && self.load_error().is_none()
-            {
-                self.session
-                    .load_initial(move |curation| self.adopt(curation));
+    /// Drop local edits and return to the last saved or loaded state. The
+    /// selection only moves when the node it named is no longer there.
+    pub(crate) fn discard(mut self) {
+        self.session.discard(|baseline| {
+            self.payload.set(Self::graph_of(baseline)?);
+            let selection_gone = self
+                .selected_node
+                .peek()
+                .as_deref()
+                .is_some_and(|id| self.payload.peek().node(id).is_none());
+            if selection_gone {
+                self.selected_node.set(Some(DATASET_NODE_ID.to_owned()));
             }
+            Ok(())
         });
-    }
-
-    pub(super) fn editor_status(&self) -> Option<CurationEditorStatus> {
-        self.loaded()
-            .then(|| CurationEditorStatus::new(self.snapshot()))
-    }
-}
-
-/// What the top bar says about the open curation.
-#[derive(Clone, PartialEq)]
-pub(crate) struct CurationEditorStatus {
-    snapshot: CurationRunSnapshot,
-}
-
-impl CurationEditorStatus {
-    fn new(snapshot: CurationRunSnapshot) -> Self {
-        Self { snapshot }
-    }
-    /// A run's phase while it is news, then the verdict it reached; nothing
-    /// before the first run.
-    pub(crate) fn headline(&self) -> Option<String> {
-        match self.snapshot.phase() {
-            RunPhase::Idle | RunPhase::Completed => self.snapshot.outcome().map(|outcome| {
-                format!(
-                    "{} of {} kept",
-                    outcome.totals().kept(),
-                    outcome.totals().episodes()
-                )
-            }),
-            phase => Some(phase.run_label().to_owned()),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn the_top_bar_reads_the_run_phase_then_the_verdict_count() {
-        assert_eq!(
-            CurationEditorStatus::new(CurationRunSnapshot::default()).headline(),
-            None
-        );
-        let mut snapshot = CurationRunSnapshot::started("run");
-        snapshot.set_phase(RunPhase::Completed);
-        snapshot.set_outcome(Some(CurationOutcome::new(
-            spiral_robotics_common::curation::run::CurationTotals::new(40, 31, (40, false)),
-            Vec::new(),
-        )));
-        assert_eq!(
-            CurationEditorStatus::new(snapshot).headline().as_deref(),
-            Some("31 of 40 kept")
-        );
-        let mut running = CurationRunSnapshot::started("run");
-        running.set_phase(RunPhase::Running);
-        assert_eq!(
-            CurationEditorStatus::new(running).headline().as_deref(),
-            Some("Running")
-        );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn the_sheet_order_cycles_through_recorded_and_both_directions() {
-        assert_eq!(SheetOrder::Recorded.next(), SheetOrder::Ascending);
-        assert_eq!(SheetOrder::Ascending.next(), SheetOrder::Descending);
-        assert_eq!(SheetOrder::Descending.next(), SheetOrder::Recorded);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn the_sheet_filter_admits_by_verdict() {
-        assert!(SheetFilter::All.admits(true) && SheetFilter::All.admits(false));
-        assert!(SheetFilter::Kept.admits(true) && !SheetFilter::Kept.admits(false));
-        assert!(!SheetFilter::Excluded.admits(true) && SheetFilter::Excluded.admits(false));
     }
 }

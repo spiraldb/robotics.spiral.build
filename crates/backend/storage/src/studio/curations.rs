@@ -9,7 +9,10 @@ pub struct Model {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) revision: i64,
-    pub(crate) document: Json,
+    /// Frontend-owned encoding version of `payload`.
+    pub(crate) encoding: i32,
+    /// Opaque document text; storage never parses it.
+    pub(crate) payload: String,
     pub updated_ms: i64,
 }
 

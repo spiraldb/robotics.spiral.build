@@ -3,7 +3,7 @@
 //!
 //! Each native member is one MCAP file, identified by the id Spiral gave it
 //! when it joined the dataset. That id is also its name — "Episode …2635e3d1"
-//! is the same file in Data's rail, a Curation sheet and an Explore index, and
+//! is the same file in Data's rail and a Curation index, and
 //! stays that file however many recordings are imported around it. A list
 //! labels each episode by the part of its source path that differs from its
 //! neighbours, so an operator recognizes their own recordings at a glance.
@@ -14,11 +14,62 @@ use crate::format::{
     WallClockPresentation,
 };
 use dioxus::prelude::*;
-use spiral_robotics_common::curation::run::EpisodeFacts;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::SqlLiteral;
-use spiral_robotics_ui::{Fact, FactLayout, FactList};
+
+/// The statistics Spiral lists for every episode of a dataset.
+#[derive(Clone, Debug, serde::Deserialize, PartialEq)]
+pub(in crate::activities) struct EpisodeFacts {
+    id: EpisodeId,
+    #[serde(default)]
+    source_uri: Option<String>,
+    #[serde(default)]
+    source_bytes: Option<u64>,
+    #[serde(default)]
+    message_count: Option<u64>,
+    #[serde(default)]
+    channel_count: Option<u64>,
+    #[serde(default)]
+    message_start_time: Option<u64>,
+    #[serde(default)]
+    duration_ns: Option<u64>,
+}
+
+impl EpisodeFacts {
+    pub(in crate::activities) fn id(&self) -> &EpisodeId {
+        &self.id
+    }
+    pub(in crate::activities) fn source_uri(&self) -> Option<&str> {
+        self.source_uri.as_deref()
+    }
+    pub(in crate::activities) const fn source_bytes(&self) -> Option<u64> {
+        self.source_bytes
+    }
+    pub(in crate::activities) const fn message_count(&self) -> Option<u64> {
+        self.message_count
+    }
+    pub(in crate::activities) const fn channel_count(&self) -> Option<u64> {
+        self.channel_count
+    }
+    pub(in crate::activities) const fn message_start_time(&self) -> Option<u64> {
+        self.message_start_time
+    }
+    pub(in crate::activities) const fn duration_ns(&self) -> Option<u64> {
+        self.duration_ns
+    }
+    pub(in crate::activities) fn duration_seconds(&self) -> Option<f64> {
+        self.duration_ns.map(|nanos| nanos as f64 / 1e9)
+    }
+    /// The file name at the end of the source path, when there is one.
+    fn file_name(&self) -> &str {
+        self.source_uri
+            .as_deref()
+            .and_then(|uri| uri.rsplit('/').next())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(self.id.as_str())
+    }
+}
 
 /// One episode of a dataset, as every surface opens and names it.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,8 +97,7 @@ impl EpisodePage {
 }
 
 impl Episode {
-    /// An episode whose facts a caller already read, such as a curation
-    /// roster's.
+    /// An episode whose facts a caller already read.
     pub(in crate::activities) fn new(dataset: DatasetSelection, facts: EpisodeFacts) -> Self {
         Self { dataset, facts }
     }
@@ -230,27 +280,6 @@ impl EpisodeFactsPresentation for EpisodeFacts {
             facts.push(bytes.byte_label());
         }
         facts.join(" · ")
-    }
-}
-
-/// An episode's recorded facts as tiles: when, how long, how much, how big.
-#[component]
-pub(in crate::activities) fn EpisodeFactList(facts: EpisodeFacts) -> Element {
-    let recorded = match facts.message_start_time() {
-        Some(start) if start.has_wall_clock() => start.utc_label(),
-        Some(_) => "No wall clock".into(),
-        None => "—".into(),
-    };
-    let count =
-        |value: Option<u64>| value.map_or_else(|| "—".into(), |value| value.grouped_label());
-    rsx! {
-        FactList { layout: FactLayout::Tiles, mono: true,
-            Fact { label: "Recorded", "{recorded}" }
-            Fact { label: "Duration", "{facts.duration_label()}" }
-            Fact { label: "Messages", "{count(facts.message_count())}" }
-            Fact { label: "Channels", "{count(facts.channel_count())}" }
-            Fact { label: "File", "{facts.source_bytes().map_or_else(|| \"—\".into(), ByteCountPresentation::byte_label)}" }
-        }
     }
 }
 

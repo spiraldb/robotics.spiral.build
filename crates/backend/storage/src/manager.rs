@@ -11,7 +11,6 @@ use crate::curations::CurationPersistence;
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
-use crate::explorations::ExplorationPersistence;
 use crate::settings::StudioPreferencePersistence;
 use crate::training::{TrainingCheckpointPersistence, TrainingRunPersistence};
 use crate::transfer::TransferPersistence;
@@ -69,10 +68,6 @@ impl StorageManager {
 
     pub fn curations(&self) -> CurationPersistence<'_> {
         CurationPersistence::new(&self.studio)
-    }
-
-    pub fn explorations(&self) -> ExplorationPersistence<'_> {
-        ExplorationPersistence::new(&self.studio)
     }
 
     /// The robot saved for the dataset version `selection` resolves to now.

@@ -1,12 +1,12 @@
 //! What one annotation node produced: the index of intervals it wrote, and
 //! the episode one of them belongs to, playing beside it.
 use super::episodes::AnnotationEpisode;
-use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
 use crate::activities::curation::document::{EpisodeFailure, SubtaskRow};
 use crate::activities::curation::poster::PosterFrames;
 use crate::activities::curation::review::{
     Counted, SubtaskContext, SubtaskEntry, SubtaskIntervals, SubtaskStanding,
 };
+use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;

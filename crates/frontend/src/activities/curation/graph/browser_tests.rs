@@ -1,8 +1,8 @@
 //! Mount the Curation canvas in the browser against a scripted document API, and
 //! grow the graph the way the + on a node does.
 use super::*;
-use dioxus::prelude::*;
 use crate::client::{project::ProjectClient, queries::QueryRefresh};
+use dioxus::prelude::*;
 use serde_json::Value;
 use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
@@ -105,10 +105,7 @@ async fn the_canvas_lists_saved_curations_and_grows_the_graph_from_a_nodes_menu(
             .collect::<Vec<_>>(),
         ["/api/curations"]
     );
-    assert_eq!(
-        controller.documents()[0].name(),
-        "Cloth folding curation"
-    );
+    assert_eq!(controller.documents()[0].name(), "Cloth folding curation");
 
     // What the + on the dataset node offers, and what choosing the first entry does.
     let dataset = controller
@@ -120,7 +117,14 @@ async fn the_canvas_lists_saved_curations_and_grows_the_graph_from_a_nodes_menu(
         .menu()
         .cloned()
         .expect("the dataset accepts children");
-    assert_eq!(menu.labels(), ["Break down subtasks"]);
+    assert_eq!(
+        menu.labels(),
+        [
+            "Break down subtasks",
+            "Identify unproductive moments",
+            "Select"
+        ]
+    );
     let added = dom
         .in_scope(ScopeId::ROOT, || menu.choose(controller, 0))
         .expect("the dataset accepts an annotation");
@@ -136,7 +140,8 @@ async fn the_canvas_lists_saved_curations_and_grows_the_graph_from_a_nodes_menu(
     assert!(controller.unsaved_changes());
     let cards = controller.with_payload(|payload| NodeCard::all(payload, None));
     let annotation = cards.iter().find(|card| card.id() == added).unwrap();
-    assert_eq!(annotation.summary(), "0 episodes · 0 subtasks");
+    // Counts wait for the sample, which a graph without a dataset never reads.
+    assert_eq!(annotation.summary(), "0 subtasks");
     assert_eq!(
         annotation
             .menu()

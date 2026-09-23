@@ -45,7 +45,11 @@ struct GraphFlow {
 }
 
 impl GraphFlow {
-    fn new(payload: &CurationGraph, sample: Option<&EpisodeSample>, selected: Option<&str>) -> Self {
+    fn new(
+        payload: &CurationGraph,
+        sample: Option<&EpisodeSample>,
+        selected: Option<&str>,
+    ) -> Self {
         let mut nodes = NodeCard::all(payload, sample)
             .into_iter()
             .map(|card| {
@@ -383,10 +387,7 @@ fn NodeCardView(
 /// popover stays fixed to its card through pan and zoom and is never clipped.
 /// Only one node has either open at a time, so this draws at most one of each.
 #[component]
-fn CanvasPopovers(
-    nodes: Signal<Vec<Node<NodeCard>>>,
-    hand: CanvasHand,
-) -> Element {
+fn CanvasPopovers(nodes: Signal<Vec<Node<NodeCard>>>, hand: CanvasHand) -> Element {
     let open = hand.open_menu.read().clone();
     let confirming = hand.confirming.read().clone();
     if open.is_none() && confirming.is_none() {
@@ -465,7 +466,7 @@ fn CanvasPopovers(
 #[cfg(test)]
 mod tests {
     use super::super::super::document::{
-        DATASET_NODE_ID, CurationNodeKind, SubtaskAnnotation, SubtaskSearch,
+        CurationNodeKind, DATASET_NODE_ID, SubtaskAnnotation, SubtaskSearch,
     };
     use super::*;
 

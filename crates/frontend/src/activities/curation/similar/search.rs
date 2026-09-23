@@ -1,25 +1,26 @@
-//! Find similar subtasks: one Noul per saved row against one query.
+//! Find similar subtasks: one Noul per row that reaches the node, against one
+//! query.
 //!
-//! The ranking is computed on the fly and kept nowhere — only the query
-//! itself is remembered, so reopening the node asks the same question of
-//! whatever the annotation has since produced. Every row is shown with its
-//! probability, best first; there is no cutoff and no threshold to tune.
-use crate::activities::curation::population::Slice;
+//! A finished ranking is saved beside the query it answers, so reopening the
+//! node shows it again without asking, and a Select after the node keeps rows
+//! by it. Every row is shown with its probability, best first; the node has
+//! no cutoff of its own — a Select after it draws one.
 use super::coverage::{CoverageMeasure, EpisodeCoverage, MeasuredEpisodes, SubtaskList};
 use super::decisions::DecisionRun;
-use crate::activities::curation::episode_map::{
-    EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
-};
 use super::questions::{QuestionBatch, SearchQuestions};
 use super::ranking::SearchRanking;
 use super::source::SubtaskSource;
-use crate::activities::episode::Episode;
-use crate::activities::curation::document::{CurationNodeKind, SubtaskRow};
+use crate::activities::curation::document::{CurationNodeKind, SubtaskRanking, SubtaskRow};
+use crate::activities::curation::episode_map::{
+    EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
+};
+use crate::activities::curation::population::Slice;
 use crate::activities::curation::poster::{PosterCut, PosterFrame, PosterFrames};
 use crate::activities::curation::review::{
     Counted, NoSubtaskChosen, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
 };
-use crate::activities::curation::state::{EpisodeFocus, CurationController};
+use crate::activities::curation::state::{CurationController, EpisodeFocus};
+use crate::activities::episode::Episode;
 use crate::client::decisions::DecisionResponse;
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
@@ -45,6 +46,38 @@ impl SearchOutcome {
             requests,
             failure: None,
         }
+    }
+    /// A stored ranking, read back as if it had just been answered.
+    fn restored(rows: &[SubtaskRow], stored: &SubtaskRanking) -> Self {
+        Self {
+            ranking: SearchRanking::restored(
+                rows.len(),
+                rows.iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| Some((index, stored.probability(row)?))),
+            ),
+            answered: 1,
+            requests: 1,
+            failure: None,
+        }
+    }
+    /// What this outcome stores: every answered row's probability, under the
+    /// question it answers.
+    fn stored(
+        &self,
+        node: &str,
+        query: &str,
+        rows: &[SubtaskRow],
+    ) -> Result<SubtaskRanking, String> {
+        SubtaskRanking::new(
+            node,
+            query,
+            self.ranking
+                .ranked()
+                .into_iter()
+                .filter(|ranked| ranked.answered())
+                .filter_map(|ranked| Some((rows.get(ranked.row())?.key(), ranked.probability()))),
+        )
     }
     fn refused(problem: String) -> Self {
         Self {
@@ -157,6 +190,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     controller: CurationController,
     node: String,
 ) -> Element {
+    let studio = crate::shell::state::StudioProjectState::current();
     let source = use_memo(use_reactive((&node,), move |(node,)| {
         SubtaskSource::of(controller, &node)
     }));
@@ -203,10 +237,14 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                 outcome.set(Some(SearchOutcome::refused(problem)));
                 return;
             }
-            asked.set(Some(AskedQuestion { text, about }));
+            asked.set(Some(AskedQuestion {
+                text: text.clone(),
+                about,
+            }));
             selected.set(None);
+            let asked_rows = source.peek().rows().to_vec();
             outcome.set(Some(SearchOutcome::started(
-                source.peek().rows().len(),
+                asked_rows.len(),
                 batches.len(),
             )));
             running.set(true);
@@ -240,6 +278,17 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                     // ranking leaves its own answer in it rather than an empty
                     // half beside a full list.
                     Ok(()) => {
+                        let stored = outcome
+                            .peek()
+                            .as_ref()
+                            .map(|outcome| outcome.stored(&node, &text, &asked_rows));
+                        if let Some(Ok(ranking)) = stored
+                            && controller
+                                .edit(|payload| payload.set_ranking(ranking))
+                                .is_ok()
+                        {
+                            controller.save(studio);
+                        }
                         if selected.peek().is_none() {
                             let top = outcome
                                 .peek()
@@ -261,6 +310,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     // Ask the saved question whenever it is not the one on screen. A row that
     // asked from elsewhere also left where it was, so its poster is carried
     // from there into the question it became.
+    let restored_node = node.clone();
     use_effect(move || {
         let saved = {
             let reading = source.read();
@@ -270,6 +320,15 @@ pub(in crate::activities::curation) fn SearchWorkspace(
             }
         };
         if saved.text.is_empty() || running() || asked.read().as_ref() == Some(&saved) {
+            return;
+        }
+        // A question already answered and saved is shown, not asked again.
+        let stored =
+            controller.with_payload(|payload| payload.current_ranking(&restored_node).cloned());
+        if let Some(stored) = stored.filter(|stored| stored.query().trim() == saved.text) {
+            outcome.set(Some(SearchOutcome::restored(source.peek().rows(), &stored)));
+            query.set(saved.text.clone());
+            asked.set(Some(saved));
             return;
         }
         query.set(saved.text.clone());

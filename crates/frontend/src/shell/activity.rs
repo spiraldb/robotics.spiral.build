@@ -8,8 +8,8 @@ pub(crate) enum Activity {
     Live,
     #[default]
     Data,
-    Workflow,
     Curation,
+    Workflow,
     Training,
     Rollout,
     Settings,
@@ -20,8 +20,8 @@ impl Activity {
         [
             Self::Live,
             Self::Data,
-            Self::Workflow,
             Self::Curation,
+            Self::Workflow,
             Self::Training,
             Self::Rollout,
             Self::Settings,
@@ -34,8 +34,8 @@ impl Activity {
     pub(super) const fn primary() -> [Self; 6] {
         [
             Self::Data,
-            Self::Workflow,
             Self::Curation,
+            Self::Workflow,
             Self::Training,
             Self::Rollout,
             Self::Live,
@@ -46,8 +46,8 @@ impl Activity {
     pub(super) const fn shortcut(self) -> &'static str {
         match self {
             Self::Data => "1",
-            Self::Workflow => "2",
-            Self::Curation => "3",
+            Self::Curation => "2",
+            Self::Workflow => "3",
             Self::Training => "4",
             Self::Rollout => "5",
             Self::Live => "6",

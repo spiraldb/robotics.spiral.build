@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use spiral_robotics_common::command_failure::CommandFailureCode;
 use std::collections::BTreeMap;
 
-/// The one model Studio asks for a decision. Curation interprets a rule with
-/// it; Explore ranks and categorizes subtasks with it.
+/// The one model Studio asks for a decision. Curation ranks and categorizes
+/// subtasks with it.
 const DECISION_MODEL: &str = "typesafe/jev-1.13";
 
 /// One question of a Decisions request: what to judge, and the words that
@@ -74,24 +74,14 @@ impl ModelClient {
     }
 }
 
-/// Answers to one Decisions request, keyed by question id. Three readers:
-/// `choice` for decisions code acts on (confidence-gated), `noul` for a
-/// calibrated yes probability, and `choice_distribution` for rankings and
-/// categorization that read every option's probability without a gate.
+/// Answers to one Decisions request, keyed by question id. Two readers: `noul`
+/// for a calibrated yes probability, and `choice_distribution` for rankings
+/// and categorization that read every option's probability without a gate.
 #[derive(Deserialize)]
 pub(crate) struct DecisionResponse {
     answers: BTreeMap<String, DecisionAnswer>,
 }
 impl DecisionResponse {
-    /// A Choice answer the caller may act on: confidence at least 0.5.
-    pub(crate) fn choice(&self, question: &str) -> Option<&str> {
-        let answer = self.answers.get(question)?;
-        (answer.kind == "choice"
-            && answer
-                .confidence
-                .is_some_and(|value| value.is_finite() && (0.5..=1.0).contains(&value)))
-        .then_some(answer.choice.as_deref()?)
-    }
     /// A Noul answer: the probability, 0 to 1, that the question is true.
     pub(crate) fn noul(&self, question: &str) -> Option<f64> {
         let answer = self.answers.get(question)?;
@@ -171,11 +161,10 @@ mod tests {
     }
 
     #[test]
-    fn choice_stays_gated_while_the_distribution_is_not() {
+    fn a_choice_reads_as_its_whole_distribution() {
         let response = response(
             r#"{"answers":{"category":{"type":"choice","choice":"fold","confidence":0.2,"probabilities":{"fold":0.4,"grasp":0.35,"smooth":0.25}}},"usage":{"input_tokens":9}}"#,
         );
-        assert_eq!(response.choice("category"), None);
         let distribution = response.choice_distribution("category").unwrap();
         assert_eq!(distribution.choice(), "fold");
         assert_eq!(distribution.probability("grasp"), 0.35);
@@ -192,8 +181,6 @@ mod tests {
         assert_eq!(response.noul("r1"), Some(0.83));
         assert_eq!(response.noul("r2"), None);
         assert_eq!(response.noul("r3"), None);
-        assert_eq!(response.choice("r1"), None);
-        assert_eq!(response.choice("r3"), Some("x"));
         assert_eq!(response.choice_distribution("r3"), None);
     }
 

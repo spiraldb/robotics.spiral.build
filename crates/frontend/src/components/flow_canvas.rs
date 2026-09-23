@@ -1,8 +1,8 @@
 //! What every node canvas in Studio does with a graph of cards: rank it, park
 //! the viewport where it can be read, and hang a detail sheet off a selection.
 //!
-//! Workflow's query plan, Curation's pipeline strip, and Explore's measurement
-//! graph all draw the same card on the same `dioxus_flow` canvas. They differ in
+//! Workflow's query plan and Curation's graph both draw the same card on the
+//! same `dioxus_flow` canvas. They differ in
 //! what a card says, never in how the canvas behaves, and that behaviour is
 //! here: [`CardGraph`] places the cards and hands back their reading order,
 //! [`FlowFit`] decides what the pane shows, and [`PopoverPlacement`] puts the

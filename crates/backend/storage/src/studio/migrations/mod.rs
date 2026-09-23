@@ -15,6 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(KeepRolloutSessions),
             Box::new(TypedRobotConfigs),
             Box::new(WorkerOwnedTraining),
+            Box::new(CurationGraphs),
         ]
     }
 }
@@ -214,6 +215,29 @@ impl MigrationTrait for WorkerOwnedTraining {
         manager
             .get_connection()
             .execute_unprepared(include_str!("m20260922_000009_worker_owned_training.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+/// Explore's graphs become the curations, replacing the recipes Curation kept.
+struct CurationGraphs;
+impl MigrationName for CurationGraphs {
+    fn name(&self) -> &str {
+        "m20260923_000010_curation_graphs"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for CurationGraphs {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260923_000010_curation_graphs.sql"))
             .await?;
         Ok(())
     }

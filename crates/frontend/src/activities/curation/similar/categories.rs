@@ -6,9 +6,7 @@
 //! category, with no "other" option and no confidence gate. The probability
 //! and confidence are kept to order members and to let ambiguous rows show.
 use super::questions::QuestionBatch;
-use crate::activities::curation::document::{
-    SubtaskAssignment, SubtaskCategory, SubtaskRow,
-};
+use crate::activities::curation::document::{SubtaskAssignment, SubtaskCategory, SubtaskRow};
 use crate::client::decisions::DecisionResponse;
 use serde::Deserialize;
 use std::collections::BTreeMap;

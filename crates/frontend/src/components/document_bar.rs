@@ -3,7 +3,7 @@
 //! switch/create/rename popover, Discard and Save — and Curation's
 //! executed-SQL disclosure.
 //!
-//! Workflow, Curation, and Explore differ in four things only, and each is a
+//! Workflow and Curation differ in four things only, and each is a
 //! value the caller supplies: the words for this kind of document
 //! ([`DocumentBarCopy`]), why an action is refused right now
 //! ([`DocumentBarGate`]), the extra creation control inside the switcher, and
@@ -277,8 +277,8 @@ pub(crate) struct DocumentBarProps {
     on_command: EventHandler<DocumentBarCommand>,
     /// Extra creation controls inside the switcher, such as "From dataset".
     creation: Element,
-    /// The activity's own Run button, or nothing: Explore has no Run, because
-    /// each measurement runs from its own workspace.
+    /// The activity's own Run button, or nothing: Curation has no Run, because
+    /// each node runs from its own workspace.
     run: Element,
 }
 

@@ -8,10 +8,10 @@
 //! it keeps them. Either way the map is the dataset at a glance — the index
 //! beside it is the same slices one at a time.
 use super::population::Slice;
+use crate::activities::curation::population::EpisodeSample;
 use crate::activities::episode::Episode;
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
-use crate::activities::curation::population::EpisodeSample;
 use spiral_robotics_common::datasets::EpisodeId;
 use std::collections::BTreeMap;
 

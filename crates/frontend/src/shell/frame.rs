@@ -1,8 +1,8 @@
 //! Low-frequency Studio chrome around the activity workspaces: the top bar
 //! and the messages that float above the workspace.
 
-use crate::activities::curation::state::CurationEditorStatus;
-use crate::activities::workflow::state::WorkflowViewStatus;
+use crate::activities::curation::state::CurationMeasure;
+use crate::activities::workflow::state::WorkflowEditorStatus;
 use dioxus::prelude::*;
 use spiral_robotics_common::workflow::WorkflowRunPhase;
 use spiral_robotics_ui::{ActionPurpose, BrowserFocus, Button, ButtonVariant, CloseIcon};
@@ -197,8 +197,8 @@ pub(crate) enum WorkspaceStatus {
     General,
     Hardware(crate::robots::HardwareViewState),
     Training(crate::activities::training::history::TrainingHistory),
-    Workflow(Memo<Option<WorkflowViewStatus>>),
-    Curation(Memo<Option<CurationEditorStatus>>),
+    Workflow(Memo<Option<WorkflowEditorStatus>>),
+    Curation(Memo<CurationMeasure>),
 }
 
 /// Workspace content stays mounted; only the active workspace supplies shell chrome.
@@ -384,13 +384,15 @@ impl StatusFacts {
                 .map(|phase| StatusFact::new(phase, StatusTone::Plain))
                 .into_iter()
                 .collect(),
-            WorkspaceStatus::Curation(snapshot) => snapshot
-                .read()
-                .as_ref()
-                .and_then(CurationEditorStatus::headline)
-                .map(|headline| StatusFact::new(headline, StatusTone::Plain))
-                .into_iter()
-                .collect(),
+            // A curation measures its dataset and has no run of its own.
+            WorkspaceStatus::Curation(measure) => {
+                let measure = measure.read();
+                measure
+                    .has_measured()
+                    .then(|| StatusFact::new(measure.measured(), StatusTone::Plain))
+                    .into_iter()
+                    .collect()
+            }
         };
         facts.sort_by_key(|fact| fact.tone.rank());
         Self { connection, facts }
@@ -599,9 +601,8 @@ fn StudioToast() -> Element {
     }
 }
 
-/// What the top bar says about the open workflow view: its phase while it is
-/// news, and nothing for an idle graph or an exploration that has measured
-/// nothing yet.
+/// What the top bar says about the open workflow: its phase while it is news,
+/// and nothing for an idle graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkflowStatusProjection {
     phase: Option<String>,
@@ -613,8 +614,8 @@ impl WorkflowStatusProjection {
     }
 }
 
-impl From<&WorkflowViewStatus> for WorkflowStatusProjection {
-    fn from(state: &WorkflowViewStatus) -> Self {
+impl From<&WorkflowEditorStatus> for WorkflowStatusProjection {
+    fn from(state: &WorkflowEditorStatus) -> Self {
         WorkflowStatusContext {
             state: Some(state),
             backend_connected: true,
@@ -663,7 +664,7 @@ impl TrainingStatus {
 }
 
 struct WorkflowStatusContext<'a> {
-    state: Option<&'a WorkflowViewStatus>,
+    state: Option<&'a WorkflowEditorStatus>,
     backend_connected: bool,
 }
 
@@ -674,11 +675,7 @@ impl WorkflowStatusContext<'_> {
         } else {
             match self.state {
                 None => Some("Loading saved workflow…".to_owned()),
-                // Explore measures a dataset and has no run of its own.
-                Some(WorkflowViewStatus::Exploration(measure)) => {
-                    measure.has_measured().then(|| measure.measured())
-                }
-                Some(WorkflowViewStatus::Agent(agent)) => match agent.snapshot().phase() {
+                Some(agent) => match agent.snapshot().phase() {
                     WorkflowRunPhase::Idle => None,
                     WorkflowRunPhase::Running => Some("Running".to_owned()),
                     WorkflowRunPhase::Completed => Some("Complete".to_owned()),
@@ -693,13 +690,12 @@ impl WorkflowStatusContext<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activities::workflow::state::WorkflowEditorStatus;
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn workflow_status_projects_the_authoritative_run_phase() {
         let mut run = spiral_robotics_common::workflow::WorkflowRunSnapshot::default();
         run.set_phase(WorkflowRunPhase::Running);
-        let state = WorkflowViewStatus::Agent(Box::new(WorkflowEditorStatus::new(run)));
+        let state = WorkflowEditorStatus::new(run);
 
         let status = WorkflowStatusContext {
             state: Some(&state),
@@ -719,9 +715,9 @@ mod tests {
         .project();
         assert_eq!(loading.phase.as_deref(), Some("Loading saved workflow…"));
 
-        let state = WorkflowViewStatus::Agent(Box::new(WorkflowEditorStatus::new(
+        let state = WorkflowEditorStatus::new(
             spiral_robotics_common::workflow::WorkflowRunSnapshot::default(),
-        )));
+        );
         let unavailable = WorkflowStatusContext {
             state: Some(&state),
             backend_connected: false,

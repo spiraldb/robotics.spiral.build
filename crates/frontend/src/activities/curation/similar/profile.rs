@@ -5,9 +5,9 @@
 //! happen, and what comes before and after them. Every number is read from the
 //! saved subtask table and the episodes' recorded lengths — nothing here asks a
 //! model — and every dot the profile draws is a member the operator can play.
-use crate::activities::curation::episode_map::EpisodeSpans;
 use super::grouping::CategoryHues;
 use crate::activities::curation::document::SubtaskRow;
+use crate::activities::curation::episode_map::EpisodeSpans;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;
 use std::collections::BTreeMap;

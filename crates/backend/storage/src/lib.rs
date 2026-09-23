@@ -4,7 +4,6 @@ pub mod curations;
 mod datasets;
 mod db;
 pub mod episodes;
-pub mod explorations;
 mod manager;
 mod settings;
 mod spiral_access;

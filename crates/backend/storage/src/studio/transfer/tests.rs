@@ -1,5 +1,5 @@
 use super::*;
-use crate::explorations::ExplorationPersistence;
+use crate::curations::CurationPersistence;
 use crate::settings::StudioPreferencePersistence;
 use crate::studio::StudioStore;
 use crate::training::{TrainingRunPersistence, TrainingRunRecord};
@@ -57,15 +57,15 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
             .await
             .unwrap()
     );
-    let exploration = spiral_robotics_common::exploration::ExplorationDocument::new(
+    let curation = spiral_robotics_common::curation::CurationDocument::new(
         "folding",
         "Cloth folding",
         1,
         r#"{"nodes":[]}"#,
     );
     assert!(
-        ExplorationPersistence::new(&source)
-            .save(&exploration)
+        CurationPersistence::new(&source)
+            .save(&curation)
             .await
             .unwrap()
     );
@@ -125,11 +125,11 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
     assert_eq!(workflow.graph(), &graph);
     assert_eq!(workflow.conversation(), Some(&conversation));
     assert_eq!(
-        ExplorationPersistence::new(&target)
+        CurationPersistence::new(&target)
             .load("folding")
             .await
             .unwrap(),
-        Some(exploration.with_revision(1))
+        Some(curation.with_revision(1))
     );
     assert_eq!(
         TrainingRunPersistence::new(&target).load().await.unwrap(),
@@ -155,7 +155,7 @@ async fn imported_sqlite_rejects_extra_schema_secrets_and_invalid_documents() {
         "INSERT INTO backend_settings VALUES (1, '{}')",
         "INSERT INTO robots VALUES ('', 'arm', '{}', 1, 1)",
         "INSERT INTO robots VALUES ('other', 'arm', '{}', 1, 1)",
-        "INSERT INTO explorations VALUES ('', 'folding', '   ', 1, 1, '{}', 0)",
+        "INSERT INTO curations VALUES ('', 'folding', '   ', 1, 1, '{}', 0)",
     ] {
         let snapshot = StudioSnapshot::capture(&project).await.unwrap();
         snapshot

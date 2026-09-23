@@ -20,9 +20,6 @@ impl MeasuredEpisodes {
     pub(super) fn of(episodes: &[EpisodeId]) -> Self {
         Self(episodes.to_vec())
     }
-    pub(super) fn iter(&self) -> impl Iterator<Item = &EpisodeId> {
-        self.0.iter()
-    }
     pub(super) fn episodes(&self) -> &[EpisodeId] {
         &self.0
     }

@@ -529,17 +529,6 @@ impl WorkflowDraft for WorkflowSpec {
     }
 }
 
-/// What the Workflow activity's status bar reports, which is whichever of its
-/// two views is open: the Agent's SQL document and run phase, or the
-/// exploration and what it has measured.
-#[derive(Clone, PartialEq)]
-pub(crate) enum WorkflowViewStatus {
-    /// Boxed: a whole SQL document beside three counted fields would make
-    /// every copy of this status the size of the larger one.
-    Agent(Box<WorkflowEditorStatus>),
-    Exploration(super::explore::state::ExplorationMeasure),
-}
-
 #[derive(Clone, PartialEq)]
 pub(crate) struct WorkflowEditorStatus {
     snapshot: WorkflowRunSnapshot,

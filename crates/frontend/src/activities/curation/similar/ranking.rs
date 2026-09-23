@@ -45,6 +45,18 @@ impl SearchRanking {
                 .collect(),
         }
     }
+    /// A ranking of `rows` rows answered as a stored ranking says, for the
+    /// rows it scored; the rest stay unanswered.
+    pub(super) fn restored(rows: usize, scores: impl IntoIterator<Item = (usize, f64)>) -> Self {
+        let mut ranking = Self::of(rows);
+        for (row, probability) in scores {
+            if let Some(entry) = ranking.rows.get_mut(row) {
+                entry.probability = probability;
+                entry.answered = true;
+            }
+        }
+        ranking
+    }
     /// Take one batch's answers. Answers for rows outside this ranking are
     /// ignored; they belong to a table that has since changed.
     pub(super) fn absorb(&mut self, batch: &QuestionBatch, answers: &DecisionResponse) {

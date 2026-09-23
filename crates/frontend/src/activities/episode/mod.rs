@@ -21,7 +21,7 @@ mod transport;
 
 pub(crate) use decoder::{DecodedGroup, EncodedCamera};
 pub(in crate::activities) use identity::{
-    Episode, EpisodeFactList, EpisodeFactsPresentation, EpisodeLabels, SourceLabel,
+    Episode, EpisodeFactsPresentation, EpisodeLabels, SourceLabel,
 };
 pub(in crate::activities) use inspection::{EpisodeInspection, FeaturedCamera, PlayRequest};
 pub(in crate::activities) use streams::StreamCatalog;

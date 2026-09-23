@@ -66,7 +66,7 @@ impl EpisodeFact {
         }
     }
     /// The fact's value for one episode, when Spiral listed it.
-    pub(crate) fn of(self, episode: &Episode) -> Option<f64> {
+    pub(in crate::activities::curation) fn of(self, episode: &Episode) -> Option<f64> {
         let facts = episode.facts();
         match self {
             Self::DurationSeconds => facts.duration_seconds(),
@@ -94,7 +94,9 @@ impl Comparison {
         }
     }
     pub(crate) fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|comparison| comparison.key() == key)
+        Self::ALL
+            .into_iter()
+            .find(|comparison| comparison.key() == key)
     }
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -154,7 +156,7 @@ impl Selection {
         }
     }
     /// Whether an episode is kept, by its recorded facts.
-    pub(crate) fn keeps_episode(&self, episode: &Episode) -> bool {
+    pub(in crate::activities::curation) fn keeps_episode(&self, episode: &Episode) -> bool {
         match self {
             Self::Episodes {
                 fact,
@@ -185,6 +187,14 @@ impl Selection {
             _ => false,
         }
     }
+    /// The value a numeric rule divides at; a rule of categories has none.
+    pub(crate) fn threshold(&self) -> Option<f64> {
+        match self {
+            Self::Episodes { value, .. } => Some(*value),
+            Self::Similar { minimum } | Self::Progressing { minimum } => Some(*minimum),
+            Self::Categories { .. } => None,
+        }
+    }
     /// The rule as its node card says it.
     pub(crate) fn sentence(&self) -> String {
         match self {
@@ -193,7 +203,10 @@ impl Selection {
                 comparison,
                 value,
             } => {
-                let unit = fact.unit().map(|unit| format!(" {unit}")).unwrap_or_default();
+                let unit = fact
+                    .unit()
+                    .map(|unit| format!(" {unit}"))
+                    .unwrap_or_default();
                 let fact = fact.label();
                 let mut sentence = format!("{fact} {} {value}{unit}", comparison.label());
                 sentence[..1].make_ascii_uppercase();

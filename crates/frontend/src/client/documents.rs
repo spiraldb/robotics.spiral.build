@@ -1,6 +1,6 @@
 //! One client for every Studio document endpoint.
 //!
-//! Workflows, curations, and explorations are stored the same three ways — list
+//! Workflows and curations are stored the same three ways — list
 //! the saved ones, load one by id, store one back — so this owns those three
 //! requests once. An activity's own client keeps only the calls that are its
 //! alone (`preview`, `plan`, `start`, `capabilities`).

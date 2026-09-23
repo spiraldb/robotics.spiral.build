@@ -9,9 +9,7 @@ mod listing;
 mod rule;
 mod strip;
 
-use super::document::{
-    CurationNode, CurationNodeKind, PopulationKind, Selection, SelectionBasis,
-};
+use super::document::{CurationNode, CurationNodeKind, PopulationKind, Selection, SelectionBasis};
 use super::episode_map::{EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, SegmentPaint};
 use super::population::{EpisodeSample, Population, Slice};
 use super::review::Counted;
@@ -63,11 +61,47 @@ impl SelectView {
             })
         })
     }
+    /// Whether the rule keeps each item that reaches it, in input order.
+    fn kept(&self) -> Vec<bool> {
+        match (&self.input, &self.output) {
+            (Population::Episodes(input), Population::Episodes(output)) => {
+                input.iter().map(|id| output.contains(id)).collect()
+            }
+            (
+                Population::Subtasks { rows: input, .. },
+                Population::Subtasks { rows: output, .. },
+            ) => input.iter().map(|row| output.contains(row)).collect(),
+            (Population::Moments(input), Population::Moments(output)) => {
+                input.iter().map(|row| output.contains(row)).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+    /// One slice per item that reaches the rule, in input order: moments one
+    /// second at a time, as they were judged.
+    fn item_slices(&self) -> Vec<Slice> {
+        match &self.input {
+            Population::Episodes(episodes) => episodes
+                .iter()
+                .map(|episode| Slice::of_episode(episode, &self.sample))
+                .collect(),
+            Population::Subtasks { rows, .. } => rows.iter().map(Slice::of_subtask).collect(),
+            Population::Moments(rows) => rows.iter().map(Slice::of_moment).collect(),
+        }
+    }
     fn kept_seconds(&self) -> f64 {
-        self.output.slices(&self.sample).iter().map(Slice::seconds).sum()
+        self.output
+            .slices(&self.sample)
+            .iter()
+            .map(Slice::seconds)
+            .sum()
     }
     fn input_seconds(&self) -> f64 {
-        self.input.slices(&self.sample).iter().map(Slice::seconds).sum()
+        self.input
+            .slices(&self.sample)
+            .iter()
+            .map(Slice::seconds)
+            .sum()
     }
     /// How much the rule keeps, in the population's own unit and in seconds
     /// of recording, which is what training is finally given.
@@ -83,9 +117,9 @@ impl SelectView {
     /// Why nothing can be judged yet, when the node above has not measured.
     fn unmeasured(&self, controller: CurationController) -> Option<String> {
         let measured = controller.with_payload(|payload| match self.measure.kind() {
-            CurationNodeKind::FindSimilarSubtasks(search) => payload
-                .ranking_for(self.measure.id())
-                .is_some_and(|ranking| ranking.query().trim() == search.query().trim()),
+            CurationNodeKind::FindSimilarSubtasks(_) => {
+                payload.current_ranking(self.measure.id()).is_some()
+            }
             CurationNodeKind::GroupSimilarSubtasks => {
                 payload.grouping_for(self.measure.id()).is_some()
             }
@@ -104,7 +138,9 @@ impl SelectView {
 #[component]
 pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> Element {
     let mut showing = use_signal(|| Showing::Kept);
-    let chosen = use_signal(|| None::<usize>);
+    // Which item that reaches the rule is open, by its place in the input, so
+    // the map, the strip, and either side of the index agree on it.
+    let mut chosen = use_signal(|| None::<usize>);
     let Some(view) = SelectView::of(controller, &node) else {
         return rsx! {
             section { class: "curation-select-workspace",
@@ -120,8 +156,21 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
     let kind = controller.with_payload(|payload| payload.population_kind(&node));
     let unmeasured = view.unmeasured(controller);
     let spans = EpisodeSpans::of(&view.sample);
+    let kept = view.kept();
     let listed_kept = showing() == Showing::Kept;
-    let left_out = view.input.len().saturating_sub(view.output.len());
+    let left_out = kept.iter().filter(|kept| !**kept).count();
+    let open = {
+        let kept = kept.clone();
+        move |item: usize| {
+            chosen.set(Some(item));
+            showing.set(if kept.get(item).copied().unwrap_or(true) {
+                Showing::Kept
+            } else {
+                Showing::LeftOut
+            });
+        }
+    };
+    let dots = StripDot::for_view(&view, controller, &kept);
     rsx! {
         section { class: "curation-select-workspace", "aria-label": "Select",
             SelectRule { controller, view: view.clone() }
@@ -138,19 +187,34 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
             if let Some(reason) = unmeasured {
                 Notice { tone: NoticeTone::Caution, "{reason}" }
             }
-            if let Some(dots) = StripDot::for_view(&view, controller) {
-                ThresholdStrip { dots, threshold: view.selection.threshold(), percent: view.selection.basis() == SelectionBasis::Similarity }
+            if let (Some(dots), Some(threshold)) = (dots, view.selection.threshold()) {
+                ThresholdStrip {
+                    dots,
+                    threshold,
+                    percent: view.selection.basis() == SelectionBasis::Similarity,
+                    chosen: chosen(),
+                    on_select: {
+                        let mut open = open.clone();
+                        move |item| open(item)
+                    },
+                }
             }
             div { class: "curation-select-overview",
                 EpisodeMap {
-                    lanes: EpisodeLanes::of(&view.input.episodes(), &SelectPaint::slices(&view), &spans),
-                    paint: MapPaint::new(SelectPaint::of(&view), None),
-                    summary: format!("Where the kept parts of {} lie", Counted::episodes(view.input.episodes().len())),
-                    on_select: move |_| {},
+                    lanes: EpisodeLanes::of(&view.input.episodes(), &view.item_slices(), &spans),
+                    paint: MapPaint::new(kept.iter().map(|kept| SegmentPaint::Kept(*kept)).collect(), chosen()),
+                    summary: format!(
+                        "Where the kept parts of {} lie",
+                        Counted::episodes(view.input.episodes().len())
+                    ),
+                    on_select: {
+                        let mut open = open.clone();
+                        move |item| open(item)
+                    },
                 }
             }
             div { class: "curation-select-filter",
-                ModeGroup { label: "Which side of the rule to list".to_owned(),
+                ModeGroup { label: "Which side of the rule to list".to_owned(), class: "curation-select-sides".to_owned(),
                     ModeButton {
                         purpose: ActionPurpose::Select,
                         checked: listed_kept,
@@ -167,45 +231,15 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
             }
             match &view.input {
                 Population::Episodes(_) => rsx! {
-                    EpisodeListing { key: "{node}", controller, view: view.clone(), kept: listed_kept, chosen }
+                    EpisodeListing { key: "{node}", controller, view: view.clone(), kept, listed_kept, chosen }
                 },
-                Population::Subtasks(_) => rsx! {
-                    SubtaskListing { key: "{node}", controller, view: view.clone(), kept: listed_kept, chosen }
+                Population::Subtasks { .. } => rsx! {
+                    SubtaskListing { key: "{node}", controller, view: view.clone(), kept, listed_kept, chosen }
                 },
                 Population::Moments(_) => rsx! {
-                    MomentListing { key: "{node}", view: view.clone(), kept: listed_kept, chosen }
+                    MomentListing { key: "{node}", view: view.clone(), kept, listed_kept, chosen }
                 },
             }
         }
-    }
-}
-
-/// How the map paints a Select: every input slice, kept in ink and left-out
-/// faded. Moments are drawn one second at a time, as they were judged.
-struct SelectPaint;
-
-impl SelectPaint {
-    fn slices(view: &SelectView) -> Vec<Slice> {
-        match &view.input {
-            Population::Moments(rows) => rows
-                .iter()
-                .map(|row| {
-                    Population::Moments(vec![row.clone()])
-                        .slices(&view.sample)
-                        .remove(0)
-                })
-                .collect(),
-            input => input.slices(&view.sample),
-        }
-    }
-    fn of(view: &SelectView) -> Vec<SegmentPaint> {
-        let kept = SelectPaint::slices(&SelectView {
-            input: view.output.clone(),
-            ..view.clone()
-        });
-        Self::slices(view)
-            .iter()
-            .map(|slice| SegmentPaint::Kept(kept.contains(slice)))
-            .collect()
     }
 }

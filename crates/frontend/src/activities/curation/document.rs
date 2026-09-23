@@ -872,6 +872,10 @@ impl CurationGraph {
                 CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
                 CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
             ],
+            // Break down what is left once the unproductive moments are out.
+            (Some(PopulationKind::Moments), _) => vec![CurationNodeKind::BreakDownSubtasks(
+                SubtaskAnnotation::default(),
+            )],
             (
                 Some(PopulationKind::Subtasks),
                 CurationNodeKind::BreakDownSubtasks(_) | CurationNodeKind::Select(_),
@@ -1120,6 +1124,15 @@ impl CurationGraph {
     pub(crate) fn ranking_for(&self, node: &str) -> Option<&SubtaskRanking> {
         self.rankings.iter().find(|ranking| ranking.node == node)
     }
+    /// A search's stored ranking while it still answers the search's query. A
+    /// ranking of an earlier question says nothing about this one.
+    pub(crate) fn current_ranking(&self, node: &str) -> Option<&SubtaskRanking> {
+        let CurationNodeKind::FindSimilarSubtasks(search) = self.node(node)?.kind() else {
+            return None;
+        };
+        self.ranking_for(node)
+            .filter(|ranking| ranking.query().trim() == search.query().trim())
+    }
     /// Store a Find similar node's ranking, replacing any earlier one.
     pub(crate) fn set_ranking(&mut self, ranking: SubtaskRanking) -> Result<(), String> {
         match self.node(&ranking.node).map(CurationNode::kind) {
@@ -1127,7 +1140,8 @@ impl CurationGraph {
             Some(_) => return Err("That node does not search subtasks.".into()),
             None => return Err("Unknown node.".into()),
         }
-        self.rankings.retain(|existing| existing.node != ranking.node);
+        self.rankings
+            .retain(|existing| existing.node != ranking.node);
         self.rankings.push(ranking);
         Ok(())
     }
@@ -1214,7 +1228,8 @@ impl CurationGraph {
         for edge in &self.edges {
             self.node(&edge.from)
                 .ok_or("An edge starts at an unknown node.")?;
-            self.node(&edge.to).ok_or("An edge ends at an unknown node.")?;
+            self.node(&edge.to)
+                .ok_or("An edge ends at an unknown node.")?;
             if edge.from == edge.to {
                 return Err("A node cannot follow itself.".into());
             }
@@ -1342,8 +1357,7 @@ impl CurationGraph {
     }
     pub(crate) fn encode(&self) -> Result<String, String> {
         self.validate()?;
-        serde_json::to_string(self)
-            .map_err(|error| format!("encoding the curation graph: {error}"))
+        serde_json::to_string(self).map_err(|error| format!("encoding the curation graph: {error}"))
     }
     pub(crate) fn decode(encoding: u32, payload: &str) -> Result<Self, String> {
         if encoding != CURATION_ENCODING_VERSION {

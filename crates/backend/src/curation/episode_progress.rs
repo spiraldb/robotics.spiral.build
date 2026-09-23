@@ -21,14 +21,14 @@ impl EpisodeProgress {
     }
     pub(super) async fn score(
         &self,
-        mut request: ProgressScoreRequest,
+        request: ProgressScoreRequest,
     ) -> Result<ProgressScoreResult, String> {
-        request.resolve_source();
-        request.selection().validate()?;
+        let selection = request.selection();
+        selection.validate()?;
         let dataset = request.episode().dataset().sql_name().replace('\'', "''");
         let sql = format!(
             "SELECT s.id,s.source_uri,s.start_frame,s.frame_count,s.source_revision FROM \"{}\" s JOIN spql.mcap.episodes('{dataset}') e ON e.id=s.id WHERE s.id=$1",
-            request.selection().sources_relation()
+            selection.sources_relation()
         );
         let bindings = self
             .storage
@@ -50,8 +50,8 @@ impl EpisodeProgress {
         // is never a storage key and no completed score result is retained here.
         let key = format!(
             "{}:{}:{}",
-            request.selection().scorer().version(),
-            request.selection().scorer().model(),
+            selection.scorer().version(),
+            selection.scorer().model(),
             serde_json::to_string(binding).map_err(|error| error.to_string())?
         );
         let mut pending = self.pending.lock().await;

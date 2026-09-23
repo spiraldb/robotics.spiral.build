@@ -55,16 +55,15 @@ impl ScoredEpisode {
             .enumerate()
             .map(|(index, frames)| {
                 let start = seconds(&frames[0]);
-                let end = chunks
-                    .get(index + 1)
-                    .map_or_else(|| seconds(&frames[frames.len() - 1]) + period, |next| {
-                        seconds(&next[0])
-                    });
+                let end = chunks.get(index + 1).map_or_else(
+                    || seconds(&frames[frames.len() - 1]) + period,
+                    |next| seconds(&next[0]),
+                );
                 let unread = frames
                     .iter()
                     .any(|frame| frame.support() == 0 || !frame.velocity().is_finite());
-                let mean = frames.iter().map(ProgressFrame::velocity).sum::<f64>()
-                    / frames.len() as f64;
+                let mean =
+                    frames.iter().map(ProgressFrame::velocity).sum::<f64>() / frames.len() as f64;
                 MomentRow::new(
                     node,
                     episode.id().clone(),
@@ -173,7 +172,8 @@ mod tests {
         assert_eq!(moments[0].start_time(), 0.0);
         assert_eq!(moments[0].end_time(), moments[1].start_time());
         assert!((moments[1].start_time() - 1.0).abs() < 1e-9);
-        assert!((moments[2].end_time() - 2.5).abs() < 1e-9);
+        // Frame times are whole nanoseconds, so the last end is 2.5 s to within one.
+        assert!((moments[2].end_time() - 2.5).abs() < 1e-6);
         assert!((moments[0].velocity().unwrap() - 0.2).abs() < 1e-9);
         assert!((moments[1].velocity().unwrap() - 0.4).abs() < 1e-9);
     }
@@ -187,8 +187,10 @@ mod tests {
         let moments = ScoredEpisode(frames).moments("detect-1", &episode).unwrap();
         assert_eq!(moments[0].velocity(), Some(0.3));
         assert_eq!(moments[1].velocity(), None);
-        assert!(ScoredEpisode(vec![frame(0, 0.1, 1)])
-            .moments("detect-1", &episode)
-            .is_err());
+        assert!(
+            ScoredEpisode(vec![frame(0, 0.1, 1)])
+                .moments("detect-1", &episode)
+                .is_err()
+        );
     }
 }

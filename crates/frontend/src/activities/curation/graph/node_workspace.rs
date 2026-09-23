@@ -1,12 +1,12 @@
 //! The workspace beside the graph: what the selected node needs, and nothing
-//! else. Every node kind owns its workspace; this file
-//! chooses between them and keeps video and tables out of the canvas.
+//! else. Every node kind owns its workspace; this file chooses between them
+//! and keeps video and tables out of the canvas.
 use dioxus::prelude::*;
 use spiral_robotics_ui::EmptyState;
 
 use super::super::document::CurationNodeKind;
 use super::super::state::CurationController;
-use super::super::{annotate, similar};
+use super::super::{annotate, moments, select, similar};
 use super::dataset::DatasetWorkspace;
 
 #[component]
@@ -34,6 +34,12 @@ pub(in crate::activities::curation) fn NodeWorkspace(controller: CurationControl
                 },
                 CurationNodeKind::GroupSimilarSubtasks => rsx! {
                     similar::GroupingWorkspace { key: "{node}", controller, node: node.clone() }
+                },
+                CurationNodeKind::IdentifyUnproductiveMoments(_) => rsx! {
+                    moments::DetectionWorkspace { key: "{node}", controller, node: node.clone() }
+                },
+                CurationNodeKind::Select(_) => rsx! {
+                    select::SelectWorkspace { key: "{node}", controller, node: node.clone() }
                 },
             }
         }

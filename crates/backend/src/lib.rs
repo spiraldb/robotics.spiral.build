@@ -12,7 +12,6 @@ mod clock;
 mod curation;
 mod data;
 mod error;
-mod exploration;
 mod http;
 mod projects;
 mod recording;

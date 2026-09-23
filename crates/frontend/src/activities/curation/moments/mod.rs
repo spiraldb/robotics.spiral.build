@@ -11,13 +11,12 @@ use super::document::{CurationNode, CurationNodeKind, MomentDetection, MomentRow
 use super::review::{Counted, MeasurementStatus, NoSubtaskChosen, SliceEntry, SubtaskReview};
 use super::state::CurationController;
 use crate::activities::episode::{Episode, EpisodeInspection, PlayRequest};
-use crate::components::timeline::{
-    NumericTrack, TimelineInterval, TimelineSample, TimelineTrack, TimelineTrackState,
-};
+use crate::components::timeline::{NumericTrack, TimelineInterval, TimelineSample, TimelineTrack};
 use crate::format::ClockPresentation as _;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use scoring::MomentPass;
+use spiral_robotics_common::curation::progress::ProgressSelection;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone};
 
@@ -141,16 +140,30 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
             }
         };
     };
+    // The scorer reads the original recordings, which only some datasets
+    // have bound; elsewhere the node says so rather than failing per episode.
+    let unsupported = controller.with_payload(|payload| {
+        payload
+            .dataset()
+            .map(|dataset| ProgressSelection::for_dataset(dataset).validate())
+            .and_then(Result::err)
+    });
     let pending = input.pending();
     let failed = input.failed();
     let shown = chosen()
         .or_else(|| input.moments.first().map(|row| row.episode().clone()))
-        .and_then(|id| input.episodes.iter().find(|episode| episode.id() == &id).cloned());
+        .and_then(|id| {
+            input
+                .episodes
+                .iter()
+                .find(|episode| episode.id() == &id)
+                .cloned()
+        });
     rsx! {
         section { class: "curation-moments-workspace", "aria-label": "Identify unproductive moments",
             MeasurementStatus {
                 facts: input.facts(running()),
-                note: None,
+                note: unsupported.clone(),
                 actions: rsx! {
                     if running() {
                         Button {
@@ -164,6 +177,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                         if !pending.is_empty() {
                             Button {
                                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
+                                disabled: unsupported.is_some(),
                                 title: "Score the {pending.len()} episodes not yet scored",
                                 onclick: {
                                     let mut start = start.clone();
@@ -176,6 +190,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                         if !failed.is_empty() {
                             Button {
                                 purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
+                                disabled: unsupported.is_some(),
                                 title: "Score the {failed.len()} episodes that failed again",
                                 onclick: {
                                     let mut start = start.clone();
@@ -303,7 +318,7 @@ pub(super) fn MomentEvidence(
     let track = TimelineTrack::new(
         "curation-progress",
         "Progress",
-        TimelineTrackState::Ready(NumericTrack::new(samples, cutoff, intervals)),
+        NumericTrack::new(samples, cutoff, intervals),
     );
     rsx! {
         div { class: "curation-review-player",

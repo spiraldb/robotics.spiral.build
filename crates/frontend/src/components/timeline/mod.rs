@@ -29,5 +29,4 @@ pub(crate) use playback::{PlaybackClock, ViewWindow};
 pub(crate) use timeline::{Timeline, TimelineContent, TimelineScrubber};
 pub(crate) use tracks::{
     NumericTrack, NumericTrackRow, TimelineInterval, TimelineSample, TimelineTrack,
-    TimelineTrackState,
 };

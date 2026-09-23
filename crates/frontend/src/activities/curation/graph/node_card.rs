@@ -1,7 +1,6 @@
 //! What one node of the curation graph says, and what its + offers. Everything
 //! here reads the payload and the sample it is interpreted over, so the
 //! canvas keeps no second copy of the graph.
-use spiral_robotics_common::curation::progress::ProgressSelection;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
 use super::super::document::{CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID};
@@ -52,20 +51,10 @@ pub(super) struct ChildMenu {
 }
 
 impl ChildMenu {
-    /// What the grammar allows after `node`, less what cannot run on this
-    /// dataset: progress is only scored where the scorer's recordings are
-    /// bound, so elsewhere the menu does not offer a node that could never run.
+    /// What the grammar allows after `node`. A node that cannot run on this
+    /// dataset is still offered; its workspace says why.
     fn of(payload: &CurationGraph, node: &CurationNode) -> Option<Self> {
-        let scorable = payload
-            .dataset()
-            .is_some_and(|dataset| ProgressSelection::for_dataset(dataset).validate().is_ok());
-        let kinds = payload
-            .child_kinds(node.id())
-            .into_iter()
-            .filter(|kind| {
-                scorable || !matches!(kind, CurationNodeKind::IdentifyUnproductiveMoments(_))
-            })
-            .collect::<Vec<_>>();
+        let kinds = payload.child_kinds(node.id());
         (!kinds.is_empty()).then(|| Self {
             parent: node.id().to_owned(),
             kinds,
@@ -155,7 +144,7 @@ impl NodeCard {
                     Some((input, output)) => format!(
                         "{} of {} · {}",
                         Self::measured(annotation.completed_episodes(), &input),
-                        Counted::episodes(input.len()),
+                        Counted::episodes(input.episodes().len()),
                         Counted::subtasks(output.len()),
                     ),
                     None => Counted::subtasks(payload.subtasks_for(node.id()).count()).to_string(),
@@ -253,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_graph_asks_for_a_dataset_and_offers_what_can_run_on_it() {
+    fn a_new_graph_asks_for_a_dataset_and_offers_every_measurement() {
         let payload = CurationGraph::new(None);
         let cards = NodeCard::all(&payload, None);
         let dataset = card(&cards, DATASET_NODE_ID);
@@ -265,17 +254,11 @@ mod tests {
                 .menu()
                 .expect("the dataset accepts children")
                 .labels(),
-            ["Break down subtasks", "Select"]
-        );
-        let bottles = CurationGraph::new(
-            DatasetSelection::new(vec!["dataset_warp_sim_bottles_sample".to_owned()]).ok(),
-        );
-        assert_eq!(
-            card(&NodeCard::all(&bottles, None), DATASET_NODE_ID)
-                .menu()
-                .expect("menu")
-                .labels(),
-            ["Break down subtasks", "Identify unproductive moments", "Select"]
+            [
+                "Break down subtasks",
+                "Identify unproductive moments",
+                "Select"
+            ]
         );
     }
 

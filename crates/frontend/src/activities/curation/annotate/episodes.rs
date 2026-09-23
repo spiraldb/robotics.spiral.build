@@ -1,16 +1,13 @@
 //! The episodes one annotation node walks: what the pass needs to sample them
 //! and what the player needs to show them.
+use crate::activities::curation::state::CurationController;
 use crate::activities::data::DatasetClient;
 use crate::activities::episode::{Episode, StreamCatalog};
 use dioxus::prelude::*;
 use serde_json::Value;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
+use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::SqlLiteral;
-
-/// An annotation pass reads whole recordings, so the list stays small enough
-/// that one operator can watch it finish.
-const MAX_ANNOTATED_EPISODES: usize = 2_000;
 
 /// The topic a dataset records the operator's own words on, when it has one.
 const INSTRUCTION_TOPIC: &str = "/instruction";
@@ -28,14 +25,19 @@ impl AnnotationEpisode {
         }
     }
 
-    /// Every episode of the dataset, in recording order, as the Data rail
-    /// lists them.
-    pub(super) async fn load(dataset: &DatasetSelection) -> Result<Vec<Self>, String> {
-        Episode::page(dataset, 0, MAX_ANNOTATED_EPISODES)
-            .await?
-            .into_episodes()
-            .into_iter()
-            .map(Self::new)
+    /// The episodes that reach `node`, in sample order: the curation's
+    /// sample, less whatever a Select above the node left out. An episode
+    /// without a recorded span cannot be sampled and is not offered.
+    pub(super) fn reaching(controller: CurationController, node: &str) -> Vec<Self> {
+        let (Some(sample), Some((input, _))) = (controller.sample(), controller.populations(node))
+        else {
+            return Vec::new();
+        };
+        input
+            .episodes()
+            .iter()
+            .filter_map(|id| sample.episode(id).cloned())
+            .filter_map(|episode| Self::new(episode).ok())
             .collect()
     }
 
@@ -127,7 +129,9 @@ mod tests {
     fn an_episode_without_a_recorded_range_is_not_annotated() {
         let facts =
             serde_json::from_value(serde_json::json!({ "id": EpisodeId::fixture(2) })).unwrap();
-        let dataset = DatasetSelection::new(vec!["folding".into()]).unwrap();
+        let dataset =
+            spiral_robotics_common::datasets::DatasetSelection::new(vec!["folding".into()])
+                .unwrap();
         assert!(AnnotationEpisode::new(Episode::new(dataset, facts)).is_err());
     }
 }

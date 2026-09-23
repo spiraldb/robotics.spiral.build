@@ -1,0 +1,107 @@
+/* Curation › select styles. Prefix every class with `curation-select-`. Use
+   @layer components like tailwind.css; the kit CSS is unlayered, so overrides
+   of kit controls must be unlayered too. */
+
+@layer components {
+  /* The Select reads top to bottom as its decision does: the rule, how much it
+     keeps, where the threshold falls, where the kept parts lie, and then the
+     parts themselves beside their recording. */
+  .curation-select-workspace {
+    @apply flex h-full min-h-0 min-w-0 flex-col;
+    background: var(--tone-surface);
+  }
+
+  /* The rule is one sentence; its variable words are its fields. */
+  .curation-select-rule {
+    @apply flex flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-line px-3 py-2 text-[12px] text-ink;
+  }
+  .curation-select-rule-choice {
+    @apply w-auto max-w-[10rem];
+  }
+  .curation-select-rule-value {
+    @apply w-20;
+  }
+  .curation-select-rule-hint {
+    @apply text-ink-faint;
+  }
+
+  /* One toggle per category, in the hue the grouping gave it. */
+  .curation-select-chips {
+    @apply flex basis-full flex-wrap items-center gap-1;
+  }
+  .curation-select-chip {
+    @apply flex min-h-6 max-w-full cursor-pointer items-baseline gap-1.5 rounded border border-line bg-surface px-1.5 py-0.5 text-left;
+    transition:
+      background-color 100ms ease-out,
+      border-color 100ms ease-out;
+  }
+  .curation-select-chip[aria-pressed="true"] {
+    border-color: var(--hue, var(--tone-ink));
+    background: color-mix(in srgb, var(--hue, var(--tone-ink)) 12%, var(--tone-surface));
+  }
+  .curation-select-chip-name {
+    @apply truncate text-[11px] font-medium text-ink;
+    flex: 0 1 auto;
+  }
+  .curation-select-chip-count {
+    @apply shrink-0 font-mono text-[10px] tabular-nums;
+    color: var(--tone-ink-soft);
+  }
+
+  /* What the rule keeps, beside the Output flag when nothing follows it. */
+  .curation-select-tally {
+    @apply m-0 flex min-h-7 items-center gap-2 border-b border-line px-3 font-mono text-[10px] text-ink-soft tabular-nums;
+  }
+
+  /* Every judged value as a dot on one axis, the threshold as a line. */
+  .curation-select-strip {
+    @apply relative mx-3 my-2 h-9 shrink-0;
+  }
+  .curation-select-strip-threshold {
+    @apply absolute top-0 h-7 w-px;
+    background: var(--tone-ink);
+  }
+  .curation-select-strip-dot {
+    @apply absolute size-[7px] -ml-[3.5px] cursor-pointer rounded-full border-0 p-0;
+    top: calc(4px + var(--lift) * 3px);
+    background: var(--tone-ink);
+    transition: transform 100ms ease-out;
+  }
+  .curation-select-strip-dot[data-kept="false"] {
+    background: color-mix(in srgb, var(--tone-ink-faint) 45%, var(--tone-surface));
+  }
+  .curation-select-strip-dot:hover,
+  .curation-select-strip-dot[aria-current="true"] {
+    transform: scale(1.5);
+  }
+  .curation-select-strip-dot[aria-current="true"] {
+    box-shadow: 0 0 0 1.5px var(--tone-accent-strong);
+  }
+  .curation-select-strip-axis {
+    @apply pointer-events-none absolute inset-x-0 bottom-0 flex justify-between font-mono text-[9px] tabular-nums;
+    color: var(--tone-ink-faint);
+  }
+
+  /* The episode map, painted kept in ink and left out faded. */
+  .curation-select-overview {
+    @apply flex flex-col gap-1.5 border-b border-line px-3 py-2;
+    --curation-map-unasked: color-mix(in srgb, var(--tone-ink-faint) 26%, var(--tone-surface));
+    --curation-map-kept: var(--tone-ink-soft);
+  }
+
+  .curation-select-filter {
+    @apply flex items-center border-b border-line px-3 py-1.5;
+  }
+}
+
+/* Unlayered: the kit's mode group is unlayered, so the two sides of the rule
+   are laid in one row here, at the size of the other segmented controls. */
+.curation-select-sides {
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+}
+.curation-select-sides .ui-button--segment {
+  min-height: 22px;
+  padding-inline: 9px;
+  font-size: 11px;
+}

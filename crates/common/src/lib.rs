@@ -10,7 +10,6 @@ pub mod account;
 pub mod command_failure;
 pub mod curation;
 pub mod datasets;
-pub mod exploration;
 pub mod identity;
 pub mod project;
 pub mod providers;

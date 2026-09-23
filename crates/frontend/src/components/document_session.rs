@@ -2,19 +2,19 @@
 //! changed, what Studio has stored, and the commands that move between them —
 //! open, save, discard.
 //!
-//! Workflow, Curation, and Explore each open one saved document at a time, edit
-//! it in the browser, and save it back. That lifecycle is this module; an
+//! Workflow and Curation each open one saved document at a time, edit it in
+//! the browser, and save it back. That lifecycle is this module; an
 //! activity's controller keeps only what is its own — the agent conversation,
-//! the sheet's selection, the graph's focus — and holds a
-//! [`DocumentSession`] beside it.
+//! the graph's selection and focus — and holds a [`DocumentSession`] beside
+//! it.
 //!
 //! A controller wires itself in by implementing [`StudioDocument`] for the value
 //! it edits and calling [`DocumentSession::use_session`] once at mount. Every
 //! command that replaces what is open takes an `on_install` hook, because the
 //! document is never the whole of what an activity shows: Workflow reinstalls
-//! its assistant conversation there, Curation resets the sheet's filter, lens,
-//! order, and selection, and Explore decodes the graph payload — and refuses the
-//! document by returning `Err` when that payload cannot be read.
+//! its assistant conversation there, and Curation decodes the graph payload —
+//! and refuses the document by returning `Err` when that payload cannot be
+//! read.
 
 use dioxus::prelude::*;
 use serde::Serialize;
@@ -36,7 +36,7 @@ use crate::shell::state::StudioProjectState;
 pub(crate) trait StudioDocument:
     Clone + PartialEq + Serialize + DeserializeOwned + 'static
 {
-    /// What Studio calls one of these: `workflow`, `curation`, `exploration`.
+    /// What Studio calls one of these: `workflow` or `curation`.
     /// A browser-minted id begins with it and the session's own messages use it.
     const NOUN: &'static str;
     /// The path segment these are served under, such as `workflows`. See
@@ -222,7 +222,7 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
 
     /// Make `document` the open one. `on_install` runs first and may refuse it:
     /// returning `Err` leaves the draft alone and reports the reason as a load
-    /// failure, which is how Explore rejects a payload it cannot decode. On
+    /// failure, which is how Curation rejects a payload it cannot decode. On
     /// `Ok` the hook has already reinstalled whatever the activity keeps beside
     /// the document — a conversation, a selection, a decoded graph.
     pub(crate) fn install(
@@ -296,7 +296,7 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
 
     /// List what is saved without opening any of it: the first read of a
     /// workspace that starts on a blank document rather than on the most
-    /// recent one, as Explore does.
+    /// recent one, as Curation does.
     pub(crate) fn refresh_summaries(mut self) {
         if self.command().is_some() {
             return;
@@ -359,7 +359,7 @@ mod tests {
 
     /// One summary type reads every collection's list. The two things a
     /// switcher shows are the two every document endpoint sends, and the extra
-    /// field an exploration carries is simply not one of them.
+    /// field a curation carries is simply not one of them.
     #[test]
     fn one_summary_reads_every_collection() {
         let listed = [
@@ -371,15 +371,8 @@ mod tests {
             serde_json::to_string(&spiral_robotics_common::curation::CurationSummary::new(
                 "w1",
                 "Throughput",
+                7,
             ))
-            .unwrap(),
-            serde_json::to_string(
-                &spiral_robotics_common::exploration::ExplorationSummary::new(
-                    "w1",
-                    "Throughput",
-                    7,
-                ),
-            )
             .unwrap(),
         ];
         for body in listed {

@@ -11,24 +11,22 @@ use super::pipeline::{
     AnnotationPass, AnnotationRecorder, ContactSheetSource, PassSettings, SampledEpisode,
 };
 use super::provider::ProviderAnnotator;
-use crate::activities::data::DatasetClient;
 use crate::activities::curation::document::{
-    DATASET_NODE_ID, CURATION_ENCODING_VERSION, CurationNode, CurationNodeKind,
-    SubtaskAnnotation, SubtaskRow,
+    CURATION_ENCODING_VERSION, CurationNode, CurationNodeKind, DATASET_NODE_ID, SubtaskAnnotation,
+    SubtaskRow,
 };
-use crate::activities::curation::poster::{
-    PosterCut, PosterFrame, PosterFrames, ShownPoster,
-};
+use crate::activities::curation::poster::{PosterCut, PosterFrame, PosterFrames, ShownPoster};
 use crate::activities::curation::review::{EpisodeOrder, SubtaskContext};
 use crate::activities::curation::state::CurationController;
+use crate::activities::data::DatasetClient;
 use crate::client::documents::DocumentClient;
 use crate::client::{project::ProjectClient, queries::QueryRefresh};
 use crate::components::document_session::StudioDocument as _;
 use dioxus::prelude::*;
 use serde_json::Value;
+use spiral_robotics_common::curation::CurationDocument;
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::datasets::EpisodeId;
-use spiral_robotics_common::curation::CurationDocument;
 use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;

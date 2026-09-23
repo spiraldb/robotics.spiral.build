@@ -7,29 +7,29 @@
 //! category, with no "other" option and no confidence gate. Renaming,
 //! redefining, or merging a category reruns only the jev pass — the LLM
 //! pass runs again only when the operator asks for new categories.
-use crate::activities::curation::population::Slice;
 use super::categories::{
     AssignmentReader, CategoryEdit, CategoryEdits, DescriptionCounts, ProposedCategories,
 };
 use super::coverage::{CoverageMeasure, EpisodeCoverage, SubtaskList};
 use super::decisions::DecisionRun;
-use crate::activities::curation::episode_map::{
-    EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
-};
 use super::profile::{CategoryProfile, ProfilePanel};
 use super::questions::AssignmentQuestions;
 use super::source::SubtaskSource;
-use crate::activities::episode::Episode;
 use crate::activities::curation::document::{
-    DEFAULT_ANNOTATION_MODEL, CurationNodeKind, SubtaskAssignment, SubtaskCategory,
+    CurationNodeKind, DEFAULT_ANNOTATION_MODEL, SubtaskAssignment, SubtaskCategory,
     SubtaskGrouping, SubtaskRow,
 };
+use crate::activities::curation::episode_map::{
+    EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
+};
+use crate::activities::curation::population::Slice;
 use crate::activities::curation::poster::{PosterCut, PosterFrames};
 use crate::activities::curation::rerun::ConfirmedRerun;
 use crate::activities::curation::review::{
     Counted, NoSubtaskChosen, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
 };
-use crate::activities::curation::state::{EpisodeFocus, CurationController};
+use crate::activities::curation::state::{CurationController, EpisodeFocus};
+use crate::activities::episode::Episode;
 use crate::client::completions::{ModelClient, ModelRequest};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
@@ -139,15 +139,26 @@ impl GroupingStage {
 /// first, the order an operator reads a taxonomy in, so the hue a category
 /// wears means its size rather than the order the model happened to name it.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct CategoryHues(Vec<String>);
+pub(in crate::activities::curation) struct CategoryHues(Vec<String>);
 
 impl CategoryHues {
     fn of(grouping: &SubtaskGrouping, source: &SubtaskSource) -> Self {
+        Self::of_rows(grouping, source.rows())
+    }
+    /// The hues of a grouping's categories, ranked by how many of `rows` each
+    /// holds, so a Select after the grouping wears the grouping's colours.
+    pub(in crate::activities::curation) fn of_rows(
+        grouping: &SubtaskGrouping,
+        rows: &[SubtaskRow],
+    ) -> Self {
         let mut sized = grouping
             .categories()
             .iter()
             .map(|category| {
-                let members = source.listed(&grouping.members(category.name())).len();
+                let members = rows
+                    .iter()
+                    .filter(|row| grouping.category_of(row) == Some(category.name()))
+                    .count();
                 (category.name().to_owned(), members)
             })
             .collect::<Vec<_>>();
@@ -163,7 +174,7 @@ impl CategoryHues {
     }
     /// The inline style that lends a category's hue to whatever wears it;
     /// nothing for no category, which falls back to the neutral line colour.
-    pub(super) fn tint_of(&self, category: Option<&str>) -> String {
+    pub(in crate::activities::curation) fn tint_of(&self, category: Option<&str>) -> String {
         category
             .and_then(|category| self.hue(category))
             .map(|hue| format!("--hue: var(--tone-category-{})", hue + 1))
@@ -258,7 +269,10 @@ impl PourPlan {
                 .unwrap_or_default();
             Flight::arc(from, via, to)
                 .after(delay)
-                .token("curation-flight-token", &hues.tint_of(Some(&token.category)))
+                .token(
+                    "curation-flight-token",
+                    &hues.tint_of(Some(&token.category)),
+                )
                 .launch(&layer);
         }
     }

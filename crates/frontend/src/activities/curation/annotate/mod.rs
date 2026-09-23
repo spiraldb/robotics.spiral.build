@@ -1,5 +1,5 @@
-//! Break down subtasks: browser-owned annotation of every episode in the
-//! dataset, one model call per episode, rows persisted through the
+//! Break down subtasks: browser-owned annotation of every episode that
+//! reaches the node, one model call per episode, rows persisted through the
 //! controller after each episode.
 mod episodes;
 mod journal;
@@ -109,16 +109,17 @@ impl AnnotationNode {
     fn settings(&self) -> Option<SubtaskAnnotation> {
         self.controller.with_payload(|payload| {
             match payload.node(&self.id).map(CurationNode::kind) {
-                Some(CurationNodeKind::BreakDownSubtasks(annotation)) => {
-                    Some(annotation.clone())
-                }
+                Some(CurationNodeKind::BreakDownSubtasks(annotation)) => Some(annotation.clone()),
                 _ => None,
             }
         })
     }
+    /// The rows the node hands on: those of the episodes reaching it.
     fn rows(&self) -> Vec<SubtaskRow> {
         self.controller
-            .with_payload(|payload| payload.subtasks_for(&self.id).cloned().collect())
+            .populations(&self.id)
+            .map(|(_, output)| output.subtasks().to_vec())
+            .unwrap_or_default()
     }
     /// Apply one configuration change, reporting what the document refused.
     fn configure(
@@ -141,18 +142,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     let studio = StudioProjectState::current();
     let annotation = AnnotationNode::new(node.clone(), controller);
     let dataset = controller.with_payload(|payload| payload.dataset().cloned());
-    let mut episodes = use_resource(use_reactive(&dataset, move |dataset| async move {
-        match dataset {
-            Some(dataset) => AnnotationEpisode::load(&dataset).await,
-            None => Err("Choose a dataset for this curation first.".to_owned()),
-        }
-    }));
-    let listed = episodes
-        .read()
-        .as_ref()
-        .and_then(|loaded| loaded.as_ref().ok())
-        .cloned()
-        .unwrap_or_default();
+    let listed = AnnotationEpisode::reaching(controller, &node);
     let cameras = AnnotationEpisode::use_cameras(listed.first().cloned());
 
     // A new node starts on the camera that shows the whole workspace, written
@@ -267,7 +257,10 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
             let subtasks = groups.iter().find(|group| group.episode() == &id).cloned();
             Some((episode, subtasks))
         });
-    let done = settings.completed_episodes().len();
+    let done = listed
+        .iter()
+        .filter(|episode| settings.is_completed(episode.id()))
+        .count();
     // Every node's progress travels to the canvas, so a graph the operator has
     // scrolled away from still shows which measurement is working.
     let reported = node.clone();
@@ -297,7 +290,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     rsx! {
         section { class: "curation-annotate-workspace", "aria-label": "Break down subtasks",
             MeasurementStatus {
-                facts: AnnotationFacts::new(settings.clone(), listed.len(), running()).to_string(),
+                facts: AnnotationFacts::new(settings.clone(), (done, listed.len()), running()).to_string(),
                 note: if settings.camera().is_none() {
                     Some("Choose a camera in Settings before running.".to_owned())
                 } else { None },
@@ -361,15 +354,12 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                     }
                 },
             }
-            match episodes.read().as_ref() {
-                Some(Err(error)) => rsx! {
-                    div { class: "curation-annotate-failure", role: "alert",
-                        p { "{error}" }
-                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
-                            onclick: move |_| episodes.restart(), "Retry the episode list" }
-                    }
-                },
-                _ => rsx! {},
+            if let Some(error) = controller.sample_error() {
+                div { class: "curation-annotate-failure", role: "alert",
+                    p { "{error}" }
+                    Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
+                        onclick: move |_| controller.reload_sample(), "Retry the episode list" }
+                }
             }
             SubtaskReview {
                 index: rsx! {
@@ -420,15 +410,16 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
 #[derive(Clone, PartialEq)]
 struct AnnotationFacts {
     settings: SubtaskAnnotation,
-    episodes: usize,
+    /// How many of the episodes reaching the node it has annotated, of how many.
+    reached: (usize, usize),
     running: bool,
 }
 
 impl AnnotationFacts {
-    fn new(settings: SubtaskAnnotation, episodes: usize, running: bool) -> Self {
+    fn new(settings: SubtaskAnnotation, reached: (usize, usize), running: bool) -> Self {
         Self {
             settings,
-            episodes,
+            reached,
             running,
         }
     }
@@ -436,7 +427,7 @@ impl AnnotationFacts {
 
 impl Display for AnnotationFacts {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        let done = self.settings.completed_episodes().len();
+        let (done, episodes) = self.reached;
         let failed = self.settings.failed_episodes().len();
         if self.running {
             write!(
@@ -444,7 +435,7 @@ impl Display for AnnotationFacts {
                 "Annotating up to {EPISODES_IN_FLIGHT} at once · "
             )?;
         }
-        write!(formatter, "{done}/{} episodes", self.episodes)?;
+        write!(formatter, "{done}/{episodes} episodes")?;
         if failed > 0 {
             write!(formatter, " · {} failed", failed)?;
         }
