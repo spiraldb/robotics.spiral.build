@@ -6,34 +6,22 @@
 //! annotation measured, in the order it measured them, so an episode the
 //! annotation read and found nothing in is as visible as one it filled. The
 //! arithmetic lives here, apart from the markup, and carries the unit tests.
-use super::super::review::{Counted, SubtaskContext};
+use super::super::review::Counted;
+use crate::activities::episode::Episode;
 use dioxus::prelude::*;
+use spiral_robotics_common::datasets::EpisodeId;
 
-/// The episodes one annotation measured, named the way the index names them.
+/// The episodes one annotation measured, in the order it measured them.
 ///
 /// This is the denominator of every coverage count, and it is the annotation's
 /// own completed episodes rather than the dataset's size: an episode the
 /// annotation failed on was never read, and "of 40" would claim it was.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct MeasuredEpisodes(Vec<MeasuredEpisode>);
-
-#[derive(Clone, Debug, PartialEq)]
-struct MeasuredEpisode {
-    id: String,
-    name: String,
-}
+pub(super) struct MeasuredEpisodes(Vec<EpisodeId>);
 
 impl MeasuredEpisodes {
-    pub(super) fn named(episodes: &[String], context: &SubtaskContext) -> Self {
-        Self(
-            episodes
-                .iter()
-                .map(|id| MeasuredEpisode {
-                    id: id.clone(),
-                    name: context.name(id),
-                })
-                .collect(),
-        )
+    pub(super) fn of(episodes: &[EpisodeId]) -> Self {
+        Self(episodes.to_vec())
     }
 }
 
@@ -113,9 +101,9 @@ struct EpisodeTally {
 /// where to look for it.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct EpisodeCell {
-    episode: String,
-    /// "Episode 7 · best match 87%" — the cell's whole meaning in words,
-    /// because a tint is never the only carrier.
+    episode: EpisodeId,
+    /// "Episode …2635e3d1 · best match 87%" — the cell's whole meaning in
+    /// words, because a tint is never the only carrier.
     label: String,
     /// How much of the surface's hue to paint, as a fraction.
     fill: f64,
@@ -125,7 +113,7 @@ pub(super) struct EpisodeCell {
 }
 
 impl EpisodeCell {
-    fn episode(&self) -> &str {
+    fn episode(&self) -> &EpisodeId {
         &self.episode
     }
     fn label(&self) -> &str {
@@ -152,16 +140,19 @@ impl EpisodeCoverage {
     /// Read the rows an index is about to show, in the order it shows them, as
     /// `(episode, probability)`. A row of an episode the annotation never
     /// recorded as measured joins no cell — the strip speaks for the
-    /// measurement — but it still takes its place in the list, so a cell and
+    /// measurement — and neither does a row the table no longer holds, which
+    /// has no episode; both still take their place in the list, so a cell and
     /// the row it reveals always count the same way.
     pub(super) fn of<'a>(
         episodes: &MeasuredEpisodes,
-        listed: impl Iterator<Item = (&'a str, f64)>,
+        listed: impl Iterator<Item = (Option<&'a EpisodeId>, f64)>,
         measure: CoverageMeasure,
     ) -> Self {
         let mut tallies = vec![EpisodeTally::default(); episodes.0.len()];
         for (position, (episode, probability)) in listed.enumerate() {
-            let Some(index) = episodes.0.iter().position(|seen| seen.id == episode) else {
+            let Some(index) =
+                episode.and_then(|episode| episodes.0.iter().position(|seen| seen == episode))
+            else {
                 continue;
             };
             let tally = &mut tallies[index];
@@ -176,8 +167,8 @@ impl EpisodeCoverage {
                 .iter()
                 .zip(&tallies)
                 .map(|(episode, tally)| EpisodeCell {
-                    episode: episode.id.clone(),
-                    label: format!("{} · {}", episode.name, measure.detail(tally)),
+                    episode: episode.clone(),
+                    label: format!("{} · {}", Episode::name_of(episode), measure.detail(tally)),
                     fill: measure.fill(tally, busiest),
                     first: tally.first,
                 })
@@ -242,7 +233,7 @@ pub(super) fn CoverageStrip(
     list: SubtaskList,
     /// The episode the evidence column is showing, so its cell reads pressed
     /// and a second click on it clears.
-    showing: Option<String>,
+    showing: Option<EpisodeId>,
     /// Which of the list's rows to show, counted in the order the list was
     /// given them, or `None` when the pressed cell was clicked again. The
     /// caller owns what its nth row is.
@@ -263,7 +254,7 @@ pub(super) fn CoverageStrip(
                     CoverageCell {
                         key: "{cell.episode()}",
                         cell: cell.clone(),
-                        pressed: showing.as_deref() == Some(cell.episode()),
+                        pressed: showing.as_ref() == Some(cell.episode()),
                         on_click: move |row: Option<usize>| {
                             if let Some(row) = row {
                                 list.reveal(row);
@@ -303,33 +294,53 @@ fn CoverageCell(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activities::workflow::explore::review::EpisodeNames;
 
-    /// Three episodes measured, named the way both indexes name them.
-    fn measured(episodes: &[&str]) -> MeasuredEpisodes {
-        let owned = episodes
-            .iter()
-            .map(|id| (*id).to_owned())
-            .collect::<Vec<_>>();
-        let context = SubtaskContext::new(
-            None,
-            None,
-            EpisodeNames::of(owned.iter().map(String::as_str)),
-        );
-        MeasuredEpisodes::named(&owned, &context)
+    const A: u32 = 0xa;
+    const B: u32 = 0xb;
+    const C: u32 = 0xc;
+
+    /// The fixture episodes `ordinals`, measured in that order.
+    fn measured(ordinals: &[u32]) -> MeasuredEpisodes {
+        MeasuredEpisodes::of(
+            &ordinals
+                .iter()
+                .copied()
+                .map(EpisodeId::fixture)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Listed rows as `(episode, probability)`; `None` is a row with no episode.
+    fn listed(rows: &[(Option<u32>, f64)]) -> Vec<(Option<EpisodeId>, f64)> {
+        rows.iter()
+            .map(|(episode, probability)| (episode.map(EpisodeId::fixture), *probability))
+            .collect()
+    }
+
+    fn coverage(
+        episodes: &[u32],
+        rows: &[(Option<u32>, f64)],
+        measure: CoverageMeasure,
+    ) -> EpisodeCoverage {
+        let rows = listed(rows);
+        EpisodeCoverage::of(
+            &measured(episodes),
+            rows.iter()
+                .map(|(episode, probability)| (episode.as_ref(), *probability)),
+            measure,
+        )
     }
 
     #[test]
     fn an_episode_is_found_when_its_best_row_is_more_likely_than_not() {
-        let coverage = EpisodeCoverage::of(
-            &measured(&["ep-a", "ep-b", "ep-c"]),
-            [
-                ("ep-a", 0.91),
-                ("ep-b", 0.50),
-                ("ep-a", 0.12),
-                ("ep-c", 0.49),
-            ]
-            .into_iter(),
+        let coverage = coverage(
+            &[A, B, C],
+            &[
+                (Some(A), 0.91),
+                (Some(B), 0.50),
+                (Some(A), 0.12),
+                (Some(C), 0.49),
+            ],
             CoverageMeasure::BestMatch,
         );
         assert_eq!(
@@ -344,15 +355,11 @@ mod tests {
 
     #[test]
     fn every_measured_episode_keeps_a_cell_even_with_nothing_in_it() {
-        let coverage = EpisodeCoverage::of(
-            &measured(&["ep-a", "ep-b"]),
-            [("ep-a", 0.8)].into_iter(),
-            CoverageMeasure::BestMatch,
-        );
+        let coverage = coverage(&[A, B], &[(Some(A), 0.8)], CoverageMeasure::BestMatch);
         assert_eq!(coverage.cells.len(), 2);
         assert_eq!(coverage.cells[1].fill(), 0.0, "the line colour");
         assert_eq!(coverage.cells[1].first(), None);
-        assert_eq!(coverage.cells[1].label(), "Episode 2 · no subtasks");
+        assert_eq!(coverage.cells[1].label(), "Episode …0000000b · no subtasks");
         assert_eq!(
             coverage.summary(),
             "Found in 1 of 2 episodes (best match ≥ 50%)"
@@ -361,9 +368,9 @@ mod tests {
 
     #[test]
     fn a_cell_points_at_its_episodes_first_listed_row() {
-        let coverage = EpisodeCoverage::of(
-            &measured(&["ep-a", "ep-b"]),
-            [("ep-b", 0.9), ("ep-a", 0.7), ("ep-b", 0.6)].into_iter(),
+        let coverage = coverage(
+            &[A, B],
+            &[(Some(B), 0.9), (Some(A), 0.7), (Some(B), 0.6)],
             CoverageMeasure::BestMatch,
         );
         assert_eq!(coverage.cells[0].first(), Some(1));
@@ -372,9 +379,14 @@ mod tests {
 
     #[test]
     fn a_category_fills_each_episode_against_the_one_holding_the_most() {
-        let coverage = EpisodeCoverage::of(
-            &measured(&["ep-a", "ep-b", "ep-c"]),
-            [("ep-a", 1.0), ("ep-a", 1.0), ("ep-a", 1.0), ("ep-b", 1.0)].into_iter(),
+        let coverage = coverage(
+            &[A, B, C],
+            &[
+                (Some(A), 1.0),
+                (Some(A), 1.0),
+                (Some(A), 1.0),
+                (Some(B), 1.0),
+            ],
             CoverageMeasure::Members,
         );
         assert_eq!(coverage.cells[0].fill(), 1.0);
@@ -382,30 +394,30 @@ mod tests {
         assert_eq!(coverage.cells[2].fill(), 0.0);
         assert_eq!(
             coverage.cells[0].label(),
-            "Episode 1 · 3 subtasks in this category"
+            "Episode …0000000a · 3 subtasks in this category"
         );
         assert_eq!(
             coverage.cells[1].label(),
-            "Episode 2 · 1 subtask in this category"
+            "Episode …0000000b · 1 subtask in this category"
         );
         assert_eq!(
             coverage.cells[2].label(),
-            "Episode 3 · nothing in this category"
+            "Episode …0000000c · nothing in this category"
         );
         assert_eq!(coverage.summary(), "In 2 of 3 episodes");
     }
 
     #[test]
     fn a_row_of_an_episode_the_annotation_never_measured_keeps_its_place() {
-        let coverage = EpisodeCoverage::of(
-            &measured(&["ep-a"]),
-            [("ep-gone", 1.0), ("ep-a", 0.9)].into_iter(),
+        let coverage = coverage(
+            &[A],
+            &[(None, 1.0), (Some(A), 0.9)],
             CoverageMeasure::Members,
         );
         assert_eq!(coverage.cells.len(), 1);
         assert_eq!(coverage.summary(), "In 1 of 1 episode");
         // The stray row is nobody's, but it still cost the list a place, so
-        // "ep-a" is the second row of the index and not the first.
+        // episode A's row is the second of the index and not the first.
         assert_eq!(coverage.cells[0].first(), Some(1));
     }
 }

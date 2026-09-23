@@ -21,7 +21,7 @@ use super::frames::{FrameMoments, MAX_FRAMES_PER_QUERY, NativeFrame};
 use super::review::SubtaskContext;
 use crate::activities::data::DatasetClient;
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeSelection};
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use std::collections::BTreeMap;
 use wasm_bindgen::{JsCast as _, JsValue};
@@ -123,7 +123,7 @@ impl PosterCanvas {
 /// exploration has nothing here to fetch and nothing to clone per render.
 #[derive(Clone, Debug, PartialEq)]
 struct PosterTarget {
-    episode: String,
+    episode: EpisodeId,
     row: u64,
     moment: f64,
 }
@@ -131,7 +131,7 @@ struct PosterTarget {
 impl PosterTarget {
     fn of(row: &SubtaskRow) -> Option<Self> {
         row.poster().is_none().then(|| Self {
-            episode: row.episode().to_owned(),
+            episode: row.episode().clone(),
             row: row.start_time().to_bits(),
             moment: row.midpoint(),
         })
@@ -150,14 +150,14 @@ impl PosterTargets {
     }
     /// Whether this episode has a row still owing a poster. An episode whose
     /// rows were all annotated with theirs is never asked for.
-    fn owes(&self, episode: &str) -> bool {
-        self.0.iter().any(|target| target.episode == episode)
+    fn owes(&self, episode: &EpisodeId) -> bool {
+        self.0.iter().any(|target| &target.episode == episode)
     }
     /// One episode's outstanding rows, which is what one query covers.
-    fn of_episode(&self, episode: &str) -> Vec<&PosterTarget> {
+    fn of_episode(&self, episode: &EpisodeId) -> Vec<&PosterTarget> {
         self.0
             .iter()
-            .filter(|target| target.episode == episode)
+            .filter(|target| &target.episode == episode)
             .collect()
     }
 }
@@ -208,9 +208,9 @@ impl PosterCut {
     /// Every poster this episode still owes, cut in one query per batch of
     /// moments. The picture goes through the same encoder the annotation pass
     /// uses, so a backfilled row is indistinguishable from a measured one.
-    async fn decode(&self, episode: &str) -> Result<BTreeMap<u64, String>, String> {
+    async fn decode(&self, episode: &EpisodeId) -> Result<BTreeMap<u64, String>, String> {
         let wanted = self.targets.of_episode(episode);
-        let selection = EpisodeSelection::new(self.dataset.clone(), episode.to_owned());
+        let selection = EpisodeSelection::new(self.dataset.clone(), episode.clone());
         let mut posters = BTreeMap::new();
         for batch in wanted.chunks(MAX_FRAMES_PER_QUERY) {
             let moments = FrameMoments::new(batch.iter().map(|target| target.moment).collect());
@@ -242,7 +242,7 @@ impl PosterCut {
 /// reaches the saved document.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct PosterCache {
-    episodes: Signal<BTreeMap<String, EpisodePosters>>,
+    episodes: Signal<BTreeMap<EpisodeId, EpisodePosters>>,
     /// What the held pictures are of. Changing the dataset or the camera
     /// changes what a poster should be, so the cut ones are dropped.
     cut: Signal<Option<PosterCut>>,
@@ -311,7 +311,7 @@ impl PosterFrames {
 
     /// Cut every poster this episode's rows still owe, unless that is already
     /// done or under way. Called when a row scrolls into view.
-    pub(super) fn request(self, episode: &str) {
+    pub(super) fn request(self, episode: &EpisodeId) {
         let mut cache = self.cache;
         let Some(cut) = cache.cut.peek().clone() else {
             return;
@@ -319,7 +319,7 @@ impl PosterFrames {
         if !cut.targets.owes(episode) || cache.episodes.peek().contains_key(episode) {
             return;
         }
-        let episode = episode.to_owned();
+        let episode = episode.clone();
         cache
             .episodes
             .write()
@@ -381,7 +381,7 @@ pub(super) fn PosterFrame(row: SubtaskRow, frames: PosterFrames) -> Element {
         (&row, &frames),
         move |(row, frames): (SubtaskRow, PosterFrames)| frames.shown(&row),
     ));
-    let episode = row.episode().to_owned();
+    let episode = row.episode().clone();
     let shown = shown();
     let (state, picture, problem) = (
         shown.state(),
@@ -420,16 +420,17 @@ pub(super) fn PosterFrame(row: SubtaskRow, frames: PosterFrames) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spiral_robotics_common::datasets::EpisodeId;
 
-    fn row(episode: &str, start: f64, end: f64) -> SubtaskRow {
+    fn row(episode: EpisodeId, start: f64, end: f64) -> SubtaskRow {
         SubtaskRow::new("break_down_subtasks-1", episode, start, end, "fold").expect("a valid row")
     }
 
     #[test]
     fn only_a_row_without_a_poster_is_something_to_fetch() {
-        let waiting = row("ep-1", 4.0, 9.0);
+        let waiting = row(EpisodeId::fixture(1), 4.0, 9.0);
         let target = PosterTarget::of(&waiting).expect("a row without a poster is a target");
-        assert_eq!(target.episode, "ep-1");
+        assert_eq!(target.episode, EpisodeId::fixture(1));
         assert_eq!(target.moment, 6.5);
         assert_eq!(target.row, 4.0_f64.to_bits());
         assert_eq!(
@@ -440,21 +441,23 @@ mod tests {
 
     #[test]
     fn an_episode_whose_rows_arrived_with_their_posters_is_never_asked_for() {
-        let posted = |episode: &str, start: f64| {
-            row(episode, start, start + 2.0).with_poster("data:image/jpeg;base64,AAAA".to_owned())
+        let (measured, older) = (EpisodeId::fixture(1), EpisodeId::fixture(2));
+        let posted = |episode: &EpisodeId, start: f64| {
+            row(episode.clone(), start, start + 2.0)
+                .with_poster("data:image/jpeg;base64,AAAA".to_owned())
         };
         let targets = PosterTargets::of(&[
-            posted("measured", 0.0),
-            posted("measured", 4.0),
-            row("older", 0.0, 3.0),
-            row("older", 3.0, 8.0),
+            posted(&measured, 0.0),
+            posted(&measured, 4.0),
+            row(older.clone(), 0.0, 3.0),
+            row(older.clone(), 3.0, 8.0),
         ]);
-        assert!(!targets.owes("measured"));
-        assert!(targets.owes("older"));
-        assert!(targets.of_episode("measured").is_empty());
+        assert!(!targets.owes(&measured));
+        assert!(targets.owes(&older));
+        assert!(targets.of_episode(&measured).is_empty());
         assert_eq!(
             targets
-                .of_episode("older")
+                .of_episode(&older)
                 .iter()
                 .map(|target| target.moment)
                 .collect::<Vec<_>>(),
@@ -462,7 +465,7 @@ mod tests {
         );
         // A whole measurement carrying its posters has nothing to fetch.
         assert_eq!(
-            PosterTargets::of(&[posted("measured", 0.0)]),
+            PosterTargets::of(&[posted(&measured, 0.0)]),
             PosterTargets::default()
         );
     }
@@ -472,9 +475,9 @@ mod tests {
         // Rows are stored in time order and never overlap, so their middles
         // are in order too: the windows a poster query asks for never cross.
         let episode = [
-            row("ep-1", 0.0, 4.0),
-            row("ep-1", 4.0, 5.0),
-            row("ep-1", 5.0, 8.5),
+            row(EpisodeId::fixture(1), 0.0, 4.0),
+            row(EpisodeId::fixture(1), 4.0, 5.0),
+            row(EpisodeId::fixture(1), 5.0, 8.5),
         ];
         let moments = episode.iter().map(SubtaskRow::midpoint).collect::<Vec<_>>();
         assert!(moments.windows(2).all(|pair| pair[0] < pair[1]));

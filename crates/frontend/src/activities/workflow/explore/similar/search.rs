@@ -11,6 +11,7 @@ use super::decisions::DecisionRun;
 use super::questions::{QuestionBatch, SearchQuestions};
 use super::ranking::{RankedRow, SearchRanking};
 use super::source::ExplorationSource;
+use crate::activities::episode::Episode;
 use crate::activities::workflow::explore::document::{ExplorationNodeKind, SubtaskRow};
 use crate::activities::workflow::explore::poster::{PosterCut, PosterFrames};
 use crate::activities::workflow::explore::review::{
@@ -115,7 +116,7 @@ impl SearchOutcome {
             episodes,
             ranked.iter().map(|ranked| {
                 (
-                    rows.get(ranked.row()).map_or("", SubtaskRow::episode),
+                    rows.get(ranked.row()).map(SubtaskRow::episode),
                     ranked.probability(),
                 )
             }),
@@ -287,7 +288,7 @@ pub(in crate::activities::workflow::explore) fn SearchWorkspace(
         .map(|row| row.description().to_owned());
     let showing = chosen
         .and_then(|row| rows.get(row))
-        .map(|row| row.episode().to_owned());
+        .map(|row| row.episode().clone());
     // Once a ranking exists the coverage line counts the table; until then,
     // say what is waiting to be ranked.
     let waiting = (coverage.is_none() && progress.is_none() && !rows.is_empty())
@@ -373,7 +374,7 @@ pub(in crate::activities::workflow::explore) fn SearchWorkspace(
                                     key: "{rows[row].episode()}-{rows[row].start_time()}",
                                     row: rows[row].clone(),
                                     standing,
-                                    episode: context.name(rows[row].episode()),
+                                    episode: Episode::name_of(rows[row].episode()),
                                     frames,
                                     on_select: move |()| selected.set(Some(row)),
                                 }
@@ -394,7 +395,7 @@ pub(in crate::activities::workflow::explore) fn SearchWorkspace(
                                 on_open: {
                                     let focus = EpisodeFocus::new(
                                         annotation.clone(),
-                                        row.episode(),
+                                        row.episode().clone(),
                                         Some((row.start_time(), row.end_time())),
                                     );
                                     move |()| controller.focus_episode(focus.clone())

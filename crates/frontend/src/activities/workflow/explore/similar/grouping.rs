@@ -14,6 +14,7 @@ use super::coverage::{CoverageMeasure, CoverageStrip, EpisodeCoverage, SubtaskLi
 use super::decisions::DecisionRun;
 use super::questions::AssignmentQuestions;
 use super::source::ExplorationSource;
+use crate::activities::episode::Episode;
 use crate::activities::workflow::explore::document::{
     DEFAULT_ANNOTATION_MODEL, ExplorationNodeKind, SubtaskCategory, SubtaskGrouping, SubtaskRow,
 };
@@ -331,9 +332,9 @@ pub(in crate::activities::workflow::explore) fn GroupingWorkspace(
                         hue: 0,
                         coverage: EpisodeCoverage::of(
                             &measured,
-                            members
-                                .iter()
-                                .map(|(row, probability)| (rows[*row].episode(), *probability)),
+                            members.iter().map(|(row, probability)| {
+                                (Some(rows[*row].episode()), *probability)
+                            }),
                             CoverageMeasure::Members,
                         ),
                         representatives: members
@@ -385,7 +386,7 @@ pub(in crate::activities::workflow::explore) fn GroupingWorkspace(
     let chosen = selected_row();
     let showing = chosen
         .and_then(|row| rows.get(row))
-        .map(|row| row.episode().to_owned());
+        .map(|row| row.episode().clone());
     // An open category needs the height for its members and their footage, so
     // the card band steps back to one row of chips while one is open.
     let band = if open_card.is_some() {
@@ -508,7 +509,7 @@ pub(in crate::activities::workflow::explore) fn GroupingWorkspace(
                                     key: "{rows[row].episode()}-{rows[row].start_time()}",
                                     row: rows[row].clone(),
                                     standing: SubtaskStanding::scored(probability, true, chosen == Some(row)),
-                                    episode: context.name(rows[row].episode()),
+                                    episode: Episode::name_of(rows[row].episode()),
                                     frames,
                                     on_select: move |()| selected_row.set(Some(row)),
                                 }
@@ -529,7 +530,7 @@ pub(in crate::activities::workflow::explore) fn GroupingWorkspace(
                                 on_open: {
                                     let focus = EpisodeFocus::new(
                                         annotation.clone(),
-                                        row.episode(),
+                                        row.episode().clone(),
                                         Some((row.start_time(), row.end_time())),
                                     );
                                     move |()| controller.focus_episode(focus.clone())

@@ -9,6 +9,7 @@ use crate::activities::workflow::explore::document::SubtaskRow;
 use crate::format::ClockPresentation as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use spiral_robotics_common::datasets::EpisodeId;
 
 /// Everything one annotation call carries to the provider.
 pub(super) struct AnnotationCall {
@@ -174,7 +175,7 @@ impl SubtaskProposals {
     pub(super) fn into_rows(
         self,
         node: &str,
-        episode: &str,
+        episode: &EpisodeId,
         duration: f64,
     ) -> Result<Vec<SubtaskRow>, String> {
         let mut rows = Vec::with_capacity(self.proposals.len());
@@ -187,7 +188,7 @@ impl SubtaskProposals {
             }
             let row = SubtaskRow::new(
                 node,
-                episode,
+                episode.clone(),
                 proposal.start_time,
                 proposal.end_time,
                 proposal.description,
@@ -212,7 +213,11 @@ mod tests {
     use super::*;
 
     fn rows(answer: &str, duration: f64) -> Result<Vec<SubtaskRow>, String> {
-        SubtaskProposals::parse(answer)?.into_rows("break_down_subtasks-1", "ep-1", duration)
+        SubtaskProposals::parse(answer)?.into_rows(
+            "break_down_subtasks-1",
+            &EpisodeId::fixture(1),
+            duration,
+        )
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -293,7 +298,7 @@ mod tests {
         .unwrap();
         assert_eq!(annotated.len(), 2);
         assert_eq!(annotated[0].node(), "break_down_subtasks-1");
-        assert_eq!(annotated[0].episode(), "ep-1");
+        assert_eq!(annotated[0].episode(), &EpisodeId::fixture(1));
         assert_eq!(annotated[0].description(), "grasp the corners");
         assert_eq!(annotated[1].start_time(), 8.0);
         assert_eq!(annotated[1].duration(), 5.0);

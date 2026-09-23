@@ -135,14 +135,16 @@ impl TopicCoverage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datasets::{DatasetSelection, EpisodeTopicRequest, MessageWindow, TopicRevision};
+    use crate::datasets::{
+        DatasetSelection, EpisodeId, EpisodeTopicRequest, MessageWindow, TopicRevision,
+    };
 
     fn read(window: Option<MessageWindow>) -> MessageRead {
         let read = MessageRead::schema(
             EpisodeTopicRequest::new(
                 DatasetSelection::new(vec!["dataset_default".into()]).unwrap(),
                 "/joints".into(),
-                "01a0989fb65870a7a5459902f9e3e090".into(),
+                EpisodeId::try_from("01a0989fb65870a7a5459902f9e3e090").unwrap(),
             ),
             TopicRevision::new("variant".into()),
         );

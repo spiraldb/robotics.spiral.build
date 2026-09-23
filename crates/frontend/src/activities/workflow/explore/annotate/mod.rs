@@ -16,7 +16,7 @@ mod browser_tests;
 use super::document::{ExplorationNode, ExplorationNodeKind, SubtaskAnnotation, SubtaskRow};
 use super::poster::{PosterCut, PosterFrames};
 use super::rerun::ConfirmedRerun;
-use super::review::{EpisodeNames, NoSubtaskChosen, SubtaskContext, SubtaskReview};
+use super::review::{EpisodeOrder, NoSubtaskChosen, SubtaskContext, SubtaskReview};
 use super::state::ExplorationController;
 use crate::activities::data::DatasetClient;
 use crate::components::icons::SettingsIcon;
@@ -28,6 +28,7 @@ use native::NativeSheets;
 use output::{AnnotatedEpisode, AnnotationOutput, ChosenSubtask, EpisodeSubtasks, SubtaskIndex};
 use pipeline::{AnnotationPass, EPISODES_IN_FLIGHT, PassSettings};
 use provider::ProviderAnnotator;
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonVariant, Field, FieldLayout, Select, TextInput,
     TextInputKind,
@@ -163,7 +164,7 @@ pub(super) fn AnnotationWorkspace(controller: ExplorationController, node: Strin
             return;
         }
         let Some(camera) =
-            crate::activities::data::StreamCatalog::overview_camera(&cameras).map(str::to_owned)
+            crate::activities::episode::StreamCatalog::overview_camera(&cameras).map(str::to_owned)
         else {
             return;
         };
@@ -253,15 +254,15 @@ pub(super) fn AnnotationWorkspace(controller: ExplorationController, node: Strin
     let context = SubtaskContext::new(
         dataset.clone(),
         settings.camera().map(str::to_owned),
-        EpisodeNames::of(listed.iter().map(AnnotationEpisode::id)),
+        EpisodeOrder::of(listed.iter().map(AnnotationEpisode::id)),
     );
     let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
     let shown = chosen
         .episode()
-        .or_else(|| groups.first().map(|group| group.episode().to_owned()))
+        .or_else(|| groups.first().map(|group| group.episode().clone()))
         .and_then(|id| {
-            let episode = listed.iter().find(|episode| episode.id() == id)?.clone();
-            let subtasks = groups.iter().find(|group| group.episode() == id).cloned();
+            let episode = listed.iter().find(|episode| episode.id() == &id)?.clone();
+            let subtasks = groups.iter().find(|group| group.episode() == &id).cloned();
             Some((episode, subtasks))
         });
     let done = settings.completed_episodes().len();
@@ -281,11 +282,11 @@ pub(super) fn AnnotationWorkspace(controller: ExplorationController, node: Strin
     let retry = {
         let listed = listed.clone();
         let mut start = start.clone();
-        move |episode: String| {
+        move |episode: EpisodeId| {
             start(
                 listed
                     .iter()
-                    .filter(|candidate| candidate.id() == episode)
+                    .filter(|candidate| candidate.id() == &episode)
                     .cloned()
                     .collect(),
             );

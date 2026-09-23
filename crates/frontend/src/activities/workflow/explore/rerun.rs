@@ -13,10 +13,9 @@ use spiral_robotics_ui::{
 
 /// A quiet control that asks before it runs, naming what it would replace.
 ///
-/// It stays quieter than the action beside it — Run, or opening a category —
-/// because that one is what the operator came for and this one undoes work
-/// they have already paid for. A link where something louder already holds the
-/// region, an outline where the control would otherwise read as a warning.
+/// It is a link, quieter than the action beside it — Run, or opening a
+/// category — because that one is what the operator came for and this one
+/// undoes work they have already paid for.
 #[component]
 pub(super) fn ConfirmedRerun(
     /// Both the control's words and the confirming button's.
@@ -24,7 +23,6 @@ pub(super) fn ConfirmedRerun(
     /// What it would replace, in full, before it does it.
     question: String,
     id: String,
-    #[props(default = ButtonVariant::Link)] variant: ButtonVariant,
     #[props(default)] disabled: bool,
     on_confirm: EventHandler<()>,
 ) -> Element {
@@ -34,7 +32,7 @@ pub(super) fn ConfirmedRerun(
             Button {
                 id: "{id}",
                 purpose: ActionPurpose::Replace,
-                variant,
+                variant: ButtonVariant::Link,
                 disabled,
                 aria_expanded: asking(),
                 onclick: move |_| asking.toggle(),

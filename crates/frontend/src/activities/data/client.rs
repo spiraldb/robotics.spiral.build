@@ -10,7 +10,7 @@ pub(crate) struct DatasetClient {
     project: ProjectClient,
 }
 impl DatasetClient {
-    pub(super) fn robot(
+    pub(in crate::activities) fn robot(
         &self,
         selection: &DatasetSelection,
     ) -> impl Future<
@@ -150,7 +150,7 @@ impl DatasetClient {
     }
     /// The same episode query as one complete Arrow IPC stream, refused
     /// rather than cut short; the statement bounds its own rows.
-    pub(super) fn run_episode_arrow_query(
+    pub(in crate::activities) fn run_episode_arrow_query(
         &self,
         request: &EpisodeQueryRequest,
     ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {

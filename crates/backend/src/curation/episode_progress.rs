@@ -87,7 +87,7 @@ impl EpisodeProgress {
     ) -> Result<ProgressScoreResult, String> {
         let started = std::time::Instant::now();
         tracing::info!(
-            episode = request.episode().episode_id(),
+            episode = request.episode().episode_id().as_str(),
             frames = expected,
             "WARP episode review started"
         );
@@ -125,7 +125,7 @@ impl EpisodeProgress {
             );
         }
         tracing::info!(
-            episode = request.episode().episode_id(),
+            episode = request.episode().episode_id().as_str(),
             frames = frames.len(),
             elapsed_ms = started.elapsed().as_millis(),
             "WARP episode review completed"

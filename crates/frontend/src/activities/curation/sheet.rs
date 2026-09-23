@@ -17,11 +17,12 @@ use super::pipeline::{
     PipelineStage, StageKind, StageMark,
 };
 use super::state::{CurationController, SheetFilter, SheetOrder};
+use crate::activities::episode::{Episode, EpisodeFactsPresentation as _, EpisodeLabels};
 use crate::components::document_bar::ExecutedSql;
 use crate::components::icons::{CurationIcon, ResultNodeIcon, SpinnerIcon};
 use crate::components::run_strip::{RunChoice, RunDuration, RunStrip};
-use crate::format::ClockPresentation;
 use crate::shell::state::StudioProjectState;
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::SheetPosition;
 use spiral_robotics_ui::{
     ActionPurpose, ArrowDownIcon, ArrowUpIcon, BrowserFocus, Button, ButtonVariant, Chip, ChipTone,
@@ -172,19 +173,19 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
         }
         let selected = controller.selected_episode();
         if selected
-            .as_deref()
+            .as_ref()
             .and_then(|id| roster.position_of(id))
             .is_none()
         {
             controller.select_episode(
                 roster
                     .get(0)
-                    .map(|tile| tile.verdict().episode().id().to_owned()),
+                    .map(|tile| tile.verdict().episode().id().clone()),
             );
         }
     }));
-    let select = move |id: String| {
-        if !output_selected && controller.selected_episode().as_deref() == Some(id.as_str()) {
+    let select = move |id: EpisodeId| {
+        if !output_selected && controller.selected_episode().as_ref() == Some(&id) {
             controller.select_episode(None);
         } else {
             controller.select_episode(Some(id));
@@ -192,7 +193,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
         }
     };
     let open = selected
-        .as_deref()
+        .as_ref()
         .and_then(|id| roster.position_of(id))
         .map(|index| SheetPosition::new(index, roster.len()));
     rsx! {
@@ -317,7 +318,7 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                                         let roster = roster.clone();
                                         move |delta: isize| {
                                             if let Some(next) = position.stepped(delta).and_then(|next| roster.get(next.index())) {
-                                                controller.select_episode(Some(next.verdict().episode().id().to_owned()));
+                                                controller.select_episode(Some(next.verdict().episode().id().clone()));
                                             }
                                         }
                                     },
@@ -337,16 +338,16 @@ pub(super) fn SheetPanel(controller: CurationController) -> Element {
                                         let roster = roster.clone();
                                         move |delta: isize| {
                                             if let Some(next) = position.stepped(delta).and_then(|next| roster.get(next.index())) {
-                                                controller.select_episode(Some(next.verdict().episode().id().to_owned()));
+                                                controller.select_episode(Some(next.verdict().episode().id().clone()));
                                                 BrowserFocus::after_render(EPISODE_HEADING_ID.to_owned());
                                             }
                                         }
                                     },
                                     on_close: {
-                                        let ordinal = tile.ordinal();
+                                        let id = tile.verdict().episode().id().clone();
                                         move |_| {
                                             controller.select_episode(None);
-                                            BrowserFocus::after_render(SheetTile::element_id(ordinal));
+                                            BrowserFocus::after_render(SheetTile::element_id(&id));
                                         }
                                     },
                                 }
@@ -378,7 +379,7 @@ fn OutputDetail(
             },
             header { class: "ui-side-sheet-heading",
                 h3 {
-                    "Episode {tile.ordinal()}"
+                    "{Episode::name_of(tile.verdict().episode().id())}"
                     span { class: "ui-side-sheet-count", " · {position.index() + 1} of {position.count()} kept" }
                 }
                 div { class: "ui-side-sheet-nav", role: "group", "aria-label": "Step between kept episodes",
@@ -516,21 +517,21 @@ fn TransformStagePreview(
         }
         let selected = controller.selected_episode();
         if selected
-            .as_deref()
+            .as_ref()
             .and_then(|id| roster.position_of(id))
             .is_none()
         {
             controller.select_episode(
                 roster
                     .get(0)
-                    .map(|tile| tile.verdict().episode().id().to_owned()),
+                    .map(|tile| tile.verdict().episode().id().clone()),
             );
         }
     });
     let roster = roster.read();
     let selected = controller.selected_episode();
     let position = selected
-        .as_deref()
+        .as_ref()
         .and_then(|id| roster.position_of(id))
         .map(|index| SheetPosition::new(index, roster.len()));
     let step = {
@@ -540,7 +541,7 @@ fn TransformStagePreview(
                 .and_then(|position| position.stepped(delta))
                 .and_then(|next| roster.get(next.index()))
             {
-                controller.select_episode(Some(next.verdict().episode().id().to_owned()));
+                controller.select_episode(Some(next.verdict().episode().id().clone()));
             }
         }
     };
@@ -572,13 +573,17 @@ fn TransformStagePreview(
                         }
                         label { r#for: "curation-preview-episode", class: "sr-only", "Episode" }
                         Select { id: "curation-preview-episode", class: "run-select curation-episode-select",
-                            title: selected.clone().unwrap_or_default(),
-                            value: selected.clone().unwrap_or_default(),
-                            onchange: move |value| controller.select_episode(Some(value)),
+                            title: selected.as_ref().map(EpisodeId::to_string).unwrap_or_default(),
+                            value: selected.as_ref().map(EpisodeId::to_string).unwrap_or_default(),
+                            onchange: move |value: String| {
+                                if let Ok(id) = EpisodeId::try_from(value) {
+                                    controller.select_episode(Some(id));
+                                }
+                            },
                             for tile in &roster.tiles {
-                                option { key: "{tile.verdict().episode().id()}", value: tile.verdict().episode().id(),
-                                    selected: selected.as_deref() == Some(tile.verdict().episode().id()),
-                                    "{tile.ordinal()} · {tile.label()} · {tile.verdict().episode().duration_seconds().map_or_else(|| \"—\".into(), ClockPresentation::clock_label)}"
+                                option { key: "{tile.verdict().episode().id()}", value: tile.verdict().episode().id().as_str(),
+                                    selected: selected.as_ref() == Some(tile.verdict().episode().id()),
+                                    "…{tile.verdict().episode().id().short()} · {tile.label()} · {tile.verdict().episode().duration_label()}"
                                 }
                             }
                         }
@@ -662,15 +667,13 @@ impl Roster {
         let Some(outcome) = outcome else {
             return Self { tiles: Vec::new() };
         };
-        let labels = SheetLabels::new(outcome.verdicts());
+        let labels = EpisodeLabels::of(outcome.verdicts().iter().map(CurationVerdict::episode));
         let mut tiles = outcome
             .verdicts()
             .iter()
-            .enumerate()
-            .filter(|(_, verdict)| filter.admits(verdict.kept()))
-            .map(|(index, verdict)| SheetTile {
-                ordinal: index + 1,
-                label: labels.label(verdict),
+            .filter(|verdict| filter.admits(verdict.kept()))
+            .map(|verdict| SheetTile {
+                label: labels.label(verdict.episode()).head().to_owned(),
                 verdict: verdict.clone(),
             })
             .collect::<Vec<_>>();
@@ -709,49 +712,31 @@ impl Roster {
     fn get(&self, index: usize) -> Option<&SheetTile> {
         self.tiles.get(index)
     }
-    fn position_of(&self, episode_id: &str) -> Option<usize> {
+    fn position_of(&self, episode_id: &EpisodeId) -> Option<usize> {
         self.tiles
             .iter()
             .position(|tile| tile.verdict.episode().id() == episode_id)
     }
 }
 
-/// One episode as the sheet knows it: its place in the dataset, the words
-/// that tell it from its neighbours, and its verdict.
+/// One episode as the sheet knows it: the words that tell it from its
+/// neighbours, and its verdict.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SheetTile {
-    ordinal: usize,
     label: String,
     verdict: CurationVerdict,
 }
 
 impl SheetTile {
-    pub(super) const fn ordinal(&self) -> usize {
-        self.ordinal
-    }
     pub(super) fn label(&self) -> &str {
         &self.label
-    }
-    /// Whether the label is an identifier rather than words: it then keeps to
-    /// one mono line instead of wrapping like a task name. Hex digits and
-    /// separators make up nearly all of a UUID or a content hash; a task name
-    /// keeps its vowels and spaces.
-    fn label_is_identifier(&self) -> bool {
-        let coded = self
-            .label
-            .chars()
-            .filter(|character| {
-                character.is_ascii_hexdigit() || matches!(character, '-' | '_' | '.')
-            })
-            .count();
-        self.label.len() >= 16 && coded * 100 >= self.label.len() * 85
     }
     pub(super) const fn verdict(&self) -> &CurationVerdict {
         &self.verdict
     }
     /// The tile's own button, where focus returns when its evidence closes.
-    fn element_id(ordinal: usize) -> String {
-        format!("curation-tile-{ordinal}")
+    fn element_id(id: &EpisodeId) -> String {
+        format!("curation-tile-{id}")
     }
 }
 
@@ -761,7 +746,7 @@ fn TileGrid(
     judged: CurationSpec,
     focus: SheetFocus,
     filter: SheetFilter,
-    on_select: EventHandler<String>,
+    on_select: EventHandler<EpisodeId>,
 ) -> Element {
     if roster.len() == 0 {
         return rsx! {
@@ -808,7 +793,7 @@ fn TileGrid(
 struct SheetFocus {
     lens: Option<CurationFact>,
     hovered_rule: Option<String>,
-    open_episode: Option<String>,
+    open_episode: Option<EpisodeId>,
     stage_rule: Option<String>,
 }
 
@@ -964,7 +949,7 @@ impl TileLook {
             facts,
             fill,
             highlight: TileHighlight::for_rule(context.focus.hovered_rule.as_deref(), verdict),
-            selected: context.focus.open_episode.as_deref() == Some(verdict.episode().id()),
+            selected: context.focus.open_episode.as_ref() == Some(verdict.episode().id()),
         }
     }
 }
@@ -974,19 +959,17 @@ fn EpisodeTile(
     tile: SheetTile,
     look: TileLook,
     position: usize,
-    on_select: EventHandler<String>,
+    on_select: EventHandler<EpisodeId>,
 ) -> Element {
     let episode = tile.verdict.episode();
-    let id = episode.id().to_owned();
-    let duration = episode
-        .duration_seconds()
-        .map_or_else(|| "—".to_owned(), ClockPresentation::clock_label);
+    let id = episode.id().clone();
+    let duration = episode.duration_label();
     // Every measured fact and every reason travels in the tooltip; the tile
     // itself prints one so the whole dataset stays on one sheet.
     let mut detail = vec![
         episode
             .source_uri()
-            .map_or_else(|| id.clone(), str::to_owned),
+            .map_or_else(|| id.to_string(), str::to_owned),
     ];
     detail.extend(
         look.facts
@@ -1015,13 +998,13 @@ fn EpisodeTile(
                 purpose: ActionPurpose::Select,
                 variant: ButtonVariant::Quiet,
                 class: "curation-tile-face",
-                id: SheetTile::element_id(tile.ordinal),
+                id: SheetTile::element_id(episode.id()),
                 aria_pressed: look.selected,
                 title: "{title}",
                 onclick: move |_| on_select.call(id.clone()),
                 div { class: "curation-tile-head",
-                    span { class: "curation-tile-ordinal", "{tile.ordinal}" }
-                    span { class: "curation-tile-name", "data-identifier": tile.label_is_identifier(), "{tile.label}" }
+                    span { class: "curation-tile-id", "…{episode.id().short()}" }
+                    span { class: "curation-tile-name", "{tile.label}" }
                 }
                 div { class: "curation-tile-line",
                     span { class: "curation-tile-clock", "{duration}" }
@@ -1052,51 +1035,6 @@ fn SheetSkeleton() -> Element {
             for index in 0..8 {
                 li { class: "curation-tile is-skeleton", style: "--tile: {index}" }
             }
-        }
-    }
-}
-
-/// The part of each source path that differs between episodes.
-struct SheetLabels {
-    shared_prefix: usize,
-}
-
-impl SheetLabels {
-    fn new(verdicts: &[CurationVerdict]) -> Self {
-        let mut uris = verdicts
-            .iter()
-            .filter_map(|verdict| verdict.episode().source_uri());
-        let Some(first) = uris.next() else {
-            return Self { shared_prefix: 0 };
-        };
-        let mut shared = first.len();
-        for uri in uris {
-            shared = shared.min(
-                first
-                    .bytes()
-                    .zip(uri.bytes())
-                    .take_while(|(left, right)| left == right)
-                    .count(),
-            );
-        }
-        // Cut back to a directory boundary so a label never starts mid-word.
-        let shared_prefix = first[..shared].rfind('/').map_or(0, |slash| slash + 1);
-        Self { shared_prefix }
-    }
-    /// The first distinguishing path segment, else the file name.
-    fn label(&self, verdict: &CurationVerdict) -> String {
-        let episode = verdict.episode();
-        let relative = episode
-            .source_uri()
-            .and_then(|uri| uri.get(self.shared_prefix..))
-            .filter(|relative| !relative.is_empty());
-        match relative {
-            Some(relative) => relative
-                .split('/')
-                .find(|segment| !segment.is_empty())
-                .unwrap_or(relative)
-                .replace('_', " "),
-            None => episode.file_name().to_owned(),
         }
     }
 }
@@ -1173,27 +1111,17 @@ mod tests {
     use spiral_robotics_common::curation::facts::{CurationFact, FactMeasure};
     use spiral_robotics_common::curation::run::{CurationTotals, EpisodeFacts};
 
-    fn verdict(uri: &str) -> CurationVerdict {
-        let episode: EpisodeFacts =
-            serde_json::from_value(serde_json::json!({"id": uri, "source_uri": uri})).unwrap();
+    /// A verdict for the fixture episode `ordinal`, recorded at `uri`.
+    fn verdict(ordinal: u32, uri: &str) -> CurationVerdict {
+        let episode: EpisodeFacts = serde_json::from_value(serde_json::json!({
+            "id": EpisodeId::fixture(ordinal), "source_uri": uri,
+        }))
+        .unwrap();
         CurationVerdict::new(episode)
     }
 
-    fn judged(uri: &str, brightness: f64) -> CurationVerdict {
-        verdict(uri).with_fact("brightness", serde_json::json!(brightness))
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn tile_labels_are_the_distinguishing_directory_with_words_not_underscores() {
-        let verdicts = vec![
-            verdict("hf://d/data/val/fold_and_stack_the_skirts/episode_a/episode.fo.mcap"),
-            verdict("hf://d/data/val/place_the_fruits/episode_b/episode.fo.mcap"),
-        ];
-        let labels = SheetLabels::new(&verdicts);
-        assert_eq!(labels.label(&verdicts[0]), "fold and stack the skirts");
-        assert_eq!(labels.label(&verdicts[1]), "place the fruits");
-        let single = vec![verdict("file:///runs/take-7.mcap")];
-        assert_eq!(SheetLabels::new(&single).label(&single[0]), "take-7.mcap");
+    fn judged(ordinal: u32, uri: &str, brightness: f64) -> CurationVerdict {
+        verdict(ordinal, uri).with_fact("brightness", serde_json::json!(brightness))
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -1211,13 +1139,13 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn the_roster_keeps_dataset_ordinals_while_ordering_by_the_lens() {
+    fn the_roster_keeps_each_tiles_id_while_ordering_by_the_lens() {
         let outcome = CurationOutcome::new(
             CurationTotals::new(3, 3, (3, false)),
             vec![
-                judged("hf://d/a/episode.mcap", 0.5),
-                judged("hf://d/b/episode.mcap", 0.1),
-                verdict("hf://d/c/episode.mcap"),
+                judged(1, "hf://d/a/episode.mcap", 0.5),
+                judged(2, "hf://d/b/episode.mcap", 0.1),
+                verdict(3, "hf://d/c/episode.mcap"),
             ],
         );
         let lens = CurationFact::new(
@@ -1228,33 +1156,25 @@ mod tests {
                 value: FactKind::Number,
             },
         );
-        let recorded = Roster::new(
-            Some(&outcome),
-            SheetFilter::All,
-            Some(&lens),
-            SheetOrder::Recorded,
-        );
-        assert_eq!(
-            recorded
+        let ids = |order: SheetOrder| {
+            Roster::new(Some(&outcome), SheetFilter::All, Some(&lens), order)
                 .tiles
                 .iter()
-                .map(SheetTile::ordinal)
-                .collect::<Vec<_>>(),
-            [1, 2, 3]
-        );
-        let ascending = Roster::new(
-            Some(&outcome),
-            SheetFilter::All,
-            Some(&lens),
-            SheetOrder::Ascending,
+                .map(|tile| tile.verdict().episode().id().clone())
+                .collect::<Vec<_>>()
+        };
+        let [first, second, third] = [1, 2, 3].map(EpisodeId::fixture);
+        assert_eq!(
+            ids(SheetOrder::Recorded),
+            [first.clone(), second.clone(), third.clone()]
         );
         assert_eq!(
-            ascending
-                .tiles
-                .iter()
-                .map(SheetTile::ordinal)
-                .collect::<Vec<_>>(),
-            [2, 1, 3]
+            ids(SheetOrder::Ascending),
+            [second.clone(), first.clone(), third.clone()]
+        );
+        assert_eq!(
+            ids(SheetOrder::Descending),
+            [first.clone(), second.clone(), third]
         );
         let descending = Roster::new(
             Some(&outcome),
@@ -1262,15 +1182,10 @@ mod tests {
             Some(&lens),
             SheetOrder::Descending,
         );
+        assert_eq!(descending.position_of(&second), Some(1));
         assert_eq!(
-            descending
-                .tiles
-                .iter()
-                .map(SheetTile::ordinal)
-                .collect::<Vec<_>>(),
-            [1, 2, 3]
+            SheetTile::element_id(&first),
+            "curation-tile-00000000000000000000000000000001"
         );
-        assert_eq!(descending.position_of("hf://d/b/episode.mcap"), Some(1));
-        assert_eq!(SheetTile::element_id(7), "curation-tile-7");
     }
 }

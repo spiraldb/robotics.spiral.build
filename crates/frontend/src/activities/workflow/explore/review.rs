@@ -9,27 +9,15 @@
 //! moves, and the row the operator chose is always beside its own footage.
 use super::document::SubtaskRow;
 use super::poster::{PosterFrame, PosterFrames};
-use crate::activities::data::{
-    DatasetClient, EpisodeInspection, EpisodeTransport, FeaturedCamera, OpenedEpisode,
-};
+use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
 use crate::components::timeline::{IntervalTrack, TimelineInterval};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeSelection};
-use spiral_robotics_common::relations::EpisodeQueryRequest;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, EmptyState, Notice, NoticeTone,
 };
 use std::fmt::{Display, Formatter, Result as FormatResult};
-
-/// A subtask plays to its own end and a moment past it, so the operator sees
-/// the motion leave the interval rather than being cut off inside it.
-///
-/// There is deliberately no lead-in. The playhead landing half a second before
-/// the row it was asked for put the cursor outside the highlight that marks
-/// the same interval, and every reading of the clock was then half a second
-/// wrong in a view whose whole product is where a subtask starts.
-pub(super) const RUN_OUT_SECONDS: f64 = 0.5;
 
 /// A count with the noun a person would say beside it: "1 episode",
 /// "12 episodes".
@@ -72,75 +60,53 @@ impl Noun {
     const CATEGORY: Self = Self("category", "categories");
 }
 
-/// Episode numbers as the operator counts them.
+/// The order an index lists episodes in: the order they were measured, each
+/// at its first sight so the rows of one episode stay together.
 ///
-/// A UUID is not a name. Explore lists recordings in recording order everywhere,
-/// so a row reads "Episode 7" and keeps its identifier in the tooltip for the
-/// one moment somebody needs to paste it.
+/// What an episode is called never depends on this order. Its name is its id,
+/// so a recording reads the same here as in Data and Curation however the
+/// measurement ran — retried, stopped, or partly failed.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct EpisodeNames(Vec<String>);
+pub(super) struct EpisodeOrder(Vec<EpisodeId>);
 
-impl EpisodeNames {
-    /// The episodes in the order they were measured, keeping the first sight
-    /// of each so repeated rows of one episode all read the same number.
-    pub(super) fn of<'a>(episodes: impl Iterator<Item = &'a str>) -> Self {
-        let mut ordered = Vec::<String>::new();
+impl EpisodeOrder {
+    pub(super) fn of<'a>(episodes: impl Iterator<Item = &'a EpisodeId>) -> Self {
+        let mut ordered = Vec::<EpisodeId>::new();
         for episode in episodes {
-            if !ordered.iter().any(|seen| seen == episode) {
-                ordered.push(episode.to_owned());
+            if !ordered.contains(episode) {
+                ordered.push(episode.clone());
             }
         }
         Self(ordered)
     }
-    /// Where an episode falls in numbering order. One this index never saw
-    /// sorts after every numbered episode, where its name already puts it.
-    pub(super) fn place(&self, episode: &str) -> usize {
+    /// Where an episode falls. One this index never saw sorts after the rest.
+    pub(super) fn place(&self, episode: &EpisodeId) -> usize {
         self.0
             .iter()
             .position(|seen| seen == episode)
             .unwrap_or(self.0.len())
     }
-    /// What to call one episode. An episode this index never saw keeps the
-    /// *tail* of its identifier rather than a number that would mean nothing:
-    /// these are time-ordered ULIDs, so every recording of one dataset shares
-    /// its head and only the tail tells them apart.
-    pub(super) fn name(&self, episode: &str) -> String {
-        match self.0.iter().position(|seen| seen == episode) {
-            Some(index) => format!("Episode {}", index + 1),
-            None => format!(
-                "…{}",
-                episode
-                    .chars()
-                    .rev()
-                    .take(6)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            ),
-        }
-    }
 }
 
 /// What a view needs to show any row of a measurement: where the recordings
-/// live, which camera the measurement read, and what the episodes are called.
+/// live, which camera the measurement read, and the order episodes list in.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct SubtaskContext {
     dataset: Option<DatasetSelection>,
     camera: Option<String>,
-    names: EpisodeNames,
+    order: EpisodeOrder,
 }
 
 impl SubtaskContext {
     pub(super) fn new(
         dataset: Option<DatasetSelection>,
         camera: Option<String>,
-        names: EpisodeNames,
+        order: EpisodeOrder,
     ) -> Self {
         Self {
             dataset,
             camera,
-            names,
+            order,
         }
     }
     pub(super) fn dataset(&self) -> Option<&DatasetSelection> {
@@ -149,11 +115,8 @@ impl SubtaskContext {
     pub(super) fn camera(&self) -> Option<&str> {
         self.camera.as_deref()
     }
-    pub(super) fn name(&self, episode: &str) -> String {
-        self.names.name(episode)
-    }
-    pub(super) fn place(&self, episode: &str) -> usize {
-        self.names.place(episode)
+    pub(super) fn place(&self, episode: &EpisodeId) -> usize {
+        self.order.place(episode)
     }
 }
 
@@ -362,17 +325,14 @@ pub(super) fn SubtaskEvidence(
             }
         };
     };
-    let episode = row.episode().to_owned();
-    let opened = use_resource(use_reactive(
-        (&dataset, &episode),
-        move |(dataset, episode)| async move { open_episode(dataset, episode).await },
-    ));
+    let selection = EpisodeSelection::new(dataset, row.episode().clone());
+    let opened = use_resource(use_reactive(&selection, Episode::open));
     let span = (row.start_time(), row.end_time());
     rsx! {
         header { class: "explore-review-head",
             p { class: "explore-review-subject", "{row.description()}" }
             p { class: "explore-review-facts",
-                span { "{context.name(row.episode())}" }
+                span { "{Episode::name_of(row.episode())}" }
                 span { "{span.0.clock_label()} – {span.1.clock_label()}" }
                 code { class: "explore-review-id", "{row.episode()}" }
                 Button {
@@ -388,14 +348,11 @@ pub(super) fn SubtaskEvidence(
         match opened.read().as_ref() {
             Some(Ok(episode)) => rsx! {
                 div { class: "explore-review-player",
-                    PlayedEpisode {
-                        key: "{episode.title()}",
+                    EpisodeInspection {
                         episode: episode.clone(),
-                        slice: Some(MeasuredSlice {
-                            span,
-                            camera: context.camera().map(str::to_owned),
-                            subtasks: SubtaskIntervals::of(&row, &episode_rows),
-                        }),
+                        featured_camera: FeaturedCamera::measured(context.camera()),
+                        tracks: vec![SubtaskIntervals::around(&row, &episode_rows).track().into()],
+                        focus: Some(PlayRequest::new(span)),
                     }
                 }
             },
@@ -417,15 +374,8 @@ pub(super) fn SubtaskEvidence(
 pub(super) struct SubtaskIntervals(Vec<TimelineInterval>);
 
 impl SubtaskIntervals {
-    /// The episode's rows when the caller has them, and the chosen row alone
-    /// when it does not — never an empty strip under a row that plainly has
-    /// an interval.
-    fn of(chosen: &SubtaskRow, episode_rows: &[SubtaskRow]) -> Self {
-        let rows = if episode_rows.is_empty() {
-            std::slice::from_ref(chosen)
-        } else {
-            episode_rows
-        };
+    /// Every row one measurement wrote for one episode.
+    pub(super) fn of(rows: &[SubtaskRow]) -> Self {
         Self(
             rows.iter()
                 .map(|row| {
@@ -434,69 +384,19 @@ impl SubtaskIntervals {
                 .collect(),
         )
     }
+    /// The episode's rows when the caller has them, and the chosen row alone
+    /// when it does not — never an empty strip under a row that plainly has
+    /// an interval.
+    fn around(chosen: &SubtaskRow, episode_rows: &[SubtaskRow]) -> Self {
+        if episode_rows.is_empty() {
+            Self::of(std::slice::from_ref(chosen))
+        } else {
+            Self::of(episode_rows)
+        }
+    }
     /// One labelled row of the shared timeline.
     pub(super) fn track(&self) -> IntervalTrack {
         IntervalTrack::new("explore-subtasks", "Subtasks", self.0.clone())
-    }
-}
-
-/// The slice of a recording the evidence column plays: where it starts and
-/// ends, the camera the measurement read it from, and the measurement's own
-/// intervals for that episode.
-#[derive(Clone, PartialEq)]
-pub(super) struct MeasuredSlice {
-    span: (f64, f64),
-    camera: Option<String>,
-    subtasks: SubtaskIntervals,
-}
-
-/// One recording on the shared player, which is how every surface in Explore
-/// shows an episode: the dataset node watching one, and every measurement's
-/// evidence column showing the row it was asked about.
-///
-/// What a measurement adds is a slice — where the playhead lands, which camera
-/// leads, and the measurement's own intervals as a track under the recording.
-/// Seeking follows the slice, so choosing another row moves the playhead
-/// without remaking the player.
-#[component]
-pub(super) fn PlayedEpisode(
-    episode: OpenedEpisode,
-    /// What a measurement is showing in this recording. A caller simply
-    /// watching the episode leaves it out: the whole recording, every camera
-    /// it holds, no track.
-    #[props(default)]
-    slice: Option<MeasuredSlice>,
-    /// Which camera leads when no measurement names one, such as the camera
-    /// the exploration is configured on.
-    #[props(default)]
-    featured_camera: FeaturedCamera,
-) -> Element {
-    let transport = EpisodeTransport::use_opened_episode(&episode);
-    let mut playing = transport.clone();
-    let span = slice.as_ref().map(|slice| slice.span);
-    use_effect(use_reactive(&span, move |span| {
-        if let Some((start, end)) = span {
-            playing.play_interval(start, end + RUN_OUT_SECONDS);
-        }
-    }));
-    let activated = transport.clone();
-    let track = slice
-        .as_ref()
-        .map(|slice| slice.subtasks.track())
-        .filter(|track| !track.is_empty());
-    rsx! {
-        EpisodeInspection {
-            episode,
-            transport,
-            featured_camera: slice
-                .and_then(|slice| slice.camera)
-                .map_or(featured_camera, FeaturedCamera::Named),
-            span_tracks: track.map(|track| vec![track]).unwrap_or_default(),
-            on_interval: move |interval: TimelineInterval| {
-                let (start, end) = interval.span();
-                activated.clone().play_interval(start, end + RUN_OUT_SECONDS);
-            },
-        }
     }
 }
 
@@ -509,43 +409,17 @@ pub(super) fn NoSubtaskChosen(prompt: String) -> Element {
     }
 }
 
-/// The episode identity the shared player needs, read for one episode.
-async fn open_episode(dataset: DatasetSelection, episode: String) -> Result<OpenedEpisode, String> {
-    let sql = format!(
-        "SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, \
-         message_start_time, message_end_time, duration_ns, channel_count \
-         FROM spql.mcap.episodes('{}') WHERE id = $1",
-        dataset.sql_name().replace('\'', "''")
-    );
-    let request = EpisodeQueryRequest::new(EpisodeSelection::new(dataset.clone(), episode), sql, 1);
-    let row = DatasetClient::current()
-        .run_episode_query(&request)
-        .await
-        .map_err(|error| error.to_string())?
-        .into_rows()
-        .into_iter()
-        .next()
-        .ok_or("This subtask's episode is no longer in the dataset.")?;
-    OpenedEpisode::from_row(dataset, row)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn episodes_are_numbered_in_the_order_they_were_measured() {
-        let names = EpisodeNames::of(["ep-a", "ep-a", "ep-b", "ep-a"].into_iter());
-        assert_eq!(names.name("ep-a"), "Episode 1");
-        assert_eq!(names.name("ep-b"), "Episode 2");
-    }
-
-    #[test]
-    fn an_episode_outside_the_index_keeps_the_tail_of_its_identifier() {
-        // Every recording of one dataset shares the head of its ULID, so the
-        // head names nothing; the tail is what differs.
-        let names = EpisodeNames::of(["ep-a"].into_iter());
-        assert_eq!(names.name("01a0989fb65870a7"), "…5870a7");
+    fn episodes_list_in_the_order_they_were_measured_and_unseen_ones_last() {
+        let [first, second, unseen] = [3, 1, 2].map(EpisodeId::fixture);
+        let order = EpisodeOrder::of([&first, &first, &second, &first].into_iter());
+        assert_eq!(order.place(&first), 0);
+        assert_eq!(order.place(&second), 1);
+        assert_eq!(order.place(&unseen), 2);
     }
 
     #[test]

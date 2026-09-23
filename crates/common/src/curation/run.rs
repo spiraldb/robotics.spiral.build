@@ -1,5 +1,6 @@
 //! One judged pass over a dataset: which episodes stayed, which left, and why.
 use super::CurationSpec;
+use crate::datasets::EpisodeId;
 use crate::runs::RunPhase;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -133,9 +134,9 @@ impl CurationTotals {
 }
 
 /// The episode statistics every verdict carries, straight from the roster.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeFacts {
-    id: String,
+    id: EpisodeId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,7 +152,7 @@ pub struct EpisodeFacts {
 }
 
 impl EpisodeFacts {
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> &EpisodeId {
         &self.id
     }
     pub fn source_uri(&self) -> Option<&str> {
@@ -181,13 +182,13 @@ impl EpisodeFacts {
             .as_deref()
             .and_then(|uri| uri.rsplit('/').next())
             .filter(|name| !name.is_empty())
-            .unwrap_or(&self.id)
+            .unwrap_or(self.id.as_str())
     }
 }
 
 /// One episode's judgement: its facts, the rules that fired, and the
 /// transforms it would receive.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CurationVerdict {
     episode: EpisodeFacts,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -204,7 +205,10 @@ impl CurationVerdict {
     pub fn new(episode: EpisodeFacts) -> Self {
         Self {
             episode,
-            ..Self::default()
+            facts: BTreeMap::new(),
+            excluded_by: Vec::new(),
+            transforms: Vec::new(),
+            eligible_transforms: Vec::new(),
         }
     }
     pub fn with_fact(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
@@ -343,7 +347,7 @@ pub struct CurationStageImpact {
     #[serde(default)]
     affected_episodes: Option<u64>,
     #[serde(default)]
-    scored_episode_ids: Option<Vec<String>>,
+    scored_episode_ids: Option<Vec<EpisodeId>>,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct StageTimeImpact {
@@ -388,7 +392,7 @@ impl CurationStageImpact {
     pub fn scored_episodes(&self) -> Option<u64> {
         self.scored_episode_ids.as_ref().map(|ids| ids.len() as u64)
     }
-    pub fn set_scored_episode_ids(&mut self, ids: Vec<String>) {
+    pub fn set_scored_episode_ids(&mut self, ids: Vec<EpisodeId>) {
         self.scored_episode_ids = Some(ids);
     }
     pub fn set_time(&mut self, retained_ns: u64, excluded_ns: u64) {

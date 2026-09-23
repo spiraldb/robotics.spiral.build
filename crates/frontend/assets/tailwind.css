@@ -6219,14 +6219,14 @@
 }
 .data-episode .ui-tree-label {
   display: grid;
-  grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+  grid-template-columns: 3.5rem minmax(0, 1fr) auto;
   align-items: baseline;
   column-gap: 8px;
   padding-block: 4px;
   color: var(--tone-ink);
   font-weight: 400;
 }
-.data-episode .ui-tree-label[aria-pressed="true"] .data-episode-ordinal {
+.data-episode .ui-tree-label[aria-pressed="true"] .data-episode-id {
   color: var(--tone-accent);
 }
 .rollout-metric-strip > .rollout-metric {
@@ -6332,8 +6332,7 @@
     --tw-numeric-spacing: tabular-nums;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
   }
-  .data-episode-ordinal {
-    text-align: right;
+  .data-episode-id {
     font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
     font-size: 10px;
     color: var(--tone-ink-faint);
@@ -7382,7 +7381,7 @@
     align-items: baseline;
     gap: calc(var(--spacing) * 1.5);
   }
-  .curation-tile-ordinal {
+  .curation-tile-id {
     flex-shrink: 0;
     font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
     font-size: 11px;
@@ -7391,7 +7390,6 @@
     color: var(--tone-ink-soft);
     --tw-numeric-spacing: tabular-nums;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
-    min-width: 2ch;
   }
   .curation-tile-name {
     min-width: 0px;
@@ -8158,23 +8156,6 @@
 }
 .curation-histogram-legend i.is-excluded {
   background: var(--stage-tone);
-}
-.curation-tile-name[data-identifier="true"] {
-  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
-  font-size: 10px;
-  --tw-leading: calc(var(--spacing) * 4);
-  line-height: calc(var(--spacing) * 4);
-  --tw-font-weight: var(--font-weight-normal);
-  font-weight: var(--font-weight-normal);
-  color: var(--tone-ink-soft);
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  -webkit-line-clamp: unset;
-}
-.curation-tile[data-kept="false"] .curation-tile-name[data-identifier="true"] {
-  color: var(--tone-ink-faint);
 }
 .curation-source-section[data-selected="true"] {
   outline: 1px solid var(--tone-accent);

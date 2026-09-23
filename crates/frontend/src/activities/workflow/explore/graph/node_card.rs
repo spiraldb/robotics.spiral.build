@@ -174,6 +174,7 @@ impl ExploreNodeCard {
 mod tests {
     use super::super::super::document::{SubtaskAnnotation, SubtaskRow, SubtaskSearch};
     use super::*;
+    use spiral_robotics_common::datasets::EpisodeId;
 
     fn card<'a>(cards: &'a [ExploreNodeCard], id: &str) -> &'a ExploreNodeCard {
         cards.iter().find(|card| card.id() == id).expect("card")
@@ -209,8 +210,8 @@ mod tests {
         payload
             .replace_episode_subtasks(
                 &annotate,
-                "ep-1",
-                vec![SubtaskRow::new(&annotate, "ep-1", 0.0, 8.0, "grasp").unwrap()],
+                &EpisodeId::fixture(1),
+                vec![SubtaskRow::new(&annotate, EpisodeId::fixture(1), 0.0, 8.0, "grasp").unwrap()],
             )
             .unwrap();
         let search = payload

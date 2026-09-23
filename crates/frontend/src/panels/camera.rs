@@ -268,7 +268,7 @@ fn CameraFrameCanvas(
     label: String,
     element_id: String,
 ) -> Element {
-    use crate::activities::data::episode_decoder::{DecodedGroup, EncodedCamera};
+    use crate::activities::episode::{DecodedGroup, EncodedCamera};
     use std::rc::Rc;
     let encoded = use_hook(|| Rc::new(EncodedCamera::new(&source, 0)));
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);

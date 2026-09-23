@@ -1,15 +1,15 @@
 //! What one annotation node produced: the index of intervals it wrote, and
 //! the episode one of them belongs to, playing beside it.
 use super::episodes::AnnotationEpisode;
-use crate::activities::data::{EpisodeInspection, EpisodeTransport, FeaturedCamera};
+use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
 use crate::activities::workflow::explore::document::{EpisodeFailure, SubtaskRow};
 use crate::activities::workflow::explore::poster::PosterFrames;
 use crate::activities::workflow::explore::review::{
-    Counted, RUN_OUT_SECONDS, SubtaskContext, SubtaskEntry, SubtaskStanding,
+    Counted, SubtaskContext, SubtaskEntry, SubtaskIntervals, SubtaskStanding,
 };
-use crate::components::timeline::{IntervalTrack, TimelineInterval};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonSize, ButtonVariant, Select, TextInput,
     TextInputKind,
@@ -18,7 +18,7 @@ use spiral_robotics_ui::{
 /// One episode's rows, in time order.
 #[derive(Clone, PartialEq)]
 pub(super) struct EpisodeSubtasks {
-    episode: String,
+    episode: EpisodeId,
     rows: Vec<SubtaskRow>,
 }
 
@@ -30,11 +30,11 @@ impl EpisodeSubtasks {
         for row in rows {
             match grouped
                 .iter_mut()
-                .find(|group| group.episode == row.episode())
+                .find(|group| &group.episode == row.episode())
             {
                 Some(group) => group.rows.push(row),
                 None => grouped.push(Self {
-                    episode: row.episode().to_owned(),
+                    episode: row.episode().clone(),
                     rows: vec![row],
                 }),
             }
@@ -42,13 +42,13 @@ impl EpisodeSubtasks {
         grouped
     }
     /// An episode the node has no rows for, so the player still opens.
-    pub(super) fn none(episode: &str) -> Self {
+    pub(super) fn none(episode: &EpisodeId) -> Self {
         Self {
-            episode: episode.to_owned(),
+            episode: episode.clone(),
             rows: Vec::new(),
         }
     }
-    pub(super) fn episode(&self) -> &str {
+    pub(super) fn episode(&self) -> &EpisodeId {
         &self.episode
     }
     pub(super) fn rows(&self) -> &[SubtaskRow] {
@@ -73,31 +73,6 @@ impl EpisodeSubtasks {
     fn chosen_row(&self, chosen: &ChosenSubtask) -> Option<&SubtaskRow> {
         self.rows.iter().find(|row| chosen.holds(row))
     }
-    /// The subtasks as one labeled timeline row.
-    fn track(&self) -> IntervalTrack {
-        IntervalTrack::new(
-            "explore-annotate-subtasks",
-            "Subtasks",
-            self.rows
-                .iter()
-                .map(|row| {
-                    TimelineInterval::labeled(row.start_time(), row.end_time(), row.description())
-                })
-                .collect(),
-        )
-    }
-}
-
-/// One ask to play an interval, and which ask it is.
-///
-/// The count is what makes two asks different values. An interval alone made
-/// pressing the same row twice indistinguishable from pressing it once, and
-/// the player — which only ever reacts to a change — sat still the second
-/// time.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct PlayRequest {
-    interval: (f64, f64),
-    asked: usize,
 }
 
 /// Which interval the operator is looking at: the episode its player shows,
@@ -107,7 +82,7 @@ struct PlayRequest {
 /// never disagree about what is on screen.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct ChosenSubtask {
-    episode: Signal<Option<String>>,
+    episode: Signal<Option<EpisodeId>>,
     /// The chosen row's start time, which is what identifies a row within its
     /// episode everywhere else in Explore.
     start: Signal<Option<f64>>,
@@ -123,26 +98,26 @@ impl ChosenSubtask {
             play: use_signal(|| None),
         }
     }
-    pub(super) fn episode(&self) -> Option<String> {
+    pub(super) fn episode(&self) -> Option<EpisodeId> {
         self.episode.read().clone()
     }
     /// Show one whole episode without playing any particular interval, as the
     /// index does when its heading is pressed. The pending ask goes with it,
     /// so opening an episode never replays the interval of the last one.
-    pub(super) fn show(mut self, episode: &str) {
-        self.episode.set(Some(episode.to_owned()));
+    pub(super) fn show(mut self, episode: &EpisodeId) {
+        self.episode.set(Some(episode.clone()));
         self.start.set(None);
         self.play.set(None);
     }
     /// Show one row and play it.
     pub(super) fn play_row(mut self, row: &SubtaskRow) {
-        self.episode.set(Some(row.episode().to_owned()));
+        self.episode.set(Some(row.episode().clone()));
         self.start.set(Some(row.start_time()));
         self.ask((row.start_time(), row.end_time()));
     }
     /// Show an episode and, when an exploration named one, its interval.
-    pub(super) fn focus(mut self, episode: &str, interval: Option<(f64, f64)>) {
-        self.episode.set(Some(episode.to_owned()));
+    pub(super) fn focus(mut self, episode: &EpisodeId, interval: Option<(f64, f64)>) {
+        self.episode.set(Some(episode.clone()));
         self.start.set(interval.map(|(start, _)| start));
         match interval {
             Some(interval) => self.ask(interval),
@@ -150,11 +125,11 @@ impl ChosenSubtask {
         }
     }
     fn ask(mut self, interval: (f64, f64)) {
-        let asked = self.play.peek().as_ref().map_or(0, |last| last.asked + 1);
-        self.play.set(Some(PlayRequest { interval, asked }));
+        let next = PlayRequest::after(*self.play.peek(), interval);
+        self.play.set(Some(next));
     }
     fn holds(&self, row: &SubtaskRow) -> bool {
-        self.episode.read().as_deref() == Some(row.episode())
+        self.episode.read().as_ref() == Some(row.episode())
             && *self.start.read() == Some(row.start_time())
     }
     /// Whether no row at all is chosen, in which case the index's first row
@@ -186,8 +161,8 @@ pub(super) struct AnnotationOutput {
 }
 
 /// One place in the index: an episode with rows, or one nobody could read.
-/// Failure sits among the episodes in numeric order, because an operator
-/// scanning by number looks for it where it belongs.
+/// Failure sits among the episodes in recording order, because an operator
+/// scanning the index looks for it where it belongs.
 #[derive(Clone, PartialEq)]
 pub(super) enum IndexEntry {
     Measured(EpisodeSubtasks),
@@ -195,7 +170,7 @@ pub(super) enum IndexEntry {
 }
 
 impl IndexEntry {
-    fn episode(&self) -> &str {
+    fn episode(&self) -> &EpisodeId {
         match self {
             Self::Measured(group) => group.episode(),
             Self::Failed(failure) => failure.episode(),
@@ -223,20 +198,15 @@ impl AnnotationOutput {
         }
     }
     /// The episodes the index lists, in the order it lists them.
-    fn jumps(&self) -> Vec<(String, String)> {
+    fn jumps(&self) -> Vec<EpisodeId> {
         self.matching("")
             .iter()
-            .map(|entry| {
-                (
-                    entry.episode().to_owned(),
-                    self.context.name(entry.episode()),
-                )
-            })
+            .map(|entry| entry.episode().clone())
             .collect()
     }
-    /// The index as one list in episode-number order: the groups whose rows
-    /// say `wanted` carrying only those rows, and the failures whose episode
-    /// or reason says it. An empty filter keeps everything.
+    /// The index as one list in recording order: the groups whose rows say
+    /// `wanted` carrying only those rows, and the failures whose episode or
+    /// reason says it. An empty filter keeps everything.
     fn matching(&self, wanted: &str) -> Vec<IndexEntry> {
         let wanted = wanted.trim().to_lowercase();
         let measured = self
@@ -256,11 +226,7 @@ impl AnnotationOutput {
             .filter(|failure| {
                 wanted.is_empty()
                     || failure.reason().to_lowercase().contains(&wanted)
-                    || self
-                        .context
-                        .name(failure.episode())
-                        .to_lowercase()
-                        .contains(&wanted)
+                    || failure.episode().as_str().contains(&wanted)
             })
             .cloned()
             .map(IndexEntry::Failed);
@@ -281,7 +247,7 @@ pub(super) fn SubtaskIndex(
     frames: PosterFrames,
     chosen: ChosenSubtask,
     /// Annotate one failed episode again.
-    on_retry: EventHandler<String>,
+    on_retry: EventHandler<EpisodeId>,
 ) -> Element {
     let mut wanted = use_signal(String::new);
     let filter = wanted();
@@ -298,7 +264,6 @@ pub(super) fn SubtaskIndex(
                 "No subtasks yet. Run the annotation to fill this list." }
         };
     }
-    let context = output.context.clone();
     rsx! {
         IndexSearch {
             jumps: output.jumps(),
@@ -315,7 +280,7 @@ pub(super) fn SubtaskIndex(
                 match entry {
                     IndexEntry::Measured(group) => rsx! {
                         li { key: "{group.episode()}", class: "explore-entries-group",
-                            "aria-current": (chosen.episode().as_deref() == Some(group.episode())).then_some("true"),
+                            "aria-current": (chosen.episode().as_ref() == Some(group.episode())).then_some("true"),
                             // The heading is a heading as well as a button, so a reader
                             // moving by heading walks thirty-nine episodes instead of
                             // finding one heading in the whole workspace.
@@ -325,10 +290,11 @@ pub(super) fn SubtaskIndex(
                                     id: "{IndexHeading::id(group.episode())}",
                                     class: "explore-entries-heading",
                                     onclick: {
-                                        let episode = group.episode().to_owned();
+                                        let episode = group.episode().clone();
                                         move |_| chosen.show(&episode)
                                     },
-                                    span { class: "explore-entries-heading-name", "{context.name(group.episode())}" }
+                                    span { class: "explore-entries-heading-name", title: "{group.episode()}",
+                                        "{Episode::name_of(group.episode())}" }
                                     span { class: "explore-entries-heading-count",
                                         "{Counted::subtasks(group.rows().len())}" }
                                 }
@@ -351,12 +317,7 @@ pub(super) fn SubtaskIndex(
                         }
                     },
                     IndexEntry::Failed(failure) => rsx! {
-                        FailedEpisode {
-                            key: "{failure.episode()}",
-                            name: context.name(failure.episode()),
-                            failure,
-                            on_retry,
-                        }
+                        FailedEpisode { key: "{failure.episode()}", failure, on_retry }
                     },
                 }
             }
@@ -367,13 +328,14 @@ pub(super) fn SubtaskIndex(
 /// The one row an episode nobody could annotate gets: what went wrong, and the
 /// one action that could change it.
 #[component]
-fn FailedEpisode(failure: EpisodeFailure, name: String, on_retry: EventHandler<String>) -> Element {
-    let episode = failure.episode().to_owned();
+fn FailedEpisode(failure: EpisodeFailure, on_retry: EventHandler<EpisodeId>) -> Element {
+    let episode = failure.episode().clone();
     rsx! {
         li { class: "explore-entries-group explore-entries-failed",
             h3 { class: "explore-entries-heading-slot",
                 div { class: "explore-entries-heading explore-entries-heading-failed",
-                    span { class: "explore-entries-heading-name", "{name}" }
+                    span { class: "explore-entries-heading-name", title: "{failure.episode()}",
+                        "{Episode::name_of(failure.episode())}" }
                     span { class: "explore-entries-heading-count", "not annotated" }
                 }
             }
@@ -397,7 +359,7 @@ struct IndexHeading;
 impl IndexHeading {
     /// Focusing the heading also scrolls the index to it, so one call does
     /// both.
-    fn id(episode: &str) -> String {
+    fn id(episode: &EpisodeId) -> String {
         format!("explore-entries-head-{episode}")
     }
 }
@@ -407,7 +369,7 @@ impl IndexHeading {
 /// only other one.
 #[component]
 fn IndexSearch(
-    jumps: Vec<(String, String)>,
+    jumps: Vec<EpisodeId>,
     saying: String,
     chosen: ChosenSubtask,
     on_filter: EventHandler<String>,
@@ -428,15 +390,15 @@ fn IndexSearch(
                 class: "explore-entries-jump",
                 value: String::new(),
                 onchange: move |episode: String| {
-                    if episode.is_empty() {
+                    let Ok(episode) = EpisodeId::try_from(episode) else {
                         return;
-                    }
+                    };
                     chosen.show(&episode);
                     BrowserFocus::after_render(IndexHeading::id(&episode));
                 },
                 option { value: "", "Go to episode" }
-                for (episode , name) in jumps {
-                    option { key: "{episode}", value: "{episode}", "{name}" }
+                for episode in jumps {
+                    option { key: "{episode}", value: "{episode}", "{Episode::name_of(&episode)}" }
                 }
             }
         }
@@ -445,11 +407,7 @@ fn IndexSearch(
 
 /// The chosen episode seen whole — every camera it recorded, and the robot
 /// when the dataset has a model — with the measurement's subtasks on the
-/// shared timeline beneath it.
-///
-/// This is the one place Explore mounts the whole-episode view: the track and
-/// the chosen interval arrive as props, so swapping the composition underneath
-/// is one component name.
+/// shared timeline beneath it, playing the row the operator chose.
 #[component]
 pub(super) fn AnnotatedEpisode(
     episode: AnnotationEpisode,
@@ -457,35 +415,21 @@ pub(super) fn AnnotatedEpisode(
     context: SubtaskContext,
     chosen: ChosenSubtask,
 ) -> Element {
-    let transport = EpisodeTransport::use_opened_episode(episode.opened());
-    let track = subtasks.track();
-    let requested = transport.clone();
-    // Read the ask rather than take it: taking registers no subscription, and
-    // an effect with no subscription runs once and never again.
-    use_effect(move || {
-        if let Some(request) = chosen.requested() {
-            let (start, end) = request.interval;
-            requested
-                .clone()
-                .play_interval(start, end + RUN_OUT_SECONDS);
-        }
-    });
-    let activated = transport.clone();
     let playing = subtasks.chosen_row(&chosen);
+    let name = episode.episode().name();
     rsx! {
         header { class: "explore-review-head",
             match playing {
                 Some(row) => rsx! {
                     p { class: "explore-review-subject", "{row.description()}" }
                     p { class: "explore-review-facts",
-                        span { "{context.name(subtasks.episode())}" }
+                        span { "{name}" }
                         span { "{row.start_time().clock_label()} – {row.end_time().clock_label()}" }
                         code { class: "explore-review-id", "{subtasks.episode()}" }
                     }
                 },
                 None => rsx! {
-                    p { class: "explore-review-subject",
-                        "{context.name(subtasks.episode())}" }
+                    p { class: "explore-review-subject", "{name}" }
                     p { class: "explore-review-facts",
                         span { "{Counted::subtasks(subtasks.rows().len())}" }
                         code { class: "explore-review-id", "{subtasks.episode()}" }
@@ -495,28 +439,24 @@ pub(super) fn AnnotatedEpisode(
         }
         section { class: "explore-review-player", "aria-label": "Annotated episode",
             EpisodeInspection {
-                episode: episode.opened().clone(),
-                transport,
-                featured_camera: context
-                    .camera()
-                    .map_or(FeaturedCamera::Overview, |camera| FeaturedCamera::Named(camera.to_owned())),
-                span_tracks: if track.is_empty() { Vec::new() } else { vec![track] },
-                on_interval: move |interval: TimelineInterval| {
-                    let (start, end) = interval.span();
-                    activated.clone().play_interval(start, end + RUN_OUT_SECONDS);
-                },
+                episode: episode.episode().clone(),
+                featured_camera: FeaturedCamera::measured(context.camera()),
+                tracks: vec![SubtaskIntervals::of(subtasks.rows()).track().into()],
+                // Read rather than taken: reading subscribes this view, so
+                // every new ask reaches the player.
+                focus: chosen.requested(),
             }
         }
     }
 }
 
-/// What the player was actually told to play, with the transport replaced by a
-/// log. The effect under test is the one `AnnotatedEpisode` runs.
+/// Every ask the player was handed, handed over the way `AnnotatedEpisode`
+/// does it: read from the choice while rendering and passed on as a value.
 #[cfg(all(test, target_arch = "wasm32"))]
 #[derive(Clone, Default, PartialEq)]
 struct PlayLog {
     chosen: std::rc::Rc<std::cell::RefCell<Option<ChosenSubtask>>>,
-    played: std::rc::Rc<std::cell::RefCell<Vec<(f64, f64)>>>,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<PlayRequest>>>,
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
@@ -524,13 +464,13 @@ impl PlayLog {
     fn render(self) -> Element {
         let chosen = ChosenSubtask::use_chosen();
         *self.chosen.borrow_mut() = Some(chosen);
-        let played = self.played.clone();
-        use_effect(move || {
-            if let Some(request) = chosen.requested() {
-                let (start, end) = request.interval;
-                played.borrow_mut().push((start, end + RUN_OUT_SECONDS));
+        let asked = self.asked.clone();
+        let focus = chosen.requested();
+        use_effect(use_reactive(&focus, move |focus| {
+            if let Some(focus) = focus {
+                asked.borrow_mut().push(focus);
             }
-        });
+        }));
         rsx! {}
     }
     fn chosen(&self) -> ChosenSubtask {
@@ -544,7 +484,7 @@ impl PlayLog {
 mod tests {
     use super::*;
 
-    fn row(episode: &str, start: f64, end: f64) -> SubtaskRow {
+    fn row(episode: EpisodeId, start: f64, end: f64) -> SubtaskRow {
         SubtaskRow::new("break_down_subtasks-1", episode, start, end, "fold").expect("a valid row")
     }
 
@@ -552,10 +492,9 @@ mod tests {
     ///
     /// Every row here belongs to one episode, so the player never remounts and
     /// the only thing that can move it is the ask itself. Taking the ask
-    /// registered no subscription, so the effect ran once at mount and the
-    /// transport sat at 0:00 through four clicks. The intervals also prove the
-    /// playhead is asked for the row's own start, with the run-out after the
-    /// end rather than half a second of lead-in before it.
+    /// registered no subscription, so the player heard it once at mount and
+    /// the transport sat at 0:00 through four clicks. Each ask carries the
+    /// row's own interval; the player adds the run-out.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn every_row_of_the_episode_already_open_moves_the_playhead() {
@@ -563,63 +502,70 @@ mod tests {
         let mut dom = VirtualDom::new_with_props(PlayLog::render, harness.clone());
         dom.rebuild_in_place();
         let chosen = harness.chosen();
+        let mut expected = Vec::new();
         for (start, end) in [
             (1.5, 4.5),
             (8.0, 12.0),
             (17.5, 23.0),
             (8.0, 12.0),
+            // Pressing one row twice is two asks, so a replay replays.
             (8.0, 12.0),
         ] {
-            let row = row("ep-1", start, end);
+            let row = row(EpisodeId::fixture(1), start, end);
             dom.in_scope(ScopeId::ROOT, || chosen.play_row(&row));
+            // Once for the view to read the ask, once for the effect it wakes.
             dom.render_immediate_to_vec();
+            dom.render_immediate_to_vec();
+            expected.push(PlayRequest::after(expected.last().copied(), (start, end)));
         }
-        assert_eq!(
-            *harness.played.borrow(),
-            [
-                (1.5, 5.0),
-                (8.0, 12.5),
-                (17.5, 23.5),
-                (8.0, 12.5),
-                // Pressing one row twice is two asks, so a replay replays.
-                (8.0, 12.5),
-            ]
-        );
+        assert_eq!(*harness.asked.borrow(), expected);
 
         // Opening a whole episode plays nothing, and does not replay the last
         // interval when the player remounts on the new episode.
-        dom.in_scope(ScopeId::ROOT, || chosen.show("ep-2"));
+        dom.in_scope(ScopeId::ROOT, || chosen.show(&EpisodeId::fixture(2)));
         dom.render_immediate_to_vec();
-        assert_eq!(harness.played.borrow().len(), 5);
+        dom.render_immediate_to_vec();
+        assert_eq!(harness.asked.borrow().len(), 5);
     }
 
     #[test]
     fn rows_group_by_episode_in_the_order_the_document_stores_them() {
         let groups = EpisodeSubtasks::group(
             [
-                row("ep-1", 0.0, 8.0),
-                row("ep-1", 8.0, 13.0),
-                row("ep-2", 0.0, 4.0),
+                row(EpisodeId::fixture(1), 0.0, 8.0),
+                row(EpisodeId::fixture(1), 8.0, 13.0),
+                row(EpisodeId::fixture(2), 0.0, 4.0),
             ]
             .into_iter(),
         );
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].episode(), "ep-1");
+        assert_eq!(groups[0].episode(), &EpisodeId::fixture(1));
         assert_eq!(groups[0].rows().len(), 2);
         assert_eq!(groups[1].rows()[0].start_time(), 0.0);
-        assert!(!groups[0].track().is_empty());
         assert!(EpisodeSubtasks::group(std::iter::empty()).is_empty());
     }
 
     #[test]
     fn a_filter_keeps_the_rows_that_say_it_and_drops_the_episodes_that_do_not() {
         let group = EpisodeSubtasks {
-            episode: "ep-1".to_owned(),
+            episode: EpisodeId::fixture(1),
             rows: vec![
-                SubtaskRow::new("break_down_subtasks-1", "ep-1", 0.0, 4.0, "Fold the skirt")
-                    .unwrap(),
-                SubtaskRow::new("break_down_subtasks-1", "ep-1", 4.0, 8.0, "Grasp the edge")
-                    .unwrap(),
+                SubtaskRow::new(
+                    "break_down_subtasks-1",
+                    EpisodeId::fixture(1),
+                    0.0,
+                    4.0,
+                    "Fold the skirt",
+                )
+                .unwrap(),
+                SubtaskRow::new(
+                    "break_down_subtasks-1",
+                    EpisodeId::fixture(1),
+                    4.0,
+                    8.0,
+                    "Grasp the edge",
+                )
+                .unwrap(),
             ],
         };
         let folded = group.with_rows_saying("fold").expect("one row says it");

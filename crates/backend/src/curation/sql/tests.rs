@@ -91,13 +91,13 @@ fn verdicts_read_positional_columns_back_into_rule_and_transform_identities() {
     let rows = |summary: serde_json::Value| {
         [
             serde_json::json!({
-                "id": "aa", "source_uri": "hf://x/a.mcap", "source_bytes": 10, "message_count": 5,
+                "id": "000000000000000000000000000000aa", "source_uri": "hf://x/a.mcap", "source_bytes": 10, "message_count": 5,
                 "channel_count": 2, "message_start_time": 100, "duration_ns": 3_000_000_000_u64,
                 "fact_0": 0.2, "fact_1": "fold the towel", "rule_0": true, "rule_1": false,
                 "transform_0": true, "kept": false
             }),
             serde_json::json!({
-                "id": "bb", "source_uri": null, "duration_ns": 9_000_000_000_u64,
+                "id": "000000000000000000000000000000bb", "source_uri": null, "duration_ns": 9_000_000_000_u64,
                 "fact_0": null, "fact_1": "fold a plane", "rule_0": false, "rule_1": null,
                 "transform_0": true, "kept": true
             }),
@@ -137,7 +137,10 @@ fn verdicts_read_positional_columns_back_into_rule_and_transform_identities() {
     assert_eq!(short.episode().file_name(), "a.mcap");
     assert!(kept.kept());
     assert_eq!(kept.transforms(), ["profile"]);
-    assert_eq!(kept.episode().file_name(), "bb");
+    assert_eq!(
+        kept.episode().file_name(),
+        "000000000000000000000000000000bb"
+    );
     let truncated = SpiralQuerySnapshot::new(vec![], rows(summary(40, 31, [6, 3], 12)), true);
     let outcome = compiled.outcome(&truncated).unwrap();
     assert_eq!(outcome.totals().episodes(), 40);

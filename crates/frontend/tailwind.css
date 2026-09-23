@@ -3589,8 +3589,8 @@
 /* Catalog rows on the shared tree: an episode row is a small grid (ordinal,
    name, duration, then a second line). The tree's own row rules are unlayered,
    so these are too. */
-.data-episode .ui-tree-label { display: grid; grid-template-columns: 2.25rem minmax(0, 1fr) auto; align-items: baseline; column-gap: 8px; padding-block: 4px; color: var(--tone-ink); font-weight: 400; }
-.data-episode .ui-tree-label[aria-pressed="true"] .data-episode-ordinal { color: var(--tone-accent); }
+.data-episode .ui-tree-label { display: grid; grid-template-columns: 3.5rem minmax(0, 1fr) auto; align-items: baseline; column-gap: 8px; padding-block: 4px; color: var(--tone-ink); font-weight: 400; }
+.data-episode .ui-tree-label[aria-pressed="true"] .data-episode-id { color: var(--tone-accent); }
 
 /* Inference metrics read label-left, value-right in one 48px row; the kit's
    strip stacks a fact, so the row form is restated here at the same layer. */
@@ -3658,8 +3658,8 @@
     @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
-  .data-episode-ordinal {
-    @apply text-right font-mono text-[10px] tabular-nums text-ink-faint;
+  .data-episode-id {
+    @apply font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
   .data-episode-head {
@@ -4442,11 +4442,10 @@
     @apply flex min-w-0 items-baseline gap-1.5;
   }
 
-  /* The ordinal is the tile's one certain identity on a sheet where task
-     names repeat, so it reads in ink, not in the margin. */
-  .curation-tile-ordinal {
+  /* The id is the tile's one certain identity on a sheet where task names
+     repeat, so it reads in ink, not in the margin. */
+  .curation-tile-id {
     @apply shrink-0 font-mono text-[11px] font-medium text-ink-soft tabular-nums;
-    min-width: 2ch;
   }
 
   .curation-tile-name {
@@ -4776,8 +4775,6 @@
 .curation-histogram-legend i.is-excluded { background: var(--stage-tone); }
 
 /* An identifier is not a task name: one mono line, cut at the right. */
-.curation-tile-name[data-identifier="true"] { @apply font-mono text-[10px] font-normal leading-4 text-ink-soft; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; -webkit-line-clamp: unset; }
-.curation-tile[data-kept="false"] .curation-tile-name[data-identifier="true"] { @apply text-ink-faint; }
 
 .curation-source-section[data-selected="true"] { outline: 1px solid var(--tone-accent); outline-offset: -1px; }
 

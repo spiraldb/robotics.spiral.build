@@ -1,4 +1,5 @@
 //! Fixed automatic progress selection and synchronized episode evidence.
+use crate::activities::episode::{Episode, EpisodeInspection};
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::progress::ProgressSelection;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
@@ -64,16 +65,11 @@ impl TrainingChunk {
 }
 
 #[component]
-pub(super) fn ProgressEvidence(
-    episode: crate::activities::data::OpenedEpisode,
-    selection: ProgressSelection,
-) -> Element {
-    use crate::activities::data::{EpisodeInspection, EpisodeTransport};
+pub(super) fn ProgressEvidence(episode: Episode, selection: ProgressSelection) -> Element {
     use crate::components::timeline::{
         NumericTrack, TimelineInterval, TimelineSample, TimelineTrack, TimelineTrackState,
     };
     use spiral_robotics_common::curation::progress::ProgressScoreRequest;
-    let transport = EpisodeTransport::use_opened_episode(&episode);
     let query_episode = episode.selection();
     let query_selection = selection.clone();
     // The parent keys this component by recording/model/source. Only the
@@ -124,14 +120,10 @@ pub(super) fn ProgressEvidence(
         None => TimelineTrackState::Loading("Identifying unproductive moments…".to_owned()),
     };
     let failed = matches!(state, TimelineTrackState::Failed(_));
-    let tracks = vec![TimelineTrack::new("warp-progress", "Progress score", state)];
-    let mut review = transport.clone();
+    let tracks = vec![TimelineTrack::new("warp-progress", "Progress score", state).into()];
     rsx! {
         section { class: "curation-evidence curation-progress-evidence",
-            EpisodeInspection { episode, transport, tracks, on_interval: move |interval: TimelineInterval| {
-                let (start, end) = interval.span();
-                review.play_interval(start - 0.5, end + 0.5);
-            } }
+            EpisodeInspection { episode, tracks }
             if failed { Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, onclick: move |_| evidence.restart(), "Retry this episode" } }
         }
     }

@@ -2,15 +2,15 @@
 //! cameras and plots on one timeline.
 use super::{
     DatasetClient,
-    catalog_rail::{CatalogRail, RailActions, RailSelection},
+    catalog_rail::{CatalogRail, OpenedEpisode, RailActions, RailSelection},
     dataset_overview::DatasetOverview,
-    episode_list::OpenedEpisode,
-    episode_playback::EpisodeCamera,
-    episode_streams::{EpisodeStreams, RecordedStream, StreamCatalog, StreamChoices},
-    episode_transport::{EpisodeTimeRange, EpisodeTransport, KeyboardFocus},
     plots_panel::PlotsPanel,
+    robot_stage::RobotStagePanel,
+    stream_choices::{EpisodeStreams, StreamChoices},
     timeline_panel::{TimelinePanel, TimelineSubject},
 };
+use crate::activities::episode::{EpisodeCamera, EpisodeTransport, RecordedStream, StreamCatalog};
+use crate::components::timeline::KeyboardFocus;
 use crate::shell::{
     activity::{Activity, WorkspaceActivity},
     frame::WorkspaceFrame,
@@ -19,7 +19,7 @@ use dioxus::prelude::*;
 use dioxus_workbench::{
     DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelPlacement, PanelWorkspace, SplitAxis,
 };
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 use std::collections::BTreeSet;
 use wasm_bindgen::JsCast as _;
@@ -72,7 +72,7 @@ impl DataSelection {
 /// so a slow answer for the previous episode is never applied to the next.
 #[derive(Clone, PartialEq)]
 struct DiscoveredStreams {
-    episode_id: String,
+    episode_id: EpisodeId,
     result: Result<StreamCatalog, String>,
 }
 
@@ -166,6 +166,11 @@ impl DataLayout {
                 Self::tile_node_mut(first, id).or_else(|| Self::tile_node_mut(second, id))
             }
         }
+    }
+
+    /// The dock panel one recorded camera opens in.
+    fn camera_panel(stream: &RecordedStream) -> PanelId {
+        PanelId::new(format!("camera:{}", stream.key()))
     }
 
     fn is_camera(panel: &PanelId) -> bool {
@@ -423,27 +428,23 @@ fn DataPanels() -> Element {
         let episode = selection.episode.read().clone();
         async move {
             let episode = episode?;
-            let result = DatasetClient::current()
-                .episode_topics(episode.selection())
-                .await
-                .map(|topics| StreamCatalog::new(topics, &episode.selection()))
-                .map_err(|error| error.to_string());
+            let result = StreamCatalog::load(episode.episode().selection()).await;
             Some(DiscoveredStreams {
-                episode_id: episode.record().id().to_owned(),
+                episode_id: episode.episode().id().clone(),
                 result,
             })
         }
     });
     // Discovered streams become the episode's choices exactly once.
-    let mut applied = use_signal(|| None::<String>);
+    let mut applied = use_signal(|| None::<EpisodeId>);
     use_effect(move || {
         let episode = selection.episode.read().clone();
         let discovered = discovery.read().clone().flatten();
         let (Some(episode), Some(discovered)) = (episode, discovered) else {
             return;
         };
-        if discovered.episode_id != episode.record().id()
-            || applied.peek().as_deref() == Some(discovered.episode_id.as_str())
+        if &discovered.episode_id != episode.episode().id()
+            || applied.peek().as_ref() == Some(&discovered.episode_id)
         {
             return;
         }
@@ -451,7 +452,7 @@ fn DataPanels() -> Element {
         if let Ok(streams) = &discovered.result {
             choices.reset(streams);
             choices.plot_default_stream(streams);
-            if let Some(range) = episode.record().time_range() {
+            if let Some(range) = episode.episode().range() {
                 choices.load_coverage(streams, range);
             }
         }
@@ -462,7 +463,7 @@ fn DataPanels() -> Element {
     let streams = episode.as_ref().map(|episode| {
         let pending = *discovery.state().read() == UseResourceState::Pending;
         match discovery.read().as_ref().and_then(Option::as_ref) {
-            Some(discovered) if !pending && discovered.episode_id == episode.record().id() => {
+            Some(discovered) if !pending && &discovered.episode_id == episode.episode().id() => {
                 match &discovered.result {
                     Ok(streams) => EpisodeStreams::Ready(streams.clone()),
                     Err(error) => EpisodeStreams::Failed(error.clone()),
@@ -481,17 +482,15 @@ fn DataPanels() -> Element {
 
     let mut opening_transport = transport.clone();
     let open_episode = EventHandler::new(move |opened: OpenedEpisode| {
-        let range = opened
-            .record()
-            .time_range()
-            .unwrap_or_else(|| EpisodeTimeRange::new(0, 0));
-        opening_transport.load(range);
+        opening_transport.open(opened.episode());
         if selection.episode.peek().as_ref() != Some(&opened) {
             choices.reset(&StreamCatalog::default());
             applied.set(None);
         }
         let mut selection = selection;
-        selection.dataset.set(Some(opened.dataset().clone()));
+        selection
+            .dataset
+            .set(Some(opened.episode().dataset().clone()));
         selection.episode.set(Some(opened));
         selection.activate("plots");
     });
@@ -527,7 +526,7 @@ fn DataPanels() -> Element {
     let select_dataset = move |dataset: DatasetSelection| {
         selection.select_dataset(dataset);
         if selection.episode.peek().is_none() {
-            clearing_transport.load(EpisodeTimeRange::new(0, 0));
+            clearing_transport.close();
             choices.reset(&StreamCatalog::default());
         }
     };
@@ -537,14 +536,14 @@ fn DataPanels() -> Element {
         dataset.clone(),
         episode
             .as_ref()
-            .map(|episode| episode.record().id().to_owned()),
+            .map(|episode| episode.episode().id().clone()),
         dataset_inspection.clone().and_then(|result| result.ok()),
     );
 
     // The primary tile keeps a stable tab order; content follows the selection.
     let mut panels = vec![
         Panel::new("stage", "3D Stage", "stage", rsx! {
-            super::robot_stage::RobotStagePanel { episode: episode.clone(), streams: streams.clone(), transport: transport.clone() }
+            RobotStagePanel { episode: episode.as_ref().map(|opened| opened.episode().clone()), streams: streams.clone(), transport: transport.clone() }
         }).with_class("data-primary-panel"),
         Panel::new(
             "catalog",
@@ -600,13 +599,13 @@ fn DataPanels() -> Element {
             if !choices.camera_open(stream.key()) {
                 continue;
             }
-            camera_ids.push(stream.panel_id());
+            camera_ids.push(DataLayout::camera_panel(stream));
             panels.push(
                 Panel::new(
-                    stream.panel_id(),
+                    DataLayout::camera_panel(stream),
                     format!("Camera · {}", streams.camera_title(stream)),
                     "cameras",
-                    rsx! { EpisodeCamera { request: stream.read().clone(), timeline: transport.range(), transport: transport.clone() } },
+                    rsx! { EpisodeCamera { request: stream.read().clone(), transport: transport.clone() } },
                 )
                 .with_closable(true)
                 .with_home_zone(DockZone::Bottom)

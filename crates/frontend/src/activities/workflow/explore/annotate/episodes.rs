@@ -1,9 +1,10 @@
 //! The episodes one annotation node walks: what the pass needs to sample them
 //! and what the player needs to show them.
-use crate::activities::data::{DatasetClient, OpenedEpisode, StreamCatalog};
+use crate::activities::data::DatasetClient;
+use crate::activities::episode::{Episode, StreamCatalog};
 use dioxus::prelude::*;
-use serde_json::{Map, Value};
-use spiral_robotics_common::datasets::DatasetSelection;
+use serde_json::Value;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::SqlLiteral;
 
@@ -14,49 +15,27 @@ const MAX_ANNOTATED_EPISODES: usize = 2_000;
 /// The topic a dataset records the operator's own words on, when it has one.
 const INSTRUCTION_TOPIC: &str = "/instruction";
 
-/// One episode a pass annotates.
+/// One episode a pass annotates: an episode with a recorded span, since
+/// camera packets are read over that span and timed from its start.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct AnnotationEpisode {
-    id: String,
-    /// The recording's first and last message time, in nanoseconds; camera
-    /// packets are read over this span and timed from its start.
-    bounds: (u64, u64),
-    opened: OpenedEpisode,
-}
+pub(super) struct AnnotationEpisode(Episode);
 
 impl AnnotationEpisode {
-    /// One row of the episode listing below.
-    fn from_row(dataset: &DatasetSelection, row: Map<String, Value>) -> Result<Self, String> {
-        let read = |name: &str| row.get(name).and_then(Value::as_u64);
-        let (start, end) = (read("message_start_time"), read("message_end_time"));
-        let (Some(start), Some(end)) = (start, end) else {
-            return Err("This episode has no recorded time range.".into());
-        };
-        let opened = OpenedEpisode::from_row(dataset.clone(), row)?;
-        Ok(Self {
-            id: opened.selection().episode_id().to_owned(),
-            bounds: (start, end.max(start)),
-            opened,
-        })
+    fn new(episode: Episode) -> Result<Self, String> {
+        match episode.range() {
+            Some(_) => Ok(Self(episode)),
+            None => Err("This episode has no recorded time range.".into()),
+        }
     }
 
     /// Every episode of the dataset, in recording order, as the Data rail
     /// lists them.
     pub(super) async fn load(dataset: &DatasetSelection) -> Result<Vec<Self>, String> {
-        let statement = format!(
-            "SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, \
-             message_start_time, message_end_time, duration_ns, channel_count \
-             FROM spql.mcap.episodes('{}') ORDER BY message_start_time, source_uri",
-            dataset.sql_name().replace('\'', "''")
-        );
-        let snapshot = DatasetClient::current()
-            .run_spiral_query(statement, MAX_ANNOTATED_EPISODES)
-            .await
-            .map_err(|error| error.to_string())?;
-        snapshot
-            .into_rows()
+        Episode::page(dataset, 0, MAX_ANNOTATED_EPISODES)
+            .await?
+            .into_episodes()
             .into_iter()
-            .map(|row| Self::from_row(dataset, row))
+            .map(Self::new)
             .collect()
     }
 
@@ -68,13 +47,9 @@ impl AnnotationEpisode {
             let Some(first) = first else {
                 return Ok(Vec::new());
             };
-            let selection = first.opened().selection();
-            let topics = DatasetClient::current()
-                .episode_topics(selection.clone())
-                .await
-                .map_err(|error| error.to_string())?;
             Ok::<_, String>(
-                StreamCatalog::new(topics, &selection)
+                StreamCatalog::load(first.selection())
+                    .await?
                     .videos()
                     .map(|stream| stream.read().topic().topic().to_owned())
                     .collect(),
@@ -92,7 +67,7 @@ impl AnnotationEpisode {
     /// an instruction topic. A dataset without one simply has no task text, so
     /// a missing topic or an unreadable row is silence rather than a failure.
     pub(super) async fn task(&self, datasets: &DatasetClient) -> Option<String> {
-        let selection = self.opened().selection();
+        let selection = self.selection();
         let statement = format!(
             "SELECT r.value.data AS instruction FROM spql.mcap.read_topic({}, {}) r \
              WHERE r.id = $1",
@@ -113,69 +88,46 @@ impl AnnotationEpisode {
             .map(str::to_owned)
     }
 
-    pub(super) fn id(&self) -> &str {
-        &self.id
+    pub(super) fn id(&self) -> &EpisodeId {
+        self.0.id()
+    }
+    pub(super) fn selection(&self) -> EpisodeSelection {
+        self.0.selection()
     }
     /// Seconds from the first recorded message to the last.
     pub(super) fn duration(&self) -> f64 {
-        self.bounds.1.saturating_sub(self.bounds.0) as f64 / 1e9
+        self.0.facts().duration_seconds().unwrap_or_default()
     }
-    pub(super) fn opened(&self) -> &OpenedEpisode {
-        &self.opened
+    pub(super) fn episode(&self) -> &Episode {
+        &self.0
     }
 
-    /// One episode of a fixed length, for tests that only need its identity
-    /// and duration.
+    /// The fixture episode `ordinal`, of a fixed length, for tests that only
+    /// need its identity and duration.
     #[cfg(test)]
-    pub(super) fn fixture(id: &str, duration_ns: u64) -> Self {
-        let Value::Object(row) = serde_json::json!({
-            "id": id,
-            "source_uri": format!("s3://recordings/{id}.mcap"),
-            "source_bytes": 1_024,
-            "message_count": 10,
-            "message_start_time": 1_000_000_000_u64,
-            "message_end_time": 1_000_000_000_u64 + duration_ns,
-            "duration_ns": duration_ns,
-            "channel_count": 3,
-        }) else {
-            panic!("an episode row is an object");
-        };
-        Self::from_row(
-            &DatasetSelection::new(vec!["folding".into()]).expect("a dataset name"),
-            row,
-        )
-        .expect("the fixture row describes one episode")
+    pub(super) fn fixture(ordinal: u32, duration_ns: u64) -> Self {
+        Self::new(Episode::fixture(&EpisodeId::fixture(ordinal), duration_ns))
+            .expect("a fixture has a recorded span")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn an_episode_takes_its_identity_and_length_from_the_recorded_bounds() {
-        let episode = AnnotationEpisode::fixture("ep-1", 20_500_000_000);
-        assert_eq!(episode.id(), "ep-1");
+        let episode = AnnotationEpisode::fixture(1, 20_500_000_000);
+        assert_eq!(episode.id(), &EpisodeId::fixture(1));
         assert!((episode.duration() - 20.5).abs() < 1e-9);
-        assert_eq!(episode.opened().title(), "ep-1");
+        assert_eq!(episode.episode().name(), "Episode …00000001");
     }
 
     #[test]
     fn an_episode_without_a_recorded_range_is_not_annotated() {
-        let Value::Object(row) = json!({
-            "id": "ep-2",
-            "source_uri": Value::Null,
-            "source_bytes": Value::Null,
-            "message_count": Value::Null,
-            "message_start_time": Value::Null,
-            "message_end_time": Value::Null,
-            "duration_ns": Value::Null,
-            "channel_count": Value::Null,
-        }) else {
-            panic!("an episode row is an object");
-        };
+        let facts =
+            serde_json::from_value(serde_json::json!({ "id": EpisodeId::fixture(2) })).unwrap();
         let dataset = DatasetSelection::new(vec!["folding".into()]).unwrap();
-        assert!(AnnotationEpisode::from_row(&dataset, row).is_err());
+        assert!(AnnotationEpisode::new(Episode::new(dataset, facts)).is_err());
     }
 }

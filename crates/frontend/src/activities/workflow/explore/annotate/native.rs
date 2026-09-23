@@ -51,7 +51,7 @@ impl NativeSheets {
     /// One cheap query before any pixels: how many frames the camera recorded
     /// for this episode, and over how long.
     async fn timing(&self, episode: &AnnotationEpisode) -> Result<CameraTiming, String> {
-        let selection = episode.opened().selection();
+        let selection = episode.selection();
         let sql = selection::timing_sql(&selection.dataset().sql_name(), &self.camera);
         let snapshot = self
             .datasets
@@ -76,7 +76,7 @@ impl NativeSheets {
         episode: &AnnotationEpisode,
         frames: &[SampledFrame],
     ) -> Result<Vec<NativeFrame>, String> {
-        let selection = episode.opened().selection();
+        let selection = episode.selection();
         let sql = selection::frames_sql(&selection.dataset().sql_name(), &self.camera, frames);
         let snapshot = self
             .datasets

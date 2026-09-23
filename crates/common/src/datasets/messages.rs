@@ -54,7 +54,7 @@ impl MessageRead {
     pub fn episode(&self) -> EpisodeSelection {
         EpisodeSelection::new(
             self.topic.dataset().clone(),
-            self.topic.episode_id().to_owned(),
+            self.topic.episode_id().clone(),
         )
     }
     /// The native reader of this topic revision, as a FROM source.
@@ -201,14 +201,14 @@ impl MessageWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datasets::DatasetSelection;
+    use crate::datasets::{DatasetSelection, EpisodeId};
 
     fn read() -> MessageRead {
         MessageRead::schema(
             EpisodeTopicRequest::new(
                 DatasetSelection::new(vec!["dataset_test".into()]).unwrap(),
                 "/sensor's".into(),
-                "episode".into(),
+                EpisodeId::try_from("01a0989fb65870a7a5459902f9e3e090").unwrap(),
             ),
             TopicRevision::new("variant".into()),
         )

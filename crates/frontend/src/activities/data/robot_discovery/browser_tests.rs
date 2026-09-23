@@ -32,7 +32,7 @@ export function installRobotDiscoveryFetch() {
         const recordedPath = path === '/api/proxy' ? metadata.url : path;
         robotRequests.push({path:recordedPath, transport:path, project: request.headers.get('X-Spiral-Project'), metadata, body});
         if (path === '/api/queries') return Response.json({
-            columns:[{name:'id',data_type:'Utf8',nullable:false}],rows:[{id:'episode-1'}],truncated:false,elapsed_ms:0
+            columns:[{name:'id',data_type:'Utf8',nullable:false}],rows:[{id:'01a0989fb65870a7a5459902f9e3e090'}],truncated:false,elapsed_ms:0
         });
         if (path === '/api/datasets/episode-topics') return Response.json([
             {name:'/joints',schemas:['sensor_msgs/JointState'],members:1,samples:3,revision:{variant:'joints'}}
@@ -182,7 +182,10 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
         .iter()
         .find(|request| request["path"] == "/api/queries/episode")
         .unwrap();
-    assert_eq!(samples["body"]["episode"]["episode_id"], "episode-1");
+    assert_eq!(
+        samples["body"]["episode"]["episode_id"],
+        "01a0989fb65870a7a5459902f9e3e090"
+    );
     assert!(
         samples["body"]["statement"]
             .as_str()

@@ -13,7 +13,7 @@ use crate::components::document_session::{
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_common::exploration::ExplorationDocument;
 use std::collections::BTreeMap;
 
@@ -112,25 +112,25 @@ impl ExplorationDraft for ExplorationDocument {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EpisodeFocus {
     node: String,
-    episode: String,
+    episode: EpisodeId,
     interval: Option<(f64, f64)>,
 }
 impl EpisodeFocus {
     pub(crate) fn new(
         node: impl Into<String>,
-        episode: impl Into<String>,
+        episode: EpisodeId,
         interval: Option<(f64, f64)>,
     ) -> Self {
         Self {
             node: node.into(),
-            episode: episode.into(),
+            episode,
             interval,
         }
     }
     pub(crate) fn node(&self) -> &str {
         &self.node
     }
-    pub(crate) fn episode(&self) -> &str {
+    pub(crate) fn episode(&self) -> &EpisodeId {
         &self.episode
     }
     pub(crate) fn interval(&self) -> Option<(f64, f64)> {

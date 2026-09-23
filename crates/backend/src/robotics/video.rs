@@ -559,7 +559,8 @@ mod tests {
             "wrist".into(),
             (32, 32, 30),
             (
-                include_bytes!("../../../frontend/src/activities/data/fixtures/seek.h264").to_vec(),
+                include_bytes!("../../../frontend/src/activities/episode/fixtures/seek.h264")
+                    .to_vec(),
                 (0..8).map(|index| index * 33_333_333).collect(),
             ),
         )

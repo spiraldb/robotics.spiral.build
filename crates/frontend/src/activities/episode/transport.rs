@@ -1,9 +1,9 @@
-//! The selected episode owns one clock and one view window.
+//! An open episode owns one clock and one view window.
 //!
-//! Every Data panel — cameras, plots, the timeline, messages — reads the same
-//! playhead and the same visible span. Nothing here fetches data; the transport
-//! only says *when* the operator is looking.
-pub(super) use crate::components::timeline::KeyboardFocus;
+//! Every panel showing the episode — cameras, plots, the timeline, messages —
+//! reads the same playhead and the same visible span. Nothing here fetches
+//! data; the transport only says *when* the operator is looking.
+use super::identity::Episode;
 use crate::components::timeline::{
     PlaybackClock, TimelineAction, TimelineEvent, TimelineInteraction, TimelineState, TransportKey,
     ViewWindow,
@@ -12,11 +12,16 @@ use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct EpisodeTimeRange {
+pub(in crate::activities) struct EpisodeTimeRange {
     start_ns: u64,
     end_ns: u64,
 }
 impl EpisodeTimeRange {
+    /// No recorded span: what the clock reads before an episode opens.
+    const EMPTY: Self = Self {
+        start_ns: 0,
+        end_ns: 0,
+    };
     pub(super) fn new(start_ns: u64, end_ns: u64) -> Self {
         Self {
             start_ns,
@@ -24,19 +29,19 @@ impl EpisodeTimeRange {
         }
     }
     /// Half-open bounds that include the final message.
-    pub(super) fn bounds(self) -> (u64, u64) {
+    pub(in crate::activities) fn bounds(self) -> (u64, u64) {
         (self.start_ns, self.end_ns.saturating_add(1))
     }
     fn duration(self) -> f64 {
         self.end_ns.saturating_sub(self.start_ns) as f64 / 1e9
     }
-    pub(super) fn start_ns(self) -> u64 {
+    pub(in crate::activities) fn start_ns(self) -> u64 {
         self.start_ns
     }
-    pub(super) fn seconds_of(self, absolute_ns: u64) -> f64 {
+    pub(in crate::activities) fn seconds_of(self, absolute_ns: u64) -> f64 {
         (i128::from(absolute_ns) - i128::from(self.start_ns)) as f64 / 1e9
     }
-    pub(super) fn ns_at(self, seconds: f64) -> u64 {
+    pub(in crate::activities) fn ns_at(self, seconds: f64) -> u64 {
         let offset = (seconds.max(0.0) * 1e9).round();
         self.start_ns.saturating_add(offset as u64)
     }
@@ -50,7 +55,7 @@ pub(super) enum FeedState {
 }
 
 #[derive(Clone)]
-pub(crate) struct EpisodeTransport {
+pub(in crate::activities) struct EpisodeTransport {
     clock: Signal<PlaybackClock>,
     view: Signal<ViewWindow>,
     range: Signal<EpisodeTimeRange>,
@@ -63,30 +68,24 @@ impl PartialEq for EpisodeTransport {
     }
 }
 impl EpisodeTransport {
-    /// One caller-owned clock for an inline episode camera and its timeline.
-    pub(in crate::activities) fn use_opened_episode(
-        episode: &super::episode_list::OpenedEpisode,
-    ) -> Self {
-        let range = episode
-            .record()
-            .time_range()
-            .unwrap_or_else(|| EpisodeTimeRange::new(0, 0));
-        let transport = Self::use_range(range);
-        let mut updating = transport.clone();
-        use_effect(use_reactive(&range, move |range| {
-            if updating.range() != range {
-                updating.load(range);
-            }
-        }));
-        transport
+    /// The clock of a composition that shows one episode for its whole life.
+    pub(super) fn use_episode(episode: &Episode) -> Self {
+        Self::use_range(episode.range().unwrap_or(EpisodeTimeRange::EMPTY))
     }
-
-    pub(in crate::activities) fn play_interval(&mut self, start: f64, end: f64) {
+    /// One transport per Data workspace; `open` points it at an episode.
+    pub(in crate::activities) fn use_transport() -> Self {
+        Self::use_range(EpisodeTimeRange::EMPTY)
+    }
+    /// Point the clock at another episode, from its beginning.
+    pub(in crate::activities) fn open(&mut self, episode: &Episode) {
+        self.load(episode.range().unwrap_or(EpisodeTimeRange::EMPTY));
+    }
+    /// Show no episode at all.
+    pub(in crate::activities) fn close(&mut self) {
+        self.load(EpisodeTimeRange::EMPTY);
+    }
+    pub(super) fn play_interval(&mut self, start: f64, end: f64) {
         self.clock.write().play_interval(start, end);
-    }
-    /// One transport per Data workspace; `load` points it at an episode.
-    pub(super) fn use_transport() -> Self {
-        Self::use_range(EpisodeTimeRange::new(0, 0))
     }
     fn use_range(initial: EpisodeTimeRange) -> Self {
         let clock = use_signal(|| PlaybackClock::new(initial.duration()));
@@ -128,8 +127,7 @@ impl EpisodeTransport {
         );
         transport
     }
-    /// Point the shared clock at another episode, from its beginning.
-    pub(super) fn load(&mut self, range: EpisodeTimeRange) {
+    fn load(&mut self, range: EpisodeTimeRange) {
         let duration = range.duration();
         self.clock.write().reset(duration);
         let next = self.generation.peek().wrapping_add(1);
@@ -141,10 +139,10 @@ impl EpisodeTransport {
     pub(in crate::activities) fn range(&self) -> EpisodeTimeRange {
         *self.range.read()
     }
-    pub(super) fn seconds(&self) -> f64 {
+    pub(in crate::activities) fn seconds(&self) -> f64 {
         self.clock.read().seconds()
     }
-    pub(super) fn seek(&mut self, seconds: f64) {
+    pub(in crate::activities) fn seek(&mut self, seconds: f64) {
         self.clock.write().seek(seconds);
     }
     fn pause(&mut self) {
@@ -153,7 +151,7 @@ impl EpisodeTransport {
     fn set_speed(&mut self, speed: f64) {
         self.clock.write().set_speed(speed);
     }
-    pub(super) fn view(&self) -> ViewWindow {
+    pub(in crate::activities) fn view(&self) -> ViewWindow {
         *self.view.read()
     }
     pub(super) fn report(&mut self, topic: &str, state: FeedState) {
@@ -167,7 +165,7 @@ impl EpisodeTransport {
     /// Shared keyboard transport: Space, arrows, Home/End, zoom keys, from a
     /// workspace event or from a listener on the page itself.
     /// Returns whether the key was consumed.
-    pub(super) fn handle_key(&mut self, key: impl Into<TransportKey>) -> bool {
+    pub(in crate::activities) fn handle_key(&mut self, key: impl Into<TransportKey>) -> bool {
         if let Some(action) = self.timeline_state().key_action(key.into()) {
             self.apply(action);
             true

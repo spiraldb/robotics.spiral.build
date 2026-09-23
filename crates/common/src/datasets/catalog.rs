@@ -1,4 +1,5 @@
 //! Spiral dataset discovery and bounded topic inspection.
+use super::EpisodeId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -36,10 +37,10 @@ impl DatasetSelection {
 #[serde(deny_unknown_fields)]
 pub struct EpisodeSelection {
     dataset: DatasetSelection,
-    episode_id: String,
+    episode_id: EpisodeId,
 }
 impl EpisodeSelection {
-    pub fn new(dataset: DatasetSelection, episode_id: String) -> Self {
+    pub fn new(dataset: DatasetSelection, episode_id: EpisodeId) -> Self {
         Self {
             dataset,
             episode_id,
@@ -48,7 +49,7 @@ impl EpisodeSelection {
     pub fn dataset(&self) -> &DatasetSelection {
         &self.dataset
     }
-    pub fn episode_id(&self) -> &str {
+    pub fn episode_id(&self) -> &EpisodeId {
         &self.episode_id
     }
 }
@@ -59,10 +60,10 @@ impl EpisodeSelection {
 pub struct EpisodeTopicRequest {
     dataset: DatasetSelection,
     topic: String,
-    episode_id: String,
+    episode_id: EpisodeId,
 }
 impl EpisodeTopicRequest {
-    pub fn new(dataset: DatasetSelection, topic: String, episode_id: String) -> Self {
+    pub fn new(dataset: DatasetSelection, topic: String, episode_id: EpisodeId) -> Self {
         Self {
             dataset,
             topic,
@@ -75,7 +76,7 @@ impl EpisodeTopicRequest {
     pub fn topic(&self) -> &str {
         &self.topic
     }
-    pub fn episode_id(&self) -> &str {
+    pub fn episode_id(&self) -> &EpisodeId {
         &self.episode_id
     }
 }

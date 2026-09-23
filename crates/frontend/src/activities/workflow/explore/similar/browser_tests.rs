@@ -8,6 +8,7 @@ use crate::activities::workflow::explore::document::{
 };
 use dioxus::prelude::*;
 use serde_json::Value;
+use spiral_robotics_common::datasets::EpisodeId;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
@@ -74,11 +75,18 @@ fn annotated() -> (ExplorationPayload, Vec<SubtaskRow>) {
     ]
     .into_iter()
     .map(|(start, end, description)| {
-        SubtaskRow::new(node.clone(), "episode-a", start, end, description).unwrap()
+        SubtaskRow::new(
+            node.clone(),
+            EpisodeId::fixture(0xa),
+            start,
+            end,
+            description,
+        )
+        .unwrap()
     })
     .collect::<Vec<_>>();
     payload
-        .replace_episode_subtasks(&node, "episode-a", rows)
+        .replace_episode_subtasks(&node, &EpisodeId::fixture(0xa), rows)
         .unwrap();
     let rows = payload.subtasks_for(&node).cloned().collect();
     (payload, rows)

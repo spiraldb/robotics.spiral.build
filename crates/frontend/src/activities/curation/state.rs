@@ -17,6 +17,7 @@ use spiral_robotics_common::curation::run::{CurationOutcome, CurationRun, Curati
 use spiral_robotics_common::curation::{
     CurationSpec, CurationValidationReport, DEFAULT_CURATION_NAME,
 };
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::runs::RunPhase;
 
 pub(crate) const RECIPE_PANEL_ID: &str = "curation-recipe";
@@ -121,7 +122,7 @@ impl SubmittedRun for CurationRun {
 #[derive(Clone, Copy, PartialEq)]
 struct CurationViewSignals {
     active_panel: Signal<Option<PanelId>>,
-    selected_episode: Signal<Option<String>>,
+    selected_episode: Signal<Option<EpisodeId>>,
     hovered_rule: Signal<Option<String>>,
     filter: Signal<SheetFilter>,
     /// The measurement every tile prints; `None` means the first declared one.
@@ -235,11 +236,11 @@ impl CurationController {
     pub(super) fn activate_panel(mut self, id: PanelId) {
         self.view.active_panel.set(Some(id));
     }
-    pub(super) fn selected_episode(&self) -> Option<String> {
+    pub(super) fn selected_episode(&self) -> Option<EpisodeId> {
         self.view.selected_episode.read().clone()
     }
     /// The episode whose evidence the side sheet shows; `None` closes it.
-    pub(super) fn select_episode(mut self, id: Option<String>) {
+    pub(super) fn select_episode(mut self, id: Option<EpisodeId>) {
         if *self.view.selected_episode.peek() != id {
             self.view.selected_episode.set(id);
         }

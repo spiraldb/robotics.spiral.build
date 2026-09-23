@@ -5,6 +5,7 @@ use spiral_robotics_common::curation::{
     CurationSpec, CurationSummary,
     run::{CurationOutcome, CurationRun, CurationRunSnapshot},
 };
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::runs::RunPhase;
 use spiral_robotics_storage::{StorageManager, curations::StoredCurationDocument};
 use std::{
@@ -263,7 +264,7 @@ impl CurationManager {
                         .filter_map(|row| {
                             row.get("id")
                                 .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned)
+                                .and_then(|id| EpisodeId::try_from(id).ok())
                         })
                         .collect(),
                 );

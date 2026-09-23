@@ -2,6 +2,7 @@
 
 mod catalog;
 mod coverage;
+mod episode_id;
 mod h264;
 mod messages;
 mod robot;
@@ -10,6 +11,7 @@ pub use catalog::{
     EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
 };
 pub use coverage::{EpisodeCoverageRequest, StreamCoverage, TopicCoverage, TopicCoverageRequest};
+pub use episode_id::EpisodeId;
 pub use h264::H264AccessUnit;
 pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision};
 pub use robot::{DatasetRobot, DatasetRobotSave, JointBinding, JointSelector};

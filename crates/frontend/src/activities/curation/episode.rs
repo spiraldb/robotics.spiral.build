@@ -6,18 +6,15 @@
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::facts::CameraSample;
 use spiral_robotics_common::curation::{CurationSpec, rules::TransformOperation};
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeSelection};
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryColumn};
 
 use super::sheet::{EPISODE_HEADING_ID, FactValueText, RuleTone, SheetTile};
 use crate::activities::data::DatasetClient;
+use crate::activities::episode::{Episode, EpisodeFactList, EpisodeInspection};
 use crate::components::icons::SpinnerIcon;
-use crate::format::{
-    ByteCountPresentation, ClockPresentation, GroupedCountPresentation, UtcTimestampPresentation,
-};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, Fact, FactLayout, FactList, SheetHeading, SheetPosition,
-    SideSheet,
+    ActionPurpose, Button, ButtonVariant, Fact, FactList, SheetHeading, SheetPosition, SideSheet,
 };
 
 #[component]
@@ -36,10 +33,14 @@ pub(super) fn EpisodeSheet(
     let dataset = judged.source().cloned();
     let heading = SheetHeading::new(
         EPISODE_HEADING_ID,
-        format!("Episode {}", tile.ordinal()),
+        Episode::name_of(episode.id()),
         "episode",
     )
-    .with_detail(format!("of {}", position.count()));
+    .with_detail(format!(
+        "· {} of {}",
+        position.index() + 1,
+        position.count()
+    ));
     let body = rsx! {
             article { class: "curation-episode", "aria-label": "Episode evidence",
                 if !inline || selected_stage.is_none() {
@@ -53,13 +54,7 @@ pub(super) fn EpisodeSheet(
                         p { class: "curation-episode-path", "{uri}" }
                     }
                 }
-                FactList { layout: FactLayout::Tiles, mono: true,
-                    Fact { label: "Recorded", "{episode.message_start_time().filter(|start| *start > 0).map_or_else(|| \"—\".into(), UtcTimestampPresentation::utc_label)}" }
-                    Fact { label: "Duration", "{episode.duration_seconds().map_or_else(|| \"—\".into(), ClockPresentation::clock_label)}" }
-                    Fact { label: "Messages", "{episode.message_count().map_or_else(|| \"—\".into(), GroupedCountPresentation::grouped_label)}" }
-                    Fact { label: "Channels", "{episode.channel_count().map_or_else(|| \"—\".into(), GroupedCountPresentation::grouped_label)}" }
-                    Fact { label: "File", "{episode.source_bytes().map_or_else(|| \"—\".into(), ByteCountPresentation::byte_label)}" }
-                }
+                EpisodeFactList { facts: episode.clone() }
                 if !judged.facts().is_empty() {
                     section { class: "curation-evidence",
                         h5 { class: "curation-evidence-title", "Measurements" }
@@ -111,18 +106,15 @@ pub(super) fn EpisodeSheet(
                 }
                 if let Some(dataset) = dataset {
                     for transform in judged.transforms().iter().filter(|transform| selected_stage.as_deref() == Some(transform.id())) {
-                        match tile.opened_episode(dataset.clone()) {
-                            Ok(opened) => match transform.operation() {
-                                TransformOperation::SelectProgressChunks { selection } => rsx! {
-                                    super::progress::ProgressEvidence {
-                                        key: "{transform.id()}:{episode.id()}:{selection.scorer().model()}:{selection.sources_relation()}",
-                                        episode: opened, selection: selection.clone(),
-                                    }
-                                },
-                                TransformOperation::ResizeCamera { .. } => rsx! {},
-                                _ => rsx! { TransformEpisodeEvidence { key: "{transform.id()}:{episode.id()}", episode: opened } },
+                        match transform.operation() {
+                            TransformOperation::SelectProgressChunks { selection } => rsx! {
+                                super::progress::ProgressEvidence {
+                                    key: "{transform.id()}:{episode.id()}:{selection.scorer().model()}:{selection.sources_relation()}",
+                                    episode: tile.episode(dataset.clone()), selection: selection.clone(),
+                                }
                             },
-                            Err(error) => rsx! { p { role: "alert", class: "curation-section-note", "{error}" } },
+                            TransformOperation::ResizeCamera { .. } => rsx! {},
+                            _ => rsx! { EpisodeInspection { key: "{transform.id()}:{episode.id()}", episode: tile.episode(dataset.clone()) } },
                         }
                     }
                     for transform in judged.transforms().iter().filter(|transform| selected_stage.as_deref().is_none_or(|id| id == transform.id()) && judged.reaches_step(verdict, transform.id()) && verdict.eligible_transforms().iter().any(|id| id == transform.id())) {
@@ -133,7 +125,7 @@ pub(super) fn EpisodeSheet(
                                 show_heading: selected_stage.is_none(),
                                 camera: CameraSample::new(topic.clone()),
                                 dataset: dataset.clone(),
-                                episode_id: episode.id().to_owned(),
+                                episode_id: episode.id().clone(),
                                 operations: judged.transforms().iter().take_while(|prior| prior.id() != transform.id()).filter(|prior| prior.operation().topic() == Some(topic) && verdict.eligible_transforms().iter().any(|id| id == prior.id())).map(|prior| prior.operation().clone()).chain(std::iter::once(transform.operation().clone())).collect::<Vec<_>>(),
                             }
                         }
@@ -145,7 +137,7 @@ pub(super) fn EpisodeSheet(
                                 title: fact.label().to_owned(),
                                 camera: camera.clone(),
                                 dataset: dataset.clone(),
-                                episode_id: episode.id().to_owned(),
+                                episode_id: episode.id().clone(),
                             }
                         }
                     }
@@ -160,32 +152,10 @@ pub(super) fn EpisodeSheet(
 }
 
 impl SheetTile {
-    fn opened_episode(
-        &self,
-        dataset: DatasetSelection,
-    ) -> Result<crate::activities::data::OpenedEpisode, String> {
-        let episode = self.verdict().episode();
-        let serde_json::Value::Object(mut row) =
-            serde_json::to_value(episode).map_err(|error| error.to_string())?
-        else {
-            return Err("Episode metadata is not a record.".into());
-        };
-        if let (Some(start), Some(duration)) = (episode.message_start_time(), episode.duration_ns())
-        {
-            let end = start
-                .checked_add(duration)
-                .ok_or("Episode time range overflows.")?;
-            row.insert("message_end_time".into(), end.into());
-        }
-        crate::activities::data::OpenedEpisode::from_row(dataset, row)
+    /// The episode this tile stands for.
+    fn episode(&self, dataset: DatasetSelection) -> Episode {
+        Episode::new(dataset, self.verdict().episode().clone())
     }
-}
-
-#[component]
-fn TransformEpisodeEvidence(episode: crate::activities::data::OpenedEpisode) -> Element {
-    use crate::activities::data::{EpisodeInspection, EpisodeTransport};
-    let transport = EpisodeTransport::use_opened_episode(&episode);
-    rsx! { EpisodeInspection { episode, transport } }
 }
 
 /// The frames a camera measurement decoded for this episode. They load as
@@ -196,7 +166,7 @@ fn FrameEvidence(
     title: String,
     camera: CameraSample,
     dataset: DatasetSelection,
-    episode_id: String,
+    episode_id: EpisodeId,
     #[props(default)] operations: Vec<TransformOperation>,
     #[props(default = true)] show_heading: bool,
 ) -> Element {

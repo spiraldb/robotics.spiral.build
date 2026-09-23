@@ -3,10 +3,9 @@
 //! Each plotted stream loads its selected fields once and draws one lane per
 //! field, one coloured trace per array index. Lanes share the visible span
 //! with the Timeline; the playhead and the hover cursor cross every lane.
-use super::{
-    episode_streams::{EpisodeStreams, RecordedStream, StreamCatalog, StreamChoices, StreamKind},
-    episode_transport::EpisodeTransport,
-    message_buffer::{MessageBuffer, MessageField},
+use super::stream_choices::{EpisodeStreams, StreamChoices};
+use crate::activities::episode::{
+    EpisodeTransport, MessageBuffer, MessageField, RecordedStream, StreamCatalog, StreamKind,
 };
 use crate::components::charts::{CharmingChart, ChartPresentation};
 use crate::components::icons::SignalStreamIcon;

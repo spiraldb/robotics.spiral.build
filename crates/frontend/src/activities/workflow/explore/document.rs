@@ -6,7 +6,7 @@
 //! This is the contract every Explore view shares. Add fields and helpers;
 //! never rename or remove what is here without checking the other views.
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const EXPLORATION_ENCODING_VERSION: u32 = 1;
@@ -131,7 +131,7 @@ pub(crate) struct SubtaskAnnotation {
     sample_interval_seconds: f64,
     /// Episodes whose rows are persisted, including episodes with no subtasks.
     #[serde(default)]
-    completed_episodes: Vec<String>,
+    completed_episodes: Vec<EpisodeId>,
     /// Episodes whose last annotation attempt failed; a rerun replaces the entry.
     #[serde(default)]
     failed_episodes: Vec<EpisodeFailure>,
@@ -175,27 +175,27 @@ impl SubtaskAnnotation {
         self.sample_interval_seconds = seconds;
         Ok(())
     }
-    pub(crate) fn completed_episodes(&self) -> &[String] {
+    pub(crate) fn completed_episodes(&self) -> &[EpisodeId] {
         &self.completed_episodes
     }
     pub(crate) fn failed_episodes(&self) -> &[EpisodeFailure] {
         &self.failed_episodes
     }
-    pub(crate) fn is_completed(&self, episode: &str) -> bool {
-        self.completed_episodes.iter().any(|done| done == episode)
+    pub(crate) fn is_completed(&self, episode: &EpisodeId) -> bool {
+        self.completed_episodes.contains(episode)
     }
-    fn mark_completed(&mut self, episode: &str) {
+    fn mark_completed(&mut self, episode: &EpisodeId) {
         if !self.is_completed(episode) {
-            self.completed_episodes.push(episode.to_owned());
+            self.completed_episodes.push(episode.clone());
         }
         self.failed_episodes
-            .retain(|failure| failure.episode != episode);
+            .retain(|failure| &failure.episode != episode);
     }
-    fn mark_failed(&mut self, episode: &str, reason: impl Into<String>) {
+    fn mark_failed(&mut self, episode: &EpisodeId, reason: impl Into<String>) {
         self.failed_episodes
-            .retain(|failure| failure.episode != episode);
+            .retain(|failure| &failure.episode != episode);
         self.failed_episodes.push(EpisodeFailure {
-            episode: episode.to_owned(),
+            episode: episode.clone(),
             reason: reason.into(),
         });
     }
@@ -213,11 +213,11 @@ impl SubtaskAnnotation {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EpisodeFailure {
-    episode: String,
+    episode: EpisodeId,
     reason: String,
 }
 impl EpisodeFailure {
-    pub(crate) fn episode(&self) -> &str {
+    pub(crate) fn episode(&self) -> &EpisodeId {
         &self.episode
     }
     pub(crate) fn reason(&self) -> &str {
@@ -254,7 +254,7 @@ impl SubtaskSearch {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskRow {
     node: String,
-    episode: String,
+    episode: EpisodeId,
     start_time: f64,
     end_time: f64,
     description: String,
@@ -267,14 +267,14 @@ pub(crate) struct SubtaskRow {
 impl SubtaskRow {
     pub(crate) fn new(
         node: impl Into<String>,
-        episode: impl Into<String>,
+        episode: EpisodeId,
         start_time: f64,
         end_time: f64,
         description: impl Into<String>,
     ) -> Result<Self, String> {
         let row = Self {
             node: node.into(),
-            episode: episode.into(),
+            episode,
             start_time,
             end_time,
             description: description.into().trim().to_owned(),
@@ -302,7 +302,7 @@ impl SubtaskRow {
     pub(crate) fn node(&self) -> &str {
         &self.node
     }
-    pub(crate) fn episode(&self) -> &str {
+    pub(crate) fn episode(&self) -> &EpisodeId {
         &self.episode
     }
     pub(crate) fn start_time(&self) -> f64 {
@@ -319,12 +319,12 @@ impl SubtaskRow {
         &self.description
     }
     /// Whether this is the row an assignment or focus refers to.
-    pub(crate) fn is(&self, episode: &str, start_time: f64) -> bool {
-        self.episode == episode && self.start_time == start_time
+    pub(crate) fn is(&self, episode: &EpisodeId, start_time: f64) -> bool {
+        &self.episode == episode && self.start_time == start_time
     }
     fn validate(&self) -> Result<(), String> {
-        if self.node.is_empty() || self.episode.is_empty() {
-            return Err("A subtask row needs its node and episode.".into());
+        if self.node.is_empty() {
+            return Err("A subtask row needs its node.".into());
         }
         if !self.start_time.is_finite()
             || !self.end_time.is_finite()
@@ -377,7 +377,7 @@ impl SubtaskCategory {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskAssignment {
-    episode: String,
+    episode: EpisodeId,
     start_time: f64,
     category: String,
     probability: f64,
@@ -385,14 +385,14 @@ pub(crate) struct SubtaskAssignment {
 }
 impl SubtaskAssignment {
     pub(crate) fn new(
-        episode: impl Into<String>,
+        episode: EpisodeId,
         start_time: f64,
         category: impl Into<String>,
         probability: f64,
         confidence: f64,
     ) -> Result<Self, String> {
         let assignment = Self {
-            episode: episode.into(),
+            episode,
             start_time,
             category: category.into(),
             probability,
@@ -401,7 +401,7 @@ impl SubtaskAssignment {
         assignment.validate()?;
         Ok(assignment)
     }
-    pub(crate) fn episode(&self) -> &str {
+    pub(crate) fn episode(&self) -> &EpisodeId {
         &self.episode
     }
     pub(crate) fn start_time(&self) -> f64 {
@@ -420,7 +420,7 @@ impl SubtaskAssignment {
     }
     fn validate(&self) -> Result<(), String> {
         let unit = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
-        if self.episode.is_empty() || !self.start_time.is_finite() || self.category.is_empty() {
+        if !self.start_time.is_finite() || self.category.is_empty() {
             return Err("A subtask assignment needs its row and category.".into());
         }
         if !unit(self.probability) || !unit(self.confidence) {
@@ -527,17 +527,13 @@ impl ExplorationPayload {
     }
     /// The camera this graph measures on, out of its annotation nodes; a
     /// graph that has not chosen one leads with whatever shows the workspace.
-    pub(crate) fn configured_camera(&self) -> crate::activities::data::FeaturedCamera {
-        self.nodes
-            .iter()
-            .find_map(|node| match node.kind() {
+    pub(crate) fn configured_camera(&self) -> crate::activities::episode::FeaturedCamera {
+        crate::activities::episode::FeaturedCamera::measured(self.nodes.iter().find_map(|node| {
+            match node.kind() {
                 ExplorationNodeKind::BreakDownSubtasks(annotation) => annotation.camera(),
                 _ => None,
-            })
-            .map_or(
-                crate::activities::data::FeaturedCamera::Overview,
-                |camera| crate::activities::data::FeaturedCamera::Named(camera.to_owned()),
-            )
+            }
+        }))
     }
     pub(crate) fn node(&self, id: &str) -> Option<&ExplorationNode> {
         self.nodes.iter().find(|node| node.id == id)
@@ -625,13 +621,13 @@ impl ExplorationPayload {
     pub(crate) fn replace_episode_subtasks(
         &mut self,
         node: &str,
-        episode: &str,
+        episode: &EpisodeId,
         mut rows: Vec<SubtaskRow>,
     ) -> Result<(), String> {
         let annotation = self.annotation_mut(node)?;
         if rows
             .iter()
-            .any(|row| row.node != node || row.episode != episode)
+            .any(|row| row.node != node || &row.episode != episode)
         {
             return Err("Subtask rows belong to another node or episode.".into());
         }
@@ -642,7 +638,7 @@ impl ExplorationPayload {
         Self::check_sequence(&rows)?;
         annotation.mark_completed(episode);
         self.subtasks
-            .retain(|row| !(row.node == node && row.episode == episode));
+            .retain(|row| !(row.node == node && &row.episode == episode));
         self.subtasks.extend(rows);
         Ok(())
     }
@@ -650,7 +646,7 @@ impl ExplorationPayload {
     pub(crate) fn record_episode_failure(
         &mut self,
         node: &str,
-        episode: &str,
+        episode: &EpisodeId,
         reason: impl Into<String>,
     ) -> Result<(), String> {
         self.annotation_mut(node)?.mark_failed(episode, reason);
@@ -778,7 +774,7 @@ impl ExplorationPayload {
         if reached.len() != self.nodes.len() {
             return Err("The graph contains a cycle.".into());
         }
-        let mut by_episode: BTreeMap<(&str, &str), Vec<&SubtaskRow>> = BTreeMap::new();
+        let mut by_episode: BTreeMap<(&str, &EpisodeId), Vec<&SubtaskRow>> = BTreeMap::new();
         for row in &self.subtasks {
             row.validate()?;
             match self.node(&row.node).map(ExplorationNode::kind) {
@@ -791,7 +787,7 @@ impl ExplorationPayload {
                 }
             }
             by_episode
-                .entry((row.node.as_str(), row.episode.as_str()))
+                .entry((row.node.as_str(), &row.episode))
                 .or_default()
                 .push(row);
         }
@@ -851,6 +847,7 @@ impl ExplorationPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spiral_robotics_common::datasets::EpisodeId;
 
     fn annotated_graph() -> (ExplorationPayload, String) {
         let mut payload = ExplorationPayload::new(None);
@@ -863,10 +860,24 @@ mod tests {
         payload
             .replace_episode_subtasks(
                 &annotate,
-                "ep-1",
+                &EpisodeId::fixture(1),
                 vec![
-                    SubtaskRow::new(&annotate, "ep-1", 8.0, 13.0, "make the first fold").unwrap(),
-                    SubtaskRow::new(&annotate, "ep-1", 0.0, 8.0, " grasp the corners ").unwrap(),
+                    SubtaskRow::new(
+                        &annotate,
+                        EpisodeId::fixture(1),
+                        8.0,
+                        13.0,
+                        "make the first fold",
+                    )
+                    .unwrap(),
+                    SubtaskRow::new(
+                        &annotate,
+                        EpisodeId::fixture(1),
+                        0.0,
+                        8.0,
+                        " grasp the corners ",
+                    )
+                    .unwrap(),
                 ],
             )
             .unwrap();
@@ -936,7 +947,7 @@ mod tests {
         let (payload, annotate) = annotated_graph();
         let rows = payload
             .subtasks_for(&annotate)
-            .filter(|row| row.episode() == "ep-1")
+            .filter(|row| row.episode() == &EpisodeId::fixture(1))
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].description(), "grasp the corners");
@@ -947,7 +958,7 @@ mod tests {
         else {
             panic!("annotation node");
         };
-        assert!(annotation.is_completed("ep-1"));
+        assert!(annotation.is_completed(&EpisodeId::fixture(1)));
         assert_eq!(payload.validate(), Ok(()));
     }
 
@@ -956,50 +967,56 @@ mod tests {
         let (mut payload, annotate) = annotated_graph();
         let before = payload.clone();
         let overlapping = vec![
-            SubtaskRow::new(&annotate, "ep-2", 0.0, 5.0, "a").unwrap(),
-            SubtaskRow::new(&annotate, "ep-2", 4.0, 9.0, "b").unwrap(),
+            SubtaskRow::new(&annotate, EpisodeId::fixture(2), 0.0, 5.0, "a").unwrap(),
+            SubtaskRow::new(&annotate, EpisodeId::fixture(2), 4.0, 9.0, "b").unwrap(),
         ];
         assert!(
             payload
-                .replace_episode_subtasks(&annotate, "ep-2", overlapping)
+                .replace_episode_subtasks(&annotate, &EpisodeId::fixture(2), overlapping)
                 .is_err()
         );
-        let foreign = vec![SubtaskRow::new("other", "ep-2", 0.0, 5.0, "a").unwrap()];
+        let foreign = vec![SubtaskRow::new("other", EpisodeId::fixture(2), 0.0, 5.0, "a").unwrap()];
         assert!(
             payload
-                .replace_episode_subtasks(&annotate, "ep-2", foreign)
+                .replace_episode_subtasks(&annotate, &EpisodeId::fixture(2), foreign)
                 .is_err()
         );
         assert!(
             payload
-                .replace_episode_subtasks(DATASET_NODE_ID, "ep-2", Vec::new())
+                .replace_episode_subtasks(DATASET_NODE_ID, &EpisodeId::fixture(2), Vec::new())
                 .is_err()
         );
         assert_eq!(payload, before);
-        assert!(SubtaskRow::new(&annotate, "ep-2", 5.0, 5.0, "a").is_err());
-        assert!(SubtaskRow::new(&annotate, "ep-2", -1.0, 5.0, "a").is_err());
-        assert!(SubtaskRow::new(&annotate, "ep-2", 0.0, 5.0, "  ").is_err());
+        assert!(SubtaskRow::new(&annotate, EpisodeId::fixture(2), 5.0, 5.0, "a").is_err());
+        assert!(SubtaskRow::new(&annotate, EpisodeId::fixture(2), -1.0, 5.0, "a").is_err());
+        assert!(SubtaskRow::new(&annotate, EpisodeId::fixture(2), 0.0, 5.0, "  ").is_err());
     }
 
     #[test]
     fn an_empty_episode_and_a_failure_both_record_progress() {
         let (mut payload, annotate) = annotated_graph();
         payload
-            .replace_episode_subtasks(&annotate, "ep-2", Vec::new())
+            .replace_episode_subtasks(&annotate, &EpisodeId::fixture(2), Vec::new())
             .unwrap();
         payload
-            .record_episode_failure(&annotate, "ep-3", "timed out")
+            .record_episode_failure(&annotate, &EpisodeId::fixture(3), "timed out")
             .unwrap();
         let ExplorationNodeKind::BreakDownSubtasks(annotation) =
             payload.node(&annotate).unwrap().kind()
         else {
             panic!("annotation node");
         };
-        assert_eq!(annotation.completed_episodes(), ["ep-1", "ep-2"]);
-        assert_eq!(annotation.failed_episodes()[0].episode(), "ep-3");
+        assert_eq!(
+            annotation.completed_episodes(),
+            [EpisodeId::fixture(1), EpisodeId::fixture(2)]
+        );
+        assert_eq!(
+            annotation.failed_episodes()[0].episode(),
+            &EpisodeId::fixture(3)
+        );
         assert_eq!(annotation.failed_episodes()[0].reason(), "timed out");
         payload
-            .replace_episode_subtasks(&annotate, "ep-3", Vec::new())
+            .replace_episode_subtasks(&annotate, &EpisodeId::fixture(3), Vec::new())
             .unwrap();
         let ExplorationNodeKind::BreakDownSubtasks(annotation) =
             payload.node(&annotate).unwrap().kind()
@@ -1016,9 +1033,9 @@ mod tests {
         payload
             .replace_episode_subtasks(
                 &annotate,
-                "ep-2",
+                &EpisodeId::fixture(2),
                 vec![
-                    SubtaskRow::new(&annotate, "ep-2", 0.0, 6.0, "unfold")
+                    SubtaskRow::new(&annotate, EpisodeId::fixture(2), 0.0, 6.0, "unfold")
                         .unwrap()
                         .with_poster(poster.clone()),
                 ],
@@ -1034,14 +1051,14 @@ mod tests {
         assert_eq!(
             decoded
                 .subtasks_for(&annotate)
-                .find(|row| row.episode() == "ep-2")
+                .find(|row| row.episode() == &EpisodeId::fixture(2))
                 .unwrap()
                 .poster(),
             Some(poster.as_str())
         );
         // An exploration saved before posters existed still decodes under
         // `deny_unknown_fields`, and its rows simply have none.
-        let older = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}}],"edges":[{"from":"dataset","to":"a"}],"subtasks":[{"node":"a","episode":"ep-1","start_time":0.0,"end_time":4.0,"description":"grasp"}]}"#;
+        let older = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}}],"edges":[{"from":"dataset","to":"a"}],"subtasks":[{"node":"a","episode":"00000000000000000000000000000001","start_time":0.0,"end_time":4.0,"description":"grasp"}]}"#;
         let older = ExplorationPayload::decode(EXPLORATION_ENCODING_VERSION, older).unwrap();
         let row = older.subtasks_for("a").next().unwrap();
         assert_eq!(row.poster(), None);
@@ -1066,7 +1083,7 @@ mod tests {
             .map(|index| {
                 SubtaskRow::new(
                     &annotate,
-                    "ep-1",
+                    EpisodeId::fixture(1),
                     f64::from(index),
                     f64::from(index) + 1.0,
                     "fold",
@@ -1076,7 +1093,7 @@ mod tests {
             })
             .collect();
         payload
-            .replace_episode_subtasks(&annotate, "ep-1", rows)
+            .replace_episode_subtasks(&annotate, &EpisodeId::fixture(1), rows)
             .unwrap();
         let encoded = payload.encode().unwrap().len();
         assert!(
@@ -1097,9 +1114,9 @@ mod tests {
             SubtaskCategory::new("Fold", "Bring one part over another").unwrap(),
         ];
         let assignments = vec![
-            SubtaskAssignment::new("ep-1", 0.0, "Grasp", 0.9, 0.8).unwrap(),
-            SubtaskAssignment::new("ep-1", 8.0, "Fold", 0.7, 0.4).unwrap(),
-            SubtaskAssignment::new("ep-9", 1.0, "Fold", 0.95, 0.9).unwrap(),
+            SubtaskAssignment::new(EpisodeId::fixture(1), 0.0, "Grasp", 0.9, 0.8).unwrap(),
+            SubtaskAssignment::new(EpisodeId::fixture(1), 8.0, "Fold", 0.7, 0.4).unwrap(),
+            SubtaskAssignment::new(EpisodeId::fixture(9), 1.0, "Fold", 0.95, 0.9).unwrap(),
         ];
         let grouping =
             SubtaskGrouping::new(&group, &annotate, categories.clone(), assignments.clone())
@@ -1109,16 +1126,18 @@ mod tests {
         assert_eq!(
             members
                 .iter()
-                .map(|member| member.episode())
+                .map(|member| member.episode().clone())
                 .collect::<Vec<_>>(),
-            ["ep-9", "ep-1"]
+            [EpisodeId::fixture(9), EpisodeId::fixture(1)]
         );
         assert!(
             SubtaskGrouping::new(
                 &group,
                 &annotate,
                 categories.clone(),
-                vec![SubtaskAssignment::new("ep-1", 0.0, "Smooth", 0.5, 0.5).unwrap()]
+                vec![
+                    SubtaskAssignment::new(EpisodeId::fixture(1), 0.0, "Smooth", 0.5, 0.5).unwrap()
+                ]
             )
             .is_err()
         );
@@ -1138,7 +1157,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(SubtaskAssignment::new("ep-1", 0.0, "Grasp", 1.2, 0.5).is_err());
+        assert!(SubtaskAssignment::new(EpisodeId::fixture(1), 0.0, "Grasp", 1.2, 0.5).is_err());
         assert_eq!(payload.validate(), Ok(()));
     }
 

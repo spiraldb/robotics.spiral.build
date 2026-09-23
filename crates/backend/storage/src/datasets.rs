@@ -10,8 +10,8 @@ use crate::{SpiralAccess, SpiralConnection, StorageManager};
 use serde::Deserialize;
 use serde_json::json;
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeTopicRequest,
-    ProjectResource,
+    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeId,
+    EpisodeTopicRequest, ProjectResource,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -330,15 +330,15 @@ impl EpisodeTopicQuery {
 
     pub(crate) fn for_episode(
         dataset: &DatasetSelection,
-        episode_id: &str,
+        episode_id: &EpisodeId,
         sql: String,
     ) -> Result<Self, String> {
         let selection = DatasetSelection::new(dataset.path().to_vec())?;
         if !selection.can_preview() {
             return Err("Preview is unavailable for this dataset name".to_owned());
         }
-        let id =
-            uuid::Uuid::parse_str(episode_id).map_err(|_| "Invalid recording UUID".to_owned())?;
+        let id = uuid::Uuid::parse_str(episode_id.as_str())
+            .map_err(|_| "Invalid recording UUID".to_owned())?;
         let values = arrow_array::FixedSizeBinaryArray::try_from_iter([id.as_bytes()].into_iter())
             .map_err(|error| error.to_string())?;
         let field =
@@ -395,8 +395,11 @@ mod tests {
     fn episode_reads_bind_uuid_bytes_and_reject_invalid_ids() {
         let dataset = DatasetSelection::new(vec!["dataset_default".into()]).unwrap();
         let id = uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001").unwrap();
-        let request =
-            EpisodeTopicRequest::new(dataset.clone(), "/camera' --".into(), id.to_string());
+        let request = EpisodeTopicRequest::new(
+            dataset.clone(),
+            "/camera' --".into(),
+            EpisodeId::try_from(id.simple().to_string()).unwrap(),
+        );
         let statement =
             EpisodeTopicQuery::for_sql(&request, "SELECT value FROM source WHERE id = $1".into())
                 .unwrap()
@@ -419,11 +422,8 @@ mod tests {
             .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(values.value(0), id.as_bytes());
-        let invalid = EpisodeTopicRequest::new(dataset, "/topic".into(), "' OR true --".into());
-        assert!(
-            EpisodeTopicQuery::for_sql(&invalid, "SELECT value FROM source WHERE id = $1".into())
-                .is_err()
-        );
+        // An id that is not a member UUID never reaches a statement at all.
+        assert!(EpisodeId::try_from("' OR true --").is_err());
     }
 
     #[test]

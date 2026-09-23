@@ -19,7 +19,7 @@ use crate::activities::workflow::explore::document::{
 use crate::activities::workflow::explore::poster::{
     PosterCut, PosterFrame, PosterFrames, ShownPoster,
 };
-use crate::activities::workflow::explore::review::{EpisodeNames, SubtaskContext};
+use crate::activities::workflow::explore::review::{EpisodeOrder, SubtaskContext};
 use crate::activities::workflow::explore::state::ExplorationController;
 use crate::client::documents::DocumentClient;
 use crate::client::{project::ProjectClient, queries::QueryRefresh};
@@ -27,6 +27,7 @@ use crate::components::document_session::StudioDocument as _;
 use dioxus::prelude::*;
 use serde_json::Value;
 use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::exploration::ExplorationDocument;
 use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
@@ -166,7 +167,7 @@ struct TestJournal {
     documents: ExplorationDocuments,
 }
 impl AnnotationRecorder for TestJournal {
-    fn record(&self, episode: &str, outcome: Result<Vec<SubtaskRow>, String>) {
+    fn record(&self, episode: &EpisodeId, outcome: Result<Vec<SubtaskRow>, String>) {
         ExplorationJournal::write(self.controller, &self.node, episode, outcome);
     }
     async fn persist(&self) {
@@ -247,8 +248,8 @@ impl AnnotationHarness {
                     },
                 )
                 .run(vec![
-                    AnnotationEpisode::fixture("ep-1", 20_000_000_000),
-                    AnnotationEpisode::fixture("ep-2", 21_000_000_000),
+                    AnnotationEpisode::fixture(1, 20_000_000_000),
+                    AnnotationEpisode::fixture(2, 21_000_000_000),
                 ])
                 .await;
                 *finished.borrow_mut() = true;
@@ -283,7 +284,7 @@ async fn annotate_sends_parallel_image_requests_and_persists_in_episode_order() 
             .subtasks_for(&node)
             .map(|row| {
                 (
-                    row.episode().to_owned(),
+                    row.episode().clone(),
                     row.start_time(),
                     row.end_time(),
                     row.description().to_owned(),
@@ -294,8 +295,18 @@ async fn annotate_sends_parallel_image_requests_and_persists_in_episode_order() 
     assert_eq!(
         rows,
         [
-            ("ep-1".to_owned(), 0.0, 3.0, "grasp the cloth".to_owned()),
-            ("ep-2".to_owned(), 4.0, 7.0, "grasp the cloth".to_owned()),
+            (
+                EpisodeId::fixture(1),
+                0.0,
+                3.0,
+                "grasp the cloth".to_owned()
+            ),
+            (
+                EpisodeId::fixture(2),
+                4.0,
+                7.0,
+                "grasp the cloth".to_owned()
+            ),
         ]
     );
     // Every row carries the still it will be shown as, cut in this browser
@@ -333,7 +344,10 @@ async fn annotate_sends_parallel_image_requests_and_persists_in_episode_order() 
                 _ => panic!("the graph keeps its annotation node"),
             },
         );
-    assert_eq!(completed, (vec!["ep-1".to_owned(), "ep-2".to_owned()], 0));
+    assert_eq!(
+        completed,
+        (vec![EpisodeId::fixture(1), EpisodeId::fixture(2)], 0)
+    );
 
     let requests = fetch.requests();
     let completions = requests
@@ -395,7 +409,10 @@ async fn annotate_sends_parallel_image_requests_and_persists_in_episode_order() 
     )
     .expect("the payload decodes");
     assert_eq!(first["subtasks"].as_array().expect("rows").len(), 1);
-    assert_eq!(first["subtasks"][0]["episode"], "ep-1");
+    assert_eq!(
+        first["subtasks"][0]["episode"],
+        EpisodeId::fixture(1).as_str()
+    );
     let last: Value = serde_json::from_str(
         saves[1]["body"]["payload"]
             .as_str()
@@ -403,7 +420,10 @@ async fn annotate_sends_parallel_image_requests_and_persists_in_episode_order() 
     )
     .expect("the payload decodes");
     assert_eq!(last["subtasks"].as_array().expect("rows").len(), 2);
-    assert_eq!(last["nodes"][1]["kind"]["completed_episodes"][1], "ep-2");
+    assert_eq!(
+        last["nodes"][1]["kind"]["completed_episodes"][1],
+        EpisodeId::fixture(2).as_str()
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test]
@@ -424,7 +444,7 @@ async fn native_frames_are_composed_into_sheets_in_the_browser() {
             // Twelve seconds at half a second: twenty-four frames, so the last
             // four spill onto a second sheet.
             let composed = NativeSheets::new(datasets, "/top-camera", 0.5)
-                .sheets(&AnnotationEpisode::fixture("ep-1", 12_000_000_000))
+                .sheets(&AnnotationEpisode::fixture(1, 12_000_000_000))
                 .await;
             *written.borrow_mut() = Some(composed);
         });
@@ -504,7 +524,7 @@ impl PosterHarness {
         let context = SubtaskContext::new(
             Some(DatasetSelection::new(vec!["folding".into()]).expect("a dataset name")),
             Some("/top-camera".to_owned()),
-            EpisodeNames::of(rows.iter().map(SubtaskRow::episode)),
+            EpisodeOrder::of(rows.iter().map(SubtaskRow::episode)),
         );
         let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
         *self.frames.borrow_mut() = Some(frames);
@@ -542,11 +562,12 @@ async fn a_row_annotated_with_a_poster_shows_it_without_any_frame_query() {
     let fetch = AnnotationFetch::install();
     let stored = "data:image/jpeg;base64,AAAA".to_owned();
     let harness = PosterHarness::default();
+    let (measured, older) = (EpisodeId::fixture(1), EpisodeId::fixture(2));
     *harness.rows.borrow_mut() = vec![
-        SubtaskRow::new("break_down_subtasks-1", "measured", 0.0, 4.0, "grasp")
+        SubtaskRow::new("break_down_subtasks-1", measured.clone(), 0.0, 4.0, "grasp")
             .unwrap()
             .with_poster(stored.clone()),
-        SubtaskRow::new("break_down_subtasks-1", "older", 2.0, 6.0, "fold").unwrap(),
+        SubtaskRow::new("break_down_subtasks-1", older.clone(), 2.0, 6.0, "fold").unwrap(),
     ];
     let mut dom = VirtualDom::new_with_props(PosterHarness::render, harness.clone());
     dom.rebuild_in_place();
@@ -560,7 +581,7 @@ async fn a_row_annotated_with_a_poster_shows_it_without_any_frame_query() {
     // Scrolling the measured episode into view asks for nothing at all: its
     // rows brought their pictures with them.
     let frames = harness.frames();
-    dom.in_scope(ScopeId::ROOT, || frames.request("measured"));
+    dom.in_scope(ScopeId::ROOT, || frames.request(&measured));
     for _ in 0..5 {
         dom.render_immediate_to_vec();
         gloo_timers::future::TimeoutFuture::new(5).await;
@@ -570,7 +591,7 @@ async fn a_row_annotated_with_a_poster_shows_it_without_any_frame_query() {
     // The older episode is backfilled in one query, selected by recorded time:
     // nothing estimates the frame rate first, and the picture it produces is
     // encoded exactly as an annotated one would have been.
-    dom.in_scope(ScopeId::ROOT, || frames.request("older"));
+    dom.in_scope(ScopeId::ROOT, || frames.request(&older));
     let backfilled = harness.settle(&mut dom, 1).await;
     assert!(backfilled.starts_with("data:image/jpeg;base64,"));
     let queries = episode_queries(&fetch);
@@ -580,7 +601,7 @@ async fn a_row_annotated_with_a_poster_shows_it_without_any_frame_query() {
     assert!(!queries[0].contains("count(*)"));
 
     // Asking again — another view of the same exploration — is free.
-    dom.in_scope(ScopeId::ROOT, || frames.request("older"));
+    dom.in_scope(ScopeId::ROOT, || frames.request(&older));
     for _ in 0..5 {
         dom.render_immediate_to_vec();
         gloo_timers::future::TimeoutFuture::new(5).await;

@@ -264,7 +264,7 @@ impl<'a> AssignmentReader<'a> {
             .iter()
             .find(|category| category.name() == distribution.choice())?;
         SubtaskAssignment::new(
-            subtask.episode(),
+            subtask.episode().clone(),
             subtask.start_time(),
             category.name(),
             distribution.probability(category.name()),
@@ -278,6 +278,7 @@ impl<'a> AssignmentReader<'a> {
 mod tests {
     use super::*;
     use crate::activities::workflow::explore::similar::questions::AssignmentQuestions;
+    use spiral_robotics_common::datasets::EpisodeId;
 
     fn categories(names: &[&str]) -> Vec<SubtaskCategory> {
         names
@@ -413,9 +414,9 @@ mod tests {
     fn every_answered_row_joins_its_argmax_category_without_a_confidence_gate() {
         let categories = categories(&["fold", "grasp", "smooth"]);
         let rows = vec![
-            SubtaskRow::new("annotate-1", "episode-a", 0.0, 1.0, "fold it").unwrap(),
-            SubtaskRow::new("annotate-1", "episode-a", 2.0, 3.0, "grab it").unwrap(),
-            SubtaskRow::new("annotate-1", "episode-b", 0.5, 1.5, "wipe it").unwrap(),
+            SubtaskRow::new("annotate-1", EpisodeId::fixture(0xa), 0.0, 1.0, "fold it").unwrap(),
+            SubtaskRow::new("annotate-1", EpisodeId::fixture(0xa), 2.0, 3.0, "grab it").unwrap(),
+            SubtaskRow::new("annotate-1", EpisodeId::fixture(0xb), 0.5, 1.5, "wipe it").unwrap(),
         ];
         let descriptions = rows.iter().map(SubtaskRow::description).collect::<Vec<_>>();
         let batch = &AssignmentQuestions::new(&categories)
@@ -434,7 +435,7 @@ mod tests {
         let assignments = AssignmentReader::new(&rows, &categories).read(batch, &answers);
 
         assert_eq!(assignments.len(), 2, "an unknown category is not an answer");
-        assert_eq!(assignments[0].episode(), "episode-a");
+        assert_eq!(assignments[0].episode(), &EpisodeId::fixture(0xa));
         assert_eq!(assignments[0].start_time(), 0.0);
         assert_eq!(assignments[0].category(), "fold");
         assert_eq!(assignments[0].probability(), 0.7);

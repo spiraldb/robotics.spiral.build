@@ -8,9 +8,8 @@ use spiral_robotics_ui::{
 };
 
 use super::super::document::ExplorationPayload;
-use super::super::review::PlayedEpisode;
 use super::super::state::ExplorationController;
-use crate::activities::data::{DatasetClient, FeaturedCamera, OpenedEpisode};
+use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera};
 use crate::components::dataset_picker::DatasetPicker;
 use crate::components::icons::SpinnerIcon;
 
@@ -93,23 +92,9 @@ fn DatasetChoice(controller: ExplorationController) -> Element {
 #[component]
 fn DatasetEpisodes(dataset: DatasetSelection, featured: FeaturedCamera) -> Element {
     let episodes = use_resource(use_reactive(&dataset, |dataset| async move {
-        let sql = format!(
-            "SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, \
-             message_start_time, message_end_time, duration_ns, channel_count \
-             FROM spql.mcap.episodes('{}') ORDER BY message_start_time, source_uri LIMIT {EPISODE_LIMIT}",
-            dataset.sql_name().replace('\'', "''"),
-        );
-        DatasetClient::current()
-            .run_spiral_query(sql, EPISODE_LIMIT)
+        Episode::page(&dataset, 0, EPISODE_LIMIT)
             .await
-            .map_err(|error| error.to_string())
-            .and_then(|snapshot| {
-                snapshot
-                    .into_rows()
-                    .into_iter()
-                    .map(|row| OpenedEpisode::from_row(dataset.clone(), row))
-                    .collect::<Result<Vec<_>, _>>()
-            })
+            .map(|page| page.into_episodes())
     }));
     let listing = episodes.read().clone();
     rsx! {
@@ -134,7 +119,7 @@ fn DatasetEpisodes(dataset: DatasetSelection, featured: FeaturedCamera) -> Eleme
 #[component]
 fn DatasetEpisodeList(
     dataset: DatasetSelection,
-    episodes: Vec<OpenedEpisode>,
+    episodes: Vec<Episode>,
     featured: FeaturedCamera,
 ) -> Element {
     let mut opened = use_signal(|| 0_usize);
@@ -160,7 +145,7 @@ fn DatasetEpisodeList(
                         id: "explore-canvas-episode", value: "{index}",
                         onchange: move |value: String| opened.set(value.parse().unwrap_or(0)),
                         for (position, episode) in episodes.iter().enumerate() {
-                            option { value: "{position}", title: "{episode.title()}", "Episode {position + 1}" }
+                            option { value: "{position}", title: "{episode.id()}", "{episode.name()}" }
                         }
                     }
                     Button {
@@ -174,7 +159,7 @@ fn DatasetEpisodeList(
         }
         match current {
             Some(episode) => rsx! {
-                PlayedEpisode { key: "{episode.title()}", episode, featured_camera: featured }
+                EpisodeInspection { episode, featured_camera: featured }
             },
             None => rsx! { EmptyState { p { "This dataset has no recordings yet." } } },
         }

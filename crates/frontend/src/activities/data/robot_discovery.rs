@@ -11,8 +11,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use spiral_robotics_common::{
     datasets::{
-        DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetTopic, EpisodeSelection,
-        HuggingFaceDatasetInspection,
+        DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetTopic, EpisodeId,
+        EpisodeSelection, HuggingFaceDatasetInspection,
     },
     relations::EpisodeQueryRequest,
     sql::SqlLiteral,
@@ -182,7 +182,7 @@ impl DiscoveryEpisode {
             .get("id")
             .and_then(Value::as_str)
             .ok_or("Episode has no identity")?;
-        let episode = EpisodeSelection::new(selection, id.into());
+        let episode = EpisodeSelection::new(selection, EpisodeId::try_from(id)?);
         let topics = data
             .episode_topics(episode.clone())
             .await

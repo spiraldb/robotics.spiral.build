@@ -1,5 +1,5 @@
 //! Typed message pages shared by schema inspection, numeric plots and recorded media.
-use super::DatasetClient;
+use crate::activities::data::DatasetClient;
 use crate::components::time_series::{
     TimelineSignalLane, TimelineSignalPoint, TimelineSignalSeries,
 };
@@ -20,25 +20,25 @@ const TRACE_COLORS: [&str; 10] = [
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum FieldStep {
+enum FieldStep {
     Name(String),
     Items,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct MessageField {
+pub(in crate::activities) struct MessageField {
     steps: Vec<FieldStep>,
     projection: Vec<String>,
     field: Field,
 }
 impl MessageField {
-    pub(super) fn root(field: &Field) -> Self {
+    pub(in crate::activities) fn root(field: &Field) -> Self {
         Self {
             steps: vec![FieldStep::Name(field.name().clone())],
             projection: vec![field.name().clone()],
             field: field.clone(),
         }
     }
-    pub(super) fn children(&self) -> Vec<Self> {
+    pub(in crate::activities) fn children(&self) -> Vec<Self> {
         match self.field.data_type() {
             DataType::Struct(fields) => fields
                 .iter()
@@ -61,7 +61,7 @@ impl MessageField {
             _ => vec![],
         }
     }
-    pub(super) fn label(&self) -> String {
+    pub(in crate::activities) fn label(&self) -> String {
         self.indexed_label(&[])
     }
     fn indexed_label(&self, indices: &[usize]) -> String {
@@ -94,13 +94,13 @@ impl MessageField {
             label
         }
     }
-    pub(super) fn name(&self) -> &str {
+    pub(in crate::activities) fn name(&self) -> &str {
         match self.steps.last() {
             Some(FieldStep::Name(name)) => name,
             _ => "[]",
         }
     }
-    pub(super) fn type_label(&self) -> String {
+    pub(in crate::activities) fn type_label(&self) -> String {
         let kind = match self.field.data_type() {
             DataType::Struct(_) => "struct".into(),
             DataType::List(_) | DataType::LargeList(_) => "list".into(),
@@ -113,17 +113,17 @@ impl MessageField {
             kind
         }
     }
-    pub(super) fn plottable(&self) -> bool {
+    pub(in crate::activities) fn plottable(&self) -> bool {
         self.field.data_type().is_numeric() || self.field.data_type() == &DataType::Boolean
     }
-    pub(super) fn is_floating(&self) -> bool {
+    pub(in crate::activities) fn is_floating(&self) -> bool {
         self.field.data_type().is_floating()
     }
     /// An element of a recorded list, drawn as one trace per index.
-    pub(super) fn is_list_item(&self) -> bool {
+    pub(in crate::activities) fn is_list_item(&self) -> bool {
         self.steps.contains(&FieldStep::Items)
     }
-    pub(super) fn projection(&self) -> Vec<String> {
+    pub(in crate::activities) fn projection(&self) -> Vec<String> {
         self.projection.clone()
     }
     fn cells(&self, array: &dyn Array, row: usize) -> Result<Vec<FieldCell>, String> {
@@ -216,14 +216,14 @@ impl FieldCell {
     }
 }
 #[derive(Clone, PartialEq)]
-pub(super) struct MessageBuffer {
+pub(in crate::activities) struct MessageBuffer {
     schema: Arc<Schema>,
     batches: Vec<RecordBatch>,
 }
 impl MessageBuffer {
     /// A schema read's empty buffer, or every message in a window, one keyset
     /// page per episode query.
-    pub(super) async fn load(mut request: MessageRead) -> Result<Rc<Self>, String> {
+    pub(in crate::activities) async fn load(mut request: MessageRead) -> Result<Rc<Self>, String> {
         let first = MessagePage::read(&request).await?;
         let mut loaded = Self {
             schema: first.schema,
@@ -257,13 +257,13 @@ impl MessageBuffer {
         }
         Ok(Rc::new(loaded))
     }
-    pub(super) fn value_field(&self) -> Result<MessageField, String> {
+    pub(in crate::activities) fn value_field(&self) -> Result<MessageField, String> {
         self.schema
             .field_with_name("value")
             .map(MessageField::root)
             .map_err(|e| e.to_string())
     }
-    pub(super) fn rows(&self) -> usize {
+    pub(in crate::activities) fn rows(&self) -> usize {
         self.batches.iter().map(RecordBatch::num_rows).sum()
     }
     fn time(batch: &RecordBatch, row: usize) -> Result<u64, String> {
@@ -277,7 +277,7 @@ impl MessageBuffer {
         Ok(times.value(row))
     }
     /// The log time of the first message, if there is one.
-    pub(super) fn first_time(&self) -> Option<u64> {
+    pub(in crate::activities) fn first_time(&self) -> Option<u64> {
         let batch = self.batches.iter().find(|batch| batch.num_rows() > 0)?;
         Self::time(batch, 0).ok()
     }
@@ -299,7 +299,10 @@ impl MessageBuffer {
         }
         Ok(None)
     }
-    pub(super) fn json_at(&self, absolute: u64) -> Result<Option<serde_json::Value>, String> {
+    pub(in crate::activities) fn json_at(
+        &self,
+        absolute: u64,
+    ) -> Result<Option<serde_json::Value>, String> {
         let Some((batch, row)) = self.at(absolute)? else {
             return Ok(None);
         };
@@ -312,7 +315,7 @@ impl MessageBuffer {
             serde_json::from_slice(&writer.into_inner()).map_err(|error| error.to_string())?;
         Ok(rows.pop())
     }
-    pub(super) fn values(
+    pub(in crate::activities) fn values(
         &self,
         fields: &[MessageField],
         absolute: u64,
@@ -334,7 +337,7 @@ impl MessageBuffer {
         Ok(result)
     }
     /// One lane per selected field; a list field draws one series per index.
-    pub(super) fn lanes(
+    pub(in crate::activities) fn lanes(
         &self,
         fields: &[MessageField],
         origin: u64,
@@ -401,7 +404,7 @@ impl MessageBuffer {
             })
             .collect())
     }
-    pub(super) fn batches(&self) -> &[RecordBatch] {
+    pub(in crate::activities) fn batches(&self) -> &[RecordBatch] {
         &self.batches
     }
 }

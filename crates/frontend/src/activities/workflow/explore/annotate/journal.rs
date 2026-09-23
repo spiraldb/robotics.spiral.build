@@ -5,6 +5,7 @@ use crate::activities::workflow::explore::document::SubtaskRow;
 use crate::activities::workflow::explore::state::ExplorationController;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
+use spiral_robotics_common::datasets::EpisodeId;
 
 /// A save is refused while the document has another command in flight, so the
 /// journal waits for it rather than dropping the episode's rows.
@@ -44,7 +45,7 @@ impl ExplorationJournal {
     pub(super) fn write(
         controller: ExplorationController,
         node: &str,
-        episode: &str,
+        episode: &EpisodeId,
         outcome: Result<Vec<SubtaskRow>, String>,
     ) {
         let stored = match outcome {
@@ -65,7 +66,7 @@ impl ExplorationJournal {
 }
 
 impl AnnotationRecorder for ExplorationJournal {
-    fn record(&self, episode: &str, outcome: Result<Vec<SubtaskRow>, String>) {
+    fn record(&self, episode: &EpisodeId, outcome: Result<Vec<SubtaskRow>, String>) {
         Self::write(self.controller, &self.node, episode, outcome);
     }
 

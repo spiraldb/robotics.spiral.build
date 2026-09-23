@@ -1,12 +1,12 @@
 //! Data-specific stream selection composed into the shared timeline.
 use super::{
-    episode_list::OpenedEpisode,
-    episode_streams::{
-        CoverageState, EpisodeStreams, PlotState, PlottableLeaves, RecordedStream, StreamChoices,
-        StreamKind, StreamSchema,
+    catalog_rail::OpenedEpisode,
+    stream_choices::{
+        CoverageState, EpisodeStreams, PlotState, PlottableLeaves, StreamChoices, StreamSchema,
     },
-    episode_transport::EpisodeTransport,
-    message_buffer::MessageField,
+};
+use crate::activities::episode::{
+    EpisodeFactsPresentation as _, EpisodeTransport, MessageField, RecordedStream, StreamKind,
 };
 use crate::components::{
     icons::{CameraStreamIcon, SignalStreamIcon},
@@ -51,7 +51,7 @@ pub(super) fn TimelinePanel(
             div { class: "data-timeline-empty", strong { "No episode open" } span { "Choose an episode under Datasets to see its streams on this clock." } }
         }) } };
     };
-    rsx! { StreamTimeline { key: "{subject.episode.record().id()}", transport, subject } }
+    rsx! { StreamTimeline { key: "{subject.episode.episode().id()}", transport, subject } }
 }
 
 #[component]
@@ -83,9 +83,10 @@ fn StreamTimeline(transport: EpisodeTransport, subject: TimelineSubject) -> Elem
         .partition(|stream| !searching && choices.stream_is_quiet(stream));
     let leading = cameras.into_iter().chain(loud).collect::<Vec<_>>();
     let nothing_listed = leading.is_empty() && quiet.is_empty();
+    let facts = subject.episode.episode().facts();
     let identity = rsx! {
-        strong { "{subject.episode.listed().title()}" }
-        span { class: "truncate", title: "{subject.episode.record().facts_label()}\n{subject.episode.record().source_uri().unwrap_or_default()}", "{subject.episode.label().head()}" }
+        strong { "{subject.episode.episode().name()}" }
+        span { class: "truncate", title: "{facts.facts_label()}\n{facts.source_uri().unwrap_or_default()}", "{subject.episode.label().head()}" }
     };
     let corner = rsx! { TextInput { class: "data-stream-filter", kind: TextInputKind::Search,
     placeholder: "Filter {total} streams", "aria-label": "Filter streams",

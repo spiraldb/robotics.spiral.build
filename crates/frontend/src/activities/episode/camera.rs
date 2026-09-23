@@ -1,8 +1,8 @@
 //! Recorded cameras render the episode playhead; they never own a playback clock.
 use super::{
-    episode_decoder::{CameraPlayback, EncodedCamera},
-    episode_transport::{EpisodeTimeRange, EpisodeTransport, FeedState},
-    message_buffer::MessageBuffer,
+    decoder::{CameraPlayback, EncodedCamera},
+    messages::MessageBuffer,
+    transport::{EpisodeTransport, FeedState},
 };
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{MessageRead, MessageWindow};
@@ -15,9 +15,9 @@ use wasm_bindgen::JsCast as _;
 #[component]
 pub(in crate::activities) fn EpisodeCamera(
     request: MessageRead,
-    timeline: EpisodeTimeRange,
     transport: EpisodeTransport,
 ) -> Element {
+    let timeline = transport.range();
     let load_request = request.clone();
     let mut video = use_resource(move || {
         let request = load_request.clone();

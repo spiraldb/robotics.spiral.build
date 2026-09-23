@@ -7,9 +7,9 @@ use super::coverage::MeasuredEpisodes;
 use crate::activities::workflow::explore::document::{
     ExplorationNode, ExplorationNodeKind, ExplorationPayload, SubtaskAssignment, SubtaskRow,
 };
-use crate::activities::workflow::explore::review::{EpisodeNames, SubtaskContext};
+use crate::activities::workflow::explore::review::{EpisodeOrder, SubtaskContext};
 use crate::activities::workflow::explore::state::ExplorationController;
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
 #[derive(Clone, PartialEq)]
 pub(super) struct ExplorationSource {
@@ -21,7 +21,7 @@ pub(super) struct ExplorationSource {
     camera: Option<String>,
     /// The episodes the parent annotation actually read, in the order it read
     /// them. An episode it failed on is not one of them.
-    measured: Vec<String>,
+    measured: Vec<EpisodeId>,
     /// The query a search node remembers; a grouping node has none.
     query: String,
 }
@@ -51,7 +51,7 @@ impl ExplorationSource {
     fn measurement(
         payload: &ExplorationPayload,
         annotation: &str,
-    ) -> (Option<String>, Vec<String>) {
+    ) -> (Option<String>, Vec<EpisodeId>) {
         match payload.node(annotation).map(ExplorationNode::kind) {
             Some(ExplorationNodeKind::BreakDownSubtasks(settings)) => (
                 settings.camera().map(str::to_owned),
@@ -78,27 +78,23 @@ impl ExplorationSource {
         &self.query
     }
     /// Everything a view needs to show these rows: the recordings, the camera
-    /// they were read from, and what to call each episode.
-    ///
-    /// The measured episodes are numbered first, so an episode the annotation
-    /// read and found no subtasks in still has a name to be counted under, and
-    /// the numbers run in the order the annotation ran.
+    /// they were read from, and the order the episodes list in — the order the
+    /// annotation measured them, then any episode only the rows mention.
     pub(super) fn context(&self) -> SubtaskContext {
         SubtaskContext::new(
             self.dataset.clone(),
             self.camera.clone(),
-            EpisodeNames::of(
+            EpisodeOrder::of(
                 self.measured
                     .iter()
-                    .map(String::as_str)
                     .chain(self.rows.iter().map(SubtaskRow::episode)),
             ),
         )
     }
     /// The episodes this exploration's answer is measured against: what the
-    /// parent annotation read, named the way the index names them.
+    /// parent annotation read.
     pub(super) fn measured(&self) -> MeasuredEpisodes {
-        MeasuredEpisodes::named(&self.measured, &self.context())
+        MeasuredEpisodes::of(&self.measured)
     }
     pub(super) fn descriptions(&self) -> Vec<&str> {
         self.rows.iter().map(SubtaskRow::description).collect()

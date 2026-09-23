@@ -14,6 +14,7 @@ use crate::activities::workflow::explore::document::SubtaskRow;
 use crate::activities::workflow::explore::frames::NativeFrame;
 use crate::activities::workflow::explore::poster::PosterImage;
 use futures_util::StreamExt as _;
+use spiral_robotics_common::datasets::EpisodeId;
 
 /// Enough parallel provider work to hide per-request latency without opening
 /// one request for every episode in a large dataset.
@@ -88,7 +89,7 @@ pub(super) trait SubtaskAnnotator {
 /// Where a pass writes what it learns, and what tells it to stop.
 pub(super) trait AnnotationRecorder {
     /// Record one episode's rows, or why the episode failed.
-    fn record(&self, episode: &str, outcome: Result<Vec<SubtaskRow>, String>);
+    fn record(&self, episode: &EpisodeId, outcome: Result<Vec<SubtaskRow>, String>);
     /// Persist everything recorded so far, waiting for any save in flight.
     async fn persist(&self);
     /// False once the operator has asked the pass to stop.
@@ -156,8 +157,8 @@ impl<S: ContactSheetSource, A: SubtaskAnnotator, R: AnnotationRecorder> Annotati
     async fn annotate_episode(
         &self,
         episode: AnnotationEpisode,
-    ) -> (String, Result<Vec<SubtaskRow>, String>) {
-        let id = episode.id().to_owned();
+    ) -> (EpisodeId, Result<Vec<SubtaskRow>, String>) {
+        let id = episode.id().clone();
         let outcome = self.annotate(&episode).await;
         (id, outcome)
     }
@@ -212,7 +213,7 @@ mod tests {
     const NODE: &str = "break_down_subtasks-1";
 
     /// One episode's rows, or why it failed, as the recorder received them.
-    type Written = (String, Result<Vec<SubtaskRow>, String>);
+    type Written = (EpisodeId, Result<Vec<SubtaskRow>, String>);
 
     /// Sheets of a fixed size, so a test decides only how many and how big.
     struct FakeSheets {
@@ -294,10 +295,8 @@ mod tests {
         stop_after: Option<usize>,
     }
     impl AnnotationRecorder for FakeRecorder {
-        fn record(&self, episode: &str, outcome: Result<Vec<SubtaskRow>, String>) {
-            self.written
-                .borrow_mut()
-                .push((episode.to_owned(), outcome));
+        fn record(&self, episode: &EpisodeId, outcome: Result<Vec<SubtaskRow>, String>) {
+            self.written.borrow_mut().push((episode.clone(), outcome));
         }
         async fn persist(&self) {
             *self.saves.borrow_mut() += 1;
@@ -333,8 +332,8 @@ mod tests {
         let annotator = FakeAnnotator::answering(vec![answer(1.0, 4.0), answer(0.0, 3.0)]);
         let run = pass(FakeSheets::of(2), annotator, FakeRecorder::default());
         run.run(vec![
-            AnnotationEpisode::fixture("ep-1", 10_000_000_000),
-            AnnotationEpisode::fixture("ep-2", 10_000_000_000),
+            AnnotationEpisode::fixture(1, 10_000_000_000),
+            AnnotationEpisode::fixture(2, 10_000_000_000),
         ])
         .now_or_never()
         .expect("the fakes answer immediately");
@@ -347,10 +346,10 @@ mod tests {
         );
         let written = run.recorder.written.borrow();
         assert_eq!(written.len(), 2);
-        assert_eq!(written[0].0, "ep-1");
+        assert_eq!(written[0].0, EpisodeId::fixture(1));
         let rows = written[0].1.as_ref().expect("ep-1 is annotated");
         assert_eq!(rows[0].node(), NODE);
-        assert_eq!(rows[0].episode(), "ep-1");
+        assert_eq!(rows[0].episode(), &EpisodeId::fixture(1));
         assert_eq!(rows[0].start_time(), 0.0);
         assert_eq!(written[1].1.as_ref().unwrap()[0].start_time(), 1.0);
         assert_eq!(*run.recorder.saves.borrow(), 2);
@@ -364,7 +363,7 @@ mod tests {
             FakeRecorder::default(),
         );
         let episodes = (0..10)
-            .map(|index| AnnotationEpisode::fixture(&format!("ep-{index}"), 10_000_000_000))
+            .map(|index| AnnotationEpisode::fixture(index, 10_000_000_000))
             .collect();
         {
             let future = run.run(episodes);
@@ -385,9 +384,9 @@ mod tests {
         ]);
         let run = pass(FakeSheets::of(1), annotator, FakeRecorder::default());
         run.run(vec![
-            AnnotationEpisode::fixture("ep-1", 10_000_000_000),
-            AnnotationEpisode::fixture("ep-2", 10_000_000_000),
-            AnnotationEpisode::fixture("ep-3", 10_000_000_000),
+            AnnotationEpisode::fixture(1, 10_000_000_000),
+            AnnotationEpisode::fixture(2, 10_000_000_000),
+            AnnotationEpisode::fixture(3, 10_000_000_000),
         ])
         .now_or_never()
         .expect("the fakes answer immediately");
@@ -413,7 +412,7 @@ mod tests {
             failing: None,
         };
         let run = pass(sheets, FakeAnnotator::default(), FakeRecorder::default());
-        run.run(vec![AnnotationEpisode::fixture("ep-1", 600_000_000_000)])
+        run.run(vec![AnnotationEpisode::fixture(1, 600_000_000_000)])
             .now_or_never()
             .expect("the fakes answer immediately");
         let written = run.recorder.written.borrow();
@@ -434,7 +433,7 @@ mod tests {
             FakeAnnotator::default(),
             FakeRecorder::default(),
         );
-        run.run(vec![AnnotationEpisode::fixture("ep-1", 10_000_000_000)])
+        run.run(vec![AnnotationEpisode::fixture(1, 10_000_000_000)])
             .now_or_never()
             .expect("the fakes answer immediately");
         assert!(
@@ -452,7 +451,7 @@ mod tests {
             failing: Some("Reading the recorded camera: no such topic".into()),
         };
         let run = pass(failing, FakeAnnotator::default(), FakeRecorder::default());
-        run.run(vec![AnnotationEpisode::fixture("ep-1", 10_000_000_000)])
+        run.run(vec![AnnotationEpisode::fixture(1, 10_000_000_000)])
             .now_or_never()
             .expect("the fakes answer immediately");
         assert!(
@@ -474,7 +473,7 @@ mod tests {
         let run = pass(FakeSheets::of(1), annotator, recorder);
         run.run(
             (0..10)
-                .map(|index| AnnotationEpisode::fixture(&format!("ep-{index}"), 10_000_000_000))
+                .map(|index| AnnotationEpisode::fixture(index, 10_000_000_000))
                 .collect(),
         )
         .now_or_never()

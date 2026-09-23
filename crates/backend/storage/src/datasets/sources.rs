@@ -618,7 +618,7 @@ mod tests {
                     (32, 32, 30),
                     (
                         include_bytes!(
-                            "../../../../frontend/src/activities/data/fixtures/seek.h264"
+                            "../../../../frontend/src/activities/episode/fixtures/seek.h264"
                         )
                         .to_vec(),
                         (0..8)
@@ -674,7 +674,7 @@ mod tests {
             ).await?;
             assert_eq!(headers.rows().len(), 3);
             for row in headers.rows() {
-                let member = row["id"].as_str().unwrap().to_owned();
+                let member = spiral_robotics_common::datasets::EpisodeId::try_from(row["id"].as_str().unwrap()).unwrap();
                 let recording = row["recording"].as_str().unwrap();
                 let available = storage.episode_topics(
                     spiral_robotics_common::datasets::EpisodeSelection::new(dataset.clone(), member.clone())
@@ -720,7 +720,7 @@ mod tests {
 
             }
             assert!(storage.episode_topics(
-                spiral_robotics_common::datasets::EpisodeSelection::new(dataset, uuid::Uuid::new_v4().to_string())
+                spiral_robotics_common::datasets::EpisodeSelection::new(dataset, spiral_robotics_common::datasets::EpisodeId::try_from(uuid::Uuid::new_v4().simple().to_string()).unwrap())
             ).await.unwrap_err().contains("no longer in the dataset"));
             storage.remove_mcap_file(&name, &format!("{name}_first.mcap")).await?;
             let mut connection = store.connect().await?;
@@ -743,7 +743,7 @@ mod tests {
             assert_eq!(other_members.rows().len(), 1);
             storage.append_mcap_file(McapFile::new(&name, "arbitrary/nested-key", &bytes)).await?;
             let members = store.connect().await?.query_rows(&format!("SELECT id FROM spql.mcap.read_topic('dataset_{name}', '/environment') LIMIT 1"), 1).await?;
-            let member = members.rows()[0]["id"].as_str().unwrap().to_owned();
+            let member = spiral_robotics_common::datasets::EpisodeId::try_from(members.rows()[0]["id"].as_str().unwrap()).unwrap();
             let dataset = spiral_robotics_common::datasets::DatasetSelection::new(vec![format!("dataset_{name}")])?;
             let topics = storage.episode_topics(spiral_robotics_common::datasets::EpisodeSelection::new(dataset.clone(), member.clone())).await?;
             let topic = topics.iter().find(|topic| topic.name() == "/environment").unwrap();
