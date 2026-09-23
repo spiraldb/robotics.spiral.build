@@ -1,6 +1,5 @@
 use super::*;
 use futures::FutureExt as _;
-use spiral_robotics_common::rollout::{RolloutPhase, RolloutSnapshot};
 use spiral_robotics_storage::{
     Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
 };
@@ -99,7 +98,7 @@ async fn studio_loads_and_saves_without_opening_spiral() {
         fixture
             .session
             .storage()
-            .training_history()
+            .training_runs()
             .load()
             .await
             .unwrap()
@@ -110,35 +109,6 @@ async fn studio_loads_and_saves_without_opening_spiral() {
     let (available, _) = fixture.session.storage().database().test().await;
     assert!(!available);
     assert_eq!(fixture.spiral_calls.load(Ordering::SeqCst), 1);
-    fixture.shutdown().await;
-}
-
-#[tokio::test]
-async fn concurrent_rollout_reads_restore_history_without_resuming_motion_or_calling_spiral() {
-    let fixture = LoadingFixture::new();
-    fixture
-        .session
-        .storage()
-        .rollout_sessions()
-        .save(
-            &RolloutSnapshot::new(
-                Some("interrupted-session".into()),
-                Some("training-run".into()),
-            )
-            .with_lifecycle(RolloutPhase::Running, Some(10)),
-        )
-        .await
-        .unwrap();
-    let (first, second) = tokio::try_join!(
-        fixture.session.rollout().runs(),
-        fixture.session.rollout().runs()
-    )
-    .unwrap();
-    assert_eq!(first, second);
-    assert_eq!(first[0].session_id(), Some("interrupted-session"));
-    assert_eq!(first[0].phase(), RolloutPhase::Failed);
-    assert!(!fixture.session.rollout().is_active());
-    assert_eq!(fixture.spiral_calls.load(Ordering::SeqCst), 0);
     fixture.shutdown().await;
 }
 

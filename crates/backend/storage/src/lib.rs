@@ -6,7 +6,6 @@ mod db;
 pub mod episodes;
 pub mod explorations;
 mod manager;
-mod rollout_runs;
 mod settings;
 mod spiral_access;
 mod studio;
@@ -23,11 +22,17 @@ pub mod bundle {
 }
 
 pub mod checkpoints {
-    //! Application-owned boundary for immutable training artifacts.
+    //! Training checkpoints the worker commits to Spiral.
 
     pub use crate::training::{
         CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore,
     };
+}
+
+pub mod training_runs {
+    //! Studio's record of the training runs it started.
+
+    pub use crate::training::TrainingRunRecord;
 }
 
 pub mod ingestion {

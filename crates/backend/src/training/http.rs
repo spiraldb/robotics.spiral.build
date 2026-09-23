@@ -8,7 +8,9 @@ use axum::{
     Json, Router,
     routing::{delete, get, post},
 };
-use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
+use spiral_robotics_common::training::{
+    TrainingCheckpoint, TrainingConfig, TrainingRun, TrainingSnapshot,
+};
 
 pub(crate) struct TrainingEndpoints;
 
@@ -17,6 +19,7 @@ impl TrainingEndpoints {
         Router::new()
             .route("/training/runs", get(Self::fetch_training))
             .route("/training/runs/{id}", get(Self::fetch_run))
+            .route("/training/checkpoints", get(Self::fetch_checkpoints))
     }
     pub(crate) fn commands() -> Router<StudioContext> {
         Router::new()
@@ -52,6 +55,11 @@ impl TrainingEndpoints {
         Project(project): Project,
     ) -> Result<Json<TrainingSnapshot>, OperationError> {
         Ok(Json(project.training().catalog().await?))
+    }
+    async fn fetch_checkpoints(
+        Project(project): Project,
+    ) -> Result<Json<Vec<TrainingCheckpoint>>, OperationError> {
+        Ok(Json(project.training().checkpoints().await?))
     }
     async fn fetch_run(
         Project(project): Project,

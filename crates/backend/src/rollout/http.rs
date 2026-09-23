@@ -10,14 +10,12 @@ use spiral_robotics_common::rollout::{RolloutConfig, RolloutSnapshot};
 pub(crate) struct RolloutEndpoints;
 impl RolloutEndpoints {
     pub(crate) fn reads() -> Router<StudioContext> {
-        Router::new()
-            .route("/rollout-runs", get(Self::fetch_rollout))
-            .route("/rollout-runs/{id}", get(Self::fetch_run))
+        Router::new().route("/rollout", get(Self::fetch_rollout))
     }
     pub(crate) fn commands() -> Router<StudioContext> {
         Router::new()
-            .route("/rollout-runs", post(Self::start_rollout))
-            .route("/rollout-runs/{id}/stop", post(Self::stop_rollout))
+            .route("/rollout", post(Self::start_rollout))
+            .route("/rollout/{id}/stop", post(Self::stop_rollout))
     }
     async fn start_rollout(
         Project(project): Project,
@@ -42,20 +40,8 @@ impl RolloutEndpoints {
             .map_err(OperationError::External)?;
         Ok(Json(()))
     }
-    async fn fetch_rollout(
-        Project(project): Project,
-    ) -> Result<Json<Vec<RolloutSnapshot>>, OperationError> {
-        let runs = project
-            .rollout()
-            .runs()
-            .await
-            .map_err(OperationError::External)?;
-        Ok(Json(runs))
-    }
-    async fn fetch_run(
-        Project(project): Project,
-        ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<RolloutSnapshot>, OperationError> {
-        Ok(Json(project.rollout().run(&id).await?))
+    /// The current rollout session, or an idle snapshot before the first one.
+    async fn fetch_rollout(Project(project): Project) -> Json<RolloutSnapshot> {
+        Json(project.rollout().snapshot())
     }
 }

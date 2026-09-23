@@ -18,10 +18,10 @@ workspace.
 MCAP camera training is unavailable until Spiral supports native MCAP video
 packet decoding for training images. Studio disables starting these jobs and
 the worker rejects the dataset request explicitly. The legacy registry/MP4
-loader and its pinned Spiral Python driver have been removed. Existing training
-history and checkpoint downloads remain accessible. The Arrow-based model
-inference service remains available for checkpoints matching the current
-schema; rollout still rejects older schema versions.
+loader and its pinned Spiral Python driver have been removed. Checkpoints
+already in Spiral remain listed and loadable. The Arrow-based model inference
+service remains available for checkpoints matching the current schema; rollout
+still rejects older schema versions.
 
 ## Lambda Cloud: clone and run
 
@@ -92,27 +92,25 @@ Control plane:
 
 - `GET /v1/health`
 - `POST /v1/jobs`
+- `GET /v1/jobs`
 - `GET /v1/jobs/{id}`
 - `POST /v1/jobs/{id}/stop`
-- `GET /v1/jobs/{id}/telemetry`
 - `POST /v1/policies`
 - `DELETE /v1/policies/{id}`
 - `POST /v1/policies/{id}/warm-up`
 
-The immutable job request carries the SpiralDB destination, optional client
-credentials, SQL/data contract, selected Spiral schema version, and model/run
-configuration. Dataset-backed job execution is currently unavailable pending
-native MCAP training support. The job protocol still carries the schema version
-for compatibility validation. Job snapshots
-never return credentials. `POST /v1/jobs` is idempotent only when the job ID and
+The immutable job request carries the job ID, the SpiralDB destination, the
+selected Spiral schema version, and Studio's run configuration unchanged under
+`config`. Dataset-backed job execution is currently unavailable pending native
+MCAP training support. `POST /v1/jobs` is idempotent only when the job ID and
 complete specification match; conflicting reuse returns HTTP 409.
 
-Job lookup and stop accept `after_metric_step`,
-`after_checkpoint_step`, and `after_log_offset`. Responses contain only
-newer evidence plus the next cursor. Worker replay windows and retained
-terminal jobs are bounded; a request older than retention gets an explicit
-`history_gap`. Studio uses exponential polling backoff during transport
-failures.
+The worker owns each job's history. `GET /v1/jobs` lists every retained job's
+state for Studio's run list; `GET /v1/jobs/{id}` adds the job's metrics and log
+tail. Metrics are thinned by halving as a run grows, so the retained sample
+always spans the whole run. Retained terminal jobs are bounded; Studio shows a
+job the worker no longer holds as unavailable, and lists its checkpoints from
+Spiral.
 
 Rollout data plane:
 

@@ -1,7 +1,7 @@
 //! Native SQLite snapshots contain one project's records and no backend secrets.
 use super::{
-    StudioProject, curations, dataset_robots, explorations, robots, rollout_runs, studio_settings,
-    training_runs, workflows,
+    StudioProject, curations, dataset_robots, explorations, robots, studio_settings, training_runs,
+    workflows,
 };
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -15,7 +15,7 @@ pub(crate) struct StudioSnapshot {
 }
 
 impl StudioSnapshot {
-    const TABLES: [&str; 8] = [
+    const TABLES: [&str; 7] = [
         "dataset_robots",
         "robots",
         "workflows",
@@ -23,7 +23,6 @@ impl StudioSnapshot {
         "explorations",
         "training_runs",
         "studio_settings",
-        "rollout_runs",
     ];
 
     pub(crate) async fn capture(project: &StudioProject) -> Result<Self, String> {
@@ -242,7 +241,7 @@ impl StudioSnapshot {
             .await
             .map_err(|error| error.to_string())?
         {
-            crate::training::TrainingHistoryPersistence::validate_record(&row.id, row.document)?;
+            crate::training::TrainingRunPersistence::validate_record(&row.id, row.document)?;
         }
         for row in studio_settings::Entity::find()
             .all(&self.database)
@@ -255,13 +254,6 @@ impl StudioSnapshot {
                 preferences.training().endpoint(),
                 preferences.video().enabled(),
             )?;
-        }
-        for row in rollout_runs::Entity::find()
-            .all(&self.database)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            crate::rollout_runs::RolloutSessionPersistence::validate_record(&row.id, row.document)?;
         }
         Ok(())
     }
@@ -354,17 +346,6 @@ impl StudioSnapshot {
                 .map_err(|error| error.to_string())?;
         }
         for mut row in studio_settings::Entity::find()
-            .all(&self.database)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            row.project = project.key().to_owned();
-            row.into_active_model()
-                .insert(&transaction)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        for mut row in rollout_runs::Entity::find()
             .all(&self.database)
             .await
             .map_err(|error| error.to_string())?

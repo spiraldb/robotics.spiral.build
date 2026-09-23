@@ -146,6 +146,20 @@ impl SpiralSql {
         )
     }
 
+    /// Every checkpoint's identity and policy configuration, without its weights.
+    pub(crate) fn training_checkpoint_catalog(dataset: &str) -> String {
+        format!(
+            "SELECT {run}, {step}, {created}, {loss}, {config} FROM {checkpoints} \
+         ORDER BY {run}, {step}",
+            run = column::RUN_ID,
+            step = column::STEP,
+            created = column::CREATED_MS,
+            loss = column::VALIDATION_LOSS,
+            config = column::CONFIG_JSON,
+            checkpoints = Table::TrainingCheckpoints.qualified_name(dataset),
+        )
+    }
+
     pub(crate) fn training_checkpoint(dataset: &str, run_id: &str, step: u64) -> String {
         let checkpoints = Table::TrainingCheckpoints.qualified_name(dataset);
         format!(

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::rollout::{MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig};
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
-use spiral_robotics_common::training::{TrainingConfig, TrainingSnapshot};
+use spiral_robotics_common::training::{TrainingConfig, TrainingRun};
 
 use crate::OperationError;
 use crate::rollout::service::{MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration};
@@ -50,11 +50,11 @@ impl TrainingManager {
         &self,
         command: RolloutConfig,
     ) -> Result<RolloutConfig, OperationError> {
-        Self::admitted_rollout(&self.snapshot().await?, command)
+        Self::admitted_rollout(&self.runs().await?, command)
     }
 
     pub(super) fn admitted_deletion(
-        snapshot: &TrainingSnapshot,
+        runs: &[TrainingRun],
         active_rollout: Option<&str>,
         run_id: &str,
     ) -> Result<String, OperationError> {
@@ -67,7 +67,7 @@ impl TrainingManager {
         {
             return Err(OperationError::invalid_input("Training run ID is invalid."));
         }
-        let Some(run) = snapshot.runs().iter().find(|run| run.id() == run_id) else {
+        let Some(run) = runs.iter().find(|run| run.id() == run_id) else {
             return Err(OperationError::NotFound(format!(
                 "training run {run_id:?} is no longer available"
             )));
@@ -85,16 +85,14 @@ impl TrainingManager {
         Ok(run_id)
     }
 
+    /// Loading the checkpoint is what proves it exists; admission only
+    /// refuses a run that is gone or still training.
     fn admitted_rollout(
-        snapshot: &TrainingSnapshot,
+        runs: &[TrainingRun],
         command: RolloutConfig,
     ) -> Result<RolloutConfig, OperationError> {
         let command = Self::validated_rollout(command)?;
-        let Some(run) = snapshot
-            .runs()
-            .iter()
-            .find(|run| run.id() == command.run_id())
-        else {
+        let Some(run) = runs.iter().find(|run| run.id() == command.run_id()) else {
             return Err(OperationError::invalid_input(
                 "the selected training run is no longer available",
             ));
@@ -102,13 +100,6 @@ impl TrainingManager {
         if run.phase().active() {
             return Err(OperationError::invalid_input(
                 "stop or finish training before starting a rollout",
-            ));
-        }
-        if !run.checkpoints().iter().any(|checkpoint| {
-            checkpoint.step() == command.checkpoint_step() && checkpoint.inference_ready()
-        }) {
-            return Err(OperationError::invalid_input(
-                "the selected checkpoint is no longer available",
             ));
         }
         Ok(command)
@@ -402,7 +393,9 @@ impl StartTrainingAdmission for TrainingConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, TrainingRunPhase};
+    use spiral_robotics_common::training::{
+        TrainingRunIdentity, TrainingRunPhase, TrainingRunStatus,
+    };
 
     fn rollout_command() -> RolloutConfig {
         RolloutConfig::new("run-1", 20_000, "follower").with_duration(30)
@@ -439,10 +432,6 @@ mod tests {
             architecture,
             attention,
         )
-    }
-
-    fn snapshot(run: Option<TrainingRun>) -> TrainingSnapshot {
-        TrainingSnapshot::new(Default::default(), run.into_iter().collect())
     }
 
     #[test]
@@ -573,7 +562,7 @@ mod tests {
 
     #[test]
     fn malformed_rollout_is_rejected_before_training_lookup() {
-        let snapshot = snapshot(run(false, 20_000, true));
+        let runs = run(false);
         for command in [
             RolloutConfig::new(String::new(), 20_000, "follower").with_duration(30),
             RolloutConfig::new("run-1", 0, "follower").with_duration(30),
@@ -581,44 +570,31 @@ mod tests {
                 .with_duration(MAX_ROLLOUT_DURATION_SECONDS + 1),
         ] {
             assert!(matches!(
-                TrainingManager::admitted_rollout(&snapshot, command),
+                TrainingManager::admitted_rollout(&runs, command),
                 Err(OperationError::InvalidInput(_))
             ));
         }
     }
 
-    fn run(active: bool, step: u64, inference_ready: bool) -> Option<TrainingRun> {
+    fn run(active: bool) -> Vec<TrainingRun> {
         let phase = if active {
             TrainingRunPhase::Running
         } else {
             TrainingRunPhase::Completed
         };
-        Some(
-            TrainingRun::starting("run-1", TrainingConfig::default())
-                .with_phase(phase, step)
-                .with_checkpoints(vec![
-                    TrainingCheckpoint::new(step, 1).with_artifact(1, inference_ready),
-                ])
-                .with_started_ms(1),
-        )
+        vec![TrainingRun::new(
+            TrainingRunIdentity::new("run-1", TrainingConfig::default(), 1),
+            TrainingRunStatus::new(phase, 20_000, None),
+        )]
     }
 
     #[test]
-    fn rollout_rejects_missing_active_or_unready_training() {
-        for (run, expected) in [
-            (None, "no longer available"),
-            (run(true, 20_000, true), "stop or finish"),
-            (
-                run(false, 10_000, true),
-                "checkpoint is no longer available",
-            ),
-            (
-                run(false, 20_000, false),
-                "checkpoint is no longer available",
-            ),
+    fn rollout_rejects_missing_or_active_training() {
+        for (runs, expected) in [
+            (Vec::new(), "no longer available"),
+            (run(true), "stop or finish"),
         ] {
-            let error =
-                TrainingManager::admitted_rollout(&snapshot(run), rollout_command()).unwrap_err();
+            let error = TrainingManager::admitted_rollout(&runs, rollout_command()).unwrap_err();
             assert!(error.message().contains(expected));
         }
     }
@@ -628,35 +604,27 @@ mod tests {
         let command = rollout_command();
 
         assert_eq!(
-            TrainingManager::admitted_rollout(&snapshot(run(false, 20_000, true)), command.clone(),),
+            TrainingManager::admitted_rollout(&run(false), command.clone()),
             Ok(command)
         );
     }
 
     #[test]
     fn deleting_a_run_rejects_training_and_rollout_activity() {
-        let error =
-            TrainingManager::admitted_deletion(&snapshot(run(true, 20_000, true)), None, "run-1")
-                .unwrap_err();
+        let error = TrainingManager::admitted_deletion(&run(true), None, "run-1").unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
 
-        let error = TrainingManager::admitted_deletion(
-            &snapshot(run(false, 20_000, true)),
-            Some("run-1"),
-            "run-1",
-        )
-        .unwrap_err();
+        let error =
+            TrainingManager::admitted_deletion(&run(false), Some("run-1"), "run-1").unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
     }
 
     #[test]
     fn deleting_a_missing_run_is_not_found_and_an_idle_run_is_admitted() {
-        let error = TrainingManager::admitted_deletion(&snapshot(None), None, "run-1").unwrap_err();
+        let error = TrainingManager::admitted_deletion(&[], None, "run-1").unwrap_err();
         assert!(matches!(error, OperationError::NotFound(_)));
 
-        let run_id =
-            TrainingManager::admitted_deletion(&snapshot(run(false, 20_000, true)), None, "run-1")
-                .unwrap();
+        let run_id = TrainingManager::admitted_deletion(&run(false), None, "run-1").unwrap();
         assert_eq!(run_id, "run-1");
     }
 }

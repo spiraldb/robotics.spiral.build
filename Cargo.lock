@@ -5387,6 +5387,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "spiral-robotics-common",
  "thiserror 2.0.19",
 ]
 

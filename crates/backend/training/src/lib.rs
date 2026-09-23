@@ -1,59 +1,26 @@
-//! Backend-neutral model-training boundary.
+//! The HTTP contract between Studio and a training worker.
 //!
-//! Studio owns orchestration and the visible run history. A job backend owns
-//! SpiralDB reads, model execution, telemetry, and artifact publication.
-//! Rollout inference has a separate HTTP + Arrow boundary; no framework tensor
-//! type crosses this training seam.
+//! Studio records which runs it started and asks their worker how they are
+//! doing. The worker owns SpiralDB reads, model execution, telemetry, and
+//! checkpoint publication. Rollout inference has a separate HTTP + Arrow
+//! boundary; no framework tensor type crosses this seam.
 
 mod backend;
 mod job;
 
-pub use backend::{
-    TrainingBackend, TrainingBackendError, TrainingBackendIdentity, TrainingBackendInfo,
-};
+pub use backend::{TrainingBackendError, TrainingBackendInfo};
 pub use job::{
-    ActLayerCounts, ActModelDimensions, ActTrainingArchitecture, ActTrainingInput,
-    ActTrainingJobConfig, SpiralJobConnection, SpiralServiceEndpoints, TrainingCheckpointSchedule,
-    TrainingDataColumns, TrainingDataQuery, TrainingDataSelection, TrainingImageSize,
-    TrainingInitialization, TrainingJobCheckpoint, TrainingJobCursor, TrainingJobIdentity,
-    TrainingJobLog, TrainingJobMetric, TrainingJobPhase, TrainingJobPlan, TrainingJobRequest,
-    TrainingJobResolved, TrainingJobSnapshot, TrainingOptimizer, TrainingProgress,
-    TrainingRuntimeSelection, TrainingSchedule,
+    SpiralJobConnection, SpiralServiceEndpoints, TrainingJobHistory, TrainingJobRequest,
+    TrainingJobState,
 };
 
 include!(concat!(env!("OUT_DIR"), "/training_protocol_version.rs"));
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use serde::{Serialize, de::DeserializeOwned};
 
     use super::*;
-
-    struct RemoteBackend;
-
-    impl TrainingBackend for RemoteBackend {
-        fn health(&self) -> Result<TrainingBackendInfo, TrainingBackendError> {
-            Ok(TrainingBackendInfo::new(
-                TrainingBackendIdentity::new("remote.test", "Remote test backend", "HTTP"),
-                vec!["remote".to_owned()],
-            ))
-        }
-    }
-
-    #[test]
-    fn boundary_is_object_safe_and_remote_implementable() {
-        let backend: Arc<dyn TrainingBackend> = Arc::new(RemoteBackend);
-        assert_eq!(backend.health().unwrap().id(), "remote.test");
-    }
-
-    #[test]
-    fn training_image_size_preserves_the_native_resolution_sentinel() {
-        TrainingImageSize::new(0, 0);
-        TrainingImageSize::new(224, 224);
-        assert!(std::panic::catch_unwind(|| TrainingImageSize::new(0, 224)).is_err());
-    }
 
     #[test]
     fn compatibility_uses_major_minor_and_schema_range_rules() {
@@ -116,18 +83,16 @@ mod tests {
         );
         let request_fixture: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/job-request.json")).unwrap();
-        let storage_schema: serde_json::Value =
-            serde_json::from_str(include_str!("../../storage/schema/version.json")).unwrap();
         assert_eq!(
             request_fixture["spiral_schema_version"],
-            storage_schema["current"]
+            CURRENT_SPIRAL_SCHEMA_VERSION
         );
         CanonicalWireFixture(include_str!("../fixtures/health.json"))
             .assert_round_trip::<TrainingBackendInfo>();
         CanonicalWireFixture(include_str!("../fixtures/job-request.json"))
             .assert_round_trip::<TrainingJobRequest>();
-        CanonicalWireFixture(include_str!("../fixtures/job-snapshot.json"))
-            .assert_round_trip::<TrainingJobSnapshot>();
+        CanonicalWireFixture(include_str!("../fixtures/job-history.json"))
+            .assert_round_trip::<TrainingJobHistory>();
     }
 
     struct CanonicalWireFixture<'a>(&'a str);

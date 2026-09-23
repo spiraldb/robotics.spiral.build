@@ -15,17 +15,10 @@ impl RolloutClient {
             project: ProjectClient::current(),
         }
     }
-    pub(super) async fn runs(&self) -> Result<Vec<RolloutSnapshot>, CommandError> {
+    /// The current rollout session, or an idle snapshot before the first one.
+    pub(super) async fn session(&self) -> Result<RolloutSnapshot, CommandError> {
         self.project
-            .request(HttpRequest::new("GET", "/api/rollout-runs"))
-            .await
-    }
-    pub(super) async fn run(&self, id: &str) -> Result<RolloutSnapshot, CommandError> {
-        self.project
-            .request(HttpRequest::new(
-                "GET",
-                format!("/api/rollout-runs/{}", id.url_component()),
-            ))
+            .request(HttpRequest::new("GET", "/api/rollout"))
             .await
     }
 
@@ -35,7 +28,7 @@ impl RolloutClient {
     ) -> impl Future<Output = Result<RolloutSnapshot, CommandError>> + use<> {
         self.project.mutate(
             &[Rollout, RobotSetup, Telemetry],
-            HttpRequest::new("POST", "/api/rollout-runs").json(&config),
+            HttpRequest::new("POST", "/api/rollout").json(&config),
         )
     }
 
@@ -45,10 +38,7 @@ impl RolloutClient {
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
             &[Rollout, RobotSetup, Telemetry],
-            HttpRequest::new(
-                "POST",
-                format!("/api/rollout-runs/{}/stop", id.url_component()),
-            ),
+            HttpRequest::new("POST", format!("/api/rollout/{}/stop", id.url_component())),
         )
     }
 }

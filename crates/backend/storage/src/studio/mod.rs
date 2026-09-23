@@ -11,8 +11,6 @@ mod migrations;
 #[allow(unreachable_pub)]
 pub(crate) mod robots;
 #[allow(unreachable_pub)]
-pub(crate) mod rollout_runs;
-#[allow(unreachable_pub)]
 pub(crate) mod studio_settings;
 #[allow(unreachable_pub)]
 pub(crate) mod training_runs;
@@ -226,51 +224,6 @@ impl StoredDocument<()> {
             ));
         }
         Ok(document.value)
-    }
-}
-
-pub(crate) mod float {
-    //! JSON has no non-finite numbers. Preserve diverged measurements explicitly.
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub(crate) fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
-        if value.is_finite() {
-            serializer.serialize_f64(*value)
-        } else {
-            serializer.serialize_str(&value.to_string())
-        }
-    }
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Number {
-            Finite(f64),
-            Special(String),
-        }
-        match Number::deserialize(deserializer)? {
-            Number::Finite(value) => Ok(value),
-            Number::Special(value) => match value.as_str() {
-                "NaN" => Ok(f64::NAN),
-                "inf" => Ok(f64::INFINITY),
-                "-inf" => Ok(f64::NEG_INFINITY),
-                _ => Err(serde::de::Error::custom("Invalid special float")),
-            },
-        }
-    }
-    #[derive(Serialize, Deserialize)]
-    struct Number(#[serde(with = "self")] f64);
-    pub(crate) mod optional {
-        use super::*;
-        pub(crate) fn serialize<S: Serializer>(
-            value: &Option<f64>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error> {
-            value.map(Number).serialize(serializer)
-        }
-        pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
-            deserializer: D,
-        ) -> Result<Option<f64>, D::Error> {
-            Option::<Number>::deserialize(deserializer).map(|value| value.map(|number| number.0))
-        }
     }
 }
 

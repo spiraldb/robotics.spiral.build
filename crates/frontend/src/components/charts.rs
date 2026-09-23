@@ -30,7 +30,6 @@ pub(crate) enum ChartColor {
     Train,
     Validation,
     Throughput,
-    Transfer,
     Cpu,
     Gpu,
     Memory,
@@ -47,7 +46,6 @@ impl ChartColor {
             Self::Train => ("--chart-train", "#2a78d6"),
             Self::Validation => ("--chart-validation", "#d9572b"),
             Self::Throughput => ("--chart-throughput", "#3a7654"),
-            Self::Transfer => ("--chart-transfer", "#7560b8"),
             Self::Cpu => ("--chart-cpu", "#d9572b"),
             Self::Gpu => ("--chart-gpu", "#2a78d6"),
             Self::Memory => ("--chart-memory", "#7a58a5"),
@@ -70,12 +68,6 @@ impl ChartColor {
 
 const STUDIO_TOOLTIP_CSS: &str =
     "border-radius: 4px; box-shadow: 0 1px 3px rgba(55, 53, 47, 0.10);";
-
-#[derive(Clone, Copy)]
-pub(crate) enum TooltipRateUnit {
-    SamplesPerSecond,
-    BytesPerSecond,
-}
 
 pub(crate) struct StudioTooltip;
 
@@ -112,17 +104,10 @@ return numeric.toLocaleString(undefined, options);
         )))
     }
 
-    pub(crate) fn rate(unit: TooltipRateUnit) -> Tooltip {
-        Self::single_series(&match unit {
-            TooltipRateUnit::SamplesPerSecond => {
-                "return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' samples/s';"
-                    .to_owned()
-            }
-            TooltipRateUnit::BytesPerSecond => format!(
-                "{TOOLTIP_BINARY_LADDER}\
-                 return scaled.toLocaleString(undefined, {{ maximumFractionDigits: 2 }}) + ' ' + unit + '/s';"
-            ),
-        })
+    pub(crate) fn samples_per_second() -> Tooltip {
+        Self::single_series(
+            "return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' samples/s';",
+        )
     }
 
     pub(crate) fn percent() -> Tooltip {
@@ -607,18 +592,14 @@ mod tests {
         );
         assert_eq!(numeric.format("valueFormatter", f64::INFINITY.into()), "—");
 
-        let rate = TooltipRuntime::from(StudioTooltip::rate(TooltipRateUnit::BytesPerSecond));
-        assert_eq!(rate.format("valueFormatter", 1_048_576.0.into()), "1 MiB/s");
-        assert_eq!(
-            rate.format("valueFormatter", 1_073_741_824.0.into()),
-            "1 GiB/s"
-        );
+        let rate = TooltipRuntime::from(StudioTooltip::samples_per_second());
+        assert_eq!(rate.format("valueFormatter", 12.0.into()), "12 samples/s");
         let point = js_sys::JSON::parse(
-            r#"[{"value":[42,1048576],"seriesName":"Throughput","axisValue":"Step 42"}]"#,
+            r#"[{"value":[42,12],"seriesName":"Throughput","axisValue":"Step 42"}]"#,
         )
         .unwrap();
         // The popup contains just the value, without series labels or HTML.
-        assert_eq!(rate.format("formatter", point), "1 MiB/s");
+        assert_eq!(rate.format("formatter", point), "12 samples/s");
     }
 
     struct TooltipRuntime(wasm_bindgen::JsValue);

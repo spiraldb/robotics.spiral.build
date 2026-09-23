@@ -51,8 +51,8 @@ are bounded to 18,000 packets and 64 MiB of encoded video per camera; oversized
 requests report an error. Existing format-1 backups require the old application.
 
 MCAP camera training is explicitly unavailable until Spiral exposes native
-MCAP video decoding for training images. Training history and existing
-checkpoints remain accessible; the old registry/MP4 training loader is removed.
+MCAP video decoding for training images. Existing checkpoints remain listed
+and loadable; the old registry/MP4 training loader is removed.
 The separate model inference and Arrow transport runtime remains available,
 subject to its existing exact checkpoint-schema compatibility check. Schema-10
 checkpoints remain inspectable/downloadable; this schema-11 migration does not

@@ -1,6 +1,6 @@
 {
   "api_id": "spiral.robotics.training",
-  "api_version": 7,
+  "api_version": 8,
   "api_revision": 0,
   "spiral_schema_minimum": 11,
   "spiral_schema_maximum": 12,

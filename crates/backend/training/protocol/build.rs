@@ -29,7 +29,7 @@ impl<'a> ProtocolVersionGenerator<'a> {
             "current storage schema must be inside the training runtime support range"
         );
         self.verify_changelog(&training_protocol);
-        self.write_generated_constants(&training_protocol);
+        self.write_generated_constants(&training_protocol, current_schema);
     }
 
     fn descriptor_path(&self) -> PathBuf {
@@ -108,7 +108,11 @@ impl<'a> ProtocolVersionGenerator<'a> {
         );
     }
 
-    fn write_generated_constants(&self, training_protocol: &TrainingProtocolVersion) {
+    fn write_generated_constants(
+        &self,
+        training_protocol: &TrainingProtocolVersion,
+        current_schema: u32,
+    ) {
         let TrainingProtocolVersion {
             api_id,
             api_major,
@@ -120,6 +124,7 @@ impl<'a> ProtocolVersionGenerator<'a> {
             "pub(crate) const TRAINING_BACKEND_API_ID: &str = {api_id:?};\n\
              pub(crate) const TRAINING_BACKEND_API_VERSION: u32 = {api_major};\n\
              pub(crate) const TRAINING_BACKEND_API_REVISION: u32 = {api_minor};\n\
+             pub(crate) const CURRENT_SPIRAL_SCHEMA_VERSION: u32 = {current_schema};\n\
              #[cfg(test)]\n\
              pub(crate) const TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION: u32 = {schema_minimum};\n\
              #[cfg(test)]\n\

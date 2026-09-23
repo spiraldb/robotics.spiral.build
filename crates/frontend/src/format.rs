@@ -85,25 +85,6 @@ impl ByteCountPresentation for u64 {
     }
 }
 
-/// Throughput as a training or ingest readout prints it: always a binary
-/// prefix per second, never bytes per second, because the figures it describes
-/// are never that small.
-pub(crate) trait ByteRatePresentation {
-    fn byte_rate_label(self) -> String;
-}
-
-impl ByteRatePresentation for f64 {
-    fn byte_rate_label(self) -> String {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-        const MIB: f64 = 1024.0 * 1024.0;
-        if self >= GIB {
-            format!("{:.2} GiB/s", self / GIB)
-        } else {
-            format!("{:.1} MiB/s", self / MIB)
-        }
-    }
-}
-
 /// A measured latency, stepping up to seconds and down to tenths so the figure
 /// keeps three significant digits. A value that was never measured reads as an
 /// em dash rather than as zero.
@@ -282,23 +263,14 @@ mod tests {
     }
 
     /// Each ladder is checked where it steps: the separator's first comma, the
-    /// byte unit's first prefix, the rate's GiB threshold, the latency's two
-    /// thresholds and its missing value, and the loss's switch to scientific
-    /// notation.
+    /// byte unit's first prefix, the latency's two thresholds and its missing
+    /// value, and the loss's switch to scientific notation.
     #[test]
     fn every_unit_ladder_is_checked_where_it_steps() {
         assert_eq!(11_404_u64.grouped_label(), "11,404");
         assert_eq!(1_000_000_u64.grouped_label(), "1,000,000");
         assert_eq!(512_u64.byte_label(), "512 B");
         assert_eq!(15_932_137_u64.byte_label(), "15.2 MiB");
-        assert_eq!(
-            (1024.0_f64 * 1024.0 * 1024.0).byte_rate_label(),
-            "1.00 GiB/s"
-        );
-        assert_eq!(
-            (1024.0_f64 * 1024.0 * 900.0).byte_rate_label(),
-            "900.0 MiB/s"
-        );
         assert_eq!(Some(1_250.0).millis_label(), "1.25 s");
         assert_eq!(Some(42.4).millis_label(), "42 ms");
         assert_eq!(Some(4.25).millis_label(), "4.2 ms");

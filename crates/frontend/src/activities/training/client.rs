@@ -3,7 +3,9 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
-use spiral_robotics_common::training::{TrainingConfig, TrainingRun, TrainingSnapshot};
+use spiral_robotics_common::training::{
+    TrainingCheckpoint, TrainingConfig, TrainingRun, TrainingSnapshot,
+};
 use std::future::Future;
 
 pub(crate) struct TrainingClient {
@@ -18,6 +20,12 @@ impl TrainingClient {
     pub(super) async fn catalog(&self) -> Result<TrainingSnapshot, CommandError> {
         self.project
             .request(HttpRequest::new("GET", "/api/training/runs"))
+            .await
+    }
+
+    pub(super) async fn checkpoints(&self) -> Result<Vec<TrainingCheckpoint>, CommandError> {
+        self.project
+            .request(HttpRequest::new("GET", "/api/training/checkpoints"))
             .await
     }
 

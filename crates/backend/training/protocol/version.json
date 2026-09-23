@@ -1,7 +1,7 @@
 {
   "format_version": 1,
   "id": "spiral.robotics.training",
-  "major": 7,
+  "major": 8,
   "minor": 0,
   "storage_schema": {
     "minimum": 11,

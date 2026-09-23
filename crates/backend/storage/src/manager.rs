@@ -12,9 +12,8 @@ use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
 use crate::explorations::ExplorationPersistence;
-use crate::rollout_runs::RolloutSessionPersistence;
 use crate::settings::StudioPreferencePersistence;
-use crate::training::TrainingHistoryPersistence;
+use crate::training::{TrainingCheckpointPersistence, TrainingRunPersistence};
 use crate::transfer::TransferPersistence;
 use crate::workflows::WorkflowPersistence;
 
@@ -56,12 +55,12 @@ impl StorageManager {
         StudioPreferencePersistence::new(&self.studio)
     }
 
-    pub fn training_history(&self) -> TrainingHistoryPersistence<'_> {
-        TrainingHistoryPersistence::new(&self.studio)
+    pub fn training_runs(&self) -> TrainingRunPersistence<'_> {
+        TrainingRunPersistence::new(&self.studio)
     }
 
-    pub fn rollout_sessions(&self) -> RolloutSessionPersistence<'_> {
-        RolloutSessionPersistence::new(&self.studio)
+    pub fn training_checkpoints(&self) -> TrainingCheckpointPersistence<'_> {
+        TrainingCheckpointPersistence::new(&self.project_store)
     }
 
     pub fn workflows(&self) -> WorkflowPersistence<'_> {

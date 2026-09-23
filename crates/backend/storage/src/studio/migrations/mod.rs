@@ -14,6 +14,7 @@ impl MigratorTrait for Migrator {
             Box::new(RenameToExplorations),
             Box::new(KeepRolloutSessions),
             Box::new(TypedRobotConfigs),
+            Box::new(WorkerOwnedTraining),
         ]
     }
 }
@@ -189,6 +190,30 @@ impl MigrationTrait for TypedRobotConfigs {
         manager
             .get_connection()
             .execute_unprepared(include_str!("m20260922_000008_typed_robot_configs.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+/// Training runs shrink to Studio's record of them; rollout sessions are no
+/// longer stored.
+struct WorkerOwnedTraining;
+impl MigrationName for WorkerOwnedTraining {
+    fn name(&self) -> &str {
+        "m20260922_000009_worker_owned_training"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for WorkerOwnedTraining {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260922_000009_worker_owned_training.sql"))
             .await?;
         Ok(())
     }

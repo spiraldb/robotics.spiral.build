@@ -18,8 +18,8 @@ use spiral_robotics_inference::{
     Policy, PolicyLoader, PolicySpecification,
 };
 use spiral_robotics_training::{
-    TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingJobCursor,
-    TrainingJobRequest, TrainingJobSnapshot,
+    TrainingBackendError, TrainingBackendInfo, TrainingJobHistory, TrainingJobRequest,
+    TrainingJobState,
 };
 
 const ARROW_STREAM_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
@@ -65,21 +65,31 @@ impl HttpTrainingBackend {
             .map_err(|error| TrainingBackendError::new(format!("requesting {path}: {error}")))?;
         response.decode_training_json(path)
     }
-}
 
-impl TrainingBackend for HttpTrainingBackend {
-    fn health(&self) -> Result<TrainingBackendInfo, TrainingBackendError> {
+    /// Run one blocking request against the worker at `endpoint` off the async
+    /// executor.
+    pub(crate) async fn request<T: Send + 'static>(
+        endpoint: String,
+        call: impl FnOnce(&Self) -> Result<T, TrainingBackendError> + Send + 'static,
+    ) -> Result<T, String> {
+        tokio::task::spawn_blocking(move || call(&Self::new(endpoint)))
+            .await
+            .map_err(|error| format!("training runtime request stopped: {error}"))?
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn health(&self) -> Result<TrainingBackendInfo, TrainingBackendError> {
         self.get_json("/v1/health")
     }
 
-    fn create_job(
+    pub(crate) fn create_job(
         &self,
-        request: TrainingJobRequest,
-    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
+        request: &TrainingJobRequest,
+    ) -> Result<TrainingJobState, TrainingBackendError> {
         let response = self
             .client
             .post(self.url("/v1/jobs")?)
-            .json(&request)
+            .json(request)
             .send()
             .map_err(|error| {
                 TrainingBackendError::new(format!("creating training job: {error}"))
@@ -87,20 +97,17 @@ impl TrainingBackend for HttpTrainingBackend {
         response.decode_training_json("creating training job")
     }
 
-    fn job_snapshot(
-        &self,
-        job_id: &str,
-        cursor: TrainingJobCursor,
-    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        self.get_json(&cursor.job_path(job_id, ""))
+    /// Every job the worker still holds.
+    pub(crate) fn jobs(&self) -> Result<Vec<TrainingJobState>, TrainingBackendError> {
+        self.get_json("/v1/jobs")
     }
 
-    fn stop_job(
-        &self,
-        job_id: &str,
-        cursor: TrainingJobCursor,
-    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        let path = cursor.job_path(job_id, "/stop");
+    pub(crate) fn job(&self, job_id: &str) -> Result<TrainingJobHistory, TrainingBackendError> {
+        self.get_json(&format!("/v1/jobs/{job_id}"))
+    }
+
+    pub(crate) fn stop_job(&self, job_id: &str) -> Result<TrainingJobState, TrainingBackendError> {
+        let path = format!("/v1/jobs/{job_id}/stop");
         let response = self
             .client
             .post(self.url(&path)?)
@@ -110,21 +117,6 @@ impl TrainingBackend for HttpTrainingBackend {
                 TrainingBackendError::new(format!("stopping training job: {error}"))
             })?;
         response.decode_training_json("stopping training job")
-    }
-}
-
-trait TrainingJobCursorHttp {
-    fn job_path(&self, job_id: &str, suffix: &str) -> String;
-}
-
-impl TrainingJobCursorHttp for TrainingJobCursor {
-    fn job_path(&self, job_id: &str, suffix: &str) -> String {
-        format!(
-            "/v1/jobs/{job_id}{suffix}?after_metric_step={}&after_checkpoint_step={}&after_log_offset={}",
-            self.metric_step(),
-            self.checkpoint_step(),
-            self.log_offset()
-        )
     }
 }
 

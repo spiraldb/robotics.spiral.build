@@ -421,8 +421,8 @@ impl RolloutHardwareResources {
     }
 }
 
-/// The current rollout lives in `state`, written by its task; every rollout
-/// is recorded in storage when it starts and when it ends.
+/// The current rollout lives in `state`, written by its task. Only the
+/// current session is kept; a restarted Studio starts idle.
 struct RolloutLifecycle {
     state: watch::Sender<RolloutSnapshot>,
     active: Mutex<Option<ActiveRollout>>,
@@ -462,43 +462,6 @@ impl RolloutManager {
 
     pub(crate) fn is_active(&self) -> bool {
         self.lifecycle.active.recover_lock().is_some() || self.snapshot().phase().active()
-    }
-
-    /// Every rollout this project recorded, the current one as it is right
-    /// now. A stored rollout still marked active outlived the process that
-    /// ran it, and reads as interrupted.
-    pub(crate) async fn runs(&self) -> Result<Vec<RolloutSnapshot>, String> {
-        let current = self.snapshot();
-        let mut runs = self
-            .storage
-            .rollout_sessions()
-            .load()
-            .await?
-            .into_iter()
-            .map(|stored| {
-                if stored.session_id().is_some() && stored.session_id() == current.session_id() {
-                    current.clone()
-                } else {
-                    stored.restored_after_restart()
-                }
-            })
-            .collect::<Vec<_>>();
-        if current
-            .session_id()
-            .is_some_and(|id| !runs.iter().any(|run| run.session_id() == Some(id)))
-        {
-            runs.push(current);
-        }
-        Ok(runs)
-    }
-
-    pub(super) async fn run(&self, id: &str) -> Result<RolloutSnapshot, crate::OperationError> {
-        self.runs()
-            .await
-            .map_err(crate::OperationError::Internal)?
-            .into_iter()
-            .find(|run| run.session_id() == Some(id))
-            .ok_or_else(|| crate::OperationError::NotFound(format!("Rollout {id:?} was not found")))
     }
 
     pub(crate) fn snapshot(&self) -> RolloutSnapshot {
@@ -577,17 +540,7 @@ impl RolloutManager {
         }
     }
 
-    async fn persist_current(&self) {
-        if let Err(error) = self.storage.rollout_sessions().save(&self.snapshot()).await {
-            tracing::error!("could not persist rollout state: {error}");
-        }
-    }
-
-    /// Storage sees a rollout when it starts and when it ends. The terminal
-    /// write lands before the rollout stops counting as active, so an idle
-    /// rollout is always durable.
     async fn run_and_finish(self: Arc<Self>, run: RolloutRun, stop: watch::Receiver<bool>) {
-        self.persist_current().await;
         let mut progress = RolloutProgress::new(&self.lifecycle.state, stop);
         let outcome = match std::panic::AssertUnwindSafe(self.run_session(&run, &mut progress))
             .catch_unwind()
@@ -606,7 +559,6 @@ impl RolloutManager {
             .stop_policy_session(&run.session)
             .await;
         progress.finish(outcome, CleanupResult::new(self.clock.now_ms(), cleanup));
-        self.persist_current().await;
         let mut active = self.lifecycle.active.recover_lock();
         if active
             .as_ref()
@@ -939,37 +891,6 @@ impl RolloutManager {
                 inference = Some(observation.spawn_inference(next_policy));
             }
         }
-    }
-}
-
-trait RestoredRolloutSnapshot {
-    fn restored_after_restart(self) -> Self;
-}
-
-impl RestoredRolloutSnapshot for RolloutSnapshot {
-    /// A running rollout is stored only when it starts, so when its process
-    /// stopped is unknown: the restored run has no finish time. Deriving the
-    /// restore from stored state alone keeps every read of it identical.
-    fn restored_after_restart(self) -> Self {
-        if self.phase().active() {
-            return Self::new(
-                self.session_id().map(str::to_owned),
-                self.run_id().map(str::to_owned),
-            )
-            .with_robot(self.robot().map(str::to_owned))
-            .with_checkpoint(self.checkpoint_step())
-            .with_duration(self.duration_seconds())
-            .with_lifecycle(RolloutPhase::Failed, self.started_ms())
-            .with_completion(
-                None,
-                Some("Studio stopped before this rollout completed.".to_owned()),
-            )
-            .with_warning(Some(
-                "No policy session was resumed after restart.".to_owned(),
-            ))
-            .with_metrics(self.metrics().clone());
-        }
-        self
     }
 }
 
@@ -1684,10 +1605,6 @@ mod tests {
             self.loads.lock().unwrap().push(key);
             let artifact = self.artifact.clone();
             Box::pin(async move { Ok(artifact) })
-        }
-
-        fn delete_run_checkpoints(&self, _run_id: String) -> CheckpointFuture<'_, ()> {
-            Box::pin(async { Err("rollout must not delete checkpoints".to_owned()) })
         }
     }
 

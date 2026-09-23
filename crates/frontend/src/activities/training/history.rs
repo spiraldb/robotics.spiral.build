@@ -1,15 +1,19 @@
 //! Training retains history across route changes and polls only while active.
 //! Rollout requests its own run/checkpoint choices while its activity is visible.
+//! Run status is live, so it is polled often; checkpoints are read from Spiral
+//! and change only when a run commits one, so they are polled rarely.
 use crate::activities::training::TrainingClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::shell::project::ProjectSelection;
 use dioxus::prelude::*;
-use spiral_robotics_common::training::TrainingSnapshot;
+use spiral_robotics_common::training::{TrainingCheckpoint, TrainingSnapshot};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct TrainingHistory {
     snapshot: Signal<TrainingSnapshot>,
+    checkpoints: Signal<Vec<TrainingCheckpoint>>,
     error: Signal<Option<String>>,
+    checkpoint_error: Signal<Option<String>>,
     loaded: Signal<bool>,
     detailed_run: Signal<Option<String>>,
 }
@@ -38,7 +42,13 @@ impl TrainingHistory {
                 }
             },
         );
-        Self::use_response(request)
+        let history = Self::use_response(request);
+        let checkpoints = QueryPolicy::new(QueryDomain::Training, 10_000).use_when(
+            move || is_active() && selection.live(),
+            || async { TrainingClient::current().checkpoints().await },
+        );
+        history.use_checkpoints(checkpoints);
+        history
     }
 
     fn use_response(
@@ -46,7 +56,9 @@ impl TrainingHistory {
     ) -> Self {
         let mut history = use_hook(|| Self {
             snapshot: Signal::new(TrainingSnapshot::default()),
+            checkpoints: Signal::new(Vec::new()),
             error: Signal::new(None),
+            checkpoint_error: Signal::new(None),
             loaded: Signal::new(false),
             detailed_run: Signal::new(None),
         });
@@ -74,6 +86,29 @@ impl TrainingHistory {
         history
     }
 
+    fn use_checkpoints(
+        self,
+        request: Resource<Result<Vec<TrainingCheckpoint>, crate::client::CommandError>>,
+    ) {
+        let mut history = self;
+        use_effect(move || {
+            let result = request.read();
+            if !request.finished() {
+                return;
+            }
+            match result.as_ref() {
+                Some(Ok(checkpoints)) => {
+                    if *history.checkpoints.peek() != *checkpoints {
+                        history.checkpoints.set(checkpoints.clone());
+                    }
+                    history.checkpoint_error.set(None);
+                }
+                Some(Err(error)) => history.checkpoint_error.set(Some(error.to_string())),
+                None => {}
+            }
+        });
+    }
+
     pub(super) fn details_loaded(self, id: &str) -> bool {
         self.detailed_run.read().as_deref() == Some(id)
     }
@@ -81,8 +116,15 @@ impl TrainingHistory {
     pub(crate) fn snapshot(self) -> MappedSignal<TrainingSnapshot, Signal<TrainingSnapshot>> {
         self.snapshot.map(|value| value)
     }
+    /// Every checkpoint in Spiral, across runs.
+    pub(crate) fn checkpoints(self) -> ReadSignal<Vec<TrainingCheckpoint>> {
+        self.checkpoints.into()
+    }
     pub(super) fn error(self) -> Option<String> {
-        self.error.read().clone()
+        self.error
+            .read()
+            .clone()
+            .or_else(|| self.checkpoint_error.read().clone())
     }
     pub(super) fn loaded(self) -> bool {
         *self.loaded.read()
@@ -124,16 +166,25 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn selected_details_are_assembled_locally_without_expanding_other_runs() {
-        use spiral_robotics_common::training::{TrainingConfig, TrainingReadiness, TrainingRun};
-        let run_a =
-            TrainingRun::starting("a", TrainingConfig::default()).with_logs(vec!["a log".into()]);
-        let run_b =
-            TrainingRun::starting("b", TrainingConfig::default()).with_logs(vec!["b log".into()]);
-        let catalog = TrainingSnapshot::new(
-            TrainingReadiness::default(),
-            vec![run_a.clone(), run_b.clone()],
-        )
-        .catalog();
+        use spiral_robotics_common::training::{
+            TrainingConfig, TrainingReadiness, TrainingRun, TrainingRunHistory,
+            TrainingRunIdentity, TrainingRunStatus,
+        };
+        let listed = |id: &str| {
+            TrainingRun::new(
+                TrainingRunIdentity::new(id, TrainingConfig::default(), 1),
+                TrainingRunStatus::default(),
+            )
+        };
+        let detailed = |id: &str| {
+            listed(id).with_history(TrainingRunHistory::new(
+                Vec::new(),
+                vec![format!("{id} log")],
+            ))
+        };
+        let (run_a, run_b) = (detailed("a"), detailed("b"));
+        let catalog =
+            TrainingSnapshot::new(TrainingReadiness::default(), vec![listed("a"), listed("b")]);
         let selected_a = TrainingHistoryResponse::new(catalog.clone(), Some(run_a.clone()));
         assert_eq!(selected_a.detailed_run.as_deref(), Some("a"));
         assert_eq!(selected_a.snapshot.runs()[0], run_a);

@@ -6,14 +6,19 @@ import uuid
 from collections import OrderedDict
 from typing import Annotated, Any
 
-from fastapi import Body, FastAPI, Query, Request, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from .act import PolicySession, backend_info
 from .arrow import decode_inference_input
 from .errors import RuntimeRequestError
 from .jobs import TrainingJob
-from .models import TrainingBackendInfoModel, TrainingJobRequestModel, TrainingJobSnapshotModel
+from .models import (
+    TrainingBackendInfoModel,
+    TrainingJobHistoryModel,
+    TrainingJobRequestModel,
+    TrainingJobStateModel,
+)
 from .protocol import VERSIONS
 
 ARROW_STREAM_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
@@ -50,6 +55,11 @@ class RuntimeState:
             self.jobs[job_id] = job
         job.start()
         return job
+
+    def all_jobs(self) -> list[TrainingJob]:
+        with self.lock:
+            self._prune_jobs_locked()
+            return list(self.jobs.values())
 
     def job(self, job_id: str) -> TrainingJob:
         with self.lock:
@@ -100,40 +110,23 @@ def create_app(policy_device: str | None = None) -> FastAPI:
     def health() -> dict[str, Any]:
         return backend_info()
 
-    @app.post("/v1/jobs", status_code=201, response_model=TrainingJobSnapshotModel)
+    @app.post("/v1/jobs", status_code=201, response_model=TrainingJobStateModel)
     def create_job(request: TrainingJobRequestModel) -> dict[str, Any]:
-        return state.add_job(request.model_dump(exclude_none=True)).snapshot()
+        return state.add_job(request.model_dump()).state()
 
-    @app.get("/v1/jobs/{job_id}", response_model=TrainingJobSnapshotModel)
-    def get_job(
-        job_id: str,
-        after_metric_step: Annotated[int, Query(ge=0)] = 0,
-        after_checkpoint_step: Annotated[int, Query(ge=0)] = 0,
-        after_log_offset: Annotated[int, Query(ge=0)] = 0,
-    ) -> dict[str, Any]:
-        return state.job(job_id).snapshot(
-            after_metric_step, after_checkpoint_step, after_log_offset
-        )
+    @app.get("/v1/jobs", response_model=list[TrainingJobStateModel])
+    def list_jobs() -> list[dict[str, Any]]:
+        return [job.state() for job in state.all_jobs()]
 
-    @app.post("/v1/jobs/{job_id}/stop", response_model=TrainingJobSnapshotModel)
-    def stop_job(
-        job_id: str,
-        after_metric_step: Annotated[int, Query(ge=0)] = 0,
-        after_checkpoint_step: Annotated[int, Query(ge=0)] = 0,
-        after_log_offset: Annotated[int, Query(ge=0)] = 0,
-    ) -> dict[str, Any]:
+    @app.get("/v1/jobs/{job_id}", response_model=TrainingJobHistoryModel)
+    def get_job(job_id: str) -> dict[str, Any]:
+        return state.job(job_id).history()
+
+    @app.post("/v1/jobs/{job_id}/stop", response_model=TrainingJobStateModel)
+    def stop_job(job_id: str) -> dict[str, Any]:
         job = state.job(job_id)
         job.stop()
-        return job.snapshot(after_metric_step, after_checkpoint_step, after_log_offset)
-
-    @app.get("/v1/jobs/{job_id}/telemetry")
-    def job_telemetry(job_id: str) -> dict[str, Any]:
-        snapshot = state.job(job_id).snapshot()
-        return {
-            "phase": snapshot["phase"],
-            "current_step": snapshot["current_step"],
-            "latest": snapshot["metrics"][-1] if snapshot["metrics"] else None,
-        }
+        return job.state()
 
     @app.post("/v1/policies", status_code=201)
     def create_policy(

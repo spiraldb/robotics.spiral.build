@@ -4,11 +4,12 @@ The backend owns two persistence boundaries:
 
 - **SQLite / SeaORM:** connection settings, robot documents and calibration,
   project preferences, saved workflows and conversations, saved curation
-  recipes, explorations, training history (including metrics and checkpoint
-  references), and rollout state.
+  recipes, explorations, and a record of each training run Studio started (its
+  configuration and worker endpoint).
 - **Spiral / ADBC:** datasets, recordings, MCAP payloads, query outputs and
   feature-cache values, and model checkpoint artifacts. The training worker
-  continues to publish checkpoint bytes directly to Spiral.
+  publishes checkpoints directly to Spiral and owns each run's metrics and
+  logs.
 
 ## Location and lifetime
 

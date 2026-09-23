@@ -1504,7 +1504,6 @@
   --tone-series-train: #2a78d6;
   --tone-series-validation: #d9572b;
   --tone-series-memory: #7a58a5;
-  --tone-series-transfer: #7560b8;
   --tone-viewport: #f5f5f3;
   --tone-camera: #1f1f1f;
   --tone-camera-ink: rgb(255 255 255 / 0.72);
@@ -1529,7 +1528,6 @@
   --chart-train: #2a78d6;
   --chart-validation: #d9572b;
   --chart-throughput: #3a7654;
-  --chart-transfer: #7560b8;
   --chart-cpu: #d9572b;
   --chart-gpu: #2a78d6;
   --chart-memory: #7a58a5;
@@ -3114,9 +3112,6 @@
   }
   .resource-throughput {
     color: var(--tone-good);
-  }
-  .resource-transfer {
-    color: var(--tone-series-transfer);
   }
   .resource-cpu {
     color: var(--tone-series-validation);

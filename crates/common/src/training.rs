@@ -1,4 +1,5 @@
-//! Native policy-training contracts and bounded run history.
+//! Native policy-training contracts: one run configuration, and what a
+//! worker reports about the runs it holds.
 
 use serde::{Deserialize, Serialize};
 
@@ -268,7 +269,7 @@ impl ActTrainingConfig {
     }
 }
 
-/// Authoritative lifecycle of one backend-owned native training run.
+/// Lifecycle of one training run, as its worker reports it.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingRunPhase {
@@ -279,6 +280,8 @@ pub enum TrainingRunPhase {
     Completed,
     Stopped,
     Failed,
+    /// The run's worker no longer holds it, or cannot be reached.
+    Unavailable,
 }
 
 impl TrainingRunPhase {
@@ -290,6 +293,7 @@ impl TrainingRunPhase {
             Self::Completed => "Completed",
             Self::Stopped => "Stopped",
             Self::Failed => "Failed",
+            Self::Unavailable => "Unavailable",
         }
     }
 
@@ -541,7 +545,7 @@ impl TrainingOptimizationConfig {
     }
 }
 
-/// One sample on the shared training-step axis used by every Studio plot.
+/// One sample on the shared training-step axis, exactly as the worker reports it.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingMetricPoint {
     #[serde(flatten)]
@@ -559,42 +563,27 @@ struct TrainingMetricProgress {
     validation_loss: Option<f64>,
     learning_rate: f64,
     elapsed_seconds: f64,
-    #[serde(default)]
     event: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingResourceMetrics {
-    /// Latest requested video payload bytes divided by total sample preparation time.
-    transfer_bytes_per_second: f64,
     examples_per_second: f64,
-    /// Studio process CPU usage; 100% represents one fully occupied core.
-    #[serde(default)]
+    /// Worker process CPU usage; 100% represents one fully occupied core.
     cpu_percent: Option<f64>,
-    /// Whole-device GPU utilization when the active backend exposes it.
-    #[serde(default)]
+    /// Whole-device GPU utilization when the worker's device exposes it.
     gpu_percent: Option<f64>,
-    /// Current resident memory used by the Studio process.
-    #[serde(default)]
+    /// Current resident memory used by the worker process.
     memory_bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingStageTimings {
     /// Spiral query, frame decode, normalization, and batch assembly time.
-    #[serde(default)]
     loader_ms: Option<f64>,
-    /// Studio-side Arrow IPC materialization time.
-    #[serde(default)]
-    arrow_encode_ms: Option<f64>,
-    /// HTTP request/response time outside the remote runtime handler.
-    #[serde(default)]
-    upload_ms: Option<f64>,
-    /// Runtime-side conversion and host-to-device transfer time.
-    #[serde(default)]
+    /// Conversion and host-to-device transfer time.
     device_copy_ms: Option<f64>,
-    /// Runtime-side optimizer or validation compute time.
-    #[serde(default)]
+    /// Optimizer or validation compute time.
     model_ms: Option<f64>,
 }
 
@@ -610,7 +599,6 @@ impl TrainingMetricPoint {
                 event: None,
             },
             resources: TrainingResourceMetrics {
-                transfer_bytes_per_second: 0.0,
                 examples_per_second: 0.0,
                 cpu_percent: None,
                 gpu_percent: None,
@@ -618,17 +606,10 @@ impl TrainingMetricPoint {
             },
             timings: TrainingStageTimings {
                 loader_ms: None,
-                arrow_encode_ms: None,
-                upload_ms: None,
                 device_copy_ms: None,
                 model_ms: None,
             },
         }
-    }
-
-    pub const fn with_learning_rate(mut self, learning_rate: f64) -> Self {
-        self.progress.learning_rate = learning_rate;
-        self
     }
 
     pub const fn with_validation_loss(mut self, validation_loss: Option<f64>) -> Self {
@@ -636,59 +617,13 @@ impl TrainingMetricPoint {
         self
     }
 
-    pub fn with_timeline(mut self, elapsed_seconds: f64, event: Option<String>) -> Self {
-        self.progress.elapsed_seconds = elapsed_seconds;
-        self.progress.event = event;
+    pub fn with_event(mut self, event: impl Into<String>) -> Self {
+        self.progress.event = Some(event.into());
         self
     }
 
-    pub const fn with_throughput(
-        mut self,
-        transfer_bytes_per_second: f64,
-        examples_per_second: f64,
-    ) -> Self {
-        self.resources.transfer_bytes_per_second = transfer_bytes_per_second;
+    pub const fn with_examples_per_second(mut self, examples_per_second: f64) -> Self {
         self.resources.examples_per_second = examples_per_second;
-        self
-    }
-
-    pub const fn with_utilization(
-        mut self,
-        cpu_percent: Option<f64>,
-        gpu_percent: Option<f64>,
-    ) -> Self {
-        self.resources.cpu_percent = cpu_percent;
-        self.resources.gpu_percent = gpu_percent;
-        self
-    }
-
-    pub const fn with_memory_bytes(mut self, memory_bytes: Option<u64>) -> Self {
-        self.resources.memory_bytes = memory_bytes;
-        self
-    }
-
-    pub const fn with_loader_ms(mut self, loader_ms: Option<f64>) -> Self {
-        self.timings.loader_ms = loader_ms;
-        self
-    }
-
-    pub const fn with_transport_timings(
-        mut self,
-        arrow_encode_ms: Option<f64>,
-        upload_ms: Option<f64>,
-    ) -> Self {
-        self.timings.arrow_encode_ms = arrow_encode_ms;
-        self.timings.upload_ms = upload_ms;
-        self
-    }
-
-    pub const fn with_runtime_timings(
-        mut self,
-        device_copy_ms: Option<f64>,
-        model_ms: Option<f64>,
-    ) -> Self {
-        self.timings.device_copy_ms = device_copy_ms;
-        self.timings.model_ms = model_ms;
         self
     }
 
@@ -707,9 +642,6 @@ impl TrainingMetricPoint {
     pub const fn elapsed_seconds(&self) -> f64 {
         self.progress.elapsed_seconds
     }
-    pub const fn transfer_bytes_per_second(&self) -> f64 {
-        self.resources.transfer_bytes_per_second
-    }
     pub const fn examples_per_second(&self) -> f64 {
         self.resources.examples_per_second
     }
@@ -725,12 +657,6 @@ impl TrainingMetricPoint {
     pub const fn loader_ms(&self) -> Option<f64> {
         self.timings.loader_ms
     }
-    pub const fn arrow_encode_ms(&self) -> Option<f64> {
-        self.timings.arrow_encode_ms
-    }
-    pub const fn upload_ms(&self) -> Option<f64> {
-        self.timings.upload_ms
-    }
     pub const fn device_copy_ms(&self) -> Option<f64> {
         self.timings.device_copy_ms
     }
@@ -742,49 +668,36 @@ impl TrainingMetricPoint {
     }
 }
 
-/// An inference checkpoint durably ingested into Spiral.
+/// An inference checkpoint the worker committed to Spiral.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingCheckpoint {
+    run_id: String,
     step: u64,
     created_ms: i64,
     validation_loss: Option<f64>,
-    byte_size: u64,
-    /// Old run-history entries default to false and cannot be selected for rollout.
-    #[serde(default)]
-    inference_ready: bool,
-    /// Number of actions to execute before refreshing the observation.
-    #[serde(default)]
-    recommended_action_steps: usize,
-    /// Control frequency inherited from the recorded dataset.
-    #[serde(default)]
-    sample_hz: f64,
+    policy: CheckpointPolicy,
 }
 
 impl TrainingCheckpoint {
-    pub const fn new(step: u64, created_ms: i64) -> Self {
+    pub fn new(run_id: impl Into<String>, step: u64, created_ms: i64) -> Self {
         Self {
+            run_id: run_id.into(),
             step,
             created_ms,
             validation_loss: None,
-            byte_size: 0,
-            inference_ready: false,
-            recommended_action_steps: 0,
-            sample_hz: 0.0,
+            policy: CheckpointPolicy::default(),
         }
     }
     pub const fn with_validation_loss(mut self, validation_loss: Option<f64>) -> Self {
         self.validation_loss = validation_loss;
         self
     }
-    pub const fn with_artifact(mut self, byte_size: u64, inference_ready: bool) -> Self {
-        self.byte_size = byte_size;
-        self.inference_ready = inference_ready;
+    pub fn with_policy(mut self, policy: CheckpointPolicy) -> Self {
+        self.policy = policy;
         self
     }
-    pub const fn with_rollout(mut self, recommended_action_steps: usize, sample_hz: f64) -> Self {
-        self.recommended_action_steps = recommended_action_steps;
-        self.sample_hz = sample_hz;
-        self
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
     pub const fn step(&self) -> u64 {
         self.step
@@ -792,45 +705,42 @@ impl TrainingCheckpoint {
     pub const fn created_ms(&self) -> i64 {
         self.created_ms
     }
-    pub const fn byte_size(&self) -> u64 {
-        self.byte_size
-    }
     pub const fn validation_loss(&self) -> Option<f64> {
         self.validation_loss
     }
-    pub const fn inference_ready(&self) -> bool {
-        self.inference_ready
-    }
-    pub const fn recommended_action_steps(&self) -> usize {
-        self.recommended_action_steps
-    }
-    pub const fn sample_hz(&self) -> f64 {
-        self.sample_hz
+    pub const fn policy(&self) -> &CheckpointPolicy {
+        &self.policy
     }
 }
 
-/// Dataset selection captured when a run starts. Project and namespace come
-/// from Studio's one process-owned Spiral destination.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TrainingSource {
-    /// Relational dataset row whose episodes supplied this run.
-    #[serde(default = "TrainingSource::default_dataset_id")]
-    dataset_id: String,
+/// What a checkpoint's policy expects from the robot it drives.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CheckpointPolicy {
+    /// Camera streams, in the order the policy reads them.
+    camera_streams: Vec<String>,
+    /// Actions executed before the observation is refreshed.
+    action_steps: usize,
+    /// Control frequency of the training data; checkpoints written before it
+    /// was recorded do not carry it.
+    sample_hz: Option<f64>,
 }
 
-impl TrainingSource {
-    fn default_dataset_id() -> String {
-        "default".to_owned()
-    }
-
-    pub fn new(dataset_id: impl Into<String>) -> Self {
+impl CheckpointPolicy {
+    pub fn new(camera_streams: Vec<String>, action_steps: usize, sample_hz: Option<f64>) -> Self {
         Self {
-            dataset_id: dataset_id.into(),
+            camera_streams,
+            action_steps,
+            sample_hz,
         }
     }
-
-    pub fn dataset_id(&self) -> &str {
-        &self.dataset_id
+    pub fn camera_streams(&self) -> &[String] {
+        &self.camera_streams
+    }
+    pub const fn action_steps(&self) -> usize {
+        self.action_steps
+    }
+    pub const fn sample_hz(&self) -> Option<f64> {
+        self.sample_hz
     }
 }
 
@@ -918,109 +828,52 @@ impl TrainingRuntimeInfo {
     }
 }
 
-/// Browser-safe run state. Checkpoint bytes and task handles never cross the
-/// wire; only their durable Spiral identity does.
+/// One run as Studio shows it: what it was asked to do, and what its worker
+/// reports now.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingRun {
     #[serde(flatten)]
     identity: TrainingRunIdentity,
     #[serde(flatten)]
-    lifecycle: TrainingRunLifecycle,
+    status: TrainingRunStatus,
     #[serde(flatten)]
     history: TrainingRunHistory,
 }
 
+/// What a run was asked to do, fixed when it starts.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-struct TrainingRunIdentity {
+pub struct TrainingRunIdentity {
     id: String,
     config: TrainingConfig,
-    #[serde(default)]
-    source: TrainingSource,
-    /// The training runtime the run's job lives on, fixed when it starts.
-    #[serde(default)]
-    runtime_endpoint: String,
+    started_ms: i64,
 }
 
+/// Where a run is now.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-struct TrainingRunLifecycle {
+pub struct TrainingRunStatus {
     phase: TrainingRunPhase,
     current_step: u64,
-    started_ms: i64,
-    finished_ms: Option<i64>,
     message: Option<String>,
 }
 
+/// The metrics and log tail a worker retains for one run.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-struct TrainingRunHistory {
+pub struct TrainingRunHistory {
     metrics: Vec<TrainingMetricPoint>,
-    checkpoints: Vec<TrainingCheckpoint>,
     logs: Vec<String>,
 }
 
 impl TrainingRun {
-    pub fn starting(id: impl Into<String>, config: TrainingConfig) -> Self {
+    pub fn new(identity: TrainingRunIdentity, status: TrainingRunStatus) -> Self {
         Self {
-            identity: TrainingRunIdentity {
-                id: id.into(),
-                config,
-                source: TrainingSource::default(),
-                runtime_endpoint: String::new(),
-            },
-            lifecycle: TrainingRunLifecycle {
-                phase: TrainingRunPhase::Starting,
-                current_step: 0,
-                started_ms: 0,
-                finished_ms: None,
-                message: None,
-            },
+            identity,
+            status,
             history: TrainingRunHistory::default(),
         }
     }
 
-    pub fn with_source(mut self, source: TrainingSource) -> Self {
-        self.identity.source = source;
-        self
-    }
-
-    pub fn with_runtime_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.identity.runtime_endpoint = endpoint.into();
-        self
-    }
-
-    /// Empty for runs recorded before the endpoint was kept with the run.
-    pub fn runtime_endpoint(&self) -> &str {
-        &self.identity.runtime_endpoint
-    }
-
-    pub const fn with_phase(mut self, phase: TrainingRunPhase, current_step: u64) -> Self {
-        self.lifecycle.phase = phase;
-        self.lifecycle.current_step = current_step;
-        self
-    }
-
-    pub const fn with_started_ms(mut self, started_ms: i64) -> Self {
-        self.lifecycle.started_ms = started_ms;
-        self
-    }
-
-    pub fn with_completion(mut self, finished_ms: Option<i64>, message: Option<String>) -> Self {
-        self.lifecycle.finished_ms = finished_ms;
-        self.lifecycle.message = message;
-        self
-    }
-
-    pub fn with_metrics(mut self, metrics: Vec<TrainingMetricPoint>) -> Self {
-        self.history.metrics = metrics;
-        self
-    }
-
-    pub fn with_checkpoints(mut self, checkpoints: Vec<TrainingCheckpoint>) -> Self {
-        self.history.checkpoints = checkpoints;
-        self
-    }
-
-    pub fn with_logs(mut self, logs: Vec<String>) -> Self {
-        self.history.logs = logs;
+    pub fn with_history(mut self, history: TrainingRunHistory) -> Self {
+        self.history = history;
         self
     }
 
@@ -1030,36 +883,64 @@ impl TrainingRun {
     pub const fn config(&self) -> &TrainingConfig {
         &self.identity.config
     }
+    pub const fn started_ms(&self) -> i64 {
+        self.identity.started_ms
+    }
     pub const fn phase(&self) -> TrainingRunPhase {
-        self.lifecycle.phase
+        self.status.phase
     }
     pub const fn current_step(&self) -> u64 {
-        self.lifecycle.current_step
+        self.status.current_step
     }
     pub fn message(&self) -> Option<&str> {
-        self.lifecycle.message.as_deref()
+        self.status.message.as_deref()
     }
     pub fn metrics(&self) -> &[TrainingMetricPoint] {
         &self.history.metrics
     }
-    pub fn checkpoints(&self) -> &[TrainingCheckpoint] {
-        &self.history.checkpoints
-    }
     pub fn logs(&self) -> &[String] {
         &self.history.logs
     }
+}
+
+impl TrainingRunIdentity {
+    pub fn new(id: impl Into<String>, config: TrainingConfig, started_ms: i64) -> Self {
+        Self {
+            id: id.into(),
+            config,
+            started_ms,
+        }
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
     pub const fn started_ms(&self) -> i64 {
-        self.lifecycle.started_ms
-    }
-    pub const fn finished_ms(&self) -> Option<i64> {
-        self.lifecycle.finished_ms
-    }
-    pub const fn source(&self) -> &TrainingSource {
-        &self.identity.source
+        self.started_ms
     }
 }
 
-/// Backend training state and its query projection.
+impl TrainingRunStatus {
+    pub fn new(phase: TrainingRunPhase, current_step: u64, message: Option<String>) -> Self {
+        Self {
+            phase,
+            current_step,
+            message,
+        }
+    }
+
+    /// A run whose worker cannot say where it is, and why.
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self::new(TrainingRunPhase::Unavailable, 0, Some(reason.into()))
+    }
+}
+
+impl TrainingRunHistory {
+    pub fn new(metrics: Vec<TrainingMetricPoint>, logs: Vec<String>) -> Self {
+        Self { metrics, logs }
+    }
+}
+
+/// Every run of a project and whether a new one could start now.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingSnapshot {
     #[serde(default)]
@@ -1074,272 +955,11 @@ impl TrainingSnapshot {
     pub const fn readiness(&self) -> &TrainingReadiness {
         &self.readiness
     }
-    /// Bounded run catalog; full metrics and logs are fetched by run identity.
-    pub fn catalog(&self) -> Self {
-        Self::new(
-            self.readiness.clone(),
-            self.runs
-                .iter()
-                .map(|run| TrainingRun {
-                    identity: run.identity.clone(),
-                    lifecycle: run.lifecycle.clone(),
-                    history: TrainingRunHistory {
-                        metrics: run.metrics().last().cloned().into_iter().collect(),
-                        checkpoints: run.checkpoints().to_vec(),
-                        logs: Vec::new(),
-                    },
-                })
-                .collect(),
-        )
-    }
-
     pub fn runs(&self) -> &[TrainingRun] {
         &self.runs
     }
-}
-
-pub(crate) const MAX_TRAINING_METRIC_POINTS: usize = 2_400;
-const TRAINING_METRIC_COMPACTION_TARGET: usize = MAX_TRAINING_METRIC_POINTS / 2;
-const TRAINING_METRIC_SERIES_COUNT: usize = 12;
-pub(crate) const MAX_TRAINING_LOG_LINES: usize = 120;
-const MAX_TRAINING_CHECKPOINTS: usize = 1_000;
-pub const MAX_TRAINING_HISTORY_RUNS: usize = 40;
-
-/// Internal training state transition.
-///
-/// The backend folds these transitions into its retained run history.
-#[derive(Clone, Debug, PartialEq)]
-pub enum TrainingUpdate {
-    Readiness {
-        readiness: TrainingReadiness,
-    },
-    RunAdded {
-        run: Box<TrainingRun>,
-    },
-    RunRemoved {
-        run_id: String,
-    },
-    RunConfigured {
-        run_id: String,
-        config: Box<TrainingConfig>,
-    },
-    RunState {
-        run_id: String,
-        phase: TrainingRunPhase,
-        current_step: u64,
-        finished_ms: Option<i64>,
-        message: Option<String>,
-    },
-    Metric {
-        run_id: String,
-        point: Box<TrainingMetricPoint>,
-    },
-    Checkpoint {
-        run_id: String,
-        checkpoint: TrainingCheckpoint,
-    },
-    Log {
-        run_id: String,
-        line: String,
-    },
-}
-
-impl TrainingSnapshot {
     pub fn active_run(&self) -> Option<&TrainingRun> {
-        self.runs.iter().find(|run| run.lifecycle.phase.active())
-    }
-
-    pub fn apply(&mut self, update: TrainingUpdate) {
-        match update {
-            TrainingUpdate::Readiness { readiness } => self.readiness = readiness,
-            TrainingUpdate::RunAdded { run } => {
-                self.runs
-                    .retain(|existing| existing.identity.id != run.identity.id);
-                self.runs.insert(0, *run);
-                self.runs.truncate(MAX_TRAINING_HISTORY_RUNS);
-            }
-            TrainingUpdate::RunRemoved { run_id } => {
-                self.runs.retain(|run| run.identity.id != run_id);
-            }
-            TrainingUpdate::RunConfigured { run_id, config } => {
-                if let Some(run) = self.runs.iter_mut().find(|run| run.identity.id == run_id) {
-                    run.identity.config = *config;
-                }
-            }
-            TrainingUpdate::RunState {
-                run_id,
-                phase,
-                current_step,
-                finished_ms,
-                message,
-            } => {
-                if let Some(run) = self.runs.iter_mut().find(|run| run.identity.id == run_id) {
-                    run.lifecycle.phase = phase;
-                    run.lifecycle.current_step = current_step;
-                    run.lifecycle.finished_ms = finished_ms;
-                    run.lifecycle.message = message;
-                }
-            }
-            TrainingUpdate::Metric { run_id, point } => {
-                if let Some(run) = self.runs.iter_mut().find(|run| run.identity.id == run_id) {
-                    run.insert_metric(*point);
-                }
-            }
-            TrainingUpdate::Checkpoint { run_id, checkpoint } => {
-                if let Some(run) = self.runs.iter_mut().find(|run| run.identity.id == run_id) {
-                    run.lifecycle.current_step = run.lifecycle.current_step.max(checkpoint.step);
-                    run.history.checkpoints.push(checkpoint);
-                    let excess = run
-                        .history
-                        .checkpoints
-                        .len()
-                        .saturating_sub(MAX_TRAINING_CHECKPOINTS);
-                    if excess > 0 {
-                        run.history.checkpoints.drain(..excess);
-                    }
-                }
-            }
-            TrainingUpdate::Log { run_id, line } => {
-                if let Some(run) = self.runs.iter_mut().find(|run| run.identity.id == run_id) {
-                    run.history.logs.push(line);
-                    let excess = run
-                        .history
-                        .logs
-                        .len()
-                        .saturating_sub(MAX_TRAINING_LOG_LINES);
-                    if excess > 0 {
-                        run.history.logs.drain(..excess);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl TrainingRun {
-    fn insert_metric(&mut self, point: TrainingMetricPoint) {
-        self.lifecycle.current_step = self.lifecycle.current_step.max(point.progress.step);
-        match self
-            .history
-            .metrics
-            .binary_search_by_key(&point.progress.step, |existing| existing.progress.step)
-        {
-            Ok(index) => self.history.metrics[index] = point,
-            Err(index) => self.history.metrics.insert(index, point),
-        }
-        if self.history.metrics.len() > MAX_TRAINING_METRIC_POINTS {
-            self.compact_metrics();
-        }
-    }
-
-    /// Keep a bounded, whole-run view instead of deleting the oldest steps.
-    ///
-    /// Event samples, endpoints, and the extrema of every plotted metric survive
-    /// each compaction pass. Remaining capacity is filled uniformly so reconnecting
-    /// clients retain continuous temporal coverage while the newest interval stays
-    /// dense between passes.
-    fn compact_metrics(&mut self) {
-        use std::collections::BTreeSet;
-
-        if self.history.metrics.len() <= TRAINING_METRIC_COMPACTION_TARGET {
-            return;
-        }
-
-        let source = std::mem::take(&mut self.history.metrics);
-        let mut keep = BTreeSet::from([0, source.len() - 1]);
-        let event_indices = source
-            .iter()
-            .enumerate()
-            .filter_map(|(index, point)| point.progress.event.is_some().then_some(index))
-            .collect::<Vec<_>>();
-        Self::retain_evenly(
-            &mut keep,
-            &event_indices,
-            TRAINING_METRIC_COMPACTION_TARGET / 8,
-        );
-
-        let extrema_capacity = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
-        let bucket_count = extrema_capacity / (TRAINING_METRIC_SERIES_COUNT * 2);
-        if bucket_count > 0 {
-            let bucket_size = source.len().div_ceil(bucket_count);
-            for bucket_start in (0..source.len()).step_by(bucket_size) {
-                let bucket_end = (bucket_start + bucket_size).min(source.len());
-                for series_index in 0..TRAINING_METRIC_SERIES_COUNT {
-                    let values = (bucket_start..bucket_end).filter_map(|index| {
-                        source[index]
-                            .series_value(series_index)
-                            .filter(|metric_value| metric_value.is_finite())
-                            .map(|metric_value| (index, metric_value))
-                    });
-                    let mut minimum = None::<(usize, f64)>;
-                    let mut maximum = None::<(usize, f64)>;
-                    for (index, metric_value) in values {
-                        if minimum.is_none_or(|(_, current)| metric_value < current) {
-                            minimum = Some((index, metric_value));
-                        }
-                        if maximum.is_none_or(|(_, current)| metric_value > current) {
-                            maximum = Some((index, metric_value));
-                        }
-                    }
-                    if let Some((index, _)) = minimum {
-                        keep.insert(index);
-                    }
-                    if let Some((index, _)) = maximum {
-                        keep.insert(index);
-                    }
-                }
-            }
-        }
-
-        let remaining = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
-        let all_indices = (0..source.len()).collect::<Vec<_>>();
-        Self::retain_evenly(&mut keep, &all_indices, remaining);
-
-        self.history.metrics = source
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, point)| keep.contains(&index).then_some(point))
-            .collect();
-    }
-    fn retain_evenly(
-        keep: &mut std::collections::BTreeSet<usize>,
-        candidates: &[usize],
-        limit: usize,
-    ) {
-        if candidates.is_empty() || limit == 0 {
-            return;
-        }
-        if candidates.len() <= limit {
-            keep.extend(candidates.iter().copied());
-            return;
-        }
-        for slot in 0..limit {
-            let index = slot * (candidates.len() - 1) / limit.saturating_sub(1).max(1);
-            keep.insert(candidates[index]);
-        }
-    }
-}
-
-impl TrainingMetricPoint {
-    fn series_value(&self, series_index: usize) -> Option<f64> {
-        match series_index {
-            0 => Some(self.progress.train_loss),
-            1 => self.progress.validation_loss,
-            2 => Some(self.resources.transfer_bytes_per_second),
-            3 => Some(self.resources.examples_per_second),
-            4 => self.resources.cpu_percent,
-            5 => self.resources.gpu_percent,
-            6 => self
-                .resources
-                .memory_bytes
-                .map(|memory_bytes| memory_bytes as f64),
-            7 => self.timings.loader_ms,
-            8 => self.timings.arrow_encode_ms,
-            9 => self.timings.upload_ms,
-            10 => self.timings.device_copy_ms,
-            11 => self.timings.model_ms,
-            _ => None,
-        }
+        self.runs.iter().find(|run| run.phase().active())
     }
 }
 
@@ -1356,19 +976,6 @@ impl ActLayerCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TrainingSnapshotTest;
-
-    impl TrainingSnapshotTest {
-        fn run(id: &str) -> TrainingRun {
-            TrainingRun::starting(id, TrainingConfig::default())
-                .with_source(TrainingSource::default())
-        }
-
-        fn metric(step: u64, train_loss: f64) -> TrainingMetricPoint {
-            TrainingMetricPoint::new(step, train_loss)
-        }
-    }
 
     #[test]
     fn act_defaults_match_current_lerobot_architecture() {
@@ -1395,134 +1002,5 @@ mod tests {
             .remove("validation_split");
         let config: TrainingConfig = serde_json::from_value(serialized_config).unwrap();
         assert_eq!(config.validation_split(), 0.0);
-    }
-
-    #[test]
-    fn incremental_training_updates_stay_bounded_without_dropping_early_history() {
-        let mut snapshot = TrainingSnapshot::new(
-            TrainingReadiness::default(),
-            vec![TrainingSnapshotTest::run("run-a")],
-        );
-        for step in 0..=12_000 {
-            snapshot.apply(TrainingUpdate::Metric {
-                run_id: "run-a".to_owned(),
-                point: Box::new(
-                    TrainingMetricPoint::new(step, if step == 123 { 10_000.0 } else { 1.0 })
-                        .with_validation_loss((step == 6_000).then_some(4.0))
-                        .with_utilization((step == 777).then_some(9_000.0), None),
-                ),
-            });
-        }
-        for line in 0..=MAX_TRAINING_LOG_LINES {
-            snapshot.apply(TrainingUpdate::Log {
-                run_id: "run-a".to_owned(),
-                line: format!("line {line}"),
-            });
-        }
-
-        let run = &snapshot.runs()[0];
-        assert!(run.metrics().len() <= MAX_TRAINING_METRIC_POINTS);
-        assert_eq!(
-            run.metrics().first().map(TrainingMetricPoint::step),
-            Some(0)
-        );
-        assert_eq!(
-            run.metrics().last().map(TrainingMetricPoint::step),
-            Some(12_000)
-        );
-        assert!(run.metrics().iter().any(|point| point.step() == 123));
-        assert!(run.metrics().iter().any(|point| point.step() == 777));
-        assert!(run.metrics().iter().any(|point| point.step() == 6_000));
-        assert_eq!(run.logs().len(), MAX_TRAINING_LOG_LINES);
-        assert_eq!(run.logs()[0], "line 1");
-        assert_eq!(run.current_step(), 12_000);
-    }
-
-    #[test]
-    fn repeated_or_late_metric_updates_replace_the_step_without_regressing_progress() {
-        let mut snapshot = TrainingSnapshot::new(
-            TrainingReadiness::default(),
-            vec![TrainingSnapshotTest::run("run-a")],
-        );
-        for (step, loss) in [(2, 2.0), (1, 1.0), (2, 0.5)] {
-            snapshot.apply(TrainingUpdate::Metric {
-                run_id: "run-a".to_owned(),
-                point: Box::new(TrainingSnapshotTest::metric(step, loss)),
-            });
-        }
-
-        let run = &snapshot.runs()[0];
-        assert_eq!(run.current_step(), 2);
-        assert_eq!(run.metrics().len(), 2);
-        assert_eq!(run.metrics()[0].step(), 1);
-        assert_eq!(run.metrics()[1].step(), 2);
-        assert_eq!(run.metrics()[1].train_loss(), 0.5);
-    }
-
-    #[test]
-    fn resolved_training_configuration_updates_the_run_snapshot() {
-        let mut snapshot = TrainingSnapshot::new(
-            TrainingReadiness::default(),
-            vec![TrainingSnapshotTest::run("run-a")],
-        );
-        let mut config = TrainingConfig::default();
-        config.act_mut().set_camera_streams(vec![
-            "follower.camera.gripper".to_owned(),
-            "follower.camera.top".to_owned(),
-        ]);
-        snapshot.apply(TrainingUpdate::RunConfigured {
-            run_id: "run-a".to_owned(),
-            config: Box::new(config.clone()),
-        });
-        assert_eq!(snapshot.runs()[0].config(), &config);
-    }
-
-    #[test]
-    fn removing_a_training_run_removes_its_complete_snapshot_record() {
-        let mut snapshot = TrainingSnapshot::new(
-            TrainingReadiness::default(),
-            vec![
-                TrainingRun::starting("run-a", TrainingConfig::default())
-                    .with_source(TrainingSource::default())
-                    .with_metrics(vec![TrainingMetricPoint::default()])
-                    .with_checkpoints(vec![TrainingCheckpoint::default()])
-                    .with_logs(vec!["retained only inside the run".to_owned()]),
-                TrainingSnapshotTest::run("run-b"),
-            ],
-        );
-
-        snapshot.apply(TrainingUpdate::RunRemoved {
-            run_id: "run-a".to_owned(),
-        });
-
-        assert_eq!(snapshot.runs().len(), 1);
-        assert_eq!(snapshot.runs()[0].id(), "run-b");
-    }
-
-    #[test]
-    fn catalog_omits_detailed_history_without_modifying_runs() {
-        let runs = ["a", "b"]
-            .into_iter()
-            .map(|id| {
-                TrainingRun::starting(id, TrainingConfig::default())
-                    .with_metrics(vec![
-                        TrainingMetricPoint::new(1, 2.0),
-                        TrainingMetricPoint::new(2, 1.0),
-                    ])
-                    .with_logs(vec!["retained log".to_owned()])
-                    .with_checkpoints(vec![TrainingCheckpoint::new(2, 1)])
-            })
-            .collect();
-        let history = TrainingSnapshot::new(TrainingReadiness::default(), runs);
-        let display = history.catalog();
-        assert_eq!(display.runs()[0].metrics().len(), 1);
-        assert!(display.runs()[0].logs().is_empty());
-        assert_eq!(
-            display.runs()[0].checkpoints(),
-            history.runs()[0].checkpoints()
-        );
-        assert_eq!(display.runs()[1].metrics().len(), 1);
-        assert!(display.runs()[1].logs().is_empty());
-        assert_eq!(history.runs()[0].metrics().len(), 2);
     }
 }

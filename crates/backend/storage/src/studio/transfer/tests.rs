@@ -1,16 +1,12 @@
 use super::*;
 use crate::explorations::ExplorationPersistence;
-use crate::rollout_runs::RolloutSessionPersistence;
 use crate::settings::StudioPreferencePersistence;
 use crate::studio::StudioStore;
-use crate::training::TrainingHistoryPersistence;
+use crate::training::{TrainingRunPersistence, TrainingRunRecord};
 use crate::workflows::{WorkflowJson, WorkflowPersistence};
 use spiral_robotics_common::robots::PortSettings;
 use spiral_robotics_common::robots::config::RobotConfig;
-use spiral_robotics_common::rollout::{RolloutPhase, RolloutSnapshot};
-use spiral_robotics_common::training::{
-    TrainingConfig, TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingSnapshot,
-};
+use spiral_robotics_common::training::{TrainingConfig, TrainingRunIdentity};
 use spiral_robotics_common::workflow::WorkflowSpec;
 
 struct Fixture;
@@ -73,21 +69,12 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
             .await
             .unwrap()
     );
-    let history = TrainingSnapshot::new(
-        TrainingReadiness::default(),
-        vec![
-            TrainingRun::starting("run", TrainingConfig::default())
-                .with_metrics(vec![TrainingMetricPoint::new(1, f64::NAN)]),
-        ],
+    let run = TrainingRunRecord::new(
+        TrainingRunIdentity::new("run", TrainingConfig::default(), 10),
+        "http://localhost:9000",
     );
-    TrainingHistoryPersistence::new(&source)
-        .save(&history)
-        .await
-        .unwrap();
-    let rollout = RolloutSnapshot::new(Some("rollout".into()), Some("run".into()))
-        .with_lifecycle(RolloutPhase::Failed, Some(10));
-    RolloutSessionPersistence::new(&source)
-        .save(&rollout)
+    TrainingRunPersistence::new(&source)
+        .insert(&run)
         .await
         .unwrap();
     StudioPreferencePersistence::new(&source)
@@ -144,18 +131,9 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
             .unwrap(),
         Some(exploration.with_revision(1))
     );
-    let restored = TrainingHistoryPersistence::new(&target)
-        .load()
-        .await
-        .unwrap();
-    assert_eq!(restored[0].id(), "run");
-    assert!(restored[0].metrics()[0].train_loss().is_nan());
     assert_eq!(
-        RolloutSessionPersistence::new(&target)
-            .load()
-            .await
-            .unwrap(),
-        [rollout]
+        TrainingRunPersistence::new(&target).load().await.unwrap(),
+        [run]
     );
     assert!(
         !StudioPreferencePersistence::new(&target)

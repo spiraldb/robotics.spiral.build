@@ -273,7 +273,6 @@ impl OpenProject {
     pub(crate) async fn shutdown(&self) {
         self.workflow().shutdown().await;
         self.curation().shutdown().await;
-        self.training().shutdown().await;
         self.rollout().shutdown().await;
     }
 }

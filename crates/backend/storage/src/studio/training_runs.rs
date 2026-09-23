@@ -7,7 +7,6 @@ pub struct Model {
     pub(super) project: String,
     #[sea_orm(primary_key, auto_increment = false)]
     pub(super) id: String,
-    pub ordinal: i64,
     pub(crate) document: Json,
 }
 

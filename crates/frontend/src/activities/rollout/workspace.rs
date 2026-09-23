@@ -6,7 +6,7 @@ use spiral_robotics_common::robots::{CameraStatus, RobotSummary};
 use spiral_robotics_common::rollout::{
     MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig, RolloutPhase, RolloutSnapshot,
 };
-use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
+use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun};
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, Fact, FactLayout, FactList, Field, Select,
     TextInput, TextInputKind,
@@ -38,7 +38,7 @@ struct CheckpointIdentity {
 #[derive(Clone, Debug, PartialEq)]
 struct CheckpointPolicy {
     action_steps: usize,
-    sample_hz: f64,
+    sample_hz: Option<f64>,
     camera_roles: Vec<String>,
 }
 
@@ -84,7 +84,7 @@ pub(super) fn RolloutWorkbench(
     let snapshot = telemetry.snapshot().read().to_owned();
     let training = training_history.snapshot().read().to_owned();
     let rollout = controller.snapshot().read().to_owned();
-    let checkpoints = training.checkpoint_choices();
+    let checkpoints = training_history.checkpoint_choices();
     let selected_key = controller
         .checkpoint()
         .filter(|key| checkpoints.iter().any(|choice| &choice.identity.key == key))
@@ -145,7 +145,7 @@ pub(super) fn RolloutWorkbench(
     let load_error = controller.error();
     let load_issue = load_error
         .clone()
-        .or_else(|| (!controller.loaded()).then(|| "Loading rollout history…".to_owned()));
+        .or_else(|| (!controller.loaded()).then(|| "Loading rollout…".to_owned()));
     let blocker = load_issue
         .clone()
         .or(precondition_blocker.clone())
@@ -155,7 +155,10 @@ pub(super) fn RolloutWorkbench(
             ))
         });
     let action_steps = selected.map_or(0, |choice| choice.policy.action_steps);
-    let control_rate = selected.map_or(0.0, |choice| choice.policy.sample_hz);
+    let control_rate = selected
+        .and_then(|choice| choice.policy.sample_hz)
+        .map(|hz| format!("{hz:.1} Hz"))
+        .unwrap_or_else(|| "—".to_owned());
     let validation_loss = selected
         .and_then(|choice| choice.validation_loss)
         .map(LossPresentation::loss_label)
@@ -233,7 +236,7 @@ pub(super) fn RolloutWorkbench(
                     }
                     div { class: "rollout-field",
                         span { "Control rate" }
-                        strong { "{control_rate:.1} Hz" }
+                        strong { "{control_rate}" }
                     }
                     Field { label: "Duration", class: "rollout-duration-field",
                         div { class: "rollout-duration-control",
@@ -472,22 +475,16 @@ fn InferenceMetric(label: &'static str, value: String, unit: &'static str) -> El
 
 /// Training history, read for the one thing Rollout wants from it: the
 /// checkpoints a policy can actually be run from, newest step first.
-pub(super) trait TrainingSnapshotRollout {
+pub(super) trait TrainingHistoryRollout {
     fn checkpoint_choices(&self) -> Vec<CheckpointChoice>;
     /// The cameras the chosen checkpoint's policy expects, which is what
     /// Rollout docks camera panels for. Falls back to the newest checkpoint.
     fn selected_checkpoint_camera_roles(&self, selected_key: Option<&str>) -> Vec<String>;
 }
 
-impl TrainingSnapshotRollout for TrainingSnapshot {
+impl TrainingHistoryRollout for crate::activities::training::history::TrainingHistory {
     fn checkpoint_choices(&self) -> Vec<CheckpointChoice> {
-        let mut choices = self
-            .runs()
-            .iter()
-            .flat_map(CheckpointChoice::for_run)
-            .collect::<Vec<_>>();
-        choices.sort_by_key(|choice| std::cmp::Reverse(choice.step));
-        choices
+        CheckpointChoice::listed(self.snapshot().read().runs(), &self.checkpoints().read())
     }
 
     fn selected_checkpoint_camera_roles(&self, selected_key: Option<&str>) -> Vec<String> {
@@ -501,46 +498,45 @@ impl TrainingSnapshotRollout for TrainingSnapshot {
 }
 
 impl CheckpointChoice {
-    fn for_run(run: &TrainingRun) -> Vec<Self> {
-        run.checkpoints()
+    /// Every checkpoint whose run Studio still records, newest step first.
+    fn listed(runs: &[TrainingRun], checkpoints: &[TrainingCheckpoint]) -> Vec<Self> {
+        let mut choices = checkpoints
             .iter()
-            .filter(|checkpoint| checkpoint.inference_ready())
-            .map(|checkpoint| Self {
-                identity: CheckpointIdentity {
-                    key: format!("{}::{}", run.id(), checkpoint.step()),
-                    run_id: run.id().to_owned(),
-                    run_name: run.config().run_name().to_owned(),
-                    run_active: run.phase().active(),
-                },
-                step: checkpoint.step(),
-                validation_loss: checkpoint.validation_loss(),
-                policy: CheckpointPolicy::for_checkpoint(run, checkpoint),
+            .filter_map(|checkpoint| {
+                let run = runs.iter().find(|run| run.id() == checkpoint.run_id())?;
+                Some(Self {
+                    identity: CheckpointIdentity {
+                        key: format!("{}::{}", run.id(), checkpoint.step()),
+                        run_id: run.id().to_owned(),
+                        run_name: run.config().run_name().to_owned(),
+                        run_active: run.phase().active(),
+                    },
+                    step: checkpoint.step(),
+                    validation_loss: checkpoint.validation_loss(),
+                    policy: CheckpointPolicy::from(checkpoint),
+                })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        choices.sort_by_key(|choice| std::cmp::Reverse(choice.step));
+        choices
     }
 }
 
-impl CheckpointPolicy {
-    fn for_checkpoint(run: &TrainingRun, checkpoint: &TrainingCheckpoint) -> Self {
+impl From<&TrainingCheckpoint> for CheckpointPolicy {
+    fn from(checkpoint: &TrainingCheckpoint) -> Self {
+        let policy = checkpoint.policy();
         // A recorded camera stream is named `{robot}.camera.{role}`; the policy
         // was trained on the roles, in first-seen order.
         let mut camera_roles = Vec::new();
-        for stream in run.config().act().camera_streams() {
+        for stream in policy.camera_streams() {
             let role = stream.rsplit('.').next().unwrap_or(stream).to_owned();
             if !camera_roles.contains(&role) {
                 camera_roles.push(role);
             }
         }
         Self {
-            action_steps: (if checkpoint.recommended_action_steps() == 0 {
-                run.config().chunk_size()
-            } else {
-                checkpoint
-                    .recommended_action_steps()
-                    .min(run.config().chunk_size())
-            })
-            .min(MAX_ROLLOUT_ACTION_STEPS),
-            sample_hz: checkpoint.sample_hz(),
+            action_steps: policy.action_steps().min(MAX_ROLLOUT_ACTION_STEPS),
+            sample_hz: policy.sample_hz(),
             camera_roles,
         }
     }
@@ -666,7 +662,8 @@ mod tests {
     };
     use spiral_robotics_common::rollout::{RolloutPhase, RolloutSnapshot};
     use spiral_robotics_common::training::{
-        TrainingCheckpoint, TrainingConfig, TrainingRun, TrainingRunPhase, TrainingSource,
+        CheckpointPolicy as TrainedPolicy, TrainingCheckpoint, TrainingConfig, TrainingRun,
+        TrainingRunIdentity, TrainingRunPhase, TrainingRunStatus,
     };
 
     use super::{
@@ -766,25 +763,30 @@ mod tests {
     /// A recorded camera stream is `{robot}.camera.{role}`; the policy names
     /// the roles, once each.
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn rollout_lists_inference_ready_checkpoints_from_an_active_run() {
-        let mut config = TrainingConfig::default();
-        config.act_mut().set_camera_streams(vec![
-            "follower.camera.gripper".to_owned(),
-            "follower.camera.top".to_owned(),
-            "leader.camera.top".to_owned(),
-        ]);
-        let run = TrainingRun::starting("active-run", config)
-            .with_source(TrainingSource::default())
-            .with_phase(TrainingRunPhase::Running, 0)
-            .with_checkpoints(vec![
-                TrainingCheckpoint::new(20_000, 0).with_artifact(0, true),
-                TrainingCheckpoint::new(10_000, 0),
-            ]);
+    fn rollout_lists_recorded_runs_checkpoints_newest_first() {
+        let run = TrainingRun::new(
+            TrainingRunIdentity::new("active-run", TrainingConfig::default(), 1),
+            TrainingRunStatus::new(TrainingRunPhase::Running, 0, None),
+        );
+        let policy = TrainedPolicy::new(
+            vec![
+                "follower.camera.gripper".to_owned(),
+                "follower.camera.top".to_owned(),
+                "leader.camera.top".to_owned(),
+            ],
+            100,
+            Some(30.0),
+        );
+        let checkpoints = [
+            TrainingCheckpoint::new("active-run", 10_000, 0).with_policy(policy.clone()),
+            TrainingCheckpoint::new("active-run", 20_000, 0).with_policy(policy),
+            TrainingCheckpoint::new("deleted-run", 30_000, 0),
+        ];
 
-        let choices = CheckpointChoice::for_run(&run);
+        let choices = CheckpointChoice::listed(&[run], &checkpoints);
 
         assert_eq!(choices[0].policy.camera_roles, ["gripper", "top"]);
-        assert_eq!(choices.len(), 1);
+        assert_eq!(choices.len(), 2);
         assert_eq!(choices[0].step, 20_000);
         assert!(choices[0].identity.run_active);
         assert_eq!(choices[0].policy.action_steps, MAX_ROLLOUT_ACTION_STEPS);

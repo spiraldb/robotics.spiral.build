@@ -281,14 +281,10 @@ Robot configuration is read by the project-scoped robot workspace when needed by
 the hardware views, robot commands, and saved-device auto-connect. The discarded startup
 validation read is gone; auto-connect runs for the saved project at startup and
 for a project once a settings save switches to it.
-Every rollout session is stored under its own ID when it starts and when it
-ends, and the rollout list is read from storage on each request, with the
-running session shown live. A stored session still marked active outlived the
-process that ran it; it reads as failed and motion is never resumed. The Rollout
-view owns loading/error feedback and
-retains its last successful snapshot if polling fails. Its execution and
-persistence remain owned by the backend after navigating away. Stop does not wait
-for history I/O.
+Rollout keeps only its current session, in memory; a restarted Studio starts
+idle and motion is never resumed. The Rollout view owns loading/error feedback
+and retains its last successful snapshot if polling fails. Its execution
+remains owned by the backend after navigating away.
 
 The shell owns only the selected project, backend liveness, its clock, and
 notifications. `/robots`, `/hardware/status`, and hardware telemetry are polled by the active
@@ -307,9 +303,11 @@ backend keeps no copy. A training run records the runtime endpoint it starts on
 and is followed there for its whole life, so a Settings change applies to the
 next run and readiness probe.
 
-Training history is read from SQLite on each request. A run's monitor writes
-each poll's new metrics, checkpoints, and logs to that run before the next read;
-a run an earlier process left active gets its monitor back when history is read.
+SQLite records only what Studio asked each training run to do: its ID,
+configuration, start time, and worker endpoint. Each run list asks the run's
+worker for its status; opening a run asks for its metrics and log tail, which
+the worker owns. A run whose worker no longer holds it, or cannot be reached,
+reads as unavailable. Checkpoints are listed from Spiral.
 Workflow, Assistant history, and the full relation catalog also load on feature
 access rather than when a project opens.
 

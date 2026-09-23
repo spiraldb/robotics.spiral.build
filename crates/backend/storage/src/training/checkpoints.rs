@@ -1,19 +1,18 @@
-//! Application-owned boundary for immutable training artifacts.
+//! Training checkpoints the worker commits to Spiral: the only place they are
+//! listed, loaded, or deleted.
 
 use std::future::Future;
 use std::pin::Pin;
 
-use arrow_array::{
-    BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, RecordBatch, StringArray,
-    StringViewArray,
-};
+use arrow_array::{BinaryArray, BinaryViewArray, LargeBinaryArray, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt as _;
+use spiral_robotics_common::training::{CheckpointPolicy, TrainingCheckpoint};
 
 use crate::db::DatabaseSession as _;
 use crate::db::ProjectStore;
 use crate::db::SpiralSql;
-use crate::db::{Table, column as db};
+use crate::db::{ArrowColumns, Table, column as db};
 use crate::manager::StorageManager;
 
 /// Keep one model cell below Spiral's 256 MiB operation limit, with headroom
@@ -107,22 +106,56 @@ impl CheckpointArtifact {
 
 pub type CheckpointFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
-/// Checkpoint operations used by rollout policy. The concrete
-/// Studio implementation always addresses its one process-owned Spiral project.
+/// Checkpoint loading used by rollout policy. The concrete Studio
+/// implementation always addresses its one process-owned Spiral project.
 pub trait CheckpointStore: Send + Sync {
     fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact>;
-
-    fn delete_run_checkpoints(&self, run_id: String) -> CheckpointFuture<'_, ()>;
 }
 
-/// Immutable checkpoint operations for one project.
-struct TrainingCheckpointPersistence<'a> {
+/// One project's checkpoints in Spiral.
+pub struct TrainingCheckpointPersistence<'a> {
     project_store: &'a ProjectStore,
 }
 
+/// The policy facts a checkpoint's stored model configuration carries.
+#[derive(serde::Deserialize)]
+struct StoredCheckpointPolicy {
+    spiral_camera_order: Vec<String>,
+    n_action_steps: usize,
+    spiral_sample_hz: Option<f64>,
+}
+
 impl<'a> TrainingCheckpointPersistence<'a> {
-    const fn new(project_store: &'a ProjectStore) -> Self {
+    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
         Self { project_store }
+    }
+
+    /// Every checkpoint of every run, without its weights.
+    pub async fn list(&self) -> Result<Vec<TrainingCheckpoint>, String> {
+        let query = SpiralSql::training_checkpoint_catalog(self.project_store.table_prefix());
+        let mut records = self.record_batches(query).await?;
+        let mut checkpoints = Vec::new();
+        while let Some(batch) = records.next().await {
+            let batch = batch.map_err(|error| format!("reading Spiral checkpoints: {error}"))?;
+            let columns = ArrowColumns::new(&batch, "training checkpoint");
+            for row in 0..batch.num_rows() {
+                checkpoints.push(Self::checkpoint_at(&columns, row)?);
+            }
+        }
+        Ok(checkpoints)
+    }
+
+    /// Delete every checkpoint of one run.
+    pub async fn delete_run(&self, run_id: &str) -> Result<(), String> {
+        let target = Table::TrainingCheckpoints.qualified_name(self.project_store.table_prefix());
+        let mut connection = self.project_store.connect().await?;
+        connection
+            .execute_update(SpiralSql::delete_training_run(&target, run_id).into())
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                format!("deleting training run {run_id:?} checkpoints from {target}: {error}")
+            })
     }
 
     async fn load(&self, key: CheckpointKey) -> Result<CheckpointArtifact, String> {
@@ -145,16 +178,22 @@ impl<'a> TrainingCheckpointPersistence<'a> {
         artifact.ok_or_else(|| "No checkpoint matched that training run and step".to_owned())
     }
 
-    async fn delete(&self, run_id: String) -> Result<(), String> {
-        let target = Table::TrainingCheckpoints.qualified_name(self.project_store.table_prefix());
-        let mut connection = self.project_store.connect().await?;
-        connection
-            .execute_update(SpiralSql::delete_training_run(&target, &run_id).into())
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                format!("deleting training run {run_id:?} checkpoints from {target}: {error}")
-            })
+    fn checkpoint_at(columns: &ArrowColumns<'_>, row: usize) -> Result<TrainingCheckpoint, String> {
+        let run_id = columns.text(db::RUN_ID, row)?;
+        let step = columns.unsigned(db::STEP, row)?;
+        let policy: StoredCheckpointPolicy =
+            serde_json::from_str(columns.text(db::CONFIG_JSON, row)?).map_err(|error| {
+                format!("checkpoint {run_id:?} step {step} has an invalid model config: {error}")
+            })?;
+        Ok(
+            TrainingCheckpoint::new(run_id, step, columns.signed(db::CREATED_MS, row)?)
+                .with_validation_loss(columns.optional_float(db::VALIDATION_LOSS, row)?)
+                .with_policy(CheckpointPolicy::new(
+                    policy.spiral_camera_order,
+                    policy.n_action_steps,
+                    policy.spiral_sample_hz,
+                )),
+        )
     }
 
     async fn record_batches(&self, sql: String) -> Result<crate::RecordBatchStream, String> {
@@ -168,30 +207,12 @@ impl<'a> TrainingCheckpointPersistence<'a> {
 
 impl CheckpointStore for StorageManager {
     fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact> {
-        Box::pin(async move {
-            TrainingCheckpointPersistence::new(self.project_store())
-                .load(key)
-                .await
-        })
-    }
-
-    fn delete_run_checkpoints(&self, run_id: String) -> CheckpointFuture<'_, ()> {
-        Box::pin(async move {
-            TrainingCheckpointPersistence::new(self.project_store())
-                .delete(run_id)
-                .await
-        })
+        Box::pin(async move { self.training_checkpoints().load(key).await })
     }
 }
 
 impl CheckpointArtifact {
     fn from_batch_row(batch: &RecordBatch, row: usize) -> Result<Self, String> {
-        let config = batch.column_by_name(db::CONFIG_JSON).ok_or_else(|| {
-            format!(
-                "Spiral checkpoint query returned no UTF-8 {} column",
-                db::CONFIG_JSON
-            )
-        })?;
         let checkpoint = batch.column_by_name(db::CHECKPOINT).ok_or_else(|| {
             format!(
                 "Spiral checkpoint query returned no {} column",
@@ -211,19 +232,10 @@ impl CheckpointArtifact {
             ));
         };
         Self::validate_size(0, payload.len())?;
-        let config_json = if let Some(values) = config.as_any().downcast_ref::<StringArray>() {
-            values.value(row).as_bytes().to_vec()
-        } else if let Some(values) = config.as_any().downcast_ref::<LargeStringArray>() {
-            values.value(row).as_bytes().to_vec()
-        } else if let Some(values) = config.as_any().downcast_ref::<StringViewArray>() {
-            values.value(row).as_bytes().to_vec()
-        } else {
-            return Err(format!(
-                "Spiral checkpoint config has unexpected type {}",
-                config.data_type()
-            ));
-        };
-        Self::validate_size(config_json.len(), payload.len())?;
+        let config_json = ArrowColumns::new(batch, "training checkpoint")
+            .text(db::CONFIG_JSON, row)?
+            .as_bytes()
+            .to_vec();
         Self::from_bytes(config_json, payload)
     }
 }

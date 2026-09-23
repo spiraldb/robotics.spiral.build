@@ -1,6 +1,6 @@
 //! Rollout owns follower scene, checkpoint cameras, controls, and inference docking.
 
-use super::workspace::{InferencePanel, RobotFleet, RolloutWorkbench, TrainingSnapshotRollout};
+use super::workspace::{InferencePanel, RobotFleet, RolloutWorkbench, TrainingHistoryRollout};
 use crate::panels::camera_panel::{AssignedCamera, CameraWorkspaceLayout};
 use crate::panels::scene::SceneSource;
 use crate::panels::scene::{Viewport, ViewportPresentation};
@@ -20,10 +20,7 @@ impl RolloutCameras {
             return Vec::new();
         };
         let checkpoint = controller.checkpoint();
-        let roles = training_history
-            .snapshot()
-            .read()
-            .selected_checkpoint_camera_roles(checkpoint.as_deref());
+        let roles = training_history.selected_checkpoint_camera_roles(checkpoint.as_deref());
         Self::for_follower(&follower, &roles)
     }
 

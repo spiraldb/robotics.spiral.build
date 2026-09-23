@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    TRAINING_BACKEND_API_ID, TRAINING_BACKEND_API_REVISION, TRAINING_BACKEND_API_VERSION,
-    TrainingJobCursor, TrainingJobRequest, TrainingJobSnapshot,
-};
+use crate::{TRAINING_BACKEND_API_ID, TRAINING_BACKEND_API_REVISION, TRAINING_BACKEND_API_VERSION};
 
 #[cfg(test)]
 use crate::{
@@ -53,7 +50,7 @@ impl TrainingBackendProtocol {
 
 /// Stable identity reported by a training backend.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TrainingBackendIdentity {
+struct TrainingBackendIdentity {
     id: String,
     display_name: String,
     runtime: String,
@@ -189,19 +186,6 @@ impl TrainingBackendInfo {
         fixture.protocol.api_version = api_version;
         fixture
     }
-    #[cfg(test)]
-    /// Constructs health information for a backend implementing this protocol.
-    pub(super) fn new(identity: TrainingBackendIdentity, devices: Vec<String>) -> Self {
-        assert!(
-            devices.iter().all(|device| !device.trim().is_empty()),
-            "backend device names must not be empty"
-        );
-        Self {
-            protocol: TrainingBackendProtocol::current(),
-            identity,
-            devices,
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -215,41 +199,6 @@ impl TrainingBackendError {
         Self {
             message: message.into(),
         }
-    }
-
-    fn unsupported_worker_jobs() -> Self {
-        Self::new("this training backend does not support worker-owned jobs")
-    }
-}
-
-/// Factory and health boundary owned by Studio as `Arc<dyn TrainingBackend>`.
-///
-/// Calls are made from worker threads, so a remote implementation may perform
-/// blocking transport I/O without blocking Studio's async control loop.
-pub trait TrainingBackend: Send + Sync {
-    fn health(&self) -> Result<TrainingBackendInfo, TrainingBackendError>;
-
-    fn create_job(
-        &self,
-        _request: TrainingJobRequest,
-    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        Err(TrainingBackendError::unsupported_worker_jobs())
-    }
-
-    fn job_snapshot(
-        &self,
-        _job_id: &str,
-        _cursor: TrainingJobCursor,
-    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        Err(TrainingBackendError::unsupported_worker_jobs())
-    }
-
-    fn stop_job(
-        &self,
-        _job_id: &str,
-        _cursor: TrainingJobCursor,
-    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        Err(TrainingBackendError::unsupported_worker_jobs())
     }
 }
 

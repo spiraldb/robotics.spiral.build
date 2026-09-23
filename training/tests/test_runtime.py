@@ -6,6 +6,7 @@ import json
 import math
 import threading
 import time
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,16 +27,15 @@ from spiral_training_runtime.arrow import decode_training_batch
 from spiral_training_runtime.config import TrainingConfig
 from spiral_training_runtime.errors import RuntimeRequestError
 from spiral_training_runtime.jobs import (
-    MAX_LOG_HISTORY,
-    MAX_METRIC_HISTORY,
+    MetricSeries,
     TrainingJob,
     _checkpoint_manifest,
 )
 from spiral_training_runtime.mcap import McapTrainingDataset
 from spiral_training_runtime.models import (
     TrainingBackendInfoModel,
+    TrainingJobHistoryModel,
     TrainingJobRequestModel,
-    TrainingJobSnapshotModel,
 )
 from spiral_training_runtime.protocol import VERSIONS
 from spiral_training_runtime.service import (
@@ -79,39 +79,43 @@ def training_request() -> dict:
 def job_request() -> dict:
     return {
         "job_id": "train-test",
-        "run_name": "test",
         "spiral": {
             "api_url": "https://api.spiraldb.dev",
             "spfs_url": "https://spfs.spiraldb.dev",
             "project_id": "project-test",
             "table_prefix": "spiral_robotics",
         },
-        "sql": "SELECT * FROM fixture",
-        "state_column": "state",
-        "action_column": "action",
         "spiral_schema_version": VERSIONS.storage_schema,
-        "device": "cpu",
-        "initialization": "random",
-        "steps": 1,
-        "batch_size": 1,
-        "validation_split": 0.0,
-        "learning_rate": 1.0e-5,
-        "checkpoint_every": 1,
-        "chunk_size": 2,
-        "seed": 7,
-        "act": {
-            "camera_streams": ["observation.images.wrist"],
-            "image_width": 32,
-            "image_height": 32,
-            "video_decoder": "auto",
-            "hidden_dimensions": 16,
-            "latent_dimensions": 4,
-            "attention_heads": 4,
-            "feedforward_dimensions": 32,
-            "encoder_layers": 1,
-            "vae_encoder_layers": 1,
-            "decoder_layers": 1,
-            "kl_weight": 1.0,
+        "config": {
+            "run_name": "test",
+            "dataset_id": "fixture",
+            "policy": "act",
+            "sql": "SELECT * FROM fixture",
+            "state_column": "state",
+            "action_column": "action",
+            "device": "cpu",
+            "steps": 1,
+            "batch_size": 1,
+            "validation_split": 0.0,
+            "learning_rate": 1.0e-5,
+            "checkpoint_every": 1,
+            "chunk_size": 2,
+            "seed": 7,
+            "act": {
+                "camera_streams": ["observation.images.wrist"],
+                "image_width": 32,
+                "image_height": 32,
+                "video_decoder": "auto",
+                "pretrained_backbone": False,
+                "hidden_dim": 16,
+                "latent_dim": 4,
+                "encoder_layers": 1,
+                "vae_encoder_layers": 1,
+                "decoder_layers": 1,
+                "attention_heads": 4,
+                "feedforward_dim": 32,
+                "kl_weight": 1.0,
+            },
         },
     }
 
@@ -121,7 +125,7 @@ def job_request() -> dict:
     [
         ("health.json", TrainingBackendInfoModel),
         ("job-request.json", TrainingJobRequestModel),
-        ("job-snapshot.json", TrainingJobSnapshotModel),
+        ("job-history.json", TrainingJobHistoryModel),
     ],
 )
 def test_canonical_wire_fixtures_round_trip_through_python_models(
@@ -220,7 +224,7 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
             created = await client.post("/v1/jobs", json=job_request())
             assert created.status_code == 201
             duplicate = job_request()
-            duplicate["run_name"] = "different"
+            duplicate["config"]["run_name"] = "different"
             conflict = await client.post("/v1/jobs", json=duplicate)
             assert conflict.status_code == 409
             assert "immutable specification" in conflict.json()["error"]
@@ -233,20 +237,18 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
             assert snapshot["phase"] == "completed", snapshot
             assert snapshot["current_step"] == 1
             assert len(snapshot["metrics"]) == 1
-            assert len(snapshot["checkpoints"]) == 1
-            cursor = snapshot["cursor"]
-            delta = await client.get(
-                "/v1/jobs/train-test",
-                params={
-                    "after_metric_step": cursor["metric_step"],
-                    "after_checkpoint_step": cursor["checkpoint_step"],
-                    "after_log_offset": cursor["log_offset"],
-                },
-            )
-            assert delta.status_code == 200
-            assert delta.json()["metrics"] == []
-            assert delta.json()["checkpoints"] == []
-            assert delta.json()["logs"] == []
+            assert any("Checkpoint 1 committed" in line for line in snapshot["logs"])
+            listed = (await client.get("/v1/jobs")).json()
+            assert listed == [
+                {
+                    "job_id": "train-test",
+                    "phase": "completed",
+                    "current_step": 1,
+                    "message": snapshot["message"],
+                }
+            ]
+            missing = await client.get("/v1/jobs/missing")
+            assert missing.status_code == 404
 
             invalid = job_request()
             invalid["unexpected"] = True
@@ -264,19 +266,32 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
     assert len(writes) == 1
 
 
-def test_job_replay_state_is_bounded_and_reports_compaction() -> None:
+def test_metric_series_stays_bounded_and_spans_the_whole_run() -> None:
+    series = MetricSeries(8)
+    for step in range(1, 101):
+        series.append({"step": step})
+
+    steps = [point["step"] for point in series.points]
+
+    assert len(steps) <= 8
+    assert steps[0] == 1
+    assert steps[-1] > 80
+    gaps = {later - earlier for earlier, later in pairwise(steps)}
+    assert len(gaps) == 1, steps
+
+
+def test_job_history_keeps_validation_points_apart_from_step_samples() -> None:
     job = TrainingJob(job_request())
     with job.lock:
-        for step in range(1, MAX_METRIC_HISTORY + 3):
-            job._append_metric_locked({"step": step})
-        for index in range(MAX_LOG_HISTORY + 2):
-            job._append_log_locked(f"line {index}")
+        for step in range(1, 5):
+            job._append_metric_locked({"step": step, "event": None})
+        job._append_metric_locked({"step": 5, "event": "validation"})
 
-    snapshot = job.snapshot()
+    history = job.history()
 
-    assert len(snapshot["metrics"]) == MAX_METRIC_HISTORY
-    assert len(snapshot["logs"]) == MAX_LOG_HISTORY
-    assert "no longer retained" in snapshot["history_gap"]
+    assert [metric["step"] for metric in history["metrics"]] == [1, 2, 3, 4, 5]
+    assert history["logs"] == []
+    assert history["phase"] == "starting"
 
 
 def policy_config() -> dict:

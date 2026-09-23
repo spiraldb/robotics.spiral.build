@@ -1,0 +1,26 @@
+{
+  "job_id": "train-fixture",
+  "phase": "running",
+  "current_step": 5,
+  "message": "Training",
+  "metrics": [
+    {
+      "step": 5,
+      "train_loss": 0.5,
+      "validation_loss": null,
+      "learning_rate": 0.00001,
+      "elapsed_seconds": 4.0,
+      "event": null,
+      "examples_per_second": 10.0,
+      "cpu_percent": 20.0,
+      "gpu_percent": null,
+      "memory_bytes": 1024,
+      "loader_ms": 1.0,
+      "device_copy_ms": 2.0,
+      "model_ms": 3.0
+    }
+  ],
+  "logs": [
+    "Training started"
+  ]
+}

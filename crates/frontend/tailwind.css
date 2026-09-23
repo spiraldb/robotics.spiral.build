@@ -58,7 +58,6 @@
   --tone-series-train: #2a78d6;
   --tone-series-validation: #d9572b;
   --tone-series-memory: #7a58a5;
-  --tone-series-transfer: #7560b8;
 
   /* The 3D stage is part of the light workspace. Camera pixels keep their own
      dark mat so letterboxing still reads as image rather than empty UI. */
@@ -101,7 +100,6 @@
   --chart-train: #2a78d6;
   --chart-validation: #d9572b;
   --chart-throughput: #3a7654;
-  --chart-transfer: #7560b8;
   --chart-cpu: #d9572b;
   --chart-gpu: #2a78d6;
   --chart-memory: #7a58a5;
@@ -1191,10 +1189,6 @@
 
   .resource-throughput {
     color: var(--tone-good);
-  }
-
-  .resource-transfer {
-    color: var(--tone-series-transfer);
   }
 
   .resource-cpu {

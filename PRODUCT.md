@@ -111,8 +111,7 @@ writing glue code or operating a second data stack.
   robot's contract. Ingested episodes without a
   matching robot remain full citizens of the catalog.
 - **SpiralDB owns the queryable project.** Robots, settings, saved workflows,
-  training history, checkpoints, and rollout state use the shared ADBC
-  repository. Each completed Live episode is first saved and synced as one
+  training runs, and checkpoints use the shared ADBC repository. Each completed Live episode is first saved and synced as one
   immutable local MCAP file, then imported as a native Blob into the selected
   Dataset. A failed import reports the retained file path; restart recovery
   and a local-file retry UI are not yet available. Backend bootstrap pointers

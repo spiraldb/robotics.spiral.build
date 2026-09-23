@@ -118,7 +118,7 @@ async fn snapshots_are_plain_gets_of_the_project_a_request_names() {
         "/robots/telemetry",
         "/recording/signals?generation=0&offset=0",
         "/training/runs",
-        "/rollout-runs",
+        "/rollout",
     ] {
         let (status, value) = fixture
             .send(
