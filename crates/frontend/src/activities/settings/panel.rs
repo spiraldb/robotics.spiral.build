@@ -290,7 +290,6 @@ fn SettingsPanel(
             header { class: "settings-header",
                 div {
                     h2 { id: "data-settings-title", "Settings" }
-                    p { "Robots, data, training, and video." }
                 }
             }
             div { class: "settings-layout",

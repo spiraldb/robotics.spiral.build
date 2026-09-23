@@ -133,14 +133,15 @@ pub(crate) fn DatasetPicker(
             }
             if let Some(entry) = unlisted.as_ref() {
                 option { value: "{entry.resource_id()}", selected: true,
-                    "{entry.selection().label()} (not in catalog)" }
+                    "{entry.selection().display_name()} (not in catalog)" }
             }
             for row in datasets.iter() {
                 option {
                     key: "{row.resource_id()}",
                     value: "{row.resource_id()}",
                     selected: current.as_ref().is_some_and(|entry| entry.resource_id() == row.resource_id()),
-                    "{row.selection().label()}"
+                    title: "{row.selection().sql_name()}",
+                    "{row.selection().display_name()}"
                 }
             }
         }

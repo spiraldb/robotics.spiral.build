@@ -583,7 +583,7 @@ fn TransformStagePreview(
                             for tile in &roster.tiles {
                                 option { key: "{tile.verdict().episode().id()}", value: tile.verdict().episode().id().as_str(),
                                     selected: selected.as_ref() == Some(tile.verdict().episode().id()),
-                                    "…{tile.verdict().episode().id().short()} · {tile.label()} · {tile.verdict().episode().duration_label()}"
+                                    "{tile.line()}"
                                 }
                             }
                         }
@@ -673,7 +673,7 @@ impl Roster {
             .iter()
             .filter(|verdict| filter.admits(verdict.kept()))
             .map(|verdict| SheetTile {
-                label: labels.label(verdict.episode()).head().to_owned(),
+                label: labels.label(verdict.episode()).head().map(str::to_owned),
                 verdict: verdict.clone(),
             })
             .collect::<Vec<_>>();
@@ -723,13 +723,25 @@ impl Roster {
 /// neighbours, and its verdict.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SheetTile {
-    label: String,
+    label: Option<String>,
     verdict: CurationVerdict,
 }
 
 impl SheetTile {
-    pub(super) fn label(&self) -> &str {
-        &self.label
+    /// What a heading calls the episode: its label, or its name when the
+    /// recording's path says nothing an operator would recognize.
+    pub(super) fn title(&self) -> String {
+        self.label
+            .clone()
+            .unwrap_or_else(|| Episode::name_of(self.verdict.episode().id()))
+    }
+    /// One line naming the episode in a picker.
+    fn line(&self) -> String {
+        let episode = self.verdict.episode();
+        match &self.label {
+            Some(label) => format!("…{} · {label} · {}", episode.id().short(), episode.duration_label()),
+            None => format!("…{} · {}", episode.id().short(), episode.duration_label()),
+        }
     }
     pub(super) const fn verdict(&self) -> &CurationVerdict {
         &self.verdict
@@ -1004,7 +1016,7 @@ fn EpisodeTile(
                 onclick: move |_| on_select.call(id.clone()),
                 div { class: "curation-tile-head",
                     span { class: "curation-tile-id", "…{episode.id().short()}" }
-                    span { class: "curation-tile-name", "{tile.label}" }
+                    if let Some(label) = &tile.label { span { class: "curation-tile-name", "{label}" } }
                 }
                 div { class: "curation-tile-line",
                     span { class: "curation-tile-clock", "{duration}" }

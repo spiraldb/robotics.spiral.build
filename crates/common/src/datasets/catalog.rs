@@ -27,6 +27,15 @@ impl DatasetSelection {
     pub fn sql_name(&self) -> String {
         self.label()
     }
+    /// What an operator calls the dataset: its own name, without the
+    /// `dataset_` prefix every native Studio Dataset carries in SQL.
+    pub fn display_name(&self) -> String {
+        let name = self.path.last().map_or("", String::as_str);
+        name.strip_prefix("dataset_")
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(name)
+            .to_owned()
+    }
     pub fn can_preview(&self) -> bool {
         self.path.iter().all(|part| !part.contains('.'))
     }
@@ -143,6 +152,12 @@ impl DatasetTopic {
     pub fn schemas(&self) -> &[String] {
         &self.schemas
     }
+    /// Whether the stream carries camera video rather than data messages.
+    pub fn is_video(&self) -> bool {
+        self.schemas
+            .iter()
+            .any(|schema| schema == "foxglove.CompressedVideo")
+    }
     pub fn members(&self) -> u64 {
         self.members
     }
@@ -186,6 +201,14 @@ mod tests {
         assert!(!selection.can_preview());
         assert!(DatasetSelection::new(vec![]).is_err());
         assert!(DatasetSelection::new(vec!["\n".into()]).is_err());
+    }
+
+    #[test]
+    fn a_dataset_is_called_by_its_own_name() {
+        let named = |name: &str| DatasetSelection::new(vec![name.into()]).unwrap().display_name();
+        assert_eq!(named("dataset_abc130k_sample"), "abc130k_sample");
+        assert_eq!(named("recordings"), "recordings");
+        assert_eq!(named("dataset_"), "dataset_");
     }
 }
 

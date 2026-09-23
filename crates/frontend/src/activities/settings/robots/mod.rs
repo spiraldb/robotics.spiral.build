@@ -114,6 +114,9 @@ fn RobotEntry(
         "Calibration needed"
     } else if robot.connection().connected() {
         "Connected"
+    } else if robot.connection().error().is_some() {
+        // The last attempt failed; the reason is in the setup below.
+        "Connection failed"
     } else {
         "Ready to connect"
     };
@@ -151,7 +154,7 @@ fn RobotEntry(
                         strong { "{robot.id()}" }
                         span { "{role}" }
                     }
-                    span { class: if ready { "device-state" } else { "device-state device-state-needed" }, "{state}" }
+                    span { class: if ready && robot.connection().error().is_none() { "device-state" } else { "device-state device-state-needed" }, "{state}" }
                     span {
                         class: "device-connection-dot",
                         style: if robot.connection().connected() { "background: var(--tone-good)" } else { "background: var(--tone-line)" },

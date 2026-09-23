@@ -44,7 +44,7 @@ pub(super) fn JointPanel(
 ) -> Element {
     let Some(robot) = robot_selection.focused(hardware.snapshot().read().robots()) else {
         return rsx! {
-            p { class: "px-2 py-1 text-[11px] text-ink-faint", "Add an arm to see its joints." }
+            ArmSetupCard { title: "No arm yet", detail: "Add an arm in Settings to drive and record it here." }
         };
     };
 
@@ -53,7 +53,7 @@ pub(super) fn JointPanel(
     // once here rather than printing eight dashed cells above the answer.
     let Some(telemetry) = hardware.robot_telemetry(robot.id()) else {
         return rsx! {
-            p { class: "px-2 py-1 text-[11px] text-ink-faint", "Connect this arm to see its joints." }
+            ArmSetupCard { title: "{robot.id()} is not connected", detail: "Connect its motor bus in Settings to see and drive its joints." }
         };
     };
     let arm = ConnectedArm::new(robot, telemetry);
@@ -755,6 +755,22 @@ fn JointRow(joint: JointTelemetry, state: JointRowState, actions: JointRowAction
                 }
             }
             output { class: "joint-value", "{displayed}" }
+        }
+    }
+}
+
+/// What stands between the bench and this panel, with the one way past it.
+#[component]
+fn ArmSetupCard(title: String, detail: String) -> Element {
+    let navigator = use_navigator();
+    rsx! {
+        div { class: "live-setup-card", role: "status",
+            strong { "{title}" }
+            p { "{detail}" }
+            Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Outline,
+                onclick: move |_| { navigator.push(crate::shell::routes::StudioRoute::Settings {}); },
+                "Set up in Settings"
+            }
         }
     }
 }

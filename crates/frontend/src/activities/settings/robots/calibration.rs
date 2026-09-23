@@ -1,7 +1,7 @@
 use crate::robots::RobotClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::{CalibrationJointProgress, RobotSummary};
-use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, CheckIcon};
 use spiral_robotics_viewport as arm;
 
 use crate::robots::{HardwareCommands, HardwareViewState};
@@ -132,9 +132,10 @@ pub(super) fn CalibrationSection(
                         }
                         SweepBar { joint: joint.clone() }
                         span {
-                            class: "w-3 shrink-0 text-center font-mono text-[10px]",
-                            style: if joint.ready() { "color: var(--tone-good)" } else { "color: var(--tone-line)" },
-                            "✓"
+                            class: "calibration-joint-check",
+                            "data-ready": joint.ready(),
+                            "aria-label": if joint.ready() { "Swept" } else { "Not swept yet" },
+                            CheckIcon {}
                         }
                     }
                 }

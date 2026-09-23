@@ -62,12 +62,7 @@ impl RecordedStream {
         self.topic.name()
     }
     pub(in crate::activities) fn kind(&self) -> StreamKind {
-        if self
-            .topic
-            .schemas()
-            .iter()
-            .any(|schema| schema == "foxglove.CompressedVideo")
-        {
+        if self.topic.is_video() {
             StreamKind::Video
         } else {
             StreamKind::Data

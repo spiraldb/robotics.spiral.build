@@ -4,6 +4,7 @@ pub(crate) mod canvas_controls;
 pub(crate) mod charts;
 pub(crate) mod document_bar;
 pub(crate) mod icons;
+pub(crate) mod page_keys;
 
 pub(crate) mod time_series;
 

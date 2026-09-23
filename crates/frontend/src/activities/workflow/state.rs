@@ -180,7 +180,7 @@ impl WorkflowController {
     }
     pub(super) fn editor_status(&self) -> Option<WorkflowEditorStatus> {
         self.loaded()
-            .then(|| WorkflowEditorStatus::new(self.spec(), self.snapshot()))
+            .then(|| WorkflowEditorStatus::new(self.snapshot()))
     }
 
     pub(super) fn validation(&self) -> WorkflowValidationReport {
@@ -542,15 +542,11 @@ pub(crate) enum WorkflowViewStatus {
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct WorkflowEditorStatus {
-    workflow: WorkflowSpec,
     snapshot: WorkflowRunSnapshot,
 }
 impl WorkflowEditorStatus {
-    pub(crate) fn new(workflow: WorkflowSpec, snapshot: WorkflowRunSnapshot) -> Self {
-        Self { workflow, snapshot }
-    }
-    pub(crate) fn workflow(&self) -> &WorkflowSpec {
-        &self.workflow
+    pub(crate) fn new(snapshot: WorkflowRunSnapshot) -> Self {
+        Self { snapshot }
     }
     pub(crate) fn snapshot(&self) -> &WorkflowRunSnapshot {
         &self.snapshot

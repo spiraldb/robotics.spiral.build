@@ -6,7 +6,9 @@ use crate::activities::live::recording_review::EpisodePreview;
 use crate::client::http::CameraApiPath;
 use crate::client::project::ProjectClient;
 use crate::format::ClockPresentation;
+use crate::components::icons::CameraStreamIcon;
 use crate::panels::recorded_source::{LoadState, RecordedSource};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 
 use wasm_bindgen::JsCast as _;
 
@@ -138,6 +140,7 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
         }),
     };
 
+    let navigator = use_navigator();
     rsx! {
         div { class: "camera-editor-frame camera-live-frame",
             if workspace.is_active() && panel.geometry().visible() {
@@ -152,8 +155,14 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
             }
             if let Some(problem) = problem {
                 div { class: "camera-live-error", role: "alert",
+                    CameraStreamIcon {}
                     strong { "Camera stream unavailable" }
-                    span { "{problem} Open Settings to rescan or assign another camera." }
+                    span { "{problem}" }
+                    Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
+                        class: "camera-live-error-action",
+                        onclick: move |_| { navigator.push(crate::shell::routes::StudioRoute::Settings {}); },
+                        "Rescan in Settings"
+                    }
                 }
             }
         }

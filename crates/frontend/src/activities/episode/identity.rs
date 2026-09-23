@@ -72,6 +72,23 @@ impl Episode {
         Ok(EpisodePage { episodes, has_more })
     }
 
+    /// How many episodes `dataset` holds.
+    pub(in crate::activities) async fn count(dataset: &DatasetSelection) -> Result<u64, String> {
+        let sql = format!(
+            "SELECT count(*) AS episodes FROM spql.mcap.episodes({})",
+            SqlLiteral::text(&dataset.sql_name())
+        );
+        DatasetClient::current()
+            .run_spiral_query(sql, 1)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_rows()
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("episodes").and_then(serde_json::Value::as_u64))
+            .ok_or_else(|| "Counting episodes returned no row".to_owned())
+    }
+
     /// One episode by its id.
     pub(in crate::activities) async fn open(selection: EpisodeSelection) -> Result<Self, String> {
         let dataset = selection.dataset().clone();
@@ -264,6 +281,15 @@ impl EpisodeLabels {
             shared_prefix: prefix.rfind('/').map_or(0, |slash| slash + 1),
         }
     }
+    /// One line naming an episode in a list: its id, its label when it has
+    /// one, and its length.
+    pub(in crate::activities) fn line(&self, episode: &Episode) -> String {
+        let facts = episode.facts();
+        match self.label(facts).head() {
+            Some(head) => format!("…{} · {head} · {}", episode.id().short(), facts.duration_label()),
+            None => format!("…{} · {}", episode.id().short(), facts.duration_label()),
+        }
+    }
     /// The source path below the directory every listed episode shares.
     pub(in crate::activities) fn label(&self, facts: &EpisodeFacts) -> SourceLabel {
         let relative = facts
@@ -275,37 +301,32 @@ impl EpisodeLabels {
     }
 }
 
-/// The distinguishing directory leads, in words; the rest of the path follows
-/// quietly.
+/// The distinguishing directory, in words. A recording whose path says
+/// nothing an operator would recognize has no label at all, and is known by
+/// its id alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::activities) struct SourceLabel {
-    head: String,
-    tail: Option<String>,
+    head: Option<String>,
 }
 
 impl SourceLabel {
     /// An identifier-shaped head tells an operator nothing, so the recording
-    /// time takes its place, and an identifier-shaped tail steps aside. The
-    /// full source path stays in the tooltip.
+    /// time takes its place when there is one. The full source path stays in
+    /// the tooltip.
     fn of(relative: &str, facts: &EpisodeFacts) -> Self {
-        let (head, tail) = match relative.split_once('/') {
-            Some((head, tail)) if !head.is_empty() && !tail.is_empty() => (head, Some(tail)),
-            _ => (relative, None),
+        let head = match relative.split_once('/') {
+            Some((head, tail)) if !head.is_empty() && !tail.is_empty() => head,
+            _ => relative,
         };
         let head = if Self::is_identifier(head) {
-            match facts.message_start_time() {
-                Some(start) if start.has_wall_clock() => {
-                    format!("Recorded {}", start.utc_time_label())
-                }
-                _ => "Unnamed recording".into(),
-            }
+            facts
+                .message_start_time()
+                .filter(|start| start.has_wall_clock())
+                .map(|start| format!("Recorded {}", start.utc_time_label()))
         } else {
-            head.replace('_', " ")
+            Some(head.replace('_', " "))
         };
-        let tail = tail
-            .filter(|tail| !tail.rsplit('/').next().is_some_and(Self::is_identifier))
-            .map(str::to_owned);
-        Self { head, tail }
+        Self { head }
     }
     /// Hex digits joined by dashes or underscores, long enough to be a UUID
     /// or a content hash; a file extension does not change the verdict.
@@ -317,11 +338,8 @@ impl SourceLabel {
             .collect::<Vec<_>>();
         digits.len() >= 24 && digits.iter().all(char::is_ascii_hexdigit)
     }
-    pub(in crate::activities) fn head(&self) -> &str {
-        &self.head
-    }
-    pub(in crate::activities) fn tail(&self) -> Option<&str> {
-        self.tail.as_deref()
+    pub(in crate::activities) fn head(&self) -> Option<&str> {
+        self.head.as_deref()
     }
 }
 
@@ -379,9 +397,8 @@ mod tests {
             ),
         ]);
         let [first, second] = labels(&listed).try_into().unwrap();
-        assert_eq!(first.head(), "fold skirts");
-        assert_eq!(first.tail(), Some("episode_aa/episode.fo.mcap"));
-        assert_eq!(second.head(), "place fruit");
+        assert_eq!(first.head(), Some("fold skirts"));
+        assert_eq!(second.head(), Some("place fruit"));
         let episode = &listed[0];
         assert_eq!(
             episode.facts().facts_label(),
@@ -396,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn identifier_named_files_read_as_recording_times_or_stay_unnamed() {
+    fn identifier_named_files_read_as_recording_times_or_go_by_their_id() {
         let listed = episodes(&[
             (
                 "spfsu://p/attempts/01a07ed2-1ed5-7542-bbf3-15a78c389242/blobs/01a07ed2-1fdd-77a2-a9ae-5c3bbca09151.bin",
@@ -408,10 +425,9 @@ mod tests {
             ),
         ]);
         let [clocked, epoch] = labels(&listed).try_into().unwrap();
-        assert_eq!(clocked.head(), "Recorded 17:28:55 UTC");
-        assert_eq!(clocked.tail(), None);
+        assert_eq!(clocked.head(), Some("Recorded 17:28:55 UTC"));
         assert_eq!(listed[0].facts().recorded_date_label(), "2025-04-03");
-        assert_eq!(epoch.head(), "Unnamed recording");
+        assert_eq!(epoch.head(), None);
         assert_eq!(listed[1].facts().recorded_date_label(), "no wall clock");
         assert!(
             listed[1]
@@ -424,7 +440,7 @@ mod tests {
     #[test]
     fn a_single_file_is_labelled_by_its_name() {
         let listed = episodes(&[("file:///runs/take-7.mcap", 0)]);
-        assert_eq!(labels(&listed)[0].head(), "take-7.mcap");
+        assert_eq!(labels(&listed)[0].head(), Some("take-7.mcap"));
         assert!(!SourceLabel::is_identifier("fold_and_stack_the_skirts"));
         assert!(SourceLabel::is_identifier(
             "01a0b638-099b-7740-a44b-ef08485546ed.bin"

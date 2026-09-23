@@ -1,5 +1,9 @@
 /* Dioxus.toml declares this as the Tailwind input, so DX watches and compiles
    it for both development and release builds. */
+/* The shared kit (`ui.css`) sits between Tailwind's reset and the Studio's
+   own components, so Studio rules restyle kit primitives without needing to
+   be unlayered. */
+@layer theme, base, ui, components, utilities;
 @import "tailwindcss" source(none);
 
 /* Only frontend Rust emits utility classes. Keep scanning explicit so prose,
@@ -15,76 +19,105 @@
 @import "./styles/explore-similar.css";
 
 /*
-  One palette, named by role rather than by hue.
+  One palette, named by role rather than by hue. A colour is only ever spelled
+  out here; panels say `var(--tone-ink)`, never a literal.
 
-  Panels say `bg-surface` and `text-ink`, never `bg-white dark:bg-slate-900`,
-  so the two themes cannot drift apart one component at a time — and a colour
-  is only ever spelled out here. The scale is warm and nearly neutral: colour
-  in this interface is reserved for things that mean something, which is why
-  there are exactly four accents and they all belong to a robot.
+  Paper panels sit on a warm canvas with graphite hairlines. Near-black ink
+  carries text and the one filled action of a region. Lime is where you are:
+  the selected row, the active tab's edge, the chosen filter. Blue is focus
+  and links. Every other hue names a real state or an identity.
 */
 :root {
   color-scheme: light;
 
-  --tone-canvas: #ffffff;
+  --font-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --tone-canvas: #f7f7f5;
   --tone-surface: #ffffff;
-  --tone-sunken: #f7f7f5;
-  --tone-hover: rgb(55 53 47 / 0.06);
-  /* Pressed is hover pushed one step further; the workbench's icon actions
-     are the only surfaces that currently need it. */
-  --tone-pressed: rgb(55 53 47 / 0.11);
-  --tone-line: #e8e8e6;
-  --tone-line-strong: #cfcfcb;
+  /* The catalog and tab-bar tone: a half step off paper, so a sidebar reads
+     as a place without becoming a grey slab. */
+  --tone-sidebar: #fbfbfa;
+  --tone-sunken: #f5f5f2;
+  --tone-hover: rgb(16 16 16 / 0.045);
+  --tone-pressed: rgb(16 16 16 / 0.085);
+  --tone-line: #e2e2de;
+  --tone-line-soft: #ececea;
+  --tone-line-strong: #c9c9c4;
 
-  --tone-ink: #37352f;
-  --tone-ink-soft: #65645f;
-  /* Faint ink has to clear 4.5:1 on the *dimmest* surface it lands on, which is
-     the pale bench rather than paper. The former #767570 passed on white and
-     quietly failed on both the bench and the recess. */
-  --tone-ink-faint: #71706c;
+  --tone-ink: #121212;
+  --tone-ink-soft: #4d4d4a;
+  /* Clears 4.5:1 on the dimmest surface it lands on, the sunken recess. */
+  --tone-ink-faint: #6e6e6a;
 
-  --tone-accent: #0868b8;
-  --tone-accent-ink: #ffffff;
-  --tone-selected: rgb(8 104 184 / 0.1);
+  /* The one filled action of a region is ink, not a hue. */
+  --tone-primary: #121212;
+  --tone-primary-hover: #2b2b2a;
+  --tone-primary-ink: #ffffff;
 
-  /* Danger has to stay legible on its own soft wash, which is where it does its
-     most important work: the chip that says a motor is powered. */
-  --tone-danger: #be423d;
-  --tone-danger-soft: rgb(190 66 61 / 0.1);
-  --tone-caution: #7d6a41;
-  --tone-caution-soft: #fbf3db;
-  --tone-good: #3a7654;
-  --tone-good-soft: rgb(58 118 84 / 0.1);
-  --tone-series-train: #2a78d6;
-  --tone-series-validation: #d9572b;
-  --tone-series-memory: #7a58a5;
+  --tone-accent: #cee562;
+  --tone-accent-strong: #a3bc2a;
+  --tone-accent-wash: #f2f8d6;
+  --tone-accent-line: #d6e595;
+  /* Text on the lime wash: lime pushed toward ink until it reads. */
+  --tone-accent-ink: #4a5610;
+  --tone-selected: #eef5cf;
+  --tone-selected-strong: var(--tone-accent);
+
+  --tone-info: #5971fd;
+  --tone-info-ink: #3a4ec4;
+  --tone-info-wash: #edf0ff;
+  --tone-info-line: #d8defe;
+  --tone-focus: #5971fd;
+
+  --tone-danger: #c4302b;
+  --tone-danger-soft: #fbeaea;
+  --tone-danger-line: #f1cfcd;
+  --tone-caution: #a64b13;
+  --tone-caution-soft: #fff1e8;
+  --tone-caution-line: #f6d6c2;
+  --tone-good: #5b7400;
+  --tone-good-dot: #84a00c;
+  --tone-good-soft: #f2f8d6;
+  --tone-series-train: #5971fd;
+  --tone-series-validation: #f07a36;
+  --tone-series-memory: #7a5ad6;
 
   /* The 3D stage is part of the light workspace. Camera pixels keep their own
      dark mat so letterboxing still reads as image rather than empty UI. */
-  --tone-viewport: #f5f5f3;
-  --tone-camera: #1f1f1f;
-  /* Text set on the camera mat: status and errors inside a recorded camera. */
+  --tone-viewport: #f4f4f1;
+  --tone-camera: #141414;
   --tone-camera-ink: rgb(255 255 255 / 0.72);
 
+  /* Resource identity: the letter badge a kind of thing wears everywhere. */
+  --tone-kind-dataset: #1fa3bb;
+  --tone-kind-episode: #5971fd;
+  --tone-kind-stream: #7a5ad6;
+  --tone-kind-camera: #e0752f;
+
   /* Stage identity: what a workflow stage does to the data. Identity, not
-     health — the same kind keeps the same hue on every graph, and a 6px mark
-     or a 14% wash is all it ever paints. */
-  --tone-stage-source: #5b7fb8;
-  --tone-stage-media: #b5701f;
-  --tone-stage-model: #8b5cc7;
-  --tone-stage-shape: #65645f;
-  --tone-stage-join: #3d8f86;
-  --tone-stage-output: #2f7d5b;
+     health — a mark or a 14% wash is all it ever paints. */
+  --tone-stage-source: #5971fd;
+  --tone-stage-media: #e0752f;
+  --tone-stage-model: #7a5ad6;
+  --tone-stage-shape: #6e6e6a;
+  --tone-stage-join: #1fa3bb;
+  --tone-stage-output: #5b7400;
 
   /* Categorical washes for repeated result values, assigned by a value's
-     rank within one result so the same decision keeps its tint down a table.
-     Text is mixed toward ink so every chip clears 4.5:1 on its own wash. */
-  --tone-category-1: #2a78d6;
-  --tone-category-2: #eb6834;
-  --tone-category-3: #1baf7a;
+     rank within one result. Text is mixed toward ink so every chip clears
+     4.5:1 on its own wash. */
+  --tone-category-1: #5971fd;
+  --tone-category-2: #f07a36;
+  --tone-category-3: #1fa3bb;
   --tone-category-4: #c98f00;
   --tone-category-5: #d9679a;
-  --tone-category-6: #7560b8;
+  --tone-category-6: #7a5ad6;
+
+  --shadow-raised: 0 1px 2px rgb(16 16 16 / 0.08), 0 0 0 1px rgb(16 16 16 / 0.05);
+  --shadow-float: 0 4px 14px rgb(16 16 16 / 0.08), 0 0 0 1px rgb(16 16 16 / 0.04);
+  --shadow-popover: 0 12px 32px rgb(16 16 16 / 0.14), 0 0 0 1px rgb(16 16 16 / 0.06);
+  --shadow-dialog: 0 24px 64px rgb(16 16 16 / 0.22), 0 0 0 1px rgb(16 16 16 / 0.06);
 
   /* The one easing the Studio moves with: fast out of the gate, settled early. */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -92,17 +125,17 @@
   /* The chart palette: ECharts paints onto a canvas and cannot resolve var(),
      so ChartColor::css() reads these off the document root when a chart is
      built, falling back to the same literals kept in ChartColor::declaration. */
-  --chart-line: #e8e8e6;
-  --chart-ink-soft: #65645f;
-  --chart-ink-faint: #71706c;
+  --chart-line: #e2e2de;
+  --chart-ink-soft: #4d4d4a;
+  --chart-ink-faint: #6e6e6a;
   --chart-surface: #ffffff;
-  --chart-selected: rgba(8, 104, 184, 0.1);
-  --chart-train: #2a78d6;
-  --chart-validation: #d9572b;
-  --chart-throughput: #3a7654;
-  --chart-cpu: #d9572b;
-  --chart-gpu: #2a78d6;
-  --chart-memory: #7a58a5;
+  --chart-selected: rgba(206, 229, 98, 0.28);
+  --chart-train: #5971fd;
+  --chart-validation: #f07a36;
+  --chart-throughput: #5b7400;
+  --chart-cpu: #f07a36;
+  --chart-gpu: #5971fd;
+  --chart-memory: #7a5ad6;
 }
 
 /* dioxus-workbench, spoken in this palette ---------------------------------
@@ -117,9 +150,9 @@
    plain class selector wins in both colour schemes. Unlayered on purpose:
    `@layer components` would lose to the crate's own unlayered stylesheet. */
 .wb-workspace {
-  --wb-canvas: var(--tone-canvas);
+  --wb-canvas: var(--tone-surface);
   --wb-surface: var(--tone-surface);
-  --wb-sunken: var(--tone-sunken);
+  --wb-sunken: var(--tone-sidebar);
   --wb-viewport: var(--tone-viewport);
   --wb-hover: var(--tone-hover);
   --wb-pressed: var(--tone-pressed);
@@ -127,19 +160,20 @@
   --wb-ink: var(--tone-ink);
   --wb-ink-soft: var(--tone-ink-soft);
   --wb-ink-faint: var(--tone-ink-faint);
-  --wb-accent: var(--tone-accent);
+  --wb-accent: var(--tone-accent-strong);
   --wb-selected: var(--tone-selected);
   --wb-good: var(--tone-good);
   --wb-caution: var(--tone-caution);
   --wb-danger: var(--tone-danger);
   --wb-danger-soft: var(--tone-danger-soft);
-  /* The dock preview's lift, carried over verbatim from the panel stylesheet
-     this crate replaced. Shadows are not part of the named palette. */
-  --wb-shadow: 0 6px 18px rgb(0 0 0 / 0.08);
-  /* A splitter is a hairline, not a gutter. Drawn 8px wide in paper it read
-     as a white margin between two recessed tab bars; the pointer target stays
-     8px through the crate's own hit-area pseudo-element below. */
+  --wb-shadow: var(--shadow-float);
+  --wb-radius: 6px;
+  --wb-font: var(--font-sans);
+  --wb-tab-bar-size: 34px;
+  /* A splitter is a hairline, not a gutter; the crate's hit-area
+     pseudo-element below keeps an 8px pointer target. */
   --wb-splitter-size: 1px;
+  font-size: 13px;
 }
 
 .wb-workspace .wb-split-horizontal > .wb-splitter::before {
@@ -148,6 +182,70 @@
 
 .wb-workspace .wb-split-vertical > .wb-splitter::before {
   inset-block: -3.5px;
+}
+
+/* A panel tab sits on the page below it: the active one is paper with an
+   ink edge along its lower side, and its title steps up to ink. A tile with
+   one tab is a header, not a choice, so it draws no edge at all. Lime is
+   kept for selection. */
+.wb-workspace .wb-tab {
+  gap: 6px;
+  padding: 0 11px;
+  font-size: 12px;
+  letter-spacing: -0.005em;
+}
+
+.wb-workspace .wb-tab-item-active .wb-tab {
+  font-weight: 560;
+}
+
+.wb-workspace .wb-tab-item-active::before {
+  inset: auto 10px -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--tone-ink);
+}
+
+.wb-workspace .wb-tabs:has(> .wb-tab-item:only-child) .wb-tab-item-active::before {
+  display: none;
+}
+
+.wb-workspace .wb-tab-icon svg {
+  color: var(--tone-ink-faint);
+}
+
+.wb-workspace .wb-tab-item-active .wb-tab-icon svg {
+  color: var(--tone-ink);
+}
+
+.wb-workspace .wb-tab-icon .ui-kind-mark {
+  width: 14px;
+  height: 14px;
+  flex-basis: 14px;
+  border-width: 1.25px;
+  border-radius: 3.5px;
+  font-size: 8.5px;
+}
+
+.wb-workspace .wb-tab-item:not(.wb-tab-item-active) .wb-tab-icon .ui-kind-mark {
+  opacity: 0.7;
+}
+
+/* Focus is blue everywhere; lime is where you are, not where the keyboard is. */
+.wb-workspace :is(.wb-tab, .wb-icon-btn, .wb-rail-item, .wb-splitter):focus-visible {
+  outline-color: var(--tone-focus);
+}
+
+.wb-workspace .wb-drop-preview {
+  border-color: var(--tone-accent-strong);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--tone-accent) 22%, transparent);
+}
+
+.wb-workspace .wb-drop-compass {
+  border-radius: 8px;
+  color: var(--tone-ink);
+  box-shadow: var(--shadow-popover);
 }
 
 /* Studio workbench v2 ----------------------------------------------------
@@ -163,85 +261,378 @@
   }
 
   .studio-v2-body {
-    display: grid;
     min-height: 0;
     flex: 1 1 auto;
     overflow: hidden;
-    grid-template-columns: 3.75rem minmax(0, 1fr);
     background: var(--tone-canvas);
-  }
-
-  .studio-activity-rail {
-    @apply flex min-h-0 flex-col border-r border-line bg-sunken py-1;
-  }
-
-  .activity-rail-item {
-    @apply relative flex min-h-14 flex-col items-center justify-center gap-1 rounded-none text-ink-faint;
-  }
-
-  .activity-rail-item::before {
-    content: "";
-    @apply absolute inset-y-1 left-0 w-0.5 rounded-r bg-transparent;
-  }
-
-  .activity-rail-item-active::before {
-    background: var(--tone-accent);
-  }
-
-  /* Two points larger than the label's own size. The icon is what the rail is
-     scanned by; at 16px it sat inside its caption rather than above it. */
-  .activity-rail-item .ui-icon {
-    width: 1.125rem;
-    height: 1.125rem;
-  }
-
-  /* The rail is sized for the longest activity name it has today. This is what
-     keeps the one after that from reaching the hairline. */
-  .activity-rail-item > span {
-    @apply max-w-full truncate;
   }
 }
 
-/*
-  Unlayered on purpose, and the only block in this file that has to be.
+/* Top bar ------------------------------------------------------------------
+   One 44px bar: the brand and the activities lead, the open workspace's
+   status line fills the middle, messages and settings trail. Unlayered,
+   because the nav items are shared buttons whose kit rules are unlayered. */
+.studio-topbar-lead,
+.studio-status-line,
+.studio-topbar-trail {
+  grid-row: 1;
+  display: flex;
+  min-width: 0;
+  height: 44px;
+  align-items: center;
+  border-bottom: 1px solid var(--tone-line);
+  background: var(--tone-surface);
+}
 
-  `ui.css` ships as plain, unlayered CSS while everything above lives in
-  Tailwind's `components` layer, and an unlayered declaration beats a layered
-  one however specific the layered selector is. Geometry is the part of the
-  shared action the rail genuinely has to argue with: six pixels of inline
-  padding is right for a label sitting beside an icon, and wrong for one sitting
-  under an icon in a sixty-pixel column, where those twelve pixels were the
-  whole difference between "Settings" and "Setti…".
+.studio-topbar-lead {
+  grid-column: 1;
+  gap: 18px;
+  padding-left: 14px;
+}
 
-  Colour and the selected wash stay with the primitive on purpose. The rail
-  reads them as the tinted current item every sidebar of this kind has, and one
-  more override here would be a second opinion about the same pixel.
-*/
-.studio-activity-rail .activity-rail-item {
-  padding-inline: 2px;
-  font-size: 10px;
-  /* Row actions normally lead from the inline edge. In the activity rail the
-     same action is a vertical icon-and-label stack, so the main axis is vertical
-     and must be centred explicitly at this unlayered cascade boundary. */
-  justify-content: center;
-  text-align: center;
-  /*
-    The layered `min-h-14` above never took: `.ui-button--compact` is unlayered
-    and set a 24px floor, so the items collapsed to the 32px their own contents
-    happened to occupy and the five activities stacked into a 160px block with
-    four pixels between an icon and the label under it. Fifty-six is the size
-    the rail was drawn for — an icon, its name, and room to tell one target from
-    the next.
-  */
-  min-height: 3.5rem;
-  gap: 5px;
+.studio-brand {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  padding-right: 18px;
+  border-right: 1px solid var(--tone-line);
+  height: 22px;
+  user-select: none;
+}
+
+.spiral-mark {
+  width: 19px;
+  height: 19px;
+  fill: var(--tone-ink);
+}
+
+.studio-brand-name {
+  font-size: 17px;
+  font-weight: 560;
+  letter-spacing: -0.035em;
+}
+
+.studio-brand-product {
+  margin-left: -2px;
+  color: var(--tone-ink-faint);
+  font-size: 17px;
+  font-weight: 400;
+  letter-spacing: -0.035em;
+}
+
+.studio-nav {
+  display: flex;
+  height: 100%;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.studio-nav .studio-nav-item {
+  position: relative;
+  height: 100%;
+  gap: 7px;
+  border-radius: 0;
+  padding-inline: 10px;
+  color: var(--tone-ink-faint);
+  font-size: 13px;
+  font-weight: 450;
+}
+
+.studio-nav .studio-nav-item:hover:not([aria-current="page"]) {
+  color: var(--tone-ink);
+  background: transparent;
+}
+
+.studio-nav .studio-nav-item::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--tone-ink);
+  opacity: 0;
+  transform: scaleX(0.4);
+  transition: opacity 160ms ease-out, transform 220ms var(--ease-out-expo);
+}
+
+.studio-nav .studio-nav-item[aria-current="page"] {
+  color: var(--tone-ink);
+  font-weight: 560;
+}
+
+.studio-nav .studio-nav-item[aria-current="page"]::after {
+  opacity: 1;
+  transform: none;
+}
+
+.studio-nav .studio-nav-item .ui-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.studio-nav .studio-nav-item:focus-visible {
+  outline-offset: -6px;
+  border-radius: 8px;
+}
+
+/* Facts are written most important first and laid out right to left, and
+   the row wraps inside a clipped line: when the bar narrows, the least
+   important facts fall to the hidden second line whole. */
+.studio-status-line {
+  grid-column: 2;
+  flex-direction: row-reverse;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: flex-start;
+  gap: 0 14px;
+  overflow: hidden;
+  padding: 0 10px 0 16px;
+  color: var(--tone-ink-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.studio-status-connection,
+.studio-status-fact {
+  display: inline-flex;
+  height: 43px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+button.studio-status-fact {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 120ms ease-out;
+}
+
+button.studio-status-fact:hover {
+  text-decoration-color: currentColor;
+}
+
+.studio-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone-good-dot);
+}
+
+.studio-status-connection[data-tone="caution"] .studio-status-dot { background: var(--tone-caution); }
+.studio-status-connection[data-tone="danger"] .studio-status-dot {
+  background: var(--tone-danger);
+  animation: studio-status-pulse 1.2s ease-in-out infinite;
+}
+
+.studio-status-fact[data-tone="caution"] { color: var(--tone-caution); }
+.studio-status-fact[data-tone="danger"] { color: var(--tone-danger); font-weight: 560; }
+
+@keyframes studio-status-pulse {
+  50% { opacity: 0.35; }
+}
+
+.studio-topbar-trail {
+  grid-column: 3;
+  gap: 2px;
+  padding-inline: 6px 10px;
+  border-left: 1px solid var(--tone-line);
+}
+
+.studio-topbar-trail .studio-topbar-action {
+  width: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  color: var(--tone-ink-faint);
+}
+
+.studio-topbar-trail .studio-topbar-action .ui-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.studio-topbar-trail .studio-topbar-action[aria-pressed="true"] {
+  color: var(--tone-ink);
+  background: var(--tone-sunken);
+}
+
+.studio-notifications {
+  position: relative;
+}
+
+.studio-notifications-count {
+  position: absolute;
+  top: 3px;
+  right: 2px;
+  display: grid;
+  min-width: 15px;
+  height: 15px;
+  place-items: center;
+  border: 1.5px solid var(--tone-surface);
+  border-radius: 999px;
+  padding-inline: 3px;
+  color: var(--tone-ink);
+  background: var(--tone-accent);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* The newest message, floating above the workspace's lower right. */
+.studio-toast {
+  position: fixed;
+  z-index: 60;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  max-width: min(28rem, calc(100vw - 2rem));
+  align-items: baseline;
+  gap: 10px;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: var(--tone-ink-soft);
+  background: var(--tone-surface);
+  box-shadow: var(--shadow-popover);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  animation: studio-toast-enter 320ms var(--ease-out-expo) both;
+}
+
+.studio-toast::before {
+  content: "";
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--tone-ink-faint);
+}
+
+.studio-toast.message-success::before { background: var(--tone-good-dot); }
+.studio-toast.message-warning::before { background: var(--tone-caution); }
+.studio-toast.message-error::before { background: var(--tone-danger); }
+.studio-toast.message-error { color: var(--tone-ink); }
+
+.studio-toast-source {
+  flex: 0 0 auto;
+  color: var(--tone-ink-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.studio-toast-text {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
+}
+
+@keyframes studio-toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+}
+
+/* Every shortcut, grouped by where it works. */
+.shortcut-sheet {
+  position: fixed;
+  z-index: 99;
+  top: 50%;
+  left: 50%;
+  width: min(40rem, calc(100vw - 2rem));
+  max-height: min(36rem, calc(100dvh - 2rem));
+  overflow: auto;
+  transform: translate(-50%, -50%);
+  animation: ui-dialog-enter 220ms var(--ease-out-expo) both;
+}
+
+.shortcut-sheet > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 12px 10px 20px;
+  border-bottom: 1px solid var(--tone-line-soft);
+}
+
+.shortcut-sheet h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.shortcut-sheet-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 28px;
+  padding: 16px 20px 22px;
+}
+
+.shortcut-sheet-group h3 {
+  margin: 0 0 8px;
+  color: var(--tone-ink-faint);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.shortcut-sheet-group dl {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.shortcut-sheet-group dl > div {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.shortcut-sheet-group dt {
+  display: flex;
+  gap: 4px;
+}
+
+.shortcut-sheet-group dd {
+  margin: 0;
+  color: var(--tone-ink-soft);
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio-toast,
+  .shortcut-sheet {
+    animation: ui-fade-in 120ms ease-out both;
+  }
+
+  .studio-nav .studio-nav-item::after {
+    transition: none;
+  }
+
+  .studio-status-connection[data-tone="danger"] .studio-status-dot {
+    animation: none;
+  }
 }
 
 @layer components {
-  .activity-rail-settings {
-    @apply mt-auto;
-  }
-
   .studio-v2-workbench {
     @apply min-h-0 min-w-0 overflow-hidden border-r border-line bg-surface;
   }
@@ -350,11 +741,17 @@
   .live-robot-roster {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-    @apply gap-1.5 border-b border-line bg-surface px-3 py-2;
+    @apply gap-1.5 border-b bg-surface px-3.5 pb-3.5;
+    border-color: var(--tone-line-soft);
   }
 
   .live-robot-row {
-    @apply flex min-h-9 min-w-0 items-center gap-2 rounded px-2.5 text-left;
+    @apply flex min-h-9 min-w-0 items-center gap-2.5 rounded-md border px-3 text-left;
+    border-color: var(--tone-line);
+  }
+
+  .live-robot-row[aria-selected="true"] {
+    border-color: var(--tone-accent-line);
   }
 
   .live-robot-accent {
@@ -367,11 +764,11 @@
   }
 
   .live-robot-copy strong {
-    @apply truncate text-[11px] font-medium;
+    @apply truncate text-[12.5px] font-medium;
   }
 
   .live-robot-copy small {
-    @apply text-[10px] text-ink-faint;
+    @apply font-mono text-[10.5px] text-ink-faint;
   }
 
   .live-robot-state {
@@ -380,51 +777,72 @@
   }
 
   .live-robot-state-ready {
-    background: var(--tone-good);
+    background: var(--tone-good-dot);
   }
 
   .workbench-empty {
-    @apply px-3 py-3 text-[11px] text-ink-faint;
+    @apply px-3.5 py-3 text-[12px] text-ink-faint;
   }
 
+  .live-setup-card {
+    @apply mx-3.5 my-3 flex flex-col items-start gap-1 rounded-lg border px-3.5 py-3;
+    border-color: var(--tone-line);
+    background: var(--tone-sidebar);
+  }
+
+  .live-setup-card strong {
+    @apply text-[13px] font-semibold text-ink;
+  }
+
+  .live-setup-card p {
+    @apply text-[12px] leading-[18px] text-ink-faint;
+  }
+
+  .live-setup-card .ui-button {
+    @apply mt-2;
+  }
+
+  /* A side panel reads as labelled sections: a small upper-case label, then
+     the controls, then a hairline. */
   .workbench-section {
-    @apply border-b border-line bg-surface;
+    @apply border-b bg-surface;
+    border-color: var(--tone-line-soft);
   }
 
   .workbench-section-heading {
-    @apply flex min-h-8 items-center gap-2 px-3;
+    @apply flex min-h-10 items-center gap-2 px-3.5 pt-1;
   }
 
   .workbench-section-heading h3 {
-    @apply text-[11px] font-semibold text-ink;
+    @apply text-[10.5px] font-semibold uppercase tracking-[0.07em] text-ink-faint;
   }
 
   .workbench-section-heading > span {
-    @apply ml-auto text-[10px] text-ink-faint;
+    @apply ml-auto font-mono text-[11px] text-ink-faint;
   }
 
   .control-segmented {
-    @apply mx-3 mb-2 grid grid-cols-3;
+    @apply mx-3.5 mb-3.5 grid grid-cols-3;
   }
 
   .control-segment {
-    @apply w-full text-[11px];
+    @apply w-full text-[12.5px];
   }
 
   .capture-destination {
-    @apply px-3 py-2;
+    @apply px-3.5 pb-3.5;
   }
 
   .capture-destination .workbench-section-heading {
-    @apply -mx-3 -mt-2 mb-2;
+    @apply -mx-3.5 mb-1;
   }
 
   .capture-dataset-field .ui-input {
-    @apply font-mono;
+    @apply font-mono text-[12.5px];
   }
 
   .capture-destination > p {
-    @apply mt-1.5 text-[10px] leading-4 text-ink-faint;
+    @apply mt-2 text-[11.5px] leading-4 text-ink-faint;
   }
 
   .camera-editor-content {
@@ -466,15 +884,27 @@
   }
 
   .camera-live-error {
-    @apply absolute inset-0 flex flex-col items-center justify-center gap-1 bg-camera px-4 text-center text-white;
+    @apply absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-camera px-6 text-center text-white;
+  }
+
+  .camera-live-error > .ui-icon {
+    @apply mb-1 size-5 text-white/45;
   }
 
   .camera-live-error strong {
-    @apply text-[12px] font-medium;
+    @apply text-[13px] font-medium;
   }
 
   .camera-live-error span {
-    @apply max-w-[36ch] text-[11px] text-white/70;
+    @apply max-w-[40ch] text-[12px] leading-[18px] text-white/60;
+  }
+
+  .camera-live-error .camera-live-error-action {
+    @apply mt-2 border-white/20 bg-white/5 text-white/85;
+  }
+
+  .camera-live-error .camera-live-error-action:hover {
+    @apply border-white/40 bg-white/10 text-white;
   }
 
   .editor-empty {
@@ -492,7 +922,7 @@
     -2147483648)". Unbounded, that filled a camera panel top to bottom in a
     column eleven words wide, in three panels at once, for one failure. Four
     lines is enough to recognise the problem; the whole string stays on the
-    element's title, in the status bar, and in the notification centre.
+    element's title and in the notification centre.
   */
   .editor-empty span {
     @apply max-w-[36ch] text-[11px] text-ink-faint;
@@ -516,78 +946,28 @@
     overflow-wrap: anywhere;
   }
 
-  .studio-status-bar {
-    @apply relative z-40 min-h-5 shrink-0 items-center border-t border-line bg-surface px-2 text-[10px] text-ink-soft;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 32rem) max-content;
-    column-gap: 0.75rem;
-  }
-
-  /* The left group carries context and the right group carries state, so when
-     the bar runs out of room the context is what gives way. Without this the
-     two groups met in the middle and ran their words together. */
-  .status-bar-group {
-    @apply flex min-w-0 items-center overflow-hidden;
-  }
-
-  .status-bar-group-right {
-    @apply shrink-0 justify-end;
-    grid-column: 3;
-  }
-
-  /*
-    Space, not rules. Six facts each fenced by a hairline turned a twenty-pixel
-    bar into a row of cells, and the bar's own top rule already separates it
-    from the workspace — the one boundary here that divides anything.
-  */
-  .status-bar-item {
-    @apply inline-flex min-h-5 items-center gap-1 whitespace-nowrap px-2 first:pl-0 last:pr-0;
-  }
-
-  .status-bar-accent {
-    color: var(--tone-accent);
-  }
-
-  .status-bar-danger {
-    color: var(--tone-danger);
-  }
-
-  /* Something on the bench wants attention but nothing is failing yet: the
-     count only appears when it is non-zero, so it can afford to be coloured. */
-  .status-bar-caution {
-    color: var(--tone-caution);
-  }
-
-  .status-bar-rate {
-    @apply justify-end font-mono tabular-nums;
-    min-width: 10ch;
-  }
-
-  .status-bar-message {
-    @apply inline-flex min-w-0 items-center truncate border-l border-line px-2 text-[10px];
-    grid-column: 2;
-    width: 100%;
-  }
-
-  .status-bar-message.message-success { color: var(--tone-good); }
-  .status-bar-message.message-warning { color: var(--tone-caution); }
-  .status-bar-message.message-error { color: var(--tone-danger); }
-
-  .status-bar-notifications {
-    @apply relative inline-flex min-h-5 min-w-6 shrink-0 items-center justify-center gap-1 border-l border-line px-1.5;
-  }
-
-  .status-bar-notifications > span {
-    @apply min-w-3 text-center font-mono text-[10px] tabular-nums;
-  }
-
   .notification-center {
-    @apply fixed bottom-5 right-2 z-[70] flex max-h-[min(32rem,calc(100vh-3rem))] w-[min(24rem,calc(100vw-1rem))] flex-col overflow-hidden rounded-md border border-line bg-surface text-ink;
-    box-shadow: 0 8px 28px rgb(0 0 0 / 0.16);
+    @apply fixed z-[70] flex flex-col overflow-hidden text-ink;
+    top: 50px;
+    right: 10px;
+    width: min(24rem, calc(100vw - 1rem));
+    max-height: min(32rem, calc(100vh - 4rem));
+    border-radius: 10px;
+    background: var(--tone-surface);
+    box-shadow: var(--shadow-popover);
+    animation: notification-center-enter 220ms var(--ease-out-expo) both;
+    transform-origin: top right;
+  }
+
+  @keyframes notification-center-enter {
+    from {
+      opacity: 0;
+      transform: translateY(-6px) scale(0.98);
+    }
   }
 
   .notification-center-header {
-    @apply flex min-h-10 shrink-0 items-center gap-1 border-b border-line px-2;
+    @apply flex min-h-12 shrink-0 items-center gap-2 border-b border-line py-2 pl-4 pr-2;
   }
 
   .notification-center-header > div {
@@ -595,15 +975,15 @@
   }
 
   .notification-center-header h2 {
-    @apply text-[12px] font-semibold tracking-[-0.01em];
+    @apply text-[13px] font-semibold tracking-[-0.01em];
   }
 
   .notification-center-header span {
-    @apply block text-[10px] text-ink-faint;
+    @apply block font-mono text-[11px] text-ink-faint;
   }
 
   .notification-center-action {
-    @apply min-h-6 shrink-0 rounded px-1.5 text-[10px];
+    @apply shrink-0 text-[12px];
   }
 
   .notification-list {
@@ -611,11 +991,12 @@
   }
 
   .notification-item {
-    @apply border-b border-line px-2.5 py-2 last:border-b-0;
+    @apply border-b border-line px-4 py-3 last:border-b-0;
+    border-color: var(--tone-line-soft);
   }
 
   .notification-item-heading {
-    @apply flex items-center gap-1.5 text-[10px];
+    @apply flex items-center gap-2 text-[11px];
   }
 
   .notification-item-heading strong {
@@ -627,37 +1008,40 @@
   }
 
   .notification-severity {
-    @apply rounded px-1 font-medium;
+    @apply rounded px-1.5 py-px font-mono text-[10px];
+    border: 1px solid var(--tone-line);
     color: var(--tone-ink-soft);
-    background: var(--tone-hover);
   }
 
   .notification-item.message-success .notification-severity {
-    color: var(--tone-good);
-    background: var(--tone-good-soft);
+    border-color: var(--tone-accent-line);
+    color: var(--tone-accent-ink);
+    background: var(--tone-accent-wash);
   }
 
   .notification-item.message-warning .notification-severity {
+    border-color: var(--tone-caution-line);
     color: var(--tone-caution);
     background: var(--tone-caution-soft);
   }
 
   .notification-item.message-error .notification-severity {
+    border-color: var(--tone-danger-line);
     color: var(--tone-danger);
     background: var(--tone-danger-soft);
   }
 
   .notification-item > p {
-    @apply mt-1 text-[11px] leading-4 text-ink-soft;
+    @apply mt-1.5 text-[12px] leading-[18px] text-ink-soft;
     overflow-wrap: anywhere;
   }
 
   .notification-item-actions {
-    @apply mt-1.5 flex justify-end gap-1;
+    @apply mt-1 flex justify-end gap-1;
   }
 
   .notification-center-empty {
-    @apply flex min-h-40 flex-col items-center justify-center gap-1 px-4 text-center text-ink-faint;
+    @apply flex min-h-44 flex-col items-center justify-center gap-1.5 px-6 text-center text-ink-faint;
   }
 
   .notification-center-empty .ui-icon {
@@ -667,11 +1051,11 @@
   }
 
   .notification-center-empty strong {
-    @apply text-[11px] font-medium text-ink;
+    @apply text-[13px] font-semibold text-ink;
   }
 
   .notification-center-empty span {
-    @apply max-w-[32ch] text-[10px] leading-4;
+    @apply max-w-[32ch] text-[12px] leading-[18px];
   }
 
   /* Training ------------------------------------------------------------
@@ -707,7 +1091,7 @@
 
   .training-phase-active {
     background: var(--tone-selected);
-    color: var(--tone-accent);
+    color: var(--tone-accent-ink);
   }
 
   .training-phase-complete {
@@ -760,15 +1144,15 @@
   }
 
   .training-active-heading strong {
-    @apply truncate text-[11px] font-semibold;
+    @apply truncate text-[12.5px] font-semibold;
   }
 
   .training-active-heading small {
-    @apply truncate text-[10px] text-ink-faint;
+    @apply truncate font-mono text-[11px] text-ink-faint;
   }
 
   .training-step-readout {
-    @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-soft;
+    @apply shrink-0 font-mono text-[11px] tabular-nums text-ink-soft;
   }
 
   .training-progress-track {
@@ -778,7 +1162,7 @@
 
   .training-progress-fill {
     @apply h-full rounded-full;
-    background: var(--tone-accent);
+    background: var(--tone-accent-strong);
   }
 
   .training-active-run > p {
@@ -791,7 +1175,8 @@
 
   .training-form-section,
   .training-query-section {
-    @apply border-b border-line px-3 py-3;
+    @apply border-b px-3.5 py-3.5;
+    border-color: var(--tone-line-soft);
   }
 
   .training-source-section {
@@ -811,11 +1196,11 @@
   }
 
   .training-runtime-summary strong {
-    @apply truncate text-[11px] font-medium text-ink;
+    @apply truncate text-[12.5px] font-medium text-ink;
   }
 
   .training-runtime-summary span:not(.training-runtime-dot) {
-    @apply text-[10px] text-ink-faint;
+    @apply text-[11.5px] text-ink-faint;
   }
 
   .training-runtime-dot {
@@ -823,7 +1208,7 @@
   }
 
   .training-runtime-dot-ready {
-    background: var(--tone-good);
+    background: var(--tone-good-dot);
   }
 
   .training-form-heading {
@@ -833,11 +1218,11 @@
   .training-form-heading h3,
   .training-subpanel-heading h3,
   .rollout-section-heading h3 {
-    @apply min-w-0 flex-1 text-[11px] font-semibold;
+    @apply min-w-0 flex-1 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-ink-faint;
   }
 
   .training-form-heading span {
-    @apply truncate text-[10px] text-ink-faint;
+    @apply truncate font-mono text-[11px] text-ink-faint;
   }
 
   .training-form-grid {
@@ -849,7 +1234,7 @@
   }
 
   .rollout-field {
-    @apply flex min-w-0 flex-col gap-1 text-[10px] text-ink-soft;
+    @apply flex min-w-0 flex-col gap-1 text-[11.5px] text-ink-soft;
   }
 
   .training-field-wide {
@@ -861,8 +1246,8 @@
   }
 
   .training-query-section textarea:focus {
-    border-color: var(--tone-accent);
-    box-shadow: 0 0 0 1px var(--tone-accent);
+    border-color: var(--tone-focus);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-focus) 18%, transparent);
   }
 
   .training-query-body {
@@ -886,17 +1271,8 @@
     width: calc(100% - 1.5rem);
   }
 
-  .training-history-empty {
-    @apply flex h-full min-h-32 flex-col items-center justify-center gap-1 px-4 text-center;
-  }
 
-  .training-history-empty strong {
-    @apply text-[11px] font-medium text-ink-soft;
-  }
 
-  .training-history-empty span {
-    @apply max-w-[30ch] text-[10px] leading-4 text-ink-faint;
-  }
 
   .training-history-panel {
     @apply bg-surface p-1;
@@ -943,17 +1319,8 @@
     @apply col-span-2 px-2;
   }
 
-  .training-run-empty {
-    @apply flex h-full flex-col items-center justify-center gap-1 bg-surface px-6 text-center;
-  }
 
-  .training-run-empty strong {
-    @apply text-[12px] font-semibold;
-  }
 
-  .training-run-empty span {
-    @apply max-w-[38ch] text-[11px] leading-4 text-ink-faint;
-  }
 
   .training-run-detail {
     @apply flex h-full min-h-0 flex-col overflow-hidden bg-surface;
@@ -1104,7 +1471,7 @@
     width: 2px;
     height: 0.875rem;
     border-radius: 0;
-    background: var(--tone-accent);
+    background: var(--tone-ink);
   }
 
   .training-event-stall {
@@ -1131,7 +1498,7 @@
   .training-event-legend small:nth-child(2)::before {
     width: 2px;
     border-radius: 0;
-    background: var(--tone-accent);
+    background: var(--tone-ink);
   }
 
   .training-event-legend small:nth-child(3)::before {
@@ -1304,7 +1671,7 @@
   /* The bar sits above the workbench so its popover clears the panels'
      own layers (the graph's node and edge tiles are z-indexed). */
   .document-bar {
-    @apply relative z-30 flex min-h-9 shrink-0 items-center gap-2 border-b border-line bg-surface pl-3 pr-2;
+    @apply relative z-30 flex min-h-10 shrink-0 items-center gap-2 border-b border-line bg-surface pl-3 pr-2;
   }
 
   .document-identity {
@@ -1316,7 +1683,7 @@
   }
 
   .document-title {
-    @apply min-w-0 max-w-[40rem] gap-1 px-1.5 text-[12px] font-semibold tracking-[-0.01em] text-ink;
+    @apply min-w-0 max-w-[40rem] gap-1.5 px-2 text-[13px] font-semibold tracking-[-0.015em] text-ink;
   }
 
   /* The chevron points where the switcher will open, and turns when it has. */
@@ -1343,7 +1710,7 @@
   }
 
   .document-state {
-    @apply inline-flex min-h-6 shrink-0 items-center gap-1.5 px-1.5 text-[11px] text-ink-faint;
+    @apply inline-flex min-h-6 shrink-0 items-center gap-1.5 px-1.5 font-mono text-[11px] text-ink-faint;
     animation: workflow-settle 220ms var(--ease-out-expo) both;
   }
 
@@ -1353,7 +1720,7 @@
   }
 
   .document-state.is-saved .document-state-dot {
-    background: var(--tone-good);
+    background: var(--tone-good-dot);
   }
 
   .document-state.is-draft {
@@ -1407,16 +1774,18 @@
   }
 
   .document-switcher {
-    @apply absolute left-0 top-full z-40 mt-1.5 flex w-80 flex-col overflow-hidden rounded-md border border-line bg-surface;
+    @apply absolute left-0 top-full z-40 mt-1.5 flex w-80 flex-col overflow-hidden bg-surface;
     max-width: calc(100vw - 6rem);
-    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-    animation: workflow-popover-enter 140ms var(--ease-out-expo) both;
+    border-radius: 10px;
+    box-shadow: var(--shadow-popover);
+    animation: workflow-popover-enter 180ms var(--ease-out-expo) both;
+    transform-origin: top left;
   }
 
   @keyframes workflow-popover-enter {
     from {
       opacity: 0;
-      translate: 0 -4px;
+      transform: translateY(-4px) scale(0.985);
     }
   }
 
@@ -1491,8 +1860,9 @@
   /* Zoom and fit share one hairline group at the bottom left; the canvas
      above them is nothing but stages. */
   .workflow-canvas-controls {
-    @apply absolute bottom-2 left-2 z-[5] flex items-center gap-px rounded border border-line bg-surface p-px;
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+    @apply absolute bottom-2.5 left-2.5 z-[5] flex items-center gap-px bg-surface p-0.5;
+    border-radius: 8px;
+    box-shadow: var(--shadow-float);
   }
 
   /* Stage cards. Fixed 224×92 so the layered layout can place them before
@@ -1506,11 +1876,12 @@
   .workflow-stage-output { --stage-tone: var(--tone-stage-output); }
 
   .workflow-stage-card {
-    @apply relative flex flex-col gap-1 rounded border border-line bg-surface px-3 pb-2 pt-2.5 text-left text-ink;
+    @apply relative flex flex-col gap-1 border border-line bg-surface px-3 pb-2 pt-2.5 text-left text-ink;
     box-sizing: border-box;
     width: 224px;
     height: 92px;
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgb(16 16 16 / 0.05);
     transition: border-color 120ms ease-out, box-shadow 160ms var(--ease-out-expo), translate 160ms var(--ease-out-expo);
     animation: workflow-stage-enter 320ms var(--ease-out-expo) both;
     animation-delay: calc(var(--stage-order, 0) * 45ms);
@@ -1523,16 +1894,22 @@
     }
   }
 
+  /* The Workflow graph's cards are narrower than Explore's column, so a
+     five-stage query fits a 1440px window at a readable zoom. */
+  .workflow-flow .workflow-stage-card {
+    width: 192px;
+  }
+
   .workflow-stage-card:hover {
-    border-color: color-mix(in srgb, var(--tone-ink-faint) 50%, var(--tone-line));
-    box-shadow: 0 2px 6px rgb(0 0 0 / 0.06);
+    border-color: var(--tone-line-strong);
+    box-shadow: var(--shadow-float);
     translate: 0 -1px;
   }
 
   .workflow-stage-card.is-selected,
   .workflow-stage-card.is-selected:hover {
-    border-color: var(--tone-accent);
-    box-shadow: inset 0 0 0 1px var(--tone-accent), 0 2px 8px color-mix(in srgb, var(--tone-accent) 14%, transparent);
+    border-color: var(--tone-accent-strong);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-accent) 45%, transparent), 0 4px 14px rgb(16 16 16 / 0.08);
     translate: none;
   }
 
@@ -1540,10 +1917,13 @@
     @apply flex min-w-0 items-center gap-2;
   }
 
+  /* The kind mark: the stage's glyph inside a thin outline of its hue, the
+     same letter-badge grammar the catalog wears. */
   .workflow-stage-mark {
-    @apply inline-flex size-[18px] shrink-0 items-center justify-center rounded-sm;
+    @apply inline-flex size-[18px] shrink-0 items-center justify-center;
+    border: 1.5px solid var(--stage-tone);
+    border-radius: 5px;
     color: var(--stage-tone);
-    background: color-mix(in srgb, var(--stage-tone) 14%, transparent);
   }
 
   .workflow-stage-mark .ui-icon {
@@ -1551,7 +1931,7 @@
   }
 
   .workflow-stage-title {
-    @apply min-w-0 truncate text-[12px] font-semibold leading-4 tracking-[-0.01em];
+    @apply min-w-0 truncate text-[12.5px] font-semibold leading-4 tracking-[-0.01em];
   }
 
   /* Paths offer their own break points (after each slash); anything else
@@ -1566,7 +1946,7 @@
   }
 
   .workflow-stage-footer {
-    @apply flex min-w-0 items-baseline gap-1.5 text-[10px] leading-3 text-ink-faint;
+    @apply flex min-w-0 items-baseline gap-1.5 font-mono text-[10.5px] leading-3 text-ink-faint;
   }
 
   .workflow-stage-footer > * {
@@ -1574,7 +1954,7 @@
   }
 
   .workflow-stage-kind {
-    @apply shrink-0 font-medium;
+    @apply shrink-0 font-medium uppercase tracking-[0.04em];
     color: var(--stage-tone);
   }
 
@@ -1584,8 +1964,9 @@
 
   .workflow-stage-output-flag {
     @apply ml-auto shrink-0 rounded px-1 font-medium;
-    color: var(--tone-stage-output);
-    background: color-mix(in srgb, var(--tone-stage-output) 12%, transparent);
+    border: 1px solid var(--tone-accent-line);
+    color: var(--tone-accent-ink);
+    background: var(--tone-accent-wash);
   }
 
   /* Stage popover ---------------------------------------------------------
@@ -1597,9 +1978,10 @@
      handed on, and one disclosure for the native operators. Position and
      height come from the canvas as inline style. */
   .workflow-stage-popover {
-    @apply absolute z-[6] flex w-80 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-md border border-line bg-surface text-ink;
-    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-    animation: workflow-popover-enter 140ms var(--ease-out-expo) both;
+    @apply absolute z-[6] flex w-80 max-w-[calc(100%-1rem)] flex-col overflow-hidden bg-surface text-ink;
+    border-radius: 10px;
+    box-shadow: var(--shadow-popover);
+    animation: workflow-popover-enter 180ms var(--ease-out-expo) both;
   }
 
   .workflow-inspector-body {
@@ -1619,7 +2001,7 @@
   }
 
   .workflow-inspector-heading h3 {
-    @apply text-[12px] font-semibold leading-4 tracking-[-0.01em];
+    @apply text-[13px] font-semibold leading-4 tracking-[-0.01em];
     overflow-wrap: anywhere;
   }
 
@@ -1629,7 +2011,7 @@
   }
 
   .workflow-inspector-summary {
-    @apply mt-2 text-[11px] leading-4 text-ink-soft;
+    @apply mt-2 text-[12px] leading-[18px] text-ink-soft;
     overflow-wrap: anywhere;
   }
 
@@ -1649,12 +2031,14 @@
   }
 
   .workflow-columns code {
-    @apply rounded bg-sunken px-1 font-mono text-[10px] leading-4 text-ink;
+    @apply rounded border px-1.5 font-mono text-[10.5px] leading-4 text-ink;
+    border-color: var(--tone-line);
   }
 
   .workflow-columns code.is-new {
-    color: var(--tone-good);
-    background: color-mix(in srgb, var(--tone-good) 12%, transparent);
+    border-color: var(--tone-accent-line);
+    color: var(--tone-accent-ink);
+    background: var(--tone-accent-wash);
   }
 
   .workflow-stage-steps {
@@ -1764,7 +2148,7 @@
   }
 
   .run-phase.is-running .run-phase-dot {
-    background: var(--tone-accent);
+    background: var(--tone-info);
     animation: workflow-pulse 900ms ease-in-out infinite;
   }
 
@@ -1790,7 +2174,7 @@
   }
 
   .run-elapsed {
-    @apply text-accent;
+    @apply text-ink;
   }
 
   .executed-sql {
@@ -1837,11 +2221,11 @@
   }
 
   .workflow-assistant-empty h3 {
-    @apply text-[12px] font-semibold tracking-[-0.01em] text-ink;
+    @apply text-[14px] font-semibold tracking-[-0.015em] text-ink;
   }
 
   .workflow-assistant-empty > p {
-    @apply mt-1 max-w-[62ch] text-[11px] leading-[1.55] text-ink-soft;
+    @apply mt-1.5 max-w-[62ch] text-[12.5px] leading-[1.55] text-ink-soft;
   }
 
   .workflow-assistant-examples {
@@ -1849,7 +2233,7 @@
   }
 
   .workflow-assistant-examples .ui-button {
-    @apply rounded border border-line px-2 text-[11px] text-ink-soft hover:border-line-strong hover:text-ink;
+    @apply rounded-md border border-line px-2.5 text-[12px] text-ink-soft hover:border-line-strong hover:text-ink;
   }
 
   .workflow-assistant-thread {
@@ -1865,7 +2249,9 @@
   }
 
   .workflow-agent-message.is-user {
-    @apply max-w-[85%] justify-self-end rounded bg-sunken px-3 py-2;
+    @apply max-w-[85%] justify-self-end rounded-lg border px-3 py-2;
+    border-color: var(--tone-line-soft);
+    background: var(--tone-sidebar);
   }
 
   .workflow-agent-message.is-user .workflow-agent-message-body {
@@ -1873,7 +2259,7 @@
   }
 
   .workflow-agent-message-body {
-    @apply min-w-0 space-y-2.5 text-[12px] leading-[1.6] text-ink;
+    @apply min-w-0 space-y-2.5 text-[13px] leading-[1.6] text-ink;
     overflow-wrap: anywhere;
   }
 
@@ -1910,7 +2296,7 @@
   }
 
   .workflow-agent-message-body a {
-    @apply text-accent underline underline-offset-[3px];
+    @apply text-[var(--tone-info-ink)] underline underline-offset-[3px];
   }
 
   .workflow-agent-message-body :not(pre) > code {
@@ -1918,12 +2304,14 @@
   }
 
   .workflow-agent-message-body pre {
-    @apply overflow-auto rounded border border-line bg-sunken px-2.5 py-2 font-mono text-[10px] leading-4 text-ink;
+    @apply overflow-auto rounded-md border px-3 py-2.5 font-mono text-[11px] leading-[17px] text-ink;
+    border-color: var(--tone-line-soft);
+    background: var(--tone-sidebar);
     white-space: pre;
   }
 
   .workflow-agent-message-body pre code {
-    @apply block bg-transparent p-0 text-[10px];
+    @apply block bg-transparent p-0 text-[11px];
   }
 
   .workflow-agent-message-body blockquote {
@@ -1956,7 +2344,7 @@
   }
 
   .workflow-agent-tools-disclosure {
-    @apply min-w-0 text-[11px] text-ink-soft;
+    @apply min-w-0 font-mono text-[11px] text-ink-soft;
   }
 
   .workflow-agent-tools-disclosure > summary {
@@ -1969,7 +2357,7 @@
   }
 
   .workflow-agent-tools-disclosure > summary:focus-visible {
-    outline: 2px solid var(--tone-accent);
+    outline: 2px solid var(--tone-focus);
     outline-offset: 1px;
   }
 
@@ -1979,7 +2367,7 @@
   }
 
   .workflow-agent-tools-disclosure[data-running="true"] .workflow-activity-dot {
-    background: var(--tone-accent);
+    background: var(--tone-info);
     animation: workflow-pulse 900ms ease-in-out infinite;
   }
 
@@ -2008,11 +2396,11 @@
   }
 
   .workflow-agent-tool-detail.is-complete .workflow-tool-step-dot {
-    background: var(--tone-good);
+    background: var(--tone-good-dot);
   }
 
   .workflow-agent-tool-detail.is-running .workflow-tool-step-dot {
-    background: var(--tone-accent);
+    background: var(--tone-info);
     animation: workflow-pulse 900ms ease-in-out infinite;
   }
 
@@ -2033,7 +2421,7 @@
   }
 
   .workflow-agent-receipt-action {
-    @apply mt-0.5 min-h-0 p-0 text-[11px] text-accent;
+    @apply mt-0.5 min-h-0 p-0 text-[11px] text-[var(--tone-info-ink)];
   }
 
   .workflow-assistant-error {
@@ -2073,13 +2461,14 @@
   }
 
   .workflow-composer-field {
-    @apply relative rounded border border-line bg-surface;
+    @apply relative rounded-lg border border-line bg-surface;
+    box-shadow: 0 1px 2px rgb(16 16 16 / 0.04);
     transition: border-color 150ms ease-out, box-shadow 150ms ease-out, background-color 150ms ease-out;
   }
 
   .workflow-composer-field:focus-within {
-    border-color: var(--tone-accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--tone-accent) 15%, transparent);
+    border-color: var(--tone-focus);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-focus) 18%, transparent);
   }
 
   .workflow-composer-field.is-disabled {
@@ -2087,7 +2476,7 @@
   }
 
   .workflow-composer-field textarea {
-    @apply block max-h-40 min-h-9 w-full resize-none bg-transparent py-2 pl-3 pr-10 text-[12px] leading-[1.5] text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:text-ink-faint;
+    @apply block max-h-40 min-h-10 w-full resize-none bg-transparent py-2.5 pl-3 pr-11 text-[13px] leading-[1.5] text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:text-ink-faint;
     field-sizing: content;
   }
 
@@ -2121,7 +2510,7 @@
      Studio notices share the tile in graphite. Tool receipts stay inside the
      activity fold, in mono, on a hairline. */
   .workflow-agent-role {
-    @apply mb-1 block text-[10px] font-medium leading-3 text-ink-faint;
+    @apply mb-1 block text-[11px] font-medium leading-3 text-ink-faint;
   }
 
   .workflow-agent-message.is-user .workflow-agent-role {
@@ -2134,9 +2523,10 @@
   }
 
   .workflow-agent-avatar {
-    @apply mt-px inline-flex size-[18px] shrink-0 items-center justify-center rounded-sm;
+    @apply mt-px inline-flex size-[18px] shrink-0 items-center justify-center;
+    border: 1.5px solid var(--tone-stage-model);
+    border-radius: 5px;
     color: var(--tone-stage-model);
-    background: color-mix(in srgb, var(--tone-stage-model) 14%, transparent);
   }
 
   .workflow-agent-avatar .ui-icon {
@@ -2144,8 +2534,8 @@
   }
 
   .workflow-agent-message.is-synthetic .workflow-agent-avatar {
+    border-color: var(--tone-line-strong);
     color: var(--tone-ink-soft);
-    background: var(--tone-hover);
   }
 
   .workflow-agent-answer {
@@ -2157,7 +2547,7 @@
   }
 
   .workflow-agent-finding .workflow-agent-message-body {
-    @apply text-[11px] text-ink-soft;
+    @apply text-[12px] text-ink-soft;
   }
 
   .workflow-agent-tool-detail .workflow-tool-step-copy strong {
@@ -2202,7 +2592,8 @@
   }
 
   .rollout-section {
-    @apply border-b border-line px-3 py-3;
+    @apply border-b px-3.5 py-3.5;
+    border-color: var(--tone-line-soft);
   }
 
   .rollout-section-heading {
@@ -2210,14 +2601,16 @@
   }
 
   .rollout-state {
-    @apply inline-flex min-h-5 items-center rounded px-1.5 text-[10px] font-medium;
+    @apply inline-flex min-h-5 items-center rounded border px-1.5 font-mono text-[10.5px] font-medium;
+    border-color: var(--tone-caution-line);
     background: var(--tone-caution-soft);
     color: var(--tone-caution);
   }
 
   .rollout-state-ready {
-    background: var(--tone-good-soft);
-    color: var(--tone-good);
+    border-color: var(--tone-accent-line);
+    background: var(--tone-accent-wash);
+    color: var(--tone-accent-ink);
   }
 
   .rollout-field-grid {
@@ -2273,7 +2666,7 @@
   }
 
   .rollout-runtime-note {
-    @apply mb-2 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2 text-[10px];
+    @apply mb-3 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2 text-[12px];
   }
 
   .rollout-runtime-note > div {
@@ -2312,8 +2705,8 @@
   }
 
   .rollout-runtime-note-active .rollout-runtime-dot {
-    background: var(--tone-accent);
-    box-shadow: 0 1px 5px color-mix(in srgb, var(--tone-accent) 28%, transparent);
+    background: var(--tone-good-dot);
+    box-shadow: 0 1px 5px color-mix(in srgb, var(--tone-good-dot) 28%, transparent);
   }
 
   .rollout-runtime-note-warning .rollout-runtime-dot {
@@ -2338,9 +2731,14 @@
     @apply min-w-0;
   }
 
+  /* Why Run is not available yet: a precondition, said plainly. A failed
+     run's reason is the one that takes the danger colour. */
   .rollout-blocker {
-    @apply mt-2 text-[10px] leading-4;
-    color: var(--tone-caution);
+    @apply mt-2.5 text-[12px] leading-4 text-ink-faint;
+  }
+
+  .rollout-blocker.rollout-failure {
+    color: var(--tone-danger);
   }
 
   .rollout-inference {
@@ -2348,7 +2746,7 @@
   }
 
   .rollout-metric-strip {
-    @apply grid shrink-0 grid-cols-3 border-b border-line;
+    @apply grid shrink-0 grid-cols-3 border-b border-line px-3.5;
   }
 
   .rollout-inference-empty {
@@ -2356,36 +2754,37 @@
   }
 
   .rollout-inference-empty strong {
-    @apply relative text-[11px] font-medium;
+    @apply relative text-[13px] font-semibold;
   }
 
   .rollout-inference-empty p {
-    @apply relative mt-1 max-w-[34rem] text-[10px] leading-4 text-ink-faint;
+    @apply relative mt-1 max-w-[34rem] text-[12px] leading-[18px] text-ink-faint;
   }
 }
 
 .settings-header {
   display: flex;
-  min-height: 3.25rem;
+  min-height: 4.25rem;
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.625rem 0.875rem;
+  padding: 0.875rem 1.5rem;
   border-bottom: 1px solid var(--tone-line);
 }
 
 .settings-header h2 {
-  font-size: 0.75rem;
+  font-size: 1.125rem;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
 }
 
 .settings-header p,
 .provider-heading p,
 .settings-help {
+  margin-top: 0.125rem;
   color: var(--tone-ink-faint);
-  font-size: 0.6875rem;
+  font-size: 0.8125rem;
 }
 
 .settings-footer > div {
@@ -2431,13 +2830,15 @@
 
   .query-table th,
   .query-table td {
-    @apply max-w-[22rem] overflow-hidden text-ellipsis whitespace-nowrap border-b border-line px-3 py-1 text-left align-middle;
+    @apply max-w-[22rem] overflow-hidden text-ellipsis whitespace-nowrap border-b px-3 py-1.5 text-left align-middle;
+    border-color: var(--tone-line-soft);
   }
 
   /* The header stays put while rows scroll under it. Its rule is drawn as a
      shadow so it travels with the sticky cell instead of staying behind. */
   .query-table thead th {
-    @apply sticky top-0 z-[1] border-b-0 bg-surface py-1.5 text-[11px] font-medium text-ink-soft;
+    @apply sticky top-0 z-[1] border-b-0 py-2 font-mono text-[10.5px] font-medium uppercase tracking-[0.03em] text-ink-faint;
+    background: var(--tone-sunken);
     box-shadow: inset 0 -1px 0 var(--tone-line);
   }
 
@@ -2447,7 +2848,8 @@
   }
 
   .query-column-type {
-    @apply font-mono text-[10px] font-normal leading-[0.875rem] text-ink-faint;
+    @apply font-mono text-[10px] font-normal normal-case leading-[0.875rem] tracking-normal text-ink-faint;
+    opacity: 0.8;
   }
 
   .query-table tbody tr {
@@ -2467,7 +2869,7 @@
   }
 
   .query-table tbody tr:hover td {
-    background: var(--tone-hover);
+    background: var(--tone-sidebar);
   }
 
   .query-table tbody tr[data-selected="true"] td {
@@ -2475,7 +2877,7 @@
   }
 
   .query-table tbody tr[data-selected="true"] .query-row-action {
-    color: var(--tone-accent);
+    color: var(--tone-ink);
     font-weight: 500;
   }
 
@@ -2532,7 +2934,7 @@
 
   .query-result-image-action:hover .query-image-preview,
   .query-result-image-action:focus-visible .query-image-preview {
-    box-shadow: 0 0 0 2px var(--tone-accent);
+    box-shadow: 0 0 0 2px var(--tone-accent-strong);
   }
 
   .query-image-unavailable {
@@ -2552,7 +2954,7 @@
      spans the smallest to the largest value among the rows returned. */
   .query-measure {
     @apply inline-grid w-full min-w-[5.5rem] justify-items-end gap-0.5;
-    --measure-tone: color-mix(in srgb, var(--tone-accent) 55%, transparent);
+    --measure-tone: color-mix(in srgb, var(--tone-accent-strong) 70%, transparent);
   }
 
   .query-measure-text {
@@ -2706,43 +3108,59 @@
   display: grid;
   min-height: 0;
   flex: 1 1 auto;
-  grid-template-columns: 10rem minmax(0, 1fr);
+  grid-template-columns: 13rem minmax(0, 1fr);
 }
 
 .settings-nav {
-  padding: 0.625rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0.75rem 0.5rem;
   border-right: 1px solid var(--tone-line);
-  background: var(--tone-sunken);
+  background: var(--tone-sidebar);
 }
 
 .settings-nav .ui-button {
   display: block;
   width: 100%;
-  min-height: 1.75rem;
-  padding-inline: 0.5rem;
+  min-height: 1.875rem;
+  padding-inline: 0.625rem;
+  border-radius: 5px;
+  color: var(--tone-ink-soft);
   text-align: left;
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 450;
+}
+
+.settings-nav .ui-button:is([aria-pressed="true"], [aria-current="page"]) {
+  color: var(--tone-ink);
+  background: var(--tone-accent);
+  font-weight: 560;
 }
 
 .settings-content {
   min-height: 0;
   overflow-y: auto;
-  padding: 1rem 1.25rem;
+  padding: 1.5rem 1.75rem 2.5rem;
+}
+
+.settings-content > * {
+  max-width: 60rem;
 }
 
 .robot-settings-panel {
-  margin-inline: -0.25rem;
-  border-top: 1px solid var(--tone-line);
-  border-bottom: 1px solid var(--tone-line);
+  display: flex;
+  flex-direction: column;
 }
 
 .provider-heading {
-  margin-bottom: 1rem;
+  margin-bottom: 1.25rem;
 }
 
 .provider-heading h3 {
-  font-size: 0.75rem;
+  font-size: 0.9375rem;
   font-weight: 600;
+  letter-spacing: -0.015em;
 }
 
 .settings-field {
@@ -2845,10 +3263,12 @@
 }
 
 @theme inline {
-  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --font-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   --color-canvas: var(--tone-canvas);
   --color-surface: var(--tone-surface);
+  --color-sidebar: var(--tone-sidebar);
   --color-sunken: var(--tone-sunken);
   --color-hover: var(--tone-hover);
   --color-line: var(--tone-line);
@@ -2882,44 +3302,56 @@
 
   body {
     background: var(--tone-canvas);
-    font-family:
-      -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    color: var(--tone-ink);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-feature-settings: "ss01" off, "cv11" on;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
 
   button,
   input,
-  select {
+  select,
+  textarea {
     font: inherit;
   }
 
-  ::selection {
-    background: var(--tone-selected);
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
   }
 
-  /* One pixel of offset, not two: at a 24px control height a 2px ring plus a
-     2px gap reaches into the neighbouring control and reads as if both were
-     focused. */
+  ::selection {
+    background: color-mix(in srgb, var(--tone-accent) 60%, transparent);
+    color: var(--tone-ink);
+  }
+
   :focus-visible {
-    outline: 2px solid var(--tone-accent);
+    outline: 2px solid var(--tone-focus);
     outline-offset: 1px;
   }
 
-  /*
-    The thumb was hairline grey on paper — about 1.2:1, which is a rule, not a
-    control. An episode list showing five of fifty-two then had nothing on it
-    that said the other forty-seven existed. Graphite at 22% stays quiet against
-    12px type and is still unmistakably a scrollbar; it darkens on hover the way
-    every other control here does.
-  */
+  /* A region focused by the Studio itself (tabindex -1), such as a panel
+     that takes focus when it opens, is not a control; it draws no ring. */
+  [tabindex="-1"]:focus-visible {
+    outline: none;
+  }
+
+  input,
+  textarea {
+    caret-color: var(--tone-ink);
+  }
+
   * {
-    scrollbar-color: rgb(55 53 47 / 0.22) transparent;
+    scrollbar-color: rgb(16 16 16 / 0.2) transparent;
     scrollbar-width: thin;
   }
 
   *:hover {
-    scrollbar-color: rgb(55 53 47 / 0.34) transparent;
+    scrollbar-color: rgb(16 16 16 / 0.32) transparent;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -2935,24 +3367,20 @@
 }
 
 /*
-  One type scale, four steps, each with a single job. Before this pass the studio
-  spelled 10, 11, 12, 13 and 22px, and the 12/13 pair carried no distinction at
-  all: a joint's name was 12px while the number beside it was 11px, and a robot's
-  id was 13px while its state was 10px. Sizes that differ without meaning read as
-  drift, so the tiers below are exhaustive — a new element picks one of them
-  rather than a fifth.
+  The type ramp, in Geist and Geist Mono:
 
-    --type-readout  16px mono   the elapsed timer, and nothing else
-    --type-body     12px        language: buttons, fields, titles, sentences
-    --type-label    11px        supporting text: names, status, blockers
-    --type-micro    10px        mono data: counts, ids, rates, metadata
+    19px  a subject's title (a dataset, Settings)
+    13–14px  body, titles of cards, panels, and documents
+    12–12.5px  secondary copy, labels, table cells
+    11–11.5px  mono metadata: ids, counts, durations, paths
+    10.5px  upper-case section and stat labels, table headers
+    16px mono  the elapsed clock, the one readout set larger
 
-  Hierarchy inside a tier comes from weight and from the graphite ramp, which is
-  what keeps a dense surface legible without a fifth size.
+  Hierarchy inside a step comes from weight and the graphite ramp.
 */
 @layer components {
   .studio-shell {
-    @apply flex h-screen flex-col overflow-hidden bg-canvas text-[12px] text-ink;
+    @apply flex h-screen flex-col overflow-hidden bg-canvas text-[13px] text-ink;
   }
 
   .status-dot {
@@ -2967,7 +3395,8 @@
     than the three beside it and left the whole strip ragged.
   */
   .readout {
-    @apply flex min-w-0 flex-col rounded bg-sunken px-1.5 py-0.5;
+    @apply flex min-w-0 flex-col rounded-md border bg-surface px-2 py-1;
+    border-color: var(--tone-line-soft);
   }
 
   .live-workbench .readout {
@@ -2979,11 +3408,11 @@
   }
 
   .readout-label {
-    @apply truncate text-[10px] leading-tight text-ink-faint;
+    @apply truncate text-[10px] font-medium uppercase leading-tight tracking-[0.04em] text-ink-faint;
   }
 
   .readout-value {
-    @apply flex items-baseline gap-0.5 font-mono text-[11px] leading-tight whitespace-nowrap;
+    @apply mt-0.5 flex items-baseline gap-0.5 font-mono text-[12px] font-medium leading-tight whitespace-nowrap;
     font-variant-numeric: tabular-nums;
   }
 
@@ -3018,7 +3447,7 @@
      returns when that individual cell has spare width. Active sliders ask for
      more room and keep their own wider rule. */
   .joint-list {
-    @apply grid gap-x-2 gap-y-1 px-3 pb-2;
+    @apply grid gap-x-3 gap-y-1 px-3.5 pb-3;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
   }
 
@@ -3052,7 +3481,7 @@
      on its own, and the extra outline was one more blue rectangle in a column
      of six. */
   .joint-row-selected:is(.joint-row-caution, .joint-row-fault) {
-    box-shadow: inset 0 0 0 1px var(--tone-accent);
+    box-shadow: inset 0 0 0 1px var(--tone-accent-strong);
   }
 
   .joint-row-caution {
@@ -3075,13 +3504,13 @@
      "Shoulder pan" to "Shoulder pa", which is not an abbreviation — it is the
      name of the joint with its last letter missing. */
   .joint-label {
-    @apply inline-flex min-h-7 w-[5.5rem] shrink-0 items-center truncate text-left text-[11px] text-ink-soft;
+    @apply inline-flex min-h-7 w-[6rem] shrink-0 items-center truncate text-left text-[12px] text-ink-soft;
   }
 
   /* The measured angle beside its slider: mono so the sign and the digits stay
      in the same place as the arm moves. */
   .joint-value {
-    @apply w-9 shrink-0 text-right font-mono text-[10px] text-ink-soft;
+    @apply w-11 shrink-0 text-right font-mono text-[11.5px] text-ink;
     font-variant-numeric: tabular-nums;
   }
 
@@ -3114,7 +3543,7 @@
   }
 
   .joint-row-selected .joint-position-meter {
-    @apply text-accent;
+    @apply text-accent-ink;
   }
 
   .joint-row-caution .joint-position-meter {
@@ -3134,7 +3563,7 @@
      camera property card already uses, for the same reason — a card on the
      inspector is white with a hairline. */
   .motor-detail {
-    @apply mx-3 mb-2 flex flex-col gap-1.5 rounded border border-line bg-surface px-2 py-1.5;
+    @apply mx-3.5 mb-3 flex flex-col gap-2 rounded-lg border border-line bg-surface px-3 py-2.5;
   }
 
   .motor-detail-head {
@@ -3142,7 +3571,7 @@
   }
 
   .motor-detail-name {
-    @apply text-[11px] font-medium text-ink;
+    @apply text-[12.5px] font-semibold text-ink;
   }
 
   /* Identity and complaint share this line so that a motor raising a fault
@@ -3298,19 +3727,24 @@
 @layer components {
   /* Device hierarchy: identity and readiness first, setup details second, file
      maintenance last. */
+  /* One arm is one card: identity and readiness on its first line, setup
+     sections under it. */
   .device-entry {
-    @apply border-b border-line;
+    @apply mb-3 overflow-hidden rounded-[10px] border border-line bg-surface;
+    box-shadow: 0 1px 2px rgb(16 16 16 / 0.04);
   }
 
   /* Adding an arm and importing one are the same kind of thing and now share a
      row, so the foot of the list is one 24px line rather than two stacked
      full-width bars that read as two more robots. */
   .device-list-actions {
-    @apply flex flex-wrap items-center gap-1 px-2 py-0.5;
+    @apply flex flex-wrap items-center gap-2 py-1;
   }
 
   .device-list-action {
-    @apply flex min-h-6 items-center rounded px-1 text-left text-[11px];
+    @apply flex min-h-8 items-center rounded-md border px-3 text-left text-[12.5px];
+    border-color: var(--tone-line);
+    background: var(--tone-surface);
   }
 
   /*
@@ -3320,16 +3754,26 @@
     below the fold.
   */
   .device-entry-row {
-    @apply flex min-h-6 items-center gap-1 pr-1.5;
+    @apply flex min-h-12 items-center gap-1.5 pl-2 pr-3.5;
   }
 
   .device-chevron {
-    @apply flex min-h-6 w-5 shrink-0 items-center justify-center;
+    @apply flex min-h-8 w-7 shrink-0 items-center justify-center;
   }
 
   .device-main {
-    @apply flex min-w-0 flex-1 items-baseline gap-1.5 py-0 text-left;
+    @apply flex min-w-0 flex-1 items-baseline gap-2 py-0 text-left;
   }
+
+  /* Which arm the joints panel shows is Live's to say; here every card reads
+     the same. */
+  .device-main[aria-pressed="true"] {
+    background: transparent;
+    box-shadow: none;
+    color: inherit;
+  }
+
+
 
   .device-accent,
   .device-connection-dot {
@@ -3337,29 +3781,42 @@
   }
 
   .device-copy strong {
-    @apply shrink-0 truncate text-[12px] font-medium text-ink;
+    @apply shrink-0 truncate text-[14px] font-semibold tracking-[-0.01em] text-ink;
   }
 
   /* The role gives way first: the arm's own name usually says it, and the state
      to its right is the part that changes. */
   .device-copy > span {
-    @apply min-w-0 truncate text-[10px] text-ink-faint;
+    @apply min-w-0 truncate font-mono text-[11px] text-ink-faint;
   }
 
   .device-state {
-    @apply shrink-0 text-[10px] text-ink-soft;
+    @apply shrink-0 font-mono text-[11px] text-ink-soft;
   }
 
+  /* A state that needs the operator is a word on its own wash. */
   .device-state-needed {
-    @apply text-caution;
+    @apply rounded border px-1.5 py-px text-caution;
+    border-color: var(--tone-caution-line);
+    background: var(--tone-caution-soft);
   }
 
   .device-setup {
-    @apply flex flex-col bg-sunken px-2 pb-1.5;
+    @apply flex flex-col border-t px-4 pb-1;
+    border-color: var(--tone-line-soft);
   }
 
   .device-setup-section {
-    @apply border-b border-line py-1.5;
+    @apply border-b py-3;
+    border-color: var(--tone-line-soft);
+  }
+
+  .device-setup-section:last-child {
+    border-bottom: 0;
+  }
+
+  .device-setup-section .label {
+    @apply text-[10.5px] font-semibold uppercase tracking-[0.07em];
   }
 
   .device-section-content {
@@ -3369,12 +3826,12 @@
   /* Every section opens the same way: its name on the left, its quiet actions
      packed to the right, one 24px line. */
   .device-section-head {
-    @apply mb-0.5 flex min-h-6 items-center gap-1.5;
+    @apply mb-1.5 flex min-h-7 items-center gap-1.5;
   }
 
   /* Instructions, only where there is still something to do. */
   .device-section-note {
-    @apply mt-0.5 text-[11px] leading-tight text-ink-faint;
+    @apply mt-1.5 text-[12px] leading-snug text-ink-faint;
   }
 
   .device-section-note-live {
@@ -3382,7 +3839,9 @@
   }
 
   .device-setup-alarm {
-    @apply mb-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] leading-tight text-danger;
+    @apply mt-3 mb-1 rounded-lg border px-3 py-2 text-[12px] leading-snug text-danger;
+    border-color: var(--tone-danger-line);
+    background: var(--tone-danger-soft);
   }
 
   /* The port and the button that opens it, on one line. */
@@ -3395,7 +3854,9 @@
   }
 
   .device-camera-row {
-    @apply flex min-h-6 items-center gap-1.5 rounded bg-surface px-1.5 pr-0.5 text-[11px];
+    @apply flex min-h-8 items-center gap-2 rounded-md border px-2.5 pr-1 text-[12.5px];
+    border-color: var(--tone-line-soft);
+    background: var(--tone-sidebar);
   }
 
   /* Same bargain the episode card strikes: the row's own labels keep the full
@@ -3421,23 +3882,29 @@
   }
 }
 
-/* One active view supplies its content and footer to the project frame. */
+/* The top bar's three cells share row one; the open workspace fills row
+   two, and its status line joins the bar's middle cell. */
 .studio-route-layout {
   display: grid;
-  grid-template-columns: 3.75rem minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: 44px minmax(0, 1fr);
 }
-.studio-route-layout > .studio-activity-rail { grid-column: 1; grid-row: 1; }
+.studio-route-layout::before {
+  content: "";
+  grid-column: 1 / -1;
+  grid-row: 1;
+  border-bottom: 1px solid var(--tone-line);
+  background: var(--tone-surface);
+}
 .studio-route-content {
   display: grid;
   min-width: 0;
   min-height: 0;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  grid-column: 2;
-  grid-row: 1;
+  grid-column: 1 / -1;
+  grid-row: 2;
 }
-.studio-workspace > .studio-status-bar { grid-column: 1 / -1; grid-row: 2; }
 
 /* Retained workspaces contribute to the shell grid only while selected. */
 .studio-workspace { display: contents; }
@@ -3453,9 +3920,9 @@
   --df-node-bg: var(--tone-surface);
   --df-node-color: var(--tone-ink);
   --df-node-border: var(--tone-line);
-  --df-accent: var(--tone-accent);
+  --df-accent: var(--tone-accent-strong);
   --df-edge: color-mix(in srgb, var(--tone-ink-faint) 72%, transparent);
-  --df-edge-selected: var(--tone-accent);
+  --df-edge-selected: var(--tone-accent-strong);
   --df-edge-label: var(--tone-ink-faint);
   --df-handle-bg: var(--tone-surface);
   --df-handle-border: var(--tone-ink-faint);
@@ -3464,7 +3931,7 @@
   --df-panel-border: var(--tone-line);
   --df-panel-color: var(--tone-ink-soft);
   --df-minimap-node: var(--tone-line);
-  --df-minimap-mask: var(--tone-selected);
+  --df-minimap-mask: rgb(16 16 16 / 0.06);
 }
 
 /* The library's node entrance is replaced by the stage's staggered one. */
@@ -3489,14 +3956,14 @@
 
 /* While a run is admitted every edge carries the accent, moving with the data. */
 .workflow-flow .df-edge.df-animated .df-edge-path {
-  stroke: var(--tone-accent);
+  stroke: var(--tone-info);
   stroke-width: 1.5;
   stroke-dasharray: 5 5;
   animation-duration: 700ms;
 }
 
 .workflow-flow .df-edge.df-animated .df-edge-arrow {
-  fill: var(--tone-accent);
+  fill: var(--tone-info);
 }
 
 .workflow-flow .df-edge-label {
@@ -3505,10 +3972,11 @@
 }
 
 .workflow-flow .df-minimap {
-  right: 8px;
-  bottom: 8px;
-  border-radius: 4px;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+  right: 10px;
+  bottom: 10px;
+  overflow: hidden;
+  border-radius: 8px;
+  box-shadow: var(--shadow-float);
 }
 
 .workflow-stage-card .df-handle {
@@ -3522,7 +3990,7 @@
 }
 
 .workflow-stage-card:is(:hover, .is-selected) .df-handle {
-  border-color: var(--tone-accent);
+  border-color: var(--tone-accent-strong);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3552,29 +4020,20 @@
   font-size: 11px;
 }
 
-/* Data: shared ledger tables, quiet text actions, and the import form.
-   Unlayered like the activity rail, so they win over the layered Data block
-   above. Panel composition lives with that block. */
-.data-ledger tbody tr:hover { background: var(--tone-hover); }
-.data-text-action { color: var(--tone-accent); font-size: 12px; min-height: 24px; text-underline-offset: 3px; }
+/* Data: the catalog rows, the streams ledger, quiet text actions, and the
+   import form. Panel composition lives with the Data block below. */
+.data-text-action { color: var(--tone-info-ink); font-size: 12px; min-height: 24px; text-underline-offset: 3px; }
 .data-text-action:hover { text-decoration: underline; }
 .data-text-action:disabled { color: var(--tone-ink-faint); opacity: 0.65; text-decoration: none; cursor: default; }
-.data-ledger { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
-.data-ledger th { position: sticky; top: 0; z-index: 1; padding: 9px 16px; background: var(--tone-sunken); color: var(--tone-ink-soft); font-size: 11px; font-weight: 500; text-align: left; border-bottom: 1px solid var(--tone-line); white-space: nowrap; }
-.data-ledger td { padding: 6px 16px; border-bottom: 1px solid var(--tone-line); vertical-align: middle; }
-.data-ledger th:first-child, .data-ledger td:first-child { padding-left: 20px; text-align: left; }
-.data-ledger th:last-child, .data-ledger td:last-child { padding-right: 20px; }
 
-.data-ledger th.text-right { text-align: right; }
-
-.data-import-action { padding: 6px 10px; border: 1px solid var(--tone-line); border-radius: 4px; font-size: 12px; background: var(--tone-surface); white-space: nowrap; }
+.data-import-action { padding: 6px 10px; border: 1px solid var(--tone-line); border-radius: 6px; font-size: 12.5px; background: var(--tone-surface); white-space: nowrap; }
 .data-import-action:disabled { opacity: .5; cursor: default; }
-.data-import-pane { overflow: auto; padding: 28px; max-width: 620px; width: 100%; }
-.data-import-pane h2 { font-size: 16px; font-weight: 600; }
-.data-import-pane p { font-size: 12px; color: var(--tone-ink-soft); line-height: 1.6; margin-top: 10px; overflow-wrap: anywhere; }
+.data-import-pane { overflow: auto; padding: 24px; max-width: 640px; width: 100%; animation: data-subject-enter 260ms var(--ease-out-expo) both; }
+.data-import-pane h2 { font-size: 19px; font-weight: 600; letter-spacing: -0.025em; }
+.data-import-pane p { font-size: 13px; color: var(--tone-ink-soft); line-height: 1.6; margin-top: 8px; overflow-wrap: anywhere; }
 .data-import-pane fieldset { display: flex; flex-direction: column; gap: 16px; margin: 24px 0; }
 .data-import-pane footer { display: flex; gap: 16px; margin-top: 20px; }
-.data-import-review { border-top: 1px solid var(--tone-line); padding-top: 16px; font-size: 12px; }
+.data-import-review { border: 1px solid var(--tone-line); border-radius: 10px; padding: 14px 16px; font-size: 12.5px; background: var(--tone-sidebar); }
 .data-import-review code { overflow-wrap: anywhere; }
 
 /* Recorded camera frames keep the dark camera mat inside light panel chrome.
@@ -3584,21 +4043,81 @@
 .episode-camera-image { flex: 1; min-height: 0; position: relative; background: var(--tone-camera); }
 .episode-camera-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
 .episode-camera-message { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; padding: 16px; text-align: center; font-size: 11px; background: var(--tone-camera); color: var(--tone-camera-ink); overflow: auto; }
-.episode-camera-message .data-text-action { color: var(--tone-accent-ink); text-decoration: underline; }
+.episode-camera-message .data-text-action { color: var(--tone-camera-ink); text-decoration: underline; }
 
-/* Catalog rows on the shared tree: an episode row is a small grid (ordinal,
-   name, duration, then a second line). The tree's own row rules are unlayered,
-   so these are too. */
-.data-episode .ui-tree-label { display: grid; grid-template-columns: 3.5rem minmax(0, 1fr) auto; align-items: baseline; column-gap: 8px; padding-block: 4px; color: var(--tone-ink); font-weight: 400; }
-.data-episode .ui-tree-label[aria-pressed="true"] .data-episode-id { color: var(--tone-accent); }
+/* Catalog rows on the shared tree. A dataset row names the dataset; an
+   episode row leads with what tells it apart and draws its length against
+   the longest one listed, so a runaway take or an aborted one shows without
+   opening it. */
+.data-rail-search { position: relative; min-width: 0; flex: 1 1 auto; }
+.data-rail-search .ui-input { width: 100%; padding-right: 28px; font-size: 12.5px; }
+.data-rail-search .ui-kbd { position: absolute; top: 50%; right: 5px; transform: translateY(-50%); pointer-events: none; }
+.data-rail-head .ui-button--outline { flex: 0 0 auto; white-space: nowrap; }
+
+.data-dataset > .ui-tree-row .ui-tree-label { gap: 8px; color: var(--tone-ink); font-weight: 500; }
+.data-dataset-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.data-dataset[data-current="true"] > .ui-tree-row .data-dataset-name { font-weight: 600; }
+.data-dataset-count { flex: 0 0 auto; color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+.data-dataset[data-selected="true"] > .ui-tree-row .data-dataset-count { color: var(--tone-accent-ink); }
+
+.data-episode .ui-tree-label { gap: 10px; padding-block: 5px; }
+.data-episode-body { display: grid; min-width: 0; flex: 1 1 auto; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 10px; row-gap: 3px; }
+.data-episode-head { min-width: 0; overflow: hidden; color: var(--tone-ink-soft); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.data-episode[data-labelled="true"] .data-episode-head { grid-column: 1 / -1; color: var(--tone-ink); }
+.data-episode-id { color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+.data-episode-head.data-episode-id { color: var(--tone-ink-soft); font-size: 12px; }
+.data-episode-sub { display: flex; min-width: 0; gap: 8px; color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 10.5px; white-space: nowrap; }
+.data-episode-length { position: relative; height: 3px; overflow: hidden; border-radius: 2px; background: var(--tone-line-soft); }
+.data-episode-length i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: color-mix(in srgb, var(--tone-ink) 30%, transparent); transition: background-color 120ms ease-out; }
+.data-episode > .ui-tree-row:hover .data-episode-length i { background: color-mix(in srgb, var(--tone-ink) 55%, transparent); }
+.data-episode-duration { color: var(--tone-ink-soft); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+.data-episode[data-selected="true"] :is(.data-episode-id, .data-episode-sub, .data-episode-duration) { color: var(--tone-accent-ink); }
+.data-episode[data-selected="true"] .data-episode-head.data-episode-id { color: var(--tone-ink); }
+.data-episode[data-selected="true"] .data-episode-length { background: rgb(16 16 16 / 0.1); }
+.data-episode[data-selected="true"] .data-episode-length i { background: var(--tone-ink); }
+
+.data-subject-path .data-subject-dataset { gap: 6px; flex: 0 1 auto; min-width: 0; color: var(--tone-ink-soft); font-size: 13px; font-weight: 450; }
+.data-subject-path .data-subject-dataset .ui-kind-mark { width: 14px; height: 14px; flex-basis: 14px; border-width: 1.25px; font-size: 8.5px; }
+
+.data-overview-head .data-overview-mark { width: 30px; height: 30px; flex-basis: 30px; border-width: 1.75px; border-radius: 8px; font-size: 14px; }
+.data-overview .data-overview-facts { margin: 0 24px; padding: 12px 0; border-top: 1px solid var(--tone-line-soft); border-bottom: 1px solid var(--tone-line-soft); }
+.data-overview .data-overview-facts { grid-auto-columns: minmax(max-content, 1fr); }
+
+.data-glance-name { display: inline-flex; align-items: center; gap: 10px; border: 0; padding: 4px 0; background: transparent; color: var(--tone-ink); font: inherit; font-size: 13.5px; font-weight: 560; cursor: pointer; }
+.data-glance-name:focus-visible { outline: 2px solid var(--tone-focus); outline-offset: 2px; border-radius: 4px; }
+.data-glance-row:hover .data-glance-name span { text-decoration: underline; text-decoration-color: var(--tone-line-strong); text-underline-offset: 3px; }
+.data-glance-span { color: var(--tone-ink-soft); font-family: var(--font-mono); font-size: 12px; white-space: nowrap; }
+
+.calibration-joint-check { display: inline-flex; width: 14px; flex: 0 0 14px; justify-content: center; color: var(--tone-line-strong); }
+.calibration-joint-check[data-ready="true"] { color: var(--tone-good); }
+.calibration-joint-check .ui-icon { width: 12px; height: 12px; }
+
+/* Streams ledger: mono measures on hairlines, cameras first. */
+.data-ledger-card { overflow: hidden; border: 1px solid var(--tone-line); border-radius: 8px; }
+.data-ledger { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12.5px; }
+.data-ledger th { position: sticky; top: 0; z-index: 1; padding: 8px 12px; border-bottom: 1px solid var(--tone-line); background: var(--tone-sunken); color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.03em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.data-ledger td { padding: 7px 12px; border-bottom: 1px solid var(--tone-line-soft); vertical-align: middle; }
+.data-ledger tbody tr:last-child td { border-bottom: 0; }
+.data-ledger tbody tr { transition: background-color 120ms ease-out; }
+.data-ledger tbody tr:hover { background: var(--tone-sidebar); }
+.data-ledger .is-number { text-align: right; }
+.data-ledger td.is-number { color: var(--tone-ink-soft); font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.data-ledger-stream { display: flex; align-items: center; gap: 8px; color: var(--tone-ink); font-family: var(--font-mono); font-size: 12px; }
+.data-ledger-glyph { display: inline-flex; color: var(--tone-ink-faint); }
+.data-ledger-glyph.is-camera { color: var(--tone-kind-camera); }
+.data-ledger-schema { color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 11.5px; }
+.data-ledger-all { color: var(--tone-ink-faint); }
+.data-ledger-partial { color: var(--tone-caution); font-weight: 500; }
 
 /* Inference metrics read label-left, value-right in one 48px row; the kit's
    strip stacks a fact, so the row form is restated here at the same layer. */
-.rollout-metric-strip > .rollout-metric { min-height: 3rem; flex-direction: row; align-items: center; gap: 8px; }
+.rollout-metric-strip > .rollout-metric { min-width: 0; min-height: 3rem; flex-direction: row; align-items: center; gap: 8px; padding-inline: 14px; }
+.rollout-metric-strip > .rollout-metric:first-child { padding-left: 0; }
+.rollout-metric-strip > .rollout-metric:last-child { padding-right: 0; }
 .rollout-metric dt { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rollout-metric dd { display: flex; flex-shrink: 0; align-items: baseline; gap: 4px; }
-.rollout-metric dd span { font-size: 12px; font-weight: 500; }
-.rollout-metric dd small { font-size: 10px; color: var(--tone-ink-faint); }
+.rollout-metric dd span { font-family: var(--font-mono); font-size: 13px; font-weight: 560; }
+.rollout-metric dd small { font-family: var(--font-mono); font-size: 11px; color: var(--tone-ink-faint); }
 
 /* Data activity ---------------------------------------------------------
    Datasets and episodes in a rail beside one subject: a dataset at a glance,
@@ -3627,24 +4146,25 @@
   }
 
   /* Rail ---------------------------------------------------------------- */
+  .data-catalog-panel {
+    background: var(--tone-sidebar);
+  }
+
   .data-rail {
     @apply flex h-full min-h-0 flex-col;
   }
 
   .data-rail-head {
-    @apply flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-2;
-  }
-
-  .data-rail-search {
-    @apply min-w-0 flex-1;
+    @apply flex shrink-0 items-center gap-1 border-b py-2 pl-2.5 pr-2;
+    border-color: var(--tone-line-soft);
   }
 
   .data-rail-scroll {
-    @apply min-h-0 flex-1 overflow-y-auto pb-3;
+    @apply min-h-0 flex-1 overflow-y-auto pb-4;
   }
 
   .data-rail-note {
-    @apply px-3 py-2 text-[11px] leading-snug text-ink-soft;
+    @apply px-4 py-2 text-[12px] leading-snug text-ink-faint;
     overflow-wrap: anywhere;
   }
 
@@ -3656,91 +4176,204 @@
     @apply text-danger;
   }
 
-  .data-dataset-count,
   .data-stream-count {
     @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
-  .data-episode-id {
-    @apply font-mono text-[10px] tabular-nums text-ink-faint;
-  }
-
-  .data-episode-head {
-    @apply min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-medium;
-  }
-
-  .data-episode-duration {
-    @apply font-mono text-[11px] tabular-nums text-ink-soft;
-  }
-
-  .data-episode-sub {
-    @apply col-start-2 col-end-4 flex min-w-0 gap-x-2 text-[10px] text-ink-faint;
-  }
-
-  .data-episode-sub > span {
-    @apply whitespace-nowrap;
-  }
-
-  .data-episode-tail {
-    @apply min-w-0 flex-1 overflow-hidden text-ellipsis;
-  }
-
   .data-rail-more {
-    @apply px-2 py-1;
+    @apply px-4 py-1.5;
   }
 
   /* Welcome and dataset overview ---------------------------------------- */
-  .data-welcome {
-    @apply m-auto max-w-[30rem] p-8;
+  /* Before a dataset is chosen: every dataset as a ledger row. */
+  .data-glance {
+    @apply flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-8 pt-6;
+    animation: data-subject-enter 260ms var(--ease-out-expo) both;
   }
 
-  /* Panel titles stay under the 16px readout ceiling; they are not page
-     headings because a tile happens to be wide. */
-  .data-welcome h2 {
-    @apply text-[16px] font-semibold;
+  .data-glance-head {
+    @apply mb-5;
   }
 
-  .data-welcome p {
-    @apply my-3 text-[12px] leading-relaxed text-ink-soft;
+  .data-glance-head h2 {
+    @apply text-[19px] font-semibold leading-tight tracking-[-0.025em];
+  }
+
+  .data-glance-head p {
+    @apply mt-1 max-w-[56ch] text-[13px] text-ink-faint;
+  }
+
+  .data-glance-row {
+    cursor: pointer;
+    animation: data-subject-enter 320ms var(--ease-out-expo) both;
+    animation-delay: calc(var(--i, 0) * 40ms);
   }
 
   .data-overview {
-    @apply flex min-h-0 flex-1 flex-col overflow-y-auto;
+    @apply flex min-h-0 flex-1 flex-col overflow-hidden;
+    animation: data-subject-enter 260ms var(--ease-out-expo) both;
+  }
+
+  .data-overview-body {
+    @apply min-h-0 flex-1 overflow-y-auto pb-8;
+  }
+
+  /* Where the episodes come from, in the walkthrough's footer voice. */
+  .data-overview-footer {
+    @apply flex min-h-8 shrink-0 items-center gap-3 border-t px-6 font-mono text-[11px] text-ink-faint;
+    border-color: var(--tone-line);
+    background: var(--tone-sidebar);
+  }
+
+  .data-overview-footer code {
+    @apply text-ink-soft;
   }
 
   .data-overview-head {
-    @apply shrink-0 px-5 pb-4 pt-5;
+    @apply flex shrink-0 items-center gap-3 px-6 pb-4 pt-6;
   }
 
   .data-overview-head h2 {
-    @apply text-[16px] font-semibold leading-tight;
+    @apply text-[19px] font-semibold leading-tight tracking-[-0.025em];
     overflow-wrap: anywhere;
   }
 
-  .data-overview-facts {
-    @apply mt-2 flex flex-wrap gap-1.5;
+  .data-overview-alert {
+    @apply mx-6 text-[12px] text-ink-faint;
   }
 
-  .data-overview-chip {
-    @apply rounded border border-line bg-sunken px-1.5 py-0.5 text-[11px] tabular-nums text-ink-soft;
+  .data-overview-alert[role="alert"] {
+    @apply text-danger;
   }
 
-  .data-overview-chip-alert {
-    @apply border-danger text-danger;
-    background: var(--tone-danger-soft);
+  .data-overview-section {
+    @apply px-6 pt-6;
   }
 
-  .data-overview-streams {
-    @apply min-h-0 border-t border-line;
+  .data-overview-section h3 {
+    @apply mb-3 text-[12.5px] font-semibold text-ink;
   }
 
-  .data-overview-streams h3 {
-    @apply px-5 pb-2 pt-4 text-[12px] font-semibold text-ink;
+  /* Episode lengths: one bar per slice, rising in as the counts arrive. */
+  .data-lengths {
+    @apply m-0;
+  }
+
+  .data-lengths-plot {
+    position: relative;
+    display: grid;
+    height: 104px;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
+    align-items: end;
+    gap: 3px;
+    padding-top: 22px;
+    border-bottom: 1px solid var(--tone-line);
+  }
+
+  .data-lengths-bin {
+    display: flex;
+    height: 100%;
+    align-items: flex-end;
+    cursor: default;
+  }
+
+  .data-lengths-bin i {
+    width: 100%;
+    min-height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: color-mix(in srgb, var(--tone-ink) 20%, transparent);
+    transform-origin: bottom;
+    animation: data-bar-rise 520ms var(--ease-out-expo) both;
+    animation-delay: calc(var(--i, 0) * 9ms);
+    transition: background-color 120ms ease-out;
+  }
+
+  .data-lengths-bin i[data-empty="true"] {
+    min-height: 0;
+  }
+
+  .data-lengths-bin:hover i {
+    background: var(--tone-ink);
+  }
+
+  .data-lengths-average {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    border-left: 1px dashed var(--tone-ink-faint);
+    pointer-events: none;
+  }
+
+  .data-lengths-average > span {
+    position: absolute;
+    top: 0;
+    left: 6px;
+    border: 1px solid var(--tone-line);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--tone-ink-soft);
+    background: var(--tone-surface);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+
+  .data-lengths-average[data-side="left"] > span {
+    right: 6px;
+    left: auto;
+  }
+
+  .data-lengths-axis {
+    @apply mt-1.5 flex justify-between font-mono text-[10.5px] tabular-nums text-ink-faint;
+  }
+
+  .data-lengths.is-loading {
+    height: 104px;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--tone-sunken) 0%, var(--tone-sidebar) 50%, var(--tone-sunken) 100%);
+    background-size: 200% 100%;
+    animation: data-shimmer 1.4s ease-in-out infinite;
+  }
+
+  @keyframes data-bar-rise {
+    from {
+      transform: scaleY(0);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .data-lengths-bin i,
+    .data-overview,
+    .data-glance,
+    .data-glance-row,
+    .data-plot {
+      animation: none;
+    }
+
+    .data-lengths.is-loading {
+      animation: none;
+    }
+  }
+
+  @keyframes data-shimmer {
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  @keyframes data-subject-enter {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
   }
 
   /* An open episode ----------------------------------------------------
      One line names where it is — its dataset, the way back, then the
-     episode — and what it holds; the inspection takes the rest. */
+     episode and its label — and what it holds; the inspection takes the
+     rest. */
   .data-episode-subject {
     @apply flex min-h-0 flex-1 flex-col overflow-y-auto;
   }
@@ -3752,36 +4385,38 @@
   /* One line whatever the label's length, so the inspection's room — and
      with it the arrangement — stays put from one episode to the next. */
   .data-subject-head {
-    @apply flex h-9 shrink-0 items-baseline gap-3 overflow-hidden border-b border-line px-3 pt-2.5;
+    @apply flex h-10 shrink-0 items-center gap-4 overflow-hidden border-b border-line bg-surface pl-3 pr-3;
   }
 
   .data-subject-path {
-    @apply flex shrink-0 items-baseline gap-1.5;
+    @apply flex min-w-0 items-center gap-2;
+    flex: 0 1 auto;
   }
 
   .data-subject-path h2 {
-    @apply whitespace-nowrap text-[12px] font-semibold tracking-[-0.01em] text-ink;
+    @apply shrink-0 whitespace-nowrap text-[13px] font-semibold tracking-[-0.01em] text-ink;
   }
 
   .data-subject-separator {
     @apply text-ink-faint;
   }
 
-  .data-subject-facts {
-    @apply flex min-w-0 items-baseline gap-x-2 whitespace-nowrap text-[11px] tabular-nums text-ink-soft;
-  }
 
-  .data-subject-facts > span {
-    @apply shrink-0;
+  .data-subject-facts {
+    @apply flex shrink-0 items-center gap-x-2 whitespace-nowrap font-mono text-[11.5px] tabular-nums text-ink-faint;
   }
 
   .data-subject-facts > span + span::before {
-    @apply mr-2 text-ink-faint;
+    @apply mr-2;
     content: "·";
   }
 
-  .data-subject-facts > .data-subject-label {
-    @apply min-w-0 shrink truncate font-medium text-ink;
+  .data-subject-keys {
+    @apply ml-auto flex shrink-0 items-center gap-1 text-[11px] text-ink-faint;
+  }
+
+  .data-subject-keys > span {
+    @apply ml-1;
   }
 
   /* Timeline ------------------------------------------------------------ */
@@ -3790,11 +4425,11 @@
   }
 
   .data-timeline:focus-visible {
-    box-shadow: inset 0 0 0 2px var(--tone-accent);
+    box-shadow: inset 0 0 0 2px var(--tone-focus);
   }
 
   .data-transport {
-    @apply flex min-h-9 shrink-0 items-center gap-2 border-b border-line px-2 text-[12px];
+    @apply flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-2.5 text-[12px];
   }
 
   /* A fixed slot, so Play sits in the same place for every episode name;
@@ -3825,8 +4460,8 @@
 
   .data-transport-play {
     @apply mx-0.5 rounded-full;
-    background: var(--tone-selected);
-    color: var(--tone-accent);
+    background: var(--tone-primary);
+    color: var(--tone-primary-ink);
   }
 
   /* The elapsed clock is the Studio's readout role: 16px, the visual
@@ -3837,7 +4472,7 @@
   }
 
   .data-transport-total {
-    @apply text-[11px] text-ink-faint;
+    @apply text-[11.5px] font-normal text-ink-faint;
   }
 
   .data-transport-speed-select {
@@ -3872,7 +4507,7 @@
   }
 
   .data-timeline-corner {
-    @apply flex h-8 items-center border-b border-r border-line px-1.5;
+    @apply flex h-9 items-center border-b border-r border-line px-2;
   }
 
   .data-stream-filter {
@@ -3880,11 +4515,13 @@
   }
 
   .data-timeline-scale {
-    @apply relative h-8 overflow-hidden border-b border-line bg-sunken;
+    @apply relative h-9 overflow-hidden border-b border-line;
+    background: var(--tone-sidebar);
   }
 
   .data-time-tick {
-    @apply pointer-events-none absolute inset-y-0 border-l border-line;
+    @apply pointer-events-none absolute inset-y-0 border-l;
+    border-color: var(--tone-line-soft);
   }
 
   .data-time-scrub,
@@ -3898,18 +4535,20 @@
   }
 
   .data-time-scrub:focus-visible + .data-timeline-handle {
-    box-shadow: 0 0 0 2px var(--tone-selected);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--tone-focus) 30%, transparent);
   }
 
   .data-timeline-handle {
     @apply pointer-events-none absolute bottom-0 top-0 z-10 w-px;
-    background: var(--tone-accent);
+    background: var(--tone-ink);
   }
 
   .data-timeline-handle::before {
     content: "";
-    @apply absolute -left-[5px] top-[3px] size-[11px] rounded-full;
+    @apply absolute -left-[6px] top-[4px] h-[14px] w-[13px] rounded-[4px];
+    border: 1.5px solid var(--tone-ink);
     background: var(--tone-accent);
+    box-shadow: 0 1px 3px rgb(16 16 16 / 0.2);
   }
 
   .data-timeline-rows {
@@ -3923,14 +4562,16 @@
   .data-timeline-cursor {
     @apply pointer-events-none absolute bottom-0 top-0 z-20 w-px;
     left: calc(var(--data-name-w, 16rem) + (100% - var(--data-name-w, 16rem)) * var(--playhead, 0));
-    background: var(--tone-accent);
+    background: var(--tone-ink);
     opacity: 0.85;
   }
 
   .data-stream-name,
   .data-field-name {
-    @apply flex min-w-0 items-center gap-1 border-b border-r border-line pr-2 text-[12px];
+    @apply flex min-w-0 items-center gap-1 border-b border-r pr-2.5 font-mono text-[11.5px];
     padding-left: 0.25rem;
+    border-bottom-color: var(--tone-line-soft);
+    border-right-color: var(--tone-line);
   }
 
   .data-stream-name {
@@ -3955,7 +4596,7 @@
   }
 
   .data-stream[data-kind="video"] .data-stream-kind {
-    color: var(--tone-stage-media);
+    color: var(--tone-kind-camera);
   }
 
   .data-stream-label {
@@ -3963,11 +4604,16 @@
   }
 
   .data-stream-label:hover {
-    @apply text-accent;
+    @apply text-ink;
   }
 
-  .data-stream-label[aria-pressed="true"] {
-    @apply font-medium text-accent;
+  .data-stream-label[aria-pressed="true"],
+  .data-stream[data-shown="true"] .data-stream-label {
+    @apply font-medium text-ink;
+  }
+
+  .data-stream-label {
+    @apply text-ink-soft;
   }
 
   .data-show-check {
@@ -3984,7 +4630,7 @@
   }
 
   .data-show-check:focus-visible {
-    outline: 2px solid var(--tone-accent);
+    outline: 2px solid var(--tone-focus);
     outline-offset: -2px;
   }
 
@@ -3999,22 +4645,27 @@
 
   .data-show-check[aria-checked="true"],
   .data-show-check[aria-checked="mixed"] {
-    color: var(--tone-accent);
+    color: var(--tone-ink);
   }
 
   .data-show-check[aria-checked="true"] rect {
-    fill: var(--tone-accent);
-    stroke: var(--tone-accent);
+    fill: var(--tone-primary);
+    stroke: var(--tone-primary);
   }
 
   .data-show-check[aria-checked="true"] path {
-    stroke: var(--tone-accent-ink);
+    stroke: var(--tone-primary-ink);
     stroke-width: 1.6;
   }
 
   .data-stream-track,
   .data-field-track {
-    @apply relative min-w-0 border-b border-line;
+    @apply relative min-w-0 border-b;
+    border-color: var(--tone-line-soft);
+  }
+
+  .data-stream-track > .data-track {
+    inset-block: 7px;
   }
 
   .data-stream-track {
@@ -4045,22 +4696,43 @@
     @apply block h-full w-full;
   }
 
-  /* Density is structure, so it draws in graphite; a dropout inside a dense
-     stream uses caution ochre. */
+  /* Density is structure, so it draws in graphite, quiet until the stream
+     is shown: a camera on screen takes the camera hue, a plotted stream
+     firms to ink. A dropout inside a dense stream stays caution. */
   .data-density path {
-    fill: var(--tone-ink-soft);
+    fill: var(--tone-ink);
   }
 
   .data-density-1 {
-    opacity: 0.22;
+    opacity: 0.08;
   }
 
   .data-density-2 {
-    opacity: 0.42;
+    opacity: 0.14;
   }
 
   .data-density-3 {
+    opacity: 0.2;
+  }
+
+  .data-stream[data-shown="true"] .data-density-1 {
+    opacity: 0.25;
+  }
+
+  .data-stream[data-shown="true"] .data-density-2 {
+    opacity: 0.45;
+  }
+
+  .data-stream[data-shown="true"] .data-density-3 {
     opacity: 0.7;
+  }
+
+  .data-stream[data-kind="video"][data-shown="true"] .data-density path:not(.data-density-gap) {
+    fill: var(--tone-kind-camera);
+  }
+
+  .data-stream[data-kind="video"][data-shown="true"] .data-density-3 {
+    opacity: 0.42;
   }
 
   .data-density path.data-density-gap {
@@ -4074,7 +4746,8 @@
   }
 
   .data-field-track {
-    @apply h-6 bg-sunken;
+    @apply h-6;
+    background: var(--tone-sidebar);
   }
 
   .data-field-group .data-field-label {
@@ -4136,16 +4809,18 @@
   }
 
   .data-plots-ruler {
-    @apply relative h-6 shrink-0 overflow-hidden border-b border-line bg-sunken;
+    @apply relative h-7 shrink-0 overflow-hidden border-b border-line;
+    background: var(--tone-sidebar);
   }
 
   .data-plots-tick {
-    @apply pointer-events-none absolute inset-y-0 border-l border-line;
+    @apply pointer-events-none absolute inset-y-0 border-l;
+    border-color: var(--tone-line-soft);
     left: calc(var(--data-readout-w) + var(--data-plot-left) + (100% - var(--data-readout-w) - var(--data-plot-left) - var(--data-plot-right)) * var(--x, 0));
   }
 
   .data-plots-tick span {
-    @apply absolute left-1 top-0.5 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint;
+    @apply absolute left-1.5 top-1.5 whitespace-nowrap font-mono text-[10.5px] tabular-nums text-ink-faint;
   }
 
   .data-plots-scroll {
@@ -4154,10 +4829,11 @@
 
   .data-plot {
     @apply border-b border-line;
+    animation: data-subject-enter 240ms var(--ease-out-expo) both;
   }
 
   .data-plot-head {
-    @apply flex min-h-8 items-center gap-1.5 px-2 text-[12px];
+    @apply flex min-h-9 items-center gap-2 px-3 font-mono text-[12px];
   }
 
   .data-plot-head .ui-icon {
@@ -4169,11 +4845,11 @@
   }
 
   .data-plot-meta {
-    @apply flex min-w-0 flex-1 items-center gap-2 text-[10px] text-ink-faint;
+    @apply flex min-w-0 flex-1 items-center gap-2 text-[10.5px] text-ink-faint;
   }
 
   .data-plot-loading {
-    @apply text-accent;
+    @apply text-ink-faint;
   }
 
   .data-plot-error {
@@ -4196,7 +4872,7 @@
   }
 
   .data-plot-readout {
-    @apply flex min-w-0 flex-col overflow-hidden px-2 pt-1.5;
+    @apply flex min-w-0 flex-col overflow-hidden px-3 pt-1.5;
   }
 
   .data-plot-readout-title {
@@ -4208,8 +4884,8 @@
   }
 
   .data-plot-trace {
-    @apply grid h-4 w-full items-center gap-1 text-left text-[10px] leading-4;
-    grid-template-columns: 0.5rem minmax(0, 1fr) auto;
+    @apply grid h-4 w-full items-center gap-1.5 rounded-[3px] px-0.5 text-left text-[10.5px] leading-4;
+    grid-template-columns: 0.625rem minmax(0, 1fr) auto;
   }
 
   .data-plot-trace:hover {
@@ -4221,7 +4897,7 @@
   }
 
   .data-plot-swatch {
-    @apply h-0.5 w-2 shrink-0;
+    @apply h-[3px] w-2.5 shrink-0 rounded-full;
   }
 
   .data-plot-trace-name {
@@ -4253,7 +4929,7 @@
 
   .data-plot-playhead {
     left: calc(var(--data-plot-left) + (100% - var(--data-plot-left) - var(--data-plot-right)) * var(--playhead, 0));
-    background: var(--tone-accent);
+    background: var(--tone-ink);
   }
 
   .data-plot-hover {
@@ -4429,9 +5105,9 @@
      tiles recede onto the sunken recess and carry their reason. A struck
      tile keeps its name legible: exclusion is a decision, not an error. */
   .curation-tile {
-    @apply relative min-w-0 overflow-hidden rounded border border-line bg-surface;
+    @apply relative min-w-0 overflow-hidden rounded-lg border border-line bg-surface;
     animation: curation-tile-enter 260ms var(--ease-out-expo) both;
-    animation-delay: calc(var(--tile, 0) * 12ms);
+    animation-delay: min(calc(var(--tile, 0) * 12ms), 240ms);
     transition: opacity 160ms var(--ease-out-expo), box-shadow 160ms var(--ease-out-expo),
       border-color 160ms var(--ease-out-expo);
   }
@@ -4451,7 +5127,7 @@
      hairline tinted by the removing rule, and the reason given a whole line. */
   .curation-tile[data-kept="false"] {
     background: var(--tone-sunken);
-    border-color: color-mix(in srgb, var(--tile-tone) 45%, var(--tone-line));
+    border-color: var(--tone-line-soft);
   }
 
   .curation-tile[data-kept="false"] .curation-tile-clock,
@@ -4460,8 +5136,8 @@
   }
 
   .curation-tile[data-selected="true"] {
-    border-color: var(--tone-accent);
-    box-shadow: inset 0 0 0 1px var(--tone-accent);
+    border-color: var(--tone-accent-strong);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-accent) 45%, transparent);
   }
 
   /* The rule under the pointer: its tiles rise in its tint, the rest fall
@@ -4516,12 +5192,22 @@
 
   /* The rule's words in the rule's wash, the same recipe as a result chip:
      text mixed 55% toward ink so it clears 4.5:1 on its 13% wash. */
+  /* The removing rule's words beside a dot of the rule's own tint: the
+     sheet of struck tiles stays quiet, and the tint still says which rule. */
   .curation-reason {
-    @apply inline-block min-w-0 flex-1 rounded px-1.5 py-px text-[10px] font-medium leading-4;
+    @apply inline-flex min-w-0 flex-1 items-baseline gap-1.5 text-[10.5px] leading-4 text-ink-soft;
     white-space: normal;
     overflow-wrap: anywhere;
-    color: color-mix(in srgb, var(--hue) 55%, var(--tone-ink));
-    background: color-mix(in srgb, var(--hue) 13%, transparent);
+  }
+
+  .curation-reason::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    flex: 0 0 6px;
+    translate: 0 -1px;
+    border-radius: 50%;
+    background: var(--hue);
   }
 
   .curation-reason-more {
@@ -4570,7 +5256,7 @@
   }
 
   .curation-episode-status[data-kept="true"] .curation-episode-dot {
-    background: var(--tone-accent);
+    background: var(--tone-good-dot);
   }
 
   .curation-episode-path {
@@ -4654,10 +5340,8 @@
   }
 }
 
-/* Unlayered on purpose, like the activity rail: `ui.css` ships unlayered, so
-   the shared action's inline-flex centring and nowrap would beat any layered
-   rule however specific. A tile is a whole small document, not a button
-   label; the filter is Workflow's compact segment in the same geometry. */
+/* A tile is a whole small document, not a button label: it drops the shared
+   action's inline-flex centring and nowrap. */
 .curation-tile .curation-tile-face {
   position: relative;
   display: flex;
@@ -4666,8 +5350,9 @@
   justify-content: flex-start;
   width: 100%;
   min-width: 0;
-  gap: 4px;
-  padding: 6px 8px;
+  gap: 5px;
+  padding: 8px 10px 9px;
+  border-radius: 0;
   text-align: left;
   white-space: normal;
 }
@@ -4679,9 +5364,10 @@
   position: absolute;
   left: 0;
   bottom: 0;
-  height: 2px;
+  height: 3px;
   width: var(--fill, 0%);
-  background: var(--tone-line-strong);
+  border-radius: 0 2px 0 0;
+  background: color-mix(in srgb, var(--tone-ink) 28%, transparent);
   transition: width 260ms var(--ease-out-expo);
 }
 
@@ -4704,12 +5390,12 @@
 .curation-steps { padding-inline: 0; padding-bottom: 0; gap: 0; }
 .curation-steps > .curation-section-title { padding: 0 12px 6px; }
 .curation-steps > .curation-section-note { padding: 0 12px 10px; }
-.curation-step { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 8px 12px 10px; background: var(--tone-surface); border-top: 1px solid var(--tone-line); transition: background-color 100ms ease-out; }
+.curation-step { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 10px 14px 12px; background: var(--tone-surface); border-top: 1px solid var(--tone-line-soft); transition: background-color 120ms ease-out; }
 .curation-step[data-hovered="true"] { background: var(--tone-hover); }
-.curation-step[data-selected="true"] { box-shadow: inset 2px 0 0 var(--tone-accent); }
+.curation-step[data-selected="true"] { background: var(--tone-selected); }
 .curation-step[data-dragging="true"] { z-index: 3; border-radius: 4px; box-shadow: 0 8px 20px rgb(0 0 0 / 0.12); }
 .curation-step-head { display: flex; min-height: 24px; align-items: center; gap: 8px; }
-.curation-step-title { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: -0.01em; color: var(--tone-ink); }
+.curation-step-title { margin: 0; font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; color: var(--tone-ink); }
 .curation-step-count { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--tone-ink-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .curation-step-tools { display: flex; align-items: center; gap: 1px; margin-left: auto; opacity: 0; transition: opacity 100ms ease-out; }
 .curation-step-count + .curation-step-tools { margin-left: 0; }
@@ -4726,9 +5412,9 @@
 .curation-transform-fields { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
 
 /* Add a step: one composer whose footer holds the kind picker and Add. */
-.curation-composer-box { display: flex; flex-direction: column; border: 1px solid var(--tone-line); border-radius: 4px; background: var(--tone-surface); transition: border-color 100ms ease-out, box-shadow 100ms ease-out; }
-.curation-composer-box:focus-within { border-color: var(--tone-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--tone-accent) 15%, transparent); }
-.curation-composer-input { display: block; width: 100%; min-height: 3.25rem; resize: none; border: 0; background: transparent; padding: 6px 8px; font: inherit; font-size: 12px; line-height: 16px; color: var(--tone-ink); outline: none; }
+.curation-composer-box { display: flex; flex-direction: column; border: 1px solid var(--tone-line); border-radius: 8px; background: var(--tone-surface); transition: border-color 100ms ease-out, box-shadow 100ms ease-out; }
+.curation-composer-box:focus-within { border-color: var(--tone-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-focus) 18%, transparent); }
+.curation-composer-input { display: block; width: 100%; min-height: 3.5rem; resize: none; border: 0; background: transparent; padding: 8px 10px; font: inherit; font-size: 13px; line-height: 18px; color: var(--tone-ink); outline: none; }
 .curation-composer-input::placeholder { color: var(--tone-ink-faint); }
 .curation-composer-actions { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-top: 1px solid var(--tone-line); }
 .curation-composer-actions .ui-button--solid { margin-left: auto; padding-inline: 10px; }
@@ -4744,7 +5430,7 @@
 .curation-pipeline-canvas { @apply relative w-full overflow-hidden rounded border border-line; height: 200px; background: var(--tone-viewport); }
 .curation-flow { width: 100%; height: 100%; }
 .curation-flow .df-node { padding: 0; border: none; background: transparent; box-shadow: none; animation: none; cursor: pointer; }
-.curation-flow .df-node:focus-visible { border-radius: 4px; outline: 2px solid var(--tone-accent); outline-offset: 2px; }
+.curation-flow .df-node:focus-visible { border-radius: 4px; outline: 2px solid var(--tone-focus); outline-offset: 2px; }
 .curation-flow .df-edge { animation: none; }
 .curation-flow .df-edge-path { stroke-width: 1.25; }
 .curation-flow .df-edge:hover .df-edge-path { stroke: var(--df-edge); }
@@ -4814,7 +5500,7 @@
 
 /* An identifier is not a task name: one mono line, cut at the right. */
 
-.curation-source-section[data-selected="true"] { outline: 1px solid var(--tone-accent); outline-offset: -1px; }
+.curation-source-section[data-selected="true"] { background: var(--tone-sidebar); }
 
 #curation-ordered-rules { position: relative; }
 
@@ -4825,17 +5511,21 @@
 /* Derived series extend the existing episode ruler and stream grid. */
 .data-numeric-track .data-numeric-name { height: auto; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 12px; gap: 4px; }
 .data-numeric-name strong { font-size: 11px; font-weight: 500; }
+/* A surface's interval row names itself the way a value row does, inset from
+   the edge rather than pressed against it. */
+.data-interval-name { padding-left: 12px; }
+.data-interval-name strong { font-size: 11px; font-weight: 500; }
 .data-numeric-name output { font-size: 12px; font-variant-numeric: tabular-nums; }
 .data-numeric-name span { font-size: 10px; color: var(--tone-ink-soft); }
 .data-stream-track.data-numeric-plot { height: 104px; overflow: hidden; }
 .data-numeric-plot svg { display: block; width: 100%; height: 100%; }
-.data-numeric-line { fill: none; stroke: var(--tone-accent); stroke-width: 1.5; }
+.data-numeric-line { fill: none; stroke: var(--tone-info); stroke-width: 1.5; }
 .data-numeric-cutoff { stroke: var(--tone-ink-soft); stroke-width: 1; stroke-dasharray: 4 3; }
 .data-numeric-overlay { fill: var(--tone-danger-soft); }
 .data-numeric-overlay[data-kind="unknown"] { fill: var(--tone-caution-soft); }
 .data-numeric-interval { position: absolute; bottom: 0; height: 12px; padding: 0; border: 0; border-top: 1px solid var(--tone-danger); background: var(--tone-danger-soft); cursor: pointer; }
 .data-numeric-interval[data-kind="unknown"] { border-color: var(--tone-caution); background: var(--tone-caution-soft); }
-.data-numeric-interval:hover, .data-numeric-interval:focus-visible { height: 18px; outline: 1px solid var(--tone-accent); outline-offset: -1px; }
+.data-numeric-interval:hover, .data-numeric-interval:focus-visible { height: 18px; outline: 1px solid var(--tone-ink); outline-offset: -1px; }
 .data-numeric-status { margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
 .data-numeric-status[role="alert"] { color: var(--tone-danger); }
 

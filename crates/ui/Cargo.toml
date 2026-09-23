@@ -24,5 +24,7 @@ web-sys = { version = "0.3", features = [
     "Node",
     "NodeList",
     "PointerEvent",
+    "ScrollIntoViewOptions",
+    "ScrollLogicalPosition",
     "Window",
 ] }

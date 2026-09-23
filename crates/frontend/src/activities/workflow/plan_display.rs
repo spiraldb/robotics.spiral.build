@@ -28,9 +28,9 @@ use spiral_robotics_ui::{
     NoticeTone,
 };
 
-const STAGE_WIDTH: f64 = 224.0;
+const STAGE_WIDTH: f64 = 192.0;
 const STAGE_HEIGHT: f64 = 92.0;
-const MIN_READABLE_ZOOM: f64 = 0.7;
+const MIN_READABLE_ZOOM: f64 = 0.8;
 
 #[component]
 pub(super) fn WorkflowPlanDisplay(
@@ -100,7 +100,7 @@ impl From<&WorkflowGraph> for PlanFlow {
                 })
             })
             .collect::<Vec<_>>();
-        let order = CardGraph::left_to_right(28.0, 56.0).rank_layout(&mut nodes, &edges);
+        let order = CardGraph::left_to_right(28.0, 44.0).rank_layout(&mut nodes, &edges);
         for (node, rank) in nodes.iter_mut().zip(order) {
             node.data.order = rank;
         }

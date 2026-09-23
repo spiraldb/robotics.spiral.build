@@ -4,8 +4,10 @@
 
 mod chip;
 mod facts;
+mod kind_mark;
 mod notice;
 
 pub use chip::{Chip, ChipProps, ChipTone};
 pub use facts::{Fact, FactLayout, FactList, FactListProps, FactProps};
+pub use kind_mark::{KindMark, KindMarkProps};
 pub use notice::{EmptyState, EmptyStateProps, Notice, NoticeProps, NoticeTone};

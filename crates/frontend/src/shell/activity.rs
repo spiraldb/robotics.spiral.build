@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 /// Every top-level Studio view, including Settings.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) enum Activity {
-    #[default]
     Live,
+    #[default]
     Data,
     Workflow,
     Curation,
@@ -26,6 +26,39 @@ impl Activity {
             Self::Rollout,
             Self::Settings,
         ]
+    }
+
+    /// The activities the top bar lists, in shortcut order: the data core
+    /// first, what consumes it next, and the bench that records into it
+    /// last. Settings sits apart at the end of the bar.
+    pub(super) const fn primary() -> [Self; 6] {
+        [
+            Self::Data,
+            Self::Workflow,
+            Self::Curation,
+            Self::Training,
+            Self::Rollout,
+            Self::Live,
+        ]
+    }
+
+    /// The key that opens this activity from anywhere on the page.
+    pub(super) const fn shortcut(self) -> &'static str {
+        match self {
+            Self::Data => "1",
+            Self::Workflow => "2",
+            Self::Curation => "3",
+            Self::Training => "4",
+            Self::Rollout => "5",
+            Self::Live => "6",
+            Self::Settings => ",",
+        }
+    }
+
+    pub(super) fn from_shortcut(key: &str) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|activity| activity.shortcut() == key)
     }
 
     pub(super) const fn label(self) -> &'static str {

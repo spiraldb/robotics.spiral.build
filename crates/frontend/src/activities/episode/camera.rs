@@ -42,8 +42,14 @@ pub(in crate::activities) fn EpisodeCamera(
         request.topic().topic(),
         request.revision().variant()
     );
+    let panel = dioxus_workbench::PanelContext::current();
+    let activity = crate::shell::activity::WorkspaceActivity::current();
+    // Only a camera on screen holds the clock: one waiting behind another tab
+    // would otherwise keep playback buffering until someone looked at it.
     use_effect(move || {
-        if *video.state().read() == UseResourceState::Pending {
+        if !(panel.geometry().visible() && activity.is_active()) {
+            status.forget(&status_topic);
+        } else if *video.state().read() == UseResourceState::Pending {
             status.report(&status_topic, FeedState::Loading);
         } else if matches!(&*video.read(), Some(Err(_))) {
             status.report(&status_topic, FeedState::Unavailable);
@@ -122,7 +128,11 @@ fn CameraFrames(
         let seconds = clock.seconds();
         let playback = playback();
         let Some(canvas) = canvas() else { return };
-        if !visible || failure.peek().is_some() {
+        if !visible {
+            status.clone().forget(&drive_topic);
+            return;
+        }
+        if failure.peek().is_some() {
             return;
         }
         // A playhead before the first recorded frame holds that frame; an

@@ -227,7 +227,7 @@ fn SourceSection(controller: CurationController) -> Element {
                             option { value: "{label}", selected: true, "{label} (not in catalog)" }
                         }
                         for item in items {
-                            option { value: "{item.selection().label()}", selected: current.as_deref() == Some(item.selection().label().as_str()), "{item.selection().label()}" }
+                            option { value: "{item.selection().label()}", selected: current.as_deref() == Some(item.selection().label().as_str()), title: "{item.selection().sql_name()}", "{item.selection().display_name()}" }
                         }
                     }
                 },

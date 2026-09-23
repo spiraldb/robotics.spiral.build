@@ -263,7 +263,8 @@ fn ControlSection(
                 ModeButton {
                     id: "motor-mode-release",
                     purpose: ActionPurpose::Release,
-                    checked: !holding && !teleop,
+                    // An arm the Studio cannot hear from is in no known mode.
+                    checked: telemetry.is_some() && !holding && !teleop,
                     class: "control-segment",
                     aria_label: "Release motor torque",
                     disabled: focused.is_none() || telemetry.is_none(),

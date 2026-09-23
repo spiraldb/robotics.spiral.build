@@ -29,7 +29,7 @@
     height: 5px;
     flex-shrink: 0;
     border-radius: 999px;
-    background: var(--tone-accent);
+    background: var(--tone-info);
     animation: explore-canvas-pulse 1.6s ease-in-out infinite;
   }
 
@@ -164,7 +164,7 @@
 /* Selecting a node is the way into every workspace, so the card is the button
    and it shows where the keyboard is. */
 .explore-canvas-node.workflow-stage-card:focus-visible {
-  outline: 2px solid var(--tone-accent);
+  outline: 2px solid var(--tone-focus);
   outline-offset: 1px;
 }
 
@@ -196,8 +196,8 @@
 }
 
 .explore-canvas-node .explore-canvas-add-action:hover {
-  border-color: var(--tone-accent);
-  color: var(--tone-accent);
+  border-color: var(--tone-line-strong);
+  color: var(--tone-ink);
   background: var(--tone-surface);
 }
 

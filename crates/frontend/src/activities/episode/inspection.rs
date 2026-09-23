@@ -18,6 +18,7 @@ use super::{
     timeline::{EpisodeTimeline, EvidenceTrack},
     transport::EpisodeTransport,
 };
+use crate::components::icons::CameraStreamIcon;
 use crate::components::timeline::KeyboardFocus;
 use dioxus::prelude::*;
 use dioxus_workbench::{Panel, PanelId, PanelLayout, PanelWorkspace};
@@ -217,11 +218,12 @@ fn InspectionDock(
         .map(|camera| {
             Panel::new(
                 EpisodeArrangement::camera(camera.key()),
-                format!("Camera · {}", catalog.camera_title(camera)),
+                catalog.camera_title(camera),
                 "episode-view-0",
                 rsx! { EpisodeCamera { request: camera.read().clone(), transport: transport.clone() } },
             )
             .with_closable(true)
+            .with_tab_icon(rsx! { CameraStreamIcon {} })
             .with_class("episode-camera-dock")
         })
         .collect::<Vec<_>>();

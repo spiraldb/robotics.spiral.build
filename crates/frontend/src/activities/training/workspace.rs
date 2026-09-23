@@ -16,9 +16,10 @@ use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::training::{
     TrainingCheckpoint, TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
+use crate::components::icons::TrainingIcon;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
-    ConfirmationResponse, DeleteIcon, Disclosure, Fact, FactLayout, FactList, Field,
+    ConfirmationResponse, DeleteIcon, Disclosure, EmptyState, Fact, FactLayout, FactList, Field,
     InlineConfirmation, Select, TextInput, TextInputKind,
 };
 
@@ -88,8 +89,8 @@ fn TrainingPanels(
                 "Run",
                 "training-runs",
                 rsx! {
-                    section { class: "training-run-empty",
-                        strong { "Select a run to inspect its progress and checkpoints" }
+                    EmptyState { icon: rsx! { TrainingIcon {} }, title: "No run open",
+                        p { "Choose a run from Runs, or start one from Setup, to follow its learning curve, resources, and checkpoints here." }
                     }
                 },
             )
@@ -330,9 +331,9 @@ fn TrainingRunControl(
                             controller.edit_config(move |config| config.set_dataset_id(value));
                         },
                         for id in dataset_ids.iter() {
-                            // Stored bare, written the way every other activity
-                            // writes it.
-                            option { value: "{id}", "dataset_{id}" }
+                            // Stored bare, and named the way every other
+                            // activity names it.
+                            option { value: "{id}", title: "dataset_{id}", "{id}" }
                         }
                     }
                 }
@@ -575,9 +576,8 @@ fn TrainingHistory(
     rsx! {
         section { class: "training-history-panel studio-workbench-scroll",
             if history.is_empty() {
-                div { class: "training-history-empty",
-                    strong { "No runs yet" }
-                    span { "Training history will appear here." }
+                EmptyState { title: "No runs yet",
+                    p { "Every training run lands here with its curve and checkpoints." }
                 }
             }
             for run in history {

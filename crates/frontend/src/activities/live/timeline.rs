@@ -254,7 +254,7 @@ fn FollowLiveControl(transport: LiveTransport) -> Element {
     rsx! {
         Button {
             purpose: ActionPurpose::Sync, variant: ButtonVariant::Outline,
-            class: if follow_live { "text-accent" } else { "" }, aria_pressed: follow_live,
+            class: if follow_live { "text-accent-ink" } else { "" }, aria_pressed: follow_live,
             title: if follow_live { "Stop following the newest recorded sample" } else { "Return the playhead to the newest recorded sample" },
             onclick: move |_| transport.set_follow_live(!follow_live),
             if follow_live { "Following live" } else { "Follow live" }

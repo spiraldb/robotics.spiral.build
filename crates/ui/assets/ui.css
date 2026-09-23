@@ -1,40 +1,59 @@
+/* The kit lives in its own cascade layer, above a host's reset (`base`) and
+   below a host's own components, so a surface restyles a primitive with an
+   ordinary rule instead of fighting the kit's specificity. */
+@layer theme, base, ui;
+
+@layer ui {
 :root {
-  --ui-ink: var(--tone-ink, #37352f);
-  --ui-ink-soft: var(--tone-ink-soft, #65645f);
-  --ui-ink-faint: var(--tone-ink-faint, #71706c);
+  --ui-ink: var(--tone-ink, #121212);
+  --ui-ink-soft: var(--tone-ink-soft, #4d4d4a);
+  --ui-ink-faint: var(--tone-ink-faint, #6e6e6a);
   --ui-surface: var(--tone-surface, #ffffff);
-  --ui-sunken: var(--tone-sunken, #f7f7f5);
-  --ui-hover: var(--tone-hover, rgb(55 53 47 / 0.06));
+  --ui-sunken: var(--tone-sunken, #f5f5f2);
+  --ui-sidebar: var(--tone-sidebar, #fbfbfa);
+  --ui-hover: var(--tone-hover, rgb(16 16 16 / 0.045));
   /* One step past hover, for the moment a control is held down and for the
-     hover of something already selected. Without it a pressed toggle lightened
-     on hover instead of darkening, which reads as the selection letting go. */
-  --ui-pressed: var(--tone-pressed, rgb(55 53 47 / 0.11));
-  --ui-line: var(--tone-line, #e8e8e6);
-  --ui-accent: var(--tone-accent, #0868b8);
-  --ui-accent-ink: var(--tone-accent-ink, #ffffff);
+     hover of something already selected. */
+  --ui-pressed: var(--tone-pressed, rgb(16 16 16 / 0.085));
+  --ui-line: var(--tone-line, #e2e2de);
+  --ui-line-soft: var(--tone-line-soft, #ececea);
+  --ui-line-strong: var(--tone-line-strong, #c9c9c4);
+  --ui-primary: var(--tone-primary, #121212);
+  --ui-primary-hover: var(--tone-primary-hover, #2b2b2a);
+  --ui-primary-ink: var(--tone-primary-ink, #ffffff);
+  --ui-accent: var(--tone-accent, #cee562);
+  --ui-accent-strong: var(--tone-accent-strong, #a3bc2a);
+  --ui-accent-wash: var(--tone-accent-wash, #f2f8d6);
+  --ui-accent-line: var(--tone-accent-line, #d6e595);
+  --ui-accent-ink: var(--tone-accent-ink, #4a5610);
+  --ui-selected: var(--tone-selected, #eef5cf);
+  --ui-focus: var(--tone-focus, #5971fd);
+  --ui-info: var(--tone-info, #5971fd);
+  --ui-info-ink: var(--tone-info-ink, #3a4ec4);
+  --ui-info-wash: var(--tone-info-wash, #edf0ff);
+  --ui-info-line: var(--tone-info-line, #d8defe);
   /* Text set on the camera mat: status and errors inside a recorded camera. */
   --ui-camera-ink: rgb(255 255 255 / 0.72);
-  --ui-selected: var(--tone-selected, rgb(8 104 184 / 0.1));
-  --ui-selected-strong: rgb(8 104 184 / 0.16);
-  --ui-line-strong: var(--tone-line-strong, #cfcfcb);
-  --ui-danger: var(--tone-danger, #be423d);
-  --ui-danger-soft: var(--tone-danger-soft, rgb(190 66 61 / 0.1));
-  --ui-caution: var(--tone-caution, #7d6a41);
-  --ui-caution-soft: var(--tone-caution-soft, #fbf3db);
-  --ui-good: var(--tone-good, #3a7654);
-  --ui-good-soft: var(--tone-good-soft, rgb(58 118 84 / 0.1));
-  /* The halo a focused field wears beside its accent border: the ring at
-     15%, so a form of six fields does not become six blue boxes. */
-  --ui-focus-halo: rgb(8 104 184 / 0.15);
-  --ui-font-mono: var(--font-mono, ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace);
+  --ui-danger: var(--tone-danger, #c4302b);
+  --ui-danger-soft: var(--tone-danger-soft, #fbeaea);
+  --ui-danger-line: var(--tone-danger-line, #f1cfcd);
+  --ui-caution: var(--tone-caution, #a64b13);
+  --ui-caution-soft: var(--tone-caution-soft, #fff1e8);
+  --ui-caution-line: var(--tone-caution-line, #f6d6c2);
+  --ui-good: var(--tone-good, #5b7400);
+  --ui-good-soft: var(--tone-good-soft, #f2f8d6);
+  --ui-focus-halo: color-mix(in srgb, var(--ui-focus) 18%, transparent);
+  --ui-font-mono: var(--font-mono, "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace);
   /* Entrances and settle-ins; the host's one easing when it names one. */
   --ui-ease-out: var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
-  --ui-backdrop: rgb(55 53 47 / 0.32);
-  --ui-dialog-shadow: 0 18px 48px rgb(55 53 47 / 0.24);
-  --ui-radius: 4px;
-  --ui-target-compact: 24px;
-  --ui-target-standard: 28px;
-  --ui-target-prominent: 32px;
+  --ui-backdrop: rgb(16 16 16 / 0.28);
+  --ui-shadow-raised: var(--shadow-raised, 0 1px 2px rgb(16 16 16 / 0.08), 0 0 0 1px rgb(16 16 16 / 0.05));
+  --ui-shadow-dialog: var(--shadow-dialog, 0 24px 64px rgb(16 16 16 / 0.22), 0 0 0 1px rgb(16 16 16 / 0.06));
+  --ui-radius: 6px;
+  --ui-radius-small: 4px;
+  --ui-target-compact: 26px;
+  --ui-target-standard: 30px;
+  --ui-target-prominent: 34px;
 }
 
 .ui-icon {
@@ -42,7 +61,7 @@
   height: 0.875rem;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.35;
+  stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -51,74 +70,68 @@
   transform: rotate(90deg);
 }
 
+/* Buttons -----------------------------------------------------------------
+   Six-pixel corners, 12px medium labels. The filled action is ink; an
+   outlined one is paper on a hairline that firms on hover. */
 .ui-button {
   display: inline-flex;
   min-width: 0;
   cursor: pointer;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 6px;
   border: 1px solid transparent;
   border-radius: var(--ui-radius);
-  padding-inline: 6px;
+  padding-inline: 8px;
   color: var(--ui-ink);
   background: transparent;
   font: inherit;
   font-size: 12px;
+  font-weight: 500;
   line-height: 1.2;
   text-align: center;
   text-decoration: none;
   white-space: nowrap;
-  transition: color 100ms ease-out, background-color 100ms ease-out,
-    border-color 100ms ease-out, opacity 100ms ease-out;
+  transition: color 120ms ease-out, background-color 120ms ease-out,
+    border-color 120ms ease-out, box-shadow 120ms ease-out, opacity 120ms ease-out;
 }
 
 /* `:where()` costs no specificity, so an unselected control keeps the plain
-   hover while a selected one is free to answer the pointer in its own colour
-   further down. Without the exclusion the neutral wash landed on top of every
-   selected state and hovering the current mode greyed it out. */
+   hover while a selected one answers the pointer in its own colour below. */
 .ui-button:where(:not([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"], [aria-current="page"])):hover:not(:disabled):not([aria-disabled="true"]) {
   color: var(--ui-ink);
   background: var(--ui-hover);
 }
 
-/* A control that is being pressed says so. One tonal step is the whole
-   gesture — no scale, no shadow, nothing that moves a neighbour. */
+/* A control being pressed says so with one tonal step; nothing moves. */
 .ui-button:active:not(:disabled):not([aria-disabled="true"]) {
   background: var(--ui-pressed);
 }
 
-/* Only for the actions that wrap a real control — the file picker hides its
-   input inside the label, so the label has to carry that input's focus. A bare
-   button never matches, which is what stopped a ring appearing on a button
-   merely because something inside it was focused. */
+/* Only for the actions that wrap a real control: the file picker hides its
+   input inside the label, so the label carries that input's focus. */
 .ui-button:focus-visible,
 .ui-button:has(input):focus-within {
-  outline: 2px solid var(--ui-accent);
+  outline: 2px solid var(--ui-focus);
   outline-offset: 1px;
 }
 
-/* Faded to 0.44 a disabled control was unreadable, and this interface puts the
-   reason a control is unavailable in the control's own label. Dimmed enough to
-   read as unavailable, legible enough to still be read. */
+/* Dimmed enough to read as unavailable, legible enough to still be read:
+   this interface puts the reason in the control's own label. */
 .ui-button:disabled,
 .ui-button[aria-disabled="true"] {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
-/*
-  A filled action that cannot be taken stops being filled. Faded, "Run policy"
-  and "Run training" stayed the largest and most saturated thing on their
-  panel — a pale blue block that still looked like the way forward while the
-  sentence underneath explained it was not. Emptied out, the panel's primary
-  action is visibly waiting, and the reason beside it is what the eye lands on.
-*/
+/* A filled action that cannot be taken stops being filled, so the reason
+   beside it is what the eye lands on. */
 .ui-button--solid:disabled,
 .ui-button--solid[aria-disabled="true"] {
   border-color: var(--ui-line);
   color: var(--ui-ink-faint);
   background: var(--ui-sunken);
+  box-shadow: none;
   opacity: 1;
 }
 
@@ -126,12 +139,47 @@
   cursor: wait;
 }
 
+/* An unavailable destructive action is unavailable first: faint ink, not a
+   faded red that still reads as a warning. */
+.ui-button:is(:disabled, [aria-disabled="true"]):is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+) {
+  color: var(--ui-ink-faint);
+}
+
+.ui-button--solid:is(:disabled, [aria-disabled="true"]):is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+) {
+  border-color: var(--ui-line);
+  background: var(--ui-sunken);
+}
+
 .ui-button--compact { min-height: var(--ui-target-compact); }
-.ui-button--standard { min-height: var(--ui-target-standard); }
-.ui-button--prominent { min-height: var(--ui-target-prominent); }
+.ui-button--standard { min-height: var(--ui-target-standard); padding-inline: 10px; }
+.ui-button--prominent { min-height: var(--ui-target-prominent); padding-inline: 12px; font-size: 13px; }
 
 .ui-button--outline {
   border-color: var(--ui-line);
+  color: var(--ui-ink-soft);
+  background: var(--ui-surface);
+}
+
+.ui-button--outline:where(:not([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"])):hover:not(:disabled):not([aria-disabled="true"]) {
+  border-color: var(--ui-line-strong);
+  color: var(--ui-ink);
+  background: var(--ui-surface);
+}
+
+.ui-button--outline:active:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--ui-sunken);
 }
 
 .ui-button--outline,
@@ -141,21 +189,37 @@
 }
 
 .ui-button--solid {
-  color: var(--ui-accent-ink);
-  background: var(--ui-accent);
+  border-color: var(--ui-primary);
+  color: var(--ui-primary-ink);
+  background: var(--ui-primary);
+  font-weight: 560;
 }
 
 .ui-button--solid:hover:not(:disabled):not([aria-disabled="true"]) {
-  color: var(--ui-accent-ink);
-  background: color-mix(in srgb, var(--ui-accent) 92%, black);
+  border-color: var(--ui-primary-hover);
+  color: var(--ui-primary-ink);
+  background: var(--ui-primary-hover);
+}
+
+.ui-button--solid:active:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--ui-primary);
 }
 
 .ui-button--link {
   padding-inline: 0;
   color: var(--ui-ink-soft);
+  font-weight: 400;
 }
 
 .ui-button--link:hover:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--ui-ink);
+  background: transparent;
+  text-decoration: underline;
+  text-decoration-color: var(--ui-line-strong);
+  text-underline-offset: 3px;
+}
+
+.ui-button--link:active:not(:disabled):not([aria-disabled="true"]) {
   background: transparent;
 }
 
@@ -163,7 +227,7 @@
   width: var(--ui-target-compact);
   min-width: var(--ui-target-compact);
   padding: 0;
-  color: var(--ui-ink-soft);
+  color: var(--ui-ink-faint);
 }
 
 .ui-button--row {
@@ -174,86 +238,82 @@
 .ui-button--tab {
   border-radius: 0;
   justify-content: flex-start;
-  color: var(--ui-ink-soft);
+  color: var(--ui-ink-faint);
   text-align: start;
 }
 
 .ui-button--segment {
-  min-height: 32px;
-  border-radius: 0;
+  min-height: 28px;
+  border-radius: 5px;
   color: var(--ui-ink-soft);
-  background: var(--ui-surface);
+  background: transparent;
 }
 
-/*
-  Selection is a wash and a weight. It is never a ring.
+/* A toggle that is on is pressed in: a recessed cell with an inner
+   hairline, in ink. */
+.ui-button:where(:not(.ui-button--solid)):is([aria-pressed="true"], [aria-checked="true"]) {
+  color: var(--ui-ink);
+  background: var(--ui-sunken);
+  box-shadow: inset 0 0 0 1px var(--ui-line);
+  font-weight: 560;
+}
 
-  One rule used to draw a one-pixel accent box around anything reporting
-  itself as pressed, selected, checked, current, or merely open, and because
-  almost everything in a workbench is one of those, the workspace became a
-  field of small blue rectangles: the arm switcher, the grid toggle, the scene
-  legend, every panel tab, and every disclosure that happened to be expanded.
-  A tinted cell among untinted neighbours already reads as the chosen one, and
-  giving the ring back to focus is what lets a keyboard be seen at all.
-*/
-.ui-button:where(:not(.ui-button--solid)):is(
-  [aria-pressed="true"],
-  [aria-selected="true"],
-  [aria-checked="true"],
-  [aria-current="page"]
-) {
-  color: var(--ui-accent);
+.ui-button:where(:not(.ui-button--solid)):is([aria-pressed="true"], [aria-checked="true"]):hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--ui-pressed);
+}
+
+/* The chosen item of a list is where you are: the lime wash. Selection is
+   a wash and a weight, never a ring, so the ring stays free for focus. */
+.ui-button:where(:not(.ui-button--solid)):is([aria-selected="true"], [aria-current="page"]) {
+  color: var(--ui-accent-ink);
   background: var(--ui-selected);
-  font-weight: 500;
+  box-shadow: none;
+  font-weight: 560;
 }
 
-.ui-button:where(:not(.ui-button--solid)):is(
-  [aria-pressed="true"],
-  [aria-selected="true"],
-  [aria-checked="true"],
-  [aria-current="page"]
-):hover:not(:disabled):not([aria-disabled="true"]) {
-  background: var(--ui-selected-strong);
+.ui-button:where(:not(.ui-button--solid)):is([aria-selected="true"], [aria-current="page"]):hover:not(:disabled):not([aria-disabled="true"]) {
+  background: color-mix(in srgb, var(--ui-accent) 45%, var(--ui-surface));
 }
 
-/*
-  A tab is the exception, because the strip it sits in is already telling the
-  story: the active tab's own row lifts to paper while the bar behind it stays
-  recessed, and a two-pixel accent edge caps it. The label's job is only to
-  stop being secondary — tinting it as well put a blue lozenge inside a white
-  tab inside a grey bar, three treatments for one fact.
-*/
+.ui-button--outline:where(:not(.ui-button--solid)):is([aria-pressed="true"], [aria-checked="true"]) {
+  border-color: var(--ui-line-strong);
+  box-shadow: none;
+}
+
+.ui-button--outline:where(:not(.ui-button--solid)):is([aria-selected="true"]) {
+  border-color: var(--ui-accent-line);
+  background: var(--ui-accent-wash);
+}
+
+/* A tab's strip already tells the story; the label only stops being
+   secondary. */
 .ui-button--tab:is([aria-selected="true"], [aria-current="page"]) {
   color: var(--ui-ink);
   background: transparent;
-  font-weight: 500;
+  font-weight: 560;
 }
 
 .ui-button--tab:is([aria-selected="true"], [aria-current="page"]):hover:not(:disabled) {
   background: transparent;
 }
 
-/* Open is not selected. A disclosure that is showing its contents has a
-   chevron that already turned; colouring it as well claimed the operator had
-   chosen it over its neighbours. */
+/* Open is not selected: the chevron already turned. */
 .ui-button[aria-expanded="true"]:not([aria-selected="true"]):not([aria-pressed="true"]) {
   color: var(--ui-ink);
   background: var(--ui-hover);
 }
 
-/*
-  The mode group is three cells on white, so the selected one needs a wash and
-  not a fill. Every one of these used to paint itself solid alarm red when
-  chosen — including Release, which is the state where the motors are *off* —
-  and a colour that is on in all three positions has stopped saying anything.
-  Blue is the current mode; red below is reserved for the one fact in this
-  group worth a colour.
-*/
+/* A segment group is a recessed track; the chosen cell is lifted paper. */
 .ui-button--segment[aria-checked="true"] {
   border-color: transparent;
-  color: var(--ui-accent);
-  background: var(--ui-selected);
-  font-weight: 500;
+  color: var(--ui-ink);
+  background: var(--ui-surface);
+  box-shadow: var(--ui-shadow-raised);
+  font-weight: 560;
+}
+
+.ui-button--segment[aria-checked="true"]:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--ui-surface);
 }
 
 .ui-button:is(
@@ -266,9 +326,8 @@
   color: var(--ui-danger);
 }
 
-/* A filled danger button is a commitment: the confirmation that actually
-   deletes the episode or drops the torque. The mode group no longer borrows
-   it — choosing a mode is not the same gesture as confirming one. */
+/* A filled danger button is a commitment: the confirmation that deletes the
+   episode or drops the torque. */
 .ui-button--solid:is(
   [data-action="delete"],
   [data-action="discard"],
@@ -276,35 +335,32 @@
   [data-action="release"],
   [data-action="stop"]
 ) {
-  border-color: transparent;
-  color: var(--ui-accent-ink);
+  border-color: var(--ui-danger);
+  color: var(--ui-primary-ink);
   background: var(--ui-danger);
 }
 
-/* Torque is live: the arm is holding itself against gravity and will move on
-   command. That is the one condition in the mode group worth a colour, and the
-   wash carries it at the same size and position as the other two cells, so the
-   control does not resize when the bench becomes dangerous. */
+/* Torque is live: the arm holds itself against gravity and moves on command.
+   That is the one condition in the mode group worth a colour. */
 .ui-button--segment:is([data-action="hold"], [data-action="teleoperate"])[aria-checked="true"] {
-  border-color: transparent;
   color: var(--ui-danger);
-  background: var(--ui-danger-soft);
+  background: var(--ui-surface);
+  box-shadow: 0 1px 2px rgb(16 16 16 / 0.08), 0 0 0 1px var(--ui-danger-line);
 }
 
 .ui-button--segment:is([data-action="hold"], [data-action="teleoperate"])[aria-checked="true"]:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--ui-danger) 16%, transparent);
+  background: var(--ui-danger-soft);
 }
 
-/* Selected, this is the resting state — the motors are off and nothing is
-   about to happen. The red belongs to the press that gets you here, which is
-   the unchecked cell above, not to sitting in it. */
+/* Selected, Release is the resting state: the motors are off. The red
+   belongs to the press that gets you here, not to sitting in it. */
 .ui-button--segment[data-action="release"][aria-checked="true"] {
-  color: var(--ui-accent);
+  color: var(--ui-ink);
 }
 
 .ui-hover-action {
-  transition: color 100ms ease-out, background-color 100ms ease-out,
-    opacity 100ms ease-out;
+  transition: color 120ms ease-out, background-color 120ms ease-out,
+    opacity 120ms ease-out;
 }
 
 .ui-hover-action-host:not(:hover):not(:focus-within) .ui-hover-action {
@@ -326,6 +382,16 @@
   background: var(--ui-danger-soft);
 }
 
+.ui-button--outline:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+):hover:not(:disabled) {
+  border-color: var(--ui-danger-line);
+}
+
 .ui-button--solid:is(
   [data-action="delete"],
   [data-action="discard"],
@@ -333,8 +399,9 @@
   [data-action="release"],
   [data-action="stop"]
 ):hover:not(:disabled) {
-  color: var(--ui-accent-ink);
-  background: color-mix(in srgb, var(--ui-danger) 92%, black);
+  border-color: color-mix(in srgb, var(--ui-danger) 88%, black);
+  color: var(--ui-primary-ink);
+  background: color-mix(in srgb, var(--ui-danger) 88%, black);
 }
 
 .ui-file-input {
@@ -350,10 +417,11 @@
 .ui-mode-group {
   display: grid;
   overflow: hidden;
-  gap: 1px;
+  gap: 2px;
   border: 1px solid var(--ui-line);
-  border-radius: var(--ui-radius);
-  background: var(--ui-line);
+  border-radius: 8px;
+  padding: 2px;
+  background: var(--ui-sunken);
 }
 
 .ui-toggle {
@@ -362,8 +430,8 @@
   cursor: pointer;
   align-items: center;
   gap: 6px;
-  color: var(--ui-ink);
-  font-size: 11px;
+  color: var(--ui-ink-soft);
+  font-size: 12px;
 }
 
 .ui-toggle[aria-disabled="true"] {
@@ -375,12 +443,38 @@
   width: 14px;
   height: 14px;
   margin: 0;
-  accent-color: var(--ui-accent);
+  accent-color: var(--ui-primary);
 }
 
 .ui-toggle:focus-within {
-  outline: 2px solid var(--ui-accent);
+  outline: 2px solid var(--ui-focus);
   outline-offset: 2px;
+  border-radius: var(--ui-radius-small);
+}
+
+/* A keyboard shortcut named beside the action it takes. */
+.ui-kbd {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid var(--ui-line-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--ui-radius-small);
+  padding-inline: 4px;
+  color: var(--ui-ink-faint);
+  background: var(--ui-sunken);
+  font-family: var(--ui-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.ui-button--solid .ui-kbd {
+  border-color: rgb(255 255 255 / 0.22);
+  color: rgb(255 255 255 / 0.72);
+  background: rgb(255 255 255 / 0.1);
+  box-shadow: none;
 }
 
 .ui-inline-confirmation {
@@ -390,7 +484,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
-  border-top: 1px solid var(--ui-line);
+  border-top: 1px solid var(--ui-danger-line);
   padding-block: 6px;
   color: var(--ui-danger);
   background: var(--ui-danger-soft);
@@ -401,8 +495,8 @@
   flex: 1 1 18rem;
   margin: 0;
   overflow-wrap: anywhere;
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .ui-confirmation-actions {
@@ -411,7 +505,7 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 6px;
 }
 
 .ui-dialog-backdrop {
@@ -419,13 +513,14 @@
   z-index: 98;
   inset: 0;
   background: var(--ui-backdrop);
+  animation: ui-fade-in 160ms ease-out both;
 }
 
 .ui-dialog-surface {
-  border-radius: 6px;
+  border-radius: 10px;
   color: var(--ui-ink);
   background: var(--ui-surface);
-  box-shadow: var(--ui-dialog-shadow);
+  box-shadow: var(--ui-shadow-dialog);
 }
 
 .ui-blocking-confirmation {
@@ -439,23 +534,38 @@
   transform: translate(-50%, -50%);
   flex-direction: column;
   overflow: auto;
+  animation: ui-dialog-enter 200ms var(--ui-ease-out) both;
+}
+
+@keyframes ui-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes ui-dialog-enter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 6px)) scale(0.985);
+  }
 }
 
 .ui-blocking-confirmation header {
-  padding: 12px 14px 8px;
+  padding: 16px 18px 8px;
 }
 
 .ui-blocking-confirmation h2 {
   margin: 0;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 .ui-confirmation-copy {
-  padding: 0 14px 12px;
+  padding: 0 18px 14px;
+  color: var(--ui-ink-soft);
   overflow-wrap: anywhere;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -464,27 +574,33 @@
 }
 
 .ui-confirmation-consequence {
-  margin-top: 8px !important;
-  padding: 7px 8px;
+  margin-top: 10px !important;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-danger-line);
   border-radius: var(--ui-radius);
   color: var(--ui-danger);
   background: var(--ui-danger-soft);
 }
 
 .ui-blocking-confirmation footer {
-  padding: 8px 14px;
+  padding: 10px 18px;
   border-top: 1px solid var(--ui-line);
+  background: var(--ui-sidebar);
+  border-radius: 0 0 10px 10px;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .ui-button {
     transition: none;
   }
+
+  .ui-blocking-confirmation {
+    animation: ui-fade-in 120ms ease-out both;
+  }
 }
 
 /* A square action keeps whatever fill its variant gave it; only the box
-   changes. The send control inside the Assistant composer is a filled 24px
-   square, which the quiet Icon variant cannot be. */
+   changes. */
 .ui-button--square {
   width: var(--ui-target-compact);
   min-width: var(--ui-target-compact);
@@ -504,7 +620,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ui-icon--spin {
-    animation: none;
+    animation-duration: 2400ms;
   }
 }
 
@@ -534,9 +650,9 @@
 .ui-field {
   display: flex;
   min-width: 0;
-  gap: 4px;
+  gap: 5px;
   color: var(--ui-ink-soft);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 16px;
 }
 
@@ -551,11 +667,11 @@
 .ui-field--inline {
   flex-direction: row;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .ui-field--inline > .ui-field-label {
-  flex: 0 0 4rem;
+  flex: 0 0 4.5rem;
 }
 
 .ui-field--inline > :is(.ui-input, .ui-select) {
@@ -567,8 +683,8 @@
   min-width: 0;
 }
 
-/* One box for text entry and choice: 24px, paper on a hairline, 4px radius,
-   6px inside. Focus is the accent border with its soft halo. */
+/* One box for text entry and choice: paper on a hairline, six-pixel
+   corners. Focus is the blue border with its soft halo. */
 .ui-input,
 .ui-select {
   box-sizing: border-box;
@@ -577,19 +693,25 @@
   margin: 0;
   border: 1px solid var(--ui-line);
   border-radius: var(--ui-radius);
-  padding: 0 6px;
+  padding: 0 8px;
   color: var(--ui-ink);
   background: var(--ui-surface);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.2;
   outline: none;
-  transition: border-color 100ms ease-out, box-shadow 100ms ease-out;
+  transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
 }
 
 .ui-select {
   cursor: pointer;
+  appearance: none;
+  padding-right: 24px;
   text-overflow: ellipsis;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%236e6e6a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 6.5 3 3 3-3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 14px;
 }
 
 .ui-input::placeholder {
@@ -602,16 +724,17 @@
 }
 
 .ui-input:focus-visible,
-.ui-select:focus-visible {
-  border-color: var(--ui-accent);
-  box-shadow: 0 0 0 2px var(--ui-focus-halo);
+.ui-select:focus-visible,
+.ui-input:focus {
+  border-color: var(--ui-focus);
+  box-shadow: 0 0 0 3px var(--ui-focus-halo);
 }
 
 .ui-input:disabled,
 .ui-select:disabled {
   cursor: not-allowed;
   color: var(--ui-ink-faint);
-  background: var(--ui-sunken);
+  background-color: var(--ui-sunken);
 }
 
 .ui-input[aria-invalid="true"] {
@@ -621,30 +744,31 @@
 /* Numbers are data: mono and tabular, so a column of thresholds lines up. */
 .ui-input--numeric {
   font-family: var(--ui-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
 /* Facts -------------------------------------------------------------------
-   A 10px faint label and the value it names. Layout is the only thing that
-   changes between a stat strip and an inspector. */
+   A label and the value it names. A strip or tile set reads as an
+   instrument: small upper-case labels over mono values. An inspector reads
+   as sentences. */
 .ui-facts {
   display: grid;
   margin: 0;
   color: var(--ui-ink);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .ui-facts dt {
   color: var(--ui-ink-faint);
-  font-size: 10px;
-  line-height: 16px;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .ui-facts dd {
   min-width: 0;
   margin: 0;
-  line-height: 16px;
+  line-height: 18px;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
@@ -655,8 +779,8 @@
 
 .ui-facts--columns {
   grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 12px;
-  row-gap: 4px;
+  column-gap: 16px;
+  row-gap: 6px;
 }
 
 .ui-facts--columns > .ui-fact {
@@ -668,8 +792,12 @@
 }
 
 .ui-facts--tiles {
-  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-line-soft);
 }
 
 .ui-facts--strip {
@@ -682,12 +810,34 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+}
+
+.ui-facts--tiles > .ui-fact {
+  padding: 8px 10px;
+  background: var(--ui-surface);
+}
+
+:is(.ui-facts--tiles, .ui-facts--strip) dt {
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+:is(.ui-facts--tiles, .ui-facts--strip) dd {
+  overflow: hidden;
+  font-family: var(--ui-font-mono);
+  font-size: 12px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ui-facts--strip > .ui-fact {
-  padding-inline: 12px;
-  border-right: 1px solid var(--ui-line);
+  padding-inline: 14px;
+  border-right: 1px solid var(--ui-line-soft);
 }
 
 .ui-facts--strip > .ui-fact:first-child {
@@ -705,7 +855,7 @@
 .ui-disclosure {
   min-width: 0;
   color: var(--ui-ink-soft);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .ui-disclosure-summary {
@@ -715,11 +865,12 @@
   gap: 4px;
   margin-inline-start: -4px;
   border-radius: var(--ui-radius);
-  padding-inline: 4px 6px;
+  padding-inline: 4px 8px;
   color: var(--ui-ink-soft);
   cursor: pointer;
   list-style: none;
   user-select: none;
+  transition: color 120ms ease-out, background-color 120ms ease-out;
 }
 
 .ui-disclosure-summary::-webkit-details-marker {
@@ -732,13 +883,13 @@
 }
 
 .ui-disclosure-summary:focus-visible {
-  outline: 2px solid var(--ui-accent);
+  outline: 2px solid var(--ui-focus);
   outline-offset: 1px;
 }
 
 .ui-disclosure-summary > .ui-icon {
   flex-shrink: 0;
-  transition: transform 100ms ease-out;
+  transition: transform 160ms var(--ui-ease-out);
 }
 
 .ui-disclosure[open] > .ui-disclosure-summary > .ui-icon {
@@ -755,64 +906,84 @@
 .ui-disclosure > :is(pre, code) {
   display: block;
   max-height: 18rem;
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   overflow: auto;
+  border: 1px solid var(--ui-line-soft);
   border-radius: var(--ui-radius);
-  padding: 6px 8px;
+  padding: 8px 10px;
   color: var(--ui-ink-soft);
   background: var(--ui-sunken);
   font-family: var(--ui-font-mono);
-  font-size: 10px;
-  line-height: 16px;
+  font-size: 11px;
+  line-height: 17px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 /* Chip --------------------------------------------------------------------
-   One word of state on a tonal wash; per the Exceptional-Status Rule it is
-   rendered only while its condition matters. */
+   One word of state: mono on a tinted wash behind a hairline of the same
+   hue. Rendered only while its condition matters. */
 .ui-chip {
   display: inline-flex;
-  min-height: 18px;
+  min-height: 20px;
   align-items: center;
-  gap: 4px;
-  border-radius: var(--ui-radius);
-  padding: 0 4px;
+  gap: 5px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-small);
+  padding: 0 6px;
   color: var(--ui-ink-soft);
-  background: var(--ui-hover);
+  background: var(--ui-surface);
+  font-family: var(--ui-font-mono);
   font-size: 11px;
   line-height: 1.2;
   white-space: nowrap;
 }
 
-.ui-chip--accent {
-  color: var(--ui-accent);
-  background: var(--ui-selected);
+.ui-chip--accent,
+.ui-chip--good {
+  border-color: var(--ui-accent-line);
+  color: var(--ui-accent-ink);
+  background: var(--ui-accent-wash);
 }
 
 .ui-chip--caution {
+  border-color: var(--ui-caution-line);
   color: var(--ui-caution);
   background: var(--ui-caution-soft);
 }
 
 .ui-chip--danger {
+  border-color: var(--ui-danger-line);
   color: var(--ui-danger);
   background: var(--ui-danger-soft);
 }
 
-.ui-chip--good {
-  color: var(--ui-good);
-  background: var(--ui-good-soft);
+/* Kind mark ---------------------------------------------------------------
+   One mono letter in a thin rounded outline of its hue. */
+.ui-kind-mark {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-items: center;
+  border: 1.5px solid var(--ui-kind-hue, var(--ui-ink-faint));
+  border-radius: 4px;
+  color: var(--ui-kind-hue, var(--ui-ink-faint));
+  font-family: var(--ui-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
 }
 
 /* Notices and empty states ------------------------------------------------ */
 .ui-notice {
   flex-shrink: 0;
   min-width: 0;
-  padding: 6px 12px;
+  padding: 8px 14px;
   color: var(--ui-ink-soft);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: 12px;
+  line-height: 17px;
   overflow-wrap: anywhere;
 }
 
@@ -826,8 +997,8 @@
   background: var(--ui-danger-soft);
 }
 
-/* A panel with nothing to show says so in its centre: a glyph, one 12px
-   title, and a sentence or two at most 46 characters wide. */
+/* A panel with nothing to show says so in its centre: a glyph, one title,
+   and a sentence or two. */
 .ui-empty {
   display: flex;
   height: 100%;
@@ -836,30 +1007,36 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  padding: 24px;
+  gap: 5px;
+  padding: 28px;
   text-align: center;
+  animation: ui-fade-in 240ms ease-out both;
 }
 
 .ui-empty > .ui-icon {
-  width: 20px;
-  height: 20px;
-  margin-bottom: 4px;
+  width: 30px;
+  height: 30px;
+  margin-bottom: 8px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  padding: 7px;
   color: var(--ui-ink-faint);
+  background: var(--ui-surface);
 }
 
 .ui-empty > strong {
   color: var(--ui-ink);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .ui-empty p {
-  max-width: 46ch;
+  max-width: 44ch;
   margin: 0;
   color: var(--ui-ink-faint);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .ui-empty--quiet p {
@@ -867,12 +1044,12 @@
 }
 
 .ui-empty > .ui-button {
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
 /* Side sheet --------------------------------------------------------------
    The docked inspector: 320px, at most 45% of its tile, a left hairline,
-   its own scroll, entering from 6px right. */
+   its own scroll, entering from 8px right. */
 .ui-side-sheet {
   display: flex;
   width: 20rem;
@@ -882,13 +1059,13 @@
   overflow-y: auto;
   border-left: 1px solid var(--ui-line);
   background: var(--ui-surface);
-  animation: ui-side-sheet-enter 180ms var(--ui-ease-out) both;
+  animation: ui-side-sheet-enter 220ms var(--ui-ease-out) both;
 }
 
 @keyframes ui-side-sheet-enter {
   from {
     opacity: 0;
-    translate: 6px 0;
+    translate: 8px 0;
   }
 }
 
@@ -897,14 +1074,15 @@
   top: 0;
   z-index: 1;
   display: flex;
-  min-height: 36px;
+  min-height: 40px;
   flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   border-bottom: 1px solid var(--ui-line);
-  padding: 0 6px 0 12px;
-  background: var(--ui-surface);
+  padding: 0 8px 0 14px;
+  background: color-mix(in srgb, var(--ui-surface) 94%, transparent);
+  backdrop-filter: blur(8px);
 }
 
 .ui-side-sheet-heading h3 {
@@ -913,19 +1091,22 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
 
 .ui-side-sheet-heading h3:focus-visible {
-  outline: 2px solid var(--ui-accent);
+  outline: 2px solid var(--ui-focus);
   outline-offset: 3px;
-  border-radius: var(--ui-radius);
+  border-radius: var(--ui-radius-small);
 }
 
 .ui-side-sheet-count {
   color: var(--ui-ink-faint);
+  font-family: var(--ui-font-mono);
+  font-size: 11px;
   font-weight: 400;
 }
 
@@ -933,19 +1114,33 @@
   display: flex;
   flex-shrink: 0;
   align-items: center;
-  gap: 1px;
+  gap: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-side-sheet {
+    animation: ui-fade-in 120ms ease-out both;
+  }
+
+  .ui-empty,
+  .ui-dialog-backdrop {
+    animation: none;
+  }
 }
 
 /* Tree --------------------------------------------------------------------
-   Rows the keyboard walks. One row is one surface: hover and selection wash
-   it edge to edge, and the chevron and label inside draw no boxes of their
-   own. A branch row leads with its chevron; a root leaf keeps that column
-   empty so labels align, and nested rows start under their parent's name. */
+   Rows the keyboard walks. One row is one surface with softened corners:
+   hover washes it, selection fills it with lime, and the chevron and label
+   inside draw no boxes of their own. */
 .ui-tree,
 .ui-tree-group {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.ui-tree {
+  padding-block: 4px;
 }
 
 .ui-tree-item {
@@ -956,38 +1151,48 @@
   display: flex;
   min-height: 28px;
   align-items: center;
-  padding-right: 8px;
-  transition: background-color 100ms ease-out;
+  margin: 1px 6px;
+  border-radius: 5px;
+  padding-right: 6px;
+  color: var(--ui-ink-soft);
+  transition: background-color 120ms ease-out, color 120ms ease-out;
 }
 
 .ui-tree-row:hover {
+  color: var(--ui-ink);
   background: var(--ui-hover);
 }
 
 .ui-tree-item[data-selected="true"] > .ui-tree-row {
-  background: var(--ui-selected);
+  color: var(--ui-ink);
+  background: var(--ui-accent);
 }
 
 .ui-tree-item[data-selected="true"] > .ui-tree-row:hover {
-  background: var(--ui-selected-strong);
+  background: color-mix(in srgb, var(--ui-accent) 88%, var(--ui-ink));
 }
 
 .ui-tree-expander,
 .ui-tree-indent {
-  flex: 0 0 var(--ui-target-compact);
-  margin-left: 4px;
+  flex: 0 0 20px;
+  margin-left: 2px;
 }
 
 .ui-tree-expander {
   display: inline-flex;
-  height: var(--ui-target-compact);
+  height: 22px;
   align-items: center;
   justify-content: center;
   border: 0;
+  border-radius: 4px;
   padding: 0;
   color: var(--ui-ink-faint);
   background: transparent;
   cursor: pointer;
+}
+
+.ui-tree-expander .ui-icon {
+  transition: transform 160ms var(--ui-ease-out);
 }
 
 .ui-tree-expander:hover {
@@ -1000,20 +1205,20 @@
   min-width: 0;
   min-height: 28px;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   border: 0;
-  padding: 0 6px;
-  color: var(--ui-ink);
+  padding: 0 4px;
+  color: inherit;
   background: transparent;
   font: inherit;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 400;
   text-align: start;
   cursor: pointer;
 }
 
 .ui-tree-label[aria-pressed="true"] {
-  color: var(--ui-accent);
+  color: var(--ui-ink);
 }
 
 .ui-tree-label .ui-icon {
@@ -1024,9 +1229,9 @@
 /* The ring sits inside the row so a focused row never overflows the rail. */
 .ui-tree-label:focus-visible,
 .ui-tree-expander:focus-visible {
-  outline: 2px solid var(--ui-accent);
+  outline: 2px solid var(--ui-focus);
   outline-offset: -2px;
-  border-radius: var(--ui-radius);
+  border-radius: 5px;
 }
 
 .ui-tree-group .ui-tree-indent {
@@ -1034,11 +1239,31 @@
 }
 
 .ui-tree-group > .ui-tree-item > .ui-tree-row {
-  padding-left: 28px;
+  padding-left: 24px;
 }
 
 .ui-tree-group .ui-tree-group > .ui-tree-item > .ui-tree-row {
-  padding-left: 52px;
+  padding-left: 44px;
+}
+
+/* An opened branch deals its rows in, top to bottom. */
+.ui-tree-group > .ui-tree-item {
+  animation: ui-tree-row-enter 220ms var(--ui-ease-out) both;
+}
+
+.ui-tree-group > .ui-tree-item:nth-child(2) { animation-delay: 12ms; }
+.ui-tree-group > .ui-tree-item:nth-child(3) { animation-delay: 24ms; }
+.ui-tree-group > .ui-tree-item:nth-child(4) { animation-delay: 36ms; }
+.ui-tree-group > .ui-tree-item:nth-child(5) { animation-delay: 48ms; }
+.ui-tree-group > .ui-tree-item:nth-child(6) { animation-delay: 60ms; }
+.ui-tree-group > .ui-tree-item:nth-child(7) { animation-delay: 72ms; }
+.ui-tree-group > .ui-tree-item:nth-child(n + 8) { animation-delay: 84ms; }
+
+@keyframes ui-tree-row-enter {
+  from {
+    opacity: 0;
+    translate: 0 -3px;
+  }
 }
 
 /* Reorder -----------------------------------------------------------------
@@ -1055,7 +1280,8 @@
   left: 12px;
   display: none;
   height: 2px;
-  background: var(--ui-accent);
+  border-radius: 999px;
+  background: var(--ui-accent-strong);
   pointer-events: none;
 }
 
@@ -1086,7 +1312,7 @@
 }
 
 .ui-reorder-handle:focus-visible {
-  outline: 2px solid var(--ui-accent);
+  outline: 2px solid var(--ui-focus);
   outline-offset: 1px;
 }
 
@@ -1094,11 +1320,14 @@
   .ui-input,
   .ui-select,
   .ui-tree-row,
-  .ui-disclosure-summary > .ui-icon {
+  .ui-disclosure-summary,
+  .ui-disclosure-summary > .ui-icon,
+  .ui-tree-expander .ui-icon {
     transition: none;
   }
 
-  .ui-side-sheet {
+  .ui-tree-group > .ui-tree-item {
     animation: none;
   }
+}
 }

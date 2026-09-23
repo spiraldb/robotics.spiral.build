@@ -49,7 +49,7 @@ pub(super) fn EpisodeSheet(
                         span { class: "curation-episode-dot", "aria-hidden": "true" }
                         if verdict.kept() { "Kept" } else { "Excluded" }
                     }
-                    h4 { id: inline.then_some(EPISODE_HEADING_ID), tabindex: "-1", class: "curation-episode-title", "{tile.label()}" }
+                    h4 { id: inline.then_some(EPISODE_HEADING_ID), tabindex: "-1", class: "curation-episode-title", "{tile.title()}" }
                     if let Some(uri) = episode.source_uri() {
                         p { class: "curation-episode-path", "{uri}" }
                     }

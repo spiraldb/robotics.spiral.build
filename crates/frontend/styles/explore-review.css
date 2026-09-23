@@ -84,7 +84,7 @@
     align-items: center;
     gap: 8px;
     color: var(--tone-ink-soft);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 10px;
     font-variant-numeric: tabular-nums;
   }
@@ -215,7 +215,7 @@
 
   .explore-entries-group[aria-current="true"] .explore-entries-heading {
     background: var(--tone-selected);
-    color: var(--tone-accent);
+    color: var(--tone-accent-ink);
   }
 
   .explore-entries-heading-name {
@@ -225,13 +225,13 @@
 
   .explore-entries-heading-count {
     color: var(--tone-ink-soft);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 10px;
     font-variant-numeric: tabular-nums;
   }
 
   .explore-entries-group[aria-current="true"] .explore-entries-heading-count {
-    color: var(--tone-accent);
+    color: var(--tone-accent-ink);
   }
 
   /* The whole row is the target. Reaching only the description text meant a
@@ -265,7 +265,6 @@
 
   .explore-entry[aria-current="true"] {
     background: var(--tone-selected);
-    box-shadow: inset 2px 0 0 var(--tone-accent);
   }
 
   .explore-entry-words {
@@ -294,7 +293,7 @@
     gap: 8px;
     overflow: hidden;
     color: var(--tone-ink-soft);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 10px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -306,7 +305,7 @@
     width: 3.25rem;
     flex-shrink: 0;
     color: var(--tone-ink);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
     text-align: right;

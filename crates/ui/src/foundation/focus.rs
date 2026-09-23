@@ -34,13 +34,15 @@ pub(crate) enum RovingStep {
     Last,
 }
 
-/// What arriving in a field does with the text already in it.
+/// What arriving at an element does.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FocusReach {
-    /// Leave the caret where the browser puts it.
+    /// Focus it and leave the caret where the browser puts it.
     Caret,
-    /// Select the whole value, for a field opened to be replaced.
+    /// Focus it and select the whole value, for a field opened to be replaced.
     SelectAll,
+    /// Scroll it into view without taking focus from where it is.
+    Reveal,
 }
 
 /// The one owner of focus movement.
@@ -62,6 +64,12 @@ impl BrowserFocus {
     /// appending to it.
     pub fn select_after_render(id: String) {
         Self::reach(id, FocusReach::SelectAll);
+    }
+
+    /// Scroll an element into view after a render without moving focus, so
+    /// a keyboard shortcut that changed the selection keeps its own keys.
+    pub fn reveal_after_render(id: String) {
+        Self::reach(id, FocusReach::Reveal);
     }
 
     fn reach(id: String, reach: FocusReach) {
@@ -86,6 +94,12 @@ impl BrowserFocus {
         else {
             return false;
         };
+        if reach == FocusReach::Reveal {
+            let options = web_sys::ScrollIntoViewOptions::new();
+            options.set_block(web_sys::ScrollLogicalPosition::Nearest);
+            element.scroll_into_view_with_scroll_into_view_options(&options);
+            return true;
+        }
         if element.focus().is_err() {
             return false;
         }

@@ -381,7 +381,7 @@ pub(super) fn RolloutWorkbench(
                     p { class: "rollout-blocker", "{reason}" }
                 }
                 if rollout.phase() == RolloutPhase::Failed && let Some(reason) = rollout.message().as_ref() {
-                    p { class: "rollout-blocker", "{reason}" }
+                    p { class: "rollout-blocker rollout-failure", "{reason}" }
                 }
             }
         }

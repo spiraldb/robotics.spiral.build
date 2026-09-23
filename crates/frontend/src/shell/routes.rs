@@ -10,19 +10,19 @@ use crate::activities::settings::panel::SettingsWorkspace;
 use crate::activities::training::workspace::TrainingWorkspace;
 use crate::activities::workflow::workspace::WorkflowWorkspace;
 use crate::shell::activity::Activity;
-use crate::shell::frame::ActivityRail;
+use crate::shell::frame::StudioTopBar;
 use crate::shell::project::ProjectSelection;
 use crate::shell::state::StudioProjectState;
 use spiral_robotics_common::project::ProjectKey;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const ECHARTS_RUNTIME: &str = "https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js";
-const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2337352f'/%3E%3Cpath d='M9 23V13l7-5 7 5v10' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E";
+const FAVICON: Asset = asset!("/assets/favicon.svg");
 
 #[derive(Clone, Routable, Debug, PartialEq)]
 pub(crate) enum StudioRoute {
     #[layout(StudioShell)]
-    #[redirect("/", || StudioRoute::Live {})]
+    #[redirect("/", || StudioRoute::Data {})]
     #[route("/live", SelectedActivityRoute)]
     Live {},
     #[route("/data", SelectedActivityRoute)]
@@ -132,7 +132,7 @@ fn ProjectStudioShell(project: ProjectKey) -> Element {
         div { class: "studio-shell studio-shell-v2",
             div { class: "studio-shell-background",
                 main { class: "studio-v2-body studio-route-layout",
-                    ActivityRail {
+                    StudioTopBar {
                         activity: route.activity(),
                         on_activity: move |next| {
                             project.close_notifications();

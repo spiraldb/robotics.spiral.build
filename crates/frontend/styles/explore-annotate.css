@@ -35,7 +35,7 @@
   .explore-annotate-facts {
     margin: 0;
     color: var(--tone-ink-soft);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 10px;
     font-variant-numeric: tabular-nums;
     user-select: text;

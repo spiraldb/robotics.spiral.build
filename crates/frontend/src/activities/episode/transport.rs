@@ -8,9 +8,9 @@ use crate::components::timeline::{
     KeyboardFocus, PlaybackClock, TimelineAction, TimelineEvent, TimelineInteraction,
     TimelineState, TransportKey, ViewWindow,
 };
+use crate::components::page_keys::PageKeys;
 use dioxus::prelude::*;
-use std::{collections::BTreeMap, rc::Rc};
-use wasm_bindgen::{JsCast as _, closure::Closure};
+use std::collections::BTreeMap;
 
 /// A span plays to its own end and a moment past it, so the operator sees the
 /// motion leave the interval rather than being cut off inside it.
@@ -152,8 +152,11 @@ impl EpisodeTransport {
             self.feeds.write().insert(topic.to_owned(), state);
         }
     }
+    /// Stop waiting for a feed, such as a camera on a tab nobody is looking at.
     pub(super) fn forget(&mut self, topic: &str) {
-        self.feeds.write().remove(topic);
+        if self.feeds.peek().contains_key(topic) {
+            self.feeds.write().remove(topic);
+        }
     }
     /// Space, the arrows and Home/End also drive this clock while focus rests
     /// on the page itself, as long as its activity is on screen. A key
@@ -161,39 +164,12 @@ impl EpisodeTransport {
     /// listener as a page key.
     pub(super) fn use_page_keys(&self) {
         let activity = crate::shell::activity::WorkspaceActivity::current();
-        let transport = self.clone();
-        let listener = use_hook(move || {
-            let mut transport = transport;
-            let listener = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
-                move |event: web_sys::KeyboardEvent| {
-                    let on_page = event
-                        .target()
-                        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-                        .is_some_and(|element| {
-                            matches!(element.tag_name().as_str(), "BODY" | "HTML")
-                        });
-                    if on_page
-                        && activity.is_active()
-                        && !KeyboardFocus::editing()
-                        && transport.handle_key(&event)
-                    {
-                        event.prevent_default();
-                    }
-                },
-            );
-            if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-                let _ = document
-                    .add_event_listener_with_callback("keydown", listener.as_ref().unchecked_ref());
-            }
-            Rc::new(listener)
-        });
-        use_drop(move || {
-            if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-                let _ = document.remove_event_listener_with_callback(
-                    "keydown",
-                    listener.as_ref().as_ref().unchecked_ref(),
-                );
-            }
+        let mut transport = self.clone();
+        PageKeys::use_listener(move |event| {
+            PageKeys::on_page(event)
+                && activity.is_active()
+                && !KeyboardFocus::editing()
+                && transport.handle_key(event)
         });
     }
     /// Shared keyboard transport: Space, arrows, Home/End, zoom keys, from a

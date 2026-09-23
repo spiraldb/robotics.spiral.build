@@ -441,42 +441,32 @@ impl CurationController {
 
     pub(super) fn editor_status(&self) -> Option<CurationEditorStatus> {
         self.loaded()
-            .then(|| CurationEditorStatus::new(self.spec(), self.snapshot()))
+            .then(|| CurationEditorStatus::new(self.snapshot()))
     }
 }
 
-/// What the status bar says about the open curation.
+/// What the top bar says about the open curation.
 #[derive(Clone, PartialEq)]
 pub(crate) struct CurationEditorStatus {
-    curation: CurationSpec,
     snapshot: CurationRunSnapshot,
 }
 
 impl CurationEditorStatus {
-    fn new(curation: CurationSpec, snapshot: CurationRunSnapshot) -> Self {
-        Self { curation, snapshot }
+    fn new(snapshot: CurationRunSnapshot) -> Self {
+        Self { snapshot }
     }
-    pub(crate) fn dataset_label(&self) -> String {
-        self.curation
-            .source()
-            .map_or_else(|| "No dataset".to_owned(), |source| source.label())
-    }
-    /// The run's phase while it is news; a completed run speaks through
-    /// the verdict count instead.
-    pub(crate) fn phase_label(&self) -> String {
+    /// A run's phase while it is news, then the verdict it reached; nothing
+    /// before the first run.
+    pub(crate) fn headline(&self) -> Option<String> {
         match self.snapshot.phase() {
-            RunPhase::Idle | RunPhase::Completed => String::new(),
-            phase => phase.run_label().to_owned(),
-        }
-    }
-    pub(crate) fn verdict_label(&self) -> String {
-        match self.snapshot.outcome() {
-            Some(outcome) => format!(
-                "{} of {} kept",
-                outcome.totals().kept(),
-                outcome.totals().episodes()
-            ),
-            None => self.curation.name().to_owned(),
+            RunPhase::Idle | RunPhase::Completed => self.snapshot.outcome().map(|outcome| {
+                format!(
+                    "{} of {} kept",
+                    outcome.totals().kept(),
+                    outcome.totals().episodes()
+                )
+            }),
+            phase => Some(phase.run_label().to_owned()),
         }
     }
 }
@@ -484,46 +474,28 @@ impl CurationEditorStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::curation::rules::{
-        ConditionOp, ConditionValue, CurationRule, RuleCondition,
-    };
-    use spiral_robotics_common::datasets::DatasetSelection;
-
-    fn recipe() -> CurationSpec {
-        CurationSpec::new("cur", "Bright")
-            .with_source(DatasetSelection::new(vec!["dataset_x".into()]).unwrap())
-            .with_rule(CurationRule::new(
-                "short",
-                "",
-                RuleCondition::new(
-                    "duration_s",
-                    ConditionOp::Below,
-                    ConditionValue::Number(5.0),
-                ),
-            ))
-    }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn the_status_bar_reads_dataset_rules_and_the_verdict_count() {
-        let spec = recipe();
-        let idle = CurationEditorStatus::new(spec.clone(), CurationRunSnapshot::default());
-        assert_eq!(idle.dataset_label(), "dataset_x");
-        assert_eq!(idle.phase_label(), "");
-        assert_eq!(idle.verdict_label(), "Bright");
+    fn the_top_bar_reads_the_run_phase_then_the_verdict_count() {
+        assert_eq!(
+            CurationEditorStatus::new(CurationRunSnapshot::default()).headline(),
+            None
+        );
         let mut snapshot = CurationRunSnapshot::started("run");
         snapshot.set_phase(RunPhase::Completed);
         snapshot.set_outcome(Some(CurationOutcome::new(
             spiral_robotics_common::curation::run::CurationTotals::new(40, 31, (40, false)),
             Vec::new(),
         )));
-        let complete = CurationEditorStatus::new(spec.clone(), snapshot);
-        assert_eq!(complete.phase_label(), "");
-        assert_eq!(complete.verdict_label(), "31 of 40 kept");
+        assert_eq!(
+            CurationEditorStatus::new(snapshot).headline().as_deref(),
+            Some("31 of 40 kept")
+        );
         let mut running = CurationRunSnapshot::started("run");
         running.set_phase(RunPhase::Running);
         assert_eq!(
-            CurationEditorStatus::new(spec, running).phase_label(),
-            "Running"
+            CurationEditorStatus::new(running).headline().as_deref(),
+            Some("Running")
         );
     }
 

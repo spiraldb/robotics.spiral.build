@@ -185,7 +185,9 @@ never becomes the motor-control runtime.
 
 **Shipped today**
 
-- A fullstack Dioxus Studio with six primary operating activities:
+- A fullstack Dioxus Studio with six primary operating activities. The
+  Studio opens on Data, which leads the top bar; Live, the collection
+  surface, closes it after Rollout:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
   - **Data** owns datasets and their episodes. A rail lists each dataset's
@@ -331,8 +333,6 @@ today, and nothing below may be presented as existing behavior:
 
 - **More ingestion sources.** Local-file uploads and object-storage import
   interfaces extend the shipped native MCAP ingestion path.
-- **Data as the home activity.** The activity rail leads with Data and the
-  Studio opens there; Live remains the collection surface.
 - **Curated datasets.** Materializing a curation's kept episodes, with their
   recorded transforms, as a new derived dataset. The Curation activity ships
   the recipe, the judgement, and the sheet; the derived dataset does not

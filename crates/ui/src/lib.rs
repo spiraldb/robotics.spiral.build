@@ -35,7 +35,7 @@ pub use controls::{
 };
 pub use display::{
     Chip, ChipProps, ChipTone, EmptyState, EmptyStateProps, Fact, FactLayout, FactList,
-    FactListProps, FactProps, Notice, NoticeProps, NoticeTone,
+    FactListProps, FactProps, KindMark, KindMarkProps, Notice, NoticeProps, NoticeTone,
 };
 pub use foundation::{
     ArrowDownIcon, ArrowUpIcon, BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon,
@@ -51,7 +51,7 @@ pub mod prelude {
         ButtonSize, ButtonVariant, CheckIcon, ChevronIcon, Chip, ChipTone, CloseIcon,
         ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, DeleteIcon, Disclosure,
         EmptyState, Fact, FactLayout, FactList, Field, FieldLayout, FileButton, FileInput,
-        InlineConfirmation, LinkButton, ModeButton, ModeGroup, Notice, NoticeTone, PauseIcon,
+        InlineConfirmation, KindMark, LinkButton, ModeButton, ModeGroup, Notice, NoticeTone, PauseIcon,
         PlayIcon, RefreshIcon, Reorder, ReorderHandle, ReorderList, ReorderMove, Select,
         SheetHeading, SheetPosition, SideSheet, SkipToEndIcon, SkipToStartIcon, SpinnerIcon,
         StepBackIcon, StepForwardIcon, StopIcon, TextInput, TextInputKind, Toggle, Tree,

@@ -52,7 +52,7 @@ pub(crate) fn IntervalTrackRow(track: IntervalTrack, interaction: TimelineIntera
         .filter(|span| span.span().1 > view.start() && span.span().0 < view.end());
     rsx! {
         div { class: "data-stream", "aria-label": track.label.clone(),
-            div { class: "data-stream-name", style: "height:{ROW_HEIGHT}px",
+            div { class: "data-stream-name data-interval-name", style: "height:{ROW_HEIGHT}px",
                 strong { "{track.label}" }
             }
             div { class: "data-stream-track", style: "height:{ROW_HEIGHT}px",

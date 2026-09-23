@@ -176,6 +176,7 @@ fn StreamRow(
     let toggle_stream = stream.clone();
     rsx! {
         div { class: "data-stream", "data-kind": if kind == StreamKind::Video { "video" } else { "data" },
+            "data-shown": state != PlotState::None,
             div { class: "data-stream-name",
                 if kind == StreamKind::Data {
                     Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Icon, class: "data-stream-expand",

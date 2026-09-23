@@ -32,7 +32,7 @@ const BRANCH_HEIGHT: f64 = 24.0;
 const CANVAS_TOP: f64 = 16.0;
 const CANVAS_LEFT: f64 = 24.0;
 /// Below this zoom a card's 12px title drops under 9px; the strip pans instead.
-const MIN_READABLE_ZOOM: f64 = 0.7;
+const MIN_READABLE_ZOOM: f64 = 0.8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum PipelineSelection {
@@ -248,7 +248,7 @@ impl PipelineStage {
             title: "Dataset".into(),
             summary: spec
                 .source()
-                .map_or_else(|| "Choose a dataset".into(), |source| source.label()),
+                .map_or_else(|| "Choose a dataset".into(), |source| source.display_name()),
             order: 0,
             flow: outcome.map(|outcome| StageFlow::unchanged(outcome.totals().episodes())),
             complete: true,

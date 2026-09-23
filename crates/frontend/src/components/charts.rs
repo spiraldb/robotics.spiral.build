@@ -10,7 +10,7 @@ use charming::element::{
 };
 use dioxus::prelude::*;
 
-pub(crate) const MONO_FONT: &str = "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace";
+pub(crate) const MONO_FONT: &str = "Geist Mono, ui-monospace, SF Mono, Menlo, monospace";
 
 /// A colour a chart paints with, named by what it means rather than by its hex.
 ///
@@ -38,17 +38,17 @@ pub(crate) enum ChartColor {
 impl ChartColor {
     const fn declaration(self) -> (&'static str, &'static str) {
         match self {
-            Self::Line => ("--chart-line", "#e8e8e6"),
-            Self::InkSoft => ("--chart-ink-soft", "#65645f"),
-            Self::InkFaint => ("--chart-ink-faint", "#71706c"),
+            Self::Line => ("--chart-line", "#e2e2de"),
+            Self::InkSoft => ("--chart-ink-soft", "#4d4d4a"),
+            Self::InkFaint => ("--chart-ink-faint", "#6e6e6a"),
             Self::Surface => ("--chart-surface", "#ffffff"),
-            Self::Selected => ("--chart-selected", "rgba(8, 104, 184, 0.10)"),
-            Self::Train => ("--chart-train", "#2a78d6"),
-            Self::Validation => ("--chart-validation", "#d9572b"),
-            Self::Throughput => ("--chart-throughput", "#3a7654"),
-            Self::Cpu => ("--chart-cpu", "#d9572b"),
-            Self::Gpu => ("--chart-gpu", "#2a78d6"),
-            Self::Memory => ("--chart-memory", "#7a58a5"),
+            Self::Selected => ("--chart-selected", "rgba(206, 229, 98, 0.28)"),
+            Self::Train => ("--chart-train", "#5971fd"),
+            Self::Validation => ("--chart-validation", "#f07a36"),
+            Self::Throughput => ("--chart-throughput", "#5b7400"),
+            Self::Cpu => ("--chart-cpu", "#f07a36"),
+            Self::Gpu => ("--chart-gpu", "#5971fd"),
+            Self::Memory => ("--chart-memory", "#7a5ad6"),
         }
     }
 

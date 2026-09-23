@@ -10,9 +10,7 @@ use spiral_robotics_ui::{
 
 use super::super::document::ExplorationPayload;
 use super::super::state::ExplorationController;
-use crate::activities::episode::{
-    Episode, EpisodeFactsPresentation as _, EpisodeInspection, EpisodeLabels, FeaturedCamera,
-};
+use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels, FeaturedCamera};
 use crate::components::dataset_picker::DatasetPicker;
 use crate::components::icons::SpinnerIcon;
 
@@ -48,7 +46,7 @@ fn DatasetChoice(controller: ExplorationController) -> Element {
             return;
         };
         let selection = source.selection().clone();
-        let label = selection.label();
+        let label = selection.display_name();
         problem.set(
             controller
                 .edit(|payload| {
@@ -140,7 +138,7 @@ fn DatasetEpisodeList(
     rsx! {
         header { class: "explore-canvas-dataset-head",
             FactList { mono: true,
-                Fact { label: "Dataset", "{dataset.label()}" }
+                Fact { label: "Dataset", "{dataset.display_name()}" }
                 Fact { label: "Episodes", "{count}" }
             }
             if count > 1 {
@@ -166,7 +164,7 @@ fn DatasetEpisodeList(
                         onchange: move |value: String| opened.set(value.parse().unwrap_or(0)),
                         for (position, episode) in episodes.iter().enumerate() {
                             option { value: "{position}", title: "{episode.id()}",
-                                "…{episode.id().short()} · {labels.label(episode.facts()).head()} · {episode.facts().duration_label()}"
+                                "{labels.line(episode)}"
                             }
                         }
                     }

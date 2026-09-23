@@ -3,6 +3,7 @@
 //! alone is Run, which judges every episode with the open recipe. The dataset
 //! is named once, in the recipe's Source section.
 
+use crate::components::page_keys::PageKeys;
 use dioxus::prelude::*;
 
 use super::state::CurationController;
@@ -67,7 +68,10 @@ pub(super) fn CurationDocumentBar(controller: CurationController) -> Element {
                         aria_busy: judging,
                         title: "{run_title}",
                         onclick: move |_| controller.run(studio),
-                        if judging { SpinnerIcon {} "Judging" } else { PlayIcon {} "Run" }
+                        if judging { SpinnerIcon {} "Judging" } else {
+                            PlayIcon {} "Run"
+                            kbd { class: "ui-kbd", "aria-hidden": "true", "{PageKeys::command_symbol()}↵" }
+                        }
                     }
                 },
             }

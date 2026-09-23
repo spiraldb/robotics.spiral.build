@@ -3,6 +3,7 @@
 //! this file owns what is Workflow's alone: the view switch, creation from a
 //! dataset, and Run.
 
+use crate::components::page_keys::PageKeys;
 use dioxus::prelude::*;
 
 use super::explore::graph::{ExplorationDocumentBar, WorkflowView};
@@ -107,7 +108,10 @@ fn WorkflowAgentDocument(controller: WorkflowController) -> Element {
                     aria_busy: running,
                     title: "{run_title}",
                     onclick: move |_| controller.run(studio),
-                    if running { SpinnerIcon {} "Running" } else { PlayIcon {} "Run" }
+                    if running { SpinnerIcon {} "Running" } else {
+                        PlayIcon {} "Run"
+                        kbd { class: "ui-kbd", "aria-hidden": "true", "{PageKeys::command_symbol()}↵" }
+                    }
                 }
             },
         }

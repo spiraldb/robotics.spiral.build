@@ -74,8 +74,22 @@ fn WorkflowPanels(
         .with_tab_icon(rsx! { ConversationIcon {} }),
     ];
 
+    let studio = crate::shell::state::StudioProjectState::current();
     rsx! {
         div { class: "workflow-workspace",
+            // ⌘/Ctrl+Enter runs the graph from anywhere outside a text field,
+            // as it does in Curation.
+            onkeydown: move |event: KeyboardEvent| {
+                let modifiers = event.modifiers();
+                if event.key() == Key::Enter
+                    && (modifiers.contains(Modifiers::META) || modifiers.contains(Modifiers::CONTROL))
+                    && view() == WorkflowView::Agent
+                    && !crate::components::timeline::KeyboardFocus::editing()
+                {
+                    event.prevent_default();
+                    controller.run(studio);
+                }
+            },
             super::document_controls::WorkflowDocumentControls { controller, exploration_controller, view }
             div { class: "workflow-panels",
                 if view() == WorkflowView::Explore {

@@ -22,17 +22,16 @@ const UNTITLED: &str = "Untitled exploration";
 /// One quiet line per node that is measuring something right now.
 pub(crate) type ExplorationActivity = BTreeMap<String, String>;
 
-/// An exploration as the status bar names it: what it is called, and what its
-/// annotation nodes have measured so far.
+/// What an exploration's annotation nodes have measured so far, as the top
+/// bar reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExplorationMeasure {
-    name: String,
     episodes: usize,
     subtasks: usize,
 }
 
 impl ExplorationMeasure {
-    fn of(name: String, payload: &ExplorationPayload) -> Self {
+    fn of(payload: &ExplorationPayload) -> Self {
         let mut episodes = 0;
         let mut subtasks = 0;
         for node in payload.nodes() {
@@ -41,14 +40,10 @@ impl ExplorationMeasure {
                 subtasks += payload.subtasks_for(node.id()).count();
             }
         }
-        Self {
-            name,
-            episodes,
-            subtasks,
-        }
+        Self { episodes, subtasks }
     }
-    pub(crate) fn name(&self) -> &str {
-        &self.name
+    pub(crate) fn has_measured(&self) -> bool {
+        self.episodes > 0
     }
     /// The measurement state in the operator's words. A graph that has
     /// measured nothing says so rather than counting zeroes.
@@ -181,11 +176,10 @@ impl ExplorationController {
     pub(crate) fn set_name(self, name: String) {
         self.session.set_name(name);
     }
-    /// What this exploration is called and how much of its dataset it has
-    /// measured, which is all the status bar wants from it.
+    /// How much of its dataset this exploration has measured, which is all
+    /// the top bar wants from it.
     pub(crate) fn measure(&self) -> ExplorationMeasure {
-        let name = self.name();
-        self.with_payload(|payload| ExplorationMeasure::of(name, payload))
+        self.with_payload(ExplorationMeasure::of)
     }
 
     /// Read the payload without cloning it.
