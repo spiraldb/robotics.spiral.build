@@ -108,12 +108,14 @@
 
   /* The evidence column takes about a second to open a recording. A short
      fade on arrival says the wait ended; a hard cut said the pane broke. */
+  /* A column shorter than the inspection needs scrolls it rather than
+     shrinking its pictures. */
   .explore-review-player {
     display: flex;
     min-height: 0;
     flex: 1;
     flex-direction: column;
-    overflow: hidden;
+    overflow: auto;
     animation: explore-review-arrive 120ms ease-out;
   }
 
@@ -426,25 +428,4 @@
       animation: none;
     }
   }
-}
-
-/* Unlayered from here down: `.episode-inspection-tiles` is itself unlayered
-   and loads later, so a layered rule of mine would lose to it. */
-
-/* The shared composition sizes itself to its content, which would leave the
-   rest of the column empty. Here the recording is the column's reason to
-   exist, so it takes what is left and its camera tiles grow into it — the same
-   stretch Curation's evidence panel uses. */
-.explore-review-player > .episode-inspection {
-  min-height: 0;
-  flex: 1;
-}
-
-/* The shared timeline reserves 9rem for track names beside a scale that has to
-   hold a ruler and the subtask chips. Here the names are "Subtasks" and one
-   camera topic, and the column they were taking left the scale so narrow at
-   1024px that the last two tick labels overlapped and every chip was clipped
-   to a syllable. */
-.explore-review-player .data-timeline {
-  --data-name-w: 6rem;
 }

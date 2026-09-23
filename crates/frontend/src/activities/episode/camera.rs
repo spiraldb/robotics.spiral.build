@@ -61,9 +61,9 @@ pub(in crate::activities) fn EpisodeCamera(
         div { class: "episode-camera-panel",
             if pending { p { class: "episode-camera-message", role: "status", "Loading recorded camera…" } }
             else { match &*video.read() {
-                Some(Ok(camera)) => rsx! { CameraFrames { camera: camera.clone(), transport, topic: format!("{} · {}", request.topic().topic(), request.revision().variant()) } },
+                Some(Ok(camera)) => rsx! { CameraFrames { camera: camera.clone(), transport, request: request.clone() } },
                 Some(Err(error)) => rsx! { div { class: "episode-camera-message", role: "alert",
-                    p { "{error}" }
+                    p { "The recorded camera could not be read: {error}" }
                     button { class: "data-text-action", onclick: move |_| video.restart(), "Retry camera" }
                 } },
                 None => rsx! {},
@@ -83,7 +83,17 @@ struct FrameRequests {
 const QUIET_RESTART_PACKETS: usize = 15;
 
 #[component]
-fn CameraFrames(camera: Rc<EncodedCamera>, transport: EpisodeTransport, topic: String) -> Element {
+fn CameraFrames(
+    camera: Rc<EncodedCamera>,
+    transport: EpisodeTransport,
+    request: MessageRead,
+) -> Element {
+    let topic = format!(
+        "{} · {}",
+        request.topic().topic(),
+        request.revision().variant()
+    );
+    let name = request.topic().topic();
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);
     let mut failure = use_signal(|| None::<String>);
     let mut covered = use_signal(|| false);
@@ -166,7 +176,7 @@ fn CameraFrames(camera: Rc<EncodedCamera>, transport: EpisodeTransport, topic: S
     rsx! {
         div { class: "episode-camera-image",
             canvas { class: "episode-camera-canvas", width: 640, height: 360,
-                role: "img", "aria-label": "{topic} at episode time {seconds:.3} seconds",
+                role: "img", "aria-label": "Recorded camera {name}",
                 onmounted: move |event| {
                     if let Some(element) = event.data().downcast::<web_sys::Element>() {
                         canvas.set(Some(element.clone().unchecked_into()));
@@ -174,7 +184,7 @@ fn CameraFrames(camera: Rc<EncodedCamera>, transport: EpisodeTransport, topic: S
                 }
             }
             if let Some(error) = failure() { div { class: "episode-camera-message", role: "alert",
-                p { "{error}" }
+                p { "The recorded camera could not be decoded: {error}" }
                 button { class: "data-text-action", onclick: move |_| { failure.set(None); covered.set(false); playback.set(retry_playback()); }, "Retry decoding" }
             } }
             else if uncovered {

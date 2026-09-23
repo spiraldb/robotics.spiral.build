@@ -1,46 +1,38 @@
-//! One recording seen whole: every camera it recorded, the robot when the
-//! dataset has a model, and a surface's own evidence, all on one clock.
+//! One recording seen whole, the same way on every surface that shows one:
+//! each camera it recorded, its robot when the dataset has a model, its
+//! numeric streams as plots, and a timeline of every stream under the rows a
+//! surface brings — docked panels on one clock.
 //!
-//! This is the episode view the whole studio shares — Curation's evidence
-//! panels, Explore's dataset node and subtask views — so an operator
-//! recognizes the same recording wherever it is shown. A surface says which
-//! episode, which camera leads, which rows sit under the recording and which
-//! span to play; the clock, the cameras and the robot belong to the episode.
+//! A surface says which episode, which camera leads, which rows it adds and
+//! which span to play. The clock, the streams, what is plotted and where each
+//! panel sits for the room the surface gives belong to the episode, so an
+//! operator recognizes the same recording wherever it is shown.
 use super::{
+    arrangement::{EpisodeArrangement, Size},
     camera::EpisodeCamera,
+    choices::StreamChoices,
     identity::Episode,
-    robot::RobotStage,
+    plots::PlotsPanel,
+    robot::{RobotModel, RobotStage},
     streams::{RecordedStream, StreamCatalog},
+    timeline::{EpisodeTimeline, EvidenceTrack},
     transport::EpisodeTransport,
 };
-use crate::components::timeline::{
-    IntervalTrack, IntervalTrackRow, NumericTrackRow, Timeline, TimelineAction, TimelineContent,
-    TimelineEvent, TimelineInteraction, TimelineTrack,
-};
+use crate::components::timeline::KeyboardFocus;
 use dioxus::prelude::*;
-use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
+use dioxus_workbench::{Panel, PanelId, PanelLayout, PanelWorkspace};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 
-/// A span plays to its own end and a moment past it, so the operator sees the
-/// motion leave the interval rather than being cut off inside it.
-///
-/// There is deliberately no lead-in. The playhead landing half a second before
-/// the span it was asked for put the cursor outside the highlight that marks
-/// the same interval, and every reading of the clock was then half a second
-/// wrong in a view whose whole product is where something starts.
-const RUN_OUT_SECONDS: f64 = 0.5;
-
-/// Which of an episode's cameras takes the height in this view.
+/// Which of an episode's cameras leads the inspection.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::activities) enum FeaturedCamera {
-    /// The episode's first camera, in its own topic order.
+    /// Whichever camera shows the workspace best, for a view that is about
+    /// the recording rather than about one camera.
     #[default]
-    First,
-    /// The camera this view is about, such as the one a measurement read. An
-    /// episode that did not record it leads with its first.
-    Named(String),
-    /// Whichever camera shows the workspace best, for a view that is about the
-    /// recording rather than about one camera.
     Overview,
+    /// The camera this view is about, such as the one a measurement read. An
+    /// episode that did not record it leads with its overview.
+    Named(String),
 }
 
 impl FeaturedCamera {
@@ -48,22 +40,22 @@ impl FeaturedCamera {
     pub(in crate::activities) fn measured(camera: Option<&str>) -> Self {
         camera.map_or(Self::Overview, |camera| Self::Named(camera.to_owned()))
     }
-    /// Where in `shown` the featured camera sits.
-    fn leading(&self, shown: &[&RecordedStream]) -> usize {
+    /// `cameras` with the featured one first; the rest keep topic order.
+    fn lead<'a>(&self, mut cameras: Vec<&'a RecordedStream>) -> Vec<&'a RecordedStream> {
+        let names = cameras
+            .iter()
+            .map(|camera| camera.name().to_owned())
+            .collect::<Vec<_>>();
         let wanted = match self {
-            Self::First => None,
-            Self::Named(camera) => Some(camera.clone()),
-            Self::Overview => {
-                let names = shown
-                    .iter()
-                    .map(|camera| camera.name().to_owned())
-                    .collect::<Vec<_>>();
-                StreamCatalog::overview_camera(&names).map(str::to_owned)
-            }
+            Self::Named(camera) if names.contains(camera) => Some(camera.as_str()),
+            _ => StreamCatalog::overview_camera(&names),
         };
-        wanted
-            .and_then(|wanted| shown.iter().position(|camera| camera.name() == wanted))
-            .unwrap_or_default()
+        if let Some(place) = wanted.and_then(|wanted| names.iter().position(|name| name == wanted))
+        {
+            let featured = cameras.remove(place);
+            cameras.insert(0, featured);
+        }
+        cameras
     }
 }
 
@@ -89,56 +81,52 @@ impl PlayRequest {
             asked: previous.map_or(0, |previous| previous.asked + 1),
         }
     }
-    /// Where the clock plays: from the span's own start to a moment past its
-    /// end.
-    fn played(self) -> (f64, f64) {
-        (self.span.0, self.span.1 + RUN_OUT_SECONDS)
-    }
-}
-
-/// A row a surface draws under the recording.
-#[derive(Clone, PartialEq)]
-pub(in crate::activities) enum EvidenceTrack {
-    /// A measurement's value over time, such as a progress score.
-    Values(TimelineTrack),
-    /// Named spans, such as a measurement's subtasks; activating one plays it.
-    Intervals(IntervalTrack),
-}
-
-impl From<TimelineTrack> for EvidenceTrack {
-    fn from(track: TimelineTrack) -> Self {
-        Self::Values(track)
-    }
-}
-
-impl From<IntervalTrack> for EvidenceTrack {
-    fn from(track: IntervalTrack) -> Self {
-        Self::Intervals(track)
-    }
 }
 
 #[component]
 pub(in crate::activities) fn EpisodeInspection(
     episode: Episode,
-    /// Rows drawn under the recording. A row of intervals with none in it is
-    /// left out rather than drawn empty.
+    /// Rows drawn above the recorded streams on the timeline.
     #[props(default)]
     tracks: Vec<EvidenceTrack>,
     /// The span to play, such as the row the operator chose. Each new ask
     /// plays it; `None` leaves the playhead where the operator put it.
     #[props(default)]
     focus: Option<PlayRequest>,
-    /// Which camera takes the height while the rest sit under it.
+    /// Which camera leads the others.
     #[props(default)]
     featured_camera: FeaturedCamera,
 ) -> Element {
-    // Another episode is another clock, other cameras and another robot, so
+    // Another episode is another clock, other streams and other choices, so
     // it mounts afresh rather than rewiring the previous one's.
     rsx! {
         InspectedEpisode {
             key: "{episode.dataset().label()}/{episode.id()}",
             episode, tracks, focus, featured_camera,
         }
+    }
+}
+
+/// An inspected episode once its streams are known: the streams its panels
+/// show, the clock they all read, the operator's choices among the streams,
+/// and the dataset's robot model.
+#[derive(Clone, PartialEq)]
+pub(super) struct LoadedEpisode {
+    catalog: StreamCatalog,
+    transport: EpisodeTransport,
+    choices: StreamChoices,
+    robot: Resource<Result<Option<RobotModel>, String>>,
+}
+
+impl LoadedEpisode {
+    pub(super) fn catalog(&self) -> &StreamCatalog {
+        &self.catalog
+    }
+    pub(super) fn transport(&self) -> &EpisodeTransport {
+        &self.transport
+    }
+    pub(super) fn choices(&self) -> StreamChoices {
+        self.choices
     }
 }
 
@@ -150,107 +138,182 @@ fn InspectedEpisode(
     featured_camera: FeaturedCamera,
 ) -> Element {
     let transport = EpisodeTransport::use_episode(&episode);
+    transport.use_page_keys();
     let mut asked = transport.clone();
     use_effect(use_reactive(&focus, move |focus| {
-        if let Some((start, end)) = focus.map(PlayRequest::played) {
-            asked.play_interval(start, end);
+        if let Some(focus) = focus {
+            asked.play_span(focus.span);
         }
     }));
     let selection = episode.selection();
-    let mut cameras = use_resource(move || StreamCatalog::load(selection.clone()));
-    let default_interaction = transport.interaction();
-    let current = transport.clone();
-    let interaction = TimelineInteraction::new(
-        transport.timeline_state(),
-        EventHandler::new(move |event: TimelineEvent| {
-            if event.target() != current.timeline_state().target() {
-                return;
-            }
-            match event.action() {
-                TimelineAction::ActivateInterval(interval) => {
-                    let (start, end) = PlayRequest::new(interval.span()).played();
-                    current.clone().play_interval(start, end);
-                }
-                action => default_interaction.emit(action),
-            }
-        }),
-    );
-    let mut values = Vec::new();
-    let mut intervals = Vec::new();
-    for track in tracks {
-        match track {
-            EvidenceTrack::Values(track) => values.push(track),
-            EvidenceTrack::Intervals(track) if !track.is_empty() => intervals.push(track),
-            EvidenceTrack::Intervals(_) => {}
+    let mut catalog = use_resource(move || StreamCatalog::load(selection.clone()));
+    let robot = RobotModel::use_dataset(episode.dataset());
+    let choices = StreamChoices::use_choices();
+    let range = episode.range();
+    use_effect(move || {
+        if let Some(Ok(catalog)) = &*catalog.read() {
+            let mut choices = choices;
+            choices.open(catalog, range);
         }
-    }
-    let numeric = !values.is_empty();
-    let trackless = values.is_empty() && intervals.is_empty();
-    let rows = rsx! {
-        for track in values { NumericTrackRow { key: "{track.id()}", track, interaction: interaction.clone() } }
-        for track in intervals { IntervalTrackRow { key: "{track.id()}", track, interaction: interaction.clone() } }
-    };
-    // Every surface that mounts this composition names the episode directly
-    // above it, so the transport's identity slot would only repeat it — as a
-    // raw identifier, pressed against the transport. "Tracks" goes with it
-    // when there are no numeric rows for it to head.
-    let content = TimelineContent::new(rows).with_identity(rsx! {});
-    let content = if numeric {
-        content
-    } else {
-        content.with_corner(rsx! {})
+    });
+    let mut keys = transport.clone();
+    let loaded = match (&*catalog.read(), &*robot.read()) {
+        (Some(Ok(streams)), Some(_)) => Ok(Some(LoadedEpisode {
+            catalog: streams.clone(),
+            transport: transport.clone(),
+            choices,
+            robot,
+        })),
+        (Some(Err(error)), _) => Err(error.clone()),
+        _ => Ok(None),
     };
     rsx! {
-        section {
-            class: "episode-inspection",
-            "aria-label": "Recorded episode",
-            "data-tracks": trackless.then_some("none"),
-            match cameras.read().as_ref() {
-                Some(Ok(catalog)) => {
-                    let shown = catalog.videos().collect::<Vec<_>>();
-                    let lead = featured_camera.leading(&shown);
-                    let rest = shown
-                        .iter()
-                        .enumerate()
-                        .filter(|(place, _)| *place != lead)
-                        .map(|(_, camera)| *camera)
-                        .collect::<Vec<_>>();
-                    rsx! {
-                        if shown.is_empty() {
-                            p { class: "episode-inspection-status", "This episode has no recorded cameras." }
-                        }
-                        div { class: "episode-inspection-tiles",
-                            if let Some(camera) = shown.get(lead) {
-                                section { class: "episode-inspection-tile episode-inspection-featured",
-                                    h5 { title: camera.label(), "{catalog.camera_title(camera)}" }
-                                    EpisodeCamera { request: camera.read().clone(), transport: transport.clone() }
-                                }
-                            }
-                            div { class: "episode-inspection-strip",
-                                for camera in rest {
-                                    section { key: "{camera.key()}", class: "episode-inspection-tile",
-                                        h5 { title: camera.label(), "{catalog.camera_title(camera)}" }
-                                        EpisodeCamera { request: camera.read().clone(), transport: transport.clone() }
-                                    }
-                                }
-                                RobotStage {
-                                    episode: episode.clone(), streams: catalog.clone(),
-                                    transport: transport.clone(),
-                                }
-                            }
-                        }
+        section { class: "episode-inspection", "aria-label": "Recorded episode",
+            // Space, the arrows and Home/End drive the clock from any panel;
+            // the timeline answers them itself, and the page listener takes
+            // them while focus rests outside every panel.
+            onkeydown: move |event: KeyboardEvent| {
+                if !KeyboardFocus::editing() && keys.handle_key(&event) {
+                    event.prevent_default();
+                    event.stop_propagation();
+                }
+            },
+            match loaded {
+                Ok(Some(loaded)) => rsx! { InspectionDock { loaded, evidence: tracks, featured_camera } },
+                Ok(None) => rsx! { p { class: "episode-panel-status", role: "status", "Reading the recorded streams…" } },
+                Err(error) => rsx! {
+                    div { class: "episode-panel-status", role: "alert",
+                        p { "The recorded streams could not be read: {error}" }
+                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
+                            onclick: move |_| catalog.restart(), "Retry" }
                     }
                 },
-                Some(Err(error)) => rsx! {
-                    div { class: "episode-inspection-status", role: "alert",
-                        p { "Could not read recorded cameras: {error}" }
-                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
-                            onclick: move |_| cameras.restart(), "Retry cameras" }
-                    }
-                },
-                None => rsx! { p { class: "episode-inspection-status", role: "status", "Loading recorded cameras…" } },
             }
-            Timeline { interaction, content }
+        }
+    }
+}
+
+/// The episode's panels docked for the room they are given. The room is
+/// measured before anything is laid out, so the first arrangement is already
+/// the one that fits.
+#[component]
+fn InspectionDock(
+    loaded: LoadedEpisode,
+    evidence: Vec<EvidenceTrack>,
+    featured_camera: FeaturedCamera,
+) -> Element {
+    let mut room = use_signal(|| None::<Size>);
+    let choices = loaded.choices();
+    let transport = loaded.transport().clone();
+    let catalog = loaded.catalog().clone();
+    let cameras = featured_camera.lead(
+        catalog
+            .videos()
+            .filter(|camera| choices.camera_open(camera.key()))
+            .collect(),
+    );
+    let mut panels = cameras
+        .iter()
+        .map(|camera| {
+            Panel::new(
+                EpisodeArrangement::camera(camera.key()),
+                format!("Camera · {}", catalog.camera_title(camera)),
+                "episode-view-0",
+                rsx! { EpisodeCamera { request: camera.read().clone(), transport: transport.clone() } },
+            )
+            .with_closable(true)
+            .with_class("episode-camera-dock")
+        })
+        .collect::<Vec<_>>();
+    let mut robot = loaded.robot;
+    let stage = match &*robot.read() {
+        Some(Ok(Some(model))) => Some(rsx! {
+            RobotStage { model: model.clone(), streams: catalog.clone(), transport: transport.clone() }
+        }),
+        Some(Err(error)) => Some(rsx! {
+            div { class: "episode-panel-status", role: "alert",
+                p { "The robot model could not be read: {error}" }
+                Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
+                    onclick: move |_| robot.restart(), "Retry" }
+            }
+        }),
+        _ => None,
+    };
+    if let Some(stage) = stage {
+        panels.push(
+            Panel::new(EpisodeArrangement::STAGE, "Scene", "episode-view-0", stage)
+                .with_class("episode-stage-dock"),
+        );
+    }
+    let arrangement =
+        EpisodeArrangement::new(panels.iter().map(|panel| panel.id.clone()).collect());
+    panels.push(
+        Panel::new(
+            EpisodeArrangement::PLOTS,
+            "Plots",
+            "episode-plots",
+            rsx! { PlotsPanel { loaded: loaded.clone() } },
+        )
+        .with_class("episode-plots-dock"),
+    );
+    panels.push(
+        Panel::new(
+            EpisodeArrangement::TIMELINE,
+            "Timeline",
+            "episode-timeline",
+            rsx! { EpisodeTimeline { loaded: loaded.clone(), evidence } },
+        )
+        .with_class("episode-timeline-dock"),
+    );
+    rsx! {
+        div { class: "episode-inspection-dock",
+            // A hidden activity measures nothing; the arrangement waits for a
+            // room with size rather than folding every view into one tab.
+            onresize: move |event: Event<ResizeData>| {
+                if let Ok(size) = event.data().get_content_box_size()
+                    && size.width > 0.0
+                    && size.height > 0.0
+                {
+                    let measured = Some(Size::new(size.width, size.height));
+                    if *room.peek() != measured {
+                        room.set(measured);
+                    }
+                }
+            },
+            if let Some(room) = room() {
+                ArrangedPanels { panels, arranged: arrangement.layout(room), choices }
+            }
+        }
+    }
+}
+
+/// The panels in the arrangement chosen for their room, where the operator
+/// may rearrange them until the room calls for another arrangement — a new
+/// arrangement is a new scope, which the dock takes up whole.
+#[component]
+fn ArrangedPanels(panels: Vec<Panel>, arranged: PanelLayout, choices: StreamChoices) -> Element {
+    let mut layout = use_signal(|| arranged.clone());
+    // Asking for a plot brings Plots forward when it waits behind a camera.
+    let asks = choices.plot_asks();
+    use_effect(use_reactive(&asks, move |asks| {
+        if asks > 0 {
+            layout
+                .write()
+                .activate(&PanelId::new(EpisodeArrangement::PLOTS));
+        }
+    }));
+    let mut closing = choices;
+    rsx! {
+        PanelWorkspace {
+            panels,
+            layout,
+            layout_scope: arranged.encode(),
+            initial_layout: arranged,
+            on_panel_close: move |panel: PanelId| {
+                if let Some(camera) = EpisodeArrangement::camera_key(&panel) {
+                    closing.set_camera(camera, false);
+                }
+            },
         }
     }
 }
@@ -260,8 +323,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_span_plays_from_its_own_start_to_a_moment_past_its_end() {
-        assert_eq!(PlayRequest::new((8.0, 12.0)).played(), (8.0, 12.5));
+    fn a_measured_camera_leads_and_an_unmeasured_view_looks_at_the_workspace() {
+        assert_eq!(
+            FeaturedCamera::measured(Some("/top")),
+            FeaturedCamera::Named("/top".into())
+        );
+        assert_eq!(FeaturedCamera::measured(None), FeaturedCamera::Overview);
     }
 
     #[test]
@@ -269,15 +336,6 @@ mod tests {
         let first = PlayRequest::after(None, (8.0, 12.0));
         let again = PlayRequest::after(Some(first), (8.0, 12.0));
         assert_ne!(first, again);
-        assert_eq!(first.played(), again.played());
-    }
-
-    #[test]
-    fn a_measured_camera_leads_and_an_unmeasured_view_looks_at_the_workspace() {
-        assert_eq!(
-            FeaturedCamera::measured(Some("/top")),
-            FeaturedCamera::Named("/top".into())
-        );
-        assert_eq!(FeaturedCamera::measured(None), FeaturedCamera::Overview);
+        assert_eq!(first.span, again.span);
     }
 }

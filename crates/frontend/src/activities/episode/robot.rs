@@ -1,18 +1,82 @@
 //! The recorded robot of an episode, driven solely by the episode clock.
 //!
-//! One read answers both questions a composition has: *does this dataset ship
-//! a robot model at all*, and *where were its joints at this instant*. A
-//! dataset without a model reads as `Ok(None)`, and [`StagePlacement`] decides
-//! whether that is said or simply leaves no tile.
-use super::{
-    identity::Episode, messages::MessageBuffer, streams::StreamCatalog, transport::EpisodeTransport,
-};
+//! Whether a dataset ships a robot model is read once per inspected episode,
+//! because it decides whether the recording has a 3D view to lay out at all.
+//! Where the joints were at each instant is read by that view itself.
+use super::{messages::MessageBuffer, streams::StreamCatalog, transport::EpisodeTransport};
 use crate::activities::data::DatasetClient;
 use crate::panels::scene::{SceneSource, Viewport};
 use crate::robots::RobotSelection;
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{DatasetRobot, JointBinding, MessageWindow};
+use spiral_robotics_common::datasets::{
+    DatasetRobot, DatasetSelection, JointBinding, MessageWindow,
+};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 use std::{collections::BTreeMap, rc::Rc};
+
+/// A dataset's robot model.
+#[derive(Clone)]
+pub(super) struct RobotModel(Rc<DatasetRobot>);
+
+impl PartialEq for RobotModel {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl RobotModel {
+    /// The model `dataset` ships, or `None` when it has none to draw.
+    pub(super) fn use_dataset(
+        dataset: &DatasetSelection,
+    ) -> Resource<Result<Option<Self>, String>> {
+        let dataset = dataset.clone();
+        use_resource(move || {
+            let dataset = dataset.clone();
+            async move {
+                DatasetClient::current()
+                    .robot(&dataset)
+                    .await
+                    .map(|model| model.map(|model| Self(Rc::new(model))))
+                    .map_err(|error| error.to_string())
+            }
+        })
+    }
+}
+
+/// The episode's robot at the shared playhead.
+#[component]
+pub(super) fn RobotStage(
+    model: RobotModel,
+    streams: StreamCatalog,
+    transport: EpisodeTransport,
+) -> Element {
+    let bounds = transport.range().bounds();
+    let joint_model = model.clone();
+    let mut joints = use_resource(move || {
+        let streams = streams.clone();
+        let model = joint_model.clone();
+        async move {
+            JointSamples::load(&streams, &model.0, bounds)
+                .await
+                .map(Rc::new)
+        }
+    });
+    match &*joints.read() {
+        None => {
+            rsx! { p { class: "episode-panel-status", role: "status", "Loading the recorded robot…" } }
+        }
+        Some(Err(error)) => rsx! {
+            div { class: "episode-panel-status", role: "alert",
+                p { "The robot's joints could not be read: {error}" }
+                Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
+                    onclick: move |_| joints.restart(), "Retry" }
+            }
+        },
+        Some(Ok(joints)) => rsx! {
+            RobotScene { robot: RecordedRobot { model: model.0.clone(), joints: joints.clone() }, transport }
+        },
+    }
+}
 
 /// A dataset's robot model together with the recorded streams that move it,
 /// read once for one episode.
@@ -21,40 +85,14 @@ struct RecordedRobot {
     model: Rc<DatasetRobot>,
     joints: Rc<Vec<JointSamples>>,
 }
+
 impl PartialEq for RecordedRobot {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.model, &other.model) && Rc::ptr_eq(&self.joints, &other.joints)
     }
 }
+
 impl RecordedRobot {
-    /// Reads the model and the joint messages covering `bounds`. `Ok(None)`
-    /// means the dataset has no robot model; nothing is drawn for it.
-    fn use_episode(
-        episode: &Episode,
-        streams: &StreamCatalog,
-        bounds: (u64, u64),
-    ) -> Resource<Result<Option<Self>, String>> {
-        let dataset = episode.dataset().clone();
-        let streams = streams.clone();
-        use_resource(move || {
-            let dataset = dataset.clone();
-            let streams = streams.clone();
-            async move {
-                let Some(model) = DatasetClient::current()
-                    .robot(&dataset)
-                    .await
-                    .map_err(|error| error.to_string())?
-                else {
-                    return Ok(None);
-                };
-                let joints = JointSamples::load(&streams, &model, bounds).await?;
-                Ok(Some(Self {
-                    model: Rc::new(model),
-                    joints: Rc::new(joints),
-                }))
-            }
-        })
-    }
     /// Every bound joint's position at `time`, or `None` when one of the
     /// streams has nothing to say yet.
     fn pose(&self, time: u64) -> Option<BTreeMap<String, f32>> {
@@ -63,64 +101,6 @@ impl RecordedRobot {
             .map(|samples| samples.at(time))
             .collect::<Option<Vec<_>>>()
             .map(|poses| poses.into_iter().flatten().collect())
-    }
-}
-
-/// Where a robot stage sits, which decides what it says when it has no robot
-/// to draw.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(in crate::activities) enum StagePlacement {
-    /// One tile among an episode's cameras. While the model is being read, and
-    /// forever after for a dataset without one, there is no tile at all: the
-    /// grid simply has one fewer.
-    #[default]
-    Tile,
-    /// A panel the operator opened on purpose, which explains itself instead
-    /// of leaving the dock blank.
-    Panel,
-}
-
-/// The episode's robot at the shared playhead, when its dataset has a model.
-#[component]
-pub(in crate::activities) fn RobotStage(
-    episode: Episode,
-    streams: StreamCatalog,
-    transport: EpisodeTransport,
-    #[props(default)] placement: StagePlacement,
-) -> Element {
-    let mut robot = RecordedRobot::use_episode(&episode, &streams, transport.range().bounds());
-    let read = robot.read();
-    match (placement, read.as_ref()) {
-        (StagePlacement::Tile, None | Some(Ok(None))) => rsx! {},
-        (StagePlacement::Tile, Some(Ok(Some(robot)))) => rsx! {
-            section { class: "episode-inspection-tile episode-inspection-stage",
-                h5 { "Robot" }
-                div { class: "episode-inspection-view",
-                    RobotScene { robot: robot.clone(), transport }
-                }
-            }
-        },
-        (StagePlacement::Tile, Some(Err(error))) => rsx! {
-            section { class: "episode-inspection-tile episode-inspection-stage",
-                h5 { "Robot" }
-                p { class: "episode-inspection-status", role: "alert", "3D view unavailable: {error}" }
-            }
-        },
-        (StagePlacement::Panel, None) => {
-            rsx! { div { class: "data-plots-empty", role: "status", "Loading 3D view…" } }
-        }
-        (StagePlacement::Panel, Some(Ok(None))) => {
-            rsx! { div { class: "data-plots-empty", "No robot model in this dataset." } }
-        }
-        (StagePlacement::Panel, Some(Err(_))) => rsx! {
-            div { class: "data-plots-empty", role: "status",
-                p { "3D view unavailable." }
-                button { class: "data-text-action", onclick: move |_| robot.restart(), "Retry" }
-            }
-        },
-        (StagePlacement::Panel, Some(Ok(Some(robot)))) => {
-            rsx! { RobotScene { robot: robot.clone(), transport } }
-        }
     }
 }
 
@@ -141,6 +121,7 @@ struct JointSamples {
     bindings: Vec<JointBinding>,
     buffer: Rc<MessageBuffer>,
 }
+
 impl JointSamples {
     fn at(&self, time: u64) -> Option<BTreeMap<String, f32>> {
         let message = self.buffer.json_at(time).ok()??;

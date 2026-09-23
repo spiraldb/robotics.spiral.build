@@ -1,16 +1,23 @@
-//! Data-specific stream selection composed into the shared timeline.
+//! The inspected episode's timeline: the rows the surface brings, then every
+//! stream the episode recorded, on the episode's one clock.
+//!
+//! A surface's rows are its evidence — a progress score, a measurement's
+//! subtasks — so they lead, and activating one of their intervals plays it.
+//! The streams follow as the hub the operator steers the rest from: ticking a
+//! camera shows its panel, ticking a stream plots its numeric fields.
 use super::{
-    catalog_rail::OpenedEpisode,
-    stream_choices::{
-        CoverageState, EpisodeStreams, PlotState, PlottableLeaves, StreamChoices, StreamSchema,
-    },
-};
-use crate::activities::episode::{
-    EpisodeFactsPresentation as _, EpisodeTransport, MessageField, RecordedStream, StreamKind,
+    choices::{CoverageState, PlotState, PlottableLeaves, StreamChoices, StreamSchema},
+    inspection::LoadedEpisode,
+    messages::MessageField,
+    streams::{RecordedStream, StreamKind},
+    transport::EpisodeTransport,
 };
 use crate::components::{
     icons::{CameraStreamIcon, SignalStreamIcon},
-    timeline::{DensityTrack, Timeline, TimelineContent, TimelineScrubber},
+    timeline::{
+        DensityTrack, IntervalTrack, IntervalTrackRow, NumericTrackRow, Timeline, TimelineContent,
+        TimelineScrubber, TimelineTrack,
+    },
 };
 use crate::format::{GroupedCountPresentation, PreciseClockPresentation};
 use dioxus::prelude::*;
@@ -19,62 +26,47 @@ use spiral_robotics_ui::{
 };
 use std::collections::BTreeSet;
 
-/// What the Timeline is about: the open episode and its discovered streams.
+/// A row a surface draws above the recorded streams.
 #[derive(Clone, PartialEq)]
-pub(super) struct TimelineSubject {
-    episode: OpenedEpisode,
-    streams: EpisodeStreams,
-    choices: StreamChoices,
+pub(in crate::activities) enum EvidenceTrack {
+    /// A measurement's value over time, such as a progress score.
+    Values(TimelineTrack),
+    /// Named spans, such as a measurement's subtasks; activating one plays it.
+    /// A row with no span in it is left out rather than drawn empty.
+    Intervals(IntervalTrack),
 }
 
-impl TimelineSubject {
-    pub(super) fn new(
-        episode: OpenedEpisode,
-        streams: EpisodeStreams,
-        choices: StreamChoices,
-    ) -> Self {
-        Self {
-            episode,
-            streams,
-            choices,
-        }
+impl From<TimelineTrack> for EvidenceTrack {
+    fn from(track: TimelineTrack) -> Self {
+        Self::Values(track)
+    }
+}
+
+impl From<IntervalTrack> for EvidenceTrack {
+    fn from(track: IntervalTrack) -> Self {
+        Self::Intervals(track)
     }
 }
 
 #[component]
-pub(super) fn TimelinePanel(
-    transport: EpisodeTransport,
-    subject: Option<TimelineSubject>,
-) -> Element {
-    let Some(subject) = subject else {
-        return rsx! { Timeline { interaction: transport.interaction(), content: TimelineContent::new(rsx! {
-            div { class: "data-timeline-empty", strong { "No episode open" } span { "Choose an episode under Datasets to see its streams on this clock." } }
-        }) } };
-    };
-    rsx! { StreamTimeline { key: "{subject.episode.episode().id()}", transport, subject } }
-}
-
-#[component]
-fn StreamTimeline(transport: EpisodeTransport, subject: TimelineSubject) -> Element {
+pub(super) fn EpisodeTimeline(loaded: LoadedEpisode, evidence: Vec<EvidenceTrack>) -> Element {
     let mut filter = use_signal(String::new);
     let expanded = use_signal(BTreeSet::<String>::new);
     let mut quiet_open = use_signal(|| false);
-    let catalog = match &subject.streams {
-        EpisodeStreams::Ready(catalog) => Some(catalog),
-        _ => None,
-    };
+    let transport = loaded.transport().clone();
+    let choices = loaded.choices();
+    let catalog = loaded.catalog();
     let needle = filter().to_lowercase();
     let searching = !needle.is_empty();
     let rows = catalog
-        .into_iter()
-        .flat_map(|catalog| catalog.streams())
+        .streams()
+        .iter()
         .filter(|stream| !searching || stream.label().to_lowercase().contains(&needle))
         .cloned()
         .collect::<Vec<_>>();
-    let total = catalog.map_or(0, |catalog| catalog.streams().len());
+    let total = catalog.streams().len();
     // Cameras lead, then streams with something to plot; the rest wait behind
     // one row until asked for. A search shows every match in place.
-    let choices = subject.choices;
     let (cameras, data): (Vec<_>, Vec<_>) = rows
         .into_iter()
         .partition(|stream| stream.kind() == StreamKind::Video);
@@ -83,29 +75,31 @@ fn StreamTimeline(transport: EpisodeTransport, subject: TimelineSubject) -> Elem
         .partition(|stream| !searching && choices.stream_is_quiet(stream));
     let leading = cameras.into_iter().chain(loud).collect::<Vec<_>>();
     let nothing_listed = leading.is_empty() && quiet.is_empty();
-    let facts = subject.episode.episode().facts();
-    let identity = rsx! {
-        strong { "{subject.episode.episode().name()}" }
-        span { class: "truncate", title: "{facts.facts_label()}\n{facts.source_uri().unwrap_or_default()}", "{subject.episode.label().head()}" }
-    };
+    let interaction = transport.interaction();
     let corner = rsx! { TextInput { class: "data-stream-filter", kind: TextInputKind::Search,
     placeholder: "Filter {total} streams", "aria-label": "Filter streams",
     value: filter(), oninput: move |value| filter.set(value) } };
     let rows = rsx! {
-        match subject.streams {
-            EpisodeStreams::Loading => rsx! { div { class: "data-timeline-none", role: "status", "Finding recorded streams…" } },
-            EpisodeStreams::Failed(error) => rsx! { div { class: "data-timeline-none", role: "alert", "Could not read this episode's streams: {error}" } },
-            EpisodeStreams::Ready(catalog) => rsx! {
-                if nothing_listed { p { class: "data-timeline-none", if catalog.is_empty() { "This episode has no readable streams." } else { "No streams match the filter." } } }
-                StreamRows { streams: leading, transport: transport.clone(), choices, expanded }
-                if !quiet.is_empty() {
-                    QuietStreamsRow { count: quiet.len(), open: quiet_open(), on_toggle: move |_| quiet_open.toggle() }
-                    if quiet_open() { StreamRows { streams: quiet, transport: transport.clone(), choices, expanded } }
-                }
-            },
+        for track in evidence {
+            match track {
+                EvidenceTrack::Values(track) => rsx! { NumericTrackRow { key: "{track.id()}", track, interaction: interaction.clone() } },
+                EvidenceTrack::Intervals(track) if !track.is_empty() => rsx! { IntervalTrackRow { key: "{track.id()}", track, interaction: interaction.clone() } },
+                EvidenceTrack::Intervals(_) => rsx! {},
+            }
+        }
+        if nothing_listed { p { class: "data-timeline-none", if catalog.is_empty() { "This episode has no readable streams." } else { "No streams match the filter." } } }
+        StreamRows { streams: leading, transport: transport.clone(), choices, expanded }
+        if !quiet.is_empty() {
+            QuietStreamsRow { count: quiet.len(), open: quiet_open(), on_toggle: move |_| quiet_open.toggle() }
+            if quiet_open() { StreamRows { streams: quiet, transport: transport.clone(), choices, expanded } }
         }
     };
-    rsx! { Timeline { interaction: transport.interaction(), content: TimelineContent::new(rows).with_identity(identity).with_corner(corner) } }
+    // Every surface names the episode above its inspection, so the transport
+    // leads with its controls rather than repeating the name.
+    let content = TimelineContent::new(rows)
+        .with_identity(rsx! {})
+        .with_corner(corner);
+    rsx! { Timeline { interaction, content } }
 }
 
 #[component]

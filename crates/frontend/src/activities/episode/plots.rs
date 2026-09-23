@@ -3,9 +3,12 @@
 //! Each plotted stream loads its selected fields once and draws one lane per
 //! field, one coloured trace per array index. Lanes share the visible span
 //! with the Timeline; the playhead and the hover cursor cross every lane.
-use super::stream_choices::{EpisodeStreams, StreamChoices};
-use crate::activities::episode::{
-    EpisodeTransport, MessageBuffer, MessageField, RecordedStream, StreamCatalog, StreamKind,
+use super::{
+    choices::StreamChoices,
+    inspection::LoadedEpisode,
+    messages::{MessageBuffer, MessageField},
+    streams::{RecordedStream, StreamCatalog, StreamKind},
+    transport::EpisodeTransport,
 };
 use crate::components::charts::{CharmingChart, ChartPresentation};
 use crate::components::icons::SignalStreamIcon;
@@ -21,7 +24,9 @@ use std::rc::Rc;
 const LANE_HEIGHT: f64 = 96.0;
 const LANE_GAP: f64 = 12.0;
 const PLOT_MARGIN_LEFT: f64 = 56.0;
-const PLOT_MARGIN_RIGHT: f64 = 10.0;
+/// None: a plot ends where the timeline's tracks end, so the two share one
+/// time axis edge to edge.
+const PLOT_MARGIN_RIGHT: f64 = 0.0;
 const QUICK_PLOT_STREAMS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -44,29 +49,11 @@ impl PlotCursor {
 }
 
 #[component]
-pub(super) fn PlotsPanel(
-    streams: Option<EpisodeStreams>,
-    transport: EpisodeTransport,
-    choices: StreamChoices,
-) -> Element {
+pub(super) fn PlotsPanel(loaded: LoadedEpisode) -> Element {
     let hover = use_signal(PlotCursor::default);
-    let Some(streams) = streams else {
-        return rsx! {
-            div { class: "data-plots-empty",
-                strong { "No episode open" }
-                p { "Choose an episode under Datasets. Its numeric streams plot here on the shared timeline." }
-            }
-        };
-    };
-    let catalog = match streams {
-        EpisodeStreams::Loading => {
-            return rsx! { div { class: "data-plots-empty", role: "status", span { "Finding recorded streams…" } } };
-        }
-        EpisodeStreams::Failed(error) => {
-            return rsx! { div { class: "data-plots-empty", role: "alert", strong { "Streams unavailable" } p { "{error}" } } };
-        }
-        EpisodeStreams::Ready(catalog) => catalog,
-    };
+    let catalog = loaded.catalog().clone();
+    let transport = loaded.transport().clone();
+    let choices = loaded.choices();
     let plotted = choices.plotted_streams();
     if plotted.is_empty() {
         return rsx! { PlotsEmpty { catalog, choices } };

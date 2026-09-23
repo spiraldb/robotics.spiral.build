@@ -380,12 +380,18 @@ put reads as a bench tool.
   two-thirds visualization, with Timeline in the lower 42% and each camera
   visible in its own row of the named camera column. Rollout narrows the
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
-- Data defaults to a 21% Datasets rail beside an episode workspace: Plots in
-  the primary tile, one panel per recorded
-  camera in a right-hand column, and a full-width Timeline across the lower
-  40%. The Timeline lists every recorded stream with its message density and
-  is where streams are shown, plotted, and selected. Import opens as a peer
-  tab in the primary tile.
+- Data defaults to a 21% Datasets rail beside one subject panel: a
+  dataset's Overview, or one open episode under a one-line location header
+  ("dataset / Episode …id · label · duration · date · messages"). An open
+  episode is the shared episode inspection every surface mounts. Import
+  opens as a peer tab beside the subject.
+- The episode inspection is one component on every surface (Data, Curation's
+  transform review, Explore's dataset pane and subtask reviews): its own
+  docked workbench of one panel per recorded camera, a Scene when the dataset
+  has a robot model, Plots, and the Timeline, all on the episode's clock. The
+  Timeline lists the surface's evidence rows first, then every recorded
+  stream with its message density, and is where streams are shown, plotted,
+  and selected.
 - Agent puts the graph first: a 24% Assistant column at the left, then
   the Graph over a Results shelf in the lower 54%. Stage details float over
   the graph beside the selected card rather than holding a tile. It has its
@@ -632,32 +638,45 @@ switcher. There is no selected-arm toolbar beneath it. Setup is global Settings
 Data follows the operator's own model of their recordings: a dataset is a
 folder of MCAP files and each file is one episode. The Datasets rail lists
 datasets and expands each into its chronological episodes (labelled by the part
-of the source path that differs between files). Selecting a dataset shows its
-Overview; opening an episode replaces it with Plots, one panel per recorded
-camera, and the Timeline.
-The canonical first-open Data layout is:
+of the source path that differs between files). The rail is the hierarchy and
+the subject panel beside it shows exactly one level of it: selecting a dataset
+shows its Overview; opening an episode replaces it with the episode
+inspection under a one-line location header whose dataset name is the way
+back. Dataset panels and episode panels never share a tile.
+The canonical Data layout at 1440×900 is:
 
 ```text
-┌── 21% ──┬────────── 49% ──────────┬──── 51% ────┐
-│ Datasets│ Overview · Plots         │ top  │ left │
-│ rail    │                          ├──────┴──────┤
-│         │                         │ right       │
-│         ├─────────────────────────┴─────────────┤
-│         │ Timeline — transport, ruler, one row  │
-│         │ per stream with message density       │
-└─────────┴───────────────────────────────────────┘
+┌── 21% ──┬── Episode ───────────────────────────────┐
+│ Datasets│ dataset / Episode …id  label · 0:20.5 · …│
+│ rail    ├─────────────┬─────────────┬──────────────┤
+│         │ Camera · top│Camera · left│Camera · right│
+│         ├─────────────┴─────────────┴──────────────┤
+│         │ Plots — lanes on the Timeline's time axis│
+│         ├──────────────────────────────────────────┤
+│         │ Timeline — transport, ruler, evidence    │
+│         │ rows, one row per stream with density    │
+└─────────┴──────────────────────────────────────────┘
 ```
 
-The upper workbench takes 60% of the episode workspace and Timeline takes
-40%. Cameras fill a two-column grid; an odd final camera spans its row, and
-an explicitly named top camera appears first. A camera panel is titled
-"Camera ·" plus the part of its stream name that differs from the episode's
-other cameras. Opening an episode selects Plots. These are defaults:
-resizing or docking a panel preserves the operator's arrangement, and from
-then on only the camera column follows the episode: when the set of
-cameras changes, the grid is rebuilt for the new cameras inside the
-arrangement the operator left, never poured into the tiles the previous
-episode happened to leave behind.
+The inspection arranges itself for the room its surface gives it
+(`activities/episode/arrangement.rs`), so it reads the same everywhere. Three
+bands share one clock, top to bottom: the views (cameras, the leading one
+first, then the Scene), Plots, and the Timeline. The views take only the
+height their pictures can use, in the grid that leaves the smallest picture
+largest and spends the least on camera mat; the leading camera takes a
+column of its own only where that makes its picture the larger. No view is
+drawn in a tile smaller than 256×200 px: views that do not fit join the last
+tile as tabs. Plots and the Timeline span the same width and give their names
+the same column, so one vertical line through both is one instant. A room too
+short for a Plots band (under 200 px after the Timeline's 30%) sends Plots to
+the last view tile as a tab, never behind the Timeline; asking to plot a
+stream brings it forward. Shares move in 2% steps, so a small resize keeps the
+operator's arrangement; a different arrangement is a new layout scope. The
+inspection keeps at least 30rem of height and its surface scrolls below that.
+A camera panel is titled "Camera ·" plus the part of its stream name that
+differs from the episode's other cameras; the leading camera is the one a
+surface names (a measurement's camera), else the overview camera (top,
+front, head).
 
 When the operator has chosen nothing, Data plots the busiest stream with
 numeric fields once every data schema has loaded, so Plots is never empty
@@ -674,10 +693,10 @@ and a type rule, never a name rule). Rows are 24px. Density draws in
 graphite, the selected stream's density in the accent, and a dropout inside
 a dense stream as a caution-ochre dash. Cameras, Plots, the ruler, and the
 stream rows share one playhead and one visible span. The transport's
-elapsed clock is the 16px readout; its episode identity holds a fixed 14rem
-slot so Play never moves between episodes, and Space, the arrows and
-Home/End drive the clock whether focus rests inside the workspace or on the
-page itself.
+elapsed clock is the 16px readout. Every surface names the episode above its
+inspection, so the transport leads with its controls, and Space, the arrows
+and Home/End drive the clock whether focus rests inside the inspection or on
+the page itself.
 
 Data speaks the operator's language over storage's. The rail names an
 episode by the part of its source path that differs between files; an
@@ -1677,10 +1696,14 @@ ambient browser selection—decides whether execution may begin.
   or under the hover cursor; clicking a trace hides it. A click seeks. A
   whole episode that exceeds the read bounds falls back to the visible span
   and says so. The empty state offers one-click plots of the busiest streams.
-- **Cameras:** Each video stream is its own camera panel in the right-hand
-  column, mounted only while open; the frame keeps the dark mat and the
+- **Cameras:** Each video stream is its own camera panel of the episode
+  inspection, mounted only while open; the frame keeps the dark mat and the
   recorded image without a redundant timing footer. Closing a panel unticks
   the stream; the Timeline reopens it.
+- **Episode stepper:** Wherever a surface walks a list of episodes (Curation's
+  transform review, Explore's dataset pane) it uses one stepper: ↑ and ↓ icon
+  buttons that also answer the arrow keys, beside a list whose options read
+  "…id · label · duration".
 - **Import:** A peer native tab contains a restrained form leading from source
   fields to inspection, a resolved-revision review, import, and a success
   receipt. Finishing selects the new dataset in the rail.

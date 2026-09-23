@@ -121,7 +121,7 @@ impl DatasetClient {
     }
 
     /// Message density for every stream of one episode, in request order.
-    pub(super) fn episode_coverage(
+    pub(in crate::activities) fn episode_coverage(
         &self,
         request: spiral_robotics_common::datasets::EpisodeCoverageRequest,
     ) -> impl Future<

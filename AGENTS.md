@@ -63,6 +63,6 @@ ghost_nodes.push(CrateInfo {
 ```
 Instead, we use use a much narrower constructor, with new(arg1, arg2, arg3), and check and enforce the invariants.
 
-- Typically a function should not have more than 3 parameters (including self if it is a member method). If it does, it is a sign of either too large function body, or a container struct should hold the parameters. 
+- Typically a function should not have more than 4 parameters (including self if it is a member method). If it does, it is a sign of either too large function body, or a container struct should hold the parameters. 
 
 - A struct should not have more than 7 fields, more than that adds cognitive burden. Use private structs to group related fields.

@@ -550,10 +550,10 @@ fn TransformStagePreview(
         section { class: "curation-stage-preview", "aria-label": "Transform episode review",
             StageHeading { stage: stage.clone(),
                 if let Some(position) = position {
-                    div { class: "curation-episode-stepper", role: "group", "aria-label": "Step between eligible episodes",
+                    div { class: "episode-stepper", role: "group", "aria-label": "Step between eligible episodes",
                         // ↑ and ↓ step while a stepper button has focus; the
                         // select beside them keeps its own arrow keys.
-                        span { class: "curation-episode-steps",
+                        span { class: "episode-steps",
                             onkeydown: {
                                 let step = step.clone();
                                 move |event: KeyboardEvent| match event.key() {
@@ -572,7 +572,7 @@ fn TransformStagePreview(
                                 onclick: { let step = step.clone(); move |_| step(1) }, ArrowDownIcon {} }
                         }
                         label { r#for: "curation-preview-episode", class: "sr-only", "Episode" }
-                        Select { id: "curation-preview-episode", class: "run-select curation-episode-select",
+                        Select { id: "curation-preview-episode", class: "run-select episode-select",
                             title: selected.as_ref().map(EpisodeId::to_string).unwrap_or_default(),
                             value: selected.as_ref().map(EpisodeId::to_string).unwrap_or_default(),
                             onchange: move |value: String| {

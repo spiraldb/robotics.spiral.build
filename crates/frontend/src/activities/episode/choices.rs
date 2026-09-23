@@ -1,10 +1,12 @@
-//! What the operator has chosen to show of the open episode's streams: which
-//! fields are plotted, which cameras are open, and the schemas and densities
-//! those choices read.
-use super::DatasetClient;
-use crate::activities::episode::{
-    EpisodeTimeRange, MessageBuffer, MessageField, RecordedStream, StreamCatalog, StreamKind,
+//! What the operator has chosen to show of an inspected episode's streams:
+//! which fields are plotted, which cameras are open, and the schemas and
+//! densities those choices read.
+use super::{
+    messages::{MessageBuffer, MessageField},
+    streams::{RecordedStream, StreamCatalog, StreamKind},
+    transport::EpisodeTimeRange,
 };
+use crate::activities::data::DatasetClient;
 use dioxus::prelude::*;
 use futures_util::StreamExt as _;
 use spiral_robotics_common::datasets::{
@@ -13,18 +15,10 @@ use spiral_robotics_common::datasets::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) const COVERAGE_BUCKETS: u16 = 240;
-pub(super) const MAX_PLOTTED_FIELDS_PER_STREAM: usize = 16;
+const COVERAGE_BUCKETS: u16 = 240;
+const MAX_PLOTTED_FIELDS_PER_STREAM: usize = 16;
 
 const CONCURRENT_SCHEMA_READS: usize = 4;
-
-/// Discovery of the open episode's streams, as the panels see it.
-#[derive(Clone, PartialEq, Debug)]
-pub(super) enum EpisodeStreams {
-    Loading,
-    Ready(StreamCatalog),
-    Failed(String),
-}
 
 #[derive(Clone, PartialEq)]
 pub(super) enum StreamSchema {
@@ -117,10 +111,10 @@ pub(super) enum PlotState {
     All,
 }
 
-/// Everything the operator has chosen to show for the current episode.
+/// Everything the operator has chosen to show for the inspected episode.
 ///
-/// Reads spawned here belong to the workspace scope, so closing a panel does
-/// not abandon a schema or coverage load another panel is waiting on.
+/// Reads spawned here belong to the inspection's scope, so closing a panel
+/// does not abandon a schema or coverage load another panel is waiting on.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct StreamChoices {
     scope: ScopeId,
@@ -128,7 +122,11 @@ pub(super) struct StreamChoices {
     plots: Signal<PlotSelection>,
     schemas: Signal<BTreeMap<String, StreamSchema>>,
     coverage: Signal<BTreeMap<String, CoverageState>>,
-    cameras: Signal<BTreeSet<String>>,
+    /// Cameras the operator closed; every other camera is shown.
+    hidden_cameras: Signal<BTreeSet<String>>,
+    /// How many times the operator asked for something to be plotted, so a
+    /// Plots panel waiting behind another tab can come forward.
+    plot_asks: Signal<usize>,
 }
 
 impl StreamChoices {
@@ -139,23 +137,30 @@ impl StreamChoices {
             plots: Signal::new(PlotSelection::default()),
             schemas: Signal::new(BTreeMap::new()),
             coverage: Signal::new(BTreeMap::new()),
-            cameras: Signal::new(BTreeSet::new()),
+            hidden_cameras: Signal::new(BTreeSet::new()),
+            plot_asks: Signal::new(0),
         })
     }
 
-    /// Forget the previous episode; every camera starts visible.
-    pub(super) fn reset(&mut self, catalog: &StreamCatalog) {
+    /// The choices an episode opens with: every camera shown, the busiest
+    /// measurement plotted, and every stream's messages counted onto the
+    /// timeline.
+    pub(super) fn open(&mut self, catalog: &StreamCatalog, range: Option<EpisodeTimeRange>) {
+        self.reset();
+        self.plot_default_stream(catalog);
+        if let Some(range) = range {
+            self.load_coverage(catalog, range);
+        }
+    }
+
+    /// Forget whatever was chosen before; every camera starts visible.
+    fn reset(&mut self) {
         let generation = self.generation.peek().wrapping_add(1);
         self.generation.set(generation);
         self.plots.set(PlotSelection::default());
         self.schemas.set(BTreeMap::new());
         self.coverage.set(BTreeMap::new());
-        self.cameras.set(
-            catalog
-                .videos()
-                .map(|stream| stream.key().to_owned())
-                .collect(),
-        );
+        self.hidden_cameras.set(BTreeSet::new());
     }
 
     fn spawn<F: Future<Output = ()> + 'static>(&self, future: F) {
@@ -195,7 +200,12 @@ impl StreamChoices {
             fields.remove(index);
         } else if fields.len() < MAX_PLOTTED_FIELDS_PER_STREAM {
             fields.push(field);
+            *self.plot_asks.write() += 1;
         }
+    }
+    /// How many times the operator has asked to plot something.
+    pub(super) fn plot_asks(&self) -> usize {
+        *self.plot_asks.read()
     }
     pub(super) fn plot_state(&self, key: &str) -> PlotState {
         let plotted = self.plotted_fields(key);
@@ -220,6 +230,7 @@ impl StreamChoices {
             self.plots.write().fields.remove(&key);
             return;
         }
+        *self.plot_asks.write() += 1;
         let mut choices = *self;
         let generation = *self.generation.peek();
         let read = stream.read().clone();
@@ -236,12 +247,11 @@ impl StreamChoices {
             }
         });
     }
-    /// Called once by Data when an episode opens: reads every data stream's
-    /// schema, busiest first and a few at a time, and plots the first one
-    /// with numeric fields, so Plots is never empty on open. The remaining
-    /// schemas keep loading for the fold and the disabled checks. Other
-    /// episode compositions can discover cameras without any of this.
-    pub(super) fn plot_default_stream(&mut self, catalog: &StreamCatalog) {
+    /// Reads every data stream's schema, busiest first and a few at a time,
+    /// and plots the first one with numeric fields, so Plots is never empty
+    /// on open. The remaining schemas keep loading for the fold and the
+    /// disabled checks.
+    fn plot_default_stream(&mut self, catalog: &StreamCatalog) {
         let ranked = catalog.data_by_traffic();
         let generation = *self.generation.peek();
         let mut choices = *self;
@@ -350,7 +360,7 @@ impl StreamChoices {
     }
     /// Count every stream's messages into timeline buckets with one request,
     /// so the rows fill together instead of one at a time.
-    pub(super) fn load_coverage(&mut self, catalog: &StreamCatalog, range: EpisodeTimeRange) {
+    fn load_coverage(&mut self, catalog: &StreamCatalog, range: EpisodeTimeRange) {
         let generation = *self.generation.peek();
         let (keys, streams): (Vec<String>, Vec<TopicCoverageRequest>) = catalog
             .streams()
@@ -415,14 +425,14 @@ impl StreamChoices {
     }
 
     pub(super) fn camera_open(&self, key: &str) -> bool {
-        self.cameras.read().contains(key)
+        !self.hidden_cameras.read().contains(key)
     }
     pub(super) fn set_camera(&mut self, key: &str, open: bool) {
-        let mut cameras = self.cameras.write();
+        let mut hidden = self.hidden_cameras.write();
         if open {
-            cameras.insert(key.to_owned());
+            hidden.remove(key);
         } else {
-            cameras.remove(key);
+            hidden.insert(key.to_owned());
         }
     }
 }

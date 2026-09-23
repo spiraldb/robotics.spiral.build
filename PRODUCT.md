@@ -189,9 +189,12 @@ never becomes the motor-control runtime.
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
   - **Data** owns datasets and their episodes. A rail lists each dataset's
-    MCAP files as chronological episodes; opening one shows its recorded
-    cameras and plots of chosen numeric fields on one shared Timeline that
-    lists every stream with its message density. Import opens as a peer tab.
+    MCAP files as chronological episodes; selecting a dataset shows its
+    overview, and opening an episode shows it in the shared episode
+    inspection: its recorded cameras, plots of chosen numeric fields, and one
+    Timeline that lists every stream with its message density. Curation and
+    Explore show episodes through the same inspection. Import opens as a peer
+    tab.
   - **Workflow** owns relation discovery and a persisted, revision-safe
     Table → Query → optional Model/backfill → final Query → Result editor over existing qualified
     Spiral relations. The backend runs bounded read-only SQL and one executable
@@ -262,8 +265,9 @@ never becomes the motor-control runtime.
   reconciliation, and compact shared chrome. Live, Data, Workflow, Training, and Rollout keep independent session
   layouts. Live defaults to a one-third workbench beside a two-thirds
   visualization with movable Scene, camera, and Timeline panels. Data defaults
-  to a 21% Datasets rail beside the episode workspace and a full-width
-  Timeline.
+  to a 21% Datasets rail beside one subject panel; an open episode's
+  inspection nests its own workbench of cameras, Scene, Plots, and Timeline,
+  arranged for the room it is given.
 - Four backend motion modes: **Idle**, **Manual**, **Teleoperation**, and
   **Policy**. The Studio presents their operator-facing form as **Hold**
   (torque engaged and joints writable), **Release** (torque off and telemetry

@@ -3601,25 +3601,28 @@
 .rollout-metric dd small { font-size: 10px; color: var(--tone-ink-faint); }
 
 /* Data activity ---------------------------------------------------------
-   Datasets and episodes in a rail; one open episode across cameras, plots,
-   messages, and a timeline that shares a single clock. Geometry lives in a
+   Datasets and episodes in a rail beside one subject: a dataset at a glance,
+   or an episode inspected whole. The inspection's panels — cameras, robot,
+   plots, and the timeline that shares their clock — keep their geometry in a
    few custom properties so the ruler, the stream rows, and the cursor agree
    about where time starts. */
 @layer components {
-  .data-workspace {
+  .episode-inspection {
     --data-name-w: 16rem;
     --data-readout-w: 11.5rem;
     --data-plot-left: 56px;
-    --data-plot-right: 10px;
+    --data-plot-right: 0px;
   }
 
   .data-catalog-panel,
-  .data-primary-panel,
-  .data-timeline-panel {
+  .data-subject-panel,
+  .episode-plots-dock,
+  .episode-timeline-dock {
     @apply flex min-h-0 min-w-0 flex-col overflow-hidden bg-surface text-ink;
   }
 
-  .data-camera-panel {
+  .episode-camera-dock,
+  .episode-stage-dock {
     @apply flex min-h-0 min-w-0 flex-col overflow-hidden;
   }
 
@@ -3735,6 +3738,52 @@
     @apply px-5 pb-2 pt-4 text-[12px] font-semibold text-ink;
   }
 
+  /* An open episode ----------------------------------------------------
+     One line names where it is — its dataset, the way back, then the
+     episode — and what it holds; the inspection takes the rest. */
+  .data-episode-subject {
+    @apply flex min-h-0 flex-1 flex-col overflow-y-auto;
+  }
+
+  .data-episode-subject > .episode-inspection {
+    flex: 1 0 auto;
+  }
+
+  /* One line whatever the label's length, so the inspection's room — and
+     with it the arrangement — stays put from one episode to the next. */
+  .data-subject-head {
+    @apply flex h-9 shrink-0 items-baseline gap-3 overflow-hidden border-b border-line px-3 pt-2.5;
+  }
+
+  .data-subject-path {
+    @apply flex shrink-0 items-baseline gap-1.5;
+  }
+
+  .data-subject-path h2 {
+    @apply whitespace-nowrap text-[12px] font-semibold tracking-[-0.01em] text-ink;
+  }
+
+  .data-subject-separator {
+    @apply text-ink-faint;
+  }
+
+  .data-subject-facts {
+    @apply flex min-w-0 items-baseline gap-x-2 whitespace-nowrap text-[11px] tabular-nums text-ink-soft;
+  }
+
+  .data-subject-facts > span {
+    @apply shrink-0;
+  }
+
+  .data-subject-facts > span + span::before {
+    @apply mr-2 text-ink-faint;
+    content: "·";
+  }
+
+  .data-subject-facts > .data-subject-label {
+    @apply min-w-0 shrink truncate font-medium text-ink;
+  }
+
   /* Timeline ------------------------------------------------------------ */
   .data-timeline {
     @apply flex h-full min-h-0 flex-col outline-none;
@@ -3805,18 +3854,6 @@
 
   .data-transport-zoom {
     @apply ml-auto border-l border-line pl-1;
-  }
-
-  .data-timeline-empty {
-    @apply m-auto flex max-w-[34ch] flex-col items-center gap-1 p-6 text-center text-[11px] leading-relaxed text-ink-soft;
-  }
-
-  .data-timeline-empty strong {
-    @apply text-[12px] font-medium text-ink;
-  }
-
-  .data-timeline-empty[role="alert"] strong {
-    @apply text-danger;
   }
 
   .data-timeline-body {
@@ -4750,9 +4787,10 @@
 .curation-stage-tools { @apply flex shrink-0 flex-wrap items-center gap-2; }
 .curation-stage-tools:empty { display: none; }
 .curation-stage-empty { @apply py-3; }
-.curation-episode-stepper { @apply flex items-center gap-1; }
-.curation-episode-steps { @apply flex items-center gap-px; }
-.curation-episode-select { @apply max-w-[22rem]; text-overflow: ellipsis; }
+/* One episode stepper wherever a surface walks a list of episodes. */
+.episode-stepper { @apply flex items-center gap-1; }
+.episode-steps { @apply flex items-center gap-px; }
+.episode-select { @apply max-w-[22rem]; text-overflow: ellipsis; }
 
 /* Histogram: how the incoming episodes measured against a numeric filter.
    Kept in graphite, excluded in the rule's tint, the threshold as a rule
@@ -4804,67 +4842,45 @@
 .curation-stage-preview > .curation-episode { padding: 0; }
 .curation-progress-evidence { gap: 8px; }
 
-/* One recording seen whole: the camera this view is about at the size it
-   deserves, every other camera of the episode as a strip under it, and the
-   shared timeline pinned beneath them on one clock.
-
-   Three 4:3 recordings in a grid of 16:9 cells letterboxed all three onto the
-   camera mat and left the third alone beside an empty cell. Here a picture is
-   drawn at the recording's own shape — the canvas carries the mat, so nothing
-   is ever matted around — the strip fills the width it is given, and the
-   pictures give height back to the clock rather than the other way round. */
-.episode-inspection { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 8px; }
-.episode-inspection-tiles { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; gap: 8px; }
-.episode-inspection-tile { display: flex; min-width: 0; min-height: 0; flex-direction: column; }
-.episode-inspection-tile h5 { flex: none; margin: 0; padding: 0 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; color: var(--tone-ink-soft); }
-.episode-inspection-tile .episode-camera-canvas { border-radius: 4px; background: var(--tone-camera); }
-
-/* The measured camera. It takes whatever height the composition has left and
-   sits at the largest size that keeps the recording's own shape. */
-.episode-inspection-featured { flex: 1; }
-.episode-inspection-featured .episode-camera-panel { flex: 1; min-height: 0; position: relative; }
-.episode-inspection-featured .episode-camera-image { display: flex; flex: 1; min-height: 0; align-items: center; justify-content: center; background: none; }
-.episode-inspection-featured .episode-camera-canvas { width: auto; height: auto; max-width: 100%; max-height: 100%; }
-
-/* The rest of the recording, at one height and their own widths: context for
-   the picture above, not a second thing to watch. */
-.episode-inspection-strip { display: flex; flex: none; align-items: flex-end; gap: 8px; }
-.episode-inspection-strip:empty { display: none; }
-.episode-inspection-strip .episode-inspection-tile { flex: none; }
-.episode-inspection-strip .episode-inspection-tile h5 { font-size: 10px; }
-.episode-inspection-strip .episode-camera-panel { flex: none; min-width: 5rem; min-height: 4.5rem; position: relative; }
-.episode-inspection-strip .episode-camera-image { flex: none; align-self: flex-start; position: relative; background: none; }
-.episode-inspection-strip .episode-camera-canvas { display: block; width: auto; height: 4.5rem; }
-.episode-inspection-strip .episode-inspection-view { height: 4.5rem; flex: none; border-radius: 4px; }
-.episode-inspection-view { display: flex; flex: 1; min-height: 0; position: relative; aspect-ratio: 16 / 9; border-radius: 4px; overflow: hidden; background: var(--tone-camera); }
-.episode-inspection-view > * { flex: 1; min-width: 0; }
-/* A tile this size is a picture of the robot, not a place to fly a camera
-   around, so the gesture legend and the orientation cube stay out of it. */
-.episode-inspection-view .viewport-help, .episode-inspection-view .view-cube { display: none; }
-/* A recording shown whole has no tracks, so the column their names would sit
-   in is an empty gutter beside the ruler. */
-.episode-inspection[data-tracks="none"] > .data-timeline { --data-name-w: 0px; }
-.episode-inspection[data-tracks="none"] .data-timeline-corner { display: none; }
-.episode-inspection > .data-timeline { flex: none; --data-name-w: 9rem; height: auto; min-height: 72px; overflow: hidden; border: 1px solid var(--tone-line); border-radius: 4px; }
-.episode-inspection .data-transport { flex-wrap: wrap; }
-/* A camera that has not opened yet rests on the sunken surface rather than the
-   mat: the featured picture is most of the pane, and a pane of black reads as a
-   dead feed rather than as one still arriving. The mat comes with the picture. */
-.episode-inspection .episode-camera-message { background: var(--tone-sunken); color: var(--tone-ink-soft); }
-.episode-inspection .episode-camera-message[role="alert"] { color: var(--tone-danger); }
-.episode-inspection-status { margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
-.episode-inspection-status[role="alert"] { color: var(--tone-danger); }
+/* One recording seen whole: its panels docked in a workbench of their own,
+   arranged for the room the surface gives it. Below a readable size the
+   inspection keeps its height and the surface scrolls, rather than drawing
+   every picture as a thumbnail. The dock is measured to choose the
+   arrangement, so the workbench fills it without adding to its size. */
+.episode-inspection { display: flex; min-width: 0; min-height: 30rem; flex: 1; flex-direction: column; }
+.episode-inspection-dock { position: relative; flex: 1; min-height: 0; }
+.episode-inspection-dock > .wb-workspace { position: absolute; inset: 0; height: auto; }
+.episode-panel-status { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 0; padding: 12px; font-size: 11px; color: var(--tone-ink-soft); }
+.episode-panel-status[role="alert"] { color: var(--tone-danger); }
+/* The stream names take what the timeline's width can spare, so a narrow
+   surface keeps a readable ruler beside them. */
+/* Plots and the timeline give their names one column, sized from the width
+   they share, so a plot's time axis starts and ends where the tracks do. */
+.episode-timeline-dock,
+.episode-plots-dock { container-type: inline-size; }
+.episode-timeline-dock .data-timeline,
+.episode-plots-dock .data-plots {
+  --data-name-w: clamp(10rem, 28cqw, 16rem);
+  --data-readout-w: calc(var(--data-name-w) - var(--data-plot-left));
+}
+/* A ruler narrower than its eight round divisions labels every other one,
+   so no two readings print over each other. */
+@container (max-width: 44rem) {
+  .data-time-tick:nth-child(even) span,
+  .data-plots-tick:nth-child(even) span { visibility: hidden; }
+}
 
 /* Before and after frames sit side by side at a bounded width, so one
    sampled frame never stretches to half the sheet. */
 .curation-stage-preview .curation-frames { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 24rem)); gap: 12px; }
 .curation-stage-preview .curation-frame img { height: clamp(140px, 22vh, 224px); aspect-ratio: auto; }
 
-/* WARP reserves the shared timeline before allocating camera height. */
-.curation-sheet-body:has(.curation-progress-evidence) { overflow: hidden; }
-.curation-stage-preview:has(.curation-progress-evidence) { display: flex; flex: 1; flex-direction: column; min-height: 0; }
-.curation-stage-preview:has(.curation-progress-evidence) > .curation-stage-heading { flex: none; }
-.curation-stage-preview:has(.curation-progress-evidence) > .curation-episode { flex: 1; min-height: 0; gap: 4px; }
-.curation-progress-evidence { flex: 1; min-height: 0; }
-.curation-progress-evidence .episode-inspection { flex: 1; min-height: 0; }
-.curation-progress-evidence .data-timeline-body { flex: none; overflow: hidden; }
+/* A transform's review is the inspected episode: it takes the stage's height
+   under the heading, and the sheet scrolls when that is less than the
+   inspection needs. */
+.curation-stage-preview:has(.episode-inspection) { display: flex; flex: 1 0 auto; flex-direction: column; }
+.curation-stage-preview:has(.episode-inspection) > .curation-stage-heading { flex: none; }
+.curation-stage-preview:has(.episode-inspection) > .curation-episode { display: flex; flex: 1 0 auto; flex-direction: column; gap: 4px; }
+.curation-episode > .episode-inspection,
+.curation-progress-evidence { flex: 1 0 auto; }
+.curation-progress-evidence { display: flex; flex-direction: column; }

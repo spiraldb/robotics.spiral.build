@@ -4,12 +4,15 @@
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, DatasetSummary};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, EmptyState, Fact, FactList, Notice, NoticeTone, Select,
+    ActionPurpose, ArrowDownIcon, ArrowUpIcon, Button, ButtonVariant, EmptyState, Fact, FactList,
+    Notice, NoticeTone, Select,
 };
 
 use super::super::document::ExplorationPayload;
 use super::super::state::ExplorationController;
-use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera};
+use crate::activities::episode::{
+    Episode, EpisodeFactsPresentation as _, EpisodeInspection, EpisodeLabels, FeaturedCamera,
+};
 use crate::components::dataset_picker::DatasetPicker;
 use crate::components::icons::SpinnerIcon;
 
@@ -126,6 +129,14 @@ fn DatasetEpisodeList(
     let count = episodes.len();
     let index = opened().min(count.saturating_sub(1));
     let current = episodes.get(index).cloned();
+    let labels = EpisodeLabels::of(episodes.iter().map(Episode::facts));
+    let mut step = move |delta: isize| {
+        opened.set(
+            index
+                .saturating_add_signed(delta)
+                .min(count.saturating_sub(1)),
+        );
+    };
     rsx! {
         header { class: "explore-canvas-dataset-head",
             FactList { mono: true,
@@ -133,26 +144,31 @@ fn DatasetEpisodeList(
                 Fact { label: "Episodes", "{count}" }
             }
             if count > 1 {
-                div { class: "explore-canvas-episode-picker",
-                    Button {
-                        purpose: ActionPurpose::Navigate, variant: ButtonVariant::Outline,
-                        disabled: index == 0, aria_label: "Previous episode", title: "Previous episode",
-                        onclick: move |_| opened.set(index.saturating_sub(1)),
-                        "‹"
+                // The same stepper Curation steps its episodes with: ↑ and ↓
+                // while a stepper button has focus, the list for a jump.
+                div { class: "episode-stepper", role: "group", "aria-label": "Step between episodes",
+                    span { class: "episode-steps",
+                        onkeydown: move |event: KeyboardEvent| match event.key() {
+                            Key::ArrowUp => { event.prevent_default(); step(-1); }
+                            Key::ArrowDown => { event.prevent_default(); step(1); }
+                            _ => {}
+                        },
+                        Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
+                            aria_label: "Previous episode", title: "Previous episode · ↑",
+                            disabled: index == 0, onclick: move |_| step(-1), ArrowUpIcon {} }
+                        Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
+                            aria_label: "Next episode", title: "Next episode · ↓",
+                            disabled: index + 1 >= count, onclick: move |_| step(1), ArrowDownIcon {} }
                     }
                     label { r#for: "explore-canvas-episode", class: "sr-only", "Episode" }
                     Select {
-                        id: "explore-canvas-episode", value: "{index}",
+                        id: "explore-canvas-episode", class: "run-select episode-select", value: "{index}",
                         onchange: move |value: String| opened.set(value.parse().unwrap_or(0)),
                         for (position, episode) in episodes.iter().enumerate() {
-                            option { value: "{position}", title: "{episode.id()}", "{episode.name()}" }
+                            option { value: "{position}", title: "{episode.id()}",
+                                "…{episode.id().short()} · {labels.label(episode.facts()).head()} · {episode.facts().duration_label()}"
+                            }
                         }
-                    }
-                    Button {
-                        purpose: ActionPurpose::Navigate, variant: ButtonVariant::Outline,
-                        disabled: index + 1 >= count, aria_label: "Next episode", title: "Next episode",
-                        onclick: move |_| opened.set((index + 1).min(count - 1)),
-                        "›"
                     }
                 }
             }

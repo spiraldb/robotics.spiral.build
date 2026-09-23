@@ -119,13 +119,6 @@ impl PlaybackClock {
     pub(crate) fn set_looping(&mut self, looping: bool) {
         self.looping = looping;
     }
-    pub(crate) fn reset(&mut self, duration: f64) {
-        *self = Self {
-            speed: self.speed,
-            looping: self.looping,
-            ..Self::new(duration)
-        };
-    }
 }
 
 /// The span of the episode currently spread across the timeline and plots.

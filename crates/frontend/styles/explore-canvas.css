@@ -109,6 +109,14 @@
     padding: 10px 12px 12px;
   }
 
+  /* The recording runs edge to edge under its heading, as it does in Data;
+     only the heading keeps the pane's inset. */
+  .explore-canvas-dataset {
+    gap: 0;
+    padding: 0;
+    overflow-y: auto;
+  }
+
   .explore-canvas-dataset-field {
     display: flex;
     align-items: center;
@@ -120,19 +128,15 @@
   .explore-canvas-dataset-head {
     display: flex;
     min-height: 28px;
+    flex: none;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
     border-bottom: 1px solid var(--tone-line);
-    padding-bottom: 8px;
+    padding: 6px 12px;
   }
 
-  .explore-canvas-episode-picker {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
 
   /* Both panes fill their tile; the workspace scrolls, the canvas clips. */
   .explore-canvas-graph-editor,
@@ -217,17 +221,6 @@
   opacity: 1;
 }
 
-.explore-canvas-episode-picker .ui-select {
-  min-width: 8.5rem;
-}
-
-/* The shared composition sizes itself to its content, which left the dataset
-   node's recording a band at the top of an empty pane. Here the recording is
-   what the node is for, so it takes the height and its pictures grow into it. */
-.explore-canvas-dataset > .episode-inspection {
-  flex: 1;
-  min-height: 0;
-}
 
 /* A node whose menu or confirmation is open is always the selected one —
    opening either selects it — and dioxus-flow already lifts the selected node
