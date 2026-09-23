@@ -91,7 +91,11 @@ impl LengthDistribution {
         (longest.saturating_sub(shortest) / Self::BINS).max(1)
     }
     fn sql(dataset: &DatasetSelection, range: (u64, u64)) -> String {
-        let bin = format!("floor((duration_ns - {}) / {})", range.0, Self::width_ns(range));
+        let bin = format!(
+            "floor((duration_ns - {}) / {})",
+            range.0,
+            Self::width_ns(range)
+        );
         format!(
             "SELECT {bin} AS bin, count(*) AS episodes FROM spql.mcap.episodes({}) \
              WHERE duration_ns IS NOT NULL GROUP BY {bin} ORDER BY bin",
@@ -159,14 +163,19 @@ pub(super) fn DatasetOverview(
         };
         let range = totals.length_range()?;
         let result = DatasetClient::current()
-            .run_spiral_query(LengthDistribution::sql(&dataset, range), LengthDistribution::BINS as usize + 1)
+            .run_spiral_query(
+                LengthDistribution::sql(&dataset, range),
+                LengthDistribution::BINS as usize + 1,
+            )
             .await
             .map_err(|error| error.to_string())
             .map(|snapshot| {
                 let rows = snapshot
                     .into_rows()
                     .into_iter()
-                    .filter_map(|row| Some((row.get("bin")?.as_f64()?, row.get("episodes")?.as_u64()?)))
+                    .filter_map(|row| {
+                        Some((row.get("bin")?.as_f64()?, row.get("episodes")?.as_u64()?))
+                    })
                     .collect::<Vec<_>>();
                 LengthDistribution::new(range, &rows, totals.average_seconds())
             });
@@ -281,7 +290,11 @@ pub(super) fn DatasetsAtAGlance(
 }
 
 #[component]
-fn DatasetRow(dataset: DatasetSelection, order: usize, on_select: EventHandler<DatasetSelection>) -> Element {
+fn DatasetRow(
+    dataset: DatasetSelection,
+    order: usize,
+    on_select: EventHandler<DatasetSelection>,
+) -> Element {
     let facts = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
         let row = DatasetClient::current()
             .run_spiral_query(DatasetFacts::sql(&dataset), 1)
@@ -293,7 +306,8 @@ fn DatasetRow(dataset: DatasetSelection, order: usize, on_select: EventHandler<D
         serde_json::from_value::<DatasetFacts>(serde_json::Value::Object(row)).ok()
     }));
     let facts = facts.read().clone().flatten();
-    let cell = |read: fn(&DatasetFacts) -> String| facts.as_ref().map_or_else(|| "…".to_owned(), read);
+    let cell =
+        |read: fn(&DatasetFacts) -> String| facts.as_ref().map_or_else(|| "…".to_owned(), read);
     let chosen = dataset.clone();
     let open = dataset.clone();
     rsx! {
@@ -325,7 +339,10 @@ fn DatasetRow(dataset: DatasetSelection, order: usize, on_select: EventHandler<D
 fn EpisodeLengthChart(distribution: LengthDistribution) -> Element {
     let tallest = distribution.tallest() as f64;
     let bins = distribution.counts.len();
-    let (shortest, longest) = (distribution.edge_seconds(0), distribution.edge_seconds(bins));
+    let (shortest, longest) = (
+        distribution.edge_seconds(0),
+        distribution.edge_seconds(bins),
+    );
     let total = distribution.counts.iter().sum::<u64>();
     rsx! {
         figure { class: "data-lengths",
@@ -418,7 +435,10 @@ mod tests {
         assert_eq!(facts.episodes_label(), "40");
         assert_eq!(facts.recorded_label(), "59 min 10 s");
         assert_eq!(facts.size_label(), "3.3 GiB");
-        assert_eq!(facts.span_label().as_deref(), Some("2025-04-03 → 2026-04-14"));
+        assert_eq!(
+            facts.span_label().as_deref(),
+            Some("2025-04-03 → 2026-04-14")
+        );
         assert_eq!(facts.length_range(), Some((4_600_000_000, 175_400_000_000)));
         assert!((facts.average_seconds().unwrap() - 88.747).abs() < 0.001);
         let sparse: DatasetFacts =

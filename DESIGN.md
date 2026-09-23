@@ -81,6 +81,11 @@ typography:
     fontFamily: "Geist, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
     fontSize: "12.5px"
     fontWeight: 600
+  dialog-title:
+    fontFamily: "Geist, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+    fontSize: "14px"
+    fontWeight: 600
+    letterSpacing: "-0.01em"
   body:
     fontFamily: "Geist, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
     fontSize: "13px"
@@ -303,6 +308,7 @@ components:
   dialog:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
+    typography: "{typography.dialog-title}"
     rounded: "{rounded.dialog}"
   toast:
     backgroundColor: "{colors.surface}"
@@ -504,8 +510,9 @@ face.
   dataset's Overview heading beside its 30px kind mark, the Import pane,
   Settings. One per subject.
 - **Heading** (600, 12.5–13px): Section names inside a subject ("Episode
-  lengths", "Streams"), the episode subject path, dialog and empty-state
-  titles (13–14px).
+  lengths", "Streams"), the episode subject path, empty-state titles (13px).
+  **Dialog title** (600, 14px, -0.01em) is the one step between Heading and
+  Title: the confirmation dialog and the shortcut sheet.
 - **Body** (400, 13px, ~1.45): Tree labels, fields, panel content,
   sentences. **Current** (560) is the weight a thing takes when it becomes
   the current one: the current nav item, the current tab, a pressed toggle,

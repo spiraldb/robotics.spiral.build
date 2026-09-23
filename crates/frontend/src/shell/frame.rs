@@ -118,7 +118,10 @@ fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
         (
             "Anywhere",
             vec![
-                ("1 – 6".into(), "Open Data, Workflow, Curation, Training, Rollout, Live"),
+                (
+                    "1 – 6".into(),
+                    "Open Data, Workflow, Curation, Training, Rollout, Live",
+                ),
                 (",".into(), "Open Settings"),
                 ("?".into(), "Show or hide these shortcuts"),
             ],
@@ -146,7 +149,10 @@ fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
         ),
         (
             "Live",
-            vec![("R".into(), "Start or finish recording"), ("Shift  X".into(), "Discard the take")],
+            vec![
+                ("R".into(), "Start or finish recording"),
+                ("Shift  X".into(), "Discard the take"),
+            ],
         ),
     ];
     rsx! {
@@ -338,8 +344,10 @@ impl StatusFacts {
             ("Robot setup unavailable".to_owned(), StatusTone::Caution)
         } else if hardware.is_some_and(|hardware| !hardware.setup().available()) {
             ("Loading robots…".to_owned(), StatusTone::Caution)
-        } else if matches!(mode, Activity::Live | Activity::Rollout | Activity::Settings)
-            && !controls_available
+        } else if matches!(
+            mode,
+            Activity::Live | Activity::Rollout | Activity::Settings
+        ) && !controls_available
         {
             ("Reconnecting".to_owned(), StatusTone::Danger)
         } else {
@@ -567,7 +575,11 @@ fn StudioToast() -> Element {
     let studio = crate::shell::state::StudioProjectState::current();
     let center = studio.notifications().read().to_owned();
     let now = (studio.clock_ms())();
-    let Some(message) = center.latest_prominent(now).cloned().filter(|_| !center.open()) else {
+    let Some(message) = center
+        .latest_prominent(now)
+        .cloned()
+        .filter(|_| !center.open())
+    else {
         return rsx! {};
     };
     let severity = message.severity();
@@ -633,8 +645,14 @@ impl TrainingStatus {
     /// is unavailable is the Training panel's to explain, in full.
     fn facts(self) -> Vec<StatusFact> {
         let mut facts = Vec::new();
-        facts.extend(self.phase.map(|phase| StatusFact::new(phase, StatusTone::Plain)));
-        facts.extend(self.step.map(|step| StatusFact::new(step, StatusTone::Plain)));
+        facts.extend(
+            self.phase
+                .map(|phase| StatusFact::new(phase, StatusTone::Plain)),
+        );
+        facts.extend(
+            self.step
+                .map(|step| StatusFact::new(step, StatusTone::Plain)),
+        );
         let runs = match self.runs {
             1 => "1 run".to_owned(),
             count => format!("{count} runs"),

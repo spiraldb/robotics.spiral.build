@@ -12,10 +12,13 @@ use std::{
 };
 use wasm_bindgen::JsCast as _;
 
+/// One recorded camera, named on its picture the way a monitor wall names
+/// its screens: its panel carries no header to name it.
 #[component]
 pub(in crate::activities) fn EpisodeCamera(
     request: MessageRead,
     transport: EpisodeTransport,
+    title: String,
 ) -> Element {
     let timeline = transport.range();
     let load_request = request.clone();
@@ -74,6 +77,7 @@ pub(in crate::activities) fn EpisodeCamera(
                 } },
                 None => rsx! {},
             } }
+            span { class: "camera-caption", "{title}" }
         }
     }
 }

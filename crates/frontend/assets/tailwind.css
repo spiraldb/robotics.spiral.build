@@ -1577,9 +1577,6 @@
   border-radius: 2px 2px 0 0;
   background: var(--tone-ink);
 }
-.wb-workspace .wb-tabs:has(> .wb-tab-item:only-child) .wb-tab-item-active::before {
-  display: none;
-}
 .wb-workspace .wb-tab-icon svg {
   color: var(--tone-ink-faint);
 }
@@ -2268,6 +2265,7 @@ button.studio-status-fact:hover {
     color: var(--tone-ink-soft);
   }
   .camera-editor-frame {
+    position: relative;
     min-height: 0px;
     flex: 1;
     overflow: hidden;
@@ -2895,6 +2893,11 @@ button.studio-status-fact:hover {
   .training-history-panel {
     background-color: var(--tone-surface);
     padding: var(--spacing);
+  }
+  .training-history-heading {
+    margin-bottom: var(--spacing);
+    padding-inline: calc(var(--spacing) * 2);
+    padding-top: calc(var(--spacing) * 2.5);
   }
   .training-history-entry {
     display: grid;
@@ -6548,6 +6551,27 @@ button.studio-status-fact:hover {
 .episode-camera-message .data-text-action {
   color: var(--tone-camera-ink);
   text-decoration: underline;
+}
+.camera-caption {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 8px;
+  max-width: calc(100% - 16px);
+  padding: 2px 7px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--tone-camera);
+  @supports (color: color-mix(in lab, red, red)) {
+    background: color-mix(in srgb, var(--tone-camera) 64%, transparent);
+  }
+  backdrop-filter: blur(4px);
+  color: rgb(255 255 255 / 0.92);
+  font: 500 11px/16px var(--font-mono);
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
 }
 .data-rail-search {
   position: relative;

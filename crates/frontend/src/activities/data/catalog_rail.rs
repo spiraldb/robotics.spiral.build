@@ -252,7 +252,12 @@ fn DatasetEpisodes(
             offset.set(next);
         }
     }));
-    EpisodeStepper::use_keys(loaded, selected_episode_id.clone(), filter.clone(), actions.on_step_episode);
+    EpisodeStepper::use_keys(
+        loaded,
+        selected_episode_id.clone(),
+        filter.clone(),
+        actions.on_step_episode,
+    );
     let pending = *page.state().read() == UseResourceState::Pending;
     let episodes = loaded.read();
     let labels = EpisodeLabels::of(episodes.iter().map(Episode::facts));
@@ -368,9 +373,12 @@ impl EpisodeStepper {
     ) {
         let activity = crate::shell::activity::WorkspaceActivity::current();
         let mut current = use_signal(|| (selected.clone(), filter.clone()));
-        use_effect(use_reactive((&selected, &filter), move |(selected, filter)| {
-            current.set((selected, filter));
-        }));
+        use_effect(use_reactive(
+            (&selected, &filter),
+            move |(selected, filter)| {
+                current.set((selected, filter));
+            },
+        ));
         PageKeys::use_listener(move |event| {
             let step = match event.key().as_str() {
                 "j" | "J" => 1,

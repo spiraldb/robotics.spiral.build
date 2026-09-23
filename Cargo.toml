@@ -45,6 +45,11 @@ serde_json = "1.0"
 serialport = { version = "4.9", default-features = false }
 tempfile = "3.27"
 
+# The lone-panel chip is not on crates.io yet; build against the local
+# dioxus-workbench checkout until its next release.
+[patch.crates-io]
+dioxus-workbench = { path = "../dioxus-workbench/dioxus-workbench" }
+
 [profile.dev]
 # The Studio's native half is large enough that full DWARF dominates compile,
 # link, and artifact I/O during edit/serve cycles. Browser artifacts already

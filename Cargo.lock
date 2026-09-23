@@ -1852,8 +1852,6 @@ dependencies = [
 [[package]]
 name = "dioxus-workbench"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abd5d4fd82bf0b1175ec6fb506db5b9c0a08639b719a825b3c146a2ed712a21e"
 dependencies = [
  "dioxus",
  "futures-timer",

@@ -216,11 +216,12 @@ fn InspectionDock(
     let mut panels = cameras
         .iter()
         .map(|camera| {
+            let title = catalog.camera_title(camera);
             Panel::new(
                 EpisodeArrangement::camera(camera.key()),
-                catalog.camera_title(camera),
+                title.clone(),
                 "episode-view-0",
-                rsx! { EpisodeCamera { request: camera.read().clone(), transport: transport.clone() } },
+                rsx! { EpisodeCamera { request: camera.read().clone(), transport: transport.clone(), title } },
             )
             .with_closable(true)
             .with_tab_icon(rsx! { CameraStreamIcon {} })

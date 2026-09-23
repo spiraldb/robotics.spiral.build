@@ -205,7 +205,11 @@ mod tests {
 
     #[test]
     fn a_dataset_is_called_by_its_own_name() {
-        let named = |name: &str| DatasetSelection::new(vec![name.into()]).unwrap().display_name();
+        let named = |name: &str| {
+            DatasetSelection::new(vec![name.into()])
+                .unwrap()
+                .display_name()
+        };
         assert_eq!(named("dataset_abc130k_sample"), "abc130k_sample");
         assert_eq!(named("recordings"), "recordings");
         assert_eq!(named("dataset_"), "dataset_");

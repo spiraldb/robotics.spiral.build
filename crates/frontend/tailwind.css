@@ -185,9 +185,9 @@
 }
 
 /* A panel tab sits on the page below it: the active one is paper with an
-   ink edge along its lower side, and its title steps up to ink. A tile with
-   one tab is a header, not a choice, so it draws no edge at all. Lime is
-   kept for selection. */
+   ink edge along its lower side, and its title steps up to ink. Lime is kept
+   for selection. Only a tile holding two or more panels draws a strip; a
+   lone panel's tab is the workbench's grabber at the panel's top centre. */
 .wb-workspace .wb-tab {
   gap: 6px;
   padding: 0 11px;
@@ -204,10 +204,6 @@
   height: 2px;
   border-radius: 2px 2px 0 0;
   background: var(--tone-ink);
-}
-
-.wb-workspace .wb-tabs:has(> .wb-tab-item:only-child) .wb-tab-item-active::before {
-  display: none;
 }
 
 .wb-workspace .wb-tab-icon svg {
@@ -854,7 +850,7 @@ button.studio-status-fact:hover {
   }
 
   .camera-editor-frame {
-    @apply min-h-0 flex-1 overflow-hidden bg-camera;
+    @apply relative min-h-0 flex-1 overflow-hidden bg-camera;
   }
 
   .camera-editor-frame img {
@@ -1276,6 +1272,10 @@ button.studio-status-fact:hover {
 
   .training-history-panel {
     @apply bg-surface p-1;
+  }
+
+  .training-history-heading {
+    @apply mb-1 px-2 pt-2.5;
   }
 
   .training-history-entry {
@@ -4044,6 +4044,29 @@ button.studio-status-fact:hover {
 .episode-camera-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
 .episode-camera-message { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; padding: 16px; text-align: center; font-size: 11px; background: var(--tone-camera); color: var(--tone-camera-ink); overflow: auto; }
 .episode-camera-message .data-text-action { color: var(--tone-camera-ink); text-decoration: underline; }
+
+/* A camera panel has no header, so every camera picture names itself at its
+   top-left, on the mat, the way a monitor wall labels its screens. Recorded
+   and live cameras alike; the name is the one fact that tells two wrist
+   cameras apart. */
+.camera-caption {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 8px;
+  max-width: calc(100% - 16px);
+  padding: 2px 7px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--tone-camera) 64%, transparent);
+  backdrop-filter: blur(4px);
+  color: rgb(255 255 255 / 0.92);
+  font: 500 11px/16px var(--font-mono);
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
 
 /* Catalog rows on the shared tree. A dataset row names the dataset; an
    episode row leads with what tells it apart and draws its length against

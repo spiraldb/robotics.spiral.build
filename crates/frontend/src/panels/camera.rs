@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 use crate::activities::live::recording_review::EpisodePreview;
 use crate::client::http::CameraApiPath;
 use crate::client::project::ProjectClient;
-use crate::format::ClockPresentation;
 use crate::components::icons::CameraStreamIcon;
+use crate::format::ClockPresentation;
 use crate::panels::recorded_source::{LoadState, RecordedSource};
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 
@@ -42,6 +42,7 @@ pub(super) fn CameraEditor(element_id: String, source: CameraEditorSource) -> El
             if let Some(recorded) = source.renderable().cloned() {
                 let updating = source.state().is_loading();
                 let warning = source.state().reason().map(str::to_owned);
+                let caption = recorded.label.clone();
                 rsx! {
                     div { class: "camera-editor-meta",
                         span {
@@ -58,6 +59,7 @@ pub(super) fn CameraEditor(element_id: String, source: CameraEditorSource) -> El
                         if let Some(ref warning) = warning {
                             div { class: "camera-live-error", role: "alert", span { "{warning}" } }
                         }
+                        span { class: "camera-caption", "{caption}" }
                     }
                 }
             } else {
@@ -165,6 +167,8 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
                     }
                 }
             }
+            // A camera panel has no header, so the picture names itself.
+            span { class: "camera-caption", "{role}" }
         }
     }
 }

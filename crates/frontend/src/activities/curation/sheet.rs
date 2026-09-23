@@ -739,7 +739,11 @@ impl SheetTile {
     fn line(&self) -> String {
         let episode = self.verdict.episode();
         match &self.label {
-            Some(label) => format!("…{} · {label} · {}", episode.id().short(), episode.duration_label()),
+            Some(label) => format!(
+                "…{} · {label} · {}",
+                episode.id().short(),
+                episode.duration_label()
+            ),
             None => format!("…{} · {}", episode.id().short(), episode.duration_label()),
         }
     }

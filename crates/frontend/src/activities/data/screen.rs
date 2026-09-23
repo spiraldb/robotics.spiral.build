@@ -78,7 +78,12 @@ impl DataSelection {
     fn open_episode(mut self, opened: OpenedEpisode) {
         let panel = Self::episode_panel(opened.episode().id());
         self.dataset.set(Some(opened.episode().dataset().clone()));
-        if !self.episodes.peek().iter().any(|open| open.episode().id() == opened.episode().id()) {
+        if !self
+            .episodes
+            .peek()
+            .iter()
+            .any(|open| open.episode().id() == opened.episode().id())
+        {
             self.episodes.write().push(opened);
         }
         self.activate(panel);
@@ -86,12 +91,23 @@ impl DataSelection {
     /// Stepping to the next or previous episode moves the tab in front on to
     /// it rather than opening another, so walking a dataset leaves one tab.
     fn step_episode(mut self, opened: OpenedEpisode) {
-        let already_open = self.episodes.peek().iter().any(|open| open.episode().id() == opened.episode().id());
-        let current = self.active_episode().map(|current| current.episode().id().clone());
+        let already_open = self
+            .episodes
+            .peek()
+            .iter()
+            .any(|open| open.episode().id() == opened.episode().id());
+        let current = self
+            .active_episode()
+            .map(|current| current.episode().id().clone());
         match current.filter(|_| !already_open) {
             Some(current) => {
                 let panel = Self::episode_panel(opened.episode().id());
-                if let Some(slot) = self.episodes.write().iter_mut().find(|open| open.episode().id() == &current) {
+                if let Some(slot) = self
+                    .episodes
+                    .write()
+                    .iter_mut()
+                    .find(|open| open.episode().id() == &current)
+                {
                     *slot = opened;
                 }
                 self.activate(panel);
@@ -107,7 +123,9 @@ impl DataSelection {
         if panel.as_str() == IMPORT_PANEL {
             self.importing.set(false);
         }
-        self.episodes.write().retain(|open| &Self::episode_panel(open.episode().id()) != panel);
+        self.episodes
+            .write()
+            .retain(|open| &Self::episode_panel(open.episode().id()) != panel);
         // Closing the tab in front brings the newest remaining episode
         // forward, or the Overview when none is left.
         if self.active_panel.peek().as_ref() == Some(panel) {
@@ -230,7 +248,9 @@ fn DataPanels() -> Element {
             .as_ref()
             .map(|opened| opened.episode().dataset().clone())
             .or_else(|| dataset.clone().filter(|_| overview_in_front)),
-        active_episode.as_ref().map(|opened| opened.episode().id().clone()),
+        active_episode
+            .as_ref()
+            .map(|opened| opened.episode().id().clone()),
         dataset_inspection.clone().and_then(|result| result.ok()),
     );
 

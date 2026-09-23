@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::components::icons::TrainingIcon;
 use charming::Chart;
 use charming::component::{Axis, DataZoom, DataZoomType, FilterMode, Grid};
 use charming::datatype::{CompositeValue, DataFrame, DataPoint};
@@ -16,7 +17,6 @@ use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::training::{
     TrainingCheckpoint, TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
-use crate::components::icons::TrainingIcon;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
     ConfirmationResponse, DeleteIcon, Disclosure, EmptyState, Fact, FactLayout, FactList, Field,
@@ -575,6 +575,11 @@ fn TrainingHistory(
     let confirming_delete = use_signal(|| None::<String>);
     rsx! {
         section { class: "training-history-panel studio-workbench-scroll",
+            // Runs sits under Setup with no tab strip between them, so the
+            // list names itself the way Setup's sections do.
+            if !history.is_empty() {
+                header { class: "training-form-heading training-history-heading", h3 { "Runs" } }
+            }
             if history.is_empty() {
                 EmptyState { title: "No runs yet",
                     p { "Every training run lands here with its curve and checkpoints." }

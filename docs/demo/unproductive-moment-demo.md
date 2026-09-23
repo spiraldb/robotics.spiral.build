@@ -1,6 +1,6 @@
 # Curation demo recording script
 
-Revised September 21, 2026. **Target: approximately 64 seconds, guided version only.** Use a warm, professional male voice, like someone explaining the product while using it. Keep delivery natural and remove loading waits and excess audio silence before accelerating speech.
+Revised September 23, 2026. **Re-recorded guided cut: 60 seconds.** [Watch the September 23 video](../../exports/demo-guided-2026-09-23/spiral-curation-guided-r4.mp4). Use a warm, professional male voice, like someone explaining the product while using it. Keep delivery natural and remove loading waits and excess audio silence before accelerating speech.
 
 Keep native mouse movements, clicks, and character-by-character typing. Let actions happen under the narration. Move briskly through the two basic filters, then give the transformation and half-speed replay more attention. The timings below are rounded from the final edit; cuts follow the spoken delivery without interrupting sentences.
 
@@ -18,19 +18,19 @@ Keep native mouse movements, clicks, and character-by-character typing. Let acti
 
 > Let's remove those moments in Spiral.
 
-**0:25–0:34 — Add both basic filters, then inspect the graph.** Type “remove episodes shorter than 20s” and click Add, then immediately type “remove episodes with fewer than 5000 messages” and click Add. Accelerate the recorded typing and pointer movement to about 1.6× for these two inputs. Complete both Add clicks, then smoothly zoom out to the full graph and show 100 → 79 → 17. Allocate exactly nine seconds: 3.2 seconds for the duration rule, 4.2 for the message-count rule, and 1.6 for the graph result.
+**0:25–0:30 — Add both basic filters, then inspect the graph.** Type “remove episodes shorter than 20s” and click Add, then immediately type “remove episodes with fewer than 5000 messages” and click Add. Cut idle pauses and accelerate the recorded typing and pointer movement by roughly 1.7–3.4× for these two inputs. Complete both Add clicks, then smoothly zoom out to the full graph and show 100 → 79 → 17. Allocate exactly five seconds: 1.7 seconds for the duration rule, 2.3 for the message-count rule, and 1.0 for the graph result.
 
-> We'll start with simple measurements—episode duration and message count. Spiral automatically removes episodes that don't qualify.
+> First, Spiral filters episodes by duration and message count.
 
-**0:34–0:44 — Add the main transformation.** Type “remove unproductive moments in each episode” and click Add. Show a brief genuine processing state, then the populated progress track. Guide attention to the flagged region. Give “within” a clear, natural vocal emphasis, with a tiny pause before it, to mark the move from filtering whole episodes to filtering sections inside them. Keep the captions in normal sentence case.
+**0:30–0:40 — Add the main transformation.** Type “remove unproductive moments in each episode” and click Add. Show a brief genuine processing state, then the populated progress track. Guide attention to the flagged region. Give “within” a clear, natural vocal emphasis, with a tiny pause before it, to mark the move from filtering whole episodes to filtering sections inside them. Keep the captions in normal sentence case.
 
 > Now let's filter out the hesitations and repeated attempts **within** each episode. Spiral uses a state-of-the-art model to identify those sections and exclude them from training.
 
-**0:44–0:55 — Inspect the flagged interval.** Seek to episode time 46 seconds and replay 46–49 seconds at 0.5×, without a speed-label overlay. Keep all three cameras and the timeline visible. After the six-second replay, keep the flagged interval in view while explaining that only those sections are excluded.
+**0:40–0:51 — Inspect the flagged interval.** Seek to episode time 46 seconds and replay 46–49 seconds at 0.5×, without a speed-label overlay. Keep all three cameras and the timeline visible. After the six-second replay, keep the flagged interval in view while explaining that only those sections are excluded.
 
 > Here's the section it flagged. Spiral automatically identifies these moments and excludes only those sections from training, so the rest of the episode is still usable.
 
-**0:55–1:04 — Inspect the output and conclude.** Click Curated output and briefly show the retained episodes and inline details. Begin the optimization sentence immediately, zoom back out by 0:58.5, then click Save and show the actual Saved state. Do not narrate the Save action or add a separate end-screen hold.
+**0:51–1:00 — Inspect the output and conclude.** Click Curated output and briefly show the retained episodes and inline details. Begin the optimization sentence immediately, zoom back out by 0:54.5, then click Save and show the actual Saved state. Do not narrate the Save action or add a separate end-screen hold.
 
 > Spiral automatically optimizes I/O, network transfers, and measurement costs—so you can focus on the data your robot learns from.
 
@@ -62,8 +62,8 @@ Sources checked September 21, 2026: [paper v4, Sections 4.2–4.3 and 4.7, Table
 - Select `dataset_warp_sim_bottles_sample`, containing **100 simulated episodes**. This is the supported sample for automatic moment detection. Do not select `abc130k_sample` (40 episodes). Keep internal dataset identifiers out of narration. The project identifies the source as human-teleoperated simulation data; do not present it as physical-robot footage. No dataset or voice disclosure overlay is included in this edit.
 - Start from an empty curation, not the existing prepared recipe. Add only these three rules, in the order shown. The intended filter conditions are **Duration < 20 seconds**, then **Messages < 5000**. Import metadata verifies the expected sequence **100 → 79 → 17**: the first filter excludes 21 episodes; the second excludes 62 of the remaining 79. Episodes with exactly 5,000 messages are retained. Confirm these counts in the live graph during rehearsal; previous filter examples do not apply.
 - The third prompt normalizes the obvious typo in “remove unproductive memoments in each episodes” to **“remove unproductive moments in each episode”**, preserving the requested meaning.
-- All three prompts and the **100 → 79 → 17** graph counts were re-verified in the September 20 native-input recording. The revised opening selects episode #14, seeks to the bottle-repositioning sequence, plays it, and visibly transitions into Curation.
-- Use **episode #14** (`01a0b638-a04a-710f-84b8-16a3a84c0a7a`; source episode 46), **60.53 seconds**, **7,268 messages**. It becomes the first eligible episode under these filters, so a new curation selects it automatically. An existing manual selection can persist if it is still eligible; start fresh as scripted.
+- All three prompts and the **100 → 79 → 17** graph counts were re-verified in the September 23 native-input recording. All footage in this cut comes from September 23 Safari captures, with the native cursor included. The transformation, review, replay, and closing were re-recorded at a fixed window size; the edit scales proportionally throughout. The revised opening selects episode #14, seeks to the bottle-repositioning sequence, plays it, and visibly transitions into Curation.
+- Use **episode #14** (current catalog ID `01a0b63c856c778e9702d903a0159504`, displayed as `…a0159504`; source attempt `01a0b638-a04a-710f-84b8-16a3a84c0a7a`, source episode 46), **60.53 seconds**, **7,268 messages**. It becomes the first eligible episode under these filters, so a new curation selects it automatically. An existing manual selection can persist if it is still eligible; start fresh as scripted.
 - The current Studio model returned all **1,817 frames** for this episode. Its red chunks are **29–30 seconds** and **46–49 seconds**. Use the longer second region for the demo: its three one-second chunks have mean progress rates of approximately **−0.041, −0.274, and −1.607**. The footage shows bottle repositioning/regrasping; the model flags it as low progress, but this is not independently labeled proof of an error.
 - Review the [three-camera excerpt, 44–53 seconds](../exports/demo-candidates-2026-09-18/episode-14-review-44-53s.mp4) before recording. Seek on the timeline to 45.5 seconds and press Play to cover all three adjacent red chunks; clicking a single chunk may play only that chunk and its short context.
 - A recording rehearsal exposed a 1,000-row SQL preview cap in episode score collection. The scoring path now collects its bounded complete result. Regression tests and the backend check passed, and the previously failing 1,019-frame episode loaded its full score track in the live UI.
@@ -71,6 +71,6 @@ Sources checked September 21, 2026: [paper v4, Sections 4.2–4.3 and 4.7, Table
 
 ## What the final shot demonstrates
 
-Curated output shows the retained-episode list and inline details below the graph. Selecting it does not itself save, execute, or export the recipe. The final pickup shot clicks Save and verifies Saved. Save persists the recipe; execution prepares its outputs. The closing describes reuse to prepare training data, not policy training or a measured improvement in policy performance.
+Curated output shows the retained-episode list and inline details below the graph. Selecting it does not itself save, execute, or export the recipe. The replacement take continues through the final Save click and verifies Saved. Save persists the recipe; execution prepares its outputs. The closing describes reuse to prepare training data, not policy training or a measured improvement in policy performance.
 
 The engine implements filter pushdown, projection pruning, costly-scalar placement, and local scalar-expression reuse. The closing names I/O, network transfers, and measurement costs; it does not promise globally minimal cost. Optimization happens at execution planning, not merely on saving. This recording does not benchmark those savings or demonstrate scoring every retained episode.

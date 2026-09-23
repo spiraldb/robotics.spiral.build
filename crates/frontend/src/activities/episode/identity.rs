@@ -286,7 +286,11 @@ impl EpisodeLabels {
     pub(in crate::activities) fn line(&self, episode: &Episode) -> String {
         let facts = episode.facts();
         match self.label(facts).head() {
-            Some(head) => format!("…{} · {head} · {}", episode.id().short(), facts.duration_label()),
+            Some(head) => format!(
+                "…{} · {head} · {}",
+                episode.id().short(),
+                facts.duration_label()
+            ),
             None => format!("…{} · {}", episode.id().short(), facts.duration_label()),
         }
     }
