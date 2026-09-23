@@ -18,6 +18,7 @@ impl StudioApi {
     /// dropped connection never leaves a write or a hardware change half done.
     pub(super) fn router(studio: StudioContext) -> Router {
         let reads = Router::new()
+            .merge(crate::account::http::AccountEndpoints::reads())
             .merge(crate::transport::http::TransportEndpoints::reads())
             .merge(crate::recording::http::RecordingEndpoints::reads())
             .merge(crate::training::http::TrainingEndpoints::reads())
@@ -31,6 +32,7 @@ impl StudioApi {
             .merge(crate::robots::camera_preview::CameraPreview::reads())
             .merge(crate::rollout::http::RolloutEndpoints::reads());
         let commands = Router::new()
+            .merge(crate::account::http::AccountEndpoints::commands())
             .merge(crate::projects::http::ProjectEndpoints::commands())
             .merge(crate::recording::http::RecordingEndpoints::commands())
             .merge(crate::training::http::TrainingEndpoints::commands())

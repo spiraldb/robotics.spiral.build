@@ -17,7 +17,10 @@ async fn save_status(fixture: &ProjectFixture, body: String) -> StatusCode {
         .body(Body::from(body))
         .unwrap();
     ExplorationEndpoints::commands()
-        .with_state(StudioContext::new(fixture.projects.clone()))
+        .with_state(StudioContext::new(
+            fixture.projects.clone(),
+            crate::account::SpiralAccount::offline(),
+        ))
         .oneshot(request)
         .await
         .unwrap()

@@ -39,7 +39,6 @@ class TrainingJob:
         self.checkpoint_floor = 0
         self.log_floor = 0
         self.next_log_offset = 1
-        self.secret = str(request.get("spiral", {}).get("client_secret") or "")
         self.thread = threading.Thread(
             target=self._run, args=(request,), name=f"training-{self.job_id}", daemon=True
         )
@@ -218,15 +217,13 @@ class TrainingJob:
                     else f"Completed {completed} optimizer step(s)."
                 )
         except Exception as error:
-            detail = str(error).replace(self.secret, "[redacted]") if self.secret else str(error)
+            detail = str(error)
             with self.lock:
                 self.phase = "failed"
                 self.finished_ms = _now_ms()
                 self.message = detail
                 self._append_log_locked(f"Training failed: {detail}")
         finally:
-            self.secret = ""
-            request.get("spiral", {}).pop("client_secret", None)
             if dataset is not None:
                 dataset.close()
 

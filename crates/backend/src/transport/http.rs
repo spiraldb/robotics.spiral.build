@@ -11,8 +11,10 @@ use axum::{
 use futures_util::TryStreamExt as _;
 use http_body::Body as _;
 use reqwest::Url;
-use spiral_robotics_common::credentials::StudioCredentials;
+use spiral_robotics_common::providers::StudioProviders;
 use std::{str::FromStr, time::Duration};
+
+use super::credentials::ProviderCredentials;
 
 pub(crate) struct TransportEndpoints;
 
@@ -26,20 +28,28 @@ impl TransportEndpoints {
             .or(MethodFilter::HEAD)
             .or(MethodFilter::OPTIONS);
         Router::new()
-            .route("/credentials", get(Self::credentials))
+            .route("/providers", get(Self::providers))
             .route("/proxy", on(relayed, Self::proxy))
     }
 
-    async fn credentials(
+    async fn providers(
         State(state): State<StudioContext>,
-    ) -> Result<Json<StudioCredentials>, HttpFailure> {
-        super::credentials::ConfiguredCredentials::load(&state.projects().saved_connection())
+    ) -> Result<Json<StudioProviders>, HttpFailure> {
+        ProviderCredentials::load(&state.projects().saved_connection())
+            .providers()
             .map(Json)
             .map_err(|error| crate::OperationError::External(error).into())
     }
 
-    async fn proxy(request: ProxyRequest) -> Result<ProxyResponse, HttpFailure> {
-        ProxyRelay::new()?.send(request).await
+    /// Relay a browser request, authenticated with the key Studio holds for
+    /// its destination.
+    async fn proxy(
+        State(state): State<StudioContext>,
+        request: ProxyRequest,
+    ) -> Result<ProxyResponse, HttpFailure> {
+        let credentials = ProviderCredentials::load(&state.projects().saved_connection());
+        let bearer = credentials.bearer_for(&request.url);
+        ProxyRelay::new()?.send(request.with_bearer(bearer)).await
     }
 }
 
@@ -90,12 +100,57 @@ struct ProxyRequest {
     body: Body,
 }
 
+impl ProxyRequest {
+    fn with_bearer(mut self, token: Option<&str>) -> Self {
+        if let Some(token) = token
+            && let Ok(mut value) = header::HeaderValue::from_str(&format!("Bearer {token}"))
+        {
+            value.set_sensitive(true);
+            self.headers.insert(header::AUTHORIZATION, value);
+        }
+        self
+    }
+
+    /// The relay attaches Studio's keys, so only Studio's own pages may use it:
+    /// another site open in the same browser must not send requests through it.
+    /// Callers outside a browser send neither header.
+    fn from_studio_page(headers: &HeaderMap) -> bool {
+        if let Some(site) = headers.get("sec-fetch-site") {
+            return matches!(site.to_str(), Ok("same-origin" | "none"));
+        }
+        let Some(origin) = headers.get(header::ORIGIN) else {
+            return true;
+        };
+        let origin = origin
+            .to_str()
+            .ok()
+            .and_then(|origin| Url::parse(origin).ok());
+        let host = headers
+            .get(header::HOST)
+            .and_then(|host| host.to_str().ok());
+        origin.zip(host).is_some_and(|(origin, host)| {
+            let authority = match (origin.host_str(), origin.port()) {
+                (Some(name), Some(port)) => format!("{name}:{port}"),
+                (Some(name), None) => name.to_owned(),
+                (None, _) => return false,
+            };
+            authority == host
+        })
+    }
+}
+
 impl<State: Send + Sync> FromRequest<State> for ProxyRequest {
     type Rejection = HttpFailure;
     async fn from_request(
         request: axum::extract::Request,
         _: &State,
     ) -> Result<Self, Self::Rejection> {
+        if !Self::from_studio_page(request.headers()) {
+            return Err(HttpFailure::rejection(
+                StatusCode::FORBIDDEN,
+                "Only Studio's own pages may use its HTTP relay",
+            ));
+        }
         let target: ProxyTarget =
             serde_urlencoded::from_str(request.uri().query().unwrap_or_default())
                 .map_err(|_| HttpFailure::invalid("Proxy url query parameter is required"))?;
@@ -385,6 +440,41 @@ mod tests {
             .expect("upstream body should be dropped")
             .unwrap();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_refuses_other_sites_and_attaches_the_destinations_key() {
+        let cross_site = |header: &'static str, value: &'static str| {
+            Request::builder()
+                .uri("/api/proxy?url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1")
+                .header("host", "127.0.0.1:8080")
+                .header(header, value)
+                .body(Body::empty())
+                .unwrap()
+        };
+        for (header, value) in [
+            ("sec-fetch-site", "cross-site"),
+            ("sec-fetch-site", "same-site"),
+            ("origin", "https://attacker.example"),
+            ("origin", "http://127.0.0.1:9999"),
+        ] {
+            let rejected = ProxyRequest::from_request(cross_site(header, value), &()).await;
+            assert!(rejected.is_err(), "{header}: {value}");
+        }
+        for (header, value) in [
+            ("sec-fetch-site", "same-origin"),
+            ("origin", "http://127.0.0.1:8080"),
+        ] {
+            let accepted = ProxyRequest::from_request(cross_site(header, value), &())
+                .await
+                .unwrap();
+            let request = accepted.with_bearer(Some("provider-key"));
+            assert_eq!(
+                request.headers[header::AUTHORIZATION],
+                "Bearer provider-key"
+            );
+            assert!(request.headers[header::AUTHORIZATION].is_sensitive());
+        }
     }
 
     #[tokio::test]

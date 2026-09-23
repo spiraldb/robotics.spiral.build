@@ -85,7 +85,7 @@ async fn dataset_models_follow_dataset_revision_and_project() {
 }
 
 #[tokio::test]
-async fn local_state_survives_reopening_and_credentials_do_not_change_project_identity() {
+async fn local_state_survives_reopening() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("Studio state #1.sqlite3");
     let store = StudioStore::at(path.clone());
@@ -111,12 +111,8 @@ async fn local_state_survives_reopening_and_credentials_do_not_change_project_id
             .await
             .unwrap();
     }
-    let changed_credentials = connection.with_credentials(Some(crate::SpiralCredentials::new(
-        "new".into(),
-        "secret".into(),
-    )));
     let reopened = StudioStore::at(path);
-    let recovered = reopened.project(&changed_credentials);
+    let recovered = reopened.project(&connection);
     assert_eq!(
         recovered.robot_config("arm").await.unwrap(),
         project.robot_config("arm").await.unwrap()

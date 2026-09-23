@@ -13,7 +13,7 @@ use super::database::{
     DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, RecordBatchStream,
     RelationName, SqlStatement,
 };
-use crate::settings::{SpiralConnectionSettings, SpiralCredentials};
+use crate::settings::SpiralConnectionSettings;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
 use super::schema::Table;
@@ -382,8 +382,7 @@ impl DatabaseSession for ProjectConnection {
     }
 }
 
-/// Storage for one immutable destination. Another project, or the same project
-/// reached with other credentials, gets another store.
+/// Storage for one immutable destination. Another project gets another store.
 pub struct ProjectStore {
     connection_settings: SpiralConnectionSettings,
     catalog: crate::datasets::DatasetCatalogClient,
@@ -404,7 +403,7 @@ impl ProjectStore {
     }
 
     pub fn new(
-        connection_settings: SpiralConnectionSettings,
+        connection: crate::SpiralConnection,
         table_prefix: String,
         database: Arc<dyn Database>,
     ) -> Result<Self, String> {
@@ -412,8 +411,8 @@ impl ProjectStore {
             return Err("Studio table prefix is not a safe SQL identifier".to_owned());
         }
         Ok(Self {
-            catalog: crate::datasets::DatasetCatalogClient::new(connection_settings.clone())?,
-            connection_settings,
+            catalog: crate::datasets::DatasetCatalogClient::new(&connection)?,
+            connection_settings: connection.settings().clone(),
             table_prefix,
             database,
             async_operation_gate: Arc::new(tokio::sync::RwLock::new(())),
@@ -441,10 +440,6 @@ impl ProjectStore {
 
     pub fn spfs_endpoint(&self) -> String {
         self.connection_settings.spfs_endpoint().to_owned()
-    }
-
-    pub fn credentials(&self) -> Option<SpiralCredentials> {
-        self.connection_settings.credentials().cloned()
     }
 
     pub(crate) fn is_studio_control_relation(&self, path: &[String]) -> bool {
@@ -514,14 +509,18 @@ mod tests {
         .unwrap();
         let first = {
             let settings = initial.clone().with_project("project_a").unwrap();
-            let database = Arc::new(crate::AdbcDatabase::new(settings.clone()));
-            ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
+            let connection =
+                crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
+            let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
+            ProjectStore::new(connection, "spiral_robotics".to_owned(), database)
         }
         .unwrap();
         let second = {
             let settings = initial.clone().with_project("project_b").unwrap();
-            let database = Arc::new(crate::AdbcDatabase::new(settings.clone()));
-            ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
+            let connection =
+                crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
+            let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
+            ProjectStore::new(connection, "spiral_robotics".to_owned(), database)
         }
         .unwrap();
         assert_eq!(first.project_id(), "project_a");
@@ -533,8 +532,10 @@ mod tests {
         assert_eq!(first.project_id(), "project_a");
         let unconfigured = {
             let settings = initial;
-            let database = Arc::new(crate::AdbcDatabase::new(settings.clone()));
-            ProjectStore::new(settings, "spiral_robotics".to_owned(), database)
+            let connection =
+                crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
+            let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
+            ProjectStore::new(connection, "spiral_robotics".to_owned(), database)
         }
         .unwrap();
         assert!(

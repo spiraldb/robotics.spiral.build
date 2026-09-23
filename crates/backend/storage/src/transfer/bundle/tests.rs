@@ -433,7 +433,12 @@ async fn spiral_failure_rolls_back_staged_sqlite_replacements() {
     project.save_robot_config(&original, None).await.unwrap();
     let source = ProjectBundleImport::new("studio", &project, &bytes).unwrap();
     let database = Arc::new(FailingSpiral::default());
-    let spiral = crate::ProjectStore::new(settings, "studio".into(), database.clone()).unwrap();
+    let spiral = crate::ProjectStore::new(
+        crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into())),
+        "studio".into(),
+        database.clone(),
+    )
+    .unwrap();
     let mut connection = spiral.connect_exclusive().await.unwrap();
     let error = ProjectBundle
         .import(&mut connection, source)

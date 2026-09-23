@@ -34,7 +34,6 @@ struct SettingsDraftSignals {
     current: Signal<DataSettings>,
     base: Signal<DataSettings>,
     saved: Signal<Option<DataSettings>>,
-    client_secret: Signal<String>,
     huggingface_token: Signal<String>,
     clear_huggingface_token: Signal<bool>,
     section: Signal<SettingsSection>,
@@ -62,7 +61,6 @@ impl SettingsPanelState {
                 base: Signal::new(initial.clone()),
                 saved: Signal::new(None),
                 current: Signal::new(initial),
-                client_secret: Signal::new(String::new()),
                 huggingface_token: Signal::new(String::new()),
                 clear_huggingface_token: Signal::new(false),
                 section: Signal::new(section),
@@ -108,7 +106,6 @@ fn SettingsPanel(
                 mut current,
                 mut base,
                 mut saved,
-                mut client_secret,
                 mut huggingface_token,
                 mut clear_huggingface_token,
                 mut section,
@@ -198,11 +195,6 @@ fn SettingsPanel(
             current().spiral().endpoint(),
             current().spiral().spfs_endpoint(),
             current().spiral().project_id(),
-        )
-        .with_client_credentials(current().spiral().client_id(), client_secret())
-        .with_clear_client_secret(
-            current().spiral().client_id().trim().is_empty()
-                && current().spiral().client_secret_configured(),
         );
         let connection = connection.with_huggingface_token(if clear_huggingface_token() {
             Some(String::new())
@@ -229,7 +221,6 @@ fn SettingsPanel(
             match result {
                 Ok(saved_project) => {
                     saved.set(Some(submitted));
-                    client_secret.set(String::new());
                     huggingface_token.set(String::new());
                     clear_huggingface_token.set(false);
                     on_saved();
@@ -328,6 +319,11 @@ fn SettingsPanel(
                                 if !preferences_loaded {
                                     p { class: "settings-help", role: "status", if load_error.is_some() { "Runtime preferences are unavailable. Saving this connection preserves them in the project." } else { "Loading runtime preferences. Connection changes preserve them in the project." } }
                                 }
+                                super::account::SpiralAccountSection {
+                                    project_id: current().spiral().project_id().to_owned(),
+                                    on_project: move |project_id| current.write().spiral_mut().set_project_id(project_id),
+                                    disabled: saving() || import_project.pending(),
+                                }
                                 div { class: "settings-field-row",
                                     SettingsField {
                                         label: "API endpoint",
@@ -346,38 +342,9 @@ fn SettingsPanel(
                                         ),
                                     }
                                 }
-                                div { class: "settings-field-row",
-                                    SettingsField {
-                                        label: "Project ID",
-                                        value: current().spiral().project_id(),
-                                        behavior: SettingsInputBehavior::new(
-                                            "your-project-id",
-                                            move |value| current.write().spiral_mut().set_project_id(value),
-                                        ),
-                                    }
-                                    SettingsField { label: "Artifact table prefix", value: current().spiral().table_prefix(), behavior: SettingsInputBehavior::new("studio", move |_| {}).with_disabled() }
-                                }
-                                div { class: "settings-field-row",
-                                    SettingsField {
-                                        label: "Client ID",
-                                        value: current().spiral().client_id(),
-                                        behavior: SettingsInputBehavior::new(
-                                            "your-client-id",
-                                            move |value| current.write().spiral_mut().set_client_id(value),
-                                        ),
-                                    }
-                                    SettingsField {
-                                        label: "Client secret",
-                                        value: client_secret(),
-                                        behavior: SettingsInputBehavior::new(
-                                            if current().spiral().client_secret_configured() { "Saved — leave blank to keep" } else { "your-client-secret" },
-                                            move |value| client_secret.set(value),
-                                        )
-                                        .with_secret(),
-                                    }
-                                }
+                                SettingsField { label: "Artifact table prefix", value: current().spiral().table_prefix(), behavior: SettingsInputBehavior::new("studio", move |_| {}).with_disabled() }
                                 p { class: "settings-help",
-                                    "The API, SpFS endpoint, project, and optional client credentials are applied to a new scoped SpiralDB connection when you save. The secret is stored only in the backend's local database and is never returned to this page."
+                                    "The endpoints and the chosen project apply when you save."
                                 }
                                 SettingsField {
                                     label: "Hugging Face token",
@@ -512,7 +479,7 @@ fn SettingsPanel(
                         "Applies to this Studio."
                     }
                     div {
-                        Button { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); client_secret.set(String::new()); huggingface_token.set(String::new()); clear_huggingface_token.set(false); save_error.set(None); test_result.set(None); }, "Discard changes" }
+                        Button { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); huggingface_token.set(String::new()); clear_huggingface_token.set(false); save_error.set(None); test_result.set(None); }, "Discard changes" }
                         Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Solid, disabled: saving() || import_project.pending() || current().spiral().project_id().trim().is_empty(), aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
                     }
                 }

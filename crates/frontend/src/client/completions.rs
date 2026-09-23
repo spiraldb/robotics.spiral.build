@@ -6,7 +6,7 @@ use futures_util::StreamExt as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use spiral_robotics_common::{
-    credentials::LlmCredentials,
+    providers::LlmProvider,
     workflow::conversation::{ProviderMessage, ProviderToolCall},
 };
 use std::collections::BTreeSet;
@@ -74,16 +74,15 @@ impl ReasoningEffort {
 pub(crate) struct ModelClient;
 impl ModelClient {
     pub(crate) async fn configured() -> Result<bool, CommandError> {
-        let credentials = ProxyClient::credentials().await?;
-        Ok(credentials.llm().is_some())
+        Ok(ProxyClient::providers().await?.llm().is_some())
     }
 
     pub(crate) async fn complete(
         request: ModelRequest,
         mut on_text: impl FnMut(&str),
     ) -> Result<ProviderMessage, String> {
-        let credentials = ProxyClient::credentials().await?;
-        let llm = credentials
+        let providers = ProxyClient::providers().await?;
+        let llm = providers
             .llm()
             .ok_or("Assistant provider is not configured.")?;
         let endpoint = format!("{}/chat/completions", llm.base_url().trim_end_matches('/'));
@@ -104,7 +103,6 @@ impl ModelClient {
         }
         let body = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
         let (response, _cancel) = ProxyClient::request("POST", &endpoint)
-            .header("authorization", format!("Bearer {}", llm.api_key()))
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .raw(body.into_bytes())
@@ -116,22 +114,14 @@ impl ModelClient {
         }
         ProviderStream::read(response, &mut on_text)
             .await
-            .map_err(|error| Self::public_error(&error, llm.api_key()))
+            .map_err(|error| error.chars().take(512).collect())
     }
-    fn provider_model(credentials: &LlmCredentials, model: &str) -> String {
-        if credentials.base_url().starts_with("https://openrouter.ai/") && !model.contains('/') {
+    fn provider_model(provider: &LlmProvider, model: &str) -> String {
+        if provider.base_url().starts_with("https://openrouter.ai/") && !model.contains('/') {
             format!("openai/{model}")
         } else {
             model.to_owned()
         }
-    }
-
-    fn public_error(detail: &str, api_key: &str) -> String {
-        detail
-            .replace(api_key, "[redacted]")
-            .chars()
-            .take(512)
-            .collect()
     }
 }
 

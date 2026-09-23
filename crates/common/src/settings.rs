@@ -87,13 +87,6 @@ pub struct SpiralSettings {
     #[serde(default = "SpiralSettings::default_spfs_endpoint")]
     spfs_endpoint: String,
     project_id: String,
-    /// Public half of the client-credentials pair used by the backend.
-    #[serde(default)]
-    client_id: String,
-    /// The settings form never reads the saved value; runtime clients receive it
-    /// through the Studio-wide credentials endpoint.
-    #[serde(default)]
-    client_secret_configured: bool,
     #[serde(default)]
     huggingface_token_configured: bool,
     table_prefix: String,
@@ -105,8 +98,6 @@ impl Default for SpiralSettings {
             endpoint: Self::default_endpoint(),
             spfs_endpoint: Self::default_spfs_endpoint(),
             project_id: String::new(),
-            client_id: String::new(),
-            client_secret_configured: false,
             huggingface_token_configured: false,
             table_prefix: "studio".to_owned(),
         }
@@ -133,11 +124,6 @@ impl SpiralSettings {
             project_id: project_id.into(),
             ..Self::default()
         }
-    }
-    pub fn with_client(mut self, client_id: impl Into<String>, secret_configured: bool) -> Self {
-        self.client_id = client_id.into();
-        self.client_secret_configured = secret_configured;
-        self
     }
     pub const fn with_huggingface_token_configured(mut self, configured: bool) -> Self {
         self.huggingface_token_configured = configured;
@@ -169,14 +155,6 @@ impl SpiralSettings {
         crate::project::ProjectKey::new(&self.endpoint, &self.project_id)
     }
 
-    pub fn client_id(&self) -> &str {
-        &self.client_id
-    }
-
-    pub const fn client_secret_configured(&self) -> bool {
-        self.client_secret_configured
-    }
-
     pub fn table_prefix(&self) -> &str {
         &self.table_prefix
     }
@@ -189,9 +167,6 @@ impl SpiralSettings {
     }
     pub fn set_project_id(&mut self, project_id: impl Into<String>) {
         self.project_id = project_id.into();
-    }
-    pub fn set_client_id(&mut self, client_id: impl Into<String>) {
-        self.client_id = client_id.into();
     }
 }
 
@@ -219,7 +194,7 @@ impl VideoSettings {
     }
 }
 
-/// Spiral connection and write-only credential changes from the settings screen.
+/// Spiral connection and write-only Hugging Face token changes from the settings screen.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpiralConnectionUpdate {
     #[serde(default = "SpiralSettings::default_endpoint")]
@@ -228,12 +203,6 @@ pub struct SpiralConnectionUpdate {
     spiral_spfs_endpoint: String,
     #[serde(default)]
     project_id: String,
-    #[serde(default)]
-    client_id: String,
-    #[serde(default)]
-    client_secret: String,
-    #[serde(default)]
-    clear_client_secret: bool,
     /// Omitted preserves the saved token; an empty string removes it.
     #[serde(default)]
     huggingface_token: Option<String>,
@@ -249,26 +218,8 @@ impl SpiralConnectionUpdate {
             spiral_endpoint: spiral_endpoint.into(),
             spiral_spfs_endpoint: spiral_spfs_endpoint.into(),
             project_id: project_id.into(),
-            client_id: String::new(),
-            client_secret: String::new(),
-            clear_client_secret: false,
             huggingface_token: None,
         }
-    }
-
-    pub fn with_client_credentials(
-        mut self,
-        client_id: impl Into<String>,
-        client_secret: impl Into<String>,
-    ) -> Self {
-        self.client_id = client_id.into();
-        self.client_secret = client_secret.into();
-        self
-    }
-
-    pub const fn with_clear_client_secret(mut self, clear_client_secret: bool) -> Self {
-        self.clear_client_secret = clear_client_secret;
-        self
     }
 
     pub fn with_huggingface_token(mut self, token: Option<String>) -> Self {
@@ -276,14 +227,11 @@ impl SpiralConnectionUpdate {
         self
     }
 
-    pub fn into_parts(self) -> (String, String, String, String, String, bool, Option<String>) {
+    pub fn into_parts(self) -> (String, String, String, Option<String>) {
         (
             self.spiral_endpoint,
             self.spiral_spfs_endpoint,
             self.project_id,
-            self.client_id,
-            self.client_secret,
-            self.clear_client_secret,
             self.huggingface_token,
         )
     }
@@ -295,9 +243,6 @@ impl std::fmt::Debug for SpiralConnectionUpdate {
             .field("spiral_endpoint", &self.spiral_endpoint)
             .field("spiral_spfs_endpoint", &self.spiral_spfs_endpoint)
             .field("project_id", &self.project_id)
-            .field("client_id", &self.client_id)
-            .field("client_secret", &"<redacted>")
-            .field("clear_client_secret", &self.clear_client_secret)
             .field(
                 "huggingface_token",
                 &self.huggingface_token.as_ref().map(|_| "<redacted>"),
@@ -325,12 +270,10 @@ mod tests {
 
     #[test]
     fn huggingface_settings_expose_presence_and_redact_update_debug() {
-        let update = SpiralConnectionUpdate::default()
-            .with_client_credentials("client", "private-client-secret")
-            .with_huggingface_token(Some("hf_private".into()));
+        let update =
+            SpiralConnectionUpdate::default().with_huggingface_token(Some("hf_private".into()));
         let debug = format!("{update:?}");
         assert!(!debug.contains("hf_private"));
-        assert!(!debug.contains("private-client-secret"));
         let settings = SpiralSettings::default().with_huggingface_token_configured(true);
         let json = serde_json::to_value(settings).unwrap();
         assert_eq!(json["huggingface_token_configured"], true);

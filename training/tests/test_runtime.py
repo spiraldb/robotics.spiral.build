@@ -85,8 +85,6 @@ def job_request() -> dict:
             "spfs_url": "https://spfs.spiraldb.dev",
             "project_id": "project-test",
             "table_prefix": "spiral_robotics",
-            "client_id": "client-id",
-            "client_secret": "client-secret",
         },
         "sql": "SELECT * FROM fixture",
         "state_column": "state",
@@ -236,7 +234,6 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
             assert snapshot["current_step"] == 1
             assert len(snapshot["metrics"]) == 1
             assert len(snapshot["checkpoints"]) == 1
-            assert "client-secret" not in json.dumps(snapshot)
             cursor = snapshot["cursor"]
             delta = await client.get(
                 "/v1/jobs/train-test",

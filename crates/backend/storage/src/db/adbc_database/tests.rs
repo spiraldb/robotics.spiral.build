@@ -1,4 +1,5 @@
 use super::*;
+use crate::SpiralConnectionSettings;
 use crate::db::DatabaseErrorKind;
 use crate::db::contract_tests::DatabaseContract;
 use arrow_array::{Array as _, Int64Array, RecordBatch, StringViewArray};
@@ -68,7 +69,7 @@ async fn project_stream_keeps_its_operation_lease_after_connection_drop() {
             .with_project("contract")
             .unwrap();
     let store = crate::ProjectStore::new(
-        settings,
+        crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into())),
         "contract".into(),
         Arc::new(AdbcDatabase::memory()),
     )
@@ -188,14 +189,14 @@ struct LocalSpiralConfig {
     api_url: String,
     spfs_url: String,
     project_id: String,
-    client_id: String,
-    client_secret: String,
+    /// A user access token, such as `spiraldb login --show-token` prints.
+    access_token: String,
 }
 
 impl LocalSpiralConfig {
-    fn load() -> SpiralConnectionSettings {
+    fn load() -> crate::SpiralConnection {
         let path = std::env::var("SPIRAL_SCHEMA_TEST_CONFIG")
-            .expect("set SPIRAL_SCHEMA_TEST_CONFIG to a local Spiral client JSON file");
+            .expect("set SPIRAL_SCHEMA_TEST_CONFIG to a local Spiral connection JSON file");
         let config: Self = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         for endpoint in [&config.api_url, &config.spfs_url] {
             let url = url::Url::parse(endpoint).unwrap();
@@ -204,14 +205,11 @@ impl LocalSpiralConfig {
                 Some("localhost" | "127.0.0.1" | "[::1]")
             ));
         }
-        SpiralConnectionSettings::new(config.api_url, config.spfs_url)
+        let settings = SpiralConnectionSettings::new(config.api_url, config.spfs_url)
             .unwrap()
             .with_project(&config.project_id)
-            .unwrap()
-            .with_credentials(Some(crate::SpiralCredentials::new(
-                config.client_id,
-                config.client_secret,
-            )))
+            .unwrap();
+        crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed(config.access_token))
     }
 }
 
@@ -233,7 +231,7 @@ async fn dropped_transaction_waits_for_result_before_rollback() {
         .await
         .unwrap()
         .unwrap();
-    let mut worker = ConnectionWorker::connect(Arc::new(database)).await.unwrap();
+    let mut worker = ConnectionWorker::connect(database).await.unwrap();
     let mut cleanup = worker.observe_cleanup();
     let connection = Box::new(AdbcConnection::new(worker));
     let mut transaction = connection.begin().await.unwrap();
@@ -359,7 +357,6 @@ async fn retaining_nested_buffers_preserves_slices_nulls_and_allocation_addresse
         .await
         .unwrap()
         .unwrap();
-    let database = Arc::new(database);
     let values: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
         Some(vec![Some(1), None, Some(3)]),
         None,

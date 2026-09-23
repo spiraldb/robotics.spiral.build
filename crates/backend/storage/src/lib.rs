@@ -8,6 +8,7 @@ pub mod explorations;
 mod manager;
 mod rollout_runs;
 mod settings;
+mod spiral_access;
 mod studio;
 pub use studio::{StudioProject, StudioStore};
 mod training;
@@ -54,6 +55,6 @@ pub use db::{SCHEMA_VERSION, StorageSchema};
 pub use manager::StorageManager;
 pub use settings::{
     BackendStateStore, SavedConnection, ServiceEndpoint, SpiralConnectionSettings,
-    SpiralCredentials, StoredStudioPreferences, StoredTrainingRuntimePreference,
-    StoredVideoPreference,
+    StoredStudioPreferences, StoredTrainingRuntimePreference, StoredVideoPreference,
 };
+pub use spiral_access::{SpiralAccess, SpiralAccessPublisher, SpiralConnection};

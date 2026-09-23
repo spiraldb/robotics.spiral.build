@@ -37,7 +37,10 @@ impl LoadingFixture {
         .unwrap();
         let store = Arc::new(
             ProjectStore::new(
-                connection,
+                spiral_robotics_storage::SpiralConnection::new(
+                    connection,
+                    spiral_robotics_storage::SpiralAccessPublisher::new().1,
+                ),
                 "studio".into(),
                 Arc::new(UnavailableSpiral(calls.clone())),
             )

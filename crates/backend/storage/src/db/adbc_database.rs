@@ -18,7 +18,7 @@ use super::database::{
     DatabaseSession, DatabaseTransaction, ExecutionSummary, RecordBatchStream, RelationMetadata,
     RelationName, SqlStatement,
 };
-use crate::settings::SpiralConnectionSettings;
+use crate::SpiralConnection;
 use driver::{DriverConfiguration, LoadedDatabase};
 use worker::ConnectionWorker;
 
@@ -29,9 +29,9 @@ pub struct AdbcDatabase {
 }
 
 impl AdbcDatabase {
-    pub fn new(settings: SpiralConnectionSettings) -> Self {
+    pub fn new(connection: SpiralConnection) -> Self {
         Self {
-            configuration: DriverConfiguration::hosted(settings),
+            configuration: DriverConfiguration::hosted(connection),
             database: OnceCell::new(),
         }
     }
@@ -47,7 +47,6 @@ impl Database for AdbcDatabase {
                     tokio::task::spawn_blocking(move || configuration.load())
                         .await
                         .map_err(DatabaseError::from_worker)?
-                        .map(Arc::new)
                 })
                 .await?
                 .clone();

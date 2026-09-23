@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use crate::account::SpiralAccount;
 use crate::projects::context::StudioContext;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
@@ -263,9 +264,10 @@ impl ServerStartup {
                 .with_project(&project)
                 .map_err(std::io::Error::other)?;
         }
-        connection = connection
-            .with_credentials(saved.credentials())
-            .with_huggingface_token(saved.huggingface_token());
+        connection = connection.with_huggingface_token(saved.huggingface_token());
+        let (account, spiral_access) = SpiralAccount::restore(connection.endpoint())
+            .await
+            .map_err(std::io::Error::other)?;
         let hardware = Arc::new(HardwareHandle::spawn(control_settings));
         let cameras = Arc::new(CameraManager::new());
         if let Some(error) = camera_access_error {
@@ -281,11 +283,14 @@ impl ServerStartup {
         );
         let factory = crate::projects::ProjectFactory::new(
             resources,
-            table_prefix,
-            backend_state.studio().clone(),
+            crate::projects::ProjectDataAccess::new(
+                table_prefix,
+                backend_state.studio().clone(),
+                spiral_access,
+            ),
         );
         let projects = crate::projects::ProjectRegistry::new(factory, backend_state, connection);
-        let state = StudioContext::new(projects);
+        let state = StudioContext::new(projects, account);
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 

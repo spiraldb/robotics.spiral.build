@@ -5228,6 +5228,15 @@
   flex-wrap: wrap;
   gap: 0.5rem;
 }
+.settings-account {
+  margin-bottom: 1rem;
+}
+.settings-account-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
 .connection-test {
   margin-top: 0.75rem;
   padding: 0.5rem 0.625rem;

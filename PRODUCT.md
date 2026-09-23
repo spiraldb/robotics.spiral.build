@@ -116,8 +116,9 @@ writing glue code or operating a second data stack.
   immutable local MCAP file, then imported as a native Blob into the selected
   Dataset. A failed import reports the retained file path; restart recovery
   and a local-file retry UI are not yet available. Backend bootstrap pointers
-  select the API endpoint, SpFS endpoint, and project. One private local JSON
-  file remembers bootstrap/auth session state, never cached Spiral rows.
+  select the API endpoint, SpFS endpoint, and project, saved in the private
+  local SQLite database; never cached Spiral rows. Studio reaches Spiral as the
+  signed-in user, sharing the `spiraldb login` session.
 - **The robot description is the single source of truth.** Geometry, joint
   limits, and the rendered model come from URDF rather than duplicated drawing
   constants.
@@ -164,7 +165,9 @@ Spiral Robotics backend
   actions without pretending the physical system is safe merely because the
   browser lost contact.
 - **Service settings are backend-scoped.** Secrets are stored and used by the
-  backend. The browser receives configuration state, not stored tokens.
+  backend: the Spiral session, the Hugging Face token, and the model provider
+  key, which the relay attaches. The browser receives configuration state and
+  who is signed in, never a token.
 
 The physical scene matters: an operator may have one hand supporting an arm
 during calibration or teleoperation. Releasing torque lets an arm fall under

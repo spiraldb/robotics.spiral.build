@@ -1,5 +1,6 @@
 //! Settings screen and robot configuration flows.
 
+mod account;
 pub(crate) mod panel;
 pub(crate) mod robots;
 

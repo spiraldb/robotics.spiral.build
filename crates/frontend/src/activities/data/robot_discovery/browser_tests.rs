@@ -19,7 +19,7 @@ export function installRobotDiscoveryFetch() {
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const path = new URL(request.url).pathname;
-        if (path === '/api/credentials') return Response.json({llm:{base_url:'https://provider.test/v1',api_key:'test-key',default_model:'openai/gpt-5.6-terra'},spiral:null,hugging_face:{token:'hf-test'}});
+        if (path === '/api/providers') return Response.json({llm:{base_url:'https://provider.test/v1',default_model:'openai/gpt-5.6-terra'}});
         let metadata = null;
         if (path === '/api/proxy') {
             metadata = {url:new URL(request.url).searchParams.get('url'),method:request.method,authorization:request.headers.get('authorization')};

@@ -133,7 +133,7 @@ impl crate::ProjectStore {
         .with_project("contract")
         .unwrap();
         Self::new(
-            settings,
+            crate::SpiralConnection::new(settings, crate::SpiralAccessPublisher::new().1),
             "contract".into(),
             std::sync::Arc::new(crate::AdbcDatabase::memory()),
         )

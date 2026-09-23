@@ -200,6 +200,9 @@ pub struct LinkButtonProps {
     title: Option<String>,
     #[props(default)]
     download: Option<String>,
+    /// Open the page in a new tab that cannot reach back into this one.
+    #[props(default)]
+    new_tab: bool,
 }
 
 /// Anchor counterpart to [`Button()`], for real downloads and navigation.
@@ -213,6 +216,8 @@ pub fn LinkButton(props: LinkButtonProps) -> Element {
             href: props.href,
             title: props.title,
             download: props.download,
+            target: props.new_tab.then_some("_blank"),
+            rel: props.new_tab.then_some("noopener noreferrer"),
             {props.children}
         }
     }

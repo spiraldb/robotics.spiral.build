@@ -13,7 +13,7 @@ export function installWorkflowFetch(nextMode) {
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const path = new URL(request.url).pathname;
-        if (path === '/api/credentials') return Response.json({llm:{base_url:'https://provider.test/v1',api_key:'test-key',default_model:'openai/gpt-5.6-terra'},spiral:null,hugging_face:null});
+        if (path === '/api/providers') return Response.json({llm:{base_url:'https://provider.test/v1',default_model:'openai/gpt-5.6-terra'}});
         let url = path;
         let metadata = null;
         if (path === '/api/proxy') {

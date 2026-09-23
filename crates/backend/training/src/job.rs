@@ -1,5 +1,3 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -34,19 +32,13 @@ impl SpiralServiceEndpoints {
     }
 }
 
-/// One immutable connection selection sent only to the training worker. The
-/// client secret is write-only control-plane material and must never appear in
-/// job snapshots, logs, or telemetry.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+/// One immutable connection selection sent only to the training worker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpiralJobConnection {
     api_url: String,
     spfs_url: String,
     project_id: String,
     table_prefix: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_secret: Option<String>,
 }
 
 impl SpiralJobConnection {
@@ -60,8 +52,6 @@ impl SpiralJobConnection {
             spfs_url: endpoints.spfs_url,
             project_id: project_id.into(),
             table_prefix: table_prefix.into(),
-            client_id: None,
-            client_secret: None,
         };
         assert!(
             !connection.project_id.trim().is_empty(),
@@ -72,38 +62,6 @@ impl SpiralJobConnection {
             "Studio table prefix must not be empty"
         );
         connection
-    }
-
-    pub fn with_credentials(
-        mut self,
-        client_id: Option<String>,
-        client_secret: Option<String>,
-    ) -> Self {
-        assert_eq!(
-            client_id.is_some(),
-            client_secret.is_some(),
-            "Spiral client ID and secret must be supplied together"
-        );
-        self.client_id = client_id;
-        self.client_secret = client_secret;
-        self
-    }
-}
-
-impl fmt::Debug for SpiralJobConnection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SpiralJobConnection")
-            .field("api_url", &self.api_url)
-            .field("spfs_url", &self.spfs_url)
-            .field("project_id", &self.project_id)
-            .field("table_prefix", &self.table_prefix)
-            .field("client_id", &self.client_id)
-            .field(
-                "client_secret",
-                &self.client_secret.as_ref().map(|_| "[redacted]"),
-            )
-            .finish()
     }
 }
 

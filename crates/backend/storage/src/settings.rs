@@ -64,10 +64,6 @@ pub struct SavedConnection {
     #[serde(default)]
     spiral_spfs_endpoint: String,
     #[serde(default)]
-    client_id: String,
-    #[serde(default)]
-    client_secret: String,
-    #[serde(default)]
     huggingface_token: Option<String>,
 }
 
@@ -84,12 +80,6 @@ impl SavedConnection {
         Self::non_empty(&self.spiral_spfs_endpoint)
     }
 
-    pub fn credentials(&self) -> Option<SpiralCredentials> {
-        let client_id = self.client_id.trim().to_owned();
-        (!client_id.is_empty() && !self.client_secret.is_empty())
-            .then(|| SpiralCredentials::new(client_id, self.client_secret.clone()))
-    }
-
     pub fn huggingface_token(&self) -> Option<String> {
         self.huggingface_token.clone()
     }
@@ -100,39 +90,16 @@ impl SavedConnection {
     }
 }
 
-#[derive(Clone, Default, Eq, PartialEq)]
-pub struct SpiralCredentials {
-    client_id: String,
-    client_secret: String,
-}
-
-impl SpiralCredentials {
-    pub fn new(client_id: String, client_secret: String) -> Self {
-        Self {
-            client_id,
-            client_secret,
-        }
-    }
-
-    pub fn client_id(&self) -> &str {
-        &self.client_id
-    }
-
-    pub fn client_secret(&self) -> &str {
-        &self.client_secret
-    }
-}
-
 /// Validated bootstrap destination for the one Spiral project connection.
 ///
 /// Construction keeps endpoints and project identity together so callers
-/// cannot partially reconfigure a live store.
+/// cannot partially reconfigure a live store. The signed-in user's access is
+/// not part of the destination: every project reads it from [`crate::SpiralAccess`].
 #[derive(Clone, Eq, PartialEq)]
 pub struct SpiralConnectionSettings {
     endpoint: String,
     spfs_endpoint: String,
     project_id: Option<String>,
-    credentials: Option<SpiralCredentials>,
     huggingface_token: Option<String>,
 }
 
@@ -142,7 +109,6 @@ impl SpiralConnectionSettings {
             endpoint: ServiceEndpoint::spiral(&endpoint)?.into_string(),
             spfs_endpoint: ServiceEndpoint::spiral_spfs(&spfs_endpoint)?.into_string(),
             project_id: None,
-            credentials: None,
             huggingface_token: None,
         })
     }
@@ -152,14 +118,9 @@ impl SpiralConnectionSettings {
         Ok(self)
     }
 
-    /// The same endpoint and credentials before a project is chosen.
+    /// The same endpoints before a project is chosen.
     pub fn without_project(mut self) -> Self {
         self.project_id = None;
-        self
-    }
-
-    pub fn with_credentials(mut self, credentials: Option<SpiralCredentials>) -> Self {
-        self.credentials = credentials;
         self
     }
 
@@ -184,10 +145,6 @@ impl SpiralConnectionSettings {
 
     pub fn project_id(&self) -> Option<&str> {
         self.project_id.as_deref()
-    }
-
-    pub fn credentials(&self) -> Option<&SpiralCredentials> {
-        self.credentials.as_ref()
     }
 
     fn validated_project_id(project_id: &str) -> Result<String, String> {
@@ -298,7 +255,15 @@ impl BackendStateStore {
         self.studio.initialize().await?;
         let saved = match self.studio.backend_settings().await? {
             Some(document) => {
-                serde_json::from_value(document).map_err(|error| error.to_string())?
+                let saved: SavedConnection =
+                    serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
+                // Rewriting drops fields Studio no longer keeps, such as the
+                // client secret saved before user sign-in replaced it.
+                let normalized = serde_json::to_value(&saved).map_err(|error| error.to_string())?;
+                if normalized != document {
+                    self.studio.save_backend_settings(normalized).await?;
+                }
+                saved
             }
             None => {
                 let saved: SavedConnection = if self.legacy_path.exists() {
@@ -321,23 +286,14 @@ impl BackendStateStore {
         Ok(saved)
     }
 
+    /// Save the connection a browser starts on; without a project, the next
+    /// browser is asked to choose one.
     pub async fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
-        let project_id = settings.project_id().ok_or_else(|| {
-            "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
-        })?;
         let next = SavedConnection {
             huggingface_token: settings.huggingface_token().map(str::to_owned),
-            project_id: project_id.to_owned(),
+            project_id: settings.project_id().unwrap_or_default().to_owned(),
             spiral_endpoint: settings.endpoint().to_owned(),
             spiral_spfs_endpoint: settings.spfs_endpoint().to_owned(),
-            client_id: settings
-                .credentials()
-                .map(|credentials| credentials.client_id().to_owned())
-                .unwrap_or_default(),
-            client_secret: settings
-                .credentials()
-                .map(|credentials| credentials.client_secret().to_owned())
-                .unwrap_or_default(),
         };
         self.studio
             .save_backend_settings(serde_json::to_value(&next).map_err(|error| error.to_string())?)
@@ -441,10 +397,7 @@ mod tests {
         assert_eq!(empty.project_id(), None);
         assert_eq!(empty.spiral_endpoint(), None);
         assert_eq!(empty.spiral_spfs_endpoint(), None);
-        assert!(empty.credentials().is_none());
 
-        let credentials =
-            SpiralCredentials::new("client-id".to_owned(), "client-secret".to_owned());
         let settings = SpiralConnectionSettings::new(
             " http://127.0.0.1:4279/ ".to_owned(),
             " http://127.0.0.1:4295/ ".to_owned(),
@@ -452,7 +405,6 @@ mod tests {
         .unwrap()
         .with_project(" project-123 ")
         .unwrap()
-        .with_credentials(Some(credentials.clone()))
         .with_huggingface_token(Some("hf_private".into()));
         store.save_connection(&settings).await.unwrap();
         let reopened = BackendStateStore::new(
@@ -470,9 +422,6 @@ mod tests {
             Some("http://127.0.0.1:4295")
         );
         assert_eq!(saved.huggingface_token().as_deref(), Some("hf_private"));
-        let saved = saved.credentials().expect("credentials are reopened");
-        assert_eq!(saved.client_id(), credentials.client_id());
-        assert_eq!(saved.client_secret(), credentials.client_secret());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -499,6 +448,27 @@ mod tests {
                 .huggingface_token()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn reopening_drops_a_client_secret_saved_before_user_sign_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(BACKEND_STATE_FILE);
+        let studio = crate::StudioStore::at(path.with_extension("sqlite3"));
+        studio.initialize().await.unwrap();
+        studio
+            .save_backend_settings(serde_json::json!({
+                "project_id": "project", "client_id": "client", "client_secret": "private-secret"
+            }))
+            .await
+            .unwrap();
+        let saved = BackendStateStore::new(studio.clone(), path)
+            .initialize()
+            .await
+            .unwrap();
+        assert_eq!(saved.project_id().as_deref(), Some("project"));
+        let document = studio.backend_settings().await.unwrap().unwrap();
+        assert!(!document.to_string().contains("private-secret"));
     }
 
     #[test]

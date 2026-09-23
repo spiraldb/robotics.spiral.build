@@ -17,8 +17,8 @@ use spiral_robotics_hardware::{
 };
 use spiral_robotics_storage::episodes::RecordingBuffer;
 use spiral_robotics_storage::{
-    BackendStateStore, ProjectStore, SpiralConnectionSettings, SpiralCredentials, StorageManager,
-    StoredStudioPreferences,
+    BackendStateStore, ProjectStore, SpiralAccess, SpiralConnection, SpiralConnectionSettings,
+    StorageManager, StoredStudioPreferences,
 };
 
 use crate::OperationError;
@@ -73,41 +73,55 @@ impl ProjectHardware {
     }
 }
 
-pub(crate) struct ProjectFactory {
-    hardware: ProjectHardware,
+/// How every project reaches its data: Studio's local store, the prefix of
+/// Studio's relations in Spiral, and the signed-in user's Spiral access.
+pub(crate) struct ProjectDataAccess {
     table_prefix: String,
     studio: spiral_robotics_storage::StudioStore,
+    spiral: SpiralAccess,
+}
+
+impl ProjectDataAccess {
+    pub(crate) fn new(
+        table_prefix: String,
+        studio: spiral_robotics_storage::StudioStore,
+        spiral: SpiralAccess,
+    ) -> Self {
+        Self {
+            table_prefix,
+            studio,
+            spiral,
+        }
+    }
+}
+
+pub(crate) struct ProjectFactory {
+    hardware: ProjectHardware,
+    data: ProjectDataAccess,
 }
 
 impl ProjectFactory {
-    pub(crate) fn new(
-        hardware: ProjectHardware,
-        table_prefix: String,
-        studio: spiral_robotics_storage::StudioStore,
-    ) -> Self {
-        Self {
-            hardware,
-            table_prefix,
-            studio,
-        }
+    pub(crate) fn new(hardware: ProjectHardware, data: ProjectDataAccess) -> Self {
+        Self { hardware, data }
     }
 
     fn create(
         &self,
-        connection: SpiralConnectionSettings,
+        settings: SpiralConnectionSettings,
     ) -> Result<Arc<OpenProject>, OperationError> {
+        let connection = SpiralConnection::new(settings, self.data.spiral.clone());
         let database = Arc::new(spiral_robotics_storage::AdbcDatabase::new(
             connection.clone(),
         ));
         let store = Arc::new(
-            ProjectStore::new(connection, self.table_prefix.clone(), database)
+            ProjectStore::new(connection, self.data.table_prefix.clone(), database)
                 .map_err(OperationError::External)?,
         );
         Ok(self.create_from_store(store))
     }
 
     fn create_from_store(&self, store: Arc<ProjectStore>) -> Arc<OpenProject> {
-        let studio = self.studio.project(&store.connection_settings());
+        let studio = self.data.studio.project(&store.connection_settings());
         let workspace = Arc::new(RobotWorkspace::new(studio.clone()));
         let recording_buffer = Arc::new(RecordingBuffer::new());
         let storage = Arc::new(StorageManager::new(store, studio));
@@ -144,47 +158,16 @@ impl OpenProject {
         update: SpiralConnectionUpdate,
         previous: &SpiralConnectionSettings,
     ) -> Result<SpiralConnectionSettings, OperationError> {
-        let (endpoint, spfs, project, client, secret, clear, huggingface_token) =
-            update.into_parts();
+        let (endpoint, spfs, project, huggingface_token) = update.into_parts();
         let huggingface_token =
             huggingface_token.or_else(|| previous.huggingface_token().map(str::to_owned));
         let endpoint =
             crate::data::settings::HttpEndpoint::parse(&endpoint, "Spiral endpoint")?.into_string();
         let spfs =
             crate::data::settings::HttpEndpoint::parse(&spfs, "SpFS endpoint")?.into_string();
-        let client = client.trim();
-        let credentials = if clear || client.is_empty() {
-            if client.is_empty() && !secret.trim().is_empty() && !clear {
-                return Err(OperationError::invalid_input(
-                    "Spiral client secret requires a client ID",
-                ));
-            }
-            None
-        } else if !secret.trim().is_empty() {
-            Some(SpiralCredentials::new(
-                client.to_owned(),
-                secret.trim().to_owned(),
-            ))
-        } else {
-            Some(
-                previous
-                    .credentials()
-                    .filter(|credentials| credentials.client_id() == client)
-                    .cloned()
-                    .ok_or_else(|| {
-                        OperationError::invalid_input(
-                            "Enter the client secret when changing the Spiral client ID",
-                        )
-                    })?,
-            )
-        };
         SpiralConnectionSettings::new(endpoint, spfs)
             .and_then(|settings| settings.with_project(project.trim()))
-            .map(|settings| {
-                settings
-                    .with_credentials(credentials)
-                    .with_huggingface_token(huggingface_token)
-            })
+            .map(|settings| settings.with_huggingface_token(huggingface_token))
             .map_err(OperationError::InvalidInput)
     }
 
@@ -194,13 +177,6 @@ impl OpenProject {
             connection.endpoint(),
             connection.spfs_endpoint(),
             connection.project_id().unwrap_or_default(),
-        )
-        .with_client(
-            connection
-                .credentials()
-                .map(SpiralCredentials::client_id)
-                .unwrap_or_default(),
-            connection.credentials().is_some(),
         )
         .with_huggingface_token_configured(connection.huggingface_token().is_some())
         .with_table_prefix(table_prefix)
@@ -349,7 +325,7 @@ impl ProjectRegistry {
     }
 
     pub(crate) fn saved_settings(&self) -> SpiralSettings {
-        OpenProject::present(&self.saved_connection(), &self.factory.table_prefix)
+        OpenProject::present(&self.saved_connection(), &self.factory.data.table_prefix)
     }
 
     /// The project `key` names, reached with the saved credentials. A key for
@@ -492,13 +468,8 @@ impl ProjectRegistry {
         }
         let account = connection.clone().without_project();
         if self.saved_connection().without_project() != account {
-            for project in self.opened() {
-                if project.busy().await? {
-                    return Err(OperationError::conflict(
-                        "Stop recording, rollout, and training before changing the Spiral connection.",
-                    ));
-                }
-            }
+            self.refuse_while_busy("changing the Spiral connection")
+                .await?;
         }
         self.backend_state
             .save_connection(&connection)
@@ -527,6 +498,44 @@ impl ProjectRegistry {
             tokio::spawn(async move { retired_project.shutdown().await });
         }
         Ok(project)
+    }
+
+    /// Run `change` to the signed-in Spiral account, then close every project
+    /// opened as the previous user and forget the saved project, which was theirs.
+    pub(crate) async fn change_account<T>(
+        &self,
+        origin: &OpenProject,
+        change: impl Future<Output = Result<T, OperationError>>,
+    ) -> Result<T, OperationError> {
+        self.release_robots(origin).await?;
+        self.refuse_while_busy("changing the Spiral account")
+            .await?;
+        let changed = change.await?;
+        let saved = self.saved_connection().without_project();
+        self.backend_state
+            .save_connection(&saved)
+            .await
+            .map_err(OperationError::Internal)?;
+        let retired = {
+            let mut opened = self.opened.recover_lock();
+            opened.saved = saved;
+            std::mem::take(&mut opened.projects)
+        };
+        for retired_project in retired {
+            tokio::spawn(async move { retired_project.shutdown().await });
+        }
+        Ok(changed)
+    }
+
+    async fn refuse_while_busy(&self, action: &str) -> Result<(), OperationError> {
+        for project in self.opened() {
+            if project.busy().await? {
+                return Err(OperationError::conflict(format!(
+                    "Stop recording, rollout, and training before {action}."
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Robots set up in the project being left stay with it: the operator
@@ -650,8 +659,11 @@ pub(crate) mod tests {
             );
             let factory = ProjectFactory::new(
                 hardware,
-                "project_lifetime_test".to_owned(),
-                spiral_robotics_storage::StudioStore::in_memory(),
+                ProjectDataAccess::new(
+                    "project_lifetime_test".to_owned(),
+                    spiral_robotics_storage::StudioStore::in_memory(),
+                    spiral_robotics_storage::SpiralAccessPublisher::new().1,
+                ),
             );
             let backend_state = Arc::new(BackendStateStore::new(
                 spiral_robotics_storage::StudioStore::at(directory.path().join("studio.sqlite3")),
@@ -743,46 +755,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn connection_repairs_preserve_credentials_unless_the_edit_explicitly_replaces_them() {
-        let previous = SpiralConnectionSettings::new(
-            "https://api.spiraldb.dev".into(),
-            "https://spfs.spiraldb.dev".into(),
-        )
-        .unwrap()
-        .with_project("old")
-        .unwrap()
-        .with_credentials(Some(SpiralCredentials::new(
-            "client".into(),
-            "saved-secret".into(),
-        )));
-        let update = SpiralConnectionUpdate::new(
-            "https://api.spiraldb.dev",
-            "https://spfs.spiraldb.dev",
-            "new",
-        )
-        .with_client_credentials("client", "");
-        let repaired = OpenProject::resolve_connection_update(update.clone(), &previous).unwrap();
-        assert_eq!(repaired.project_id(), Some("new"));
-        assert!(repaired.credentials() == previous.credentials());
-        assert!(
-            OpenProject::resolve_connection_update(
-                update.clone().with_client_credentials("different", ""),
-                &previous,
-            )
-            .is_err()
-        );
-        assert!(
-            OpenProject::resolve_connection_update(
-                update.with_clear_client_secret(true),
-                &previous,
-            )
-            .unwrap()
-            .credentials()
-            .is_none()
-        );
-    }
-
     #[tokio::test]
     async fn settings_present_the_project_connection_and_preferences_without_secrets() {
         let fixture = ProjectFixture::new();
@@ -793,10 +765,7 @@ pub(crate) mod tests {
         .unwrap()
         .with_project("configured_project")
         .unwrap()
-        .with_credentials(Some(SpiralCredentials::new(
-            "client".to_owned(),
-            "private-secret".to_owned(),
-        )));
+        .with_huggingface_token(Some("hf_private".to_owned()));
         let project = fixture.projects.factory.create(connection).unwrap();
         let preferences =
             StoredStudioPreferences::from_settings("http://127.0.0.1:5050", false).unwrap();
@@ -814,14 +783,13 @@ pub(crate) mod tests {
             "https://spfs.spiraldb.dev"
         );
         assert_eq!(settings.spiral().table_prefix(), "project_lifetime_test");
-        assert_eq!(settings.spiral().client_id(), "client");
-        assert!(settings.spiral().client_secret_configured());
+        assert!(settings.spiral().huggingface_token_configured());
         assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");
         assert!(!settings.video().enabled());
         assert!(
             !serde_json::to_string(&settings)
                 .unwrap()
-                .contains("private-secret")
+                .contains("hf_private")
         );
         fixture.projects.hardware().shutdown().await.unwrap();
     }

@@ -1,22 +1,29 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Weak};
 
 use adbc_core::{
-    Driver as _,
+    Driver as _, Optionable as _,
     options::{AdbcVersion, OptionDatabase, OptionValue},
 };
 use adbc_driver_manager::{ManagedDatabase, ManagedDriver};
 
 use super::{DatabaseError, DatabaseResult};
 use crate::db::DatabaseErrorKind;
-use crate::settings::SpiralConnectionSettings;
+use crate::{SpiralAccess, SpiralConnection};
+
+/// The driver option carrying the signed-in user's token; the driver never refreshes it.
+const ACCESS_TOKEN_OPTION: &str = "spiral.access_token";
 
 #[derive(Clone)]
 pub(super) struct DriverConfiguration {
     options: Vec<(OptionDatabase, OptionValue)>,
+    /// Hosted databases authenticate as the signed-in user.
+    access: Option<SpiralAccess>,
 }
 
 impl DriverConfiguration {
-    pub(super) fn hosted(settings: SpiralConnectionSettings) -> Self {
+    pub(super) fn hosted(connection: SpiralConnection) -> Self {
+        let settings = connection.settings();
         let mut uri = url::Url::parse("spiraldb://").expect("constant driver URI");
         if let Some(project) = settings.project_id() {
             uri.query_pairs_mut().append_pair("project", project);
@@ -36,27 +43,43 @@ impl DriverConfiguration {
                 settings.spfs_endpoint().into(),
             ),
         ];
-        if let Some(credentials) = settings.credentials() {
-            options.push((OptionDatabase::Username, credentials.client_id().into()));
-            options.push((OptionDatabase::Password, credentials.client_secret().into()));
-        }
         if let Some(token) = settings.huggingface_token() {
             options.push((
                 OptionDatabase::Other("spiral.huggingface_token".into()),
                 token.into(),
             ));
         }
-        Self { options }
+        Self {
+            options,
+            access: Some(connection.access().clone()),
+        }
     }
 
-    pub(super) fn load(self) -> DatabaseResult<LoadedDatabase> {
+    /// Open the database as the user signed in now, and give it every later
+    /// token so long-running work outlives each token's short lifetime.
+    pub(super) fn load(self) -> DatabaseResult<Arc<LoadedDatabase>> {
+        let mut options = self.options;
+        // Follow before reading, so a token published in between still arrives.
+        let follower = self.access.clone();
+        if let Some(access) = &self.access {
+            let token = access
+                .token()
+                .map_err(|message| DatabaseError::new(DatabaseErrorKind::InvalidState, message))?;
+            options.push((
+                OptionDatabase::Other(ACCESS_TOKEN_OPTION.into()),
+                token.into(),
+            ));
+        }
         let path = Self::library_path()?;
         let mut driver = ManagedDriver::load_dynamic_from_filename(
             &path, Some(b"AdbcDriverSpiraldbInit"), AdbcVersion::V110,
         ).map_err(|error| DatabaseError::new(DatabaseErrorKind::Unavailable,
             format!("loading Spiral ADBC driver at {}: {error}; install the pinned driver and set SPIRALDB_ADBC_DRIVER", path.display())))?;
-        let database = driver.new_database_with_opts(self.options)?;
-        Ok(LoadedDatabase::new(database))
+        let database = Arc::new(LoadedDatabase::new(driver.new_database_with_opts(options)?));
+        if let Some(access) = follower {
+            LoadedDatabase::follow(Arc::downgrade(&database), access);
+        }
+        Ok(database)
     }
 
     fn library_path() -> DatabaseResult<PathBuf> {
@@ -82,6 +105,7 @@ impl DriverConfiguration {
     pub(super) fn memory() -> Self {
         Self {
             options: vec![(OptionDatabase::Uri, "spiral:memory:".into())],
+            access: None,
         }
     }
 }
@@ -103,6 +127,32 @@ impl LoadedDatabase {
         self.database
             .as_ref()
             .expect("database is only taken during drop")
+    }
+
+    /// Replace the database's token with each one the account publishes, until
+    /// the database is released.
+    fn follow(database: Weak<Self>, mut access: SpiralAccess) {
+        tokio::spawn(async move {
+            while let Some(token) = access.replaced().await {
+                let Some(loaded) = database.upgrade() else {
+                    return;
+                };
+                // Signing out retires every project; its last token lapses.
+                let Some(token) = token else { continue };
+                let mut managed = loaded.database().clone();
+                drop(loaded);
+                let replaced = tokio::task::spawn_blocking(move || {
+                    managed.set_option(
+                        OptionDatabase::Other(ACCESS_TOKEN_OPTION.into()),
+                        token.into(),
+                    )
+                })
+                .await;
+                if let Ok(Err(error)) = replaced {
+                    tracing::warn!(detail = %error.message, "could not replace the Spiral access token");
+                }
+            }
+        });
     }
 }
 
@@ -165,15 +215,20 @@ impl DatabaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adbc_core::Optionable as _;
 
-    #[test]
-    fn huggingface_token_reaches_the_native_driver_as_a_write_only_option() {
-        let settings =
-            SpiralConnectionSettings::new("http://127.0.0.1:1".into(), "http://127.0.0.1:1".into())
-                .unwrap()
-                .with_huggingface_token(Some("hf_test_only".into()));
-        let database = DriverConfiguration::hosted(settings).load().unwrap();
+    fn settings() -> crate::SpiralConnectionSettings {
+        crate::SpiralConnectionSettings::new(
+            "http://127.0.0.1:1".into(),
+            "http://127.0.0.1:1".into(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn huggingface_token_reaches_the_native_driver_as_a_write_only_option() {
+        let settings = settings().with_huggingface_token(Some("hf_test_only".into()));
+        let connection = SpiralConnection::new(settings, SpiralAccess::fixed("token".into()));
+        let database = DriverConfiguration::hosted(connection).load().unwrap();
         let error = database
             .database()
             .get_option_string(OptionDatabase::Other("spiral.huggingface_token".into()))
@@ -181,5 +236,73 @@ mod tests {
         assert_eq!(error.status, adbc_core::error::Status::InvalidState);
         assert!(error.message.contains("write-only"));
         assert!(!error.message.contains("hf_test_only"));
+    }
+
+    /// Spiral's API as the driver reaches it, recording each request's bearer token.
+    async fn recording_api() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let recorded = seen.clone();
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let recorded = recorded.clone();
+            async move {
+                if let Some(value) = request.headers().get("authorization") {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(value.to_str().unwrap().to_owned());
+                }
+                axum::Json(serde_json::json!({"items": [], "next_page_token": null}))
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (endpoint, seen)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_databases_authenticate_with_each_published_access_token() {
+        use crate::Database as _;
+        use futures::StreamExt as _;
+
+        let (endpoint, seen) = recording_api().await;
+        let settings = crate::SpiralConnectionSettings::new(endpoint.clone(), endpoint).unwrap();
+        let (publisher, access) = crate::SpiralAccessPublisher::new();
+        let database = crate::AdbcDatabase::new(SpiralConnection::new(settings, access));
+        let signed_out = database
+            .connect()
+            .await
+            .err()
+            .expect("hosted databases need a user");
+        assert!(signed_out.to_string().contains("Sign in to Spiral"));
+
+        let read_projects = || async {
+            let mut connection = database.connect().await.unwrap();
+            if let Ok(mut rows) = connection
+                .query("SELECT * FROM spql.meta.projects()".into())
+                .await
+            {
+                while rows.next().await.is_some() {}
+            }
+        };
+        publisher.publish(Some("first".into()));
+        read_projects().await;
+        assert_eq!(
+            seen.lock().unwrap().last().map(String::as_str),
+            Some("Bearer first")
+        );
+
+        publisher.publish(Some("second".into()));
+        for _ in 0..50 {
+            read_projects().await;
+            if seen.lock().unwrap().last().map(String::as_str) == Some("Bearer second") {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!(
+            "the open database kept its first token: {:?}",
+            seen.lock().unwrap()
+        );
     }
 }

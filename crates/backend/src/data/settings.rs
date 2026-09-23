@@ -44,23 +44,20 @@ pub(crate) struct UpdateDataSettingsCommand {
     spiral_endpoint: String,
     spiral_spfs_endpoint: String,
     project_id: String,
-    credentials: ConnectionCredentialUpdate,
+    huggingface_token: HuggingFaceTokenUpdate,
     training_endpoint: String,
     video_enabled: bool,
 }
 
+/// Omitted keeps the saved token; empty removes it.
 #[derive(Clone, Default, Eq, PartialEq)]
-struct ConnectionCredentialUpdate {
-    client_id: String,
-    client_secret: Option<String>,
-    huggingface_token: Option<String>,
-}
+struct HuggingFaceTokenUpdate(Option<String>);
 
-impl std::fmt::Debug for ConnectionCredentialUpdate {
+impl std::fmt::Debug for HuggingFaceTokenUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConnectionCredentialUpdate")
-            .field("client_id", &self.client_id)
-            .finish_non_exhaustive()
+        f.debug_tuple("HuggingFaceTokenUpdate")
+            .field(&self.0.as_ref().map(|_| "<redacted>"))
+            .finish()
     }
 }
 
@@ -80,7 +77,7 @@ impl UpdateDataSettingsCommand {
             spiral_endpoint: spiral_endpoint.into(),
             spiral_spfs_endpoint: String::new(),
             project_id: project_id.into(),
-            credentials: ConnectionCredentialUpdate::default(),
+            huggingface_token: HuggingFaceTokenUpdate::default(),
             training_endpoint: training_endpoint.into(),
             video_enabled: false,
         }
@@ -91,18 +88,8 @@ impl UpdateDataSettingsCommand {
         self
     }
 
-    pub(super) fn with_client(mut self, client_id: impl Into<String>) -> Self {
-        self.credentials.client_id = client_id.into();
-        self
-    }
-
-    pub(super) fn with_client_secret(mut self, secret: Option<String>) -> Self {
-        self.credentials.client_secret = secret;
-        self
-    }
-
     pub(super) fn with_huggingface_token(mut self, token: Option<String>) -> Self {
-        self.credentials.huggingface_token = token;
+        self.huggingface_token = HuggingFaceTokenUpdate(token);
         self
     }
 
@@ -120,12 +107,6 @@ impl UpdateDataSettingsCommand {
     fn project_id(&self) -> &str {
         &self.project_id
     }
-    fn client_id(&self) -> &str {
-        &self.credentials.client_id
-    }
-    fn client_secret(&self) -> Option<&str> {
-        self.credentials.client_secret.as_deref()
-    }
     pub(crate) fn training_endpoint(&self) -> &str {
         &self.training_endpoint
     }
@@ -134,23 +115,12 @@ impl UpdateDataSettingsCommand {
     }
 }
 
-/// A blank secret keeps the saved one; clearing it saves an empty one.
 impl From<SettingsUpdate> for UpdateDataSettingsCommand {
     fn from(update: SettingsUpdate) -> Self {
         let (connection, training, video) = update.into_parts();
-        let (endpoint, spfs, project, client_id, secret, clear_secret, huggingface_token) =
-            connection.into_parts();
-        let secret = if clear_secret {
-            Some(String::new())
-        } else if secret.trim().is_empty() {
-            None
-        } else {
-            Some(secret)
-        };
+        let (endpoint, spfs, project, huggingface_token) = connection.into_parts();
         Self::new(endpoint, project, training.endpoint())
             .with_spfs_endpoint(spfs)
-            .with_client(client_id)
-            .with_client_secret(secret)
             .with_huggingface_token(huggingface_token)
             .with_video_enabled(video.enabled())
     }
@@ -176,11 +146,6 @@ impl UpdateDataSettingsCommand {
         self.spiral_spfs_endpoint =
             HttpEndpoint::parse(&self.spiral_spfs_endpoint, "Spiral SpFS endpoint")?.into_string();
         self.project_id = self.project_id.trim().to_owned();
-        self.credentials.client_id = self.credentials.client_id.trim().to_owned();
-        self.credentials.client_secret = self
-            .credentials
-            .client_secret
-            .map(|secret| secret.trim().to_owned());
         self.training_endpoint = self.training_endpoint.trim().to_owned();
 
         if self.project_id.is_empty()
@@ -191,18 +156,6 @@ impl UpdateDataSettingsCommand {
         {
             return Err(OperationError::InvalidInput(
                 "Spiral project must contain only letters, numbers, '_' or '-'".to_owned(),
-            ));
-        }
-
-        if self.credentials.client_id.is_empty()
-            && self
-                .credentials
-                .client_secret
-                .as_ref()
-                .is_some_and(|secret| !secret.is_empty())
-        {
-            return Err(OperationError::InvalidInput(
-                "Spiral client secret requires a client ID".to_owned(),
             ));
         }
 
@@ -221,12 +174,7 @@ impl From<&UpdateDataSettingsCommand> for spiral_robotics_common::settings::Spir
             command.spiral_spfs_endpoint(),
             command.project_id(),
         )
-        .with_client_credentials(
-            command.client_id(),
-            command.client_secret().unwrap_or_default(),
-        )
-        .with_clear_client_secret(command.client_secret() == Some(""))
-        .with_huggingface_token(command.credentials.huggingface_token.clone())
+        .with_huggingface_token(command.huggingface_token.0.clone())
     }
 }
 
@@ -239,7 +187,7 @@ mod tests {
             spiral_endpoint: " https://api.spiraldb.dev/ ".to_owned(),
             spiral_spfs_endpoint: " https://spfs.spiraldb.dev/ ".to_owned(),
             project_id: " project ".to_owned(),
-            credentials: ConnectionCredentialUpdate::default(),
+            huggingface_token: HuggingFaceTokenUpdate::default(),
             training_endpoint: " http://127.0.0.1:50051 ".to_owned(),
             video_enabled: true,
         }
@@ -264,12 +212,9 @@ mod tests {
                 .validated()
                 .unwrap();
             assert!(!format!("{command:?}").contains("hf_replacement"));
-            let (_, _, project, client, secret, clear, converted_token) =
+            let (_, _, project, converted_token) =
                 SpiralConnectionUpdate::from(&command).into_parts();
             assert_eq!(project, "project");
-            assert!(client.is_empty());
-            assert!(secret.is_empty());
-            assert!(!clear);
             assert_eq!(converted_token, token);
         }
     }

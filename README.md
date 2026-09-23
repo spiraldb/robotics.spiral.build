@@ -53,10 +53,10 @@ DX builds them together using the `@client` and `@server` package selections.
 
 Agent orchestration belongs to the frontend: Workflow authoring, imported robot
 discovery, and Curation rule interpretation own their prompts, model responses,
-and tool selection in the browser. `GET /api/credentials` supplies Studio-wide
-configured credentials to the frontend, which constructs authorization headers
-and provider requests and interprets responses. `/api/proxy` relays external HTTP
-requests and streams their responses without provider or credential logic.
+and tool selection in the browser. `GET /api/providers` tells the frontend which
+model provider is configured; it constructs provider requests and interprets
+responses. `/api/proxy` relays external HTTP requests, attaches the key Studio
+holds for the destination's origin, and streams the responses back.
 Native data operations, robot validation, and persistence remain on the backend.
 Browser orchestration ends when its owning task is disposed; this does not undo
 completed data operations.
@@ -110,9 +110,9 @@ without direnv or manually exporting secrets:
 LLM_API_KEY=your-provider-key
 ```
 
-The frontend receives configured credentials through `/api/credentials` and uses
-them in memory. Credentials belong to Studio, independently of the selected
-project; keep them out of saved workflows, browser storage, and logs.
+The key never reaches the browser: the relay attaches it to requests bound for
+the provider's origin. Credentials belong to Studio, independently of the
+selected project; keep them out of saved workflows, browser storage, and logs.
 
 The default is `openai/gpt-5.6-terra` through OpenRouter, with `medium` reasoning
 effort and fast mode requested using `service_tier: "priority"`. Priority
@@ -154,13 +154,18 @@ dx serve --fullstack --debug-symbols false \
   @server --package spiral-robotics-backend
 ```
 
-On first launch, Studio opens **Settings → SpiralDB** so you can enter the
-Spiral API endpoint, SpFS endpoint, and project ID. The hosted services are the
-defaults; for the local stack use `http://127.0.0.1:4279` and
-`http://127.0.0.1:4295`. The backend remembers these three bootstrap pointers
-in its private local SQLite database. Project-only switches apply immediately while Studio
-is idle. Service-endpoint and credential changes also apply live while Studio
-is idle, after the old repository pool drains.
+On first launch, Studio opens **Settings → SpiralDB**. Choose **Sign in with
+Spiral**, confirm the code on the Spiral sign-in page, then pick a project. Studio
+signs in the same way `spiraldb login` does and shares that session: if the CLI
+is already signed in, Studio starts signed in, and signing out of Studio signs
+the CLI out too. The backend holds the session and keeps its short-lived access
+token fresh; the browser never sees a token.
+The hosted services are the default endpoints; for the local stack use
+`http://127.0.0.1:4279` and `http://127.0.0.1:4295`. The backend remembers the
+endpoints and project in its private local SQLite database. Project-only switches
+apply immediately while Studio is idle. Service-endpoint changes also apply live
+while Studio is idle, after the old repository pool drains; signing out or
+switching organization closes the open projects.
 `--spiral-project` or `SPIRAL_PROJECT_ID` may still provide an initial project
 override.
 The SQLite file defaults to `.studio/studio.sqlite3` in this repository;

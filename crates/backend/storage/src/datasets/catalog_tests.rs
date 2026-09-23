@@ -9,8 +9,7 @@ use axum::{
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 
-use super::*;
-use crate::{AdbcDatabase, ProjectStore};
+use crate::{AdbcDatabase, ProjectStore, SpiralConnectionSettings};
 
 #[test]
 fn control_tables_are_excluded_without_hiding_data_plane_relations() {
@@ -19,10 +18,12 @@ fn control_tables_are_excluded_without_hiding_data_plane_relations() {
         "http://localhost:2".into(),
     )
     .unwrap();
+    let connection =
+        crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
     let store = ProjectStore::new(
-        settings.clone(),
+        connection.clone(),
         "bench".into(),
-        Arc::new(AdbcDatabase::new(settings)),
+        Arc::new(AdbcDatabase::new(connection)),
     )
     .unwrap();
     for (path, hidden) in [
@@ -45,10 +46,9 @@ fn control_tables_are_excluded_without_hiding_data_plane_relations() {
 
 #[derive(Default)]
 struct CatalogState {
-    tokens: usize,
     reads: usize,
     version: usize,
-    rejected: Option<String>,
+    tokens: Vec<String>,
     deny_all: bool,
 }
 
@@ -76,21 +76,16 @@ impl CatalogServer {
 
     async fn respond(State(state): State<Arc<Mutex<CatalogState>>>, request: Request) -> Response {
         let mut state = state.lock().unwrap();
-        if request.uri().path() == "/v1/oauth2/token" {
-            state.tokens += 1;
-            return Json(
-                json!({"access_token":format!("token-{}", state.tokens), "expires_in":3600}),
-            )
-            .into_response();
-        }
         state.reads += 1;
         let token = request
             .headers()
-            .get(AUTHORIZATION)
+            .get(reqwest::header::AUTHORIZATION)
             .unwrap()
             .to_str()
-            .unwrap();
-        if state.deny_all || state.rejected.as_deref() == Some(token) {
+            .unwrap()
+            .to_owned();
+        state.tokens.push(token);
+        if state.deny_all {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         if request.uri().path().ends_with("/branches/main") {
@@ -102,17 +97,14 @@ impl CatalogServer {
         }],"nextPageToken":null})).into_response()
     }
 
-    fn store(&self, project: &str) -> ProjectStore {
+    fn store(&self, project: &str, access: crate::SpiralAccess) -> ProjectStore {
         let settings = SpiralConnectionSettings::new(self.endpoint.clone(), self.endpoint.clone())
             .unwrap()
             .with_project(project)
-            .unwrap()
-            .with_credentials(Some(SpiralCredentials::new(
-                project.into(),
-                "secret".into(),
-            )));
-        let database = Arc::new(AdbcDatabase::new(settings.clone()));
-        ProjectStore::new(settings, "studio".into(), database).unwrap()
+            .unwrap();
+        let connection = crate::SpiralConnection::new(settings, access);
+        let database = Arc::new(AdbcDatabase::new(connection.clone()));
+        ProjectStore::new(connection, "studio".into(), database).unwrap()
     }
 }
 
@@ -123,18 +115,13 @@ impl Drop for CatalogServer {
 }
 
 #[tokio::test]
-async fn concurrent_catalog_reads_share_auth_but_observe_new_versions_and_isolate_projects() {
+async fn catalog_reads_observe_new_versions_and_isolate_projects() {
     let server = CatalogServer::start().await;
-    let first = server.store("first");
+    let first = server.store("first", crate::SpiralAccess::fixed("token".into()));
     let catalog = first.dataset_catalog();
-    let (a, b, c) = tokio::join!(
-        catalog.resources(),
-        catalog.resources(),
-        catalog.resources()
-    );
+    let (a, b) = tokio::join!(catalog.resources(), catalog.resources());
     assert_eq!(a.unwrap()[0].dataset().unwrap().version_id(), "0");
-    assert!(b.is_ok() && c.is_ok());
-    assert_eq!(server.state.lock().unwrap().tokens, 1);
+    assert!(b.is_ok());
     server.state.lock().unwrap().version = 1;
     assert_eq!(
         catalog.resources().await.unwrap()[0]
@@ -143,67 +130,45 @@ async fn concurrent_catalog_reads_share_auth_but_observe_new_versions_and_isolat
             .version_id(),
         "1"
     );
-    assert_eq!(server.state.lock().unwrap().tokens, 1);
-    assert_eq!(server.state.lock().unwrap().reads, 8);
-    server
-        .store("second")
-        .dataset_catalog()
-        .resources()
-        .await
-        .unwrap();
-    assert_eq!(server.state.lock().unwrap().tokens, 2);
+    assert_eq!(server.state.lock().unwrap().reads, 6);
+    assert!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .tokens
+            .iter()
+            .all(|token| token == "Bearer token")
+    );
 }
 
 #[tokio::test]
-async fn catalog_renews_expiring_and_rejected_tokens() {
+async fn catalog_reads_as_the_currently_signed_in_user() {
     let server = CatalogServer::start().await;
-    let store = server.store("first");
+    let (publisher, access) = crate::SpiralAccessPublisher::new();
+    let store = server.store("first", access);
     let catalog = store.dataset_catalog();
+    let signed_out = catalog.resources().await.unwrap_err();
+    assert!(signed_out.contains("Sign in to Spiral"));
+    assert_eq!(server.state.lock().unwrap().reads, 0);
+    publisher.publish(Some("first".into()));
     catalog.resources().await.unwrap();
-    catalog.token.lock().await.as_mut().unwrap().refresh_at = Some(Instant::now());
+    publisher.publish(Some("refreshed".into()));
     catalog.resources().await.unwrap();
-    assert_eq!(server.state.lock().unwrap().tokens, 2);
-    server.state.lock().unwrap().rejected = Some("Bearer token-2".into());
-    let (a, b) = tokio::join!(catalog.resources(), catalog.resources());
-    assert!(a.is_ok() && b.is_ok());
-    assert_eq!(server.state.lock().unwrap().tokens, 3);
-    catalog.resources().await.unwrap();
-    assert_eq!(server.state.lock().unwrap().tokens, 3);
+    let tokens = server.state.lock().unwrap().tokens.clone();
+    assert_eq!(tokens.first().map(String::as_str), Some("Bearer first"));
+    assert_eq!(tokens.last().map(String::as_str), Some("Bearer refreshed"));
 }
 
 #[tokio::test]
-async fn persistent_unauthorized_response_is_retried_only_once() {
+async fn unauthorized_responses_fail_without_retrying() {
     let server = CatalogServer::start().await;
     server.state.lock().unwrap().deny_all = true;
-    let store = server.store("first");
+    let store = server.store("first", crate::SpiralAccess::fixed("token".into()));
     let catalog = store.dataset_catalog();
     let response = catalog
         .request::<Value>(catalog.client.get(format!("{}/denied", server.endpoint)))
         .await;
     assert!(response.unwrap_err().contains("401"));
-    let state = server.state.lock().unwrap();
-    assert_eq!((state.tokens, state.reads), (2, 2));
-}
-
-#[test]
-fn token_lifetimes_support_oauth_jwt_and_opaque_tokens() {
-    let token = AccessToken {
-        access_token: "opaque".into(),
-        expires_in: Some(60),
-    };
-    assert_eq!(token.refresh_after(), Some(Duration::from_secs(30)));
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-        json!({"exp":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()+3600.0})
-            .to_string(),
-    );
-    let token = AccessToken {
-        access_token: format!("header.{payload}.signature"),
-        expires_in: None,
-    };
-    assert!(token.refresh_after().unwrap() > Duration::from_secs(3500));
-    let token = AccessToken {
-        access_token: "opaque".into(),
-        expires_in: None,
-    };
-    assert_eq!(token.refresh_after(), None);
+    assert_eq!(server.state.lock().unwrap().reads, 1);
 }

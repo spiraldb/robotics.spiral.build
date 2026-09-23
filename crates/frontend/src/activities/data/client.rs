@@ -44,9 +44,10 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/hugging-face/import").json(&source))
     }
 
+    /// Robot files are public; the relay authenticates Hugging Face requests
+    /// when a token is saved.
     pub(super) async fn read_robot_description(&self, url: &str) -> Result<String, CommandError> {
-        let request = Self::robot_source(url)
-            .await?
+        let request = crate::client::proxy::ProxyClient::request("GET", url)
             .header(
                 "accept",
                 "text/plain, application/json, application/xml, text/xml",
@@ -60,25 +61,8 @@ impl DatasetClient {
         url: &str,
         max_bytes: usize,
     ) -> Result<Vec<u8>, CommandError> {
-        let request = Self::robot_source(url).await?.timeout(30_000);
+        let request = crate::client::proxy::ProxyClient::request("GET", url).timeout(30_000);
         crate::client::proxy::ProxyClient::bytes(request, max_bytes).await
-    }
-
-    /// A public model file, authenticated for Hugging Face when a token is set.
-    async fn robot_source(url: &str) -> Result<HttpRequest, CommandError> {
-        let credentials = crate::client::proxy::ProxyClient::credentials().await?;
-        let request = crate::client::proxy::ProxyClient::request("GET", url);
-        Ok(
-            match credentials
-                .hugging_face()
-                .filter(|_| url.starts_with("https://huggingface.co/"))
-            {
-                Some(credentials) => {
-                    request.header("authorization", format!("Bearer {}", credentials.token()))
-                }
-                None => request,
-            },
-        )
     }
 
     pub(super) async fn save_dataset_robot(

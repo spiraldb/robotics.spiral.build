@@ -6,9 +6,11 @@ use futures_util::StreamExt as _;
 pub(crate) struct ProxyClient;
 
 impl ProxyClient {
-    pub(crate) async fn credentials()
-    -> Result<spiral_robotics_common::credentials::StudioCredentials, CommandError> {
-        HttpRequest::new("GET", "/api/credentials").send().await
+    /// The configured providers. The relay attaches their keys, so requests
+    /// through it carry no credentials of their own.
+    pub(crate) async fn providers()
+    -> Result<spiral_robotics_common::providers::StudioProviders, CommandError> {
+        HttpRequest::new("GET", "/api/providers").send().await
     }
 
     pub(crate) fn request(method: &'static str, url: &str) -> HttpRequest {

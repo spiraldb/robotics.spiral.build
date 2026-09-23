@@ -28,8 +28,6 @@ class SpiralJobConnectionModel(RuntimeModel):
     spfs_url: str = Field(min_length=1)
     project_id: str = Field(min_length=1)
     table_prefix: str = Field(min_length=1)
-    client_id: str | None = None
-    client_secret: str | None = None
 
 
 class ActTrainingJobConfigModel(RuntimeModel):

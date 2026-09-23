@@ -620,7 +620,6 @@ impl RemoteJobMonitor {
 
     fn job_request(&self) -> TrainingJobRequest {
         let (storage, config) = (&self.manager.inner.storage, &self.config);
-        let credentials = storage.project_store().credentials();
         let spiral = SpiralJobConnection::new(
             SpiralServiceEndpoints::new(
                 storage.project_store().endpoint(),
@@ -628,14 +627,6 @@ impl RemoteJobMonitor {
             ),
             storage.project_store().project_id(),
             storage.project_store().table_prefix(),
-        )
-        .with_credentials(
-            credentials
-                .as_ref()
-                .map(|credentials| credentials.client_id().to_owned()),
-            credentials
-                .as_ref()
-                .map(|credentials| credentials.client_secret().to_owned()),
         );
         let data = TrainingDataSelection::new(
             spiral,

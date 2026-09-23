@@ -48,8 +48,8 @@ export function installAnnotationFetch() {
         const request = input instanceof Request ? input : new Request(input, options);
         const url = new URL(request.url);
         const path = url.pathname;
-        if (path === '/api/credentials') {
-            return Response.json({llm:{base_url:'https://openrouter.ai/api/v1',api_key:'test-key',default_model:'openai/gpt-5.6-terra'},spiral:null,hugging_face:null});
+        if (path === '/api/providers') {
+            return Response.json({llm:{base_url:'https://openrouter.ai/api/v1',default_model:'openai/gpt-5.6-terra'}});
         }
         const body = await request.json();
         requests.push({path, upstream: url.searchParams.get('url'), body});

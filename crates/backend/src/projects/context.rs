@@ -1,4 +1,5 @@
 //! What a request can reach: Studio-wide services, and the project it names.
+use crate::account::SpiralAccount;
 use crate::curation::manager::CurationManager;
 use crate::exploration::manager::ExplorationManager;
 use crate::projects::{OpenProject, ProjectRegistry};
@@ -14,16 +15,17 @@ use spiral_robotics_hardware::HardwareHandle;
 use spiral_robotics_storage::{StorageManager, episodes::RecordingBuffer};
 use std::sync::Arc;
 
-/// Services shared by every request: the open projects and the hardware
-/// they share.
+/// Services shared by every request: the open projects, the hardware they
+/// share, and the Spiral account they reach Spiral as.
 #[derive(Clone)]
 pub(crate) struct StudioContext {
     projects: Arc<ProjectRegistry>,
+    account: Arc<SpiralAccount>,
 }
 
 impl StudioContext {
-    pub(crate) fn new(projects: Arc<ProjectRegistry>) -> Self {
-        Self { projects }
+    pub(crate) fn new(projects: Arc<ProjectRegistry>, account: Arc<SpiralAccount>) -> Self {
+        Self { projects, account }
     }
 
     pub(crate) fn open(&self, key: &ProjectKey) -> Result<ProjectContext, crate::OperationError> {
@@ -47,6 +49,9 @@ impl StudioContext {
 
     pub(crate) fn projects(&self) -> &Arc<ProjectRegistry> {
         &self.projects
+    }
+    pub(crate) fn account(&self) -> &Arc<SpiralAccount> {
+        &self.account
     }
     pub(crate) fn cameras(&self) -> &Arc<CameraManager> {
         self.projects.cameras()
@@ -72,6 +77,9 @@ impl ProjectContext {
     }
     pub(crate) fn projects(&self) -> &Arc<ProjectRegistry> {
         self.studio.projects()
+    }
+    pub(crate) fn account(&self) -> &Arc<SpiralAccount> {
+        self.studio.account()
     }
     pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
         self.project.workspace()

@@ -11,11 +11,11 @@ schema or versioned contract.
    `project_id` name the project Studio starts with.
 2. Send `X-Spiral-Endpoint: <endpoint>` and `X-Spiral-Project: <project_id>` on
    project reads and commands. Omit the project header before a project is chosen;
-   Studio-only features such as robot setup still work. Studio-wide `/credentials`,
-   `/proxy`, `GET /settings/connection`, and `POST /datasets/hugging-face/inspect`
-   need neither header.
+   Studio-only features such as robot setup still work. Studio-wide `/providers`,
+   `/proxy`, `/account` reads, `GET /settings/connection`, and
+   `POST /datasets/hugging-face/inspect` need neither header.
 3. The backend keeps no current project. A request may name any project on the
-   saved endpoint, which the backend reaches with the saved credentials. A request
+   saved endpoint, which the backend reaches as the signed-in user. A request
    naming another endpoint fails with `stale_project`; read the saved connection
    again.
 4. The client decides which project it works on. `PUT /settings` and
@@ -134,8 +134,8 @@ plus the native report metadata. Logical graphs remain available if physical
 lowering fails. Studio displays these with Dioxus Flow. The installed native AI
 function catalog is likewise a `/queries` read of `spql.meta.scalar_functions()`.
 Read executions by their run IDs. Workflow cancellation is not exposed.
-The frontend builds authenticated model requests using Studio-wide `/credentials`
-and sends them through `/proxy`. It parses provider streams, owns retry decisions,
+The frontend builds model requests for the provider `/providers` names and sends
+them through `/proxy`, which authenticates them. It parses provider streams, owns retry decisions,
 conversation history, and tool execution. Disconnecting cancels the proxied request.
 
 ## Feature notes
@@ -143,21 +143,39 @@ conversation history, and tool execution. Disconnecting cancels the proxied requ
 Paths are relative to `/api`. Each feature's routes are in its `http.rs`, and
 request and response types are in `crates/common`.
 
+### Spiral account
+
+Studio reaches Spiral as a signed-in user, through the same WorkOS device-code
+sign-in and shared session file as `spiraldb login`. The backend holds the tokens;
+responses never include one.
+
+- `GET /account` returns `SpiralAccountStatus`: `signed_out` (with an optional
+  `problem`), `signing_in` (`verification_url`, `user_code`), or `signed_in`
+  (`email`, `organization`).
+- `POST /account/sign-in` starts a sign-in the user confirms at `verification_url`;
+  it completes in the background. Starting again replaces an unconfirmed one.
+- `GET /account/organizations` and `GET /account/projects` list the user's
+  organizations and the projects they can open in the current one.
+- `POST /account/sign-out` and `PUT /account/organization`
+  (`{"organization_id": …}`) name the mounted project. They refuse while any
+  project is recording, rolling out, or training, then close every open project
+  and clear the saved project.
+
 ### External HTTP and credentials
 
-`GET /credentials` and `/proxy?url=…` (any method) are Studio-wide and work without
+`GET /providers` and `/proxy?url=…` (any method) are Studio-wide and work without
 the project headers. They do not select credentials or destinations based on a project.
 
-`StudioCredentials` contains optional `llm` (`base_url`, `api_key`, `default_model`),
-`spiral` (`endpoint`, `spfs_endpoint`, `client_id`, `client_secret`), and
-`hugging_face` (`token`) entries. These are known configured Studio credentials,
-not arbitrary environment variables. The frontend uses them in memory and builds
-the upstream authorization headers.
+`StudioProviders` contains an optional `llm` (`base_url`, `default_model`). Its key
+stays on the backend.
 
 Percent-encode the upstream URL in the `url` query parameter. Use the upstream
-HTTP method, authorization and content headers, and original request body,
-including binary or multipart content. There is no JSON or metadata envelope.
-The relay removes Studio cookies, project and browser-origin headers,
+HTTP method, content headers, and original request body, including binary or
+multipart content. There is no JSON or metadata envelope. The relay attaches the
+key Studio holds for the destination's origin: the LLM key for the configured
+provider, and the saved Hugging Face token for `https://huggingface.co`. It
+refuses requests from other sites (`Sec-Fetch-Site` other than `same-origin`, or
+a foreign `Origin`), removes Studio cookies, project and browser-origin headers,
 and manages HTTP framing and connection headers.
 
 The response can contain JSON, text, binary data, or a live SSE stream. Provider

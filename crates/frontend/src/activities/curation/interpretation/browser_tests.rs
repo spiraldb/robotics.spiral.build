@@ -12,7 +12,7 @@ export function installInterpretationFetch() {
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const path = new URL(request.url).pathname;
-        if (path === '/api/credentials') return Response.json({llm:{base_url:'https://openrouter.ai/api/v1',api_key:'test-key',default_model:'openai/gpt-5.6-terra'},spiral:null,hugging_face:null});
+        if (path === '/api/providers') return Response.json({llm:{base_url:'https://openrouter.ai/api/v1',default_model:'openai/gpt-5.6-terra'}});
         if (path !== '/api/proxy') throw new Error('Unexpected request ' + path);
         const metadata = {url:new URL(request.url).searchParams.get('url'),method:request.method,authorization:request.headers.get('authorization')};
         requests.push({path, project: request.headers.get('X-Spiral-Project'), metadata, body: await request.json()});
@@ -98,6 +98,8 @@ async fn browser_builds_decisions_and_binds_the_selected_quantity() {
         requests[0]["metadata"]["url"],
         "https://openrouter.ai/api/alpha/decisions"
     );
+    // The relay attaches the provider key; the browser never holds it.
+    assert!(requests[0]["metadata"]["authorization"].is_null());
     let body = &requests[0]["body"];
     assert_eq!(body["model"], "typesafe/jev-1.13");
     assert_eq!(body["state"]["request"], prompt);

@@ -41,7 +41,10 @@ struct HttpFixture {
 impl HttpFixture {
     fn new() -> Self {
         let project = ProjectFixture::new();
-        let router = StudioApi::router(StudioContext::new(project.projects.clone()));
+        let router = StudioApi::router(StudioContext::new(
+            project.projects.clone(),
+            crate::account::SpiralAccount::offline(),
+        ));
         Self { project, router }
     }
     /// Name the fixture's project the way the browser does.

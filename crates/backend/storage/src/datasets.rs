@@ -6,12 +6,7 @@ mod sources;
 mod topics;
 pub(crate) use sources::{McapDatasetDefinition, McapFile, McapSourceBlob, McapSources};
 
-use crate::{
-    StorageManager,
-    settings::{SpiralConnectionSettings, SpiralCredentials},
-};
-use base64::Engine as _;
-use reqwest::header::{AUTHORIZATION, HeaderValue};
+use crate::{SpiralAccess, SpiralConnection, StorageManager};
 use serde::Deserialize;
 use serde_json::json;
 use spiral_robotics_common::datasets::{
@@ -19,24 +14,19 @@ use spiral_robotics_common::datasets::{
     ProjectResource,
 };
 use std::collections::{BTreeSet, VecDeque};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use std::time::Duration;
 
+/// Reads a project's journal as the signed-in user.
 pub(crate) struct DatasetCatalogClient {
     client: reqwest::Client,
     endpoint: String,
     project: String,
-    credentials: Option<SpiralCredentials>,
-    token: Mutex<Option<CatalogToken>>,
-}
-
-struct CatalogToken {
-    authorization: HeaderValue,
-    refresh_at: Option<Instant>,
+    access: SpiralAccess,
 }
 
 impl DatasetCatalogClient {
-    pub(crate) fn new(settings: SpiralConnectionSettings) -> Result<Self, String> {
+    pub(crate) fn new(connection: &SpiralConnection) -> Result<Self, String> {
+        let settings = connection.settings();
         Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -45,79 +35,19 @@ impl DatasetCatalogClient {
                 .map_err(|error| error.to_string())?,
             endpoint: settings.endpoint().trim_end_matches('/').to_owned(),
             project: settings.project_id().unwrap_or_default().to_owned(),
-            credentials: settings.credentials().cloned(),
-            token: Mutex::new(None),
+            access: connection.access().clone(),
         })
-    }
-
-    async fn authorization(
-        &self,
-        rejected: Option<&HeaderValue>,
-    ) -> Result<Option<HeaderValue>, String> {
-        let Some(credentials) = &self.credentials else {
-            return Ok(None);
-        };
-        let mut cached = self.token.lock().await;
-        if let Some(token) = cached.as_ref()
-            && token
-                .refresh_at
-                .is_none_or(|deadline| deadline > Instant::now())
-            && rejected != Some(&token.authorization)
-        {
-            return Ok(Some(token.authorization.clone()));
-        }
-        let started = Instant::now();
-        let response = self.client.post(format!("{}/v1/oauth2/token", self.endpoint)).json(&json!({
-            "grant_type": "client_credentials", "client_id": credentials.client_id(), "client_secret": credentials.client_secret()
-        })).send().await.map_err(|error| format!("Authenticating the dataset catalog: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Dataset catalog authentication failed ({})",
-                response.status()
-            ));
-        }
-        let token: AccessToken = response
-            .json()
-            .await
-            .map_err(|error| format!("Reading dataset catalog authentication: {error}"))?;
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", token.access_token))
-            .map_err(|_| "Invalid dataset catalog authentication header")?;
-        authorization.set_sensitive(true);
-        *cached = Some(CatalogToken {
-            authorization: authorization.clone(),
-            refresh_at: token
-                .refresh_after()
-                .and_then(|lifetime| started.checked_add(lifetime)),
-        });
-        Ok(Some(authorization))
     }
 
     async fn request<T: serde::de::DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T, String> {
-        let mut request = request.build().map_err(|error| error.to_string())?;
-        let authorization = self.authorization(None).await?;
-        if let Some(value) = &authorization {
-            request.headers_mut().insert(AUTHORIZATION, value.clone());
-        }
-        let retry = request.try_clone();
-        let mut response = self
-            .client
-            .execute(request)
+        let mut response = request
+            .bearer_auth(self.access.token()?)
+            .send()
             .await
             .map_err(|error| format!("Reading Spiral dataset metadata: {error}"))?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED && authorization.is_some() {
-            let mut retry = retry.ok_or("Dataset catalog request cannot be retried")?;
-            if let Some(value) = self.authorization(authorization.as_ref()).await? {
-                retry.headers_mut().insert(AUTHORIZATION, value);
-            }
-            response = self
-                .client
-                .execute(retry)
-                .await
-                .map_err(|error| format!("Reading Spiral dataset metadata: {error}"))?;
-        }
         if !response.status().is_success() {
             return Err(format!(
                 "Spiral dataset metadata request failed ({})",
@@ -199,35 +129,6 @@ impl DatasetCatalogClient {
             Some(revision.data.member_count),
             topics,
         ))
-    }
-}
-
-#[derive(Deserialize)]
-struct AccessToken {
-    access_token: String,
-    expires_in: Option<u64>,
-}
-impl AccessToken {
-    fn refresh_after(&self) -> Option<Duration> {
-        // Spiral also returns JWTs with a null OAuth lifetime. The claim only
-        // schedules renewal; the service still decides whether a token is valid.
-        let lifetime = match self.expires_in {
-            Some(seconds) => Duration::from_secs(seconds),
-            None => {
-                let payload = self.access_token.split('.').nth(1)?;
-                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .decode(payload)
-                    .ok()?;
-                let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-                let expires = claims.get("exp")?.as_f64()?;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .ok()?
-                    .as_secs_f64();
-                Duration::try_from_secs_f64((expires - now).max(0.0)).ok()?
-            }
-        };
-        Some(lifetime.saturating_sub(Duration::from_secs(30)))
     }
 }
 

@@ -5,8 +5,6 @@
     "api_url": "https://api.spiraldb.dev",
     "spfs_url": "https://spfs.spiraldb.dev",
     "project_id": "fixture-project",
-    "client_id": "fixture-client",
-    "client_secret": "fixture-secret",
     "table_prefix": "studio"
   },
   "sql": "SELECT * FROM fixture",

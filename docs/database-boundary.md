@@ -22,8 +22,10 @@ Set `SPIRALDB_ADBC_DRIVER` to an absolute path to the standalone library.
 Without that override, the adapter loads `libadbc_driver_spiraldb.dylib` on
 macOS or `libadbc_driver_spiraldb.so` on Linux alongside the server executable.
 Loading and database initialization happen on the first async `connect`.
-Endpoints and credentials are passed as database options, without changing
-process environment variables.
+Endpoints and the signed-in user's access token are passed as database options,
+without changing process environment variables. The driver never refreshes the
+token: Studio replaces `spiral.access_token` on every open database whenever it
+refreshes the session, which requires a driver with that option.
 
 `flake.nix` pins the official version and SHA-256 archive digests in
 `adbcVersion` and `adbcArchiveHashes`.
@@ -253,8 +255,9 @@ nix develop .#local-driver --command cargo test -p spiral-robotics-storage -p sp
 The storage suite includes offline execution through the actual shared library,
 resource ownership, exact Arrow allocation retention, and async input polling.
 
-The existing local test configuration contains `api_url`, `spfs_url`,
-`project_id`, `client_id`, and `client_secret`. The hosted tests require loopback
+The local test configuration contains `api_url`, `spfs_url`, `project_id`, and
+`access_token`, a user token such as `spiraldb login --show-token` prints; it
+lasts about five minutes. The hosted tests require loopback
 endpoints, create unique table names, and remove their tables afterward:
 
 ```sh

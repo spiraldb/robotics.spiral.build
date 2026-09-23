@@ -51,8 +51,8 @@ impl ModelClient {
         state: Value,
         questions: Value,
     ) -> Result<DecisionResponse, CommandError> {
-        let credentials = ProxyClient::credentials().await?;
-        let llm = credentials.llm().ok_or_else(|| {
+        let providers = ProxyClient::providers().await?;
+        let llm = providers.llm().ok_or_else(|| {
             CommandError::new(
                 CommandFailureCode::InvalidInput,
                 "Configure the Assistant's OpenRouter credential to interpret a rule.",
@@ -65,7 +65,6 @@ impl ModelClient {
             ));
         }
         let request = ProxyClient::request("POST", "https://openrouter.ai/api/alpha/decisions")
-            .header("authorization", format!("Bearer {}", llm.api_key()))
             .json(&json!({"model":DECISION_MODEL, "state":state, "questions":questions}))
             .timeout(30_000);
         let text = ProxyClient::text(request, 128 * 1024).await?;

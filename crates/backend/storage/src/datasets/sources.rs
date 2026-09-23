@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires SPIRAL_MCAP_TEST_CONFIG and Spiral access; creates and removes a uniquely named dataset"]
+    #[ignore = "requires SPIRAL_MCAP_TEST_CONFIG and SPIRAL_ACCESS_TOKEN; creates and removes a uniquely named dataset"]
     async fn mcap_files_share_publication_and_dataset_reads() {
         use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
         use crate::settings::{BackendStateStore, SpiralConnectionSettings};
@@ -591,13 +591,16 @@ mod tests {
         )
         .unwrap()
         .with_project(&config.project_id().unwrap())
-        .unwrap()
-        .with_credentials(config.credentials());
+        .unwrap();
+        let access = crate::SpiralAccess::fixed(
+            std::env::var("SPIRAL_ACCESS_TOKEN").expect("a user access token for the test"),
+        );
+        let connection = crate::SpiralConnection::new(settings, access);
         let store = Arc::new(
             crate::ProjectStore::new(
-                settings.clone(),
+                connection.clone(),
                 "mcap_probe".into(),
-                Arc::new(crate::AdbcDatabase::new(settings)),
+                Arc::new(crate::AdbcDatabase::new(connection)),
             )
             .unwrap(),
         );

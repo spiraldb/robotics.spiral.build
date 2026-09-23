@@ -49,22 +49,6 @@ mod tests {
     }
 
     #[test]
-    fn job_connection_debug_output_redacts_the_client_secret() {
-        let connection = SpiralJobConnection::new(
-            SpiralServiceEndpoints::new("https://api.spiraldb.dev", "https://spfs.spiraldb.dev"),
-            "project",
-            "spiral_robotics",
-        )
-        .with_credentials(
-            Some("client-id".to_owned()),
-            Some("do-not-log-this".to_owned()),
-        );
-        let debug_output = format!("{connection:?}");
-        assert!(debug_output.contains("[redacted]"));
-        assert!(!debug_output.contains("do-not-log-this"));
-    }
-
-    #[test]
     fn training_image_size_preserves_the_native_resolution_sentinel() {
         TrainingImageSize::new(0, 0);
         TrainingImageSize::new(224, 224);

@@ -1,6 +1,4 @@
-use spiral_robotics_common::credentials::{
-    HuggingFaceCredentials, LlmCredentials, SpiralCredentials, StudioCredentials,
-};
+use spiral_robotics_common::providers::{LlmProvider, StudioProviders};
 use spiral_robotics_storage::SpiralConnectionSettings;
 use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
 use url::Url;
@@ -8,26 +6,48 @@ use url::Url;
 const LLM_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const LLM_MODEL: &str = "openai/gpt-5.6-terra";
 const MAX_LOCAL_ENV_BYTES: u64 = 64 * 1024;
+const HUGGING_FACE: &str = "https://huggingface.co";
 
-pub(super) struct ConfiguredCredentials;
+/// The provider keys Studio holds. They never reach the browser: the relay
+/// attaches each one to requests bound for its provider's origin.
+pub(super) struct ProviderCredentials {
+    /// A malformed local configuration only fails what needs the provider.
+    llm: Result<Option<LlmCredentials>, String>,
+    hugging_face: Option<String>,
+}
 
-impl ConfiguredCredentials {
-    /// Spiral and Hugging Face credentials come from the saved connection.
-    pub(super) fn load(saved: &SpiralConnectionSettings) -> Result<StudioCredentials, String> {
+impl ProviderCredentials {
+    /// The LLM key comes from the environment or `.env.local`; the Hugging
+    /// Face token from the saved connection.
+    pub(super) fn load(saved: &SpiralConnectionSettings) -> Self {
         let local_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.local");
-        let llm = Self::llm(|name| std::env::var(name).ok(), &local_path)?;
-        let spiral = saved.credentials().map(|credentials| {
-            SpiralCredentials::new(
-                saved.endpoint().to_owned(),
-                saved.spfs_endpoint().to_owned(),
-                credentials.client_id().to_owned(),
-                credentials.client_secret().to_owned(),
-            )
-        });
-        let hugging_face = saved
-            .huggingface_token()
-            .map(|token| HuggingFaceCredentials::new(token.to_owned()));
-        Ok(StudioCredentials::new(llm, spiral, hugging_face))
+        Self {
+            llm: Self::llm(|name| std::env::var(name).ok(), &local_path),
+            hugging_face: saved.huggingface_token().map(str::to_owned),
+        }
+    }
+
+    /// What the browser may know about the providers.
+    pub(super) fn providers(&self) -> Result<StudioProviders, String> {
+        let llm = self
+            .llm
+            .clone()?
+            .map(|llm| LlmProvider::new(llm.base_url, llm.default_model));
+        Ok(StudioProviders::new(llm))
+    }
+
+    /// The bearer token Studio holds for `url`'s origin, if any.
+    pub(super) fn bearer_for(&self, url: &Url) -> Option<&str> {
+        let same_origin =
+            |base: &str| Url::parse(base).is_ok_and(|base| base.origin() == url.origin());
+        if let Ok(Some(llm)) = &self.llm
+            && same_origin(&llm.base_url)
+        {
+            return Some(&llm.api_key);
+        }
+        self.hugging_face
+            .as_deref()
+            .filter(|_| same_origin(HUGGING_FACE))
     }
 
     fn llm(
@@ -63,13 +83,13 @@ impl ConfiguredCredentials {
                     .into(),
             );
         }
-        Ok(Some(LlmCredentials::new(
-            parsed.as_str().trim_end_matches('/').into(),
+        Ok(Some(LlmCredentials {
+            base_url: parsed.as_str().trim_end_matches('/').into(),
             api_key,
-            values
+            default_model: values
                 .remove("LLM_MODEL")
                 .unwrap_or_else(|| LLM_MODEL.into()),
-        )))
+        }))
     }
 
     fn non_empty(value: String) -> Option<String> {
@@ -123,6 +143,13 @@ impl ConfiguredCredentials {
     }
 }
 
+#[derive(Clone)]
+struct LlmCredentials {
+    base_url: String,
+    api_key: String,
+    default_model: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,7 +163,7 @@ mod tests {
             Self(file)
         }
         fn load(&self) -> Result<Option<LlmCredentials>, String> {
-            ConfiguredCredentials::llm(|_| None, self.0.path())
+            ProviderCredentials::llm(|_| None, self.0.path())
         }
     }
 
@@ -145,22 +172,22 @@ mod tests {
         let file =
             CredentialFile::new("export LLM_API_KEY='local-secret' # comment\nUNRELATED=ignored\n");
         let local = file.load().unwrap().unwrap();
-        assert_eq!(local.api_key(), "local-secret");
-        assert_eq!(local.base_url(), LLM_BASE_URL);
-        assert_eq!(local.default_model(), LLM_MODEL);
+        assert_eq!(local.api_key, "local-secret");
+        assert_eq!(local.base_url, LLM_BASE_URL);
+        assert_eq!(local.default_model, LLM_MODEL);
         let process = BTreeMap::from([
             ("LLM_API_KEY", "process-secret"),
             ("LLM_MODEL", "process-model"),
         ]);
-        let config = ConfiguredCredentials::llm(
+        let config = ProviderCredentials::llm(
             |name| process.get(name).map(ToString::to_string),
             file.0.path(),
         )
         .unwrap()
         .unwrap();
-        assert_eq!(config.api_key(), "process-secret");
-        assert_eq!(config.default_model(), "process-model");
-        assert_eq!(config.base_url(), LLM_BASE_URL);
+        assert_eq!(config.api_key, "process-secret");
+        assert_eq!(config.default_model, "process-model");
+        assert_eq!(config.base_url, LLM_BASE_URL);
         assert!(
             CredentialFile::new("UNRELATED=secret\nLLM_API_KEY=  \n")
                 .load()
@@ -175,7 +202,7 @@ mod tests {
         let error = file.load().err().expect("reject malformed credential");
         assert!(error.contains("invalid dotenv syntax"));
         assert!(!error.contains("never-log-this-secret"));
-        let config = ConfiguredCredentials::llm(
+        let config = ProviderCredentials::llm(
             |name| {
                 Some(
                     match name {
@@ -190,7 +217,40 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(config.base_url(), "https://custom.example/v1");
+        assert_eq!(config.base_url, "https://custom.example/v1");
+    }
+
+    #[test]
+    fn keys_attach_only_to_their_providers_origin() {
+        let credentials = ProviderCredentials {
+            llm: Ok(Some(LlmCredentials {
+                base_url: "https://openrouter.ai/api/v1".into(),
+                api_key: "llm-key".into(),
+                default_model: LLM_MODEL.into(),
+            })),
+            hugging_face: Some("hf-token".into()),
+        };
+        let bearer = |url: &str| credentials.bearer_for(&Url::parse(url).unwrap());
+        assert_eq!(
+            bearer("https://openrouter.ai/api/alpha/decisions"),
+            Some("llm-key")
+        );
+        assert_eq!(
+            bearer("https://huggingface.co/org/model/resolve/main/x"),
+            Some("hf-token")
+        );
+        assert_eq!(bearer("http://openrouter.ai/api/v1/chat/completions"), None);
+        assert_eq!(bearer("https://openrouter.ai.example/api/v1"), None);
+        assert_eq!(bearer("https://raw.githubusercontent.com/robot.urdf"), None);
+        let providers = serde_json::to_string(&credentials.providers().unwrap()).unwrap();
+        assert!(providers.contains("openrouter.ai") && !providers.contains("llm-key"));
+        let broken = ProviderCredentials {
+            llm: Err("invalid dotenv syntax".into()),
+            hugging_face: Some("hf-token".into()),
+        };
+        assert!(broken.providers().is_err());
+        let url = Url::parse("https://huggingface.co/model").unwrap();
+        assert_eq!(broken.bearer_for(&url), Some("hf-token"));
     }
 
     #[cfg(unix)]
@@ -207,7 +267,7 @@ mod tests {
         let link = directory.path().join("credentials");
         symlink(file.0.path(), &link).unwrap();
         assert!(
-            ConfiguredCredentials::local_values(&link)
+            ProviderCredentials::local_values(&link)
                 .unwrap_err()
                 .contains("regular file")
         );
