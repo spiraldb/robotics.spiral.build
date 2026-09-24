@@ -16,9 +16,10 @@ use crate::activities::curation::episode_map::{
 };
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::population::Slice;
-use crate::activities::curation::poster::{PosterCut, PosterFrame, PosterFrames};
+use crate::activities::curation::poster::{PosterCut, PosterFrame, PosterFrames, PosterStill};
 use crate::activities::curation::review::{
-    Counted, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
+    Counted, IndexBar, NodeBar, NodeReach, RowStanding, SubtaskEntry, SubtaskEvidence,
+    SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus};
 use crate::activities::episode::Episode;
@@ -113,14 +114,14 @@ impl SearchOutcome {
         })
     }
     /// The rows to show, best first, each with its probability.
-    fn ranked(&self, chosen: Option<usize>) -> Vec<(usize, SubtaskStanding)> {
+    fn ranked(&self, chosen: Option<usize>) -> Vec<(usize, RowStanding)> {
         self.ranking
             .ranked()
             .iter()
             .map(|ranked| {
                 (
                     ranked.row(),
-                    SubtaskStanding::scored(
+                    RowStanding::scored(
                         ranked.probability(),
                         ranked.answered(),
                         chosen == Some(ranked.row()),
@@ -409,7 +410,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     // The row the ranking on screen asked about is its question, not one of
     // its answers: it would only rank itself first.
     let about = asked.read().as_ref().and_then(|asked| asked.about);
-    let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
+    let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
     let slices = rows.iter().map(Slice::of_subtask).collect::<Vec<_>>();
     let lanes = spans
         .as_ref()
@@ -439,7 +440,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     let listed = match reported.as_ref().filter(|outcome| outcome.ranks()) {
         Some(outcome) => outcome.ranked(chosen),
         None => (0..rows.len())
-            .map(|row| (row, SubtaskStanding::plain(chosen == Some(row))))
+            .map(|row| (row, RowStanding::plain(chosen == Some(row))))
             .collect(),
     }
     .into_iter()
@@ -488,6 +489,22 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     let typed = Some(query().trim().to_owned()).filter(|text| !text.is_empty());
     let asked_row = about.and_then(|row| rows.get(row)).cloned();
     let places = listed.iter().map(|(row, _)| *row).collect::<Vec<_>>();
+    let listed_count = places.len();
+    let chosen_place = chosen.and_then(|chosen| places.iter().position(|row| *row == chosen));
+    // The first listed row a finished ranking puts below the match line; a
+    // ranking whose every row is below it, or none, draws no divider.
+    let cut = answered.as_ref().and_then(|answers| {
+        places
+            .iter()
+            .position(|row| {
+                answers
+                    .get(*row)
+                    .copied()
+                    .flatten()
+                    .is_none_or(|probability| probability < CoverageMeasure::MATCHED)
+            })
+            .filter(|cut| *cut > 0)
+    });
     let find = {
         let annotation = annotation.clone();
         move |row: SubtaskRow, from: Option<Place>| controller.find_similar(&annotation, &row, from)
@@ -504,50 +521,52 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                     Motion::finish_within(&workspace);
                 }
             },
-            form {
-                class: "curation-similar-query",
-                onsubmit: move |event| {
-                    event.prevent_default();
-                    search.call(());
+            NodeBar {
+                lead: rsx! {
+                    form {
+                        class: "curation-similar-query",
+                        onsubmit: move |event| {
+                            event.prevent_default();
+                            search.call(());
+                        },
+                        TextInput {
+                            class: "curation-similar-query-input",
+                            kind: TextInputKind::Search,
+                            value: query(),
+                            "aria-label": "Subtask to match",
+                            placeholder: "Describe a subtask, or use Find similar on any row",
+                            oninput: move |value| query.set(value),
+                        }
+                        Button {
+                            purpose: ActionPurpose::Start,
+                            variant: ButtonVariant::Solid,
+                            r#type: "submit",
+                            disabled: running() || typed.is_none(),
+                            title: typed
+                                .is_none()
+                                .then(|| "Type a subtask to search for.".to_owned()),
+                            if running() { "Searching…" } else { "Search" }
+                        }
+                    }
                 },
-                TextInput {
-                    class: "curation-similar-query-input",
-                    kind: TextInputKind::Search,
-                    value: query(),
-                    "aria-label": "Subtask to match",
-                    placeholder: "Describe a subtask, or use Find similar on any row",
-                    oninput: move |value| query.set(value),
-                }
-                Button {
-                    purpose: ActionPurpose::Start,
-                    variant: ButtonVariant::Solid,
-                    r#type: "submit",
-                    disabled: running() || typed.is_none(),
-                    title: typed
-                        .is_none()
-                        .then(|| "Type a subtask to search for.".to_owned()),
-                    if running() { "Searching…" } else { "Search" }
-                }
-            }
-            if let Some(row) = asked_row {
-                AskedAbout { row, frames }
+                note: (unanswered > 0 && progress.is_none())
+                    .then(|| format!("{unanswered} came back without an answer and are listed last")),
+                reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
             }
             if let Some(problem) = failure {
                 Notice { tone: NoticeTone::Danger, "{problem}" }
             }
-            if let Some(progress) = progress {
-                p { class: "curation-similar-note", role: "status", "{progress}" }
-            } else if unanswered > 0 {
-                Notice { tone: NoticeTone::Caution,
-                    "{unanswered} subtasks came back without an answer and are listed last."
-                }
-            }
             if !rows.is_empty() {
                 div { class: "curation-similar-overview",
+                    if let Some(row) = asked_row {
+                        AskedAbout { row, frames }
+                    }
                     EpisodeMap {
                         lanes,
                         paint,
-                        summary,
+                        // While jev reads, the line over the map says how far
+                        // it has got; once it answers, what it found.
+                        summary: progress.clone().unwrap_or(summary),
                         on_select: {
                             let choose = choose.clone();
                             move |row: usize| {
@@ -583,15 +602,30 @@ pub(in crate::activities::curation) fn SearchWorkspace(
             } else {
                 SubtaskReview {
                     index: rsx! {
+                        IndexBar {
+                            p { class: "curation-index-caption",
+                                // The row asked about is the question, not an answer.
+                                if about.is_some() { "{listed_count} other subtasks" } else { "{Counted::subtasks(listed_count)}" }
+                                if answered.is_some() { " · closest first" }
+                            }
+                        }
                         ol {
                             id: SubtaskList::RANKED.id(),
                             class: "curation-entries",
                             "aria-label": "Subtasks, closest to the query first; each row ends with how likely it is the same operation",
-                            for (row , standing) in listed {
+                            for (position , (row , standing)) in listed.into_iter().enumerate() {
+                                // Where the ranking crosses the line the
+                                // episode count above is drawn at: likely
+                                // matches above it, the rest below.
+                                Fragment { key: "{rows[row].episode()}-{rows[row].start_time()}",
+                                if Some(position) == cut {
+                                    li { class: "curation-entries-divider", role: "separator",
+                                        "Below {CoverageMeasure::MATCHED * 100.0:.0}% · unlikely the same operation"
+                                    }
+                                }
                                 SubtaskEntry {
-                                    key: "{rows[row].episode()}-{rows[row].start_time()}",
                                     row: rows[row].clone(),
-                                    standing,
+                                    standing: standing.roving(TabStop::at(position, chosen_place)),
                                     episode: Episode::listed_name_of(rows[row].episode()),
                                     frames,
                                     on_select: {
@@ -603,6 +637,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                                         let asked = rows[row].clone();
                                         move |from| find(asked.clone(), from)
                                     },
+                                }
                                 }
                             }
                         }
@@ -623,11 +658,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                                     SubtaskEvidence {
                                         row: asked.clone(),
                                         play: tab.play(),
-                                        episode_rows: rows
-                                            .iter()
-                                            .filter(|other| other.episode() == asked.episode())
-                                            .cloned()
-                                            .collect::<Vec<_>>(),
+                                        intervals: SubtaskIntervals::around(&asked, &rows),
                                         context: context.clone(),
                                         on_open: {
                                             let focus = EpisodeFocus::new(
@@ -659,9 +690,12 @@ pub(in crate::activities::curation) fn SearchWorkspace(
 fn AskedAbout(row: SubtaskRow, frames: PosterFrames) -> Element {
     rsx! {
         div { class: "curation-similar-asked",
-            PosterFrame { row: row.clone(), frames }
+            PosterFrame { still: PosterStill::of_subtask(&row), frames }
             p { class: "curation-similar-asked-facts",
-                "From {Episode::name_of(row.episode())} · {row.start_time().clock_label()} – {row.end_time().clock_label()}"
+                "Asked from "
+                code { "{Episode::listed_name_of(row.episode())}" }
+                " at "
+                code { "{row.start_time().clock_label()} – {row.end_time().clock_label()}" }
             }
         }
     }

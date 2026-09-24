@@ -278,14 +278,20 @@ impl CurationController {
     }
 
     /// The episodes this curation is interpreted over: `None` while they are
-    /// read, and for a graph without a dataset.
+    /// read, and for a graph without a dataset. A resource keeps its last
+    /// value while it reads the next, so the sample of the dataset before —
+    /// another curation's, just after switching — is held back rather than
+    /// listed as this one's.
     pub(super) fn sample(&self) -> Option<EpisodeSample> {
-        self.sample
+        let sample = self
+            .sample
             .read()
             .as_ref()
             .and_then(|loaded| loaded.as_ref().ok())
             .cloned()
-            .flatten()
+            .flatten()?;
+        let current = self.with_payload(|payload| payload.dataset() == Some(sample.dataset()));
+        current.then_some(sample)
     }
     /// Why the sample could not be read, when it could not.
     pub(super) fn sample_error(&self) -> Option<String> {

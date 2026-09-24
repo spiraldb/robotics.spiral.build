@@ -5,7 +5,7 @@ use crate::activities::curation::document::{EpisodeFailure, SubtaskRow};
 use crate::activities::curation::episode_tabs::{OpenEpisode, OpenEpisodes};
 use crate::activities::curation::poster::PosterFrames;
 use crate::activities::curation::review::{
-    Counted, EvidenceHeading, SubtaskContext, SubtaskEntry, SubtaskIntervals, SubtaskStanding,
+    Counted, EvidenceHeading, IndexBar, RowStanding, SubtaskContext, SubtaskEntry, SubtaskIntervals,
 };
 #[cfg(all(test, target_arch = "wasm32"))]
 use crate::activities::episode::PlayRequest;
@@ -296,7 +296,7 @@ pub(super) fn SubtaskIndex(
                                     SubtaskEntry {
                                         key: "{row.start_time()}",
                                         row: row.clone(),
-                                        standing: SubtaskStanding::plain(chosen.holds(row))
+                                        standing: RowStanding::plain(chosen.holds(row))
                                             .roving(chosen.holds(row) || resting_stop.as_ref() == Some(row)),
                                         frames,
                                         on_select: {
@@ -371,7 +371,7 @@ fn IndexSearch(
     on_filter: EventHandler<String>,
 ) -> Element {
     rsx! {
-        div { class: "curation-entries-search",
+        IndexBar {
             label { r#for: "curation-entries-filter", class: "sr-only", "Filter subtasks" }
             TextInput {
                 id: "curation-entries-filter".to_owned(),
@@ -410,6 +410,9 @@ pub(super) fn AnnotatedEpisode(
     subtasks: EpisodeSubtasks,
     context: SubtaskContext,
     tab: OpenEpisode,
+    /// Ask for subtasks like the one playing, as every other view of a
+    /// subtask offers.
+    on_find_similar: EventHandler<SubtaskRow>,
 ) -> Element {
     let playing = subtasks.row_in(&tab);
     rsx! {
@@ -419,6 +422,19 @@ pub(super) fn AnnotatedEpisode(
                     subject: row.description().to_owned(),
                     episode: Some(subtasks.episode().clone()),
                     facts: vec![format!("{} – {}", row.start_time().clock_label(), row.end_time().clock_label())],
+                    actions: {
+                        let row = row.clone();
+                        rsx! {
+                            Button {
+                                purpose: ActionPurpose::Navigate,
+                                variant: ButtonVariant::Link,
+                                size: ButtonSize::Compact,
+                                title: "Rank every other subtask by how likely it is the same operation",
+                                onclick: move |_| on_find_similar.call(row.clone()),
+                                "Find similar"
+                            }
+                        }
+                    },
                 }
             },
             None => rsx! {
@@ -433,7 +449,7 @@ pub(super) fn AnnotatedEpisode(
             EpisodeInspection {
                 episode: episode.episode().clone(),
                 featured_camera: FeaturedCamera::measured(context.camera()),
-                tracks: vec![SubtaskIntervals::of(subtasks.rows()).track().into()],
+                tracks: vec![SubtaskIntervals::of(subtasks.rows()).choosing(playing).track().into()],
                 focus: tab.play(),
             }
         }
@@ -484,7 +500,7 @@ mod tests {
     /// the only thing that can move it is the ask itself. Taking the ask
     /// registered no subscription, so the player heard it once at mount and
     /// the transport sat at 0:00 through four clicks. Each ask carries the
-    /// row's own interval; the player adds the run-out.
+    /// row's own start, where playing picks up.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn every_row_of_the_episode_already_open_moves_the_playhead() {
@@ -506,7 +522,7 @@ mod tests {
             // Once for the view to read the ask, once for the effect it wakes.
             dom.render_immediate_to_vec();
             dom.render_immediate_to_vec();
-            expected.push(PlayRequest::after(expected.last().copied(), (start, end)));
+            expected.push(PlayRequest::after(expected.last().copied(), start));
         }
         assert_eq!(*harness.asked.borrow(), expected);
 

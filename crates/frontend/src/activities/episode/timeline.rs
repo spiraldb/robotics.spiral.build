@@ -4,7 +4,9 @@
 //! A surface's rows are its evidence — a progress score, a measurement's
 //! subtasks — so they lead, and activating one of their intervals plays it.
 //! The streams follow as the hub the operator steers the rest from: ticking a
-//! camera shows its panel, ticking a stream plots its numeric fields.
+//! camera shows its panel, ticking a stream plots its numeric fields. Under
+//! evidence they wait folded behind one row, since every camera's density is
+//! a full bar that says nothing about the measurement being checked.
 use super::{
     choices::{CoverageState, PlotState, PlottableLeaves, StreamChoices, StreamSchema},
     inspection::LoadedEpisode,
@@ -53,6 +55,7 @@ pub(super) fn EpisodeTimeline(loaded: LoadedEpisode, evidence: Vec<EvidenceTrack
     let mut filter = use_signal(String::new);
     let expanded = use_signal(BTreeSet::<String>::new);
     let mut quiet_open = use_signal(|| false);
+    let mut streams_open = use_signal(|| false);
     let transport = loaded.transport().clone();
     let choices = loaded.choices();
     let catalog = loaded.catalog();
@@ -75,6 +78,8 @@ pub(super) fn EpisodeTimeline(loaded: LoadedEpisode, evidence: Vec<EvidenceTrack
         .partition(|stream| !searching && choices.stream_is_quiet(stream));
     let leading = cameras.into_iter().chain(loud).collect::<Vec<_>>();
     let nothing_listed = leading.is_empty() && quiet.is_empty();
+    // A search shows its matches in place, folded or not.
+    let folded = !evidence.is_empty() && !searching;
     let interaction = transport.interaction();
     let corner = rsx! { TextInput { class: "data-stream-filter", kind: TextInputKind::Search,
     placeholder: "Filter {total} streams", "aria-label": "Filter streams",
@@ -87,11 +92,18 @@ pub(super) fn EpisodeTimeline(loaded: LoadedEpisode, evidence: Vec<EvidenceTrack
                 EvidenceTrack::Intervals(_) => rsx! {},
             }
         }
-        if nothing_listed { p { class: "data-timeline-none", if catalog.is_empty() { "This episode has no readable streams." } else { "No streams match the filter." } } }
-        StreamRows { streams: leading, transport: transport.clone(), choices, expanded }
-        if !quiet.is_empty() {
-            QuietStreamsRow { count: quiet.len(), open: quiet_open(), on_toggle: move |_| quiet_open.toggle() }
-            if quiet_open() { StreamRows { streams: quiet, transport: transport.clone(), choices, expanded } }
+        if folded {
+            StreamFoldRow { label: Counted(total, "stream").to_string(), open: streams_open(),
+                on_toggle: move |_| streams_open.toggle() }
+        }
+        if !folded || streams_open() {
+            if nothing_listed { p { class: "data-timeline-none", if catalog.is_empty() { "This episode has no readable streams." } else { "No streams match the filter." } } }
+            StreamRows { streams: leading, transport: transport.clone(), choices, expanded }
+            if !quiet.is_empty() {
+                StreamFoldRow { label: format!("{} with nothing to plot", Counted(quiet.len(), "stream")), open: quiet_open(),
+                    on_toggle: move |_| quiet_open.toggle() }
+                if quiet_open() { StreamRows { streams: quiet, transport: transport.clone(), choices, expanded } }
+            }
         }
     };
     // Every surface names the episode above its inspection, so the transport
@@ -123,21 +135,33 @@ fn StreamRows(
     }
 }
 
-/// One row standing in for the streams with nothing to plot, so the hub
-/// leads with cameras and measurements. They stay one click away.
+/// A count and the singular noun it counts, said the way a person would.
+struct Counted(usize, &'static str);
+
+impl std::fmt::Display for Counted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self(count, noun) = self;
+        write!(
+            formatter,
+            "{count} {noun}{}",
+            if *count == 1 { "" } else { "s" }
+        )
+    }
+}
+
+/// One row standing in for streams the hub does not lead with — every
+/// recorded stream under a surface's evidence, or those with nothing to plot —
+/// so they stay one click away without taking the rows.
 #[component]
-fn QuietStreamsRow(count: usize, open: bool, on_toggle: EventHandler<()>) -> Element {
-    let noun = if count == 1 { "stream" } else { "streams" };
+fn StreamFoldRow(label: String, open: bool, on_toggle: EventHandler<()>) -> Element {
     let verb = if open { "Hide" } else { "Show" };
     rsx! {
         div { class: "data-stream data-stream-fold",
             div { class: "data-stream-name",
                 Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Icon, class: "data-stream-expand",
-                    aria_expanded: open, aria_label: "{verb} the {count} {noun} with nothing to plot",
+                    aria_expanded: open, aria_label: "{verb} the {label}",
                     onclick: move |_| on_toggle.call(()), ChevronIcon { open } }
-                span { class: "data-stream-expand-space" }
-                span { class: "data-stream-kind", "aria-hidden": "true" }
-                span { class: "data-stream-label", "{count} {noun} with nothing to plot" }
+                span { class: "data-stream-label", "{label}" }
             }
             div { class: "data-stream-track" }
         }

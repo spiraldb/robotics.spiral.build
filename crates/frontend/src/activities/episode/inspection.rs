@@ -61,25 +61,26 @@ impl FeaturedCamera {
     }
 }
 
-/// One ask to play a span, and which ask it is.
+/// One ask to play from an instant, and which ask it is.
 ///
-/// The count is what makes two asks different values. A span alone made
+/// The count is what makes two asks different values. An instant alone made
 /// asking for the same one twice indistinguishable from asking once, and the
 /// view — which reacts only to a change — sat still the second time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::activities) struct PlayRequest {
-    span: (f64, f64),
+    start: f64,
     asked: usize,
 }
 
 impl PlayRequest {
-    pub(in crate::activities) fn new(span: (f64, f64)) -> Self {
-        Self { span, asked: 0 }
+    pub(in crate::activities) fn new(start: f64) -> Self {
+        Self { start, asked: 0 }
     }
-    /// The ask after `previous`, which differs from it even for the same span.
-    pub(in crate::activities) fn after(previous: Option<Self>, span: (f64, f64)) -> Self {
+    /// The ask after `previous`, which differs from it even for the same
+    /// instant.
+    pub(in crate::activities) fn after(previous: Option<Self>, start: f64) -> Self {
         Self {
-            span,
+            start,
             asked: previous.map_or(0, |previous| previous.asked + 1),
         }
     }
@@ -91,8 +92,9 @@ pub(in crate::activities) fn EpisodeInspection(
     /// Rows drawn above the recorded streams on the timeline.
     #[props(default)]
     tracks: Vec<EvidenceTrack>,
-    /// The span to play, such as the row the operator chose. Each new ask
-    /// plays it; `None` leaves the playhead where the operator put it.
+    /// Where to play from, such as the start of the row the operator chose.
+    /// Each new ask plays from there on; `None` leaves the playhead where the
+    /// operator put it.
     #[props(default)]
     focus: Option<PlayRequest>,
     /// Which camera leads the others.
@@ -143,7 +145,7 @@ fn InspectedEpisode(
     let mut asked = transport.clone();
     use_effect(use_reactive(&focus, move |focus| {
         if let Some(focus) = focus {
-            asked.play_span(focus.span);
+            asked.play_from(focus.start);
         }
     }));
     let selection = episode.selection();
@@ -372,10 +374,10 @@ mod tests {
     }
 
     #[test]
-    fn asking_for_the_same_span_again_is_a_new_ask() {
-        let first = PlayRequest::after(None, (8.0, 12.0));
-        let again = PlayRequest::after(Some(first), (8.0, 12.0));
+    fn asking_for_the_same_instant_again_is_a_new_ask() {
+        let first = PlayRequest::after(None, 8.0);
+        let again = PlayRequest::after(Some(first), 8.0);
         assert_ne!(first, again);
-        assert_eq!(first.span, again.span);
+        assert_eq!(first.start, again.start);
     }
 }

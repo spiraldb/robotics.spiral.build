@@ -4583,7 +4583,7 @@ button.studio-status-fact:hover {
   }
 
   .data-stream-fold .data-stream-label {
-    @apply text-ink-soft;
+    @apply truncate text-ink-soft;
   }
 
   .data-stream-expand {
@@ -4957,20 +4957,44 @@ button.studio-status-fact:hover {
 /* Derived series extend the existing episode ruler and stream grid. */
 .data-numeric-track .data-numeric-name { height: auto; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 12px; gap: 4px; }
 .data-numeric-name strong { font-size: 11px; font-weight: 500; }
-/* A surface's interval row names itself the way a value row does, inset from
-   the edge rather than pressed against it. */
-.data-interval-name { padding-left: 12px; }
+/* A surface's interval row names itself the way a value row does, and under
+   its name reads out, in full, the span the playhead is in: the spans are
+   often too narrow to say their own names, and the name is what the operator
+   is checking against the picture. */
+.data-interval-track .data-interval-name { height: auto; min-height: 44px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 2px; padding: 5px 12px; }
 .data-interval-name strong { font-size: 11px; font-weight: 500; }
+.data-interval-now { display: -webkit-box; min-height: 1.3em; overflow: hidden; color: var(--tone-ink); font-family: var(--font-sans); font-size: 11.5px; line-height: 1.3; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.data-stream-track.data-interval-lane { height: auto; min-height: 44px; }
+/* Spans are paper on the lane with a graphite edge; the one under the
+   playhead takes an ink edge, and only the one the index has chosen is lime. */
+.data-interval { position: absolute; top: 5px; bottom: 5px; display: flex; align-items: center; margin-left: 1px; overflow: hidden; padding: 0 4px; container-type: inline-size; border: 1px solid color-mix(in srgb, var(--tone-ink) 38%, var(--tone-surface)); border-radius: 4px; background: var(--tone-sunken); color: var(--tone-ink-soft); cursor: pointer; transition: background-color 100ms ease-out, border-color 100ms ease-out, color 100ms ease-out; }
+.data-interval[data-tinted="true"] { border-color: color-mix(in srgb, var(--hue) 70%, var(--tone-ink)); background: color-mix(in srgb, var(--hue) 16%, var(--tone-surface)); color: color-mix(in srgb, var(--hue) 45%, var(--tone-ink)); }
+.data-interval:hover { border-color: var(--tone-ink-faint); color: var(--tone-ink); }
+.data-interval[data-current="true"] { border-color: var(--tone-ink); color: var(--tone-ink); }
+.data-interval[data-chosen="true"] { border-color: var(--tone-accent-strong); background: var(--tone-selected); color: var(--tone-accent-ink); }
+.data-interval[data-chosen="true"][data-current="true"] { border-color: var(--tone-ink); }
+.data-interval:focus-visible { z-index: 1; outline: 2px solid var(--tone-focus); outline-offset: 1px; }
+.data-interval-label { display: -webkit-box; overflow: hidden; font-size: 10.5px; line-height: 1.2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.data-interval-now::first-letter, .data-interval-label::first-letter { text-transform: uppercase; }
+/* A span too narrow for a word says nothing rather than half of one; the
+   readout beside the lane names it in full. */
+@container (max-width: 46px) { .data-interval-label { display: none; } }
 .data-numeric-name output { font-size: 12px; font-variant-numeric: tabular-nums; }
 .data-numeric-name span { font-size: 10px; color: var(--tone-ink-soft); }
 .data-stream-track.data-numeric-plot { height: 104px; overflow: hidden; }
 .data-numeric-plot svg { display: block; width: 100%; height: 100%; }
-.data-numeric-line { fill: none; stroke: var(--tone-info); stroke-width: 1.5; }
+.data-numeric-line { fill: none; stroke: var(--tone-ink); stroke-width: 1.5; }
 .data-numeric-cutoff { stroke: var(--tone-ink-soft); stroke-width: 1; stroke-dasharray: 4 3; }
-.data-numeric-overlay { fill: var(--tone-danger-soft); }
-.data-numeric-overlay[data-kind="unknown"] { fill: var(--tone-caution-soft); }
-.data-numeric-interval { position: absolute; bottom: 0; height: 12px; padding: 0; border: 0; border-top: 1px solid var(--tone-danger); background: var(--tone-danger-soft); cursor: pointer; }
-.data-numeric-interval[data-kind="unknown"] { border-color: var(--tone-caution); background: var(--tone-caution-soft); }
+.data-numeric-reference { stroke: var(--tone-line-strong); stroke-width: 1; }
+.data-numeric-reference-mark { position: absolute; right: 4px; translate: 0 -100%; padding: 0 2px; color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 10.5px; line-height: 1.2; pointer-events: none; }
+/* A stretch a rule leaves out is a decision, not a fault: a graphite wash,
+   with the danger hue kept for what went wrong. */
+.data-numeric-overlay { fill: rgb(16 16 16 / 0.06); }
+/* A second the scorer could not read is kept, and says so in a lighter
+   graphite than one a rule left out. */
+.data-numeric-overlay[data-kind="unknown"] { fill: rgb(16 16 16 / 0.03); }
+.data-numeric-interval { position: absolute; bottom: 0; height: 12px; padding: 0; border: 0; border-top: 1px solid var(--tone-ink-faint); background: rgb(16 16 16 / 0.08); cursor: pointer; }
+.data-numeric-interval[data-kind="unknown"] { border-top-style: dashed; border-color: var(--tone-line-strong); background: rgb(16 16 16 / 0.03); }
 .data-numeric-interval:hover, .data-numeric-interval:focus-visible { height: 18px; outline: 1px solid var(--tone-ink); outline-offset: -1px; }
 
 /* One recording seen whole: its panels docked in a workbench of their own,

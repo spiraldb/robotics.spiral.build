@@ -864,6 +864,11 @@
   box-shadow: var(--ui-shadow-popover);
 }
 
+/* A press on an item may focus the menu itself; its items carry the ring. */
+.ui-menu:focus {
+  outline: none;
+}
+
 .ui-menu > .ui-button--row {
   width: 100%;
 }

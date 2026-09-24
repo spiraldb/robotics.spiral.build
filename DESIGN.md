@@ -292,10 +292,21 @@ components:
     textColor: "{colors.stage-source}"
     rounded: "{rounded.row}"
     size: "18px"
-  curation-tile:
+  curation-node-bar:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
-    rounded: "{rounded.card}"
+    typography: "{typography.secondary}"
+    padding: "5px 12px"
+    height: "40px"
+  curation-index-row:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.secondary}"
+    padding: "4px 12px"
+    height: "62px"
+  curation-index-row-chosen:
+    backgroundColor: "{colors.selected}"
+    textColor: "{colors.ink}"
   side-sheet:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
@@ -340,7 +351,8 @@ left activity rail, and a bottom status bar; none of those return.
 The Studio has six activities, reached from one 44px top bar and the keys
 1–6 in this order: **Data** (catalog, episodes, import; the home route),
 **Workflow** (deriving and querying Spiral relations: Explore and Agent),
-**Curation** (judging every episode of a dataset against a written recipe),
+**Curation** (a graph of measurements and selections over one dataset's
+episodes, ending in the parts worth training on),
 **Training** (configuring and observing policy runs), **Rollout** (staging a
 trained checkpoint against the configured follower), and **Live** (operating
 hardware and recording). Everything else is a panel in a session-owned
@@ -433,8 +445,9 @@ line colour.
 - **Result categories** (`{colors.category-1}` … `{colors.category-6}`):
   Washes for repeated string values in a result table, assigned by rank
   within that result: hue at 13% wash, text mixed 55% toward ink. Curation
-  deals the same six to exclusion rules in recipe order as
-  `category-2, 4, 3, 5, 6, 1`, so blue comes last.
+  deals the same six to a grouping's categories, biggest first, as
+  `category-2, 4, 3, 5, 6, 1`, so blue comes last; a search's matches wear
+  its node's own `stage-media` hue rather than focus blue.
 - **Arm identity** (`{colors.arm-1}` … `{colors.arm-4}`), **joint signals**
   (`{colors.signal-1}` … `{colors.signal-6}`, by joint name in kinematic
   order), **axis key**, and **training series** (`{colors.series-train}`,
@@ -699,37 +712,63 @@ status line. Robot setup lives in Settings → Robots.
 
 ### Curation
 
-Curation is a contact sheet under a pipeline strip. Under the shared document
-bar, the `curation-sheet-v2` layout scope opens as two tiles: a 26% Recipe
-column beside the Sheet. The Sheet begins with a fixed 200px canvas that lays
-the recipe out left to right as stage cards on the dotted bench (Dataset · 1
-· Filter · … · Curated output), narrowed to 180×108 on a 204px step, with the
-episodes a filter excluded hanging beneath it as a chip in that rule's tint.
-Two fingers pan the strip as they do the Workflow graph, a pinch and the
-shared canvas controls zoom, and selecting a card outside the pane slides it
-into view. Under the strip one stage heading repeats the selected card's
-mark, title, and summary and holds the list's controls (All · Kept ·
-Excluded segments, or the episode stepper for a transform), then the stage's
-evidence: the tile grid, a histogram of what a numeric filter measured, or
-one eligible episode's cameras and clock. The selected episode's evidence
-docks beside the tiles as the shared 320px side sheet; the curated output
-splits its stage in half instead, kept tiles beside the first episode's
-evidence, and never shows an empty half.
+Curation is a graph beside the selected node's workspace. Under the shared
+document bar, the `curation-graph-v1` layout scope opens as two tiles: a 23%
+Graph of 190px stage cards on the dotted bench (Dataset, then the
+measurements and Selects it feeds, joined by edges that carry populations),
+beside the node's Workspace. A card says what the node holds, or while it
+runs what it is doing; a leaf Select wears the Output flag, and a Select over
+moments says the recording it keeps ("keeps 1:53.9 of 2:26.9") because that
+is the training budget. Every count below the Dataset is over the first 100
+episodes the curation reads.
+
+Every node's workspace has the same anatomy, top to bottom:
 
 ```text
-┌── 26% ──┬──────────────── 74% ────────────────┐
-│ Recipe  │ Sheet — run strip while a run exists │
-│ Dataset │ [Dataset]─[1·Filter]─[2·Filter]─[Out]│
-│ Steps   │            └ 21 excluded             │
-│  1 · F  │ ▣ Dataset · name      All Kept Excl. │
-│  2 · F  │  tiles …            ┊ Episode N of M │
-│  3 · T  │                     ┊ (side sheet,   │
-│ Add step│                     ┊  while open)   │
-└─────────┴──────────────────────────────────────┘
+┌ node bar (40px) ─ what the node reads, runs with or asks · note ── actions ┐
+├ overview band (when the node has one) ─ strip / episode map / categories   ┤
+├ index bar (34px) ──────────────┬ tab strip (34px, 2+ tabs) / evidence head ┤
+│ rows: still · name / facts ·   │ episode inspection: cameras, Scene, and    │
+│       drawing · measure        │ the timeline led by the node's own tracks  │
+└────────────────────────────────┴────────────────────────────────────────────┘
 ```
 
-The grid is `repeat(auto-fill, minmax(11rem, 1fr))`, so the number of columns
-follows the tile's width rather than a breakpoint.
+- **Node bar:** the node's input or configuration on the left — Find
+  similar's query and Search, a Select's rule as one sentence with its
+  threshold read out, Break down's camera · model · sampling as the button
+  that opens its settings, what Moments, Group and the Dataset read ("Every
+  node reads these 100 episodes"). At the far end, in one group: a caution
+  note for what needs attention (a missing setting, failed episodes), a
+  quiet line for how many episodes reach the node when fewer than all do,
+  with a link to the measurement they wait on ("Score the rest"), and the
+  node's actions (Run N left, Retry failed, Stop, Re-score all, Regenerate)
+  or a Select's tally ("Keeps 1:53.9 of 2:26.9").
+- **Overview band:** Select's threshold strip — every judged value as a dot,
+  the threshold as a line running into the handle of a real slider under
+  them (a 4px track filled in ink on the side the rule keeps, a 16px round
+  handle, its value riding the axis beneath, a 1× tick on pace axes), dots
+  and handle on one track inset by half the handle so they share pixels —
+  over the episode map
+  ("Kept in 6 of 6 episodes"); Find similar's asked-about still, the map of
+  matches and the match strip; Group's map and category chips (the open one
+  lime, each with its hue as a dot).
+- **Index:** one width for every node (`clamp(18rem, 36%, 28rem)`), so the
+  divider holds still between nodes. Its 34px bar holds its filter, its
+  Kept / Left out segments, or a caption naming its order ("6 episodes ·
+  slowest first", "32 subtasks · closest first"). An index of a measurement
+  lists by that measurement: Moments slowest first (failures first of all),
+  Find similar closest first with a "Below 50%" divider, Group's members
+  most typical first; Break down, and a Select over moments, list by episode
+  under sticky headings (the open one in the selected wash) that say what the
+  episode holds ("10 subtasks", "leaves out 0:09.0 of 0:16.0"), the rows
+  named by their spans. Kept / Left out count rows — stretches, not seconds —
+  and switching sides plays that side's first row. Rows are one roving tab
+  stop.
+- **Evidence:** the shared episode inspection in episode tabs (every row
+  opens its episode or brings its tab forward), after a leading tab when the
+  node has one (the Dataset's Overview, a category's Profile). Choosing a row
+  plays from its start and keeps playing. The node's rows lead the timeline
+  and the recorded streams fold behind one row.
 
 ### Workflow, Training, Rollout
 
@@ -793,14 +832,14 @@ StudioShell
 │       │   ├── LiveWorkbench                 operate / record semantics
 │       │   ├── DataCatalogRail               dataset / episode selection
 │       │   ├── WorkflowInspectorPanels       saved graph / node-edit semantics
-│       │   ├── CurationRecipe                recipe / rule semantics
+│       │   ├── CurationGraph                 node cards, edges, + menus
 │       │   ├── TrainingWorkbench             train / observe semantics
 │       │   └── RolloutWorkbench              fixed-follower policy semantics
 │       ├── PrimaryVisualizationPanel
 │       │   ├── Scene
 │       │   ├── DataSubject                   Overview tab + one tab per episode
 │       │   ├── WorkflowCanvas
-│       │   ├── CurationSheet                 tiles; hosts EpisodeSheet in a SideSheet
+│       │   ├── CurationNodeWorkspace         node bar, index, episode tabs
 │       │   ├── TrainingEvidence
 │       │   └── EmptyOrLoadingState
 │       ├── CameraPanel(s)
@@ -815,8 +854,7 @@ StudioShell
 opens beside a table or grid for the one selected item. It owns the heading,
 the previous / next / close controls, the keyboard (Escape closes, ↑ and ↓
 step), and the entering motion; the caller owns the body. Workflow's result
-table mounts it as the row inspector and `CurationSheet` mounts it as
-`EpisodeSheet`.
+table mounts it as the row inspector.
 
 `StudioShell` owns the application frame. `StudioTopBar` chooses the active
 activity (including the Settings entry) and owns the global keys 1–6, `,`,
@@ -915,7 +953,8 @@ Plots, and the Timeline itself.
 | Catalog, Overview dataset, opened episode tabs, front tab | Data workspace selection | Catalog rail, subject tabs, episode inspection |
 | Workflow saved graph, local draft, run snapshot, terminal result | Workflow Activity Controller, reconciled with backend truth | Node panel, canvas, Results, Assistant, status line |
 | Workflow Assistant conversations and tool receipts | Backend Workflow agent, reconciled by the Workflow controller | Assistant panel |
-| Curation saved recipe, draft, judged run, hovered rule, filter, lens, order, selected episode | Curation Activity Controller, reconciled with backend truth | Recipe, Sheet, EpisodeSheet, document bar, status line |
+| Curation saved graph, draft, measurements, runs, episode sample, selected node | Curation Controller (browser-owned passes, saved through the backend) | Graph, node workspace, document bar, status line |
+| Curation open episode tabs, chosen row, index filter, listed side | The node workspace that shows them | Index, episode tabs, timeline tracks |
 | Rollout checkpoint, execution inputs, fixed follower, readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, Scene, follower cameras, Inference lane |
 | Timeline subject, playhead, playback, Follow Live | Timeline Controller within the active activity | Scene, Cameras, Plots, Timeline |
 | Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
@@ -1242,33 +1281,38 @@ time, identity) changes how a stored value is drawn, never what it is. The
 exact value stays in the tooltip and the inspector, and the presentation
 never invents a count, class, or total.
 
-### Curation Contact Sheet
+### Curation Index Rows
 
-**Mark the contact sheet.** The whole dataset is visible at once; the recipe
-says in words why an episode leaves, and the sheet shows the consequence.
+**Every row leads with a still.** An index is scanned before it is read, so
+every row of every node — a subtask, a whole episode, a stretch of one — is
+one anatomy at one height: a 96×54 still on the camera mat, the name over a
+mono facts line, and the measure in a fixed right-hand column.
 
-- **Tile:** Paper, hairline, 8px radius in the `minmax(11rem, 1fr)` grid: the
-  ordinal in mono, the name clamped to two lines, the mono clock and the
-  lensed value, and a duration baseline on kept tiles. The selected tile
-  takes the accent-strong hairline and lime halo.
-- **Struck tile:** On the recess with faint ink, the hairline mixed toward
-  the rule's tint, and a reason chip in the rule's tint carrying the rule's
-  own words. Exclusion is a decision, not an error.
-- **Hover sweep:** While a rule's mark or count is hovered, the tiles it
-  struck take an inset ring in its tint and the rest fade back.
-- **Episode evidence:** The shared side sheet headed "Episode N of M";
-  curated output shows the same body inline in its right half.
-- **Motion:** Tiles enter over 260ms with a 3px rise, 12ms apart (capped at
-  240ms); ring, opacity, and hairline settle over 160ms.
+- **Still:** a subtask's middle as the annotation pass stored it; an
+  episode's or a stretch's middle cut on demand on the camera its node read
+  (else the configured camera, else the overview camera), one query per
+  episode, cached per camera, episode and instant for the whole curation.
+  Waiting is a shimmer on the recess; failure says why on the mat.
+- **Name:** a subtask's words, clamped to two lines; a recording's label
+  when its path gives one; otherwise its id tail ("…206c08ff") in mono.
+- **Facts line:** 11px mono, with one small drawing before the facts: an
+  episode's length against the longest listed (square-root scale, as Data's
+  rail), where a stretch sits in its episode, or an episode's pace across
+  its recording against a dashed 1× line.
+- **Measure:** whole percentages for probabilities ("97%"), pace as "0.90×",
+  a recorded fact in its own unit. Its tooltip says what the number is.
+- **Chosen:** the selected wash; its place bar turns ink. One row is a tab
+  stop — the chosen one, else the first — and the arrows move between rows.
+- **Folded:** what an index counts but does not list says so once after its
+  last row ("94 episodes not scored yet"), never as a row per item.
 
-**The Struck-Not-Erased Rule.** An excluded episode stays on the sheet with
-its name legible and the reason in words. Exclusion dims and tints; it never
-hides, shrinks, or strikes the text through.
+**The Measured-Order Rule.** An index of a measurement lists by that
+measurement, and its bar says so. Recording order is for the Dataset node
+and for indexes grouped by episode.
 
-**The Said-Once Rule.** A fact has one home on the Curation surface: the
-dataset is named in Source; totals live in the filter segments; the run phase
-reaches the status line only while it is news; a run is numbered only once
-there is more than one.
+**The Said-Once Rule.** A fact has one home: what a node holds is on its
+card, what it runs with and what reaches it on its bar, what a row is in its
+row, and the playing span's words in the timeline's readout.
 
 ### Timeline and Plots
 
@@ -1283,9 +1327,19 @@ there is more than one.
 - **Plots:** One section per plotted stream, one lane per field with a
   labelled value axis and one trace per array index; the readout column
   doubles as the legend (swatch, index, value at the playhead or cursor).
-- **Episode stepper:** Wherever a surface walks a list of episodes
-  (Curation's transform review, Explore's dataset pane) it uses ↑ and ↓ icon
-  buttons that also answer the arrow keys.
+- **Evidence tracks:** A surface's own rows lead the stream rows: a value
+  track (Curation's pace, 168px tall, read out as "0.72×" against a 1×
+  expert-pace reference line, with a Select's cutoff dashed and the
+  stretches it leaves out in a graphite wash — a decision, not a fault), or
+  a span track (subtasks). Spans are paper chips with a graphite edge; the
+  one under the playhead takes an ink edge and only the chosen one is lime;
+  a grouping lends each its category's hue. A chip too narrow for a word
+  shows none, and the track's name column reads out the span under the
+  playhead in full. Activating a span plays from its start and keeps
+  playing. Under evidence the recorded streams wait behind one "N streams"
+  row.
+- **Episode stepper:** Wherever a surface walks a list of episodes it uses
+  ↑ and ↓ icon buttons that also answer the arrow keys.
 
 ### Camera Panels
 
@@ -1426,5 +1480,7 @@ while work is in progress; reduced motion keeps fades and nothing else.
   mark carrying the same meaning.
 - **Don't** fabricate rollout readiness, latency, or training telemetry.
 - **Don't** introduce viewport breakpoints or alternate mobile/touch UI.
-- **Don't** hide excluded episodes from the contact sheet or strike their
-  names through.
+- **Don't** hide what a Select leaves out: its Left out side lists it with
+  its measure, and the pace track washes it in graphite, not danger.
+- **Don't** list one row per item a node has not measured; count them once
+  after the last row.

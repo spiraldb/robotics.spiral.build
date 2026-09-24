@@ -144,13 +144,15 @@ impl SubtaskList {
     }
     /// Bring the list's nth row into view.
     pub(super) fn reveal(self, place: usize) {
+        // Rows only: a divider between them is not a place in the list.
         let found = self
             .element()
             .and_then(|list| {
-                list.query_selector(&format!(":scope > li:nth-child({})", place + 1))
+                list.query_selector_all(":scope > li.curation-entry-item")
                     .ok()
             })
-            .flatten();
+            .and_then(|rows| rows.item(place as u32))
+            .and_then(|row| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(row).ok());
         if let Some(entry) = found {
             entry.scroll_into_view();
         }

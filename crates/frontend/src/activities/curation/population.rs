@@ -22,6 +22,9 @@ const TOUCHING_SECONDS: f64 = 1e-6;
 /// in recording order.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EpisodeSample {
+    /// Which dataset's episodes these are, so a sample still held from the
+    /// dataset before is never read as this one's.
+    dataset: DatasetSelection,
     episodes: Vec<Episode>,
     /// Whether the dataset lists more episodes than the sample holds.
     partial: bool,
@@ -31,9 +34,13 @@ impl EpisodeSample {
     pub(super) async fn load(dataset: &DatasetSelection) -> Result<Self, String> {
         let page = Episode::page(dataset, 0, INTERPRETED_EPISODES).await?;
         Ok(Self {
+            dataset: dataset.clone(),
             partial: page.has_more(),
             episodes: page.into_episodes(),
         })
+    }
+    pub(super) fn dataset(&self) -> &DatasetSelection {
+        &self.dataset
     }
     pub(super) fn episodes(&self) -> &[Episode] {
         &self.episodes
@@ -51,6 +58,10 @@ impl EpisodeSample {
     #[cfg(test)]
     pub(super) fn fixture(episodes: Vec<Episode>) -> Self {
         Self {
+            dataset: episodes.first().map_or_else(
+                || DatasetSelection::new(vec!["fixture".to_owned()]).expect("a dataset name"),
+                |episode| episode.dataset().clone(),
+            ),
             episodes,
             partial: false,
         }

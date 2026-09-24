@@ -11,7 +11,6 @@ pub(crate) struct PlaybackClock {
     duration: f64,
     speed: f64,
     looping: bool,
-    stop_at: Option<f64>,
 }
 impl PlaybackClock {
     pub(crate) fn new(duration: f64) -> Self {
@@ -21,23 +20,21 @@ impl PlaybackClock {
             duration: duration.max(0.0),
             speed: 1.0,
             looping: false,
-            stop_at: None,
         }
     }
     pub(crate) fn seek(&mut self, seconds: f64) {
         if seconds.is_finite() {
-            self.stop_at = None;
             self.seconds = seconds.clamp(0.0, self.duration);
         }
     }
-    pub(crate) fn play_interval(&mut self, start: f64, end: f64) {
-        if !start.is_finite() || !end.is_finite() || end <= start {
+    /// Seek to `start` and play on from there, as far as the operator lets it
+    /// run: an interval is where to start watching, not where to stop.
+    pub(crate) fn play_from(&mut self, start: f64) {
+        if !start.is_finite() {
             return;
         }
         self.seek(start);
-        let end = end.clamp(self.seconds, self.duration);
-        self.stop_at = Some(end);
-        self.playing = end > self.seconds;
+        self.playing = self.seconds < self.duration;
     }
     fn toggle(&mut self) {
         if self.duration <= 0.0 {
@@ -51,11 +48,7 @@ impl PlaybackClock {
     pub(crate) fn advance(&mut self, elapsed: f64) {
         let step = elapsed.clamp(0.0, 0.25).min(self.duration) * self.speed;
         let next = self.seconds + step;
-        if let Some(end) = self.stop_at.filter(|end| next >= *end) {
-            self.seconds = end;
-            self.playing = false;
-            self.stop_at = None;
-        } else if next >= self.duration {
+        if next >= self.duration {
             if self.looping && self.duration > 0.0 {
                 self.seconds = next % self.duration;
             } else {
@@ -242,18 +235,23 @@ impl TickStep for f64 {
 mod tests {
     use super::*;
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn interval_review_stops_exactly_and_manual_seek_clears_boundary() {
+    fn playing_from_an_instant_keeps_going_past_it() {
         let mut clock = PlaybackClock::new(30.0);
-        clock.looping = true;
-        clock.play_interval(23.9, 24.0);
+        clock.play_from(23.9);
+        assert!(clock.playing);
         clock.advance(0.2);
-        assert_eq!(clock.seconds, 24.0);
+        clock.advance(0.2);
+        assert!(clock.playing);
+        assert!(clock.seconds > 24.2);
+        // The end of the recording still ends playback.
+        clock.play_from(29.95);
+        clock.advance(0.2);
+        assert_eq!(clock.seconds, 30.0);
         assert!(!clock.playing);
-        clock.play_interval(23.0, 24.0);
-        clock.seek(25.0);
-        assert_eq!(clock.stop_at, None);
-        clock.advance(0.2);
-        assert!(clock.seconds > 25.0);
+        clock.play_from(30.0);
+        assert!(!clock.playing);
+        clock.play_from(f64::NAN);
+        assert_eq!(clock.seconds, 30.0);
     }
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn one_clock_clamps_seeks_loops_and_honours_speed() {

@@ -13,9 +13,38 @@ use spiral_robotics_ui::{EmptyState, KindMark};
 
 /// The tile the tabs open in.
 const TABS_TILE: &str = "curation-episodes";
-/// The one tab a workspace may keep ahead of its episodes, such as a
-/// dataset's overview.
-const OVERVIEW_PANEL: &str = "curation-episodes-overview";
+/// The one tab a workspace may keep ahead of its episodes.
+const LEADING_PANEL: &str = "curation-episodes-leading";
+
+/// The one tab a workspace keeps ahead of its episodes and never closes —
+/// a dataset's overview, a category's profile — named and marked the way
+/// the episode tabs beside it are.
+#[derive(Clone, PartialEq)]
+pub(super) struct LeadingTab {
+    title: &'static str,
+    mark: (char, String),
+    content: Element,
+}
+
+impl LeadingTab {
+    /// A tab titled `title`, marked by `letter` in `hue`.
+    pub(super) fn new(title: &'static str, letter: char, hue: String, content: Element) -> Self {
+        Self {
+            title,
+            mark: (letter, hue),
+            content,
+        }
+    }
+    /// The dataset a workspace reads, as Data shows it.
+    pub(super) fn dataset(content: Element) -> Self {
+        Self::new(
+            "Overview",
+            'D',
+            "var(--tone-kind-dataset)".to_owned(),
+            content,
+        )
+    }
+}
 
 /// One open episode, and the stretch of it last chosen.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,7 +52,8 @@ pub(super) struct OpenEpisode {
     episode: EpisodeId,
     /// The chosen stretch; `None` for the episode whole.
     interval: Option<(f64, f64)>,
-    /// Each ask to play `interval`, counted, so choosing it again replays it.
+    /// Each ask to play from `interval`'s start, counted, so choosing it
+    /// again replays it.
     play: Option<PlayRequest>,
 }
 
@@ -63,19 +93,19 @@ impl OpenEpisodes {
         }
     }
     /// Open `episode` in a tab of its own, or bring its tab forward, and play
-    /// `interval` in it when one is given.
+    /// on from `interval`'s start when one is given.
     pub(super) fn open(mut self, episode: &EpisodeId, interval: Option<(f64, f64)>) {
         {
             let mut open = self.open.write();
             match open.iter_mut().find(|tab| &tab.episode == episode) {
                 Some(tab) => {
                     tab.interval = interval;
-                    tab.play = interval.map(|span| PlayRequest::after(tab.play, span));
+                    tab.play = interval.map(|(start, _)| PlayRequest::after(tab.play, start));
                 }
                 None => open.push(OpenEpisode {
                     episode: episode.clone(),
                     interval,
-                    play: interval.map(PlayRequest::new),
+                    play: interval.map(|(start, _)| PlayRequest::new(start)),
                 }),
             }
         }
@@ -118,27 +148,25 @@ impl OpenEpisodes {
                 .peek()
                 .last()
                 .map(|tab| OpenEpisode::panel(&tab.episode))
-                .or_else(|| Some(PanelId::new(OVERVIEW_PANEL)));
+                .or_else(|| Some(PanelId::new(LEADING_PANEL)));
             self.front.set(next);
         }
     }
 }
 
 /// The open episodes as tabs, each drawn by `render`, after the workspace's
-/// overview when it has one.
+/// leading tab when it has one.
 #[component]
 pub(super) fn EpisodeTabs(
     open: OpenEpisodes,
     render: Callback<OpenEpisode, Element>,
-    /// A tab kept ahead of the episodes and never closed.
-    #[props(default)]
-    overview: Option<Element>,
+    #[props(default)] leading: Option<LeadingTab>,
     /// What an empty column says when nothing is open and there is no
-    /// overview to show instead.
+    /// leading tab to show instead.
     empty: String,
 ) -> Element {
     let tabs = open.open.read().clone();
-    if tabs.is_empty() && overview.is_none() {
+    if tabs.is_empty() && leading.is_none() {
         return rsx! {
             div { class: "curation-episode-tabs-empty",
                 EmptyState { title: "Nothing open", p { "{empty}" } }
@@ -146,10 +174,20 @@ pub(super) fn EpisodeTabs(
         };
     }
     let mut panels = Vec::new();
-    if let Some(overview) = overview {
+    if let Some(LeadingTab {
+        title,
+        mark: (letter, hue),
+        content,
+    }) = leading
+    {
         panels.push(
-            Panel::new(OVERVIEW_PANEL, "Overview", TABS_TILE, overview)
-                .with_tab_icon(rsx! { KindMark { letter: 'D', hue: "var(--tone-kind-dataset)", label: "Dataset" } }),
+            Panel::new(
+                LEADING_PANEL,
+                title,
+                TABS_TILE,
+                rsx! { div { class: "curation-leading-tab", {content} } },
+            )
+            .with_tab_icon(rsx! { KindMark { letter, hue, label: title } }),
         );
     }
     for tab in tabs {

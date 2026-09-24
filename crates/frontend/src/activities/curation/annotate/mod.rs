@@ -18,7 +18,7 @@ use super::episode_tabs::{EpisodeTabs, OpenEpisode};
 use super::poster::{PosterCut, PosterFrames};
 use super::rerun::ConfirmedRerun;
 use super::review::{
-    EpisodeOrder, FailedEpisodes, MeasurementStatus, SubtaskContext, SubtaskReview,
+    EpisodeOrder, FailedEpisodes, NodeBar, NodeReach, SubtaskContext, SubtaskReview,
 };
 use super::state::{CurationController, RunState};
 use crate::activities::data::DatasetClient;
@@ -33,8 +33,8 @@ use pipeline::{AnnotationPass, PassSettings};
 use provider::ProviderAnnotator;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{
-    ActionPurpose, BrowserFocus, Button, ButtonVariant, Field, FieldLayout, Place, Select,
-    TextInput, TextInputKind,
+    ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Field, FieldLayout, Place,
+    Select, TextInput, TextInputKind,
 };
 
 /// Which episodes one run covers.
@@ -170,19 +170,18 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     }));
 
     let chosen = ChosenSubtask::use_chosen();
-    // The first annotated episode, or the first episode at all, opens by
-    // itself, so the recording column is never an empty half.
+    // The first annotated episode the index lists, or the first episode at
+    // all, opens by itself, so the recording column is never an empty half
+    // and what it shows is the index's first heading.
     let first = annotation.clone();
     use_effect(move || {
-        let opening = first
-            .rows()
-            .first()
-            .map(|row| row.episode().clone())
-            .or_else(|| {
-                AnnotationEpisode::reaching(controller, &first.id)
-                    .first()
-                    .map(|episode| episode.id().clone())
-            });
+        let rows = first.rows();
+        let reaching = AnnotationEpisode::reaching(controller, &first.id);
+        let opening = reaching
+            .iter()
+            .find(|episode| rows.iter().any(|row| row.episode() == episode.id()))
+            .or_else(|| reaching.first())
+            .map(|episode| episode.id().clone());
         chosen
             .tabs()
             .open_first(opening.map(|episode| (episode, None)));
@@ -259,7 +258,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
         settings.camera().map(str::to_owned),
         EpisodeOrder::of(listed.iter().map(AnnotationEpisode::id)),
     );
-    let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
+    let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
     let evidence = (listed.clone(), groups.clone(), context.clone());
     let done = listed
         .iter()
@@ -281,15 +280,37 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     };
     rsx! {
         section { class: "curation-annotate-workspace", "aria-label": "Break down subtasks",
-            MeasurementStatus {
-                // What the node holds is on its card, what it runs with behind
-                // the ⚙, and a run's progress on the card and in the top bar;
-                // the line says only what needs attention.
-                note: if settings.camera().is_none() {
-                    Some("Choose a camera in Settings before running.".to_owned())
-                } else {
-                    FailedEpisodes::note(settings.failed_episodes().len())
+            NodeBar {
+                // What the node holds is on its card and a run's progress on
+                // the card and in the top bar; the bar says what the pass runs
+                // with, which is also the way into changing it.
+                lead: rsx! {
+                    AnnotationSettings {
+                        annotation: annotation.clone(),
+                        settings: settings.clone(),
+                        cameras,
+                        disabled: running,
+                        reannotate: {
+                            let start = start.clone();
+                            let episodes = RunScope::All.episodes(&listed, &settings);
+                            rsx! {
+                                if replaceable > 0 && !running {
+                                    ConfirmedRerun {
+                                        id: "curation-annotate-replace".to_owned(),
+                                        label: RunScope::All.label().to_owned(),
+                                        question: format!(
+                                            "Annotate all {replaceable} episodes again? This replaces the {} subtasks already stored, and costs another full run.",
+                                            rows.len(),
+                                        ),
+                                        on_confirm: move |()| start(episodes.clone()),
+                                    }
+                                }
+                            }
+                        },
+                    }
                 },
+                note: FailedEpisodes::note(settings.failed_episodes().len()),
+                reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
                     if running {
                         Button {
@@ -303,7 +324,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                             if run == RunState::Stopping { "Stopping…" } else { "Stop" }
                         }
                     } else {
-                        for scope in [RunScope::Pending, RunScope::Failed] {
+                        for scope in [RunScope::Failed, RunScope::Pending] {
                             {
                                 let count = scope.episodes(&listed, &settings).len();
                                 let episodes = scope.episodes(&listed, &settings);
@@ -327,29 +348,6 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                                 }
                             }
                         }
-                    }
-                    AnnotationSettings {
-                        annotation: annotation.clone(),
-                        settings: settings.clone(),
-                        cameras,
-                        disabled: running,
-                        reannotate: {
-                            let start = start.clone();
-                            let episodes = RunScope::All.episodes(&listed, &settings);
-                            rsx! {
-                                if replaceable > 0 && !running {
-                                    ConfirmedRerun {
-                                        id: "curation-annotate-replace".to_owned(),
-                                        label: RunScope::All.label().to_owned(),
-                                        question: format!(
-                                            "Annotate all {replaceable} episodes again? This replaces the {} subtasks already stored, and costs another full run.",
-                                            rows.len(),
-                                        ),
-                                        on_confirm: move |()| start(episodes.clone()),
-                                    }
-                                }
-                            }
-                        },
                     }
                 },
             }
@@ -393,7 +391,16 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                                 .find(|group| group.episode() == tab.episode())
                                 .cloned()
                                 .unwrap_or_else(|| EpisodeSubtasks::none(tab.episode()));
-                            rsx! { AnnotatedEpisode { episode, subtasks, context: context.clone(), tab } }
+                            let annotation = node.clone();
+                            rsx! {
+                                AnnotatedEpisode {
+                                    episode,
+                                    subtasks,
+                                    context: context.clone(),
+                                    tab,
+                                    on_find_similar: move |row: SubtaskRow| controller.find_similar(&annotation, &row, None),
+                                }
+                            }
                         },
                     }
                 },
@@ -402,9 +409,9 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     }
 }
 
-/// The camera, model, and sampling one pass runs with, plus the run that
-/// replaces what they already produced — behind the ⚙ on the status line
-/// rather than in a band of their own.
+/// The camera, model, and sampling one pass runs with, said on the node's
+/// bar as the button that changes them, plus the run that replaces what they
+/// already produced.
 /// The settings dialog answers Escape and the backdrop, so it needs a name
 /// focus can reach it by.
 const SETTINGS_DIALOG_ID: &str = "curation-annotate-settings";
@@ -434,13 +441,21 @@ fn AnnotationSettings(
         span { class: "curation-annotate-settings-slot",
             Button {
                 purpose: ActionPurpose::Navigate,
-                variant: ButtonVariant::Icon,
+                variant: ButtonVariant::Quiet,
+                class: "curation-node-bar-settings",
                 aria_haspopup: "dialog",
                 aria_expanded: open(),
-                aria_label: "Settings",
-                title: "Camera, model, and sampling",
+                title: "Change the camera, model, and sampling",
                 onclick: move |_| open.toggle(),
                 SettingsIcon {}
+                if camera.is_empty() {
+                    span { class: "curation-node-bar-missing", "Choose a camera" }
+                } else {
+                    code { "{camera}" }
+                    code { "{settings.model()}" }
+                    code { "every {settings.sample_interval_seconds()} s" }
+                }
+                ChevronIcon { open: open() }
             }
             if open() {
                 div { class: "popover-backdrop", onclick: move |_| open.set(false) }

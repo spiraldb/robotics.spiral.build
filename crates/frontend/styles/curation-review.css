@@ -5,65 +5,106 @@
    must be unlayered too. */
 
 @layer components {
-  /* A measurement's status: one line, 28px. It used to be four bands and
-     121px — a phase word, a count, a remainder, a chip, a settings summary
-     and a failures list, all saying the same two numbers before the operator
-     reached a single row. */
-  .curation-review-status {
+  /* Every node's workspace opens with one bar: what the node reads, runs
+     with or asks on the left, what needs attention after it, and the node's
+     own actions at the far end. 40px, the document bar's height, whatever
+     the node. */
+  .curation-node-bar {
     display: flex;
-    min-height: 28px;
+    min-height: 40px;
+    flex-shrink: 0;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
-    padding: 2px 12px;
+    gap: 6px 12px;
+    padding: 5px 12px;
     border-bottom: 1px solid var(--tone-line);
+    background: var(--tone-surface);
   }
 
-  /* The camera topic and the model id are exactly what an operator pastes
-     into a bug report, so they select. The kit's disclosure summary — where
-     they used to live — forbids it. */
-  .curation-review-status-facts {
+  .curation-node-bar-lead {
+    display: flex;
+    min-width: 0;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
+    color: var(--tone-ink);
+    font-size: 12px;
+  }
+
+  .curation-node-bar-lead:empty {
+    display: none;
+  }
+
+  /* What a node reads, in words, with the topic it reads in mono — the
+     part an operator pastes into a bug report, so it selects. */
+  .curation-node-bar-reads {
     margin: 0;
     color: var(--tone-ink-soft);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
     user-select: text;
   }
 
-  /* Why the action beside it will not run, on the page rather than in a
-     tooltip a disabled button never fires. */
-  .curation-review-status-note {
-    margin: 0;
-    color: var(--tone-caution);
+  .curation-node-bar-reads code,
+  .curation-node-bar-settings code {
+    color: var(--tone-ink);
+    font-family: var(--font-mono);
     font-size: 11px;
+    font-variant-numeric: tabular-nums;
   }
 
-  /* The actions sit at the strip's far end, away from the numbers they change. */
-  .curation-review-status-actions {
+  /* Why the actions beside it will not run, or what the node cannot see, on
+     the page rather than in a tooltip a disabled button never fires. */
+  .curation-node-bar-note {
+    min-width: 0;
+    margin: 0;
+    color: var(--tone-caution);
+    font-size: 11.5px;
+  }
+
+  /* The bar's far end: what the node's state is, then what can be done
+     about it. */
+  .curation-node-bar-end {
     display: flex;
+    min-width: 0;
     margin-left: auto;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px 14px;
+  }
+
+  /* How many episodes reach the node, in the bar's quiet voice, beside the
+     way to let the rest through. */
+  .curation-node-bar-reach {
+    display: flex;
+    margin: 0;
+    align-items: baseline;
+    gap: 8px;
+    color: var(--tone-ink-soft);
+    font-size: 11.5px;
+  }
+
+  .curation-node-bar-actions {
+    display: flex;
     align-items: center;
     gap: 6px;
   }
 
+  .curation-node-bar-actions:empty {
+    display: none;
+  }
+
   /* An index that scrolls beside a recording that holds still. The index is
-     given the smaller share because a row is one line of words; the recording
-     needs the width to be worth watching. Neither column may collapse, and
-     only the index scrolls — the whole point is that the video stays put. */
-  /* The index is a column of rows to pick from, the recording is what is
-     studied: the index takes what a still and two lines of words need and no
-     more, and a list of names alone — episodes, stretches — takes less. */
+     a column of rows to pick from and takes what a still and two lines of
+     words need; the recording is what is studied and takes the rest. Only
+     the index scrolls — the whole point is that the video stays put. Every
+     row of every index leads with a still, so every node's index is one
+     width and the divider holds still as the operator moves between nodes. */
   .curation-review {
     display: grid;
     min-height: 0;
     flex: 1;
     grid-template-columns: clamp(18rem, 36%, 28rem) minmax(0, 1fr);
-    border-top: 1px solid var(--tone-line);
-  }
-
-  .curation-review:not(:has(.curation-review-index :is(.curation-poster, .curation-entry-span))) {
-    grid-template-columns: clamp(13rem, 22%, 18rem) minmax(0, 1fr);
   }
 
   /* The episodes a row opens, as tabs beside the index. */
@@ -94,10 +135,13 @@
     place-items: center;
   }
 
-  /* Data's overview, scrolling inside its tab. */
-  .curation-dataset-overview {
+  /* The tab kept ahead of the episodes — Data's overview, a category's
+     profile — scrolling inside itself. */
+  .curation-leading-tab {
     height: 100%;
-    overflow-y: auto;
+    /* A narrow window scrolls the overview sideways rather than cutting
+       its columns off. */
+    overflow: auto;
   }
 
   /* The index answers to its own width, not the window's: the same 1024px
@@ -113,19 +157,65 @@
     overscroll-behavior: contain;
   }
 
-  /* Two ways into three hundred rows. It sits above the scroll, so it stays
-     reachable at row 280. */
-  .curation-entries-search {
+  /* The bar over an index: its filter, its sides. It sits above the
+     scroll, so it stays reachable at row 280, and it is the height of the
+     evidence heading and of the workbench tab bar — whichever tops the
+     column beside it — so the two columns' hairlines meet. */
+  .curation-index-bar {
     position: sticky;
     top: 0;
     z-index: 2;
-    display: grid;
+    display: flex;
+    height: 34px;
+    flex-shrink: 0;
     align-items: center;
     gap: 6px;
-    grid-template-columns: minmax(0, 1fr) auto;
-    padding: 4px 12px;
+    padding: 0 12px;
     border-bottom: 1px solid var(--tone-line);
     background: var(--tone-surface);
+  }
+
+  .curation-index-bar > .ui-field-input,
+  .curation-index-bar > input {
+    min-width: 0;
+    flex: 1;
+  }
+
+  /* What an index lists and in what order, when there is nothing to filter. */
+  .curation-index-caption {
+    margin: 0;
+    color: var(--tone-ink-soft);
+    font-size: 11.5px;
+  }
+
+  /* Where a ranking crosses its match line: likely matches above, the rest
+     below. A label over what follows it, so small upper-case. */
+  .curation-entries-divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px 4px;
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .curation-entries-divider::after {
+    content: "";
+    height: 1px;
+    flex: 1;
+    background: var(--tone-line);
+  }
+
+  /* What an index counts but does not list, after its last row. */
+  .curation-index-footer {
+    margin: 0;
+    padding: 10px 12px;
+    color: var(--tone-ink-soft);
+    font-size: 11.5px;
   }
 
   .curation-entries-jump {
@@ -148,7 +238,8 @@
   .curation-review-head {
     display: flex;
     min-width: 0;
-    min-height: 32px;
+    height: 34px;
+    flex-shrink: 0;
     align-items: center;
     gap: 10px;
     padding: 0 12px;
@@ -179,10 +270,11 @@
     display: none;
   }
 
+  /* The facts are measurements and never cut; the subject gives way. */
   .curation-review-facts {
     display: flex;
     min-width: 0;
-    flex: 0 1 auto;
+    flex: 0 0 auto;
     margin: 0;
     overflow: hidden;
     flex-wrap: nowrap;
@@ -191,7 +283,7 @@
     white-space: nowrap;
     color: var(--tone-ink-soft);
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
 
@@ -200,7 +292,10 @@
      so the tail every index heading names the episode by is what shows. */
   .curation-review-id {
     overflow: hidden;
-    max-width: 12ch;
+    /* "…" and eight hex digits: the tail every index row names it by,
+       which the subject gives way to rather than it. */
+    max-width: 9.6ch;
+    flex-shrink: 0;
     color: var(--tone-ink-soft);
     font: inherit;
     direction: rtl;
@@ -336,6 +431,13 @@
     background: var(--tone-hover);
   }
 
+  /* The episode open beside the index names itself in the index too, in the
+     selection's quieter form, however far its rows have scrolled away. */
+  .curation-entries-group[aria-current="true"] > .curation-entries-heading-slot > .curation-entries-heading {
+    background: var(--tone-selected);
+    color: var(--tone-accent-ink);
+  }
+
   /* An episode nobody could annotate keeps its place in the list rather than
      living in a band above it: the same heading, saying what is missing. */
   .curation-entries-heading-failed {
@@ -367,7 +469,7 @@
   .curation-entries-heading-count {
     color: var(--tone-ink-soft);
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
 
@@ -408,23 +510,6 @@
     outline-offset: -2px;
   }
 
-  /* A row with neither a still nor a place in its episode — a whole episode —
-     gives the words the first column. */
-  .curation-entry:not(:has(> .curation-poster, > .curation-entry-span)) {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  /* A row without a still is two short lines, and is only as tall as they
-     are, so a list of episodes or stretches shows twice as many at once. */
-  .curation-entry:not(:has(> .curation-poster)) {
-    min-height: 38px;
-    padding-block: 3px;
-  }
-
-  .curation-entry-item:not(:has(.curation-poster)) {
-    contain-intrinsic-size: 0 39px;
-  }
-
   .curation-entry[aria-current="true"] {
     background: var(--tone-selected);
   }
@@ -451,41 +536,88 @@
 
   .curation-entry-facts {
     display: flex;
+    min-height: 18px;
     flex-wrap: nowrap;
+    align-items: center;
     gap: 8px;
     overflow: hidden;
     color: var(--tone-ink-soft);
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
 
-  /* Every probability holds the same column, so a ranking reads as a column of
-     numbers rather than a ragged edge. */
-  /* A posterless row's place in its episode: a hairline the width of a
-     poster, filled where the slice runs. */
-  .curation-entry-span {
+  /* A model's words begin as a sentence does, however the model wrote them;
+     what is stored is left as written. */
+  .curation-entry-description:not([data-id="true"])::first-letter,
+  .curation-review-subject::first-letter {
+    text-transform: uppercase;
+  }
+
+  /* A row named by its id sets it as the identifier it is. */
+  .curation-entry-description[data-id="true"] {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The facts line's drawing, before its words: an episode's length against
+     the longest listed, or where a stretch sits in its episode — Data's rail
+     draws the same bar — or a measurement's values across the episode. */
+  .curation-entry-extent {
     position: relative;
     display: block;
-    width: 64px;
-    height: 6px;
+    width: 56px;
+    height: 3px;
+    flex-shrink: 0;
+    align-self: center;
+    overflow: hidden;
     border-radius: 999px;
-    background: var(--tone-sunken);
-    box-shadow: inset 0 0 0 1px var(--tone-line);
+    background: var(--tone-line-soft);
   }
-  .curation-entry-span-fill {
+
+  .curation-entry-extent i {
     position: absolute;
     top: 0;
     bottom: 0;
+    left: 0;
     min-width: 2px;
     border-radius: 999px;
-    background: var(--tone-ink-soft);
-  }
-  .curation-entry[aria-current="true"] .curation-entry-span-fill {
-    background: var(--tone-accent-strong);
+    background: color-mix(in srgb, var(--tone-ink) 38%, transparent);
   }
 
+  .curation-entry[aria-current="true"] .curation-entry-extent i {
+    background: var(--tone-ink);
+  }
+
+  .curation-entry[aria-current="true"] .curation-entry-trace path {
+    stroke: var(--tone-ink);
+  }
+
+  .curation-entry-trace {
+    display: block;
+    width: min(9rem, 55%);
+    height: 18px;
+    flex-shrink: 0;
+    overflow: visible;
+  }
+
+  .curation-entry-trace path {
+    fill: none;
+    stroke: var(--tone-ink-soft);
+    stroke-width: 1.25;
+    stroke-linejoin: round;
+  }
+
+  .curation-entry-trace-reference {
+    stroke: var(--tone-line-strong);
+    stroke-width: 1;
+    stroke-dasharray: 2 2;
+  }
+
+  /* Every measure holds the same column, so an index reads as a column of
+     numbers rather than a ragged edge. */
   .curation-entry-score {
     width: 3.25rem;
     flex-shrink: 0;
@@ -600,6 +732,18 @@
     .curation-entry-score {
       width: 2.75rem;
     }
+
+    /* The words give way last: the bar that places a row shortens first,
+       and facts that still do not fit take a second line rather than
+       losing the end of a time. */
+    .curation-entry-extent {
+      width: 24px;
+    }
+
+    .curation-entry-facts {
+      flex-wrap: wrap;
+      gap: 0 6px;
+    }
   }
 
   /* Under reduce, a picture and a pane still arrive — they just arrive rather
@@ -619,4 +763,13 @@
    so they are drawn tall enough to read a shape in. */
 .curation-review-evidence .data-stream-track.data-numeric-plot {
   height: 168px;
+}
+
+/* Unlayered, over Data's own strip: in a tab beside an index, Data's
+   overview has less width than Data gives it, so its facts wrap onto a second
+   row rather than running off the tab. */
+.curation-leading-tab .data-overview .data-overview-facts {
+  grid-auto-flow: row;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  row-gap: 10px;
 }

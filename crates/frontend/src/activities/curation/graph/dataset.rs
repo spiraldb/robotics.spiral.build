@@ -4,13 +4,16 @@
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, DatasetSummary};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone, Remount,
+    ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone, Remount, TextInput,
+    TextInputKind,
 };
 
 use super::super::document::{CurationGraph, EpisodeFact};
-use super::super::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
+use super::super::episode_tabs::{EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes};
+use super::super::poster::{PosterCut, PosterFrames, StillCamera};
 use super::super::review::{
-    Counted, EvidenceHeading, MeasurementStatus, SliceEntry, SubtaskReview,
+    Counted, EvidenceHeading, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SliceShape,
+    SubtaskReview, TabStop,
 };
 use super::super::state::CurationController;
 use crate::activities::data::{DatasetClient, DatasetOverview};
@@ -104,6 +107,7 @@ fn DatasetEpisodes(
             match (sample, controller.sample_error()) {
                 (Some(sample), _) => rsx! {
                     DatasetEpisodeList {
+                        controller,
                         dataset: dataset.clone(),
                         episodes: sample.episodes().to_vec(),
                         partial: sample.is_partial(),
@@ -127,6 +131,7 @@ fn DatasetEpisodes(
 /// Data shows it, and a tab for each episode chosen from the list.
 #[component]
 fn DatasetEpisodeList(
+    controller: CurationController,
     dataset: DatasetSelection,
     episodes: Vec<Episode>,
     /// Whether the dataset holds more episodes than the curation reads.
@@ -134,6 +139,7 @@ fn DatasetEpisodeList(
     featured: FeaturedCamera,
 ) -> Element {
     let tabs = OpenEpisodes::use_open();
+    let mut wanted = use_signal(String::new);
     let inspection = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
         DatasetClient::current()
             .inspect_dataset(dataset)
@@ -141,48 +147,78 @@ fn DatasetEpisodeList(
             .map_err(|error| error.to_string())
     }));
     let labels = EpisodeLabels::of(episodes.iter().map(Episode::facts));
+    // On a square-root scale, as Data's rail draws it, so one runaway take
+    // does not flatten every other bar into a dot.
+    let longest = episodes
+        .iter()
+        .filter_map(|episode| episode.facts().duration_seconds())
+        .fold(0.0_f64, f64::max);
+    let faces = episodes
+        .iter()
+        .map(|episode| {
+            let share = episode
+                .facts()
+                .duration_seconds()
+                .filter(|_| longest > 0.0)
+                .map_or(0.0, |seconds| (seconds / longest).sqrt());
+            let label = labels.label(episode.facts());
+            (
+                episode.id().clone(),
+                SliceFace::episode(episode, label.head()).shaped(SliceShape::Length(share)),
+            )
+        })
+        .filter(|(_, face)| face.says(&wanted()))
+        .collect::<Vec<_>>();
+    let camera = StillCamera::use_camera(controller, None);
+    let stills = faces
+        .iter()
+        .map(|(_, face)| face.still().clone())
+        .collect::<Vec<_>>();
+    let frames =
+        PosterFrames::use_frames(PosterCut::of(Some(&dataset), camera.as_deref(), &stills));
     let front = tabs.front().map(|tab| tab.episode().clone());
-    // The card already counts the episodes; only a dataset read in part has
-    // something to add.
-    let partial = partial.then(|| {
+    let chosen = faces.iter().position(|(id, _)| front.as_ref() == Some(id));
+    // Every count below the Dataset card is over these episodes, so the bar
+    // says which they are.
+    let reads = if partial {
         format!(
-            "The first {} · the rest are not read",
+            "Every node reads the first {} of this dataset",
             Counted::episodes(episodes.len())
         )
-    });
+    } else {
+        format!(
+            "Every node reads these {}",
+            Counted::episodes(episodes.len())
+        )
+    };
     let opened = episodes.clone();
     rsx! {
-        if let Some(facts) = partial {
-            MeasurementStatus { facts }
+        NodeBar {
+            lead: rsx! { p { class: "curation-node-bar-reads", "{reads}" } },
         }
         SubtaskReview {
             index: rsx! {
+                IndexBar {
+                    TextInput {
+                        kind: TextInputKind::Search,
+                        value: wanted(),
+                        placeholder: "Filter episodes",
+                        "aria-label": "Filter episodes",
+                        oninput: move |text| wanted.set(text),
+                    }
+                }
+                if faces.is_empty() {
+                    p { class: "curation-review-note", role: "status", "No episode says “{wanted}”." }
+                }
                 ol { class: "curation-entries", "aria-label": "Episodes this curation reads",
-                    for episode in episodes.iter() {
-                        {
-                            let id = episode.id().clone();
-                            let label = labels.label(episode.facts());
-                            // A recording's own name, when its path gives one,
-                            // tells more than its id; the id follows it.
-                            let (title, named) = match label.head() {
-                                Some(head) => (head.to_owned(), true),
-                                None => (Episode::listed_name_of(episode.id()), false),
-                            };
-                            let mut facts = Vec::new();
-                            if named {
-                                facts.push(Episode::listed_name_of(episode.id()));
-                            }
-                            facts.extend(EpisodeFact::DurationSeconds.reading(episode));
-                            facts.extend(EpisodeFact::Messages.reading(episode).map(|count| format!("{count} messages")));
-                            rsx! {
-                                SliceEntry {
-                                    key: "{id}",
-                                    title,
-                                    facts,
-                                    chosen: front.as_ref() == Some(&id),
-                                    on_select: move |()| tabs.open(&id, None),
-                                }
-                            }
+                    for (position, (id, face)) in faces.into_iter().enumerate() {
+                        SliceEntry {
+                            key: "{id}",
+                            face,
+                            frames,
+                            standing: RowStanding::plain(chosen == Some(position))
+                                .roving(TabStop::at(position, chosen)),
+                            on_select: move |()| tabs.open(&id, None),
                         }
                     }
                 }
@@ -191,19 +227,14 @@ fn DatasetEpisodeList(
                 EpisodeTabs {
                     open: tabs,
                     empty: "Choose an episode to watch it.".to_owned(),
-                    overview: rsx! {
-                        div { class: "curation-dataset-overview",
-                            DatasetOverview { dataset: dataset.clone(), inspection: inspection.read().clone() }
-                        }
-                    },
+                    leading: LeadingTab::dataset(rsx! {
+                        DatasetOverview { dataset: dataset.clone(), inspection: inspection.read().clone() }
+                    }),
                     render: move |tab: OpenEpisode| {
                         let Some(episode) = opened.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
                             return rsx! {};
                         };
-                        let facts = [EpisodeFact::DurationSeconds.reading(&episode), EpisodeFact::Messages.reading(&episode).map(|count| format!("{count} messages"))]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>();
+                        let facts = EpisodeFact::DurationSeconds.reading(&episode).into_iter().collect::<Vec<_>>();
                         rsx! {
                             EvidenceHeading { subject: episode.name(), episode: Some(episode.id().clone()), facts }
                             div { class: "curation-review-player",

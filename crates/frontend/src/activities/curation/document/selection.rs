@@ -207,6 +207,33 @@ impl Selection {
             Self::Categories { .. } => None,
         }
     }
+    /// Whether the rule keeps what measures at least its threshold, rather
+    /// than at most it.
+    pub(crate) fn keeps_at_least(&self) -> bool {
+        !matches!(
+            self,
+            Self::Episodes {
+                comparison: Comparison::AtMost,
+                ..
+            }
+        )
+    }
+    /// The same rule dividing at `value`; a rule of categories has no
+    /// threshold and stays as it is.
+    pub(crate) fn with_threshold(self, value: f64) -> Self {
+        match self {
+            Self::Episodes {
+                fact, comparison, ..
+            } => Self::Episodes {
+                fact,
+                comparison,
+                value,
+            },
+            Self::Similar { .. } => Self::Similar { minimum: value },
+            Self::Progressing { .. } => Self::Progressing { minimum: value },
+            Self::Categories { names } => Self::Categories { names },
+        }
+    }
     /// The rule as its node card says it.
     pub(crate) fn sentence(&self) -> String {
         match self {
@@ -227,7 +254,7 @@ impl Selection {
             Self::Similar { minimum } => format!("At least {:.0}% similar", minimum * 100.0),
             Self::Categories { names } if names.is_empty() => "No category chosen".to_owned(),
             Self::Categories { names } => names.join(", "),
-            Self::Progressing { minimum } => format!("Progress at least {minimum}"),
+            Self::Progressing { minimum } => format!("Pace at least {minimum:.2}×"),
         }
     }
     pub(super) fn validate(&self) -> Result<(), String> {

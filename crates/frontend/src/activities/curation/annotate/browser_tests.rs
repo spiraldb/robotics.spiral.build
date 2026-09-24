@@ -15,7 +15,9 @@ use crate::activities::curation::document::{
     CURATION_ENCODING_VERSION, CurationNode, CurationNodeKind, DATASET_NODE_ID, SubtaskAnnotation,
     SubtaskRow,
 };
-use crate::activities::curation::poster::{PosterCut, PosterFrame, PosterFrames, ShownPoster};
+use crate::activities::curation::poster::{
+    PosterCut, PosterFrame, PosterFrames, PosterStill, ShownPoster,
+};
 use crate::activities::curation::review::{EpisodeOrder, SubtaskContext};
 use crate::activities::curation::state::CurationController;
 use crate::activities::data::DatasetClient;
@@ -524,14 +526,17 @@ impl PosterHarness {
             Some("/top-camera".to_owned()),
             EpisodeOrder::of(rows.iter().map(SubtaskRow::episode)),
         );
-        let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
+        let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
         *self.frames.borrow_mut() = Some(frames);
-        *self.shown.borrow_mut() = rows.iter().map(|row| frames.shown(row)).collect();
+        *self.shown.borrow_mut() = rows
+            .iter()
+            .map(|row| frames.shown(&PosterStill::of_subtask(row)))
+            .collect();
         rsx! {
             ol {
                 for row in rows {
                     li { key: "{row.episode()}-{row.start_time()}",
-                        PosterFrame { row: row.clone(), frames }
+                        PosterFrame { still: PosterStill::of_subtask(&row), frames }
                     }
                 }
             }

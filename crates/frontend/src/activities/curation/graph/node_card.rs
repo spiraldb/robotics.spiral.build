@@ -3,10 +3,13 @@
 //! canvas keeps no second copy of the graph.
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
-use super::super::document::{CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID};
-use super::super::population::{EpisodeSample, Population, PopulationReader};
+use super::super::document::{
+    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PopulationKind,
+};
+use super::super::population::{EpisodeSample, Population, PopulationReader, Slice};
 use super::super::review::Counted;
 use super::super::state::CurationController;
+use crate::format::ClockPresentation as _;
 
 /// What a node does to the data; drives its glyph and identity tint, in the
 /// same vocabulary the Workflow graph speaks.
@@ -185,17 +188,31 @@ impl NodeCard {
                 || "No categories yet".to_owned(),
                 |grouping| Counted::categories(grouping.categories().len()).to_string(),
             ),
-            CurationNodeKind::IdentifyUnproductiveMoments(detection) => match counts {
-                Some((input, output)) => format!(
-                    "{} of {} · {}",
+            // A moment is one second, so what the detection holds is said as
+            // the recording it scored rather than a count of seconds.
+            CurationNodeKind::IdentifyUnproductiveMoments(detection) => match (counts, sample) {
+                (Some((input, output)), Some(sample)) => format!(
+                    "{} of {} · {} scored",
                     Self::measured(detection.completed_episodes(), &input),
                     Counted::episodes(input.len()),
-                    Counted::moments(output.len()),
+                    Self::recorded(&output, sample),
                 ),
-                None => "Progress per second of recording".to_owned(),
+                _ => "Pace per second of recording".to_owned(),
             },
-            CurationNodeKind::Select(selection) => match counts {
-                Some((input, output)) => {
+            CurationNodeKind::Select(selection) => match (counts, sample) {
+                // A moment is a second, so what a rule over moments keeps is
+                // said as the recording it adds up to: what training gets.
+                (Some((input, output)), Some(sample))
+                    if payload.population_kind(node.id()) == Some(PopulationKind::Moments) =>
+                {
+                    format!(
+                        "{} · keeps {} of {}",
+                        selection.sentence(),
+                        Self::recorded(&output, sample),
+                        Self::recorded(&input, sample)
+                    )
+                }
+                (Some((input, output)), _) => {
                     let unit = payload.population_kind(node.id());
                     format!(
                         "{} · {} of {}",
@@ -204,9 +221,18 @@ impl NodeCard {
                         Counted::of_kind(unit, input.len())
                     )
                 }
-                None => selection.sentence(),
+                (None, _) => selection.sentence(),
             },
         }
+    }
+    /// How much recording a population adds up to, on the clock.
+    fn recorded(population: &Population, sample: &EpisodeSample) -> String {
+        population
+            .slices(sample)
+            .iter()
+            .map(Slice::seconds)
+            .sum::<f64>()
+            .clock_label()
     }
     /// How many of the episodes reaching a measurement it has read.
     fn measured(completed: &[EpisodeId], input: &Population) -> usize {

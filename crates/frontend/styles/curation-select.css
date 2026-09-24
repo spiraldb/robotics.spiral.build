@@ -11,20 +11,16 @@
     background: var(--tone-surface);
   }
 
-  /* The rule is one sentence; its variable words are its fields. */
+  /* The rule is one sentence on the node's bar; its variable words are its
+     fields, and its threshold reads out in the rule's own digits. */
   .curation-select-rule {
-    @apply flex flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-line px-3 py-2 text-[12px] text-ink;
+    @apply flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-ink;
   }
   .curation-select-rule-choice {
     @apply w-auto max-w-[10rem];
   }
-  /* The threshold slides in the sentence, with the value it stands at read
-     out beside it in the rule's own digits. */
-  .curation-select-rule-slider {
-    @apply inline-flex items-center gap-2;
-  }
   .curation-select-rule-readout {
-    @apply min-w-[3.5ch] font-mono text-[12px] tabular-nums text-ink;
+    @apply min-w-[3.5ch] font-mono text-[12px] font-medium tabular-nums text-ink;
   }
   .curation-select-rule-hint {
     @apply text-ink-faint;
@@ -53,23 +49,30 @@
     color: var(--tone-ink-soft);
   }
 
-  /* How much recording the rule keeps, beside the counts it adds up. */
+  /* How much recording the rule keeps, at the bar's far end. */
   .curation-select-tally {
-    @apply m-0 font-mono text-[11px] text-ink-soft tabular-nums;
+    @apply m-0 font-mono text-[11.5px] text-ink tabular-nums;
   }
 
-  /* Every judged value as a dot on one axis, and the threshold as a line
-     where the rule's slider stands. */
+  /* Every judged value as a dot on one track, the threshold as a line down
+     it, and the slider's thumb at the foot of the line. The track is inset
+     by half the thumb at either end, as a range input insets its own, so a
+     dot and the thumb set to its value stand at the same pixel. */
   .curation-select-strip {
-    @apply relative mx-3 my-2 h-9 shrink-0;
+    @apply relative flex shrink-0 flex-col;
+    --thumb: 16px;
+  }
+  .curation-select-strip-track {
+    @apply relative h-6;
+    margin-inline: calc(var(--thumb) / 2);
   }
   .curation-select-strip-threshold {
-    @apply absolute top-0 h-7 w-px;
+    @apply absolute -bottom-1 top-0 w-px;
     background: var(--tone-ink);
   }
   .curation-select-strip-dot {
     @apply absolute size-[7px] -ml-[3.5px] cursor-pointer rounded-full border-0 p-0;
-    top: calc(4px + var(--lift) * 3px);
+    top: calc(2px + var(--lift) * 3px);
     background: var(--tone-ink);
     transition: transform 100ms ease-out;
   }
@@ -84,19 +87,29 @@
     box-shadow: 0 0 0 1.5px var(--tone-accent-strong);
   }
   .curation-select-strip-axis {
-    @apply pointer-events-none absolute inset-x-0 bottom-0 flex justify-between font-mono text-[10.5px] leading-none tabular-nums;
+    @apply pointer-events-none relative flex h-3.5 items-center justify-between font-mono text-[10.5px] leading-none tabular-nums;
     color: var(--tone-ink-faint);
   }
-
-  /* The episode map, painted kept in ink and left out faded. */
-  .curation-select-overview {
-    @apply flex flex-col gap-1.5 border-b border-line px-3 py-2;
-    --curation-map-unasked: color-mix(in srgb, var(--tone-ink-faint) 26%, var(--tone-surface));
-    --curation-map-kept: var(--tone-ink-soft);
+  /* A label that rides the track at `--at`, 0–1, on the same inset as the
+     dots and the thumb. */
+  .curation-select-strip-value,
+  .curation-select-strip-reference {
+    @apply absolute top-0 px-1;
+    left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--at));
+    translate: -50% 0;
+    background: var(--tone-surface);
+  }
+  /* The threshold's value under its handle, in the rule's own digits. */
+  .curation-select-strip-value {
+    @apply z-[1] font-medium text-ink;
   }
 
-  .curation-select-filter {
-    @apply flex items-center gap-3 border-b border-line px-3 py-1.5;
+  /* The strip over the episode map: where the threshold falls among the
+     values, then where the kept parts lie in their episodes. */
+  .curation-select-overview {
+    @apply flex shrink-0 flex-col gap-2 border-b border-line px-3 pb-2.5 pt-1.5;
+    --curation-map-unasked: color-mix(in srgb, var(--tone-ink-faint) 26%, var(--tone-surface));
+    --curation-map-kept: var(--tone-ink-soft);
   }
 }
 
@@ -112,12 +125,16 @@
   font-size: 11px;
 }
 
-/* Unlayered: a range input's parts are browser pseudo-elements. A hairline
-   track on the rule's line, and an ink thumb the size of a strip dot's
-   ring, so the control reads as part of the sentence. */
-.curation-select-rule-slider input[type="range"] {
-  width: 14rem;
-  height: 18px;
+/* Unlayered: a range input's parts are browser pseudo-elements. The level
+   a Select keeps by is slid on a real slider: a 4px track, filled in ink on
+   the side the rule keeps, and a round handle the threshold line runs into.
+   The fill stops at the handle's centre, on the same inset as the dots. */
+.curation-select-strip-slider {
+  --kept: var(--tone-ink-soft);
+  --dropped: var(--tone-line);
+  --stop: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--at));
+  width: 100%;
+  height: 22px;
   margin: 0;
   background: transparent;
   cursor: pointer;
@@ -125,46 +142,72 @@
   -webkit-appearance: none;
 }
 
-.curation-select-rule-slider input[type="range"]::-webkit-slider-runnable-track {
-  height: 2px;
-  border-radius: 999px;
-  background: var(--tone-line-strong);
+.curation-select-strip-slider[data-keeps="above"] {
+  --track: linear-gradient(to right, var(--dropped) var(--stop), var(--kept) var(--stop));
 }
 
-.curation-select-rule-slider input[type="range"]::-moz-range-track {
-  height: 2px;
-  border-radius: 999px;
-  background: var(--tone-line-strong);
+.curation-select-strip-slider[data-keeps="below"] {
+  --track: linear-gradient(to right, var(--kept) var(--stop), var(--dropped) var(--stop));
 }
 
-.curation-select-rule-slider input[type="range"]::-webkit-slider-thumb {
-  width: 12px;
-  height: 12px;
-  margin-top: -5px;
-  border: 0;
+.curation-select-strip-slider::-webkit-slider-runnable-track {
+  height: 4px;
   border-radius: 999px;
-  background: var(--tone-ink);
-  box-shadow: 0 0 0 2px var(--tone-surface);
+  background: var(--track);
+}
+
+.curation-select-strip-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--track);
+}
+
+.curation-select-strip-slider::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 2px solid var(--tone-ink);
+  border-radius: 999px;
+  background: var(--tone-surface);
+  box-shadow: 0 1px 3px rgb(16 16 16 / 0.22);
+  cursor: grab;
+  transition: scale 100ms ease-out;
   -webkit-appearance: none;
 }
 
-.curation-select-rule-slider input[type="range"]::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  border: 0;
+.curation-select-strip-slider::-moz-range-thumb {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--tone-ink);
   border-radius: 999px;
-  background: var(--tone-ink);
-  box-shadow: 0 0 0 2px var(--tone-surface);
+  background: var(--tone-surface);
+  box-shadow: 0 1px 3px rgb(16 16 16 / 0.22);
+  cursor: grab;
 }
 
-.curation-select-rule-slider input[type="range"]:focus {
+.curation-select-strip-slider:hover::-webkit-slider-thumb {
+  scale: 1.12;
+}
+
+.curation-select-strip-slider:active::-webkit-slider-thumb {
+  cursor: grabbing;
+}
+
+.curation-select-strip-slider:focus {
   outline: none;
 }
 
-.curation-select-rule-slider input[type="range"]:focus-visible::-webkit-slider-thumb {
+.curation-select-strip-slider:focus-visible::-webkit-slider-thumb {
   box-shadow: 0 0 0 2px var(--tone-surface), 0 0 0 4px var(--tone-focus);
 }
 
-.curation-select-rule-slider input[type="range"]:focus-visible::-moz-range-thumb {
+.curation-select-strip-slider:focus-visible::-moz-range-thumb {
   box-shadow: 0 0 0 2px var(--tone-surface), 0 0 0 4px var(--tone-focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curation-select-strip-slider::-webkit-slider-thumb {
+    transition: none;
+  }
 }

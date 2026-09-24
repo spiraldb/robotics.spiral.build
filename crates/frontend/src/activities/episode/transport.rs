@@ -12,15 +12,6 @@ use crate::components::timeline::{
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
-/// A span plays to its own end and a moment past it, so the operator sees the
-/// motion leave the interval rather than being cut off inside it.
-///
-/// There is deliberately no lead-in. The playhead landing half a second before
-/// the span it was asked for put the cursor outside the highlight that marks
-/// the same interval, and every reading of the clock was then half a second
-/// wrong in a view whose whole product is where something starts.
-const RUN_OUT_SECONDS: f64 = 0.5;
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(in crate::activities) struct EpisodeTimeRange {
     start_ns: u64,
@@ -84,11 +75,11 @@ impl EpisodeTransport {
     pub(super) fn use_episode(episode: &Episode) -> Self {
         Self::use_range(episode.range().unwrap_or(EpisodeTimeRange::EMPTY))
     }
-    /// Play `span` from its own start to a moment past its end.
-    pub(super) fn play_span(&mut self, (start, end): (f64, f64)) {
-        self.clock
-            .write()
-            .play_interval(start, end + RUN_OUT_SECONDS);
+    /// Play from `start`, exactly there — the playhead lands inside the
+    /// highlight that marks the same interval — and on past its end, so the
+    /// operator sees what came next rather than a clip cut off.
+    pub(super) fn play_from(&mut self, start: f64) {
+        self.clock.write().play_from(start);
     }
     fn use_range(initial: EpisodeTimeRange) -> Self {
         let clock = use_signal(|| PlaybackClock::new(initial.duration()));
@@ -202,7 +193,7 @@ impl EpisodeTransport {
             TimelineAction::SetSpeed(speed) => self.set_speed(speed),
             TimelineAction::SetLooping(looping) => self.clock.write().set_looping(looping),
             TimelineAction::SetWindow(window) => self.view.set(window),
-            TimelineAction::ActivateInterval(interval) => self.play_span(interval.span()),
+            TimelineAction::ActivateInterval(interval) => self.play_from(interval.span().0),
         }
     }
     fn buffering(&self) -> bool {

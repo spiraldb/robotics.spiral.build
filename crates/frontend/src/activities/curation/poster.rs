@@ -16,10 +16,12 @@
 //! curation owns rather than the view, so moving between the annotation,
 //! search and grouping nodes never decodes a frame twice. Viewing never
 //! changes the document; only the annotation pass persists a poster.
-use super::document::SubtaskRow;
+use super::document::{CurationGraph, SubtaskRow};
 use super::frames::{FrameMoments, MAX_FRAMES_PER_QUERY, NativeFrame};
 use super::review::SubtaskContext;
+use super::state::CurationController;
 use crate::activities::data::DatasetClient;
+use crate::activities::episode::{Episode, FeaturedCamera, StreamCatalog};
 use crate::components::scoped_task::ScopedTask;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
@@ -116,63 +118,91 @@ impl PosterCanvas {
     }
 }
 
-/// One row whose poster still has to be cut: which recording, which row of it,
-/// and the instant to cut at. `f64` bits identify the row because that is
-/// already how a row is identified.
+/// One still an index row shows: an instant of one episode, and the picture
+/// the annotation pass already cut for it, when it cut one.
 ///
-/// A row annotated with its poster never becomes a target, so a measured
-/// curation has nothing here to fetch and nothing to clone per render.
+/// Every index leads each row with one — a subtask's middle, a stretch's
+/// middle, an episode's middle — so a list of episodes is as scannable as a
+/// list of subtasks, and a row reads the same wherever it is met.
 #[derive(Clone, Debug, PartialEq)]
-struct PosterTarget {
+pub(super) struct PosterStill {
     episode: EpisodeId,
-    row: u64,
-    moment: f64,
+    /// Seconds from the episode's start.
+    at: f64,
+    stored: Option<String>,
 }
 
-impl PosterTarget {
-    fn of(row: &SubtaskRow) -> Option<Self> {
-        row.poster().is_none().then(|| Self {
+impl PosterStill {
+    /// A subtask's still: its middle, as the annotation pass stored it.
+    pub(super) fn of_subtask(row: &SubtaskRow) -> Self {
+        Self {
             episode: row.episode().clone(),
-            row: row.start_time().to_bits(),
-            moment: row.midpoint(),
-        })
+            at: row.midpoint(),
+            stored: row.poster().map(str::to_owned),
+        }
+    }
+    /// The middle of `span` of `episode` — a stretch of it, or all of it.
+    pub(super) fn within(episode: &EpisodeId, (start, end): (f64, f64)) -> Self {
+        Self {
+            episode: episode.clone(),
+            at: f64::midpoint(start, end.max(start)),
+            stored: None,
+        }
+    }
+    fn key(&self, camera: &str) -> StillKey {
+        StillKey {
+            camera: camera.to_owned(),
+            episode: self.episode.clone(),
+            at: self.at.to_bits(),
+        }
     }
 }
 
-/// Everything one measurement still owes a poster, in the order the rows are
-/// stored. A measurement whose rows all arrived with theirs is empty, which is
-/// what makes an index of it free.
+/// Which picture a cut still is: the camera, the episode, and the instant,
+/// whose `f64` bits identify it exactly.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct StillKey {
+    camera: String,
+    episode: EpisodeId,
+    at: u64,
+}
+
+/// Every still one index still owes, in the order its rows are listed. An
+/// index whose rows all arrived with their pictures is empty, which is what
+/// makes it free.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct PosterTargets(Vec<PosterTarget>);
+struct PosterTargets(Vec<(EpisodeId, f64)>);
 
 impl PosterTargets {
-    fn of(rows: &[SubtaskRow]) -> Self {
-        Self(rows.iter().filter_map(PosterTarget::of).collect())
+    fn of(stills: &[PosterStill]) -> Self {
+        Self(
+            stills
+                .iter()
+                .filter(|still| still.stored.is_none() && still.at.is_finite())
+                .map(|still| (still.episode.clone(), still.at))
+                .collect(),
+        )
     }
-    /// Whether this episode has a row still owing a poster. An episode whose
-    /// rows were all annotated with theirs is never asked for.
-    fn owes(&self, episode: &EpisodeId) -> bool {
-        self.0.iter().any(|target| &target.episode == episode)
-    }
-    /// One episode's outstanding rows, which is what one query covers.
-    fn of_episode(&self, episode: &EpisodeId) -> Vec<&PosterTarget> {
+    /// One episode's owed instants, which is what one query covers.
+    fn of_episode(&self, episode: &EpisodeId) -> Vec<f64> {
         self.0
             .iter()
-            .filter(|target| &target.episode == episode)
+            .filter(|(owed, _)| owed == episode)
+            .map(|(_, at)| *at)
             .collect()
     }
 }
 
-/// One episode's backfilled posters, keyed by the row each belongs to.
+/// What a cut still is right now.
 #[derive(Clone, Debug, PartialEq)]
-enum EpisodePosters {
-    Loading,
-    Ready(BTreeMap<u64, String>),
+enum CutStill {
+    Cutting,
+    Cut(String),
     Failed(String),
 }
 
-/// What one episode's missing posters are cut from: the recordings, the camera
-/// the measurement read, and the moments its unposted rows sit at.
+/// What one index's missing stills are cut from: the recordings, the camera,
+/// and the instants its rows sit at.
 ///
 /// The client is held rather than read inside the task, because a cut outlives
 /// the render that started it, exactly as an annotation pass does.
@@ -195,26 +225,38 @@ impl PartialEq for PosterCut {
 }
 
 impl PosterCut {
-    /// Nothing to cut from without both a dataset and the camera the
-    /// measurement sampled, so a curation missing either shows no posters.
-    pub(super) fn of(context: &SubtaskContext, rows: &[SubtaskRow]) -> Option<Self> {
+    /// Nothing to cut from without both a dataset and a camera, so an index
+    /// missing either shows no pictures.
+    pub(super) fn of(
+        dataset: Option<&DatasetSelection>,
+        camera: Option<&str>,
+        stills: &[PosterStill],
+    ) -> Option<Self> {
         Some(Self {
             datasets: DatasetClient::current(),
-            dataset: context.dataset()?.clone(),
-            camera: context.camera()?.to_owned(),
-            targets: PosterTargets::of(rows),
+            dataset: dataset?.clone(),
+            camera: camera?.to_owned(),
+            targets: PosterTargets::of(stills),
         })
     }
+    /// A measurement's subtask rows, on the camera the measurement read.
+    pub(super) fn of_rows(context: &SubtaskContext, rows: &[SubtaskRow]) -> Option<Self> {
+        let stills = rows.iter().map(PosterStill::of_subtask).collect::<Vec<_>>();
+        Self::of(context.dataset(), context.camera(), &stills)
+    }
 
-    /// Every poster this episode still owes, cut in one query per batch of
-    /// moments. The picture goes through the same encoder the annotation pass
-    /// uses, so a backfilled row is indistinguishable from a measured one.
-    async fn decode(&self, episode: &EpisodeId) -> Result<BTreeMap<u64, String>, String> {
-        let wanted = self.targets.of_episode(episode);
+    /// `instants` of one episode, cut in one query per batch. The picture
+    /// goes through the same encoder the annotation pass uses, so a
+    /// backfilled row is indistinguishable from a measured one.
+    async fn decode(
+        &self,
+        episode: &EpisodeId,
+        instants: &[f64],
+    ) -> Result<BTreeMap<u64, String>, String> {
         let selection = EpisodeSelection::new(self.dataset.clone(), episode.clone());
         let mut posters = BTreeMap::new();
-        for batch in wanted.chunks(MAX_FRAMES_PER_QUERY) {
-            let moments = FrameMoments::new(batch.iter().map(|target| target.moment).collect());
+        for batch in instants.chunks(MAX_FRAMES_PER_QUERY) {
+            let moments = FrameMoments::new(batch.to_vec());
             let snapshot = self
                 .datasets
                 .run_episode_query(&EpisodeQueryRequest::new(
@@ -226,111 +268,185 @@ impl PosterCut {
                 .map_err(|error| format!("Decoding poster frames: {error}"))?;
             for (moment, frame) in moments.read(&snapshot)? {
                 let poster = PosterImage::cut_from(&frame).await?;
-                posters.insert(batch[moment].row, poster.into_data_url());
+                posters.insert(batch[moment].to_bits(), poster.into_data_url());
             }
         }
         Ok(posters)
     }
 }
 
-/// Every poster this curation has had to cut, held once.
+/// The camera an index of whole episodes or stretches cuts its stills on:
+/// the one a measurement read when it names one, else the camera the graph
+/// is configured on, else whichever shows the workspace best.
+pub(super) struct StillCamera;
+
+impl StillCamera {
+    pub(super) fn use_camera(
+        controller: CurationController,
+        measured: Option<&str>,
+    ) -> Option<String> {
+        let first = controller
+            .sample()
+            .and_then(|sample| sample.episodes().first().map(Episode::selection));
+        let topics = StreamCatalog::use_camera_topics(first);
+        let configured = match controller.with_payload(CurationGraph::configured_camera) {
+            FeaturedCamera::Named(camera) => Some(camera),
+            FeaturedCamera::Overview => None,
+        };
+        measured.map(str::to_owned).or(configured).or_else(|| {
+            topics.and_then(|topics| StreamCatalog::overview_camera(&topics).map(str::to_owned))
+        })
+    }
+}
+
+/// Every still this curation has had to cut, held once.
 ///
-/// The three views that show subtask rows — the annotation's own index, the
-/// search ranking, the grouping's cards — are the same rows read three ways,
-/// so a poster cut for one is already cut for the others. `CurationController`
-/// provides this beside the payload rather than each view creating its own, so
-/// moving between a curation's nodes costs nothing and nothing here ever
-/// reaches the saved document.
+/// Every index is the curation's episodes read one way or another, so a still
+/// cut for one is already cut for the rest. `CurationController` provides
+/// this beside the payload rather than each view creating its own, so moving
+/// between a curation's nodes costs nothing and nothing here ever reaches the
+/// saved document.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct PosterCache {
-    episodes: Signal<BTreeMap<EpisodeId, EpisodePosters>>,
-    /// What the held pictures are of. Changing the dataset or the camera
-    /// changes what a poster should be, so the cut ones are dropped.
-    cut: Signal<Option<PosterCut>>,
+    stills: Signal<BTreeMap<StillKey, CutStill>>,
+    /// Which recordings the held pictures are of. Another dataset's episodes
+    /// share no picture, so the cut ones are dropped.
+    dataset: Signal<Option<DatasetSelection>>,
 }
 
 impl PosterCache {
     pub(super) fn new() -> Self {
         Self {
-            episodes: Signal::new(BTreeMap::new()),
-            cut: Signal::new(None),
+            stills: Signal::new(BTreeMap::new()),
+            dataset: Signal::new(None),
         }
     }
 
-    fn follow(mut self, cut: Option<PosterCut>) {
-        if *self.cut.peek() == cut {
+    fn follow(mut self, dataset: Option<DatasetSelection>) {
+        if *self.dataset.peek() == dataset {
             return;
         }
-        self.episodes.write().clear();
-        self.cut.set(cut);
+        self.stills.write().clear();
+        self.dataset.set(dataset);
     }
 
     /// A cut runs in the cache's own scope rather than the row that asked for
     /// it, so selecting another node while an episode is still decoding
     /// finishes the cut instead of abandoning it half held.
     fn cut_in_background(&self, task: impl std::future::Future<Output = ()> + 'static) {
-        ScopedTask::spawn(self.episodes.origin_scope(), task);
+        ScopedTask::spawn(self.stills.origin_scope(), task);
     }
 }
 
-/// The posters one measurement's rows are shown with.
+/// The stills one index's rows are shown with.
 ///
-/// A handle on the curation's cache, not a cache of its own: it is a
-/// component prop, so it is copied into every row of an index.
+/// A handle on the curation's cache and on this index's own cut, not a cache
+/// of its own: it is a component prop, so it is copied into every row.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct PosterFrames {
     cache: PosterCache,
+    cut: Memo<Option<PosterCut>>,
 }
 
 impl PosterFrames {
-    /// Posters for one measurement's rows. Changing the camera, or measuring
-    /// more episodes, changes what the pictures should be, so the cut is
-    /// compared and the decoded ones dropped when it differs.
+    /// Stills for one index's rows.
     pub(super) fn use_frames(cut: Option<PosterCut>) -> Self {
         let cache = use_context::<PosterCache>();
-        use_effect(use_reactive((&cut,), move |(cut,)| cache.follow(cut)));
-        Self { cache }
+        let cut = use_memo(use_reactive((&cut,), |(cut,)| cut));
+        use_effect(move || cache.follow(cut.read().as_ref().map(|cut| cut.dataset.clone())));
+        Self { cache, cut }
     }
 
     /// What one row's poster slot shows. A row that was annotated with its
     /// poster answers from itself and never reads the cache, so filling the
     /// cache re-renders only the rows that are waiting on it.
-    pub(super) fn shown(&self, row: &SubtaskRow) -> ShownPoster {
-        if let Some(poster) = row.poster() {
-            return ShownPoster::Picture(poster.to_owned());
+    pub(super) fn shown(&self, still: &PosterStill) -> ShownPoster {
+        if let Some(poster) = &still.stored {
+            return ShownPoster::Picture(poster.clone());
         }
-        match self.cache.episodes.read().get(row.episode()) {
-            Some(EpisodePosters::Ready(posters)) => posters
-                .get(&row.start_time().to_bits())
-                .map_or(ShownPoster::Waiting, |poster| {
-                    ShownPoster::Picture(poster.clone())
-                }),
-            Some(EpisodePosters::Failed(reason)) => ShownPoster::Failed(reason.clone()),
-            Some(EpisodePosters::Loading) | None => ShownPoster::Waiting,
+        let Some(camera) = self.cut.read().as_ref().map(|cut| cut.camera.clone()) else {
+            return ShownPoster::Waiting;
+        };
+        let stills = self.cache.stills.read();
+        let key = still.key(&camera);
+        match stills.get(&key) {
+            Some(CutStill::Cut(poster)) => ShownPoster::Picture(poster.clone()),
+            Some(CutStill::Failed(reason)) => ShownPoster::Failed(reason.clone()),
+            // While its own still is cut, a row shows the nearest one already
+            // cut of the same episode, so moving a threshold re-cuts stills
+            // under pictures rather than under a column of blanks.
+            Some(CutStill::Cutting) | None => {
+                Self::nearest(&stills, &key).map_or(ShownPoster::Waiting, ShownPoster::Picture)
+            }
         }
     }
+    /// The cut still of `key`'s camera and episode nearest its instant.
+    fn nearest(stills: &BTreeMap<StillKey, CutStill>, key: &StillKey) -> Option<String> {
+        let at = f64::from_bits(key.at);
+        let episode = StillKey {
+            at: 0,
+            ..key.clone()
+        }..=StillKey {
+            at: u64::MAX,
+            ..key.clone()
+        };
+        stills
+            .range(episode)
+            .filter_map(|(other, still)| match still {
+                CutStill::Cut(poster) => Some(((f64::from_bits(other.at) - at).abs(), poster)),
+                CutStill::Cutting | CutStill::Failed(_) => None,
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+            .map(|(_, poster)| poster.clone())
+    }
 
-    /// Cut every poster this episode's rows still owe, unless that is already
-    /// done or under way. Called when a row scrolls into view.
+    /// Cut every still this episode's rows still owe that is neither cut nor
+    /// being cut. Called when a row scrolls into view.
     pub(super) fn request(self, episode: &EpisodeId) {
         let mut cache = self.cache;
-        let Some(cut) = cache.cut.peek().clone() else {
+        let Some(cut) = self.cut.peek().clone() else {
             return;
         };
-        if !cut.targets.owes(episode) || cache.episodes.peek().contains_key(episode) {
+        let owed = cut
+            .targets
+            .of_episode(episode)
+            .into_iter()
+            .filter(|at| {
+                let key = PosterStill::within(episode, (*at, *at)).key(&cut.camera);
+                !cache.stills.peek().contains_key(&key)
+            })
+            .collect::<Vec<_>>();
+        if owed.is_empty() {
             return;
         }
+        let key_of = {
+            let (camera, episode) = (cut.camera.clone(), episode.clone());
+            move |at: f64| StillKey {
+                camera: camera.clone(),
+                episode: episode.clone(),
+                at: at.to_bits(),
+            }
+        };
+        {
+            let mut stills = cache.stills.write();
+            for at in &owed {
+                stills.insert(key_of(*at), CutStill::Cutting);
+            }
+        }
         let episode = episode.clone();
-        cache
-            .episodes
-            .write()
-            .insert(episode.clone(), EpisodePosters::Loading);
         cache.cut_in_background(async move {
-            let outcome = match cut.decode(&episode).await {
-                Ok(posters) => EpisodePosters::Ready(posters),
-                Err(reason) => EpisodePosters::Failed(reason),
-            };
-            cache.episodes.write().insert(episode, outcome);
+            let outcome = cut.decode(&episode, &owed).await;
+            let mut stills = cache.stills.write();
+            for at in owed {
+                let still = match &outcome {
+                    Ok(posters) => posters.get(&at.to_bits()).cloned().map_or_else(
+                        || CutStill::Failed("No frame was recorded at this instant.".to_owned()),
+                        CutStill::Cut,
+                    ),
+                    Err(reason) => CutStill::Failed(reason.clone()),
+                };
+                stills.insert(key_of(at), still);
+            }
         });
     }
 }
@@ -375,14 +491,14 @@ impl ShownPoster {
 /// The mat is the same dark surface a camera panel uses while it waits, so a
 /// ranking does not flicker between paper and picture as it fills.
 #[component]
-pub(super) fn PosterFrame(row: SubtaskRow, frames: PosterFrames) -> Element {
-    // Through a memo, so an episode arriving in the cache re-renders the rows
-    // of that episode alone rather than every row on screen.
+pub(super) fn PosterFrame(still: PosterStill, frames: PosterFrames) -> Element {
+    // Through a memo, so a still arriving in the cache re-renders the rows
+    // waiting on it alone rather than every row on screen.
     let shown = use_memo(use_reactive(
-        (&row, &frames),
-        move |(row, frames): (SubtaskRow, PosterFrames)| frames.shown(&row),
+        (&still, &frames),
+        move |(still, frames): (PosterStill, PosterFrames)| frames.shown(&still),
     ));
-    let episode = row.episode().clone();
+    let episode = still.episode.clone();
     let shown = shown();
     let (state, picture, problem) = (
         shown.state(),
@@ -428,42 +544,41 @@ mod tests {
     }
 
     #[test]
-    fn only_a_row_without_a_poster_is_something_to_fetch() {
-        let waiting = row(EpisodeId::fixture(1), 4.0, 9.0);
-        let target = PosterTarget::of(&waiting).expect("a row without a poster is a target");
-        assert_eq!(target.episode, EpisodeId::fixture(1));
-        assert_eq!(target.moment, 6.5);
-        assert_eq!(target.row, 4.0_f64.to_bits());
+    fn only_a_still_without_a_stored_picture_is_something_to_fetch() {
+        let waiting = PosterStill::of_subtask(&row(EpisodeId::fixture(1), 4.0, 9.0));
+        assert_eq!(waiting.at, 6.5);
+        let stored = PosterStill::of_subtask(
+            &row(EpisodeId::fixture(1), 4.0, 9.0)
+                .with_poster("data:image/jpeg;base64,AAAA".to_owned()),
+        );
         assert_eq!(
-            PosterTarget::of(&waiting.with_poster("data:image/jpeg;base64,AAAA".to_owned())),
-            None
+            PosterTargets::of(&[waiting.clone(), stored]).0,
+            [(EpisodeId::fixture(1), 6.5)]
+        );
+        // An episode's still is its middle.
+        assert_eq!(
+            PosterStill::within(&EpisodeId::fixture(2), (0.0, 30.0)).at,
+            15.0
         );
     }
 
     #[test]
-    fn an_episode_whose_rows_arrived_with_their_posters_is_never_asked_for() {
+    fn one_query_covers_the_instants_one_episode_owes() {
         let (measured, older) = (EpisodeId::fixture(1), EpisodeId::fixture(2));
         let posted = |episode: &EpisodeId, start: f64| {
-            row(episode.clone(), start, start + 2.0)
-                .with_poster("data:image/jpeg;base64,AAAA".to_owned())
+            PosterStill::of_subtask(
+                &row(episode.clone(), start, start + 2.0)
+                    .with_poster("data:image/jpeg;base64,AAAA".to_owned()),
+            )
         };
         let targets = PosterTargets::of(&[
             posted(&measured, 0.0),
             posted(&measured, 4.0),
-            row(older.clone(), 0.0, 3.0),
-            row(older.clone(), 3.0, 8.0),
+            PosterStill::of_subtask(&row(older.clone(), 0.0, 3.0)),
+            PosterStill::within(&older, (3.0, 8.0)),
         ]);
-        assert!(!targets.owes(&measured));
-        assert!(targets.owes(&older));
         assert!(targets.of_episode(&measured).is_empty());
-        assert_eq!(
-            targets
-                .of_episode(&older)
-                .iter()
-                .map(|target| target.moment)
-                .collect::<Vec<_>>(),
-            [1.5, 5.5]
-        );
+        assert_eq!(targets.of_episode(&older), [1.5, 5.5]);
         // A whole measurement carrying its posters has nothing to fetch.
         assert_eq!(
             PosterTargets::of(&[posted(&measured, 0.0)]),
@@ -472,21 +587,41 @@ mod tests {
     }
 
     #[test]
-    fn the_moments_of_one_episodes_rows_run_forward() {
-        // Rows are stored in time order and never overlap, so their middles
-        // are in order too: the windows a poster query asks for never cross.
-        let episode = [
-            row(EpisodeId::fixture(1), 0.0, 4.0),
-            row(EpisodeId::fixture(1), 4.0, 5.0),
-            row(EpisodeId::fixture(1), 5.0, 8.5),
-        ];
-        let moments = episode.iter().map(SubtaskRow::midpoint).collect::<Vec<_>>();
-        assert!(moments.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(
-            moments
-                .iter()
-                .zip(episode.iter())
-                .all(|(moment, row)| *moment > row.start_time() && *moment < row.end_time())
+    fn a_still_being_cut_stands_in_with_the_nearest_cut_one_of_its_episode() {
+        let cut = |episode: u32, at: f64, poster: &str| {
+            (
+                PosterStill::within(&EpisodeId::fixture(episode), (at, at)).key("/top"),
+                CutStill::Cut(poster.to_owned()),
+            )
+        };
+        let stills = BTreeMap::from([
+            cut(1, 2.0, "early"),
+            cut(1, 9.0, "late"),
+            cut(2, 5.0, "other"),
+        ]);
+        let wanted = |at: f64| PosterStill::within(&EpisodeId::fixture(1), (at, at)).key("/top");
+        assert_eq!(
+            PosterFrames::nearest(&stills, &wanted(3.0)).as_deref(),
+            Some("early")
+        );
+        assert_eq!(
+            PosterFrames::nearest(&stills, &wanted(7.0)).as_deref(),
+            Some("late")
+        );
+        let elsewhere = PosterStill::within(&EpisodeId::fixture(3), (1.0, 1.0)).key("/top");
+        assert_eq!(PosterFrames::nearest(&stills, &elsewhere), None);
+        let wrist = PosterStill::within(&EpisodeId::fixture(1), (3.0, 3.0)).key("/wrist");
+        assert_eq!(PosterFrames::nearest(&stills, &wrist), None);
+    }
+
+    #[test]
+    fn a_still_is_one_picture_per_camera_episode_and_instant() {
+        let still = PosterStill::within(&EpisodeId::fixture(1), (2.0, 4.0));
+        assert_eq!(still.key("/top"), still.clone().key("/top"));
+        assert_ne!(still.key("/top"), still.key("/wrist"));
+        assert_ne!(
+            still.key("/top"),
+            PosterStill::within(&EpisodeId::fixture(1), (2.0, 6.0)).key("/top")
         );
     }
 }

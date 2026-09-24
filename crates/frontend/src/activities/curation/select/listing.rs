@@ -9,19 +9,19 @@ use crate::activities::curation::document::{
     CurationNodeKind, EpisodeFact, MomentRow, Selection, SubtaskRow,
 };
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
-use crate::activities::curation::moments::MomentEvidence;
+use crate::activities::curation::moments::{MomentEvidence, Pace};
 use crate::activities::curation::population::Population;
-use crate::activities::curation::poster::{PosterCut, PosterFrames};
+use crate::activities::curation::poster::{PosterCut, PosterFrames, StillCamera};
 use crate::activities::curation::review::{
-    EpisodeOrder, EvidenceHeading, SliceEntry, SubtaskContext, SubtaskEntry, SubtaskEvidence,
-    SubtaskReview, SubtaskStanding,
+    EpisodeOrder, EvidenceHeading, IndexBar, RowStanding, SliceEntry, SliceFace, SubtaskContext,
+    SubtaskEntry, SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus};
-use crate::activities::episode::{Episode, EpisodeInspection};
+use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
+use spiral_robotics_common::curation::progress::ProgressScorer;
 use spiral_robotics_common::datasets::EpisodeId;
-use spiral_robotics_ui::EmptyState;
 
 /// The items on the listed side, by their place in the input, and the one
 /// playing in the tab in front when it is on this side.
@@ -58,91 +58,177 @@ impl ListedItems {
     fn first_place(&self, view: &SelectView) -> Option<(EpisodeId, Option<(f64, f64)>)> {
         self.items.first().and_then(|item| view.place(*item))
     }
-}
-
-/// What a whole-episode row says about its episode beside its name: its
-/// length and its messages, less the one the rule already prints in the
-/// score column.
-struct EpisodeFacts<'a>(&'a Episode);
-
-impl<'a> EpisodeFacts<'a> {
-    fn of(episode: &'a Episode) -> Self {
-        Self(episode)
-    }
-    fn line(&self, judged: Option<EpisodeFact>) -> Vec<String> {
-        [EpisodeFact::DurationSeconds, EpisodeFact::Messages]
-            .into_iter()
-            .filter(|fact| Some(*fact) != judged)
-            .filter_map(|fact| {
-                let reading = fact.reading(self.0)?;
-                Some(match fact {
-                    EpisodeFact::Messages => format!("{reading} messages"),
-                    _ => reading,
-                })
-            })
-            .collect()
+    /// Where the chosen item is in the listing, for the list's one tab stop.
+    fn chosen_position(&self) -> Option<usize> {
+        let chosen = self.chosen?;
+        self.items.iter().position(|item| *item == chosen)
     }
 }
 
-/// What an empty side says, rather than an empty column.
+/// One side of the rule, laid out the same way whatever it lists and however
+/// much of it there is: the sides over the index, the recording beside it.
 #[component]
-fn NothingListed(view: SelectView, listed_kept: bool) -> Element {
+fn SideReview(
+    side: ListedSide,
+    /// The Kept and Left out segments, over the index they switch.
+    sides: Element,
+    /// The rows, or nothing when this side is empty.
+    rows: Option<Element>,
+    evidence: Element,
+) -> Element {
     rsx! {
-        EmptyState { p { "{view.empty_side(listed_kept)}" } }
+        SubtaskReview {
+            index: rsx! {
+                IndexBar { {sides} }
+                match rows {
+                    Some(rows) => rows,
+                    None => rsx! {
+                        p { class: "curation-review-note", role: "status", "{side.view.empty_side(side.listed_kept)}" }
+                    },
+                }
+            },
+            evidence,
+        }
+    }
+}
+
+/// Which side of a Select's rule a listing shows: the Select, whether the
+/// rule keeps each item that reaches it, and whether the kept side is the
+/// one listed.
+#[derive(Clone, PartialEq)]
+pub(super) struct ListedSide {
+    view: SelectView,
+    kept: Vec<bool>,
+    listed_kept: bool,
+}
+
+impl ListedSide {
+    pub(super) fn new(view: SelectView, kept: Vec<bool>, listed_kept: bool) -> Self {
+        Self {
+            view,
+            kept,
+            listed_kept,
+        }
+    }
+    /// This side's items in the order the listing shows them: subtasks after
+    /// a search closest first, as the search lists them; the rest in input
+    /// order.
+    fn listed(&self, controller: CurationController, chosen: Option<usize>) -> ListedItems {
+        match &self.view.input {
+            Population::Subtasks { rows, .. } => {
+                let ranking = controller.with_payload(|payload| {
+                    payload.current_ranking(self.view.measure.id()).cloned()
+                });
+                ListedItems::best_first(&self.kept, self.listed_kept, chosen, |item| {
+                    ranking
+                        .as_ref()
+                        .and_then(|ranking| ranking.probability(&rows[item]))
+                })
+            }
+            _ => ListedItems::of(&self.kept, self.listed_kept, chosen),
+        }
+    }
+    /// How many rows this side lists: its items, or for moments the
+    /// stretches they run into — a moment is a second, not a row.
+    pub(super) fn rows(&self, controller: CurationController) -> usize {
+        let listed = self.listed(controller, None);
+        match &self.view.input {
+            Population::Moments(rows) => Stretch::of(rows, &listed.items).len(),
+            _ => listed.items.len(),
+        }
+    }
+    /// Where this side's first row plays: an episode whole, or a subtask's or
+    /// a stretch's span.
+    pub(super) fn opening(
+        &self,
+        controller: CurationController,
+    ) -> Option<(EpisodeId, Option<(f64, f64)>)> {
+        let listed = self.listed(controller, None);
+        match &self.view.input {
+            Population::Moments(rows) => Stretch::of(rows, &listed.items)
+                .first()
+                .map(|stretch| (stretch.episode.clone(), Some(stretch.span))),
+            _ => listed.first_place(&self.view),
+        }
     }
 }
 
 #[component]
 pub(super) fn EpisodeListing(
     controller: CurationController,
-    view: SelectView,
-    kept: Vec<bool>,
-    listed_kept: bool,
+    side: ListedSide,
     tabs: OpenEpisodes,
+    sides: Element,
 ) -> Element {
+    let view = side.view.clone();
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
-    let listed = ListedItems::of(&kept, listed_kept, chosen);
-    let first = listed.first_place(&view);
+    let listed = side.listed(controller, chosen);
+    let first = side.opening(controller);
     use_effect(use_reactive((&first,), move |(first,)| {
         tabs.open_first(first)
     }));
-    let Population::Episodes(episodes) = &view.input else {
-        return rsx! {};
-    };
-    if listed.items.is_empty() {
-        return rsx! { NothingListed { view: view.clone(), listed_kept } };
-    }
-    let featured = controller.with_payload(|payload| payload.configured_camera());
+    let episodes = view.input.episodes();
     let fact = match &view.selection {
         Selection::Episodes { fact, .. } => Some(*fact),
         _ => None,
     };
+    let labels = EpisodeLabels::of(view.sample.episodes().iter().map(Episode::facts));
+    let faces = listed
+        .items
+        .iter()
+        .filter_map(|item| {
+            let episode = view.sample.episode(episodes.get(*item)?)?;
+            let face = SliceFace::episode(episode, labels.label(episode.facts()).head());
+            // The judged fact is the row's measure, so it is not said twice.
+            let face = match fact {
+                Some(EpisodeFact::DurationSeconds) => face.saying(
+                    labels
+                        .label(episode.facts())
+                        .head()
+                        .map(|_| Episode::listed_name_of(episode.id()))
+                        .into_iter()
+                        .collect(),
+                ),
+                _ => face,
+            };
+            let face = match fact.and_then(|fact| Some((fact, fact.reading(episode)?))) {
+                Some((fact, reading)) => face.measured(reading, fact.label()),
+                None => face,
+            };
+            Some((*item, episode.id().clone(), face))
+        })
+        .collect::<Vec<_>>();
+    let camera = StillCamera::use_camera(controller, None);
+    let stills = faces
+        .iter()
+        .map(|(_, _, face)| face.still().clone())
+        .collect::<Vec<_>>();
+    let frames = PosterFrames::use_frames(PosterCut::of(
+        Some(view.sample.dataset()),
+        camera.as_deref(),
+        &stills,
+    ));
+    let featured = controller.with_payload(|payload| payload.configured_camera());
     let sample = view.sample.clone();
+    let stop = listed.chosen_position();
     rsx! {
-        SubtaskReview {
-            index: rsx! {
+        SideReview {
+            side,
+            sides,
+            rows: (!faces.is_empty()).then(|| rsx! {
                 ol { class: "curation-entries", "aria-label": "Episodes on this side of the rule",
-                    for item in listed.items.iter().copied() {
-                        {
-                            let id = episodes[item].clone();
-                            let episode = view.sample.episode(&id);
-                            let facts = episode.map(|episode| EpisodeFacts::of(episode).line(fact)).unwrap_or_default();
-                            let score = fact.zip(episode).and_then(|(fact, episode)| fact.reading(episode));
-                            rsx! {
-                                SliceEntry {
-                                    key: "{id}",
-                                    title: Episode::listed_name_of(&id),
-                                    facts,
-                                    score,
-                                    score_meaning: fact.map(|fact| fact.label().to_owned()),
-                                    chosen: listed.chosen == Some(item),
-                                    on_select: move |()| tabs.open(&id, None),
-                                }
-                            }
+                    for (position, (item, id, face)) in faces.into_iter().enumerate() {
+                        SliceEntry {
+                            key: "{id}",
+                            face,
+                            frames,
+                            standing: RowStanding::plain(listed.chosen == Some(item))
+                                .roving(TabStop::at(position, stop)),
+                            on_select: move |()| tabs.open(&id, None),
                         }
                     }
                 }
-            },
+            }),
             evidence: rsx! {
                 EpisodeTabs {
                     open: tabs,
@@ -155,7 +241,7 @@ pub(super) fn EpisodeListing(
                             EvidenceHeading {
                                 subject: episode.name(),
                                 episode: Some(episode.id().clone()),
-                                facts: EpisodeFacts::of(&episode).line(None),
+                                facts: EpisodeFact::DurationSeconds.reading(&episode).into_iter().collect::<Vec<_>>(),
                             }
                             div { class: "curation-review-player",
                                 EpisodeInspection { episode, featured_camera: featured.clone() }
@@ -171,22 +257,17 @@ pub(super) fn EpisodeListing(
 #[component]
 pub(super) fn SubtaskListing(
     controller: CurationController,
-    view: SelectView,
-    kept: Vec<bool>,
-    listed_kept: bool,
+    side: ListedSide,
     tabs: OpenEpisodes,
+    sides: Element,
 ) -> Element {
+    let view = side.view.clone();
     let rows = view.input.subtasks().to_vec();
     let ranking =
         controller.with_payload(|payload| payload.current_ranking(view.measure.id()).cloned());
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
-    // After a search the closest subtasks come first, as the search lists them.
-    let listed = ListedItems::best_first(&kept, listed_kept, chosen, |item| {
-        ranking
-            .as_ref()
-            .and_then(|ranking| ranking.probability(&rows[item]))
-    });
-    let first = listed.first_place(&view);
+    let listed = side.listed(controller, chosen);
+    let first = side.opening(controller);
     use_effect(use_reactive((&first,), move |(first,)| {
         tabs.open_first(first)
     }));
@@ -212,22 +293,23 @@ pub(super) fn SubtaskListing(
         .iter()
         .map(|item| rows[*item].clone())
         .collect::<Vec<_>>();
-    let frames = PosterFrames::use_frames(PosterCut::of(&context, &listed_rows));
-    if listed.items.is_empty() {
-        return rsx! { NothingListed { view: view.clone(), listed_kept } };
-    }
+    let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &listed_rows));
+    let stop = listed.chosen_position();
     let opening = view.clone();
     rsx! {
-        SubtaskReview {
-            index: rsx! {
+        SideReview {
+            side,
+            sides,
+            rows: (!listed.items.is_empty()).then(|| rsx! {
                 ol { class: "curation-entries", "aria-label": "Subtasks on this side of the rule",
-                    for item in listed.items.iter().copied() {
+                    for (position, item) in listed.items.iter().copied().enumerate() {
                         {
                             let row = rows[item].clone();
                             let standing = match ranking.as_ref().and_then(|ranking| ranking.probability(&row)) {
-                                Some(probability) => SubtaskStanding::scored(probability, true, listed.chosen == Some(item)),
-                                None => SubtaskStanding::plain(listed.chosen == Some(item)),
-                            };
+                                Some(probability) => RowStanding::scored(probability, true, listed.chosen == Some(item)),
+                                None => RowStanding::plain(listed.chosen == Some(item)),
+                            }
+                            .roving(TabStop::at(position, stop));
                             let opening = opening.clone();
                             rsx! {
                                 SubtaskEntry {
@@ -242,7 +324,7 @@ pub(super) fn SubtaskListing(
                         }
                     }
                 }
-            },
+            }),
             evidence: rsx! {
                 EpisodeTabs {
                     open: tabs,
@@ -254,11 +336,7 @@ pub(super) fn SubtaskListing(
                         rsx! {
                             SubtaskEvidence {
                                 play: tab.play(),
-                                episode_rows: rows
-                                    .iter()
-                                    .filter(|other| other.episode() == row.episode())
-                                    .cloned()
-                                    .collect::<Vec<_>>(),
+                                intervals: SubtaskIntervals::around(&row, &rows),
                                 context: context.clone(),
                                 on_open: {
                                     let focus = annotation.clone().map(|annotation| {
@@ -326,63 +404,150 @@ impl Stretch {
     }
 }
 
+/// One episode's stretches on one side of the rule, and how much of the
+/// episode they hold, as its heading says it.
+struct StretchGroup {
+    episode: EpisodeId,
+    /// The stretches' places in the listing.
+    positions: Vec<usize>,
+    holds: String,
+}
+
+impl StretchGroup {
+    fn of(stretches: &[Stretch], view: &SelectView, listed_kept: bool) -> Vec<Self> {
+        let mut groups = Vec::<Self>::new();
+        for (position, stretch) in stretches.iter().enumerate() {
+            match groups.last_mut() {
+                Some(group) if group.episode == stretch.episode => group.positions.push(position),
+                _ => groups.push(Self {
+                    episode: stretch.episode.clone(),
+                    positions: vec![position],
+                    holds: String::new(),
+                }),
+            }
+        }
+        for group in &mut groups {
+            let seconds = group
+                .positions
+                .iter()
+                .map(|position| stretches[*position].span)
+                .map(|(start, end)| (end - start).max(0.0))
+                .sum::<f64>();
+            let verb = if listed_kept { "keeps" } else { "leaves out" };
+            group.holds = match view.sample.duration(&group.episode) {
+                Some(duration) => format!(
+                    "{verb} {} of {}",
+                    seconds.clock_label(),
+                    duration.clock_label()
+                ),
+                None => format!("{verb} {}", seconds.clock_label()),
+            };
+        }
+        groups
+    }
+}
+
 #[component]
 pub(super) fn MomentListing(
-    view: SelectView,
-    kept: Vec<bool>,
-    listed_kept: bool,
+    controller: CurationController,
+    side: ListedSide,
     tabs: OpenEpisodes,
+    sides: Element,
 ) -> Element {
+    let view = side.view.clone();
     let rows = match &view.input {
         Population::Moments(rows) => rows.clone(),
         _ => Vec::new(),
     };
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
-    let listed = ListedItems::of(&kept, listed_kept, chosen);
+    let listed = side.listed(controller, chosen);
     let stretches = Stretch::of(&rows, &listed.items);
-    // A stretch opens whole, so the first one plays from its first second to
-    // its last rather than for one second.
-    let first = stretches
-        .first()
-        .map(|stretch| (stretch.episode.clone(), Some(stretch.span)));
+    // A stretch opens whole, so the first one plays from its first second
+    // rather than a single moment's.
+    let first = side.opening(controller);
     use_effect(use_reactive((&first,), move |(first,)| {
         tabs.open_first(first)
     }));
-    if listed.items.is_empty() {
-        return rsx! { NothingListed { view: view.clone(), listed_kept } };
-    }
     let shown = stretches.iter().position(|stretch| {
         listed
             .chosen
             .is_some_and(|item| stretch.items.contains(&item))
     });
+    // One heading per episode, as Break down lists its subtasks: the rows
+    // under it are its stretches, named by their spans, and the heading says
+    // how much of the episode this side holds.
+    let groups = StretchGroup::of(&stretches, &view, side.listed_kept);
+    let faces = stretches
+        .iter()
+        .map(|stretch| {
+            let duration = view.sample.duration(&stretch.episode).unwrap_or_default();
+            let face = SliceFace::stretch(&stretch.episode, stretch.span, duration);
+            match stretch.mean {
+                Some(mean) => face.measured(
+                    Pace::label(mean),
+                    "Mean pace over this stretch; 1× is expert pace",
+                ),
+                None => face,
+            }
+        })
+        .collect::<Vec<_>>();
+    // The stills are of the camera the pace was read from.
+    let camera = StillCamera::use_camera(controller, Some(ProgressScorer::WarpSimBottles.camera()));
+    let stills = faces
+        .iter()
+        .map(|face| face.still().clone())
+        .collect::<Vec<_>>();
+    let frames = PosterFrames::use_frames(PosterCut::of(
+        Some(view.sample.dataset()),
+        camera.as_deref(),
+        &stills,
+    ));
+    let front = tabs.front().map(|tab| tab.episode().clone());
     let cutoff = view.selection.threshold();
     let evidence = view.clone();
     rsx! {
-        SubtaskReview {
-            index: rsx! {
-                ol { class: "curation-entries", "aria-label": "Stretches of moments on this side of the rule",
-                    for (position , stretch) in stretches.iter().enumerate() {
-                        {
-                            let duration = view.sample.duration(&stretch.episode).unwrap_or_default().max(f64::EPSILON);
-                            let episode = stretch.episode.clone();
-                            let (start, end) = stretch.span;
-                            rsx! {
-                                SliceEntry {
-                                    key: "{stretch.episode}-{start}",
-                                    title: Episode::listed_name_of(&stretch.episode),
-                                    facts: vec![format!("{} – {}", start.clock_label(), end.clock_label())],
-                                    place: Some((start / duration, end / duration)),
-                                    score: stretch.mean.map(|mean| format!("{mean:.2}")),
-                                    score_meaning: "Mean progress per second over this stretch".to_owned(),
-                                    chosen: shown == Some(position),
-                                    on_select: move |()| tabs.open(&episode, Some((start, end))),
+        SideReview {
+            side,
+            sides,
+            rows: (!faces.is_empty()).then(|| rsx! {
+                ol { class: "curation-entries curation-entries-grouped", "aria-label": "Stretches of moments on this side of the rule, by episode",
+                    for group in groups {
+                        li { key: "{group.episode}", class: "curation-entries-group",
+                            "aria-current": (front.as_ref() == Some(&group.episode)).then_some("true"),
+                            h3 { class: "curation-entries-heading-slot",
+                                button {
+                                    r#type: "button",
+                                    class: "curation-entries-heading",
+                                    onclick: {
+                                        let episode = group.episode.clone();
+                                        move |_| tabs.open(&episode, None)
+                                    },
+                                    span { class: "curation-entries-heading-name", title: "{group.episode}",
+                                        "{Episode::name_of(&group.episode)}" }
+                                    span { class: "curation-entries-heading-count", "{group.holds}" }
+                                }
+                            }
+                            ol { class: "curation-entries",
+                                for position in group.positions {
+                                    {
+                                        let (episode, (start, end)) = (stretches[position].episode.clone(), stretches[position].span);
+                                        rsx! {
+                                            SliceEntry {
+                                                key: "{start}",
+                                                face: faces[position].clone(),
+                                                frames,
+                                                standing: RowStanding::plain(shown == Some(position))
+                                                    .roving(TabStop::at(position, shown)),
+                                                on_select: move |()| tabs.open(&episode, Some((start, end))),
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            },
+            }),
             evidence: rsx! {
                 EpisodeTabs {
                     open: tabs,
@@ -396,9 +561,19 @@ pub(super) fn MomentListing(
                             .filter(|row| row.episode() == tab.episode())
                             .cloned()
                             .collect::<Vec<_>>();
+                        // The stretch's span and its pace, as its row says them.
                         let facts = tab
                             .interval()
-                            .map(|(start, end)| vec![format!("{} – {}", start.clock_label(), end.clock_label())])
+                            .map(|(start, end)| {
+                                let within = moments
+                                    .iter()
+                                    .filter(|row| row.start_time() >= start && row.end_time() <= end)
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                let mut facts = vec![format!("{} – {}", start.clock_label(), end.clock_label())];
+                                facts.extend(Pace::mean(&within).map(|pace| format!("mean pace {}", Pace::label(pace))));
+                                facts
+                            })
                             .unwrap_or_default();
                         rsx! {
                             MomentEvidence {

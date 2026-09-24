@@ -16,9 +16,10 @@
     font-size: 12px;
   }
 
-  /* The ⚙ and what it opens. The fields are a popover hanging off the status
-     line, not a band across the workspace: after the first run they describe a
-     run that has already happened. */
+  /* What the pass runs with, said on the node's bar as the button that
+     changes it, and the popover it opens. The fields are not a band across
+     the workspace: after the first run they describe a run that has already
+     happened. */
   .curation-annotate-settings-slot {
     position: relative;
     display: flex;
@@ -28,7 +29,7 @@
   .curation-annotate-settings {
     position: absolute;
     top: calc(100% + 6px);
-    right: 0;
+    left: 0;
     z-index: 6;
     display: grid;
     width: 22rem;
@@ -42,7 +43,7 @@
     /* It comes out of the ⚙ it hangs from, so the press and the panel read as
        one movement rather than a panel appearing over the workspace. */
     animation: curation-annotate-settings-open 120ms cubic-bezier(0.16, 1, 0.3, 1);
-    transform-origin: top right;
+    transform-origin: top left;
   }
 
   @keyframes curation-annotate-settings-open {
@@ -51,6 +52,26 @@
       scale: 0.96;
       translate: 0 -4px;
     }
+  }
+
+  /* The summary reads as facts, not as a button's label: mono values between
+     separators, the gear leading them. */
+  .curation-node-bar-settings {
+    gap: 8px;
+    margin-left: -8px;
+    color: var(--tone-ink-soft);
+    font-weight: 400;
+  }
+
+  .curation-node-bar-settings > code + code::before {
+    content: "·";
+    margin-right: 8px;
+    color: var(--tone-ink-faint);
+  }
+
+  .curation-node-bar-missing {
+    color: var(--tone-caution);
+    font-weight: 500;
   }
 
   /* Re-annotating replaces work already paid for, so it is a quiet link at the

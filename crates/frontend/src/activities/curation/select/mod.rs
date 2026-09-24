@@ -13,14 +13,15 @@ use super::document::{CurationNode, CurationNodeKind, ProgressCurve, Selection, 
 use super::episode_map::{EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, SegmentPaint};
 use super::episode_tabs::{OpenEpisode, OpenEpisodes};
 use super::population::{EpisodeSample, Population, Slice};
+use super::review::{Counted, NodeBar, NodeReach};
 use super::state::CurationController;
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
-use listing::{EpisodeListing, MomentListing, SubtaskListing};
-use rule::SelectRule;
+use listing::{EpisodeListing, ListedSide, MomentListing, SubtaskListing};
+use rule::{SelectNode, SelectRule};
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{ActionPurpose, EmptyState, ModeButton, ModeGroup, Notice, NoticeTone};
-use strip::{StripDot, ThresholdScale, ThresholdStrip};
+use strip::{AxisUnit, StripDot, Threshold, ThresholdScale, ThresholdStrip};
 
 /// Which side of the rule the index lists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,13 +104,33 @@ impl SelectView {
             .sum()
     }
     /// How much recording the rule keeps, which is what training is finally
-    /// given. The counts are the Kept and Left out segments beside it.
+    /// given, of what reaches it. The counts are the Kept and Left out
+    /// segments over the index.
     fn tally(&self) -> String {
         format!(
-            "{} of {} recorded",
+            "Keeps {} of {}",
             self.kept_seconds().clock_label(),
             self.input_seconds().clock_label(),
         )
+    }
+    /// How many of the episodes that reach the rule keep anything, which is
+    /// what the map under the strip draws.
+    fn kept_in(&self) -> String {
+        let reached = self.input.episodes();
+        let kept = self.output.episodes();
+        format!(
+            "Kept in {} of {}",
+            kept.len(),
+            Counted::episodes(reached.len())
+        )
+    }
+    /// How the rule's value reads on its axis.
+    fn unit(&self) -> AxisUnit {
+        match self.selection.basis() {
+            SelectionBasis::Similarity => AxisUnit::Percent,
+            SelectionBasis::Progress => AxisUnit::Pace,
+            SelectionBasis::EpisodeFacts | SelectionBasis::Categories => AxisUnit::Plain,
+        }
     }
     /// Where one item of the input plays: its episode, and its stretch unless
     /// the item is the episode whole.
@@ -212,11 +233,9 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
             }
         };
     };
-    let unmeasured = view.unmeasured(controller);
     let spans = EpisodeSpans::of(&view.sample);
     let kept = view.kept();
     let listed_kept = showing() == Showing::Kept;
-    let left_out = kept.iter().filter(|kept| !**kept).count();
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
     let open = {
         let kept = kept.clone();
@@ -231,80 +250,107 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
         }
     };
     let dots = StripDot::for_view(&view, controller, &kept);
-    // One axis for the rule's slider and the strip, so the line on the strip
-    // is always where the slider stands.
-    let scale = view.selection.threshold().map(|threshold| {
-        ThresholdScale::of(
-            dots.as_deref().unwrap_or_default(),
-            threshold,
-            view.selection.basis() == SelectionBasis::Similarity,
+    // One axis for the strip and the slider on it, so the thumb is always
+    // where the threshold line stands.
+    let threshold = view.selection.threshold().map(|value| {
+        Threshold::new(
+            value,
+            ThresholdScale::of(dots.as_deref().unwrap_or_default(), value, view.unit()),
+            view.selection.keeps_at_least(),
         )
     });
+    let rule = SelectNode::new(view.node.clone(), controller);
+    let selection = view.selection.clone();
+    // Switching sides plays that side's first row, so the recording beside
+    // the list is always one of the rows it lists.
+    let kept_side = ListedSide::new(view.clone(), kept.clone(), true);
+    let left_side = ListedSide::new(view.clone(), kept.clone(), false);
+    let (kept_rows, left_rows) = (kept_side.rows(controller), left_side.rows(controller));
+    let sides = rsx! {
+        ModeGroup { label: "Which side of the rule to list".to_owned(), class: "curation-select-sides".to_owned(),
+            ModeButton {
+                purpose: ActionPurpose::Select,
+                checked: listed_kept,
+                onclick: move |_| {
+                    if showing() != Showing::Kept {
+                        showing.set(Showing::Kept);
+                        if let Some((episode, span)) = kept_side.opening(controller) {
+                            tabs.open(&episode, span);
+                        }
+                    }
+                },
+                "Kept {kept_rows}"
+            }
+            ModeButton {
+                purpose: ActionPurpose::Select,
+                checked: !listed_kept,
+                onclick: move |_| {
+                    if showing() != Showing::LeftOut {
+                        showing.set(Showing::LeftOut);
+                        if let Some((episode, span)) = left_side.opening(controller) {
+                            tabs.open(&episode, span);
+                        }
+                    }
+                },
+                "Left out {left_rows}"
+            }
+        }
+    };
+    let side = ListedSide::new(view.clone(), kept.clone(), listed_kept);
     rsx! {
         section { class: "curation-select-workspace", "aria-label": "Select",
-            SelectRule { controller, view: view.clone(), scale }
-            if let Some(reason) = unmeasured {
-                Notice { tone: NoticeTone::Caution, "{reason}" }
+            NodeBar {
+                lead: rsx! { SelectRule { controller, view: view.clone(), threshold } },
+                note: view.unmeasured(controller),
+                reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
+                // Whether this is an output is the card's flag in the graph;
+                // the bar ends with what the rule gives training.
+                actions: rsx! {
+                    p { class: "curation-select-tally", role: "status", "{view.tally()}" }
+                },
             }
-            if let (Some(dots), Some(scale), Some(threshold)) = (dots, scale, view.selection.threshold()) {
-                ThresholdStrip {
-                    dots,
-                    scale,
-                    threshold,
-                    chosen,
-                    on_select: {
-                        let mut open = open.clone();
-                        move |item| open(item)
-                    },
-                }
-            }
-            // Where the kept parts lie inside their episodes. A rule over whole
-            // episodes keeps each one end to end or not at all, so its map
-            // would be a column of full bars saying what the counts below
-            // already say.
-            if !matches!(view.input, Population::Episodes(_)) {
+            if dots.is_some() || !matches!(view.input, Population::Episodes(_)) {
                 div { class: "curation-select-overview",
-                    EpisodeMap {
-                        lanes: EpisodeLanes::of(&view.input.episodes(), &view.item_slices(), &spans),
-                        // Kept in ink, left out faded; the Kept and Left out
-                        // segments under it say the same in words.
-                        paint: MapPaint::new(kept.iter().map(|kept| SegmentPaint::Kept(*kept)).collect(), chosen),
-                        on_select: {
-                            let mut open = open.clone();
-                            move |item| open(item)
-                        },
+                    if let (Some(dots), Some(threshold)) = (dots, threshold) {
+                        ThresholdStrip {
+                            dots,
+                            threshold,
+                            chosen,
+                            on_select: {
+                                let mut open = open.clone();
+                                move |item| open(item)
+                            },
+                            on_threshold: move |value| rule.set(selection.clone().with_threshold(value)),
+                        }
+                    }
+                    // Where the kept parts lie inside their episodes. A rule over
+                    // whole episodes keeps each one end to end or not at all, so
+                    // its map would be a column of full bars saying what the
+                    // counts already say.
+                    if !matches!(view.input, Population::Episodes(_)) {
+                        EpisodeMap {
+                            lanes: EpisodeLanes::of(&view.input.episodes(), &view.item_slices(), &spans),
+                            // Kept in ink, left out faded; the Kept and Left out
+                            // segments over the index say the same in words.
+                            paint: MapPaint::new(kept.iter().map(|kept| SegmentPaint::Kept(*kept)).collect(), chosen),
+                            summary: view.kept_in(),
+                            on_select: {
+                                let mut open = open.clone();
+                                move |item| open(item)
+                            },
+                        }
                     }
                 }
-            }
-            div { class: "curation-select-filter",
-                ModeGroup { label: "Which side of the rule to list".to_owned(), class: "curation-select-sides".to_owned(),
-                    ModeButton {
-                        purpose: ActionPurpose::Select,
-                        checked: listed_kept,
-                        onclick: move |_| showing.set(Showing::Kept),
-                        "Kept {view.output.len()}"
-                    }
-                    ModeButton {
-                        purpose: ActionPurpose::Select,
-                        checked: !listed_kept,
-                        onclick: move |_| showing.set(Showing::LeftOut),
-                        "Left out {left_out}"
-                    }
-                }
-                // The counts are the segments; beside them, the recording
-                // they add up to. Whether this is an output is the card's
-                // flag in the graph.
-                p { class: "curation-select-tally", role: "status", "{view.tally()}" }
             }
             match &view.input {
                 Population::Episodes(_) => rsx! {
-                    EpisodeListing { controller, view: view.clone(), kept, listed_kept, tabs }
+                    EpisodeListing { controller, side, tabs, sides }
                 },
                 Population::Subtasks { .. } => rsx! {
-                    SubtaskListing { controller, view: view.clone(), kept, listed_kept, tabs }
+                    SubtaskListing { controller, side, tabs, sides }
                 },
                 Population::Moments(_) => rsx! {
-                    MomentListing { view: view.clone(), kept, listed_kept, tabs }
+                    MomentListing { controller, side, tabs, sides }
                 },
             }
         }

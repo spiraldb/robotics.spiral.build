@@ -9,13 +9,19 @@ mod scoring;
 
 use super::document::{CurationNode, CurationNodeKind, MomentDetection, MomentRow, ProgressCurve};
 use super::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
+use super::poster::{PosterCut, PosterFrames, PosterStill};
 use super::rerun::ConfirmedRerun;
 use super::review::{
-    EvidenceHeading, FailedEpisodes, MeasurementStatus, SliceEntry, SubtaskReview,
+    Counted, EvidenceHeading, FailedEpisodes, IndexBar, NodeBar, NodeNotes, NodeReach, RowStanding,
+    SliceEntry, SliceFace, SliceShape, SubtaskReview, TabStop, TraceLine,
 };
 use super::state::{CurationController, RunState};
-use crate::activities::episode::{Episode, EpisodeInspection, PlayRequest, StreamCatalog};
-use crate::components::timeline::{NumericTrack, TimelineInterval, TimelineSample, TimelineTrack};
+use crate::activities::episode::{
+    Episode, EpisodeInspection, EpisodeLabels, PlayRequest, StreamCatalog,
+};
+use crate::components::timeline::{
+    NumericReading, NumericTrack, TimelineInterval, TimelineSample, TimelineTrack,
+};
 use crate::format::ClockPresentation as _;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
@@ -86,21 +92,97 @@ impl DetectionInput {
     }
 }
 
+/// One episode as the index lists it: scored, failed, or neither yet.
+#[derive(Clone, PartialEq)]
+enum ListedEpisode {
+    Scored { episode: Episode, pace: Option<f64> },
+    Failed { episode: Episode, reason: String },
+}
+
+impl ListedEpisode {
+    fn episode(&self) -> &Episode {
+        match self {
+            Self::Scored { episode, .. } | Self::Failed { episode, .. } => episode,
+        }
+    }
+}
+
+impl DetectionInput {
+    /// The index in the order it is read: failures first, since they need
+    /// something done, then the scored episodes slowest first — where the
+    /// time a training set would waste is. Episodes not scored yet are only
+    /// counted.
+    fn listed(&self) -> Vec<ListedEpisode> {
+        let mut failed = Vec::new();
+        let mut scored = Vec::new();
+        for episode in &self.episodes {
+            let failure = self
+                .settings
+                .failed_episodes()
+                .iter()
+                .find(|failure| failure.episode() == episode.id());
+            if let Some(failure) = failure {
+                failed.push(ListedEpisode::Failed {
+                    episode: episode.clone(),
+                    reason: failure.reason().to_owned(),
+                });
+            } else if self.settings.is_completed(episode.id()) {
+                scored.push(ListedEpisode::Scored {
+                    episode: episode.clone(),
+                    pace: Pace::mean(&self.moments_of(episode.id())),
+                });
+            }
+        }
+        let slowest = |listed: &ListedEpisode| match listed {
+            ListedEpisode::Scored { pace, .. } => pace.unwrap_or(f64::INFINITY),
+            ListedEpisode::Failed { .. } => f64::NEG_INFINITY,
+        };
+        scored.sort_by(|left, right| slowest(left).total_cmp(&slowest(right)));
+        failed.into_iter().chain(scored).collect()
+    }
+    /// The episode's pace across its recording, drawn small in its row: its
+    /// finer curve when the detection kept one, else its moments.
+    fn trace(&self, episode: &Episode) -> TraceLine {
+        let duration = episode
+            .facts()
+            .duration_seconds()
+            .unwrap_or_default()
+            .max(f64::EPSILON);
+        let points = match self.settings.curve(episode.id()) {
+            Some(curve) => curve
+                .samples()
+                .map(|(seconds, value)| (seconds / duration, value))
+                .collect(),
+            None => self
+                .moments_of(episode.id())
+                .iter()
+                .map(|row| {
+                    (
+                        f64::midpoint(row.start_time(), row.end_time()) / duration,
+                        row.velocity(),
+                    )
+                })
+                .collect(),
+        };
+        TraceLine::new(points, Pace::TRACE_DOMAIN, 1.0)
+    }
+}
+
 /// The workspace shown for a selected Identify unproductive moments node.
 #[component]
 pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -> Element {
     let studio = StudioProjectState::current();
     let tabs = OpenEpisodes::use_open();
-    // The first scored episode, or before anything is scored the first
-    // episode at all, opens by itself, so the recording column is never an
-    // empty half beside the index.
+    // The first episode listed — the slowest scored one, or before anything
+    // is scored the first episode at all — opens by itself, so the recording
+    // column is never an empty half beside the index.
     let first = node.clone();
     use_effect(move || {
         let opening = DetectionInput::of(controller, &first).and_then(|input| {
             input
-                .moments
+                .listed()
                 .first()
-                .map(|row| row.episode().clone())
+                .map(|listed| listed.episode().id().clone())
                 .or_else(|| input.episodes.first().map(|episode| episode.id().clone()))
         });
         tabs.open_first(opening.map(|episode| (episode, None)));
@@ -132,9 +214,28 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
             .map(Episode::selection),
     )
     .filter(|cameras| !cameras.iter().any(|topic| topic == camera))
-    .map(|_| {
-        format!("Progress scoring reads the {camera} camera, which this dataset does not record.")
-    });
+    .map(|_| format!("Pace is read from {camera}, which this dataset does not record"));
+    let listed = input
+        .as_ref()
+        .map(DetectionInput::listed)
+        .unwrap_or_default();
+    let stills = listed
+        .iter()
+        .map(|listed| {
+            let episode = listed.episode();
+            PosterStill::within(
+                episode.id(),
+                (0.0, episode.facts().duration_seconds().unwrap_or_default()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let frames = PosterFrames::use_frames(PosterCut::of(
+        controller
+            .with_payload(|payload| payload.dataset().cloned())
+            .as_ref(),
+        Some(camera),
+        &stills,
+    ));
     let Some(input) = input else {
         return rsx! {
             section { class: "curation-moments-workspace",
@@ -150,17 +251,29 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     let pending = input.pending();
     let failed = input.failed();
     let scored = input.episodes.len() - pending.len();
+    let unscored = pending.len() - failed.len().min(pending.len());
     let rescore = {
         let start = start.clone();
         let every = input.episodes.clone();
         move |()| start(every.clone())
     };
     let shown = tabs.front().map(|tab| tab.episode().clone());
+    let chosen = listed
+        .iter()
+        .position(|listed| shown.as_ref() == Some(listed.episode().id()));
+    let labels = EpisodeLabels::of(input.episodes.iter().map(Episode::facts));
     let evidence = input.clone();
     rsx! {
         section { class: "curation-moments-workspace", "aria-label": "Identify unproductive moments",
-            MeasurementStatus {
-                note: unsupported.clone().or_else(|| FailedEpisodes::note(failed.len())),
+            NodeBar {
+                lead: rsx! {
+                    p { class: "curation-node-bar-reads",
+                        "Pace against expert demonstrations, read from "
+                        code { "{camera}" }
+                    }
+                },
+                note: NodeNotes::join([unsupported.clone(), FailedEpisodes::note(failed.len())]),
+                reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
                     if running {
                         Button {
@@ -174,17 +287,19 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                             if run == RunState::Stopping { "Stopping…" } else { "Stop" }
                         }
                     } else {
-                        if !pending.is_empty() {
-                            Button {
-                                purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
-                                disabled: unsupported.is_some(),
-                                title: "Score the {pending.len()} episodes not yet scored",
-                                onclick: {
-                                    let start = start.clone();
-                                    let pending = pending.clone();
-                                    move |_| start(pending.clone())
-                                },
-                                if pending.len() < input.episodes.len() { "Run {pending.len()} left" } else { "Run" }
+                        // Scoring runs on this machine and costs nothing, so
+                        // it can be asked again — which also draws the finer
+                        // pace line for episodes scored before it was kept.
+                        if scored > 0 && unsupported.is_none() {
+                            ConfirmedRerun {
+                                id: "curation-moments-rescore".to_owned(),
+                                label: "Re-score all".to_owned(),
+                                question: format!(
+                                    "Score all {} episodes again? This replaces the {} moments already stored.",
+                                    input.episodes.len(),
+                                    input.moments.len(),
+                                ),
+                                on_confirm: rescore,
                             }
                         }
                         if !failed.is_empty() {
@@ -200,20 +315,17 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                                 "Retry failed"
                             }
                         }
-                        // Scoring runs on this machine and costs nothing, so
-                        // it can be asked again — which also draws the finer
-                        // progress line for episodes scored before it was
-                        // kept.
-                        if scored > 0 && unsupported.is_none() {
-                            ConfirmedRerun {
-                                id: "curation-moments-rescore".to_owned(),
-                                label: "Re-score all".to_owned(),
-                                question: format!(
-                                    "Score all {} episodes again? This replaces the {} moments already stored.",
-                                    input.episodes.len(),
-                                    input.moments.len(),
-                                ),
-                                on_confirm: rescore,
+                        if !pending.is_empty() {
+                            Button {
+                                purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
+                                disabled: unsupported.is_some(),
+                                title: "Score the {pending.len()} episodes not yet scored",
+                                onclick: {
+                                    let start = start.clone();
+                                    let pending = pending.clone();
+                                    move |_| start(pending.clone())
+                                },
+                                if pending.len() < input.episodes.len() { "Run {pending.len()} left" } else { "Run" }
                             }
                         }
                     }
@@ -221,37 +333,43 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
             }
             SubtaskReview {
                 index: rsx! {
-                    ol { class: "curation-entries", "aria-label": "Episodes, each with the seconds it was scored in",
-                        for episode in input.episodes.iter() {
+                    if !listed.is_empty() {
+                        IndexBar {
+                            p { class: "curation-index-caption", "{Counted::episodes(listed.len())} · slowest first" }
+                        }
+                    }
+                    ol { class: "curation-entries", "aria-label": "Scored episodes, slowest first; each row ends with its mean pace",
+                        for (position, listed) in listed.iter().enumerate() {
                             {
+                                let episode = listed.episode().clone();
                                 let id = episode.id().clone();
-                                let moments = input.moments_of(&id);
-                                let failure = input
-                                    .settings
-                                    .failed_episodes()
-                                    .iter()
-                                    .find(|failure| failure.episode() == &id)
-                                    .map(|failure| failure.reason().to_owned());
-                                let facts = match (&failure, moments.is_empty()) {
-                                    (Some(reason), _) => vec![format!("Failed: {reason}")],
-                                    (None, true) => vec!["Not scored yet".to_owned()],
-                                    // A moment is a second, so its count only
-                                    // repeats the length.
-                                    (None, false) => vec![
-                                        episode.facts().duration_seconds().unwrap_or_default().clock_label(),
-                                    ],
+                                let label = labels.label(episode.facts());
+                                let face = SliceFace::episode(&episode, label.head());
+                                let face = match listed {
+                                    ListedEpisode::Scored { pace, .. } => face
+                                        .shaped(SliceShape::Trace(input.trace(&episode)))
+                                        .measured(pace.map(Pace::label).unwrap_or_else(|| "—".to_owned()), Pace::MEANING),
+                                    ListedEpisode::Failed { reason, .. } => face.saying(vec![format!("Failed: {reason}")]),
                                 };
                                 rsx! {
                                     SliceEntry {
                                         key: "{id}",
-                                        title: Episode::listed_name_of(&id),
-                                        facts,
-                                        score: MomentShare::of(&moments).label(),
-                                        score_meaning: MomentShare::MEANING.to_owned(),
-                                        chosen: shown.as_ref() == Some(&id),
+                                        face,
+                                        frames,
+                                        standing: RowStanding::plain(chosen == Some(position))
+                                            .roving(TabStop::at(position, chosen)),
                                         on_select: move |()| tabs.open(&id, None),
                                     }
                                 }
+                            }
+                        }
+                    }
+                    if unscored > 0 {
+                        p { class: "curation-index-footer",
+                            if listed.is_empty() {
+                                "{Counted::episodes(unscored)} not scored yet. Run scores them on this machine."
+                            } else {
+                                "{Counted::episodes(unscored)} not scored yet"
                             }
                         }
                     }
@@ -259,15 +377,16 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                 evidence: rsx! {
                     EpisodeTabs {
                         open: tabs,
-                        empty: "Choose an episode to watch its progress.".to_owned(),
+                        empty: "Choose an episode to watch its pace.".to_owned(),
                         render: move |tab: OpenEpisode| {
                             let Some(episode) = evidence.episodes.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
                                 return rsx! {};
                             };
                             let moments = evidence.moments_of(episode.id());
-                            let facts = vec![
+                            let mut facts = vec![
                                 episode.facts().duration_seconds().unwrap_or_default().clock_label(),
                             ];
+                            facts.extend(Pace::mean(&moments).map(|pace| format!("mean pace {}", Pace::label(pace))));
                             let curve = evidence.settings.curve(episode.id()).cloned();
                             rsx! { MomentEvidence { moments, curve, episode, facts } }
                         },
@@ -278,23 +397,28 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     }
 }
 
-/// How fast an episode progressed on the whole: its mean over the seconds the
-/// scorer could read, as an index row's measure.
-struct MomentShare(Option<f64>);
+/// Pace: progress per unit time against the expert demonstrations the
+/// scorer was trained on, so 1× is expert pace, below it slower, and below
+/// zero the task went backwards.
+pub(super) struct Pace;
 
-impl MomentShare {
-    /// What the number in an episode's row is.
-    const MEANING: &'static str =
-        "Mean progress per second the scorer read; negative means the task went backwards";
-    fn of(moments: &[MomentRow]) -> Self {
+impl Pace {
+    /// How pace is printed wherever it is read.
+    pub(super) const READING: NumericReading = NumericReading::new(2, "×");
+    /// The span every row's small pace line shares, so rows compare: a
+    /// little below standing still to about twice expert pace.
+    const TRACE_DOMAIN: (f64, f64) = (-0.5, 2.0);
+    const MEANING: &'static str = "Mean pace against expert demonstrations: 1× is expert pace, below 0 the task went backwards";
+    /// The mean over the seconds the scorer could read.
+    pub(super) fn mean(moments: &[MomentRow]) -> Option<f64> {
         let read = moments
             .iter()
             .filter_map(MomentRow::velocity)
             .collect::<Vec<_>>();
-        Self((!read.is_empty()).then(|| read.iter().sum::<f64>() / read.len() as f64))
+        (!read.is_empty()).then(|| read.iter().sum::<f64>() / read.len() as f64)
     }
-    fn label(&self) -> Option<String> {
-        self.0.map(|mean| format!("{mean:.2}"))
+    pub(super) fn label(pace: f64) -> String {
+        format!("{pace:.2}×")
     }
 }
 
@@ -340,13 +464,13 @@ pub(super) fn MomentEvidence(
                 (None, _) => Some(TimelineInterval::unknown(
                     span.0,
                     span.1,
-                    "The scorer could not read this second, so it is kept",
+                    "Not read by the scorer, so kept",
                 )),
                 (Some(velocity), Some(cutoff)) if velocity < cutoff => {
                     Some(TimelineInterval::excluded(
                         span.0,
                         span.1,
-                        format!("Progress {velocity:.2}, below {cutoff}"),
+                        format!("Pace {velocity:.2}×, below {cutoff:.2}×"),
                     ))
                 }
                 _ => None,
@@ -355,8 +479,10 @@ pub(super) fn MomentEvidence(
         .collect();
     let track = TimelineTrack::new(
         "curation-progress",
-        "Progress",
-        NumericTrack::new(samples, cutoff, intervals),
+        "Pace",
+        NumericTrack::new(samples, cutoff, intervals)
+            .read_as(Pace::READING)
+            .with_reference(1.0, "1×", "1× is expert pace"),
     );
     rsx! {
         EvidenceHeading { subject: episode.name(), episode: Some(episode.id().clone()), facts }

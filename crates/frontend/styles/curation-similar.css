@@ -10,36 +10,22 @@
     background: var(--tone-surface);
   }
 
-  /* The query row keeps the field wide and its two actions at their own
-     width, so a long query never squeezes the buttons out of reach. */
+  /* The query is the search node's bar: the field takes the width, its
+     action keeps its own, so a long query never squeezes Search out. */
+  .curation-node-bar-lead:has(> .curation-similar-query) {
+    @apply flex-1;
+  }
+
   .curation-similar-query {
-    @apply flex flex-wrap items-center gap-2 border-b border-line px-3 py-2;
+    @apply flex min-w-0 flex-1 items-center gap-2;
   }
 
   .curation-similar-query-input {
     @apply min-w-48 flex-1;
   }
 
-  /* The same 28px band the annotation's status line is, so the three
-     workspaces open at one height. */
-  .curation-similar-actions {
-    @apply flex min-h-7 flex-wrap items-center gap-3 border-b border-line px-3 py-0.5;
-  }
-
   .curation-similar-note {
     @apply m-0 px-3 py-1 text-[11px] text-ink-soft;
-  }
-
-  .curation-similar-actions .curation-similar-note {
-    @apply p-0;
-  }
-
-  /* The action sits at the strip's far end, away from the counts it replaces,
-     the way the annotation's status line puts its own. It is `ConfirmedRerun`,
-     whose button is wrapped, so the wrapper is what moves. */
-  .curation-similar-actions > .curation-rerun,
-  .curation-similar-actions > .ui-button {
-    @apply ml-auto;
   }
 
   /* The dataset at a glance, between the question and the rows: the episode
@@ -48,7 +34,8 @@
   .curation-similar-overview {
     @apply flex flex-col gap-1.5 border-b border-line px-3 py-2;
     --curation-map-unasked: color-mix(in srgb, var(--tone-ink-faint) 26%, var(--tone-surface));
-    --curation-map-match: var(--tone-category-1);
+    /* The search node's own hue, not focus blue. */
+    --curation-map-match: var(--tone-stage-media);
   }
 
   .curation-map {
@@ -211,10 +198,10 @@
     color: var(--tone-ink-faint);
   }
 
-  /* The row a search asks about: its still, where it came from. Its words
-     are already in the box above. */
+  /* The row a search asks about, first in the band its answers fill: its
+     still and where it came from. Its words are already in the query. */
   .curation-similar-asked {
-    @apply flex items-center gap-2 border-b border-line px-3 py-1;
+    @apply flex items-center gap-2;
   }
 
   .curation-similar-asked .curation-poster {
@@ -223,7 +210,11 @@
   }
 
   .curation-similar-asked-facts {
-    @apply m-0 font-mono text-[11px] tabular-nums text-ink-soft;
+    @apply m-0 text-[11.5px] text-ink-soft;
+  }
+
+  .curation-similar-asked-facts code {
+    @apply font-mono text-[11px] tabular-nums text-ink;
   }
 
   /* The grouping workspace is the frame tokens fly across, from the map up
@@ -273,10 +264,17 @@
   /* The name is what a chip is for, so it keeps its width and the row wraps
      rather than cutting six names to three words each. */
   .curation-similar-chip {
-    @apply flex min-h-6 max-w-full cursor-pointer items-baseline gap-1.5 rounded border border-line bg-surface px-1.5 py-0.5 text-left;
+    @apply flex min-h-6 max-w-full cursor-pointer items-center gap-1.5 rounded border border-line bg-surface px-1.5 py-0.5 text-left;
     transition:
       background-color 100ms ease-out,
       border-color 100ms ease-out;
+  }
+
+  /* The category's hue is its identity, a dot before its name; the chip
+     itself takes the selection's lime when it is the open one. */
+  .curation-similar-chip::before {
+    @apply size-2 shrink-0 rounded-full content-[''];
+    background: var(--hue, var(--tone-line-strong));
   }
 
   /* A bin the model named and jev has not filled yet: dashed, quiet, and
@@ -294,8 +292,8 @@
   }
 
   .curation-similar-chip[data-selected="true"] {
-    border-color: var(--hue);
-    background: color-mix(in srgb, var(--hue) 8%, var(--tone-surface));
+    border-color: var(--tone-accent-line);
+    background: var(--tone-accent-wash);
   }
 
   .curation-similar-chip-name {
@@ -378,9 +376,6 @@
     scroll-margin-top: 6rem;
   }
 
-  .curation-similar-members-heading {
-    @apply m-0 border-b border-line px-3 pb-1.5 pt-3 text-[10px] font-medium uppercase tracking-wide text-ink-soft;
-  }
 
   /* How the open category differs from every other subtask: three sentences,
      then the evidence for them, then its neighbours. */

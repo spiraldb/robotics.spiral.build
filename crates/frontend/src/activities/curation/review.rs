@@ -7,8 +7,9 @@
 //! subtask had nothing visible to show for itself. One frame owns that
 //! proportion now: the index owns the scroll, the evidence column never
 //! moves, and the row the operator chose is always beside its own footage.
-use super::document::{PopulationKind, SubtaskRow};
-use super::poster::{PosterFrame, PosterFrames};
+use super::document::{CurationNodeKind, PopulationKind, SubtaskRow};
+use super::poster::{PosterFrame, PosterFrames, PosterStill};
+use super::state::CurationController;
 use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
 use crate::components::icons::FindSimilarIcon;
 use crate::components::timeline::{IntervalTrack, TimelineInterval};
@@ -134,10 +135,10 @@ impl SubtaskContext {
 }
 
 /// What an index says about one row beyond its own words: what jev made of
-/// it, whether it is the row the evidence column is showing, and whether it
-/// answers Tab for its list.
+/// a subtask, whether it is the row the evidence column is showing, and
+/// whether it answers Tab for its list.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct SubtaskStanding {
+pub(super) struct RowStanding {
     /// `None` before anything has been asked about this row.
     probability: Option<f64>,
     /// A batch that came back without an answer for this row leaves it in the
@@ -152,7 +153,7 @@ pub(super) struct SubtaskStanding {
     tab_stop: bool,
 }
 
-impl SubtaskStanding {
+impl RowStanding {
     /// A row nobody has scored: the annotation's own output.
     pub(super) fn plain(chosen: bool) -> Self {
         Self {
@@ -175,12 +176,12 @@ impl SubtaskStanding {
         self.tab_stop = tab_stop;
         self
     }
-    /// What the score column reads. One decimal is as much as a calibrated
-    /// probability earns.
+    /// What the score column reads: a whole percentage, as the Select's
+    /// threshold and every tooltip print one.
     fn label(self) -> Option<String> {
         let probability = self.probability?;
         Some(if self.answered {
-            format!("{:.1}%", probability * 100.0)
+            format!("{:.0}%", probability * 100.0)
         } else {
             "—".to_owned()
         })
@@ -255,7 +256,7 @@ impl IndexFocus {
 #[component]
 pub(super) fn SubtaskEntry(
     row: SubtaskRow,
-    standing: SubtaskStanding,
+    standing: RowStanding,
     /// What to call the episode, for an index that is not already grouped by
     /// one. Grouped indexes leave it out rather than repeat their heading.
     episode: Option<String>,
@@ -288,7 +289,7 @@ pub(super) fn SubtaskEntry(
                 "aria-current": standing.chosen.then_some("true"),
                 onclick: move |_| on_select.call(()),
                 onkeydown: move |event: KeyboardEvent| IndexFocus::handle(&event, on_select),
-                PosterFrame { row: row.clone(), frames }
+                PosterFrame { still: PosterStill::of_subtask(&row), frames }
                 span { class: "curation-entry-words",
                     span { class: "curation-entry-description", "{row.description()}" }
                     span { class: "curation-entry-facts",
@@ -334,55 +335,246 @@ pub(super) fn SubtaskEntry(
     }
 }
 
+/// What a row of whole episodes or stretches is called: a recording's own
+/// label, or its id, which is set as the measurement it is.
+#[derive(Clone, Debug, PartialEq)]
+struct SliceTitle {
+    words: String,
+    is_id: bool,
+}
+
+/// The small drawing in a row's facts line: an episode's length against the
+/// longest listed, where a stretch sits in its episode, or a measurement's
+/// values across the episode.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum SliceShape {
+    /// A share of the longest episode listed, 0–1.
+    Length(f64),
+    /// Where a stretch starts and ends, as fractions of its episode.
+    Within(f64, f64),
+    Trace(TraceLine),
+}
+
+/// A measurement's values across one episode, drawn small against the level
+/// they are read by: where a recording slowed, stalled or went backwards,
+/// before it is opened.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct TraceLine {
+    /// Each value at its place across the episode, 0–1; `None` where nothing
+    /// was read, which breaks the line.
+    points: Vec<(f64, Option<f64>)>,
+    /// The values the drawing's height spans; values beyond it are drawn at
+    /// its edge, so every row of an index shares one scale.
+    domain: (f64, f64),
+    reference: f64,
+}
+
+impl TraceLine {
+    const WIDTH: f64 = 100.0;
+    const HEIGHT: f64 = 20.0;
+
+    pub(super) fn new(points: Vec<(f64, Option<f64>)>, domain: (f64, f64), reference: f64) -> Self {
+        Self {
+            points,
+            domain,
+            reference,
+        }
+    }
+    fn y(&self, value: f64) -> f64 {
+        let (low, high) = self.domain;
+        let share = ((value - low) / (high - low).max(f64::EPSILON)).clamp(0.0, 1.0);
+        Self::HEIGHT - 1.0 - share * (Self::HEIGHT - 2.0)
+    }
+    fn path(&self) -> String {
+        use std::fmt::Write as _;
+        let mut path = String::new();
+        let mut connected = false;
+        for (place, value) in &self.points {
+            let Some(value) = value.filter(|value| value.is_finite()) else {
+                connected = false;
+                continue;
+            };
+            let command = if connected { 'L' } else { 'M' };
+            let _ = write!(
+                path,
+                "{command}{:.2},{:.2} ",
+                place.clamp(0.0, 1.0) * Self::WIDTH,
+                self.y(value)
+            );
+            connected = true;
+        }
+        path
+    }
+}
+
+/// The measure a row is ranked or kept by, and what that number is.
+#[derive(Clone, Debug, PartialEq)]
+struct RowMeasure {
+    reading: String,
+    meaning: String,
+}
+
+/// One row of an index of whole episodes or stretches, in the anatomy every
+/// index row shares: a still, a name over a line of facts, and the measure.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct SliceFace {
+    title: SliceTitle,
+    facts: Vec<String>,
+    still: PosterStill,
+    shape: Option<SliceShape>,
+    measure: Option<RowMeasure>,
+}
+
+impl SliceFace {
+    /// A whole episode: its own label when its path gives one, with the id
+    /// beside its length, else its id alone.
+    pub(super) fn episode(episode: &Episode, label: Option<&str>) -> Self {
+        let id = Episode::listed_name_of(episode.id());
+        let seconds = episode.facts().duration_seconds();
+        let (title, mut facts) = match label {
+            Some(label) => (
+                SliceTitle {
+                    words: label.to_owned(),
+                    is_id: false,
+                },
+                vec![id],
+            ),
+            None => (
+                SliceTitle {
+                    words: id,
+                    is_id: true,
+                },
+                Vec::new(),
+            ),
+        };
+        facts.extend(seconds.map(|seconds| seconds.clock_label()));
+        Self {
+            title,
+            facts,
+            still: PosterStill::within(episode.id(), (0.0, seconds.unwrap_or_default())),
+            shape: None,
+            measure: None,
+        }
+    }
+    /// A stretch of one episode, listed under its episode's heading: named
+    /// by its span, saying how long it runs — a stretch too short to train
+    /// on reads as one — and drawn where it sits in the episode's
+    /// `duration`.
+    pub(super) fn stretch(episode: &EpisodeId, (start, end): (f64, f64), duration: f64) -> Self {
+        let duration = duration.max(f64::EPSILON);
+        Self {
+            title: SliceTitle {
+                words: format!("{} – {}", start.clock_label(), end.clock_label()),
+                is_id: true,
+            },
+            facts: vec![format!("{:.1} s", (end - start).max(0.0))],
+            still: PosterStill::within(episode, (start, end)),
+            shape: Some(SliceShape::Within(start / duration, end / duration)),
+            measure: None,
+        }
+    }
+    pub(super) fn shaped(mut self, shape: SliceShape) -> Self {
+        self.shape = Some(shape);
+        self
+    }
+    /// Replace the facts line's words, keeping its drawing.
+    pub(super) fn saying(mut self, facts: Vec<String>) -> Self {
+        self.facts = facts;
+        self
+    }
+    pub(super) fn measured(mut self, reading: String, meaning: impl Into<String>) -> Self {
+        self.measure = Some(RowMeasure {
+            reading,
+            meaning: meaning.into(),
+        });
+        self
+    }
+    /// Whether this row names its recording with the words `needle` says.
+    pub(super) fn says(&self, needle: &str) -> bool {
+        let needle = needle.trim().to_lowercase();
+        needle.is_empty()
+            || self.title.words.to_lowercase().contains(&needle)
+            || self
+                .facts
+                .iter()
+                .any(|fact| fact.to_lowercase().contains(&needle))
+    }
+    pub(super) fn still(&self) -> &PosterStill {
+        &self.still
+    }
+}
+
+/// A row's facts-line drawing.
+#[component]
+fn SliceDrawing(shape: SliceShape) -> Element {
+    match shape {
+        SliceShape::Length(share) => rsx! {
+            span { class: "curation-entry-extent", "aria-hidden": "true",
+                i { style: "width: {share.clamp(0.0, 1.0) * 100.0:.1}%" }
+            }
+        },
+        SliceShape::Within(left, right) => {
+            let (left, right) = (left.clamp(0.0, 1.0), right.clamp(0.0, 1.0));
+            rsx! {
+                span { class: "curation-entry-extent", "aria-hidden": "true",
+                    i { style: "left: {left * 100.0:.2}%; width: {(right - left).max(0.0) * 100.0:.2}%" }
+                }
+            }
+        }
+        SliceShape::Trace(trace) => rsx! {
+            svg {
+                class: "curation-entry-trace",
+                "aria-hidden": "true",
+                view_box: "0 0 {TraceLine::WIDTH} {TraceLine::HEIGHT}",
+                preserve_aspect_ratio: "none",
+                line {
+                    class: "curation-entry-trace-reference",
+                    x1: "0", x2: "{TraceLine::WIDTH}",
+                    y1: "{trace.y(trace.reference):.2}", y2: "{trace.y(trace.reference):.2}",
+                    vector_effect: "non-scaling-stroke",
+                }
+                path { d: "{trace.path()}", vector_effect: "non-scaling-stroke" }
+            }
+        },
+    }
+}
+
 /// One row of an index that is not a subtask — a whole episode, or a stretch
-/// of one — in the same anatomy as a subtask's row: where it sits in its
-/// episode in place of a poster, its name and facts, and its measure.
+/// of one — in the same anatomy as a subtask's row.
 #[component]
 pub(super) fn SliceEntry(
-    title: String,
-    facts: Vec<String>,
-    /// Where a stretch sits in its episode, as fractions of its length. A
-    /// whole episode leaves it out: a bar filled end to end on every row says
-    /// nothing about any of them.
-    #[props(default)]
-    place: Option<(f64, f64)>,
-    /// The measure the row is kept or left out by, as its column reads it.
-    #[props(default)]
-    score: Option<String>,
-    /// What that number is, for the column's tooltip.
-    #[props(default)]
-    score_meaning: Option<String>,
-    chosen: bool,
+    face: SliceFace,
+    frames: PosterFrames,
+    standing: RowStanding,
     on_select: EventHandler<()>,
 ) -> Element {
-    let place = place.map(|(left, right)| (left.clamp(0.0, 1.0), right.clamp(0.0, 1.0)));
     rsx! {
         li { class: "curation-entry-item",
             div {
                 class: "curation-entry",
                 role: "button",
-                tabindex: "0",
-                "aria-current": chosen.then_some("true"),
+                tabindex: if standing.tab_stop { "0" } else { "-1" },
+                "aria-current": standing.chosen.then_some("true"),
                 onclick: move |_| on_select.call(()),
                 onkeydown: move |event: KeyboardEvent| IndexFocus::handle(&event, on_select),
-                if let Some((left, right)) = place {
-                    span { class: "curation-entry-span", "aria-hidden": "true",
-                        span {
-                            class: "curation-entry-span-fill",
-                            style: "left: {left * 100.0:.2}%; width: {(right - left).max(0.0) * 100.0:.2}%",
-                        }
-                    }
-                }
+                PosterFrame { still: face.still.clone(), frames }
                 span { class: "curation-entry-words",
-                    span { class: "curation-entry-description", "{title}" }
+                    span {
+                        class: "curation-entry-description",
+                        "data-id": face.title.is_id.then_some("true"),
+                        "{face.title.words}"
+                    }
                     span { class: "curation-entry-facts",
-                        for fact in facts {
+                        if let Some(shape) = face.shape.clone() {
+                            SliceDrawing { shape }
+                        }
+                        for fact in face.facts.iter() {
                             span { "{fact}" }
                         }
                     }
                 }
-                if let Some(score) = score {
-                    span { class: "curation-entry-score", title: score_meaning, "{score}" }
+                if let Some(measure) = face.measure.clone() {
+                    span { class: "curation-entry-score", title: "{measure.meaning}", "{measure.reading}" }
                 }
             }
         }
@@ -419,12 +611,9 @@ pub(super) fn SubtaskEvidence(
     /// out.
     #[props(default)]
     on_find_similar: Option<EventHandler<()>>,
-    /// Every row the measurement wrote for this row's episode, drawn as one
-    /// track under the recording so a ranked result is read in the context of
-    /// what came before and after it. A caller that has only the one row
-    /// leaves this out and the track carries that row alone.
-    #[props(default)]
-    episode_rows: Vec<SubtaskRow>,
+    /// The episode's subtasks as the track under the recording draws them,
+    /// with this row chosen.
+    intervals: SubtaskIntervals,
 ) -> Element {
     let Some(dataset) = context.dataset().cloned() else {
         return rsx! {
@@ -468,7 +657,7 @@ pub(super) fn SubtaskEvidence(
                     EpisodeInspection {
                         episode: episode.clone(),
                         featured_camera: FeaturedCamera::measured(context.camera()),
-                        tracks: vec![SubtaskIntervals::around(&row, &episode_rows).track().into()],
+                        tracks: vec![intervals.track().into()],
                         focus: play,
                     }
                 }
@@ -525,63 +714,208 @@ pub(super) fn EvidenceHeading(
     }
 }
 
-/// One measurement's intervals for one episode, as the timeline draws them.
+/// One measurement's intervals for one episode, as the timeline draws them,
+/// and which of them the index has chosen.
 ///
 /// The same track in every view that shows a subtask, so the strip under the
 /// recording means one thing wherever it is met.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct SubtaskIntervals(Vec<TimelineInterval>);
+pub(super) struct SubtaskIntervals {
+    spans: Vec<TimelineInterval>,
+    chosen: Option<f64>,
+}
 
 impl SubtaskIntervals {
     /// Every row one measurement wrote for one episode.
     pub(super) fn of(rows: &[SubtaskRow]) -> Self {
-        Self(
-            rows.iter()
+        Self::painted(rows, |_| String::new())
+    }
+    /// Every row, each wearing the hue `tint` lends it — the category a
+    /// grouping put it in — as `--hue: <colour>`, or nothing.
+    pub(super) fn painted(rows: &[SubtaskRow], tint: impl Fn(&SubtaskRow) -> String) -> Self {
+        Self {
+            spans: rows
+                .iter()
                 .map(|row| {
                     TimelineInterval::labeled(row.start_time(), row.end_time(), row.description())
+                        .tinted(tint(row))
                 })
                 .collect(),
-        )
+            chosen: None,
+        }
     }
-    /// The episode's rows when the caller has them, and the chosen row alone
-    /// when it does not — never an empty strip under a row that plainly has
-    /// an interval.
-    fn around(chosen: &SubtaskRow, episode_rows: &[SubtaskRow]) -> Self {
-        if episode_rows.is_empty() {
-            Self::of(std::slice::from_ref(chosen))
+    /// Mark the row the index has chosen, so the track shows it selected too.
+    pub(super) fn choosing(mut self, row: Option<&SubtaskRow>) -> Self {
+        self.chosen = row.map(SubtaskRow::start_time);
+        self
+    }
+    /// Every row of `rows` from the chosen row's episode, with the chosen one
+    /// marked, so a ranked result is read in the context of what came before
+    /// and after it.
+    pub(super) fn around(chosen: &SubtaskRow, rows: &[SubtaskRow]) -> Self {
+        Self::of(&Self::episode_of(chosen, rows)).choosing(Some(chosen))
+    }
+    /// `rows` of the chosen row's episode, or the chosen row alone when none
+    /// are — never an empty strip under a row that plainly has an interval.
+    pub(super) fn episode_of(chosen: &SubtaskRow, rows: &[SubtaskRow]) -> Vec<SubtaskRow> {
+        let episode = rows
+            .iter()
+            .filter(|row| row.episode() == chosen.episode())
+            .cloned()
+            .collect::<Vec<_>>();
+        if episode.is_empty() {
+            vec![chosen.clone()]
         } else {
-            Self::of(episode_rows)
+            episode
         }
     }
     /// One labelled row of the shared timeline.
     pub(super) fn track(&self) -> IntervalTrack {
-        IntervalTrack::new("curation-subtasks", "Subtasks", self.0.clone())
+        IntervalTrack::new("curation-subtasks", "Subtasks", self.spans.clone())
+            .with_chosen(self.chosen)
     }
 }
 
-/// One line over the index: the node's actions, and beside them only what
-/// needs saying there. What the node holds is on its card and a run's progress
-/// is on the card and in the top bar, so neither is repeated here.
+/// The one bar every node's workspace opens with: on the left what the node
+/// reads, runs with or asks — its query, its rule, its settings — and any note
+/// that needs attention, and at the far end the node's own actions. What the
+/// node holds is on its card, so it is not repeated here.
 #[component]
-pub(super) fn MeasurementStatus(
-    /// A plain fact the card does not carry.
-    #[props(default)]
-    facts: Option<String>,
+pub(super) fn NodeBar(
+    #[props(default = VNode::empty())] lead: Element,
     /// What needs attention: a missing setting, failed episodes.
     #[props(default)]
     note: Option<String>,
+    /// How many episodes reach the node, when fewer than all do.
+    #[props(default)]
+    reach: Option<(CurationController, NodeReach)>,
     #[props(default = VNode::empty())] actions: Element,
 ) -> Element {
     rsx! {
-        div { class: "curation-review-status",
-            if let Some(facts) = facts {
-                p { class: "curation-review-status-facts", "{facts}" }
+        div { class: "curation-node-bar",
+            div { class: "curation-node-bar-lead", {lead} }
+            // What the node's state is, then what can be done about it, in
+            // one group at the bar's far end.
+            div { class: "curation-node-bar-end",
+                if let Some(note) = note {
+                    p { class: "curation-node-bar-note", role: "status", "{note}" }
+                }
+                if let Some((controller, reach)) = reach {
+                    ReachNote { controller, reach }
+                }
+                div { class: "curation-node-bar-actions", {actions} }
             }
-            if let Some(note) = note {
-                p { class: "curation-review-status-note", role: "status", "{note}" }
-            }
-            div { class: "curation-review-status-actions", {actions} }
         }
+    }
+}
+
+/// The bar over an index, the height of the evidence heading beside it so
+/// the two columns' hairlines meet: the index's own filter and sides.
+#[component]
+pub(super) fn IndexBar(children: Element) -> Element {
+    rsx! {
+        div { class: "curation-index-bar", {children} }
+    }
+}
+
+/// Which row of an index answers Tab: the chosen one, else the first, so a
+/// keyboard reaches the index once and the arrows carry on from there.
+pub(super) struct TabStop;
+
+impl TabStop {
+    pub(super) fn at(position: usize, chosen: Option<usize>) -> bool {
+        position == chosen.unwrap_or(0)
+    }
+}
+
+/// How many of the curation's episodes reach a node, said only when fewer
+/// than all of them do: after a Select, or after a measurement that has not
+/// run on every episode yet, everything below reads only what came through,
+/// and a node's own counts look complete when they are not.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct NodeReach {
+    reached: usize,
+    sampled: usize,
+    /// The nearest measurement above that has not measured every episode
+    /// reaching it, and what finishing it is called: the one place to go
+    /// to let the rest through.
+    unfinished: Option<(String, &'static str)>,
+}
+
+impl NodeReach {
+    pub(super) fn of(controller: CurationController, node: &str) -> Option<Self> {
+        let sampled = controller.sample()?.episodes().len();
+        let (input, _) = controller.populations(node)?;
+        let reached = input.episodes().len();
+        (reached < sampled).then(|| Self {
+            reached,
+            sampled,
+            unfinished: Self::unfinished_above(controller, node),
+        })
+    }
+    fn unfinished_above(
+        controller: CurationController,
+        node: &str,
+    ) -> Option<(String, &'static str)> {
+        let mut above =
+            controller.with_payload(|payload| payload.parent_of(node).map(str::to_owned));
+        while let Some(id) = above {
+            let (input, _) = controller.populations(&id)?;
+            let finished = controller.with_payload(|payload| {
+                match payload.node(&id).map(|node| node.kind()) {
+                    Some(CurationNodeKind::IdentifyUnproductiveMoments(detection)) => Some((
+                        input
+                            .episodes()
+                            .iter()
+                            .all(|episode| detection.is_completed(episode)),
+                        "Score the rest",
+                    )),
+                    Some(CurationNodeKind::BreakDownSubtasks(annotation)) => Some((
+                        input
+                            .episodes()
+                            .iter()
+                            .all(|episode| annotation.is_completed(episode)),
+                        "Annotate the rest",
+                    )),
+                    _ => None,
+                }
+            });
+            if let Some((false, verb)) = finished {
+                return Some((id, verb));
+            }
+            above = controller.with_payload(|payload| payload.parent_of(&id).map(str::to_owned));
+        }
+        None
+    }
+}
+
+/// How many episodes reach a node, beside the way to let the rest through.
+#[component]
+pub(super) fn ReachNote(controller: CurationController, reach: NodeReach) -> Element {
+    rsx! {
+        p { class: "curation-node-bar-reach",
+            "{reach.reached} of {Counted::episodes(reach.sampled)} reach this node"
+            if let Some((node, verb)) = reach.unfinished.clone() {
+                Button {
+                    purpose: ActionPurpose::Navigate,
+                    variant: ButtonVariant::Link,
+                    size: ButtonSize::Compact,
+                    title: "Open the measurement the other episodes are waiting on",
+                    onclick: move |_| controller.select_node(Some(node.clone())),
+                    "{verb}"
+                }
+            }
+        }
+    }
+}
+
+/// What a node's bar says needs attention, in order, as one line.
+pub(super) struct NodeNotes;
+
+impl NodeNotes {
+    pub(super) fn join(notes: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+        let notes = notes.into_iter().flatten().collect::<Vec<_>>();
+        (!notes.is_empty()).then(|| notes.join(" · "))
     }
 }
 
@@ -623,8 +957,8 @@ mod tests {
 
     #[test]
     fn only_an_index_that_moves_focus_itself_takes_rows_out_of_the_tab_order() {
-        assert!(SubtaskStanding::plain(false).tab_stop);
-        assert!(SubtaskStanding::scored(0.9, true, false).tab_stop);
-        assert!(!SubtaskStanding::plain(false).roving(false).tab_stop);
+        assert!(RowStanding::plain(false).tab_stop);
+        assert!(RowStanding::scored(0.9, true, false).tab_stop);
+        assert!(!RowStanding::plain(false).roving(false).tab_stop);
     }
 }

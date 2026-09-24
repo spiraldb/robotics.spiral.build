@@ -38,6 +38,11 @@ pub fn Menu(props: MenuProps) -> Element {
             class,
             role: "menu",
             "aria-label": "{props.label}",
+            // Safari and Firefox do not focus a pressed button; they focus
+            // its nearest focusable ancestor. Being that ancestor keeps a
+            // press on an item inside the menu, so the item's click lands
+            // rather than the menu closing under it.
+            tabindex: "-1",
             onmounted: move |event: Event<MountedData>| {
                 let mounted = event.data().downcast::<web_sys::Element>().cloned();
                 if let Some(menu) = mounted.as_ref() {
@@ -63,11 +68,8 @@ pub fn Menu(props: MenuProps) -> Element {
                 event.prevent_default();
                 BrowserFocus::rove(RovingGroup::MENU, step, false);
             },
-            // Only focus moving onto another control closes the menu. A press
-            // that focuses nothing leaves focus nowhere — Safari and Firefox
-            // do not focus a pressed button, so pressing an item does this —
-            // and closing then would drop the item's click. Presses are
-            // `OutsidePress`'s to answer.
+            // Only focus moving onto another control closes the menu; a press
+            // that leaves focus nowhere is `OutsidePress`'s to answer.
             onfocusout: move |event: FocusEvent| {
                 let moved_to = event
                     .downcast::<web_sys::FocusEvent>()

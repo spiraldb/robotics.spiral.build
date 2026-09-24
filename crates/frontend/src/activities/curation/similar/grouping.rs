@@ -22,12 +22,15 @@ use crate::activities::curation::document::{
 use crate::activities::curation::episode_map::{
     EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
 };
-use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
+use crate::activities::curation::episode_tabs::{
+    EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes,
+};
 use crate::activities::curation::population::Slice;
 use crate::activities::curation::poster::{PosterCut, PosterFrames};
 use crate::activities::curation::rerun::ConfirmedRerun;
 use crate::activities::curation::review::{
-    Counted, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
+    Counted, NodeBar, NodeReach, RowStanding, SubtaskEntry, SubtaskEvidence, SubtaskIntervals,
+    SubtaskReview, TabStop,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus};
 use crate::activities::episode::Episode;
@@ -45,6 +48,10 @@ const REPRESENTATIVES: usize = 3;
 /// The result-category washes Studio deals to repeated values. Six categories
 /// is the most the grouping proposes, so every one gets its own.
 const CATEGORY_HUES: usize = 6;
+/// The order those washes are dealt, biggest category first, as 1-based tone
+/// numbers: away from blue, which already means focus, and reaching it last
+/// (DESIGN.md's Blue-Comes-Last Rule).
+const DEALT_TONES: [usize; CATEGORY_HUES] = [2, 4, 3, 5, 6, 1];
 const CATEGORY_ROLE: &str = "You name the categories of manipulation subtasks in a robot \
                              dataset. You answer with JSON and nothing else.";
 
@@ -180,8 +187,12 @@ impl CategoryHues {
     fn rank(&self, category: &str) -> Option<usize> {
         self.0.iter().position(|name| name == category)
     }
+    /// The 1-based wash a category of this size rank wears.
+    fn tone_of_rank(rank: usize) -> usize {
+        DEALT_TONES[rank % CATEGORY_HUES]
+    }
     fn hue(&self, category: &str) -> Option<usize> {
-        self.rank(category).map(|rank| rank % CATEGORY_HUES)
+        self.rank(category).map(|rank| Self::tone_of_rank(rank) - 1)
     }
     /// The inline style that lends a category's hue to whatever wears it;
     /// nothing for no category, which falls back to the neutral line colour.
@@ -323,9 +334,12 @@ impl CategorySummary {
         self.members.first().map(|(row, _)| *row)
     }
     fn tint(&self) -> String {
+        format!("--hue: {}", self.colour())
+    }
+    fn colour(&self) -> String {
         format!(
-            "--hue: var(--tone-category-{})",
-            self.rank % CATEGORY_HUES + 1
+            "var(--tone-category-{})",
+            CategoryHues::tone_of_rank(self.rank)
         )
     }
 }
@@ -580,7 +594,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     let open_name = open_card
         .as_ref()
         .map(|card| card.category.name().to_owned());
-    let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
+    let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
     let busy = stage.read().as_ref().is_some_and(GroupingStage::busy);
     let running = stage.read().as_ref().and_then(GroupingStage::label);
     let problem = stage
@@ -679,6 +693,11 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         .as_ref()
         .map(|card| card.members.clone())
         .unwrap_or_default();
+    let chosen_place = chosen.and_then(|chosen| members.iter().position(|(row, _)| *row == chosen));
+    let colour = open_card
+        .as_ref()
+        .map(CategorySummary::colour)
+        .unwrap_or_default();
     rsx! {
         section {
             class: "curation-similar-workspace curation-similar-grouping",
@@ -693,23 +712,32 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             },
             div { class: "curation-flights", "aria-hidden": "true" }
             if !cards.is_empty() || waiting.is_some() {
-                // The categories are the chips below and their count is on the
-                // card; the line holds only a run in progress and Regenerate.
-                div { class: "curation-similar-actions",
-                    if let Some(running) = running.clone() {
-                        p { class: "curation-similar-note", role: "status", "{running}" }
-                    }
-                    ConfirmedRerun {
-                        id: "curation-similar-regenerate".to_owned(),
-                        label: "Regenerate".to_owned(),
-                        disabled: busy,
-                        question: format!(
-                            "Propose categories again? This replaces the {} categories and all {} assignments below.",
-                            cards.len(),
-                            rows.len(),
-                        ),
-                        on_confirm: move |()| group.call(None),
-                    }
+                // What the grouping reads — the annotation's words, not its
+                // pictures — or how far a run has got, and Regenerate. The
+                // categories are the chips below and their count is on the card.
+                NodeBar {
+                    lead: rsx! {
+                        p { class: "curation-node-bar-reads", role: "status",
+                            match running.clone() {
+                                Some(running) => rsx! { "{running}" },
+                                None => rsx! { "Groups the words of {Counted::subtasks(rows.len())} by what the robot does" },
+                            }
+                        }
+                    },
+                    reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
+                    actions: rsx! {
+                        ConfirmedRerun {
+                            id: "curation-similar-regenerate".to_owned(),
+                            label: "Regenerate".to_owned(),
+                            disabled: busy,
+                            question: format!(
+                                "Propose categories again? This replaces the {} categories and all {} assignments below.",
+                                cards.len(),
+                                rows.len(),
+                            ),
+                            on_confirm: move |()| group.call(None),
+                        }
+                    },
                 }
             }
             // The dataset first, then the bins its rows pour down into, then
@@ -797,22 +825,16 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                     }
                                 }
                             }
-                            ProfilePanel {
-                                profile,
-                                hues: hues.clone(),
-                                chosen,
-                                on_select: move |row: usize| open_row(row),
-                            }
-                            h4 { class: "curation-similar-members-heading", "Members, most typical first" }
                             ol {
                                 id: SubtaskList::MEMBERS.id(),
                                 class: "curation-entries",
                                 "aria-label": "Members of this category, most typical first; each row ends with how sure it is that the row belongs here",
-                                for (row , probability) in members {
+                                for (position , (row , probability)) in members.into_iter().enumerate() {
                                     SubtaskEntry {
                                         key: "{rows[row].episode()}-{rows[row].start_time()}",
                                         row: rows[row].clone(),
-                                        standing: SubtaskStanding::scored(probability, true, chosen == Some(row)),
+                                        standing: RowStanding::scored(probability, true, chosen == Some(row))
+                                            .roving(TabStop::at(position, chosen_place)),
                                         episode: Episode::listed_name_of(rows[row].episode()),
                                         frames,
                                         on_select: move |()| open_row(row),
@@ -830,6 +852,17 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                         EpisodeTabs {
                             open: tabs,
                             empty: "Choose a member to watch it play, most typical first.".to_owned(),
+                            // How the open category differs from the rest, a tab
+                            // beside its members' recordings rather than a wall
+                            // above the members themselves.
+                            leading: LeadingTab::new("Profile", 'C', colour.clone(), rsx! {
+                                ProfilePanel {
+                                    profile,
+                                    hues: hues.clone(),
+                                    chosen,
+                                    on_select: move |row: usize| open_row(row),
+                                }
+                            }),
                             render: move |tab: OpenEpisode| {
                                 let Some(row) = rows
                                     .iter()
@@ -841,11 +874,13 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                 rsx! {
                                     SubtaskEvidence {
                                         play: tab.play(),
-                                        episode_rows: rows
-                                            .iter()
-                                            .filter(|other| other.episode() == row.episode())
-                                            .cloned()
-                                            .collect::<Vec<_>>(),
+                                        // Each subtask in the hue of the category it joined,
+                                        // as the map above paints it.
+                                        intervals: SubtaskIntervals::painted(
+                                            &SubtaskIntervals::episode_of(&row, &rows),
+                                            |other| hues.tint_of(grouping.as_ref().and_then(|grouping| grouping.category_of(other))),
+                                        )
+                                        .choosing(Some(&row)),
                                         context: context.clone(),
                                         on_open: {
                                             let focus = EpisodeFocus::new(
