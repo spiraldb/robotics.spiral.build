@@ -1705,7 +1705,13 @@ button.studio-status-fact:hover {
   }
 
   .document-state {
-    @apply inline-flex min-h-6 shrink-0 items-center gap-1.5 px-1.5 font-mono text-[11px] text-ink-faint;
+    @apply inline-flex min-h-6 shrink-0 items-center px-1.5 font-mono text-[11px] text-ink-faint;
+  }
+
+  /* What the chip says, remounted on every change of state so the settle
+     plays once; the status region around it stays put. */
+  .document-state-settle {
+    @apply inline-flex items-center gap-1.5;
     animation: workflow-settle 220ms var(--ease-out-expo) both;
   }
 
@@ -1957,11 +1963,13 @@ button.studio-status-fact:hover {
     @apply font-mono;
   }
 
+  /* An output is identity, not selection, so it wears the output stage's
+     hue rather than the lime that means "you are here". */
   .workflow-stage-output-flag {
     @apply ml-auto shrink-0 rounded px-1 font-medium;
-    border: 1px solid var(--tone-accent-line);
-    color: var(--tone-accent-ink);
-    background: var(--tone-accent-wash);
+    border: 1px solid color-mix(in srgb, var(--tone-stage-output) 35%, var(--tone-surface));
+    color: var(--tone-stage-output);
+    background: var(--tone-surface);
   }
 
   /* Stage popover ---------------------------------------------------------
@@ -2547,7 +2555,7 @@ button.studio-status-fact:hover {
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .document-state,
+    .document-state-settle,
     .document-switcher,
     .workflow-stage-card,
     .workflow-stage-popover,

@@ -5,19 +5,21 @@
 //! moments of a fixed number of frames, which is what the curation stores and
 //! what a Select keeps or leaves out: a second of recording is the smallest
 //! stretch worth training on or throwing away.
-use crate::activities::curation::document::MomentRow;
-use crate::activities::curation::state::CurationController;
+use crate::activities::curation::document::{MomentRow, ProgressCurve};
+use crate::activities::curation::state::{CurationController, RunHandle};
 use crate::activities::episode::Episode;
 use crate::client::project::ProjectClient;
 use crate::client::transport::HttpRequest;
 use crate::shell::state::StudioProjectState;
-use dioxus::prelude::*;
 use spiral_robotics_common::curation::progress::{
     ProgressFrame, ProgressScoreRequest, ProgressScoreResult,
 };
 
 /// Frames per moment: one second of the 30 fps recordings the scorer reads.
 const MOMENT_FRAMES: usize = 30;
+/// Frames per sample of the progress curve the timeline draws: six a second,
+/// fine enough to read as a line rather than as strokes between seconds.
+const CURVE_FRAMES: usize = 5;
 
 /// One recording's frames, scored.
 pub(super) struct ScoredEpisode(Vec<ProgressFrame>);
@@ -39,16 +41,49 @@ impl ScoredEpisode {
         Ok(Self(result.frames().to_vec()))
     }
 
+    /// Seconds between two frames, read from the last two.
+    fn frame_period(&self) -> Result<f64, String> {
+        match self.0.as_slice() {
+            [.., before, last] => Ok(Self::seconds(last) - Self::seconds(before)),
+            _ => Err("The scorer returned too few frames to read.".into()),
+        }
+    }
+    fn seconds(frame: &ProgressFrame) -> f64 {
+        frame.timestamp_ns() as f64 / 1e9
+    }
+    /// The recording's progress `CURVE_FRAMES` frames at a time, each sample
+    /// at the middle of its frames. A frame the scorer had no support for
+    /// leaves its sample unread, as it does its moment.
+    pub(super) fn curve(&self, episode: &Episode) -> Result<ProgressCurve, String> {
+        let period = self.frame_period()?;
+        let first = self.0.first().map(Self::seconds).unwrap_or_default();
+        let values = self
+            .0
+            .chunks(CURVE_FRAMES)
+            .map(|frames| {
+                let unread = frames
+                    .iter()
+                    .any(|frame| frame.support() == 0 || !frame.velocity().is_finite());
+                (!unread).then(|| {
+                    frames.iter().map(ProgressFrame::velocity).sum::<f64>() / frames.len() as f64
+                })
+            })
+            .collect();
+        let middle = (CURVE_FRAMES as f64 - 1.0) / 2.0 * period;
+        ProgressCurve::new(
+            episode.id().clone(),
+            (first + middle, CURVE_FRAMES as f64 * period),
+            values,
+        )
+    }
+
     /// The recording as moments of `MOMENT_FRAMES` frames. A moment starts at
     /// its first frame's time and ends where the next begins; the last one
     /// ends one frame period after its last frame. A frame the scorer had no
     /// support for makes its whole moment unread.
     pub(super) fn moments(&self, node: &str, episode: &Episode) -> Result<Vec<MomentRow>, String> {
-        let seconds = |frame: &ProgressFrame| frame.timestamp_ns() as f64 / 1e9;
-        let period = match self.0.as_slice() {
-            [.., before, last] => seconds(last) - seconds(before),
-            _ => return Err("The scorer returned too few frames to read.".into()),
-        };
+        let seconds = Self::seconds;
+        let period = self.frame_period()?;
         let chunks = self.0.chunks(MOMENT_FRAMES).collect::<Vec<_>>();
         chunks
             .iter()
@@ -79,26 +114,23 @@ impl ScoredEpisode {
 /// model runs on the backend's hardware, and a second request would only
 /// queue behind the first.
 pub(super) struct MomentPass {
-    node: String,
     controller: CurationController,
     studio: StudioProjectState,
-    /// What the operator still wants: cleared by Stop, after which the pass
-    /// scores no further episode.
-    wanted: Signal<bool>,
+    /// The run as the curation holds it: Stop clears what it wants, after
+    /// which the pass scores no further episode.
+    run: RunHandle,
 }
 
 impl MomentPass {
     pub(super) fn new(
-        node: String,
         controller: CurationController,
         studio: StudioProjectState,
-        wanted: Signal<bool>,
+        run: RunHandle,
     ) -> Self {
         Self {
-            node,
             controller,
             studio,
-            wanted,
+            run,
         }
     }
 
@@ -107,29 +139,30 @@ impl MomentPass {
     pub(super) async fn run(self, episodes: Vec<Episode>) {
         let total = episodes.len();
         for (done, episode) in episodes.iter().enumerate() {
-            if !*self.wanted.peek() {
+            if !self.run.wanted() {
                 break;
             }
-            self.controller.report_activity(
-                &self.node,
-                Some(format!("Scoring {} of {total} episodes", done + 1)),
-            );
-            let outcome = ScoredEpisode::request(episode)
-                .await
-                .and_then(|scored| scored.moments(&self.node, episode));
+            self.run
+                .report(format!("Scoring {} of {total} episodes", done + 1));
+            let outcome = ScoredEpisode::request(episode).await.and_then(|scored| {
+                Ok((
+                    scored.moments(self.run.node(), episode)?,
+                    scored.curve(episode)?,
+                ))
+            });
             self.record(episode, outcome);
             self.controller.save_when_idle(self.studio).await;
         }
-        self.controller.report_activity(&self.node, None);
     }
 
-    fn record(&self, episode: &Episode, outcome: Result<Vec<MomentRow>, String>) {
-        let node = self.node.as_str();
+    fn record(&self, episode: &Episode, outcome: Result<(Vec<MomentRow>, ProgressCurve), String>) {
+        let node = self.run.node();
         let id = episode.id();
         let stored = match outcome {
-            Ok(rows) => self
-                .controller
-                .edit(|payload| payload.replace_episode_moments(node, id, rows)),
+            Ok((rows, curve)) => self.controller.edit(|payload| {
+                payload.replace_episode_moments(node, id, rows)?;
+                payload.record_progress_curve(node, curve)
+            }),
             Err(reason) => self
                 .controller
                 .edit(|payload| payload.record_episode_failure(node, id, reason)),
@@ -150,7 +183,6 @@ mod tests {
     fn frame(index: u32, velocity: f64, support: u32) -> ProgressFrame {
         serde_json::from_value(serde_json::json!({
             "frame_index": index,
-            "source_frame_index": index,
             "timestamp_ns": u64::from(index) * 1_000_000_000 / 30,
             "velocity": velocity,
             "progress": null,
@@ -176,6 +208,32 @@ mod tests {
         assert!((moments[2].end_time() - 2.5).abs() < 1e-6);
         assert!((moments[0].velocity().unwrap() - 0.2).abs() < 1e-9);
         assert!((moments[1].velocity().unwrap() - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn frames_fold_into_six_curve_samples_a_second() {
+        let episode = Episode::fixture(&EpisodeId::fixture(1), 1_000_000_000);
+        let frames = (0..30)
+            .map(|index| {
+                frame(
+                    index,
+                    if index < 5 { 0.6 } else { 0.3 },
+                    if index == 7 { 0 } else { 2 },
+                )
+            })
+            .collect();
+        let curve = ScoredEpisode(frames).curve(&episode).unwrap();
+        let samples = curve.samples().collect::<Vec<_>>();
+        assert_eq!(samples.len(), 6);
+        // Each sample sits at the middle of its five frames.
+        assert!((samples[0].0 - 2.0 / 30.0).abs() < 1e-6);
+        assert!((samples[1].0 - samples[0].0 - 5.0 / 30.0).abs() < 1e-6);
+        assert_eq!(samples[0].1, Some(0.6));
+        assert_eq!(
+            samples[1].1, None,
+            "a frame without support leaves its sample unread"
+        );
+        assert_eq!(samples[2].1, Some(0.3));
     }
 
     #[test]

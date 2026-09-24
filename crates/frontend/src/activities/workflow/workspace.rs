@@ -588,7 +588,7 @@ fn WorkflowResults(controller: super::state::WorkflowController) -> Element {
             if snapshot.result().is_some() && snapshot.error().is_some() {
                 Notice { tone: NoticeTone::Danger, class: "inline-error", "{snapshot.error().clone().unwrap_or_default()}" }
             }
-            div { key: "{snapshot.run_id().unwrap_or_default()}", class: "workflow-result-body",
+            div { class: "workflow-result-body",
                 if !controller.loaded() && controller.load_error().is_none() {
                     EmptyState { icon: rsx! { SpinnerIcon {} }, title: "Loading workflow…" }
                 } else if let Some(model) = result_model.or(transient_model) {

@@ -1,6 +1,7 @@
 //! The rule a Select keeps by, written as one sentence in the words of the
 //! node above it, with the sentence's variable words as its fields.
 use super::SelectView;
+use super::strip::ThresholdScale;
 use crate::activities::curation::document::{
     Comparison, CurationNode, CurationNodeKind, EpisodeFact, Selection,
 };
@@ -8,7 +9,7 @@ use crate::activities::curation::population::Population;
 use crate::activities::curation::similar::CategoryHues;
 use crate::activities::curation::state::CurationController;
 use dioxus::prelude::*;
-use spiral_robotics_ui::{Select, TextInput, TextInputKind};
+use spiral_robotics_ui::Select;
 
 /// One Select node, edited through the controller.
 #[derive(Clone, PartialEq)]
@@ -18,6 +19,9 @@ struct SelectNode {
 }
 
 impl SelectNode {
+    fn new(id: String, controller: CurationController) -> Self {
+        Self { id, controller }
+    }
     /// Replace the node's rule. The document refuses a rule for another
     /// basis, so a slip can never re-point a Select at something else.
     fn set(&self, rule: Selection) {
@@ -34,38 +38,64 @@ impl SelectNode {
     }
 }
 
+/// Where a numeric rule's threshold stands, and the axis it slides along.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Threshold {
+    value: f64,
+    scale: ThresholdScale,
+}
+
 #[component]
-pub(super) fn SelectRule(controller: CurationController, view: SelectView) -> Element {
-    let node = SelectNode {
-        id: view.node.clone(),
-        controller,
-    };
+pub(super) fn SelectRule(
+    controller: CurationController,
+    view: SelectView,
+    /// The axis a numeric rule slides along, shared with the strip below it.
+    scale: Option<ThresholdScale>,
+) -> Element {
+    let node = SelectNode::new(view.node.clone(), controller);
+    let at = move |value: f64| scale.map(|scale| Threshold { value, scale });
     rsx! {
         div { class: "curation-select-rule",
             match view.selection.clone() {
                 Selection::Episodes { fact, comparison, value } => rsx! {
-                    EpisodeRule { node, fact, comparison, value }
+                    if let Some(threshold) = at(value) {
+                        EpisodeRule { node, fact, comparison, threshold }
+                    }
                 },
                 Selection::Similar { minimum } => {
                     let query = match view.measure.kind() {
                         CurationNodeKind::FindSimilarSubtasks(search) => search.query().trim().to_owned(),
                         _ => String::new(),
                     };
-                    rsx! { SimilarRule { node, minimum, query } }
+                    rsx! {
+                        if let Some(threshold) = at(minimum) {
+                            SimilarRule { node, threshold, query }
+                        }
+                    }
                 }
                 Selection::Categories { names } => {
                     let categories = CategoryChoice::of(controller, &view);
                     rsx! { CategoryRule { node, names, categories } }
                 }
-                Selection::Progressing { minimum } => rsx! { ProgressRule { node, minimum } },
+                Selection::Progressing { minimum } => rsx! {
+                    if let Some(threshold) = at(minimum) {
+                        ProgressRule { node, threshold }
+                    }
+                },
             }
         }
     }
 }
 
-/// "Keep episodes whose [duration] is [at least] [20] s".
+/// "Keep episodes whose [duration] is [at least] [——●——] 20 s".
 #[component]
-fn EpisodeRule(node: SelectNode, fact: EpisodeFact, comparison: Comparison, value: f64) -> Element {
+fn EpisodeRule(
+    node: SelectNode,
+    fact: EpisodeFact,
+    comparison: Comparison,
+    threshold: Threshold,
+) -> Element {
+    let value = threshold.value;
     let with_fact = node.clone();
     let with_comparison = node.clone();
     rsx! {
@@ -97,9 +127,9 @@ fn EpisodeRule(node: SelectNode, fact: EpisodeFact, comparison: Comparison, valu
                 option { key: "{option.key()}", value: "{option.key()}", selected: option == comparison, "{option.label()}" }
             }
         }
-        ThresholdField {
-            value,
-            label: "Threshold".to_owned(),
+        ThresholdSlider {
+            threshold,
+            label: format!("Least {}", fact.label()),
             on_change: move |value| node.set(Selection::Episodes { fact, comparison, value }),
         }
         if let Some(unit) = fact.unit() {
@@ -108,32 +138,30 @@ fn EpisodeRule(node: SelectNode, fact: EpisodeFact, comparison: Comparison, valu
     }
 }
 
-/// "Keep subtasks at least [50] % likely to be “fold the towel”".
+/// "Keep subtasks at least [——●——] 50% likely to be “fold the towel”".
 #[component]
-fn SimilarRule(node: SelectNode, minimum: f64, query: String) -> Element {
+fn SimilarRule(node: SelectNode, threshold: Threshold, query: String) -> Element {
     rsx! {
         span { "Keep subtasks at least" }
-        ThresholdField {
-            value: (minimum * 100.0).round(),
-            label: "Similarity, in percent".to_owned(),
-            on_change: move |percent: f64| {
-                node.set(Selection::Similar { minimum: (percent / 100.0).clamp(0.0, 1.0) });
-            },
+        ThresholdSlider {
+            threshold,
+            label: "Least similarity".to_owned(),
+            on_change: move |minimum: f64| node.set(Selection::Similar { minimum }),
         }
         span {
-            if query.is_empty() { "% likely to be what the search above asks" } else { "% likely to be “{query}”" }
+            if query.is_empty() { "likely to be what the search above asks" } else { "likely to be “{query}”" }
         }
     }
 }
 
-/// "Keep moments progressing at least [0]".
+/// "Keep moments progressing at least [——●——] 0.89".
 #[component]
-fn ProgressRule(node: SelectNode, minimum: f64) -> Element {
+fn ProgressRule(node: SelectNode, threshold: Threshold) -> Element {
     rsx! {
         span { "Keep moments progressing at least" }
-        ThresholdField {
-            value: minimum,
-            label: "Progress".to_owned(),
+        ThresholdSlider {
+            threshold,
+            label: "Least progress".to_owned(),
             on_change: move |minimum| node.set(Selection::Progressing { minimum }),
         }
     }
@@ -218,32 +246,29 @@ fn CategoryRule(node: SelectNode, names: Vec<String>, categories: Vec<CategoryCh
     }
 }
 
-/// A threshold typed as text. The text is the operator's until it reads as a
-/// number, so "0." and "-" survive while they are being typed; a value
-/// changed from elsewhere replaces it.
+/// A rule's threshold as a slider along the axis of the strip beneath it,
+/// with the value it stands at beside it. The rule re-divides kept from left
+/// out as it moves, and the arrows step it one step at a time.
 #[component]
-fn ThresholdField(value: f64, label: String, on_change: EventHandler<f64>) -> Element {
-    let mut text = use_signal(|| value.to_string());
-    use_effect(use_reactive(&value, move |value| {
-        let typed = text.peek().trim().parse::<f64>().ok();
-        if typed != Some(value) {
-            text.set(value.to_string());
-        }
-    }));
+fn ThresholdSlider(threshold: Threshold, label: String, on_change: EventHandler<f64>) -> Element {
+    let Threshold { value, scale } = threshold;
     rsx! {
-        TextInput {
-            class: "curation-select-rule-value",
-            kind: TextInputKind::Decimal,
-            value: text(),
-            "aria-label": "{label}",
-            oninput: move |typed: String| {
-                if let Ok(number) = typed.trim().parse::<f64>()
-                    && number.is_finite()
-                {
-                    on_change.call(number);
-                }
-                text.set(typed);
-            },
+        span { class: "curation-select-rule-slider",
+            input {
+                r#type: "range",
+                min: "{scale.low()}",
+                max: "{scale.high()}",
+                step: "{scale.step()}",
+                value: "{value}",
+                "aria-label": "{label}",
+                "aria-valuetext": "{scale.label(value)}",
+                oninput: move |event: FormEvent| {
+                    if let Ok(slid) = event.value().parse::<f64>() {
+                        on_change.call(scale.snap(slid));
+                    }
+                },
+            }
+            output { class: "curation-select-rule-readout", "{scale.label(value)}" }
         }
     }
 }

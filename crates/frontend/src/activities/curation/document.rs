@@ -9,6 +9,7 @@
 //!
 //! This is the contract every Curation view shares. Add fields and helpers;
 //! never rename or remove what is here without checking the other views.
+mod progress;
 mod selection;
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) use progress::ProgressCurve;
 pub(crate) use selection::{Comparison, EpisodeFact, Selection, SelectionBasis};
 
 pub(crate) const CURATION_ENCODING_VERSION: u32 = 1;
@@ -271,7 +273,9 @@ impl EpisodeFailure {
 }
 
 /// Progress of one Identify unproductive moments node. Its scorer has nothing
-/// to configure; what it keeps is which episodes it has scored.
+/// to configure; what it keeps is which episodes it has scored, and each
+/// scored episode's finer progress curve. Episodes scored before curves were
+/// kept have none, and their timeline draws the moments instead.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MomentDetection {
@@ -279,8 +283,14 @@ pub(crate) struct MomentDetection {
     completed_episodes: Vec<EpisodeId>,
     #[serde(default)]
     failed_episodes: Vec<EpisodeFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    curves: Vec<ProgressCurve>,
 }
 impl MomentDetection {
+    /// The finer progress curve of one scored episode, when it was kept.
+    pub(crate) fn curve(&self, episode: &EpisodeId) -> Option<&ProgressCurve> {
+        self.curves.iter().find(|curve| curve.episode() == episode)
+    }
     pub(crate) fn completed_episodes(&self) -> &[EpisodeId] {
         &self.completed_episodes
     }
@@ -1118,6 +1128,24 @@ impl CurationGraph {
         self.moments
             .retain(|row| !(row.node == node && &row.episode == episode));
         self.moments.extend(rows);
+        Ok(())
+    }
+    /// Keep one episode's finer progress curve on the detection node that
+    /// scored it, replacing the one it had.
+    pub(crate) fn record_progress_curve(
+        &mut self,
+        node: &str,
+        curve: ProgressCurve,
+    ) -> Result<(), String> {
+        let detection = match self.node_mut(node).map(CurationNode::kind_mut) {
+            Some(CurationNodeKind::IdentifyUnproductiveMoments(detection)) => detection,
+            Some(_) => return Err("That node does not identify moments.".into()),
+            None => return Err("Unknown node.".into()),
+        };
+        detection
+            .curves
+            .retain(|kept| kept.episode() != curve.episode());
+        detection.curves.push(curve);
         Ok(())
     }
     /// What a Find similar node last found, whatever it was asked.

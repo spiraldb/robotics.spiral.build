@@ -18,7 +18,7 @@ use spiral_robotics_common::datasets::EpisodeId;
 
 /// Enough parallel provider work to hide per-request latency without opening
 /// one request for every episode in a large dataset.
-pub(super) const EPISODES_IN_FLIGHT: usize = 8;
+const EPISODES_IN_FLIGHT: usize = 8;
 
 /// What one request may spend on pictures. Chunking a longer episode across
 /// several requests, and reconciling the answers, is its own design.

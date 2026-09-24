@@ -14,10 +14,11 @@ use crate::activities::curation::document::{CurationNodeKind, SubtaskRanking, Su
 use crate::activities::curation::episode_map::{
     EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
 };
+use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::population::Slice;
 use crate::activities::curation::poster::{PosterCut, PosterFrame, PosterFrames};
 use crate::activities::curation::review::{
-    Counted, NoSubtaskChosen, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
+    Counted, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus};
 use crate::activities::episode::Episode;
@@ -155,14 +156,21 @@ impl SearchOutcome {
         }
         answers
     }
-    /// Which episodes the ranking reached.
-    fn coverage(&self, episodes: &MeasuredEpisodes, rows: &[SubtaskRow]) -> EpisodeCoverage {
+    /// Which episodes the ranking reached. The row asked about is the
+    /// question, and jev finding it the same as itself says nothing about
+    /// its episode, so it is not counted.
+    fn coverage(
+        &self,
+        episodes: &MeasuredEpisodes,
+        rows: &[SubtaskRow],
+        about: Option<usize>,
+    ) -> EpisodeCoverage {
         let ranked = self.ranking.ranked();
         EpisodeCoverage::of(
             episodes,
             ranked
                 .iter()
-                .filter(|ranked| ranked.answered())
+                .filter(|ranked| ranked.answered() && Some(ranked.row()) != about)
                 .filter_map(|ranked| {
                     Some((rows.get(ranked.row())?.episode(), ranked.probability()))
                 }),
@@ -197,7 +205,9 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     let spans = controller.sample().as_ref().map(EpisodeSpans::of);
     let mut query = use_signal(|| source.peek().query().to_owned());
     let mut outcome = use_signal(|| Option::<SearchOutcome>::None);
-    let mut selected = use_signal(|| Option::<usize>::None);
+    // The results a click opens, one tab per episode; the row chosen is the
+    // one playing in the tab in front.
+    let tabs = OpenEpisodes::use_open();
     let mut running = use_signal(|| false);
     let mut asked = use_signal(|| Option::<AskedQuestion>::None);
     // Bumped when a ranking's first answers land, so the map lights up again
@@ -241,7 +251,6 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                 text: text.clone(),
                 about,
             }));
-            selected.set(None);
             let asked_rows = source.peek().rows().to_vec();
             outcome.set(Some(SearchOutcome::started(
                 asked_rows.len(),
@@ -289,12 +298,15 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                         {
                             controller.save(studio);
                         }
-                        if selected.peek().is_none() {
-                            let top = outcome
-                                .peek()
-                                .as_ref()
-                                .and_then(|outcome| outcome.top(about));
-                            selected.set(top);
+                        // The best answer opens as soon as there is one, so
+                        // the question's result is on screen, not a click away.
+                        let top = outcome
+                            .peek()
+                            .as_ref()
+                            .and_then(|outcome| outcome.top(about))
+                            .and_then(|top| asked_rows.get(top));
+                        if let Some(row) = top {
+                            tabs.open(row.episode(), Some((row.start_time(), row.end_time())));
                         }
                     }
                     Err(problem) => {
@@ -310,23 +322,50 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     // Ask the saved question whenever it is not the one on screen. A row that
     // asked from elsewhere also left where it was, so its poster is carried
     // from there into the question it became.
+    // A search's card and the top bar say it is ranking while it does. Its
+    // requests belong to this workspace, so leaving the node ends them and
+    // the line with them.
+    let reported = node.clone();
+    use_effect(move || {
+        let line =
+            running().then(|| format!("Ranking {}", Counted::subtasks(source.read().rows().len())));
+        controller.report_activity(&reported, line);
+    });
+    let dropped = node.clone();
+    use_drop(move || controller.report_activity(&dropped, None));
     let restored_node = node.clone();
     use_effect(move || {
-        let saved = {
+        // The rows arrive with the episode sample, which may still be read
+        // when the node opens. A question restored or asked against no rows
+        // was answered for nothing and never asked again, so it waits.
+        let (saved, no_rows) = {
             let reading = source.read();
-            AskedQuestion {
+            let saved = AskedQuestion {
                 text: reading.query().trim().to_owned(),
                 about: reading.asked_about(),
-            }
+            };
+            (saved, reading.rows().is_empty())
         };
-        if saved.text.is_empty() || running() || asked.read().as_ref() == Some(&saved) {
+        if saved.text.is_empty() || no_rows || running() || asked.read().as_ref() == Some(&saved) {
             return;
         }
         // A question already answered and saved is shown, not asked again.
         let stored =
             controller.with_payload(|payload| payload.current_ranking(&restored_node).cloned());
         if let Some(stored) = stored.filter(|stored| stored.query().trim() == saved.text) {
-            outcome.set(Some(SearchOutcome::restored(source.peek().rows(), &stored)));
+            let restored = SearchOutcome::restored(source.peek().rows(), &stored);
+            // A reopened search plays its best answer, as a finished one does,
+            // rather than an empty half beside the ranking.
+            let top = restored
+                .top(saved.about)
+                .and_then(|top| source.peek().rows().get(top).cloned());
+            tabs.open_first(top.map(|row| {
+                (
+                    row.episode().clone(),
+                    Some((row.start_time(), row.end_time())),
+                )
+            }));
+            outcome.set(Some(restored));
             query.set(saved.text.clone());
             asked.set(Some(saved));
             return;
@@ -376,7 +415,18 @@ pub(in crate::activities::curation) fn SearchWorkspace(
         .as_ref()
         .map(|spans| EpisodeLanes::of(measured.episodes(), &slices, spans))
         .unwrap_or_default();
-    let chosen = selected();
+    let chosen = tabs.front().and_then(|tab| {
+        rows.iter()
+            .position(|row| tab.holds(row.episode(), row.start_time()))
+    });
+    let choose = {
+        let rows = rows.clone();
+        move |row: usize| {
+            if let Some(row) = rows.get(row) {
+                tabs.open(row.episode(), Some((row.start_time(), row.end_time())));
+            }
+        }
+    };
     let reported = outcome.read();
     let failure = reported
         .as_ref()
@@ -400,7 +450,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
         .filter(|outcome| outcome.has_answers())
         .map(|outcome| outcome.answers(rows.len()));
     let summary = match (&answered, reported.as_ref()) {
-        (Some(_), Some(outcome)) => outcome.coverage(&measured, &rows).summary(),
+        (Some(_), Some(outcome)) => outcome.coverage(&measured, &rows, about).summary(),
         _ => format!(
             "{} across {}",
             Counted::subtasks(rows.len()),
@@ -498,8 +548,10 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                         lanes,
                         paint,
                         summary,
-                        on_select: move |row: usize| {
-                            selected.set(Some(row));
+                        on_select: {
+                            let choose = choose.clone();
+                            move |row: usize| {
+                            choose(row);
                             let place = places.iter().position(|listed| *listed == row);
                             spawn(async move {
                                 Motion::after_render().await;
@@ -507,6 +559,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                                     SubtaskList::RANKED.reveal(place);
                                 }
                             });
+                            }
                         },
                     }
                     if let Some(answers) = answered.clone() {
@@ -515,7 +568,10 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                             answers,
                             about,
                             chosen,
-                            on_select: move |row: usize| selected.set(Some(row)),
+                            on_select: {
+                                let choose = choose.clone();
+                                move |row: usize| choose(row)
+                            },
                         }
                     }
                 }
@@ -530,7 +586,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                         ol {
                             id: SubtaskList::RANKED.id(),
                             class: "curation-entries",
-                            "aria-label": "Subtasks, closest to the query first; each row ends with how likely jev thinks it is the same operation",
+                            "aria-label": "Subtasks, closest to the query first; each row ends with how likely it is the same operation",
                             for (row , standing) in listed {
                                 SubtaskEntry {
                                     key: "{rows[row].episode()}-{rows[row].start_time()}",
@@ -538,7 +594,10 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                                     standing,
                                     episode: Episode::name_of(rows[row].episode()),
                                     frames,
-                                    on_select: move |()| selected.set(Some(row)),
+                                    on_select: {
+                                        let choose = choose.clone();
+                                        move |()| choose(row)
+                                    },
                                     on_find_similar: {
                                         let find = find.clone();
                                         let asked = rows[row].clone();
@@ -548,37 +607,45 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                             }
                         }
                     },
-                    evidence: match chosen.and_then(|row| rows.get(row)) {
-                        Some(row) => rsx! {
-                            SubtaskEvidence {
-                                key: "{row.episode()}-{row.start_time()}",
-                                row: row.clone(),
-                                episode_rows: rows
+                    evidence: rsx! {
+                        EpisodeTabs {
+                            open: tabs,
+                            empty: "Choose a result to watch it play.".to_owned(),
+                            render: move |tab: OpenEpisode| {
+                                let Some(row) = rows
                                     .iter()
-                                    .filter(|other| other.episode() == row.episode())
-                                    .cloned()
-                                    .collect::<Vec<_>>(),
-                                context: context.clone(),
-                                on_open: {
-                                    let focus = EpisodeFocus::new(
-                                        annotation.clone(),
-                                        row.episode().clone(),
-                                        Some((row.start_time(), row.end_time())),
-                                    );
-                                    move |()| controller.focus_episode(focus.clone())
-                                },
-                                on_find_similar: (chosen != about).then(|| {
-                                    let find = find.clone();
-                                    let asked = row.clone();
-                                    EventHandler::new(move |()| find(asked.clone(), None))
-                                }),
-                            }
-                        },
-                        None => rsx! {
-                            NoSubtaskChosen {
-                                prompt: "Choose a result to watch it play.",
-                            }
-                        },
+                                    .position(|row| tab.holds(row.episode(), row.start_time()))
+                                else {
+                                    return rsx! {};
+                                };
+                                let asked = rows[row].clone();
+                                rsx! {
+                                    SubtaskEvidence {
+                                        row: asked.clone(),
+                                        play: tab.play(),
+                                        episode_rows: rows
+                                            .iter()
+                                            .filter(|other| other.episode() == asked.episode())
+                                            .cloned()
+                                            .collect::<Vec<_>>(),
+                                        context: context.clone(),
+                                        on_open: {
+                                            let focus = EpisodeFocus::new(
+                                                annotation.clone(),
+                                                asked.episode().clone(),
+                                                Some((asked.start_time(), asked.end_time())),
+                                            );
+                                            move |()| controller.focus_episode(focus.clone())
+                                        },
+                                        on_find_similar: (Some(row) != about).then(|| {
+                                            let find = find.clone();
+                                            let asked = asked.clone();
+                                            EventHandler::new(move |()| find(asked.clone(), None))
+                                        }),
+                                    }
+                                }
+                            },
+                        }
                     },
                 }
             }
@@ -587,17 +654,14 @@ pub(in crate::activities::curation) fn SearchWorkspace(
 }
 
 /// The row a search is asking about, pinned above its answers: its still and
-/// where it came from. Its words are already in the box above it.
+/// where it came from, in one line. Its words are already in the box above it.
 #[component]
 fn AskedAbout(row: SubtaskRow, frames: PosterFrames) -> Element {
     rsx! {
         div { class: "curation-similar-asked",
             PosterFrame { row: row.clone(), frames }
-            p { class: "curation-similar-asked-words",
-                span { class: "curation-similar-asked-label", "Asked about" }
-                span { class: "curation-similar-asked-facts",
-                    "{Episode::name_of(row.episode())} · {row.start_time().clock_label()} – {row.end_time().clock_label()}"
-                }
+            p { class: "curation-similar-asked-facts",
+                "From {Episode::name_of(row.episode())} · {row.start_time().clock_label()} – {row.end_time().clock_label()}"
             }
         }
     }
@@ -626,7 +690,9 @@ fn MatchStrip(
     ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
     let spread = ranked.len().max(1) as f64;
     rsx! {
-        div { class: "curation-match-strip", role: "group", "aria-label": "Every answer by how likely it is the same operation",
+        // A pointer shortcut, as the map is: the ranking beside it is the
+        // same answers in words.
+        div { class: "curation-match-strip", "aria-hidden": "true",
             span { class: "curation-match-threshold", style: "left: {CoverageMeasure::MATCHED * 100.0}%" }
             for (rank , (row , probability)) in ranked.into_iter().enumerate() {
                 button {

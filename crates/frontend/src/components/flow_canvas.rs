@@ -141,11 +141,35 @@ impl FlowMargins {
 pub(crate) struct ReadableViewport {
     margins: FlowMargins,
     min_zoom: f64,
+    overflow: OverflowZoom,
+}
+
+/// The zoom a graph too big to show whole parks at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum OverflowZoom {
+    /// As large as the pane's height allows: a pipeline running off to the
+    /// right is read one stage at a time anyway.
+    FitHeight,
+    /// As small as a card stays readable: a graph branching sideways shows
+    /// as many of its branches as it can.
+    Smallest,
 }
 
 impl ReadableViewport {
     pub(crate) const fn new(margins: FlowMargins, min_zoom: f64) -> Self {
-        Self { margins, min_zoom }
+        Self {
+            margins,
+            min_zoom,
+            overflow: OverflowZoom::FitHeight,
+        }
+    }
+
+    /// Park an overflowing graph at the smallest readable zoom rather than the
+    /// largest its height allows — the right answer for a tree read downwards,
+    /// whose overflow is its branches side by side.
+    pub(crate) const fn showing_most(mut self) -> Self {
+        self.overflow = OverflowZoom::Smallest;
+        self
     }
 
     /// Where to park for a graph of `bounds` inside `container`, and whether the
@@ -157,7 +181,10 @@ impl ReadableViewport {
         if whole >= self.min_zoom {
             return (Viewport::fit(Some(bounds), safe, self.min_zoom, 1.0), false);
         }
-        let zoom = (safe.height / bounds.height).clamp(self.min_zoom, 1.0);
+        let zoom = match self.overflow {
+            OverflowZoom::FitHeight => (safe.height / bounds.height).clamp(self.min_zoom, 1.0),
+            OverflowZoom::Smallest => self.min_zoom,
+        };
         let parked = Viewport::new(
             safe.x - bounds.x * zoom,
             safe.y + (safe.height - bounds.height * zoom) / 2.0 - bounds.y * zoom,
@@ -172,28 +199,34 @@ impl ReadableViewport {
 struct CardReveal {
     graph: Rect,
     pane_width: f64,
+    /// How far a revealed card stays from the pane's edge: the fit's own side
+    /// margin, so a card the fit already placed is never "revealed" by a pan.
+    margin: f64,
 }
 
 impl CardReveal {
-    /// How far a revealed card stays from the pane's edge.
-    const MARGIN: f64 = 24.0;
-
-    const fn new(graph: Rect, pane_width: f64) -> Self {
-        Self { graph, pane_width }
+    const fn new(graph: Rect, pane_width: f64, margin: f64) -> Self {
+        Self {
+            graph,
+            pane_width,
+            margin,
+        }
     }
 
     /// `base` panned along the ranks just far enough to bring `card` inside the
     /// pane — `base` itself when it already is — and never far enough to slide
     /// the graph's first or last card away from the pane's edge.
     fn of(self, base: Viewport, card: Rect) -> Viewport {
+        // Rounding in the fit can leave a card a hair past its own margin.
+        let margin = self.margin - 0.5;
         let left = base.x + card.x * base.zoom;
         let right = base.x + card.max_x() * base.zoom;
-        if left >= Self::MARGIN && right <= self.pane_width - Self::MARGIN {
+        if left >= margin && right <= self.pane_width - margin {
             return base;
         }
         let centred = self.pane_width / 2.0 - card.center().x * base.zoom;
-        let first = Self::MARGIN - self.graph.x * base.zoom;
-        let last = self.pane_width - Self::MARGIN - self.graph.max_x() * base.zoom;
+        let first = self.margin - self.graph.x * base.zoom;
+        let last = self.pane_width - self.margin - self.graph.max_x() * base.zoom;
         let x = if last > first {
             first
         } else {
@@ -273,7 +306,7 @@ pub(crate) fn FlowFit(
             .iter()
             .find(|node| node.id == wanted)
             .map_or(base, |node| {
-                CardReveal::new(bounds, container.width).of(base, node.rect)
+                CardReveal::new(bounds, container.width, fit.margins.sides).of(base, node.rect)
             });
         automatic.set(Some(target));
         if target != current {
@@ -370,12 +403,20 @@ mod tests {
         assert_eq!(parked.zoom, 1.0);
         // The first rank sits at the safe area's left edge, not off-screen.
         assert_eq!(parked.x, 24.0);
+
+        // A tree read downwards shows as many branches as stay readable.
+        let (parked, cut_off) = fit
+            .showing_most()
+            .park(Rect::new(0.0, 0.0, 4_000.0, 300.0), pane);
+        assert!(cut_off);
+        assert_eq!(parked.zoom, 0.7);
+        assert_eq!(parked.x, 24.0);
     }
 
     #[test]
     fn revealing_a_card_never_slides_the_ends_of_the_graph_off_the_pane() {
         let graph = Rect::new(0.0, 0.0, 2_000.0, 92.0);
-        let reveal = CardReveal::new(graph, 800.0);
+        let reveal = CardReveal::new(graph, 800.0, 24.0);
         let base = Viewport::new(24.0, 0.0, 1.0);
 
         let visible = reveal.of(base, Rect::new(100.0, 0.0, 224.0, 92.0));

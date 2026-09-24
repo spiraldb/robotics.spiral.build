@@ -4,16 +4,16 @@
 use dioxus::prelude::*;
 use dioxus_flow::{
     Background, BackgroundVariant, Edge, EdgeKind, Flow, Handle, HandleKind, MarkerKind, Node,
-    NodeViewCtx, Point, Side, WorldLayer,
+    NodeViewCtx, Point, Side, WorldLayer, use_flow,
 };
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
-    ConfirmationResponse, DeleteIcon, InlineConfirmation, Notice, NoticeTone,
+    ConfirmationResponse, DeleteIcon, InlineConfirmation, Menu, Notice, NoticeTone,
 };
 
 use super::super::document::CurationGraph;
 use super::super::population::EpisodeSample;
-use super::super::state::CurationController;
+use super::super::state::{CurationController, NodeActivity};
 use super::node_card::{ChildMenu, NodeCard, NodeFace};
 use crate::components::flow_canvas::{
     CanvasControls, CardGraph, FlowFit, FlowMargins, ReadableViewport,
@@ -22,20 +22,25 @@ use crate::components::icons::{
     DataIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon, SignalStreamIcon,
 };
 
-/// The Studio stage card's size, so a graph node reads like a Workflow stage
-/// and the layout can place it before it mounts.
-const NODE_WIDTH: f64 = 224.0;
-const NODE_HEIGHT: f64 = 92.0;
+/// A node's size, so the layout can place it before it mounts. The Workflow
+/// graph's stage width, and taller: the graph pane is a fifth of the window,
+/// two branches side by side have to stay readable in it, and the longest
+/// name ("Identify unproductive moments") takes a second line rather than the
+/// card taking more width.
+const NODE_WIDTH: f64 = 192.0;
+const NODE_HEIGHT: f64 = 100.0;
 /// How far under a card's bottom edge its popovers hang, clear of the +.
-const MENU_DROP: f64 = 22.0;
+const MENU_DROP: f64 = 18.0;
 
 /// The dataset above what it feeds, with room under each card for its + and
-/// the menu it opens.
-const GRAPH: CardGraph = CardGraph::top_to_bottom(28.0, 76.0);
+/// no more: the menu the + opens floats over what is below.
+const GRAPH: CardGraph = CardGraph::top_to_bottom(20.0, 40.0);
 
 /// Where the pane parks: the whole graph, clear of the canvas's own hairline,
-/// for as long as a card stays large enough to read.
-const FIT: ReadableViewport = ReadableViewport::new(FlowMargins::new(24.0, 24.0, 24.0), 0.4);
+/// for as long as a card stays large enough to read. Past that the graph is
+/// panned rather than shrunk into cards nobody can read.
+const FIT: ReadableViewport =
+    ReadableViewport::new(FlowMargins::new(14.0, 18.0, 44.0), 0.66).showing_most();
 
 /// The nodes and edges one payload draws as.
 #[derive(Clone)]
@@ -49,10 +54,13 @@ impl GraphFlow {
         payload: &CurationGraph,
         sample: Option<&EpisodeSample>,
         selected: Option<&str>,
+        activity: &NodeActivity,
     ) -> Self {
         let mut nodes = NodeCard::all(payload, sample)
             .into_iter()
             .map(|card| {
+                let status = activity.get(card.id()).cloned();
+                let card = card.running(status.as_ref());
                 let id = card.id().to_owned();
                 let selected = selected == Some(id.as_str());
                 let mut node = Node::with_data(id, card.label(), Point::ZERO, card)
@@ -115,6 +123,10 @@ impl CanvasHand {
     fn remove_action(node: &str) -> String {
         format!("curation-canvas-remove-{node}")
     }
+    /// The id the + menu returns focus to when Escape closes it.
+    fn add_action(node: &str) -> String {
+        format!("curation-canvas-add-{node}")
+    }
     fn menu_open(self, node: &str) -> bool {
         self.open_menu.read().as_deref() == Some(node)
     }
@@ -168,18 +180,21 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
                 payload,
                 controller.sample().as_ref(),
                 controller.selected_node().as_deref(),
+                &controller.activity(),
             )
         })
     });
     let mut nodes = use_signal(|| initial.nodes);
     let mut edges = use_signal(|| initial.edges);
-    // The payload and the selection are the truth; the canvas follows them.
+    // The payload, the selection, and what is running are the truth; the
+    // canvas follows them.
     use_effect(move || {
         let flow = controller.with_payload(|payload| {
             GraphFlow::new(
                 payload,
                 controller.sample().as_ref(),
                 controller.selected_node().as_deref(),
+                &controller.activity(),
             )
         });
         nodes.set(flow.nodes);
@@ -189,7 +204,6 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
     // Curation draws no minimap; the fit reports an overflowing graph all the
     // same, and parking at the first rank is the answer either way.
     let overflowing = use_signal(|| false);
-    let running = controller.activity();
     let message = hand.problem().or_else(|| controller.error());
     rsx! {
         section { class: "workflow-flow-wrap curation-canvas-graph", "aria-label": "Curation graph",
@@ -205,10 +219,7 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
                 is_valid_connection: move |_| false,
                 on_pane_click: move |_| hand.close_menu(),
                 on_node_click: move |id: String| hand.select(id),
-                node_view: move |ctx: NodeViewCtx<NodeCard>| {
-                    let status = running.get(ctx.node.id.as_str()).cloned();
-                    rsx! { NodeCardView { ctx, hand, status } }
-                },
+                node_view: move |ctx: NodeViewCtx<NodeCard>| rsx! { NodeCardView { ctx, hand } },
                 Background { variant: BackgroundVariant::Dots, gap: 22.0, size: 0.7 }
                 CanvasPopovers { nodes, hand }
                 FlowFit {
@@ -271,7 +282,7 @@ fn AddGlyph() -> Element {
 }
 
 /// One node: what it is, what it holds, what may follow it, and — while it
-/// runs — one quiet line from the view that runs it.
+/// runs — one quiet line from the view that runs it in place of what it holds.
 ///
 /// What it does not hold is either of its popovers. A node is drawn inside a
 /// world tile, and a tile carries `content-visibility: auto` so the engine can
@@ -282,11 +293,7 @@ fn AddGlyph() -> Element {
 /// `CanvasPopovers`, in the world layer the crate provides for exactly
 /// this.
 #[component]
-fn NodeCardView(
-    ctx: NodeViewCtx<NodeCard>,
-    hand: CanvasHand,
-    #[props(default)] status: Option<String>,
-) -> Element {
+fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
     let card = ctx.node.data.clone();
     let id = card.id().to_owned();
     let menu_open = hand.menu_open(&id);
@@ -314,25 +321,31 @@ fn NodeCardView(
                 event.stop_propagation();
                 hand.select(activated.clone());
             },
+            // An output wears its flag on the card's edge rather than in the
+            // heading, so the name keeps the heading's width and the flag
+            // never sits under the card's remove control.
+            if card.is_output() {
+                span {
+                    class: "workflow-stage-output-flag curation-canvas-output",
+                    title: "One of this curation's outputs: the data a training run can use",
+                    "Output"
+                }
+            }
             div { class: "workflow-stage-heading",
                 span { class: "workflow-stage-mark", "aria-hidden": "true",
                     NodeGlyph { face: card.face() }
                 }
                 strong { class: "workflow-stage-title", "{card.label()}" }
-                if card.is_output() {
-                    span {
-                        class: "workflow-stage-output-flag",
-                        title: "One of this curation's outputs: the data a training run can use",
-                        "Output"
-                    }
-                }
             }
-            p { class: "workflow-stage-summary", "{card.summary()}" }
-            if let Some(status) = status {
-                footer { class: "workflow-stage-footer curation-canvas-node-status", role: "status",
+            // While it runs, what the node is doing replaces what it holds:
+            // the run line carries the live count, so the card says it once.
+            if card.is_running() {
+                footer { class: "workflow-stage-footer curation-canvas-node-status",
                     span { class: "curation-canvas-node-dot", "aria-hidden": "true" }
-                    span { "{status}" }
+                    span { "{card.summary()}" }
                 }
+            } else {
+                p { class: "workflow-stage-summary", "{card.summary()}" }
             }
             if card.removable() {
                 Handle { id: "parent".to_owned(), kind: HandleKind::Target, position: Side::Top }
@@ -343,6 +356,7 @@ fn NodeCardView(
                 // node, so pressing + again closes what it opened.
                 span { class: "curation-canvas-add", onpointerdown: move |event| event.stop_propagation(),
                     Button {
+                        id: "{CanvasHand::add_action(&id)}",
                         purpose: ActionPurpose::Create,
                         variant: ButtonVariant::Icon,
                         class: "curation-canvas-add-action",
@@ -368,7 +382,7 @@ fn NodeCardView(
                     variant: ButtonVariant::Icon,
                     class: "curation-canvas-node-remove",
                     aria_label: "Remove {card.label()}",
-                    title: "Remove this node and everything after it",
+                    title: "Remove this step and everything after it",
                     onclick: {
                         let id = id.clone();
                         move |_| hand.confirm_removal(&id)
@@ -386,13 +400,17 @@ fn NodeCardView(
 /// `WorldLayer` shares the viewport transform without being a tile, so a
 /// popover stays fixed to its card through pan and zoom and is never clipped.
 /// Only one node has either open at a time, so this draws at most one of each.
+/// Each is scaled back by the zoom: it hangs from a card in the graph, but
+/// it is read at the size of every other menu in Studio.
 #[component]
 fn CanvasPopovers(nodes: Signal<Vec<Node<NodeCard>>>, hand: CanvasHand) -> Element {
+    let zoom = use_flow().viewport.read().zoom;
     let open = hand.open_menu.read().clone();
     let confirming = hand.confirming.read().clone();
     if open.is_none() && confirming.is_none() {
         return rsx! {};
     }
+    let screen = format!("--screen-scale: {:.4}", 1.0 / zoom.max(0.05));
     let placed = |wanted: &Option<String>| {
         let wanted = wanted.as_deref()?;
         nodes
@@ -407,27 +425,24 @@ fn CanvasPopovers(nodes: Signal<Vec<Node<NodeCard>>>, hand: CanvasHand) -> Eleme
                 if let Some(menu) = card.menu().cloned() {
                     div {
                         class: "curation-canvas-menu",
-                        role: "menu",
-                        "aria-label": "Add a step after {card.label()}",
-                        style: "left:{at.x + NODE_WIDTH / 2.0}px;top:{at.y + NODE_HEIGHT + MENU_DROP}px",
+                        style: "left:{at.x + NODE_WIDTH / 2.0}px;top:{at.y + NODE_HEIGHT + MENU_DROP}px;{screen}",
                         onpointerdown: move |event| event.stop_propagation(),
-                        onkeydown: move |event: KeyboardEvent| {
-                            if event.key() == Key::Escape {
-                                event.prevent_default();
-                                hand.close_menu();
-                            }
-                        },
-                        for (index, label) in menu.labels().into_iter().enumerate() {
-                            Button {
-                                key: "{label}",
-                                purpose: ActionPurpose::Create,
-                                variant: ButtonVariant::Row,
-                                role: "menuitem",
-                                onclick: {
-                                    let menu = menu.clone();
-                                    move |_| hand.choose(&menu, index)
-                                },
-                                "{label}"
+                        Menu {
+                            label: format!("Add a step after {}", card.label()),
+                            opener: CanvasHand::add_action(card.id()),
+                            on_close: move |()| hand.close_menu(),
+                            for (index, label) in menu.labels().into_iter().enumerate() {
+                                Button {
+                                    key: "{label}",
+                                    purpose: ActionPurpose::Create,
+                                    variant: ButtonVariant::Row,
+                                    role: "menuitem",
+                                    onclick: {
+                                        let menu = menu.clone();
+                                        move |_| hand.choose(&menu, index)
+                                    },
+                                    "{label}"
+                                }
                             }
                         }
                     }
@@ -436,7 +451,7 @@ fn CanvasPopovers(nodes: Signal<Vec<Node<NodeCard>>>, hand: CanvasHand) -> Eleme
             if let Some((card, at)) = placed(&confirming) {
                 div {
                     class: "curation-canvas-remove",
-                    style: "left:{at.x}px;top:{at.y + NODE_HEIGHT + MENU_DROP}px",
+                    style: "left:{at.x}px;top:{at.y + NODE_HEIGHT + MENU_DROP}px;{screen}",
                     onpointerdown: move |event| event.stop_propagation(),
                     InlineConfirmation {
                         id: "{CanvasHand::remove_action(card.id())}-confirmation",
@@ -488,7 +503,7 @@ mod tests {
         let group = payload
             .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks)
             .unwrap();
-        let flow = GraphFlow::new(&payload, None, Some(&search));
+        let flow = GraphFlow::new(&payload, None, Some(&search), &NodeActivity::new());
         let node = |id: &str| {
             flow.nodes
                 .iter()

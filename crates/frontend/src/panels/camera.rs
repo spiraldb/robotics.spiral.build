@@ -8,7 +8,7 @@ use crate::client::project::ProjectClient;
 use crate::components::icons::CameraStreamIcon;
 use crate::format::ClockPresentation;
 use crate::panels::recorded_source::{LoadState, RecordedSource};
-use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant, Remount};
 
 use wasm_bindgen::JsCast as _;
 
@@ -43,6 +43,10 @@ pub(super) fn CameraEditor(element_id: String, source: CameraEditorSource) -> El
                 let updating = source.state().is_loading();
                 let warning = source.state().reason().map(str::to_owned);
                 let caption = recorded.label.clone();
+                // Another episode or stream is another clip and another
+                // decoder, and the frame captures both when it mounts, so a
+                // new identity mounts it afresh rather than reusing the last.
+                let identity = format!("{}:{}", recorded.episode, recorded.stream);
                 rsx! {
                     div { class: "camera-editor-meta",
                         span {
@@ -55,7 +59,9 @@ pub(super) fn CameraEditor(element_id: String, source: CameraEditorSource) -> El
                         }
                     }
                     div { class: "camera-editor-frame",
-                        RecordedCameraFrame { key: "{recorded.episode}:{recorded.stream}", recorded, element_id }
+                        Remount { identity,
+                            RecordedCameraFrame { recorded, element_id }
+                        }
                         if let Some(ref warning) = warning {
                             div { class: "camera-live-error", role: "alert", span { "{warning}" } }
                         }

@@ -44,10 +44,6 @@
             # The studio's web interface compiles to WebAssembly.
             targets = [ "wasm32-unknown-unknown" ];
           };
-          # Current upstream Spiral requires this compiler for driver builds.
-          adbcBuildToolchain = pkgs.rust-bin.nightly."2026-08-10".minimal.override {
-            extensions = [ "rustfmt" "clippy" ];
-          };
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
           # `dx` builds the web client and native server as one fullstack app,
@@ -159,20 +155,6 @@
 
           devShells.default = pkgs.mkShell developmentShell;
           devShells.ci = pkgs.mkShell sharedShell;
-
-          devShells.adbc-build = pkgs.mkShell (
-            developmentShell
-            // {
-              packages = (pkgs.lib.remove rustToolchain developmentShell.packages) ++ [
-                adbcBuildToolchain
-                pkgs.openssl
-                pkgs.flatbuffers
-              ];
-              # openssl-sys otherwise prefers Homebrew on macOS over pkg-config.
-              OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
-              OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
-            }
-          );
 
           # Explicit validation environment until the public release includes
           # the upstream persistence fixes. No hand-written exports are needed.

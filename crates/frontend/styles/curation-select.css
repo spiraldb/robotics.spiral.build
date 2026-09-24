@@ -18,8 +18,13 @@
   .curation-select-rule-choice {
     @apply w-auto max-w-[10rem];
   }
-  .curation-select-rule-value {
-    @apply w-20;
+  /* The threshold slides in the sentence, with the value it stands at read
+     out beside it in the rule's own digits. */
+  .curation-select-rule-slider {
+    @apply inline-flex items-center gap-2;
+  }
+  .curation-select-rule-readout {
+    @apply min-w-[3.5ch] font-mono text-[12px] tabular-nums text-ink;
   }
   .curation-select-rule-hint {
     @apply text-ink-faint;
@@ -48,12 +53,13 @@
     color: var(--tone-ink-soft);
   }
 
-  /* What the rule keeps, beside the Output flag when nothing follows it. */
+  /* How much recording the rule keeps, beside the counts it adds up. */
   .curation-select-tally {
-    @apply m-0 flex min-h-7 items-center gap-2 border-b border-line px-3 font-mono text-[10px] text-ink-soft tabular-nums;
+    @apply m-0 font-mono text-[11px] text-ink-soft tabular-nums;
   }
 
-  /* Every judged value as a dot on one axis, the threshold as a line. */
+  /* Every judged value as a dot on one axis, and the threshold as a line
+     where the rule's slider stands. */
   .curation-select-strip {
     @apply relative mx-3 my-2 h-9 shrink-0;
   }
@@ -78,7 +84,7 @@
     box-shadow: 0 0 0 1.5px var(--tone-accent-strong);
   }
   .curation-select-strip-axis {
-    @apply pointer-events-none absolute inset-x-0 bottom-0 flex justify-between font-mono text-[9px] tabular-nums;
+    @apply pointer-events-none absolute inset-x-0 bottom-0 flex justify-between font-mono text-[10.5px] leading-none tabular-nums;
     color: var(--tone-ink-faint);
   }
 
@@ -90,7 +96,7 @@
   }
 
   .curation-select-filter {
-    @apply flex items-center border-b border-line px-3 py-1.5;
+    @apply flex items-center gap-3 border-b border-line px-3 py-1.5;
   }
 }
 
@@ -104,4 +110,61 @@
   min-height: 22px;
   padding-inline: 9px;
   font-size: 11px;
+}
+
+/* Unlayered: a range input's parts are browser pseudo-elements. A hairline
+   track on the rule's line, and an ink thumb the size of a strip dot's
+   ring, so the control reads as part of the sentence. */
+.curation-select-rule-slider input[type="range"] {
+  width: 14rem;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.curation-select-rule-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 999px;
+  background: var(--tone-line-strong);
+}
+
+.curation-select-rule-slider input[type="range"]::-moz-range-track {
+  height: 2px;
+  border-radius: 999px;
+  background: var(--tone-line-strong);
+}
+
+.curation-select-rule-slider input[type="range"]::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--tone-ink);
+  box-shadow: 0 0 0 2px var(--tone-surface);
+  -webkit-appearance: none;
+}
+
+.curation-select-rule-slider input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--tone-ink);
+  box-shadow: 0 0 0 2px var(--tone-surface);
+}
+
+.curation-select-rule-slider input[type="range"]:focus {
+  outline: none;
+}
+
+.curation-select-rule-slider input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--tone-surface), 0 0 0 4px var(--tone-focus);
+}
+
+.curation-select-rule-slider input[type="range"]:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 2px var(--tone-surface), 0 0 0 4px var(--tone-focus);
 }

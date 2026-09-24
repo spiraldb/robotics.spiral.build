@@ -6,6 +6,7 @@
 //! categories, or a detection's progress. The rule is stored in those terms,
 //! so a Select reads as one sentence about the node it follows.
 use crate::activities::episode::Episode;
+use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
 
 /// What a Select's input was measured by, and so what its rule can name.
@@ -49,11 +50,12 @@ impl EpisodeFact {
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|fact| fact.key() == key)
     }
+    /// The fact as the noun of "Keep episodes whose … is at least".
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::DurationSeconds => "duration",
-            Self::Messages => "messages",
-            Self::Channels => "channels",
+            Self::Messages => "message count",
+            Self::Channels => "channel count",
             Self::SizeMegabytes => "file size",
         }
     }
@@ -64,6 +66,16 @@ impl EpisodeFact {
             Self::SizeMegabytes => Some("MB"),
             Self::Messages | Self::Channels => None,
         }
+    }
+    /// The fact's value for one episode as a row reads it, in its own unit:
+    /// "0:20.5", "11,404", "3", "15.2 MB".
+    pub(in crate::activities::curation) fn reading(self, episode: &Episode) -> Option<String> {
+        let value = self.of(episode)?;
+        Some(match self {
+            Self::DurationSeconds => value.clock_label(),
+            Self::Messages | Self::Channels => (value as u64).grouped_label(),
+            Self::SizeMegabytes => format!("{value:.1} MB"),
+        })
     }
     /// The fact's value for one episode, when Spiral listed it.
     pub(in crate::activities::curation) fn of(self, episode: &Episode) -> Option<f64> {

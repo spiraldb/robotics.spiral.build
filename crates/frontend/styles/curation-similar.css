@@ -30,7 +30,6 @@
     @apply m-0 px-3 py-1 text-[11px] text-ink-soft;
   }
 
-  .curation-similar-query ~ .curation-similar-note,
   .curation-similar-actions .curation-similar-note {
     @apply p-0;
   }
@@ -208,31 +207,23 @@
   }
 
   .curation-match-axis {
-    @apply pointer-events-none absolute inset-x-0 bottom-0 flex justify-between font-mono text-[9px] tabular-nums;
+    @apply pointer-events-none absolute inset-x-0 bottom-0 flex justify-between font-mono text-[10.5px] leading-none tabular-nums;
     color: var(--tone-ink-faint);
   }
 
   /* The row a search asks about: its still, where it came from. Its words
      are already in the box above. */
   .curation-similar-asked {
-    @apply flex items-center gap-2 border-b border-line px-3 py-1.5;
+    @apply flex items-center gap-2 border-b border-line px-3 py-1;
   }
 
   .curation-similar-asked .curation-poster {
-    width: 64px;
-    height: 36px;
-  }
-
-  .curation-similar-asked-words {
-    @apply m-0 flex flex-col gap-0.5;
-  }
-
-  .curation-similar-asked-label {
-    @apply text-[10px] font-medium uppercase tracking-wide text-ink-soft;
+    width: 48px;
+    height: 27px;
   }
 
   .curation-similar-asked-facts {
-    @apply font-mono text-[10px] tabular-nums text-ink-soft;
+    @apply m-0 font-mono text-[11px] tabular-nums text-ink-soft;
   }
 
   /* The grouping workspace is the frame tokens fly across, from the map up
@@ -564,11 +555,15 @@
      drop, and the transitions become the state changes they decorated. */
   @media (prefers-reduced-motion: reduce) {
     .curation-map-segment,
+    .curation-map-lanes:is([data-reveal="ripple"], [data-reveal="pour"]) .curation-map-segment,
+    .curation-map-lanes[data-reveal="reading"] .curation-map-segment[data-source="true"],
     .curation-match-dot,
     .curation-similar-category,
     .curation-similar-chip,
+    .curation-similar-chip[data-pending="true"],
     .curation-profile,
-    .curation-profile-dot {
+    .curation-profile-dot,
+    .curation-profile-lane[data-side="members"] .curation-profile-dot {
       transition: none;
       animation: none;
     }

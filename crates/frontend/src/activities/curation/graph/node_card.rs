@@ -82,14 +82,27 @@ impl ChildMenu {
     }
 }
 
-/// One node as the canvas draws it: what it is, one line of what it holds,
-/// whether it is one of the curation's outputs, and what may follow it.
+/// The one line under a card's title: what the node holds, or — while it
+/// runs — what it is doing, which carries the live count in its place.
+#[derive(Clone, Debug, PartialEq)]
+enum CardLine {
+    Holds(String),
+    Running(String),
+}
+
+/// One node as the canvas draws it: what it is, one line of what it holds or
+/// is doing, whether it is one of the curation's outputs, and what may follow
+/// it.
+///
+/// The run line is part of the card rather than read beside it: the canvas
+/// redraws a node when its card changes, so a line kept anywhere else went
+/// on saying "Annotating 6 of 6 episodes" after the run had finished.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct NodeCard {
     id: String,
     face: NodeFace,
     label: &'static str,
-    summary: String,
+    line: CardLine,
     output: bool,
     menu: Option<ChildMenu>,
     order: usize,
@@ -111,7 +124,7 @@ impl NodeCard {
                 id: node.id().to_owned(),
                 face: NodeFace::of(node.kind()),
                 label: node.kind().label(),
-                summary: Self::describe(payload, node, reader.as_ref()),
+                line: CardLine::Holds(Self::describe(payload, node, sample, reader.as_ref())),
                 output: outputs.iter().any(|output| output == node.id()),
                 menu: ChildMenu::of(payload, node),
                 order: 0,
@@ -124,36 +137,42 @@ impl NodeCard {
     fn describe(
         payload: &CurationGraph,
         node: &CurationNode,
+        sample: Option<&EpisodeSample>,
         reader: Option<&PopulationReader<'_>>,
     ) -> String {
         let counts = reader.map(|reader| (reader.input(node.id()), reader.of(node.id())));
         match node.kind() {
             CurationNodeKind::Dataset => {
-                let name = payload
-                    .dataset()
-                    .map_or_else(|| "No dataset yet".to_owned(), DatasetSelection::label);
+                // The name the Dataset workspace and Data show, without the
+                // storage prefix that only pushed the count to a second line.
+                let name = payload.dataset().map_or_else(
+                    || "No dataset yet".to_owned(),
+                    DatasetSelection::display_name,
+                );
+                // Every count below this card is over the episodes it reads, so
+                // a dataset read only in part says so here, once.
+                let partial = sample.is_some_and(EpisodeSample::is_partial);
                 match counts {
+                    Some((_, episodes)) if payload.dataset().is_some() && partial => {
+                        format!("{name} · first {}", Counted::episodes(episodes.len()))
+                    }
                     Some((_, episodes)) if payload.dataset().is_some() => {
                         format!("{name} · {}", Counted::episodes(episodes.len()))
                     }
                     _ => name,
                 }
             }
-            CurationNodeKind::BreakDownSubtasks(annotation) => {
-                let measured = match counts {
-                    Some((input, output)) => format!(
-                        "{} of {} · {}",
-                        Self::measured(annotation.completed_episodes(), &input),
-                        Counted::episodes(input.episodes().len()),
-                        Counted::subtasks(output.len()),
-                    ),
-                    None => Counted::subtasks(payload.subtasks_for(node.id()).count()).to_string(),
-                };
-                match annotation.camera() {
-                    Some(camera) => format!("{measured} · {camera}"),
-                    None => measured,
-                }
-            }
+            // What the node holds, not what it runs with: the camera and model
+            // are the workspace's status line.
+            CurationNodeKind::BreakDownSubtasks(annotation) => match counts {
+                Some((input, output)) => format!(
+                    "{} of {} · {}",
+                    Self::measured(annotation.completed_episodes(), &input),
+                    Counted::episodes(input.episodes().len()),
+                    Counted::subtasks(output.len()),
+                ),
+                None => Counted::subtasks(payload.subtasks_for(node.id()).count()).to_string(),
+            },
             CurationNodeKind::FindSimilarSubtasks(search) => {
                 let query = search.query().trim();
                 if query.is_empty() {
@@ -201,6 +220,14 @@ impl NodeCard {
         self.order = order;
         self
     }
+    /// This card while its node runs, saying `activity` in place of what it
+    /// holds.
+    pub(super) fn running(mut self, activity: Option<&String>) -> Self {
+        if let Some(activity) = activity {
+            self.line = CardLine::Running(activity.clone());
+        }
+        self
+    }
     pub(super) fn id(&self) -> &str {
         &self.id
     }
@@ -210,8 +237,14 @@ impl NodeCard {
     pub(super) fn label(&self) -> &'static str {
         self.label
     }
+    /// The words under the title, whichever they are.
     pub(super) fn summary(&self) -> &str {
-        &self.summary
+        match &self.line {
+            CardLine::Holds(words) | CardLine::Running(words) => words,
+        }
+    }
+    pub(super) fn is_running(&self) -> bool {
+        matches!(self.line, CardLine::Running(_))
     }
     /// Whether this node is one of the curation's outputs.
     pub(super) fn is_output(&self) -> bool {
@@ -342,7 +375,7 @@ mod tests {
             config.set_query("make the first fold");
         }
         let cards = NodeCard::all(&payload, None);
-        assert_eq!(card(&cards, &annotate).summary(), "1 subtask · /camera/top");
+        assert_eq!(card(&cards, &annotate).summary(), "1 subtask");
         assert_eq!(card(&cards, &search).summary(), "“make the first fold”");
     }
 }

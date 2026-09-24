@@ -12,14 +12,16 @@
 //! `review` is the proportion every output is read in — an index that
 //! scrolls beside a recording that holds still — `frames` the native frame
 //! selection both the contact sheets and the poster stills are cut from, and
-//! `poster` the stills themselves. `rerun` guards the handful of actions that
-//! spend money or replace work already measured.
+//! `poster` the stills themselves. `episode_tabs` opens the episodes an index's
+//! rows belong to as tabs beside it. `rerun` guards the handful of actions
+//! that spend money or replace work already measured.
 pub(crate) mod state;
 pub(crate) mod workspace;
 
 mod annotate;
 mod document;
 mod episode_map;
+mod episode_tabs;
 mod frames;
 mod graph;
 mod moments;

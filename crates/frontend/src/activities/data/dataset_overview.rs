@@ -135,7 +135,7 @@ impl LengthDistribution {
 }
 
 #[component]
-pub(super) fn DatasetOverview(
+pub(crate) fn DatasetOverview(
     dataset: DatasetSelection,
     inspection: Option<Result<DatasetInspection, String>>,
 ) -> Element {

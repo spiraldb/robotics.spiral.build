@@ -387,7 +387,7 @@ pub(super) fn ProfilePanel(
                 }
             }
             p { class: "curation-profile-facts",
-                "{profile.members} subtasks · {repeats} per episode where it occurs"
+                "{repeats} per episode where it occurs"
             }
             for comparison in profile.metrics.iter() {
                 MetricStrip {

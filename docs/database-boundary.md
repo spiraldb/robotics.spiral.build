@@ -49,19 +49,26 @@ nix develop .#local-driver
 ```
 
 The shell sets `SPIRALDB_ADBC_DRIVER` to the platform's shared library in
-`target/release` and checks that it exists. Build it directly from the sibling
-SpiralDB checkout using the flake's `adbc-build` shell, which supplies upstream's
-August 10 compiler, OpenSSL, and FFmpeg while Studio keeps its own compiler pin:
+`target/release` and checks that it exists. Build it from the sibling SpiralDB
+checkout the way upstream CI does: rustup follows upstream's
+`rust-toolchain.toml`, and Homebrew supplies the native dependencies
+(`brew install protobuf openssl@3 pkgconf ffmpeg flatbuffers`). Run it outside
+Studio's Nix shells, whose compiler would override upstream's pin:
 
 ```sh
-# Run from the upstream Spiral checkout so its Cargo configuration applies.
-nix develop /absolute/path/to/spiral-robotics#adbc-build --command cargo build \
-  --release --locked -p adbc-driver-spiraldb \
+# Run from the upstream Spiral checkout so its toolchain and Cargo configuration apply.
+cargo build --release --locked -p adbc-driver-spiraldb \
   --target-dir /absolute/path/to/spiral-robotics/target
 ```
 
-This is a locally built release library; its native dependencies live in the
-Nix store, so it is not a standalone redistributable archive.
+This is a locally built release library linked against Homebrew's FFmpeg and
+OpenSSL, so it is not a standalone redistributable archive. The build also
+produces the matching `libspiral_video_runtime` artifact, which the driver
+finds on its own; do not place another copy beside the driver.
+`local-driver` loads whatever file sits at that path, so it must be this
+`--release` build. Never copy a debug build (`cargo build` without `--release`)
+into `target/release`: the unoptimized engine made video frame planning and
+model preprocessing, not inference, dominate progress scoring.
 The September 7 release build is 185.2 MiB and passes all 375 regular
 storage/backend tests plus the three hosted persistence regressions.
 Studio's Cargo dependency graph contains no Spiral or Vortex source packages.
@@ -84,7 +91,7 @@ The library SHA-256 is
 Logical, optimized logical, and physical plan fields now contain versioned
 node/edge diagnostics. Text trees remain under the `*_plan_text` keys. Studio
 requires this structured contract and no longer uses Graphviz.
-Rebuild with `adbc-build`, run with `local-driver`, and restart existing servers.
+Rebuild with the command above, run with `local-driver`, and restart existing servers.
 
 ## SQL workflow driver verification
 
@@ -109,13 +116,10 @@ commit `0a2d04c7163114b36f6e821c96774b5439d99125` ([PR #9873](https://github.com
 SpiralDB commit `a2ac94916` pins that revision, and the current checkout already
 uses compatible protobuf APIs. Build the driver directly from that checkout
 using the command above; no Studio patch or local Vortex fork is required.
-The `adbc-build` shell supplies the required FlatBuffers 25.12.19 compiler.
+Homebrew's `flatbuffers` supplies the required FlatBuffers 25.12.19 compiler.
 
-The earlier local-fork validation installed a debug driver with SHA-256
-`60ceb4f136ea949899db6c80b345b4c48106fa211eb94ac1339d82cf39668bf0` at
-`target/release/libadbc_driver_spiraldb.dylib`. The directory name does not
-indicate its build profile. Rebuilding the driver does not replace a running
-server's loaded library; restart Studio after rebuilding.
+Rebuilding the driver does not replace a running server's loaded library;
+restart Studio after rebuilding.
 
 Validation passed all 377 decimal-related Vortex tests, the SPQL protobuf feature
 check, and the original `CAST(row_number() OVER () - 1 AS BIGINT)` reproduction
@@ -129,12 +133,6 @@ September 12, 2026: Settings → SpiralDB accepts a write-only Hugging Face toke
 Studio passes it as `spiral.huggingface_token` when opening the ADBC database.
 This requires the local upstream HF-token support merged at
 `5eaad38bd4d150efe8525c2a8bdbd8a5266a0152`; the public archive pin is unchanged.
-
-The Settings preview on port 8094 uses that driver's **debug build**, copied to
-`target/release/libadbc_driver_spiraldb.dylib` so `local-driver` selects it.
-The directory name does not indicate this artifact's build profile. Its SHA-256 is
-`8438918bab084281b9e06b15b1c79c6e3a506660200c6a946bd8a400718d24d6`.
-The build command was `cargo build -p adbc-driver-spiraldb` in the upstream checkout.
 Tests verified private token persistence, preserve/replace/remove updates, and the
 native write-only option boundary. Non-null inference remains unverified.
 
@@ -156,7 +154,7 @@ WebCodecs playback were not tested. Details are recorded in
 `exports/driver-refresh-2026-09-11/validation.json`.
 
 The source build used an isolated checkout at
-`/private/tmp/spiral-driver-prod-20260911` and the existing `adbc-build` shell.
+`/private/tmp/spiral-driver-prod-20260911`.
 The upstream development checkout was left unchanged. The public archive pin
 in the default Nix shell is unchanged; use `nix develop .#local-driver`.
 
@@ -164,7 +162,7 @@ in the default Nix shell is unchanged; use `nix develop .#local-driver`.
 
 The workflow verification preview on port 8080 uses local `xiangpeng/dev` commit
 `fe0726b14c8256626060e3caf48681b169a48390`, rebuilt in release mode on September 10,
-2026 with the `adbc-build` command above. The library SHA-256 is
+2026 with the build command above. The library SHA-256 is
 `0cc4d559e0db14d837a41f88def3820b871469d18439abb00ce07926eb3688ab`.
 This includes packet video decoding and join-filter publication gates across
 streaming exchanges. Live IN and JOIN queries now read only the selected 274 MCAP
@@ -177,7 +175,7 @@ Nix shell's public archive pin is unchanged.
 
 The schema inspector uses local `xiangpeng/dev` commit
 `02d06b5c59df0d67bc2ca9c4624520e24e328af5`, rebuilt on September 9, 2026 with
-the `adbc-build` command above. It includes `320d50ddb`, which fixes
+the build command above. It includes `320d50ddb`, which fixes
 demand-pruning convergence for nested projections. The local library SHA-256 is
 `be631980da06733ddc2e26624a81f76dc18d84dcab65b7b5272008329ee85751`.
 Studio's verification preview on port 8091 was restarted with that library;

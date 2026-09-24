@@ -2,10 +2,11 @@
 //! episode, so a reload keeps every episode already annotated.
 use super::pipeline::AnnotationRecorder;
 use crate::activities::curation::document::SubtaskRow;
-use crate::activities::curation::state::CurationController;
+use crate::activities::curation::state::{CurationController, RunHandle};
 use crate::shell::state::StudioProjectState;
-use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// The curation as one pass writes to it.
 #[derive(Clone)]
@@ -14,23 +15,49 @@ pub(super) struct CurationJournal {
     controller: CurationController,
     /// Reports save failures through the project's notifications.
     studio: StudioProjectState,
-    /// What the operator still wants: cleared by Stop, after which the pass
-    /// starts no further episode but finishes the ones in flight.
-    wanted: Signal<bool>,
+    /// The run as the curation holds it: whether the operator still wants it
+    /// — Stop clears that, after which the pass starts no further episode but
+    /// finishes the ones in flight — and where it says how far it has got.
+    run: RunHandle,
+    progress: PassProgress,
+}
+
+/// How many of one pass's episodes have been written, of how many.
+#[derive(Clone)]
+struct PassProgress {
+    written: Rc<Cell<usize>>,
+    total: usize,
+}
+
+impl PassProgress {
+    fn line(&self) -> String {
+        format!(
+            "Annotating {} of {} episodes",
+            self.written.get(),
+            self.total
+        )
+    }
 }
 
 impl CurationJournal {
+    /// The journal of one run that will write `total` episodes.
     pub(super) fn new(
-        node: impl Into<String>,
         controller: CurationController,
         studio: StudioProjectState,
-        wanted: Signal<bool>,
+        run: RunHandle,
+        total: usize,
     ) -> Self {
+        let progress = PassProgress {
+            written: Rc::new(Cell::new(0)),
+            total,
+        };
+        run.report(progress.line());
         Self {
-            node: node.into(),
+            node: run.node().to_owned(),
             controller,
             studio,
-            wanted,
+            run,
+            progress,
         }
     }
 }
@@ -63,6 +90,8 @@ impl CurationJournal {
 impl AnnotationRecorder for CurationJournal {
     fn record(&self, episode: &EpisodeId, outcome: Result<Vec<SubtaskRow>, String>) {
         Self::write(self.controller, &self.node, episode, outcome);
+        self.progress.written.set(self.progress.written.get() + 1);
+        self.run.report(self.progress.line());
     }
 
     async fn persist(&self) {
@@ -70,6 +99,6 @@ impl AnnotationRecorder for CurationJournal {
     }
 
     fn running(&self) -> bool {
-        *self.wanted.peek()
+        self.run.wanted()
     }
 }

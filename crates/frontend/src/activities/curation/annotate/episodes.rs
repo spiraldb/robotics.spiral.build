@@ -2,7 +2,7 @@
 //! and what the player needs to show them.
 use crate::activities::curation::state::CurationController;
 use crate::activities::data::DatasetClient;
-use crate::activities::episode::{Episode, StreamCatalog};
+use crate::activities::episode::Episode;
 use dioxus::prelude::*;
 use serde_json::Value;
 use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
@@ -39,30 +39,6 @@ impl AnnotationEpisode {
             .filter_map(|id| sample.episode(id).cloned())
             .filter_map(|episode| Self::new(episode).ok())
             .collect()
-    }
-
-    /// The camera topics the operator may annotate, read from one episode of
-    /// the dataset: every episode of one recording session carries the same
-    /// cameras, so the first one answers for the rest.
-    pub(super) fn use_cameras(first: Option<Self>) -> Vec<String> {
-        let cameras = use_resource(use_reactive(&first, move |first| async move {
-            let Some(first) = first else {
-                return Ok(Vec::new());
-            };
-            Ok::<_, String>(
-                StreamCatalog::load(first.selection())
-                    .await?
-                    .videos()
-                    .map(|stream| stream.read().topic().topic().to_owned())
-                    .collect(),
-            )
-        }));
-        let listed = cameras
-            .read()
-            .as_ref()
-            .and_then(|loaded| loaded.as_ref().ok())
-            .cloned();
-        listed.unwrap_or_default()
     }
 
     /// What the operator asked the robot to do, when the dataset records it on

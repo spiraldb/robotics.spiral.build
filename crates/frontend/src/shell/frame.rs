@@ -1,7 +1,7 @@
 //! Low-frequency Studio chrome around the activity workspaces: the top bar
 //! and the messages that float above the workspace.
 
-use crate::activities::curation::state::CurationMeasure;
+use crate::activities::curation::state::CurationRuns;
 use crate::activities::workflow::state::WorkflowEditorStatus;
 use dioxus::prelude::*;
 use spiral_robotics_common::workflow::WorkflowRunPhase;
@@ -198,7 +198,7 @@ pub(crate) enum WorkspaceStatus {
     Hardware(crate::robots::HardwareViewState),
     Training(crate::activities::training::history::TrainingHistory),
     Workflow(Memo<Option<WorkflowEditorStatus>>),
-    Curation(Memo<CurationMeasure>),
+    Curation(Memo<CurationRuns>),
 }
 
 /// Workspace content stays mounted; only the active workspace supplies shell chrome.
@@ -384,15 +384,14 @@ impl StatusFacts {
                 .map(|phase| StatusFact::new(phase, StatusTone::Plain))
                 .into_iter()
                 .collect(),
-            // A curation measures its dataset and has no run of its own.
-            WorkspaceStatus::Curation(measure) => {
-                let measure = measure.read();
-                measure
-                    .has_measured()
-                    .then(|| StatusFact::new(measure.measured(), StatusTone::Plain))
-                    .into_iter()
-                    .collect()
-            }
+            // A curation has no run of its own; each of its running nodes
+            // reports itself, and a curation at rest says nothing.
+            WorkspaceStatus::Curation(runs) => runs
+                .read()
+                .lines()
+                .iter()
+                .map(|line| StatusFact::new(line.clone(), StatusTone::Plain))
+                .collect(),
         };
         facts.sort_by_key(|fact| fact.tone.rank());
         Self { connection, facts }
@@ -572,6 +571,9 @@ fn NotificationCenter() -> Element {
 
 /// The newest message, floated above the workspace while it is news. A
 /// click opens the full list.
+///
+/// One toast, updated in place: a newer message replaces the words of the one
+/// on screen, because a live region inserted afresh is not reliably announced.
 #[component]
 fn StudioToast() -> Element {
     let studio = crate::shell::state::StudioProjectState::current();
@@ -588,7 +590,6 @@ fn StudioToast() -> Element {
     let urgent = severity == crate::shell::notifications::MessageSeverity::Error;
     rsx! {
         button {
-            key: "{message.id()}",
             r#type: "button",
             class: "studio-toast {severity.class_name()}",
             role: if urgent { "alert" } else { "status" },

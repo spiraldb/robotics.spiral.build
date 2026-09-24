@@ -1,11 +1,13 @@
 //! Dataset identity and import contracts.
 
+mod camera_video;
 mod catalog;
 mod coverage;
 mod episode_id;
 mod h264;
 mod messages;
 mod robot;
+pub use camera_video::CameraVideo;
 pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
     EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,

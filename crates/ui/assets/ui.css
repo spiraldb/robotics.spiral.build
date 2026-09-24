@@ -49,6 +49,7 @@
   --ui-backdrop: rgb(16 16 16 / 0.28);
   --ui-shadow-raised: var(--shadow-raised, 0 1px 2px rgb(16 16 16 / 0.08), 0 0 0 1px rgb(16 16 16 / 0.05));
   --ui-shadow-dialog: var(--shadow-dialog, 0 24px 64px rgb(16 16 16 / 0.22), 0 0 0 1px rgb(16 16 16 / 0.06));
+  --ui-shadow-popover: var(--shadow-popover, 0 12px 32px rgb(16 16 16 / 0.14), 0 0 0 1px rgb(16 16 16 / 0.06));
   --ui-radius: 6px;
   --ui-radius-small: 4px;
   --ui-target-compact: 26px;
@@ -847,6 +848,24 @@
 .ui-facts--strip > .ui-fact:last-child {
   padding-right: 0;
   border-right: 0;
+}
+
+/* Menu --------------------------------------------------------------------
+   A few actions on paper, floating over whatever opened them. The surface
+   places it; this owns how it looks. */
+.ui-menu {
+  display: flex;
+  min-width: 12rem;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  border-radius: var(--ui-radius);
+  background: var(--ui-surface);
+  box-shadow: var(--ui-shadow-popover);
+}
+
+.ui-menu > .ui-button--row {
+  width: 100%;
 }
 
 /* Disclosure --------------------------------------------------------------

@@ -22,11 +22,12 @@ use crate::activities::curation::document::{
 use crate::activities::curation::episode_map::{
     EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
 };
+use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::population::Slice;
 use crate::activities::curation::poster::{PosterCut, PosterFrames};
 use crate::activities::curation::rerun::ConfirmedRerun;
 use crate::activities::curation::review::{
-    Counted, NoSubtaskChosen, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
+    Counted, SubtaskEntry, SubtaskEvidence, SubtaskReview, SubtaskStanding,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus};
 use crate::activities::episode::Episode;
@@ -131,6 +132,16 @@ impl GroupingStage {
         match self {
             Self::Failed(problem) => Some(problem),
             Self::Proposing | Self::Assigning { .. } => None,
+        }
+    }
+    /// The line the node's card and the top bar carry while the grouping runs.
+    fn activity(&self) -> Option<String> {
+        match self {
+            Self::Proposing => Some("Proposing categories".to_owned()),
+            Self::Assigning { answered, requests } => {
+                Some(format!("Grouping · {answered} of {requests} batches"))
+            }
+            Self::Failed(_) => None,
         }
     }
 }
@@ -338,37 +349,62 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     // them.
     let mut pending = use_signal(|| Option::<Vec<SubtaskCategory>>::None);
     let mut opened = use_signal(|| Option::<CategoryEdit>::None);
-    let mut selected_row = use_signal(|| Option::<usize>::None);
+    // The members a click opens, one tab per episode; the row chosen is the
+    // one playing in the tab in front.
+    let tabs = OpenEpisodes::use_open();
+    let open_row = move |row: usize| {
+        if let Some(row) = source.peek().rows().get(row) {
+            tabs.open(row.episode(), Some((row.start_time(), row.end_time())));
+        }
+    };
     let mut reveal = use_signal(|| MapReveal::Still);
     let mut generation = use_signal(|| 0_u32);
     let mut workspace = use_signal(|| None::<web_sys::Element>);
     // A grouping with nothing open is a band of cards over an empty half-pane,
     // which says nothing about the rows it just sorted. Arriving on one — a new
     // node, or a run that just finished — opens its biggest category on its
-    // most typical member. Closing it afterwards stays closed.
-    use_effect(use_reactive((&saved(),), move |(grouping,)| {
-        let biggest = grouping.as_ref().and_then(|grouping| {
-            let reading = source.peek();
-            let hues = CategoryHues::of(grouping, &reading);
-            let name = hues.0.first()?.clone();
-            let category = grouping
-                .categories()
-                .iter()
-                .find(|category| category.name() == name)?;
-            Some((category.clone(), reading.listed(&grouping.members(&name))))
-        });
-        match biggest {
-            Some((category, members)) => {
-                opened.set(Some(CategoryEdit::of(&category)));
-                selected_row.set(members.first().map(|(row, _)| *row));
+    // most typical member. Closing it afterwards stays closed. The rows come
+    // with the episode sample, so a node opened before it arrives waits for
+    // them rather than opening a category of nothing.
+    let row_count = source.read().rows().len();
+    use_effect(use_reactive(
+        (&saved(), &row_count),
+        move |(grouping, rows)| {
+            if rows == 0 {
+                return;
             }
-            None => {
-                opened.set(None);
-                selected_row.set(None);
+            let biggest = grouping.as_ref().and_then(|grouping| {
+                let reading = source.peek();
+                let hues = CategoryHues::of(grouping, &reading);
+                let name = hues.0.first()?.clone();
+                let category = grouping
+                    .categories()
+                    .iter()
+                    .find(|category| category.name() == name)?;
+                Some((category.clone(), reading.listed(&grouping.members(&name))))
+            });
+            match biggest {
+                Some((category, members)) => {
+                    opened.set(Some(CategoryEdit::of(&category)));
+                    if let Some((row, _)) = members.first() {
+                        open_row(*row);
+                    }
+                }
+                None => opened.set(None),
             }
-        }
-    }));
+        },
+    ));
 
+    // A grouping runs for a minute or more, so its card and the top bar say
+    // so. Its requests belong to this workspace, so leaving the node ends
+    // them and the line with them.
+    let reported = node.clone();
+    let activity = stage.read().as_ref().and_then(GroupingStage::activity);
+    use_effect(use_reactive((&activity,), move |(activity,)| {
+        controller.report_activity(&reported, activity);
+    }));
+    let dropped = node.clone();
+    use_drop(move || controller.report_activity(&dropped, None));
     let grouped_node = node.clone();
     let group = use_callback(move |categories: Option<Vec<SubtaskCategory>>| {
         if stage.peek().as_ref().is_some_and(GroupingStage::busy) {
@@ -556,7 +592,10 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         .iter()
         .map(|card| card.category.clone())
         .collect::<Vec<_>>();
-    let chosen = selected_row();
+    let chosen = tabs.front().and_then(|tab| {
+        rows.iter()
+            .position(|row| tab.holds(row.episode(), row.start_time()))
+    });
     let waiting = pending.read().clone();
     // An open category needs the height for its members and their footage, and
     // bins waiting to be filled have nothing to say but their names, so both
@@ -585,11 +624,9 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     )
     .revealing(reveal(), generation());
     let summary = match &open_card {
-        Some(card) => format!(
-            "{} · {}",
-            card.category.name(),
-            card.coverage.summary().to_lowercase()
-        ),
+        // The open category is named by its chip and its heading; the map
+        // says only how far it reaches.
+        Some(card) => card.coverage.summary(),
         None => format!(
             "{} across {}",
             Counted::subtasks(rows.len()),
@@ -621,7 +658,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             if opened.peek().as_ref().map(CategoryEdit::original) != Some(card.category.name()) {
                 opened.set(Some(CategoryEdit::of(&card.category)));
             }
-            selected_row.set(Some(row));
+            open_row(row);
             spawn(async move {
                 Motion::after_render().await;
                 if let Some(place) = place {
@@ -656,14 +693,9 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             },
             div { class: "curation-flights", "aria-hidden": "true" }
             if !cards.is_empty() || waiting.is_some() {
+                // The categories are the chips below and their count is on the
+                // card; the line holds only a run in progress and Regenerate.
                 div { class: "curation-similar-actions",
-                    p { class: "curation-similar-note",
-                        if let Some(waiting) = waiting.as_ref() {
-                            "{Counted::categories(waiting.len())} proposed · putting {rows.len()} subtasks in them"
-                        } else {
-                            "{Counted::categories(cards.len())} over {rows.len()} subtasks"
-                        }
-                    }
                     if let Some(running) = running.clone() {
                         p { class: "curation-similar-note", role: "status", "{running}" }
                     }
@@ -691,7 +723,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             if cards.is_empty() && waiting.is_none() {
                 EmptyState { title: "No categories yet",
                     p {
-                        "One model pass reads the {rows.len()} saved descriptions and proposes four to eight categories; jev then puts every row in one of them."
+                        "One model pass reads the {rows.len()} saved descriptions and proposes four to eight categories, then every subtask is put in one of them."
                     }
                     Button {
                         purpose: ActionPurpose::Start,
@@ -733,7 +765,9 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                     // Opening a category lands on its most typical
                                     // member, so the evidence column is never an
                                     // empty half beside a full list.
-                                    selected_row.set((!same).then(|| summary.most_typical()).flatten());
+                                    if let Some(row) = (!same).then(|| summary.most_typical()).flatten() {
+                                        open_row(row);
+                                    }
                                 }),
                             }
                         }
@@ -767,13 +801,13 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                 profile,
                                 hues: hues.clone(),
                                 chosen,
-                                on_select: move |row: usize| selected_row.set(Some(row)),
+                                on_select: move |row: usize| open_row(row),
                             }
                             h4 { class: "curation-similar-members-heading", "Members, most typical first" }
                             ol {
                                 id: SubtaskList::MEMBERS.id(),
                                 class: "curation-entries",
-                                "aria-label": "Members of this category, most typical first; each row ends with how sure jev is it belongs here",
+                                "aria-label": "Members of this category, most typical first; each row ends with how sure it is that the row belongs here",
                                 for (row , probability) in members {
                                     SubtaskEntry {
                                         key: "{rows[row].episode()}-{rows[row].start_time()}",
@@ -781,7 +815,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                         standing: SubtaskStanding::scored(probability, true, chosen == Some(row)),
                                         episode: Episode::name_of(rows[row].episode()),
                                         frames,
-                                        on_select: move |()| selected_row.set(Some(row)),
+                                        on_select: move |()| open_row(row),
                                         on_find_similar: {
                                             let find = find.clone();
                                             let asked = rows[row].clone();
@@ -792,37 +826,45 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                             }
                         }
                     },
-                    evidence: match chosen.and_then(|row| rows.get(row)) {
-                        Some(row) => rsx! {
-                            SubtaskEvidence {
-                                key: "{row.episode()}-{row.start_time()}",
-                                row: row.clone(),
-                                episode_rows: rows
+                    evidence: rsx! {
+                        EpisodeTabs {
+                            open: tabs,
+                            empty: "Choose a member to watch it play, most typical first.".to_owned(),
+                            render: move |tab: OpenEpisode| {
+                                let Some(row) = rows
                                     .iter()
-                                    .filter(|other| other.episode() == row.episode())
+                                    .find(|row| tab.holds(row.episode(), row.start_time()))
                                     .cloned()
-                                    .collect::<Vec<_>>(),
-                                context: context.clone(),
-                                on_open: {
-                                    let focus = EpisodeFocus::new(
-                                        annotation.clone(),
-                                        row.episode().clone(),
-                                        Some((row.start_time(), row.end_time())),
-                                    );
-                                    move |()| controller.focus_episode(focus.clone())
-                                },
-                                on_find_similar: {
-                                    let find = find.clone();
-                                    let asked = row.clone();
-                                    EventHandler::new(move |()| find(asked.clone(), None))
-                                },
-                            }
-                        },
-                        None => rsx! {
-                            NoSubtaskChosen {
-                                prompt: "Choose a member to watch it play, most typical first.",
-                            }
-                        },
+                                else {
+                                    return rsx! {};
+                                };
+                                rsx! {
+                                    SubtaskEvidence {
+                                        play: tab.play(),
+                                        episode_rows: rows
+                                            .iter()
+                                            .filter(|other| other.episode() == row.episode())
+                                            .cloned()
+                                            .collect::<Vec<_>>(),
+                                        context: context.clone(),
+                                        on_open: {
+                                            let focus = EpisodeFocus::new(
+                                                annotation.clone(),
+                                                row.episode().clone(),
+                                                Some((row.start_time(), row.end_time())),
+                                            );
+                                            move |()| controller.focus_episode(focus.clone())
+                                        },
+                                        on_find_similar: {
+                                            let find = find.clone();
+                                            let asked = row.clone();
+                                            EventHandler::new(move |()| find(asked.clone(), None))
+                                        },
+                                        row,
+                                    }
+                                }
+                            },
+                        }
                     },
                 }
             }
@@ -856,13 +898,15 @@ fn CategoryCard(
                 r#type: "button",
                 class: "curation-similar-chip",
                 style: "{summary.tint()}",
+                title: "{members}",
+                "aria-label": "{summary.category.name()}, {members}",
                 "aria-expanded": "{opened}",
                 "data-selected": "{opened}",
                 "data-bin": "{summary.rank}",
                 "data-motion-key": "{summary.category.name()}",
                 onclick: move |_| on_open.call(()),
                 span { class: "curation-similar-chip-name", "{summary.category.name()}" }
-                span { class: "curation-similar-chip-count", "{members}" }
+                span { class: "curation-similar-chip-count", "{summary.members.len()}" }
             }
         };
     }

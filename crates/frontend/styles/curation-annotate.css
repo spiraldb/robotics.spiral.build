@@ -36,10 +36,9 @@
     gap: 8px 12px;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     padding: 10px 12px;
-    border: 1px solid var(--tone-line);
-    @apply rounded-sm;
+    border-radius: 8px;
     background: var(--tone-surface);
-    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    box-shadow: var(--shadow-popover);
     /* It comes out of the ⚙ it hangs from, so the press and the panel read as
        one movement rather than a panel appearing over the workspace. */
     animation: curation-annotate-settings-open 120ms cubic-bezier(0.16, 1, 0.3, 1);

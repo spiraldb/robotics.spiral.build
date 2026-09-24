@@ -24,6 +24,11 @@ impl RovingGroup {
         container: "[role='tree']",
         members: ".ui-tree-label:not([disabled])",
     };
+    /// The items of a [`Menu`](crate::Menu).
+    pub(crate) const MENU: Self = Self {
+        container: "[role='menu']",
+        members: "[role='menuitem']:not([disabled])",
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

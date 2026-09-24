@@ -1,13 +1,16 @@
 //! Native read-only inference for one selected recording. Only in-flight requests are shared.
 use spiral_robotics_common::curation::progress::{
-    ProgressFrame, ProgressScoreRequest, ProgressScoreResult,
+    ProgressFrame, ProgressScoreRequest, ProgressScoreResult, ProgressScorer,
 };
-use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_storage::StorageManager;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::{Mutex, watch};
 
 type ScoreCompletion = Option<Result<ProgressScoreResult, String>>;
+/// The scorer every recording is read with.
+const SCORER: ProgressScorer = ProgressScorer::WarpSimBottles;
+/// The most frames one recording is scored over: five and a half minutes at 30 Hz.
+const MAX_FRAMES: usize = 10_000;
 pub(super) struct EpisodeProgress {
     storage: Arc<StorageManager>,
     pending: Arc<Mutex<BTreeMap<String, watch::Receiver<ScoreCompletion>>>>,
@@ -23,36 +26,13 @@ impl EpisodeProgress {
         &self,
         request: ProgressScoreRequest,
     ) -> Result<ProgressScoreResult, String> {
-        let selection = request.selection();
-        selection.validate()?;
-        let dataset = request.episode().dataset().sql_name().replace('\'', "''");
-        let sql = format!(
-            "SELECT s.id,s.source_uri,s.start_frame,s.frame_count,s.source_revision FROM \"{}\" s JOIN spql.mcap.episodes('{dataset}') e ON e.id=s.id WHERE s.id=$1",
-            selection.sources_relation()
-        );
-        let bindings = self
-            .storage
-            .queries()
-            .query_for_episode(&EpisodeQueryRequest::new(request.episode().clone(), sql, 2))
-            .await?;
-        if bindings.truncated() || bindings.rows().len() != 1 {
-            return Err("This recording needs exactly one original-video binding in the selected model source.".into());
-        }
-        let binding = &bindings.rows()[0];
-        let expected = binding
-            .get("frame_count")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or("Original-video binding is missing its frame count.")?;
-        if !(33..=10_000).contains(&expected) {
-            return Err("Episode review supports 33–10,000 original frames.".into());
-        }
         // A textual request identity exists only while a task is in flight. It
         // is never a storage key and no completed score result is retained here.
         let key = format!(
             "{}:{}:{}",
-            selection.scorer().version(),
-            selection.scorer().model(),
-            serde_json::to_string(binding).map_err(|error| error.to_string())?
+            SCORER.version(),
+            SCORER.model(),
+            serde_json::to_string(request.episode()).map_err(|error| error.to_string())?
         );
         let mut pending = self.pending.lock().await;
         let mut receiver = if let Some(receiver) = pending.get(&key) {
@@ -63,7 +43,7 @@ impl EpisodeProgress {
             let storage = self.storage.clone();
             let active = self.pending.clone();
             tokio::spawn(async move {
-                let result = Self::evaluate(storage, request, expected as usize).await;
+                let result = Self::evaluate(storage, request).await;
                 let _ = sender.send(Some(result));
                 active.lock().await.remove(&key);
             });
@@ -83,28 +63,30 @@ impl EpisodeProgress {
     async fn evaluate(
         storage: Arc<StorageManager>,
         request: ProgressScoreRequest,
-        expected: usize,
     ) -> Result<ProgressScoreResult, String> {
         let started = std::time::Instant::now();
         tracing::info!(
             episode = request.episode().episode_id().as_str(),
-            frames = expected,
             "WARP episode review started"
         );
         let mut connection = storage.workflow_store().connect().await?;
         let rows = connection
             .execute_query_for_recording(
-                &request.selection().episode_score_query()?,
+                &SCORER.episode_score_query(request.episode().dataset()),
                 request.episode(),
             )
             .await?
-            .into_internal_rows_drained(expected)
+            .into_internal_rows_drained(MAX_FRAMES)
             .await?;
-        if rows.truncated() || rows.rows().len() != expected {
+        if rows.truncated() {
             return Err(format!(
-                "Native progress inference returned {} of {expected} expected frames (truncated: {}).",
-                rows.rows().len(),
-                rows.truncated(),
+                "Progress scoring reads recordings of at most {MAX_FRAMES} frames."
+            ));
+        }
+        if rows.rows().is_empty() {
+            return Err(format!(
+                "This recording has no {} camera to score.",
+                SCORER.camera()
             ));
         }
         let frames = rows

@@ -3,14 +3,17 @@
 //!
 //! Every listing names its items by their place in the Select's input, the
 //! same number the map and the strip use, so choosing an item anywhere opens
-//! it here.
+//! its episode in a tab beside the list.
 use super::SelectView;
-use crate::activities::curation::document::{CurationNodeKind, MomentRow, Selection, SubtaskRow};
+use crate::activities::curation::document::{
+    CurationNodeKind, EpisodeFact, MomentRow, Selection, SubtaskRow,
+};
+use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::moments::MomentEvidence;
 use crate::activities::curation::population::Population;
 use crate::activities::curation::poster::{PosterCut, PosterFrames};
 use crate::activities::curation::review::{
-    EpisodeOrder, NoSubtaskChosen, SliceEntry, SubtaskContext, SubtaskEntry, SubtaskEvidence,
+    EpisodeOrder, EvidenceHeading, SliceEntry, SubtaskContext, SubtaskEntry, SubtaskEvidence,
     SubtaskReview, SubtaskStanding,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus};
@@ -20,11 +23,11 @@ use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::EmptyState;
 
-/// The items on the listed side, by their place in the input; the chosen one
-/// when it is on this side, else the first listed.
+/// The items on the listed side, by their place in the input, and the one
+/// playing in the tab in front when it is on this side.
 struct ListedItems {
     items: Vec<usize>,
-    shown: Option<usize>,
+    chosen: Option<usize>,
 }
 
 impl ListedItems {
@@ -47,22 +50,45 @@ impl ListedItems {
             .collect::<Vec<_>>();
         let rank = |item: usize| score(item).unwrap_or(f64::NEG_INFINITY);
         items.sort_by(|left, right| rank(*right).total_cmp(&rank(*left)));
-        let shown = chosen
-            .filter(|chosen| items.contains(chosen))
-            .or_else(|| items.first().copied());
-        Self { items, shown }
+        let chosen = chosen.filter(|chosen| items.contains(chosen));
+        Self { items, chosen }
+    }
+    /// Where the first listed item plays, which opens by itself so the
+    /// recording column is never an empty half beside the list.
+    fn first_place(&self, view: &SelectView) -> Option<(EpisodeId, Option<(f64, f64)>)> {
+        self.items.first().and_then(|item| view.place(*item))
+    }
+}
+
+/// What a whole-episode row says about its episode beside its name: its
+/// length and its messages, less the one the rule already prints in the
+/// score column.
+struct EpisodeFacts<'a>(&'a Episode);
+
+impl<'a> EpisodeFacts<'a> {
+    fn of(episode: &'a Episode) -> Self {
+        Self(episode)
+    }
+    fn line(&self, judged: Option<EpisodeFact>) -> Vec<String> {
+        [EpisodeFact::DurationSeconds, EpisodeFact::Messages]
+            .into_iter()
+            .filter(|fact| Some(*fact) != judged)
+            .filter_map(|fact| {
+                let reading = fact.reading(self.0)?;
+                Some(match fact {
+                    EpisodeFact::Messages => format!("{reading} messages"),
+                    _ => reading,
+                })
+            })
+            .collect()
     }
 }
 
 /// What an empty side says, rather than an empty column.
 #[component]
-fn NothingListed(listed_kept: bool) -> Element {
+fn NothingListed(view: SelectView, listed_kept: bool) -> Element {
     rsx! {
-        EmptyState {
-            p {
-                if listed_kept { "The rule keeps nothing that reaches it." } else { "The rule keeps everything that reaches it." }
-            }
-        }
+        EmptyState { p { "{view.empty_side(listed_kept)}" } }
     }
 }
 
@@ -72,21 +98,26 @@ pub(super) fn EpisodeListing(
     view: SelectView,
     kept: Vec<bool>,
     listed_kept: bool,
-    chosen: Signal<Option<usize>>,
+    tabs: OpenEpisodes,
 ) -> Element {
+    let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
+    let listed = ListedItems::of(&kept, listed_kept, chosen);
+    let first = listed.first_place(&view);
+    use_effect(use_reactive((&first,), move |(first,)| {
+        tabs.open_first(first)
+    }));
     let Population::Episodes(episodes) = &view.input else {
         return rsx! {};
     };
-    let listed = ListedItems::of(&kept, listed_kept, chosen());
     if listed.items.is_empty() {
-        return rsx! { NothingListed { listed_kept } };
+        return rsx! { NothingListed { view: view.clone(), listed_kept } };
     }
     let featured = controller.with_payload(|payload| payload.configured_camera());
     let fact = match &view.selection {
         Selection::Episodes { fact, .. } => Some(*fact),
         _ => None,
     };
-    let mut chosen = chosen;
+    let sample = view.sample.clone();
     rsx! {
         SubtaskReview {
             index: rsx! {
@@ -95,38 +126,43 @@ pub(super) fn EpisodeListing(
                         {
                             let id = episodes[item].clone();
                             let episode = view.sample.episode(&id);
-                            let facts = episode.map(|episode| {
-                                vec![
-                                    episode.facts().duration_seconds().unwrap_or_default().clock_label(),
-                                    format!("{} messages", episode.facts().message_count().unwrap_or_default()),
-                                ]
-                            }).unwrap_or_default();
-                            let score = fact
-                                .zip(episode)
-                                .and_then(|(fact, episode)| fact.of(episode))
-                                .map(|value| format!("{value:.1}"));
+                            let facts = episode.map(|episode| EpisodeFacts::of(episode).line(fact)).unwrap_or_default();
+                            let score = fact.zip(episode).and_then(|(fact, episode)| fact.reading(episode));
                             rsx! {
                                 SliceEntry {
                                     key: "{id}",
                                     title: Episode::name_of(&id),
                                     facts,
-                                    place: (0.0, 1.0),
                                     score,
-                                    chosen: listed.shown == Some(item),
-                                    on_select: move |()| chosen.set(Some(item)),
+                                    score_meaning: fact.map(|fact| fact.label().to_owned()),
+                                    chosen: listed.chosen == Some(item),
+                                    on_select: move |()| tabs.open(&id, None),
                                 }
                             }
                         }
                     }
                 }
             },
-            evidence: match listed.shown.and_then(|item| view.sample.episode(&episodes[item])).cloned() {
-                Some(episode) => rsx! {
-                    div { class: "curation-review-player",
-                        EpisodeInspection { key: "{episode.id()}", episode, featured_camera: featured }
-                    }
-                },
-                None => rsx! { NoSubtaskChosen { prompt: "Choose an episode to watch it." } },
+            evidence: rsx! {
+                EpisodeTabs {
+                    open: tabs,
+                    empty: "Choose an episode to watch it.".to_owned(),
+                    render: move |tab: OpenEpisode| {
+                        let Some(episode) = sample.episode(tab.episode()).cloned() else {
+                            return rsx! {};
+                        };
+                        rsx! {
+                            EvidenceHeading {
+                                subject: episode.name(),
+                                episode: Some(episode.id().clone()),
+                                facts: EpisodeFacts::of(&episode).line(None),
+                            }
+                            div { class: "curation-review-player",
+                                EpisodeInspection { episode, featured_camera: featured.clone() }
+                            }
+                        }
+                    },
+                }
             },
         }
     }
@@ -138,17 +174,22 @@ pub(super) fn SubtaskListing(
     view: SelectView,
     kept: Vec<bool>,
     listed_kept: bool,
-    chosen: Signal<Option<usize>>,
+    tabs: OpenEpisodes,
 ) -> Element {
     let rows = view.input.subtasks().to_vec();
     let ranking =
         controller.with_payload(|payload| payload.current_ranking(view.measure.id()).cloned());
+    let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
     // After a search the closest subtasks come first, as the search lists them.
-    let listed = ListedItems::best_first(&kept, listed_kept, chosen(), |item| {
+    let listed = ListedItems::best_first(&kept, listed_kept, chosen, |item| {
         ranking
             .as_ref()
             .and_then(|ranking| ranking.probability(&rows[item]))
     });
+    let first = listed.first_place(&view);
+    use_effect(use_reactive((&first,), move |(first,)| {
+        tabs.open_first(first)
+    }));
     let (annotation, camera, dataset) = controller.with_payload(|payload| {
         let annotation = payload.subtask_source(&view.node).map(str::to_owned);
         let camera = annotation.as_deref().and_then(|annotation| {
@@ -173,9 +214,9 @@ pub(super) fn SubtaskListing(
         .collect::<Vec<_>>();
     let frames = PosterFrames::use_frames(PosterCut::of(&context, &listed_rows));
     if listed.items.is_empty() {
-        return rsx! { NothingListed { listed_kept } };
+        return rsx! { NothingListed { view: view.clone(), listed_kept } };
     }
-    let mut chosen = chosen;
+    let opening = view.clone();
     rsx! {
         SubtaskReview {
             index: rsx! {
@@ -184,9 +225,10 @@ pub(super) fn SubtaskListing(
                         {
                             let row = rows[item].clone();
                             let standing = match ranking.as_ref().and_then(|ranking| ranking.probability(&row)) {
-                                Some(probability) => SubtaskStanding::scored(probability, true, listed.shown == Some(item)),
-                                None => SubtaskStanding::plain(listed.shown == Some(item)),
+                                Some(probability) => SubtaskStanding::scored(probability, true, listed.chosen == Some(item)),
+                                None => SubtaskStanding::plain(listed.chosen == Some(item)),
                             };
+                            let opening = opening.clone();
                             rsx! {
                                 SubtaskEntry {
                                     key: "{row.episode()}-{row.start_time()}",
@@ -194,41 +236,49 @@ pub(super) fn SubtaskListing(
                                     row,
                                     standing,
                                     frames,
-                                    on_select: move |()| chosen.set(Some(item)),
+                                    on_select: move |()| opening.open(tabs, item),
                                 }
                             }
                         }
                     }
                 }
             },
-            evidence: match listed.shown.map(|item| rows[item].clone()) {
-                Some(row) => rsx! {
-                    SubtaskEvidence {
-                        key: "{row.episode()}-{row.start_time()}",
-                        episode_rows: rows
-                            .iter()
-                            .filter(|other| other.episode() == row.episode())
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        context: context.clone(),
-                        on_open: {
-                            let focus = annotation.clone().map(|annotation| {
-                                EpisodeFocus::new(
-                                    annotation,
-                                    row.episode().clone(),
-                                    Some((row.start_time(), row.end_time())),
-                                )
-                            });
-                            move |()| {
-                                if let Some(focus) = focus.clone() {
-                                    controller.focus_episode(focus);
-                                }
+            evidence: rsx! {
+                EpisodeTabs {
+                    open: tabs,
+                    empty: "Choose a subtask to watch it play.".to_owned(),
+                    render: move |tab: OpenEpisode| {
+                        let Some(row) = rows.iter().find(|row| tab.holds(row.episode(), row.start_time())).cloned() else {
+                            return rsx! {};
+                        };
+                        rsx! {
+                            SubtaskEvidence {
+                                play: tab.play(),
+                                episode_rows: rows
+                                    .iter()
+                                    .filter(|other| other.episode() == row.episode())
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                                context: context.clone(),
+                                on_open: {
+                                    let focus = annotation.clone().map(|annotation| {
+                                        EpisodeFocus::new(
+                                            annotation,
+                                            row.episode().clone(),
+                                            Some((row.start_time(), row.end_time())),
+                                        )
+                                    });
+                                    move |()| {
+                                        if let Some(focus) = focus.clone() {
+                                            controller.focus_episode(focus);
+                                        }
+                                    }
+                                },
+                                row,
                             }
-                        },
-                        row,
-                    }
-                },
-                None => rsx! { NoSubtaskChosen { prompt: "Choose a subtask to watch it play." } },
+                        }
+                    },
+                }
             },
         }
     }
@@ -281,26 +331,33 @@ pub(super) fn MomentListing(
     view: SelectView,
     kept: Vec<bool>,
     listed_kept: bool,
-    chosen: Signal<Option<usize>>,
+    tabs: OpenEpisodes,
 ) -> Element {
-    let Population::Moments(rows) = &view.input else {
-        return rsx! {};
+    let rows = match &view.input {
+        Population::Moments(rows) => rows.clone(),
+        _ => Vec::new(),
     };
-    let listed = ListedItems::of(&kept, listed_kept, chosen());
+    let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
+    let listed = ListedItems::of(&kept, listed_kept, chosen);
+    let stretches = Stretch::of(&rows, &listed.items);
+    // A stretch opens whole, so the first one plays from its first second to
+    // its last rather than for one second.
+    let first = stretches
+        .first()
+        .map(|stretch| (stretch.episode.clone(), Some(stretch.span)));
+    use_effect(use_reactive((&first,), move |(first,)| {
+        tabs.open_first(first)
+    }));
     if listed.items.is_empty() {
-        return rsx! { NothingListed { listed_kept } };
+        return rsx! { NothingListed { view: view.clone(), listed_kept } };
     }
-    let stretches = Stretch::of(rows, &listed.items);
-    let shown = stretches
-        .iter()
-        .position(|stretch| {
-            listed
-                .shown
-                .is_some_and(|item| stretch.items.contains(&item))
-        })
-        .unwrap_or_default();
+    let shown = stretches.iter().position(|stretch| {
+        listed
+            .chosen
+            .is_some_and(|item| stretch.items.contains(&item))
+    });
     let cutoff = view.selection.threshold();
-    let mut chosen = chosen;
+    let evidence = view.clone();
     rsx! {
         SubtaskReview {
             index: rsx! {
@@ -308,48 +365,53 @@ pub(super) fn MomentListing(
                     for (position , stretch) in stretches.iter().enumerate() {
                         {
                             let duration = view.sample.duration(&stretch.episode).unwrap_or_default().max(f64::EPSILON);
-                            let first = stretch.items[0];
+                            let episode = stretch.episode.clone();
                             let (start, end) = stretch.span;
                             rsx! {
                                 SliceEntry {
                                     key: "{stretch.episode}-{start}",
                                     title: Episode::name_of(&stretch.episode),
-                                    facts: vec![
-                                        format!("{} – {}", start.clock_label(), end.clock_label()),
-                                        (end - start).clock_label(),
-                                    ],
-                                    place: (start / duration, end / duration),
+                                    facts: vec![format!("{} – {}", start.clock_label(), end.clock_label())],
+                                    place: Some((start / duration, end / duration)),
                                     score: stretch.mean.map(|mean| format!("{mean:.2}")),
-                                    chosen: position == shown,
-                                    on_select: move |()| chosen.set(Some(first)),
+                                    score_meaning: "Mean progress per second over this stretch".to_owned(),
+                                    chosen: shown == Some(position),
+                                    on_select: move |()| tabs.open(&episode, Some((start, end))),
                                 }
                             }
                         }
                     }
                 }
             },
-            evidence: match stretches.get(shown) {
-                Some(stretch) => {
-                    let episode = view.sample.episode(&stretch.episode).cloned();
-                    let moments = rows
-                        .iter()
-                        .filter(|row| row.episode() == &stretch.episode)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    match episode {
-                        Some(episode) => rsx! {
+            evidence: rsx! {
+                EpisodeTabs {
+                    open: tabs,
+                    empty: "Choose a stretch to watch it.".to_owned(),
+                    render: move |tab: OpenEpisode| {
+                        let Some(episode) = evidence.sample.episode(tab.episode()).cloned() else {
+                            return rsx! {};
+                        };
+                        let moments = rows
+                            .iter()
+                            .filter(|row| row.episode() == tab.episode())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let facts = tab
+                            .interval()
+                            .map(|(start, end)| vec![format!("{} – {}", start.clock_label(), end.clock_label())])
+                            .unwrap_or_default();
+                        rsx! {
                             MomentEvidence {
-                                key: "{episode.id()}",
+                                curve: evidence.curve(tab.episode()),
                                 episode,
                                 moments,
+                                facts,
                                 cutoff,
-                                focus: Some(stretch.span),
+                                play: tab.play(),
                             }
-                        },
-                        None => rsx! {},
-                    }
+                        }
+                    },
                 }
-                None => rsx! {},
             },
         }
     }

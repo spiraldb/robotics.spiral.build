@@ -13,6 +13,7 @@
 //! checking, and they are checked without a browser; the one thing here that
 //! needs a page is handing a decoded frame back as a picture to draw.
 use serde_json::{Map, Value};
+use spiral_robotics_common::datasets::CameraVideo;
 use spiral_robotics_common::relations::{QueryColumn, SpiralQuerySnapshot};
 use spiral_robotics_common::sql::SqlLiteral;
 use std::collections::BTreeMap;
@@ -112,45 +113,6 @@ pub(super) fn timing_sql(dataset: &str, camera: &str) -> String {
     )
 }
 
-/// One camera of one episode, assembled out of its recorded packets into a
-/// stream frames can be picked from. `$1` is the episode's UUID, bound by the
-/// episode query endpoint.
-///
-/// `presentation_time` is what gives the assembled stream a media timeline, so
-/// `f.time` reports when a frame was actually recorded rather than nothing at
-/// all. That time is a native Duration with no JSON form, so it is totalled to
-/// nanoseconds in SQL rather than deserialized.
-#[derive(Clone, Copy)]
-struct RecordedStream<'a> {
-    dataset: &'a str,
-    camera: &'a str,
-}
-
-impl RecordedStream<'_> {
-    /// Decode the frames `selection` picks out of the stream, keeping only
-    /// those `keeping` accepts. A predicate on `f.time` is applied before the
-    /// decode, so filtering by moment costs nothing the decode would not.
-    fn decode(self, selection: &str, keeping: Option<&str>) -> String {
-        let dataset = SqlLiteral::text(self.dataset);
-        let filter = keeping
-            .map(|predicate| format!(" WHERE {predicate}"))
-            .unwrap_or_default();
-        format!(
-            "WITH packets AS (SELECT r.id, r.value.data AS payload, \
-             CAST(ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.chunk_start_offset, r.sample_ordinal) - 1 AS BIGINT) AS decode_index, \
-             spql.dt.from_epoch(CAST(r.log_time AS BIGINT), 'ns') - spql.dt.from_epoch(CAST(e.message_start_time AS BIGINT), 'ns') AS presentation_time \
-             FROM spql.mcap.read_topic({dataset}, {}) r \
-             JOIN spql.mcap.episodes({dataset}) e ON e.id = r.id WHERE r.id = $1), \
-             streams AS (SELECT id, spql.video.from_packets(\
-             spql.list.collect(STRUCT_PACK(payload := payload, decode_index := decode_index, presentation_time := presentation_time)), 'h264', 'annex_b') AS source \
-             FROM packets GROUP BY id) \
-             SELECT f.request_index, spql.dt.duration_total(f.time, 'ns') AS time_ns, spql.video.decode(f.frame) AS image \
-             FROM streams s CROSS JOIN LATERAL spql.video.frames(s.source, {selection}) f{filter}",
-            SqlLiteral::text(self.camera)
-        )
-    }
-}
-
 /// The selected frames of one episode, decoded natively and nothing else.
 /// `$1` is the episode's UUID, bound by the episode query endpoint.
 ///
@@ -163,7 +125,7 @@ pub(super) fn frames_sql(dataset: &str, camera: &str, frames: &[SampledFrame]) -
         .map(|frame| frame.index.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    RecordedStream { dataset, camera }
+    CameraVideo::new(dataset, camera)
         .decode(&format!("spql.video.frame_indices([{indices}])"), None)
 }
 
@@ -235,7 +197,7 @@ impl FrameMoments {
             })
             .collect::<Vec<_>>()
             .join(" OR ");
-        RecordedStream { dataset, camera }.decode("spql.video.frame_slice()", Some(&windows))
+        CameraVideo::new(dataset, camera).decode("spql.video.frame_slice()", Some(&windows))
     }
 
     /// The frame each wanted moment landed on, as the moment's own position in

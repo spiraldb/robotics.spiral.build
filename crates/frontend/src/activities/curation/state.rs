@@ -2,17 +2,16 @@
 //! node selection, episode focus, and saves. The controller is passed as a
 //! prop like `WorkflowController`; every Curation view reads and edits through
 //! it. Shared contract: extend it, never change what is here.
-use super::document::{
-    CURATION_ENCODING_VERSION, CurationGraph, CurationNodeKind, DATASET_NODE_ID, SubtaskRow,
-};
+use super::document::{CURATION_ENCODING_VERSION, CurationGraph, DATASET_NODE_ID, SubtaskRow};
 use super::population::{EpisodeSample, Population, PopulationReader};
 use super::poster::PosterCache;
-use super::review::Counted;
 use crate::components::document_session::{
     DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
 };
+use crate::components::scoped_task::ScopedTask;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
+use dioxus::dioxus_core::Task;
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::CurationDocument;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
@@ -29,40 +28,131 @@ const SAVE_WAIT_ROUNDS: usize = 200;
 /// One quiet line per node that is measuring something right now.
 pub(crate) type NodeActivity = BTreeMap<String, String>;
 
-/// What a curation's annotation nodes have measured so far, as the top
-/// bar reports it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CurationMeasure {
-    episodes: usize,
-    subtasks: usize,
+/// Where a node's long measurement stands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunState {
+    Idle,
+    Running,
+    /// Stop was pressed: nothing new starts, and what is in flight finishes
+    /// and is saved.
+    Stopping,
 }
 
-impl CurationMeasure {
-    fn of(payload: &CurationGraph) -> Self {
-        let mut episodes = 0;
-        let mut subtasks = 0;
-        for node in payload.nodes() {
-            if let CurationNodeKind::BreakDownSubtasks(annotation) = node.kind() {
-                episodes += annotation.completed_episodes().len();
-                subtasks += payload.subtasks_for(node.id()).count();
+/// One long measurement the curation owns.
+#[derive(Clone, Copy)]
+struct OwnedRun {
+    task: Task,
+    wanted: bool,
+}
+
+/// What the curation's nodes are doing: the line each running node shows, and
+/// the long runs the curation itself owns.
+///
+/// A run a workspace spawned was the workspace's, so choosing another node —
+/// which unmounts it — ended an annotation part way and left its card saying
+/// "Annotating 12 of 40 episodes" forever. Annotation and scoring therefore
+/// run as the curation's own tasks and outlive the view that started them;
+/// opening another document cancels them, since their node ids mean nothing
+/// in it.
+#[derive(Clone, Copy, PartialEq)]
+struct RunBook {
+    lines: Signal<NodeActivity>,
+    owned: Signal<BTreeMap<String, OwnedRun>>,
+}
+
+impl RunBook {
+    fn new() -> Self {
+        Self {
+            lines: Signal::new(NodeActivity::new()),
+            owned: Signal::new(BTreeMap::new()),
+        }
+    }
+    fn state(&self, node: &str) -> RunState {
+        match self.owned.read().get(node) {
+            None => RunState::Idle,
+            Some(run) if run.wanted => RunState::Running,
+            Some(_) => RunState::Stopping,
+        }
+    }
+    fn wanted(&self, node: &str) -> bool {
+        self.owned.peek().get(node).is_some_and(|run| run.wanted)
+    }
+    fn report(mut self, node: &str, line: Option<String>) {
+        let mut lines = self.lines.write();
+        match line {
+            Some(line) => lines.insert(node.to_owned(), line),
+            None => lines.remove(node),
+        };
+    }
+    fn stop(mut self, node: &str) {
+        if let Some(run) = self.owned.write().get_mut(node) {
+            run.wanted = false;
+        }
+    }
+    fn finish(mut self, node: &str) {
+        self.owned.write().remove(node);
+        self.report(node, None);
+    }
+    /// End every run at once, for a document that is being replaced.
+    fn cancel_all(mut self) {
+        for (_, run) in std::mem::take(&mut *self.owned.write()) {
+            run.task.cancel();
+        }
+        self.lines.write().clear();
+    }
+    /// End the runs of nodes the graph no longer holds: a removed node's
+    /// pass would otherwise go on paying for episodes it cannot write.
+    fn cancel_removed(mut self, graph: &CurationGraph) {
+        let removed = self
+            .owned
+            .peek()
+            .keys()
+            .filter(|node| graph.node(node).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        for node in removed {
+            if let Some(run) = self.owned.write().remove(&node) {
+                run.task.cancel();
             }
+            self.report(&node, None);
         }
-        Self { episodes, subtasks }
     }
-    pub(crate) fn has_measured(&self) -> bool {
-        self.episodes > 0
+}
+
+/// What a running measurement holds of the curation: whether it is still
+/// wanted, and where it says how far it has got.
+#[derive(Clone)]
+pub(super) struct RunHandle {
+    node: String,
+    book: RunBook,
+}
+
+impl RunHandle {
+    /// The node the run measures for.
+    pub(super) fn node(&self) -> &str {
+        &self.node
     }
-    /// The measurement state in the operator's words. A graph that has
-    /// measured nothing says so rather than counting zeroes.
-    pub(crate) fn measured(&self) -> String {
-        if self.episodes == 0 {
-            return "Nothing measured yet".to_owned();
-        }
-        format!(
-            "{} annotated · {}",
-            Counted::episodes(self.episodes),
-            Counted::subtasks(self.subtasks),
-        )
+    /// Whether the operator still wants the run; Stop clears it, and the run
+    /// starts nothing new.
+    pub(super) fn wanted(&self) -> bool {
+        self.book.wanted(&self.node)
+    }
+    /// The line the node's card and the top bar carry.
+    pub(super) fn report(&self, line: String) {
+        self.book.report(&self.node, Some(line));
+    }
+}
+
+/// What a curation is doing right now, as the top bar reports it: one line
+/// for each node that is running, and nothing at all at rest — what a graph
+/// has measured is on its cards, and a resting total in the status line only
+/// said it again.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CurationRuns(Vec<String>);
+
+impl CurationRuns {
+    pub(crate) fn lines(&self) -> &[String] {
+        &self.0
     }
 }
 
@@ -147,11 +237,10 @@ pub(crate) struct CurationController {
     payload: Signal<CurationGraph>,
     selected_node: Signal<Option<String>>,
     focus: Signal<Option<EpisodeFocus>>,
-    /// One line per node that is measuring something right now. A run in
-    /// flight is not in the payload, so the view that runs it says so here and
-    /// the canvas reads it: a node the operator has scrolled away from still
-    /// shows that it is working.
-    activity: Signal<NodeActivity>,
+    /// What every node is doing right now. A run in flight is not in the
+    /// payload, so it says so here and the canvas and the top bar read it: a
+    /// node the operator has moved away from still shows that it is working.
+    runs: RunBook,
     /// Where on screen the last Find similar was asked from, until the search
     /// it opened has carried its query card in from there.
     launch: Signal<Option<Place>>,
@@ -182,7 +271,7 @@ impl CurationController {
             payload,
             selected_node: Signal::new(Some(DATASET_NODE_ID.to_owned())),
             focus: Signal::new(None),
-            activity: Signal::new(NodeActivity::new()),
+            runs: RunBook::new(),
             launch: Signal::new(None),
             sample,
         })
@@ -228,10 +317,10 @@ impl CurationController {
     pub(crate) fn set_name(self, name: String) {
         self.session.set_name(name);
     }
-    /// How much of its dataset this curation has measured, which is all
-    /// the top bar wants from it.
-    pub(crate) fn measure(&self) -> CurationMeasure {
-        self.with_payload(CurationMeasure::of)
+    /// What every running node is doing, which is all the top bar wants
+    /// from a curation.
+    pub(crate) fn runs(&self) -> CurationRuns {
+        CurationRuns(self.runs.lines.read().values().cloned().collect())
     }
 
     /// Read the payload without cloning it.
@@ -258,6 +347,7 @@ impl CurationController {
         };
         if outcome.is_ok() {
             self.record_payload();
+            self.runs.cancel_removed(&self.payload.peek());
             let selection_gone = self
                 .selected_node
                 .peek()
@@ -290,15 +380,45 @@ impl CurationController {
     }
     /// What every node that is measuring right now has to say for itself.
     pub(crate) fn activity(&self) -> NodeActivity {
-        self.activity.read().clone()
+        self.runs.lines.read().clone()
     }
-    /// One node's line while it runs; `None` once it has stopped.
-    pub(crate) fn report_activity(mut self, node: &str, line: Option<String>) {
-        let mut activity = self.activity.write();
-        match line {
-            Some(line) => activity.insert(node.to_owned(), line),
-            None => activity.remove(node),
+    /// One node's line while a view's own work runs; `None` once it stops.
+    pub(crate) fn report_activity(self, node: &str, line: Option<String>) {
+        self.runs.report(node, line);
+    }
+    /// Start `run` for `node` as the curation's own task, so it keeps going
+    /// while the operator looks at other nodes. A node already running is
+    /// left alone.
+    pub(super) fn start_run<F>(self, node: &str, run: impl FnOnce(RunHandle) -> F)
+    where
+        F: std::future::Future<Output = ()> + 'static,
+    {
+        let mut owned = self.runs.owned;
+        if owned.peek().contains_key(node) {
+            return;
+        }
+        let book = self.runs;
+        let handle = RunHandle {
+            node: node.to_owned(),
+            book,
         };
+        let finished = node.to_owned();
+        let work = run(handle);
+        let task = ScopedTask::spawn(self.payload.origin_scope(), async move {
+            work.await;
+            book.finish(&finished);
+        });
+        owned
+            .write()
+            .insert(node.to_owned(), OwnedRun { task, wanted: true });
+    }
+    /// Where `node`'s own run stands.
+    pub(super) fn run_state(&self, node: &str) -> RunState {
+        self.runs.state(node)
+    }
+    /// Ask `node`'s run to start nothing new.
+    pub(super) fn stop_run(self, node: &str) {
+        self.runs.stop(node);
     }
     pub(crate) fn focus(&self) -> Option<EpisodeFocus> {
         self.focus.read().clone()
@@ -364,7 +484,9 @@ impl CurationController {
     /// Take the document's graph as the one on screen. A payload this Studio
     /// cannot read refuses the document rather than emptying the canvas.
     fn adopt(mut self, document: &CurationDocument) -> Result<(), String> {
-        self.payload.set(Self::graph_of(document)?);
+        let graph = Self::graph_of(document)?;
+        self.runs.cancel_all();
+        self.payload.set(graph);
         self.selected_node.set(Some(DATASET_NODE_ID.to_owned()));
         self.focus.set(None);
         Ok(())
@@ -393,6 +515,7 @@ impl CurationController {
     pub(crate) fn discard(mut self) {
         self.session.discard(|baseline| {
             self.payload.set(Self::graph_of(baseline)?);
+            self.runs.cancel_removed(&self.payload.peek());
             let selection_gone = self
                 .selected_node
                 .peek()

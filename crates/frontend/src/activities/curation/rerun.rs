@@ -15,7 +15,8 @@ use spiral_robotics_ui::{
 ///
 /// It is a link, quieter than the action beside it — Run, or opening a
 /// category — because that one is what the operator came for and this one
-/// undoes work they have already paid for.
+/// undoes work they have already paid for. Pressing it only asks, so it rests
+/// in plain ink; the red belongs to the confirmation that replaces the work.
 #[component]
 pub(super) fn ConfirmedRerun(
     /// Both the control's words and the confirming button's.
@@ -31,7 +32,7 @@ pub(super) fn ConfirmedRerun(
         span { class: "curation-rerun",
             Button {
                 id: "{id}",
-                purpose: ActionPurpose::Replace,
+                purpose: ActionPurpose::Refresh,
                 variant: ButtonVariant::Link,
                 disabled,
                 aria_expanded: asking(),

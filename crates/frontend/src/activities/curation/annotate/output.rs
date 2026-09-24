@@ -2,11 +2,14 @@
 //! the episode one of them belongs to, playing beside it.
 use super::episodes::AnnotationEpisode;
 use crate::activities::curation::document::{EpisodeFailure, SubtaskRow};
+use crate::activities::curation::episode_tabs::{OpenEpisode, OpenEpisodes};
 use crate::activities::curation::poster::PosterFrames;
 use crate::activities::curation::review::{
-    Counted, SubtaskContext, SubtaskEntry, SubtaskIntervals, SubtaskStanding,
+    Counted, EvidenceHeading, SubtaskContext, SubtaskEntry, SubtaskIntervals, SubtaskStanding,
 };
-use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
+#[cfg(all(test, target_arch = "wasm32"))]
+use crate::activities::episode::PlayRequest;
+use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;
@@ -69,81 +72,68 @@ impl EpisodeSubtasks {
             rows,
         })
     }
-    /// The row the operator chose, out of this episode's own.
-    fn chosen_row(&self, chosen: &ChosenSubtask) -> Option<&SubtaskRow> {
-        self.rows.iter().find(|row| chosen.holds(row))
+    /// The row a tab of this episode is playing, out of its own.
+    fn row_in(&self, tab: &OpenEpisode) -> Option<&SubtaskRow> {
+        self.rows
+            .iter()
+            .find(|row| tab.holds(row.episode(), row.start_time()))
     }
 }
 
-/// Which interval the operator is looking at: the episode its player shows,
-/// and the row inside it, if they picked one.
+/// Which interval the operator is looking at: the episodes open as tabs, and
+/// in the one in front the row they picked, if they picked one.
 ///
 /// Both halves of the review read this, so the index and the recording can
 /// never disagree about what is on screen.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct ChosenSubtask {
-    episode: Signal<Option<EpisodeId>>,
-    /// The chosen row's start time, which is what identifies a row within its
-    /// episode everywhere else in Curation.
-    start: Signal<Option<f64>>,
-    /// The interval the player has been asked to play.
-    play: Signal<Option<PlayRequest>>,
+    tabs: OpenEpisodes,
 }
 
 impl ChosenSubtask {
     pub(super) fn use_chosen() -> Self {
         Self {
-            episode: use_signal(|| None),
-            start: use_signal(|| None),
-            play: use_signal(|| None),
+            tabs: OpenEpisodes::use_open(),
         }
     }
+    pub(super) fn tabs(&self) -> OpenEpisodes {
+        self.tabs
+    }
+    /// The episode in front.
     pub(super) fn episode(&self) -> Option<EpisodeId> {
-        self.episode.read().clone()
+        self.tabs.front().map(|tab| tab.episode().clone())
     }
     /// Show one whole episode without playing any particular interval, as the
-    /// index does when its heading is pressed. The pending ask goes with it,
-    /// so opening an episode never replays the interval of the last one.
-    pub(super) fn show(mut self, episode: &EpisodeId) {
-        self.episode.set(Some(episode.clone()));
-        self.start.set(None);
-        self.play.set(None);
+    /// index does when its heading is pressed.
+    pub(super) fn show(self, episode: &EpisodeId) {
+        self.tabs.open(episode, None);
     }
     /// Show one row and play it.
-    pub(super) fn play_row(mut self, row: &SubtaskRow) {
-        self.episode.set(Some(row.episode().clone()));
-        self.start.set(Some(row.start_time()));
-        self.ask((row.start_time(), row.end_time()));
+    pub(super) fn play_row(self, row: &SubtaskRow) {
+        self.tabs
+            .open(row.episode(), Some((row.start_time(), row.end_time())));
     }
     /// Show an episode and, when a curation named one, its interval.
-    pub(super) fn focus(mut self, episode: &EpisodeId, interval: Option<(f64, f64)>) {
-        self.episode.set(Some(episode.clone()));
-        self.start.set(interval.map(|(start, _)| start));
-        match interval {
-            Some(interval) => self.ask(interval),
-            None => self.play.set(None),
-        }
-    }
-    fn ask(mut self, interval: (f64, f64)) {
-        let next = PlayRequest::after(*self.play.peek(), interval);
-        self.play.set(Some(next));
+    pub(super) fn focus(self, episode: &EpisodeId, interval: Option<(f64, f64)>) {
+        self.tabs.open(episode, interval);
     }
     fn holds(&self, row: &SubtaskRow) -> bool {
-        self.episode.read().as_ref() == Some(row.episode())
-            && *self.start.read() == Some(row.start_time())
+        self.tabs.shows(row.episode(), row.start_time())
     }
     /// Whether no row at all is chosen, in which case the index's first row
     /// carries its tab stop: a roving list always answers Tab once.
     fn holds_no_row(&self) -> bool {
-        self.start.read().is_none()
+        self.tabs.front().and_then(|tab| tab.interval()).is_none()
     }
-    /// The interval the player has been asked for, read rather than taken.
+    /// The interval the tab in front has been asked to play, read rather than
+    /// taken.
     ///
     /// Taking it was the whole bug: `Signal::write` registers no subscription,
     /// so the effect that took the ask never learned that a new one had
     /// arrived, and only ran again when the episode changed underneath it.
+    #[cfg(all(test, target_arch = "wasm32"))]
     fn requested(&self) -> Option<PlayRequest> {
-        *self.play.read()
+        self.tabs.front().and_then(|tab| tab.play())
     }
 }
 
@@ -411,46 +401,40 @@ fn IndexSearch(
     }
 }
 
-/// The chosen episode seen whole — every camera it recorded, and the robot
+/// One open episode seen whole — every camera it recorded, and the robot
 /// when the dataset has a model — with the measurement's subtasks on the
-/// shared timeline beneath it, playing the row the operator chose.
+/// shared timeline beneath it, playing the row chosen in its tab.
 #[component]
 pub(super) fn AnnotatedEpisode(
     episode: AnnotationEpisode,
     subtasks: EpisodeSubtasks,
     context: SubtaskContext,
-    chosen: ChosenSubtask,
+    tab: OpenEpisode,
 ) -> Element {
-    let playing = subtasks.chosen_row(&chosen);
-    let name = episode.episode().name();
+    let playing = subtasks.row_in(&tab);
     rsx! {
-        header { class: "curation-review-head",
-            match playing {
-                Some(row) => rsx! {
-                    p { class: "curation-review-subject", "{row.description()}" }
-                    p { class: "curation-review-facts",
-                        span { "{name}" }
-                        span { "{row.start_time().clock_label()} – {row.end_time().clock_label()}" }
-                        code { class: "curation-review-id", "{subtasks.episode()}" }
-                    }
-                },
-                None => rsx! {
-                    p { class: "curation-review-subject", "{name}" }
-                    p { class: "curation-review-facts",
-                        span { "{Counted::subtasks(subtasks.rows().len())}" }
-                        code { class: "curation-review-id", "{subtasks.episode()}" }
-                    }
-                },
-            }
+        match playing {
+            Some(row) => rsx! {
+                EvidenceHeading {
+                    subject: row.description().to_owned(),
+                    episode: Some(subtasks.episode().clone()),
+                    facts: vec![format!("{} – {}", row.start_time().clock_label(), row.end_time().clock_label())],
+                }
+            },
+            None => rsx! {
+                EvidenceHeading {
+                    subject: episode.episode().name(),
+                    episode: Some(subtasks.episode().clone()),
+                    facts: vec![Counted::subtasks(subtasks.rows().len()).to_string()],
+                }
+            },
         }
         section { class: "curation-review-player", "aria-label": "Annotated episode",
             EpisodeInspection {
                 episode: episode.episode().clone(),
                 featured_camera: FeaturedCamera::measured(context.camera()),
                 tracks: vec![SubtaskIntervals::of(subtasks.rows()).track().into()],
-                // Read rather than taken: reading subscribes this view, so
-                // every new ask reaches the player.
-                focus: chosen.requested(),
+                focus: tab.play(),
             }
         }
     }

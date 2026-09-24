@@ -73,7 +73,7 @@ pub(crate) fn CurationWorkspace(is_active: ReadSignal<bool>) -> Element {
         is_active,
     );
     let controller = CurationController::use_controller();
-    let status = use_memo(move || controller.measure());
+    let status = use_memo(move || controller.runs());
     rsx! {
         crate::shell::frame::WorkspaceFrame {
             workspace,

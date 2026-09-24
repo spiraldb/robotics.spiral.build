@@ -22,7 +22,7 @@ use crate::components::icons::CameraStreamIcon;
 use crate::components::timeline::KeyboardFocus;
 use dioxus::prelude::*;
 use dioxus_workbench::{Panel, PanelId, PanelLayout, PanelWorkspace};
-use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant, Remount};
 
 /// Which of an episode's cameras leads the inspection.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -101,9 +101,8 @@ pub(in crate::activities) fn EpisodeInspection(
     // Another episode is another clock, other streams and other choices, so
     // it mounts afresh rather than rewiring the previous one's.
     rsx! {
-        InspectedEpisode {
-            key: "{episode.dataset().label()}/{episode.id()}",
-            episode, tracks, focus, featured_camera,
+        Remount { identity: format!("{}/{}", episode.dataset().label(), episode.id()),
+            InspectedEpisode { episode, tracks, focus, featured_camera }
         }
     }
 }
@@ -249,7 +248,8 @@ fn InspectionDock(
         );
     }
     let arrangement =
-        EpisodeArrangement::new(panels.iter().map(|panel| panel.id.clone()).collect());
+        EpisodeArrangement::new(panels.iter().map(|panel| panel.id.clone()).collect())
+            .led_by_evidence(!evidence.is_empty());
     panels.push(
         Panel::new(
             EpisodeArrangement::PLOTS,

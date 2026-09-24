@@ -4,6 +4,7 @@
 //! decided from recorded schema names only; nothing here reads meaning into
 //! topic or field names.
 use crate::activities::data::DatasetClient;
+use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
     DatasetTopic, EpisodeSelection, EpisodeTopicRequest, MessageRead,
 };
@@ -142,6 +143,27 @@ impl StreamCatalog {
             .await
             .map_err(|error| error.to_string())?;
         Ok(Self::new(topics, &episode))
+    }
+    /// The camera topics `episode` recorded: every episode of one recording
+    /// session carries the same cameras, so one episode answers for a sample.
+    /// `None` until they are read, or when they cannot be; no episode records
+    /// no cameras.
+    pub(in crate::activities) fn use_camera_topics(
+        episode: Option<EpisodeSelection>,
+    ) -> Option<Vec<String>> {
+        let cameras = use_resource(use_reactive(&episode, move |episode| async move {
+            let Some(episode) = episode else {
+                return Some(Vec::new());
+            };
+            let catalog = Self::load(episode).await.ok()?;
+            Some(
+                catalog
+                    .videos()
+                    .map(|stream| stream.name().to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        }));
+        cameras.read().clone().flatten()
     }
     pub(in crate::activities) fn streams(&self) -> &[RecordedStream] {
         &self.streams

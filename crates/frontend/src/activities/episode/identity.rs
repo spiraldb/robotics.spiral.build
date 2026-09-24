@@ -310,19 +310,6 @@ impl EpisodeLabels {
             shared_prefix: prefix.rfind('/').map_or(0, |slash| slash + 1),
         }
     }
-    /// One line naming an episode in a list: its id, its label when it has
-    /// one, and its length.
-    pub(in crate::activities) fn line(&self, episode: &Episode) -> String {
-        let facts = episode.facts();
-        match self.label(facts).head() {
-            Some(head) => format!(
-                "…{} · {head} · {}",
-                episode.id().short(),
-                facts.duration_label()
-            ),
-            None => format!("…{} · {}", episode.id().short(), facts.duration_label()),
-        }
-    }
     /// The source path below the directory every listed episode shares.
     pub(in crate::activities) fn label(&self, facts: &EpisodeFacts) -> SourceLabel {
         let relative = facts

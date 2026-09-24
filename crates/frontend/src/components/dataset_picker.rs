@@ -125,11 +125,18 @@ pub(crate) fn DatasetPicker(
             value: current.as_ref().map(|entry| entry.resource_id().to_owned()).unwrap_or_default(),
             disabled: datasets.is_empty() && unlisted.is_none(),
             onchange: choose,
+            // The placeholder says what the list is doing, so an empty field
+            // never reads "No datasets available" beside a note that they are
+            // still loading.
             option {
                 value: "",
                 disabled: true,
                 selected: current.is_none(),
-                if datasets.is_empty() { "No datasets available" } else { "Choose a dataset" }
+                match (datasets.is_empty(), catalog.reading()) {
+                    (true, true) => "Loading datasets…",
+                    (true, false) => "No datasets available",
+                    (false, _) => "Choose a dataset",
+                }
             }
             if let Some(entry) = unlisted.as_ref() {
                 option { value: "{entry.resource_id()}", selected: true,
@@ -163,8 +170,6 @@ pub(crate) fn DatasetPicker(
                     div { class: "mt-1", "Retry when the project is available." }
                 }
             }
-        } else if catalog.reading() {
-            div { class: "text-[11px] text-ink-faint", role: "status", "Loading datasets…" }
         }
     }
 }

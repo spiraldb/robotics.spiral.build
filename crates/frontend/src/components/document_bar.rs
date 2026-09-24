@@ -14,23 +14,27 @@
 use crate::components::icons::{CheckIcon, SqlIcon};
 use dioxus::prelude::*;
 use spiral_robotics_ui::{
-    ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Disclosure, TextInput,
+    ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Disclosure, Remount, TextInput,
 };
 
 /// The saved state the chip below reports now lives with the session that owns
 /// it; the bars that import it from here keep working.
 pub(crate) use crate::components::document_session::DocumentState;
 
-/// Keyed on the state so a change replays its settle motion once.
+/// A change of state remounts what the chip says, which replays its settle
+/// motion once. The status region itself stays mounted: a live region
+/// inserted afresh is not reliably announced, while new words inside a
+/// standing one are.
 #[component]
 fn DocumentStateChip(state: DocumentState) -> Element {
     rsx! {
-        span {
-            key: "{state.class_name()}",
-            class: "document-state {state.class_name()}",
-            role: "status",
-            span { class: "document-state-dot", "aria-hidden": "true" }
-            "{state.label()}"
+        span { class: "document-state {state.class_name()}", role: "status",
+            Remount { identity: state.class_name().to_owned(),
+                span { class: "document-state-settle",
+                    span { class: "document-state-dot", "aria-hidden": "true" }
+                    "{state.label()}"
+                }
+            }
         }
     }
 }

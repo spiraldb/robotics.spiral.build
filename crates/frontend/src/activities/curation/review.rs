@@ -16,7 +16,7 @@ use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonSize, ButtonVariant, EmptyState, Notice, NoticeTone, Place,
+    ActionPurpose, Button, ButtonSize, ButtonVariant, Notice, NoticeTone, Place,
 };
 use std::fmt::{Display, Formatter, Result as FormatResult};
 
@@ -302,7 +302,7 @@ pub(super) fn SubtaskEntry(
                     span {
                         class: "curation-entry-score",
                         "data-answered": "{standing.answered}",
-                        title: if standing.answered { "How likely jev thinks this is the same operation" }
+                        title: if standing.answered { "How likely this is the same operation" }
                                else { "This row came back without an answer" },
                         "{score}"
                     }
@@ -341,15 +341,21 @@ pub(super) fn SubtaskEntry(
 pub(super) fn SliceEntry(
     title: String,
     facts: Vec<String>,
-    /// Where the slice sits in its episode, as fractions of its length.
-    place: (f64, f64),
+    /// Where a stretch sits in its episode, as fractions of its length. A
+    /// whole episode leaves it out: a bar filled end to end on every row says
+    /// nothing about any of them.
+    #[props(default)]
+    place: Option<(f64, f64)>,
     /// The measure the row is kept or left out by, as its column reads it.
     #[props(default)]
     score: Option<String>,
+    /// What that number is, for the column's tooltip.
+    #[props(default)]
+    score_meaning: Option<String>,
     chosen: bool,
     on_select: EventHandler<()>,
 ) -> Element {
-    let (left, right) = (place.0.clamp(0.0, 1.0), place.1.clamp(0.0, 1.0));
+    let place = place.map(|(left, right)| (left.clamp(0.0, 1.0), right.clamp(0.0, 1.0)));
     rsx! {
         li { class: "curation-entry-item",
             div {
@@ -359,10 +365,12 @@ pub(super) fn SliceEntry(
                 "aria-current": chosen.then_some("true"),
                 onclick: move |_| on_select.call(()),
                 onkeydown: move |event: KeyboardEvent| IndexFocus::handle(&event, on_select),
-                span { class: "curation-entry-span", "aria-hidden": "true",
-                    span {
-                        class: "curation-entry-span-fill",
-                        style: "left: {left * 100.0:.2}%; width: {(right - left).max(0.0) * 100.0:.2}%",
+                if let Some((left, right)) = place {
+                    span { class: "curation-entry-span", "aria-hidden": "true",
+                        span {
+                            class: "curation-entry-span-fill",
+                            style: "left: {left * 100.0:.2}%; width: {(right - left).max(0.0) * 100.0:.2}%",
+                        }
                     }
                 }
                 span { class: "curation-entry-words",
@@ -374,7 +382,7 @@ pub(super) fn SliceEntry(
                     }
                 }
                 if let Some(score) = score {
-                    span { class: "curation-entry-score", "{score}" }
+                    span { class: "curation-entry-score", title: score_meaning, "{score}" }
                 }
             }
         }
@@ -402,6 +410,8 @@ pub(super) fn SubtaskReview(index: Element, evidence: Element) -> Element {
 #[component]
 pub(super) fn SubtaskEvidence(
     row: SubtaskRow,
+    /// The ask to play the row, counted, so choosing it again replays it.
+    play: Option<PlayRequest>,
     context: SubtaskContext,
     /// Send the operator to this interval in the annotation it came from.
     on_open: EventHandler<()>,
@@ -427,12 +437,11 @@ pub(super) fn SubtaskEvidence(
     let opened = use_resource(use_reactive(&selection, Episode::open));
     let span = (row.start_time(), row.end_time());
     rsx! {
-        header { class: "curation-review-head",
-            p { class: "curation-review-subject", "{row.description()}" }
-            p { class: "curation-review-facts",
-                span { "{Episode::name_of(row.episode())}" }
-                span { "{span.0.clock_label()} – {span.1.clock_label()}" }
-                code { class: "curation-review-id", "{row.episode()}" }
+        EvidenceHeading {
+            subject: row.description().to_owned(),
+            episode: Some(row.episode().clone()),
+            facts: vec![format!("{} – {}", span.0.clock_label(), span.1.clock_label())],
+            actions: rsx! {
                 Button {
                     purpose: ActionPurpose::Navigate,
                     variant: ButtonVariant::Link,
@@ -451,7 +460,7 @@ pub(super) fn SubtaskEvidence(
                         "Find similar"
                     }
                 }
-            }
+            },
         }
         match opened.read().as_ref() {
             Some(Ok(episode)) => rsx! {
@@ -460,7 +469,7 @@ pub(super) fn SubtaskEvidence(
                         episode: episode.clone(),
                         featured_camera: FeaturedCamera::measured(context.camera()),
                         tracks: vec![SubtaskIntervals::around(&row, &episode_rows).track().into()],
-                        focus: Some(PlayRequest::new(span)),
+                        focus: play,
                     }
                 }
             },
@@ -470,6 +479,48 @@ pub(super) fn SubtaskEvidence(
             None => rsx! {
                 p { class: "curation-review-note", role: "status", "Opening the recording…" }
             },
+        }
+    }
+}
+
+/// What the evidence column is showing, named once, on one line: the
+/// subject, the facts that place it, and at the end the actions that take it
+/// elsewhere.
+///
+/// A subtask's episode is named by its id, cut from the front so the tail
+/// every index heading shows ("…f9e3e090") is the part that stays; it is text,
+/// so it can be selected and pasted. When the subject is the episode itself
+/// its name already says that tail, so the id is the name's tooltip instead.
+#[component]
+pub(super) fn EvidenceHeading(
+    subject: String,
+    /// The episode the subject belongs to, when the subject is not the
+    /// episode itself.
+    #[props(default)]
+    episode: Option<EpisodeId>,
+    #[props(default)] facts: Vec<String>,
+    #[props(default = VNode::empty())] actions: Element,
+) -> Element {
+    let names_itself = episode
+        .as_ref()
+        .is_some_and(|episode| Episode::name_of(episode) == subject);
+    let (subject_title, id) = match episode {
+        Some(episode) if names_itself => (episode.to_string(), None),
+        Some(episode) => (subject.clone(), Some(episode)),
+        None => (subject.clone(), None),
+    };
+    rsx! {
+        header { class: "curation-review-head",
+            p { class: "curation-review-subject", title: "{subject_title}", "{subject}" }
+            p { class: "curation-review-facts",
+                if let Some(episode) = id {
+                    code { class: "curation-review-id", title: "{episode}", "{episode}" }
+                }
+                for fact in facts {
+                    span { "{fact}" }
+                }
+            }
+            div { class: "curation-review-actions", {actions} }
         }
     }
 }
@@ -508,28 +559,42 @@ impl SubtaskIntervals {
     }
 }
 
-/// One line: what a measurement's run has reached, what it runs with, and the
-/// actions that change either. Nothing else sits between the workspace tab
-/// and the index.
+/// One line over the index: the node's actions, and beside them only what
+/// needs saying there. What the node holds is on its card and a run's progress
+/// is on the card and in the top bar, so neither is repeated here.
 #[component]
-pub(super) fn MeasurementStatus(facts: String, note: Option<String>, actions: Element) -> Element {
+pub(super) fn MeasurementStatus(
+    /// A plain fact the card does not carry.
+    #[props(default)]
+    facts: Option<String>,
+    /// What needs attention: a missing setting, failed episodes.
+    #[props(default)]
+    note: Option<String>,
+    #[props(default = VNode::empty())] actions: Element,
+) -> Element {
     rsx! {
         div { class: "curation-review-status",
-            p { class: "curation-review-status-facts", role: "status", "{facts}" }
+            if let Some(facts) = facts {
+                p { class: "curation-review-status-facts", "{facts}" }
+            }
             if let Some(note) = note {
-                p { class: "curation-review-status-note", "{note}" }
+                p { class: "curation-review-status-note", role: "status", "{note}" }
             }
             div { class: "curation-review-status-actions", {actions} }
         }
     }
 }
 
-/// Nothing chosen yet: say what choosing one does rather than leaving the
-/// column blank beside a full list.
-#[component]
-pub(super) fn NoSubtaskChosen(prompt: String) -> Element {
-    rsx! {
-        EmptyState { title: "Nothing selected", p { "{prompt}" } }
+/// How many episodes a node could not measure, said only when some failed.
+pub(super) struct FailedEpisodes;
+
+impl FailedEpisodes {
+    pub(super) fn note(failed: usize) -> Option<String> {
+        match failed {
+            0 => None,
+            1 => Some("1 episode failed".to_owned()),
+            failed => Some(format!("{failed} episodes failed")),
+        }
     }
 }
 

@@ -14,12 +14,13 @@ mod sheet;
 mod browser_tests;
 
 use super::document::{CurationNode, CurationNodeKind, SubtaskAnnotation, SubtaskRow};
+use super::episode_tabs::{EpisodeTabs, OpenEpisode};
 use super::poster::{PosterCut, PosterFrames};
 use super::rerun::ConfirmedRerun;
 use super::review::{
-    EpisodeOrder, MeasurementStatus, NoSubtaskChosen, SubtaskContext, SubtaskReview,
+    EpisodeOrder, FailedEpisodes, MeasurementStatus, SubtaskContext, SubtaskReview,
 };
-use super::state::CurationController;
+use super::state::{CurationController, RunState};
 use crate::activities::data::DatasetClient;
 use crate::components::icons::SettingsIcon;
 use crate::shell::state::StudioProjectState;
@@ -28,14 +29,13 @@ use episodes::AnnotationEpisode;
 use journal::CurationJournal;
 use native::NativeSheets;
 use output::{AnnotatedEpisode, AnnotationOutput, ChosenSubtask, EpisodeSubtasks, SubtaskIndex};
-use pipeline::{AnnotationPass, EPISODES_IN_FLIGHT, PassSettings};
+use pipeline::{AnnotationPass, PassSettings};
 use provider::ProviderAnnotator;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonVariant, Field, FieldLayout, Place, Select,
     TextInput, TextInputKind,
 };
-use std::fmt::{Display, Formatter, Result as FormatResult};
 
 /// Which episodes one run covers.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -143,7 +143,10 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     let annotation = AnnotationNode::new(node.clone(), controller);
     let dataset = controller.with_payload(|payload| payload.dataset().cloned());
     let listed = AnnotationEpisode::reaching(controller, &node);
-    let cameras = AnnotationEpisode::use_cameras(listed.first().cloned());
+    let cameras = crate::activities::episode::StreamCatalog::use_camera_topics(
+        listed.first().map(AnnotationEpisode::selection),
+    )
+    .unwrap_or_default();
 
     // A new node starts on the camera that shows the whole workspace, written
     // into the node so the picker shows the choice and a run can start at once.
@@ -167,6 +170,23 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     }));
 
     let chosen = ChosenSubtask::use_chosen();
+    // The first annotated episode, or the first episode at all, opens by
+    // itself, so the recording column is never an empty half.
+    let first = annotation.clone();
+    use_effect(move || {
+        let opening = first
+            .rows()
+            .first()
+            .map(|row| row.episode().clone())
+            .or_else(|| {
+                AnnotationEpisode::reaching(controller, &first.id)
+                    .first()
+                    .map(|episode| episode.id().clone())
+            });
+        chosen
+            .tabs()
+            .open_first(opening.map(|episode| (episode, None)));
+    });
     let focus_node = node.clone();
     use_effect(move || {
         let Some(focus) = controller.focus() else {
@@ -182,21 +202,14 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     // The client belongs to this mount, and a pass outlives the click that
     // started it, so it is captured here rather than read inside its task.
     let datasets = DatasetClient::current();
-    // `running` is what the pass is actually doing; `wanted` is what the
-    // operator asked for. Pressing Stop clears `wanted`, which stops the next
-    // episode from starting, but the episodes already paid for finish and
-    // save. Collapsing the two would let the interface report idle while
-    // eight model calls were still billing, and would let a second pass start
-    // underneath the first.
-    let mut running = use_signal(|| false);
-    let mut wanted = use_signal(|| false);
+    // The pass is the curation's, not this view's: choosing another node
+    // leaves it annotating. Stop only asks it to start no further episode;
+    // the episodes already paid for finish and save, and the node reads
+    // "Stopping…" until they have, so a second pass cannot start underneath.
+    let run = controller.run_state(&node);
     let start = {
         let annotation = annotation.clone();
         move |chosen: Vec<AnnotationEpisode>| {
-            if *running.peek() {
-                return;
-            }
-            wanted.set(true);
             let Some(settings) = annotation.settings() else {
                 return;
             };
@@ -210,8 +223,8 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
             let node = annotation.id.clone();
             let model_name = settings.model().to_owned();
             let datasets = datasets.clone();
-            running.set(true);
-            spawn(async move {
+            controller.start_run(&node.clone(), move |run| async move {
+                let total = chosen.len();
                 // The dataset's own words for the job, when it records them,
                 // are worth more to the model than any of our phrasing.
                 let task = match chosen.first() {
@@ -219,19 +232,17 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                     None => None,
                 };
                 AnnotationPass::new(
-                    PassSettings::new(node.clone(), model_name, interval).with_task(task),
+                    PassSettings::new(node, model_name, interval).with_task(task),
                     NativeSheets::new(datasets, camera, interval),
                     ProviderAnnotator,
-                    CurationJournal::new(node.clone(), controller, studio, wanted),
+                    CurationJournal::new(controller, studio, run, total),
                 )
                 .run(chosen)
                 .await;
-                running.set(false);
-                wanted.set(false);
-                controller.report_activity(&node, None);
             });
         }
     };
+    let running = run != RunState::Idle;
 
     // Every hook above runs for any selected node, so a graph edit that
     // replaces this node cannot leave the workspace with a shorter hook list.
@@ -249,34 +260,15 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
         EpisodeOrder::of(listed.iter().map(AnnotationEpisode::id)),
     );
     let frames = PosterFrames::use_frames(PosterCut::of(&context, &rows));
-    let shown = chosen
-        .episode()
-        .or_else(|| groups.first().map(|group| group.episode().clone()))
-        .and_then(|id| {
-            let episode = listed.iter().find(|episode| episode.id() == &id)?.clone();
-            let subtasks = groups.iter().find(|group| group.episode() == &id).cloned();
-            Some((episode, subtasks))
-        });
+    let evidence = (listed.clone(), groups.clone(), context.clone());
     let done = listed
         .iter()
         .filter(|episode| settings.is_completed(episode.id()))
         .count();
-    // Every node's progress travels to the canvas, so a graph the operator has
-    // scrolled away from still shows which measurement is working.
-    let reported = node.clone();
-    use_effect(use_reactive(
-        (&running(), &done, &listed.len()),
-        move |(running, done, all)| {
-            controller.report_activity(
-                &reported,
-                running.then(|| format!("{done} of {all} episodes")),
-            );
-        },
-    ));
     let replaceable = RunScope::All.episodes(&listed, &settings).len();
     let retry = {
         let listed = listed.clone();
-        let mut start = start.clone();
+        let start = start.clone();
         move |episode: EpisodeId| {
             start(
                 listed
@@ -290,25 +282,32 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     rsx! {
         section { class: "curation-annotate-workspace", "aria-label": "Break down subtasks",
             MeasurementStatus {
-                facts: AnnotationFacts::new(settings.clone(), (done, listed.len()), running()).to_string(),
+                // What the node holds is on its card, what it runs with behind
+                // the ⚙, and a run's progress on the card and in the top bar;
+                // the line says only what needs attention.
                 note: if settings.camera().is_none() {
                     Some("Choose a camera in Settings before running.".to_owned())
-                } else { None },
+                } else {
+                    FailedEpisodes::note(settings.failed_episodes().len())
+                },
                 actions: rsx! {
-                    if running() {
+                    if running {
                         Button {
                             purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
-                            disabled: !wanted(),
+                            disabled: run == RunState::Stopping,
                             title: "Start no further episode; the ones already in flight finish and are saved",
-                            onclick: move |_| wanted.set(false),
-                            if wanted() { "Stop" } else { "Stopping…" }
+                            onclick: {
+                                let node = node.clone();
+                                move |_| controller.stop_run(&node)
+                            },
+                            if run == RunState::Stopping { "Stopping…" } else { "Stop" }
                         }
                     } else {
                         for scope in [RunScope::Pending, RunScope::Failed] {
                             {
                                 let count = scope.episodes(&listed, &settings).len();
                                 let episodes = scope.episodes(&listed, &settings);
-                                let mut start = start.clone();
+                                let start = start.clone();
                                 rsx! {
                                     if count > 0 {
                                         Button {
@@ -333,12 +332,12 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                         annotation: annotation.clone(),
                         settings: settings.clone(),
                         cameras,
-                        disabled: running(),
+                        disabled: running,
                         reannotate: {
-                            let mut start = start.clone();
+                            let start = start.clone();
                             let episodes = RunScope::All.episodes(&listed, &settings);
                             rsx! {
-                                if replaceable > 0 && !running() {
+                                if replaceable > 0 && !running {
                                     ConfirmedRerun {
                                         id: "curation-annotate-replace".to_owned(),
                                         label: RunScope::All.label().to_owned(),
@@ -380,72 +379,26 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                         },
                     }
                 },
-                evidence: match shown {
-                    Some((episode, subtasks)) => rsx! {
-                        AnnotatedEpisode {
-                            key: "{episode.id()}",
-                            episode: episode.clone(),
-                            subtasks: subtasks.unwrap_or_else(|| EpisodeSubtasks::none(episode.id())),
-                            context: context.clone(),
-                            chosen,
-                        }
-                    },
-                    None => rsx! {
-                        NoSubtaskChosen {
-                            prompt: "Run the annotation, then choose a subtask to watch it play.",
-                        }
-                    },
+                evidence: rsx! {
+                    EpisodeTabs {
+                        open: chosen.tabs(),
+                        empty: "Choose a subtask to watch it play.".to_owned(),
+                        render: move |tab: OpenEpisode| {
+                            let (listed, groups, context) = &evidence;
+                            let Some(episode) = listed.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
+                                return rsx! {};
+                            };
+                            let subtasks = groups
+                                .iter()
+                                .find(|group| group.episode() == tab.episode())
+                                .cloned()
+                                .unwrap_or_else(|| EpisodeSubtasks::none(tab.episode()));
+                            rsx! { AnnotatedEpisode { episode, subtasks, context: context.clone(), tab } }
+                        },
+                    }
                 },
             }
         }
-    }
-}
-
-/// The one line a Break down subtasks node reports itself in: what it has
-/// measured, and what it measured with.
-///
-/// It used to be four bands and six phrasings of one fact — `Part way`,
-/// `39 of 40 episodes`, `1 to go`, `1 failed`, `Run 1 left`, `Retry failed` —
-/// standing between the operator and the first row.
-#[derive(Clone, PartialEq)]
-struct AnnotationFacts {
-    settings: SubtaskAnnotation,
-    /// How many of the episodes reaching the node it has annotated, of how many.
-    reached: (usize, usize),
-    running: bool,
-}
-
-impl AnnotationFacts {
-    fn new(settings: SubtaskAnnotation, reached: (usize, usize), running: bool) -> Self {
-        Self {
-            settings,
-            reached,
-            running,
-        }
-    }
-}
-
-impl Display for AnnotationFacts {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        let (done, episodes) = self.reached;
-        let failed = self.settings.failed_episodes().len();
-        if self.running {
-            write!(
-                formatter,
-                "Annotating up to {EPISODES_IN_FLIGHT} at once · "
-            )?;
-        }
-        write!(formatter, "{done}/{episodes} episodes")?;
-        if failed > 0 {
-            write!(formatter, " · {} failed", failed)?;
-        }
-        write!(
-            formatter,
-            " · {} · {} · every {}s",
-            self.settings.camera().unwrap_or("no camera"),
-            self.settings.model(),
-            self.settings.sample_interval_seconds(),
-        )
     }
 }
 

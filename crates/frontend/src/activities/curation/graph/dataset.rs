@@ -4,12 +4,16 @@
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, DatasetSummary};
 use spiral_robotics_ui::{
-    ActionPurpose, ArrowDownIcon, ArrowUpIcon, Button, ButtonVariant, EmptyState, Fact, FactList,
-    Notice, NoticeTone, Select,
+    ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone, Remount,
 };
 
-use super::super::document::CurationGraph;
+use super::super::document::{CurationGraph, EpisodeFact};
+use super::super::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
+use super::super::review::{
+    Counted, EvidenceHeading, MeasurementStatus, SliceEntry, SubtaskReview,
+};
 use super::super::state::CurationController;
+use crate::activities::data::{DatasetClient, DatasetOverview};
 use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels, FeaturedCamera};
 use crate::components::dataset_picker::DatasetPicker;
 use crate::components::icons::SpinnerIcon;
@@ -26,7 +30,9 @@ pub(super) fn DatasetWorkspace(controller: CurationController) -> Element {
     match dataset {
         None => rsx! { DatasetChoice { controller } },
         Some(dataset) => rsx! {
-            DatasetEpisodes { key: "{dataset.label()}", controller, dataset, featured }
+            Remount { identity: dataset.label(),
+                DatasetEpisodes { controller, dataset, featured }
+            }
         },
     }
 }
@@ -117,8 +123,8 @@ fn DatasetEpisodes(
     }
 }
 
-/// The dataset's recordings and the one on screen. Stepping through them keeps
-/// the same controls the Data view uses to open an episode.
+/// The dataset's recordings beside what opens from them: its overview, as
+/// Data shows it, and a tab for each episode chosen from the list.
 #[component]
 fn DatasetEpisodeList(
     dataset: DatasetSelection,
@@ -127,61 +133,86 @@ fn DatasetEpisodeList(
     partial: bool,
     featured: FeaturedCamera,
 ) -> Element {
-    let mut opened = use_signal(|| 0_usize);
-    let count = episodes.len();
-    let index = opened().min(count.saturating_sub(1));
-    let current = episodes.get(index).cloned();
+    let tabs = OpenEpisodes::use_open();
+    let inspection = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
+        DatasetClient::current()
+            .inspect_dataset(dataset)
+            .await
+            .map_err(|error| error.to_string())
+    }));
     let labels = EpisodeLabels::of(episodes.iter().map(Episode::facts));
-    let mut step = move |delta: isize| {
-        opened.set(
-            index
-                .saturating_add_signed(delta)
-                .min(count.saturating_sub(1)),
-        );
-    };
+    let front = tabs.front().map(|tab| tab.episode().clone());
+    // The card already counts the episodes; only a dataset read in part has
+    // something to add.
+    let partial = partial.then(|| {
+        format!(
+            "The first {} · the rest are not read",
+            Counted::episodes(episodes.len())
+        )
+    });
+    let opened = episodes.clone();
     rsx! {
-        header { class: "curation-canvas-dataset-head",
-            FactList { mono: true,
-                Fact { label: "Dataset", "{dataset.display_name()}" }
-                Fact { label: "Episodes",
-                    if partial { "First {count}" } else { "{count}" }
-                }
-            }
-            if count > 1 {
-                // The same stepper Curation steps its episodes with: ↑ and ↓
-                // while a stepper button has focus, the list for a jump.
-                div { class: "episode-stepper", role: "group", "aria-label": "Step between episodes",
-                    span { class: "episode-steps",
-                        onkeydown: move |event: KeyboardEvent| match event.key() {
-                            Key::ArrowUp => { event.prevent_default(); step(-1); }
-                            Key::ArrowDown => { event.prevent_default(); step(1); }
-                            _ => {}
-                        },
-                        Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
-                            aria_label: "Previous episode", title: "Previous episode · ↑",
-                            disabled: index == 0, onclick: move |_| step(-1), ArrowUpIcon {} }
-                        Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Icon,
-                            aria_label: "Next episode", title: "Next episode · ↓",
-                            disabled: index + 1 >= count, onclick: move |_| step(1), ArrowDownIcon {} }
-                    }
-                    label { r#for: "curation-canvas-episode", class: "sr-only", "Episode" }
-                    Select {
-                        id: "curation-canvas-episode", class: "run-select episode-select", value: "{index}",
-                        onchange: move |value: String| opened.set(value.parse().unwrap_or(0)),
-                        for (position, episode) in episodes.iter().enumerate() {
-                            option { value: "{position}", title: "{episode.id()}",
-                                "{labels.line(episode)}"
+        if let Some(facts) = partial {
+            MeasurementStatus { facts }
+        }
+        SubtaskReview {
+            index: rsx! {
+                ol { class: "curation-entries", "aria-label": "Episodes this curation reads",
+                    for episode in episodes.iter() {
+                        {
+                            let id = episode.id().clone();
+                            let label = labels.label(episode.facts());
+                            // A recording's own name, when its path gives one,
+                            // tells more than its id; the id follows it.
+                            let (title, named) = match label.head() {
+                                Some(head) => (head.to_owned(), true),
+                                None => (episode.name(), false),
+                            };
+                            let mut facts = Vec::new();
+                            if named {
+                                facts.push(episode.name());
+                            }
+                            facts.extend(EpisodeFact::DurationSeconds.reading(episode));
+                            facts.extend(EpisodeFact::Messages.reading(episode).map(|count| format!("{count} messages")));
+                            rsx! {
+                                SliceEntry {
+                                    key: "{id}",
+                                    title,
+                                    facts,
+                                    chosen: front.as_ref() == Some(&id),
+                                    on_select: move |()| tabs.open(&id, None),
+                                }
                             }
                         }
                     }
                 }
-            }
-        }
-        match current {
-            Some(episode) => rsx! {
-                EpisodeInspection { episode, featured_camera: featured }
             },
-            None => rsx! { EmptyState { p { "This dataset has no recordings yet." } } },
+            evidence: rsx! {
+                EpisodeTabs {
+                    open: tabs,
+                    empty: "Choose an episode to watch it.".to_owned(),
+                    overview: rsx! {
+                        div { class: "curation-dataset-overview",
+                            DatasetOverview { dataset: dataset.clone(), inspection: inspection.read().clone() }
+                        }
+                    },
+                    render: move |tab: OpenEpisode| {
+                        let Some(episode) = opened.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
+                            return rsx! {};
+                        };
+                        let facts = [EpisodeFact::DurationSeconds.reading(&episode), EpisodeFact::Messages.reading(&episode).map(|count| format!("{count} messages"))]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>();
+                        rsx! {
+                            EvidenceHeading { subject: episode.name(), episode: Some(episode.id().clone()), facts }
+                            div { class: "curation-review-player",
+                                EpisodeInspection { episode, featured_camera: featured.clone() }
+                            }
+                        }
+                    },
+                }
+            },
         }
     }
 }

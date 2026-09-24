@@ -21,9 +21,9 @@ mod display;
 mod foundation;
 
 pub use containers::{
-    Disclosure, DisclosureProps, Reorder, ReorderHandle, ReorderHandleProps, ReorderList,
-    ReorderListProps, ReorderMove, SheetHeading, SheetPosition, SideSheet, SideSheetProps, Tree,
-    TreeBranch, TreeItem, TreeItemProps, TreeProps,
+    Disclosure, DisclosureProps, Menu, MenuProps, Reorder, ReorderHandle, ReorderHandleProps,
+    ReorderList, ReorderListProps, ReorderMove, SheetHeading, SheetPosition, SideSheet,
+    SideSheetProps, Tree, TreeBranch, TreeItem, TreeItemProps, TreeProps,
 };
 pub use controls::{
     ActionPurpose, BlockingConfirmation, BlockingConfirmationProps, Button,
@@ -40,8 +40,8 @@ pub use display::{
 pub use foundation::{
     Arrangement, ArrowDownIcon, ArrowUpIcon, BrowserFocus, CheckIcon, ChevronIcon,
     ChevronIconProps, CloseIcon, DeleteIcon, Flight, GripIcon, Motion, PauseIcon, Place, PlayIcon,
-    RefreshIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon,
-    StopIcon, UiStyles, UnassignIcon, ZoomInIcon, ZoomOutIcon,
+    RefreshIcon, Remount, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon,
+    StepForwardIcon, StopIcon, UiStyles, UnassignIcon, ZoomInIcon, ZoomOutIcon,
 };
 
 /// Everything a surface typically needs.

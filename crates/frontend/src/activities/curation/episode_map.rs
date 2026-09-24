@@ -252,26 +252,31 @@ impl MapPaint {
 
 /// The map, with the count it illustrates above it.
 ///
-/// A segment is a pointer shortcut to its row; keyboard users reach the same
-/// row in the index beside the map, so no segment is a tab stop.
+/// A segment is a pointer shortcut to its row; keyboard and screen-reader
+/// users reach the same row in the index beside the map, and the summary says
+/// what the map shows, so the lanes are neither tab stops nor read aloud —
+/// hundreds of "fold · 0:05.0 – 0:10.0" buttons were noise before the index.
 #[component]
 pub(super) fn EpisodeMap(
     lanes: EpisodeLanes,
     paint: MapPaint,
     /// "Found in 23 of 39 episodes (best match ≥ 50%)" — the map's meaning in
-    /// words, because colour is never the only carrier.
+    /// words, because colour is never the only carrier. Empty where the lists
+    /// beside the map already say it.
+    #[props(default)]
     summary: String,
     on_select: EventHandler<usize>,
 ) -> Element {
     rsx! {
         div { class: "curation-map",
-            p { class: "curation-map-summary", "{summary}" }
+            if !summary.is_empty() {
+                p { class: "curation-map-summary", "{summary}" }
+            }
             if !lanes.is_empty() {
                 div {
                     key: "{paint.generation}",
                     class: "curation-map-lanes",
-                    role: "group",
-                    "aria-label": "Every measured episode, each subtask placed where it happens",
+                    "aria-hidden": "true",
                     "data-reveal": paint.reveal_key(),
                     for (lane , episode) in lanes.0.iter().enumerate() {
                         div {

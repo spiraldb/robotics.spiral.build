@@ -21,6 +21,10 @@ use std::iter;
 /// The least of the height the timeline keeps: its transport, its ruler and
 /// a handful of rows.
 const LEAST_TIMELINE_SHARE: f64 = 0.3;
+/// The least it keeps when the surface brings rows of its own — a node's
+/// progress, its subtasks — because those rows are what the surface is
+/// about, and the pictures give way first.
+const LEAST_EVIDENCE_TIMELINE_SHARE: f64 = 0.46;
 /// The least height a Plots band is worth: its tab, its ruler, a stream's
 /// heading and one lane.
 const LEAST_PLOTS_BAND: f64 = 200.0;
@@ -67,6 +71,8 @@ impl Size {
 pub(super) struct EpisodeArrangement {
     /// Cameras, the leading one first, then the robot.
     views: Vec<PanelId>,
+    /// The least share of the room the timeline keeps.
+    least_timeline: f64,
 }
 
 impl EpisodeArrangement {
@@ -76,7 +82,17 @@ impl EpisodeArrangement {
     const CAMERA_PREFIX: &str = "camera:";
 
     pub(super) fn new(views: Vec<PanelId>) -> Self {
-        Self { views }
+        Self {
+            views,
+            least_timeline: LEAST_TIMELINE_SHARE,
+        }
+    }
+    /// The arrangement for a surface that brings timeline rows of its own.
+    pub(super) fn led_by_evidence(mut self, evidence: bool) -> Self {
+        if evidence {
+            self.least_timeline = LEAST_EVIDENCE_TIMELINE_SHARE;
+        }
+        self
     }
     /// The panel one recorded camera opens in.
     pub(super) fn camera(key: &str) -> PanelId {
@@ -94,7 +110,7 @@ impl EpisodeArrangement {
             // Nothing to watch: the plots take the space the pictures would.
             return Self::rows(0.5, plots, timeline);
         }
-        let least_timeline = room.height * LEAST_TIMELINE_SHARE;
+        let least_timeline = room.height * self.least_timeline;
         let tallest = Size::new(room.width, room.height - least_timeline);
         let plan = ViewPlan::for_room(self.views.len(), tallest);
         let rest = room.height - plan.height;
@@ -400,6 +416,24 @@ mod tests {
         assert_eq!(tile_of(&layout, four[2].as_str()), last);
         assert_eq!(tile_of(&layout, four[3].as_str()), last);
         assert_eq!(tile_of(&layout, EpisodeArrangement::PLOTS), last);
+    }
+
+    #[test]
+    fn a_surface_with_rows_of_its_own_gives_the_timeline_more_of_the_room() {
+        let cameras = views(2);
+        let share = |layout: PanelLayout| match layout.root {
+            LayoutNode::Split { ratio, .. } => ratio,
+            _ => 1.0,
+        };
+        let room = Size::new(600.0, 900.0);
+        let plain = EpisodeArrangement::new(cameras.clone()).layout(room);
+        let led = EpisodeArrangement::new(cameras)
+            .led_by_evidence(true)
+            .layout(room);
+        assert!(
+            share(led) < share(plain),
+            "the pictures give way to the evidence"
+        );
     }
 
     #[test]

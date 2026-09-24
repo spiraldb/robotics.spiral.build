@@ -8,9 +8,10 @@ pub(crate) trait ClockPresentation {
 impl ClockPresentation for f64 {
     fn clock_label(self) -> String {
         let seconds = if self.is_finite() { self.max(0.0) } else { 0.0 };
-        let minutes = (seconds / 60.0).floor() as u64;
-        let remainder = seconds - minutes as f64 * 60.0;
-        format!("{minutes}:{remainder:04.1}")
+        // Rounded to tenths before it is split, so 59.97 s carries into the
+        // minute as "1:00.0" instead of printing "0:60.0".
+        let tenths = (seconds * 10.0).round_ties_even() as u64;
+        format!("{}:{:02}.{}", tenths / 600, tenths % 600 / 10, tenths % 10)
     }
 }
 
@@ -255,6 +256,8 @@ mod tests {
         assert_eq!(f64::NAN.clock_label(), "0:00.0");
         assert_eq!((-2.0_f64).clock_label(), "0:00.0");
         assert_eq!(61.25_f64.clock_label(), "1:01.2");
+        assert_eq!(59.97_f64.clock_label(), "1:00.0");
+        assert_eq!(9.96_f64.clock_label(), "0:10.0");
         assert_eq!(61.0005_f64.precise_clock_label(), "1:01.001");
         assert_eq!(f64::NAN.precise_clock_label(), "0:00.000");
         assert_eq!(3_549.9_f64.long_duration_label(), "59 min 10 s");
