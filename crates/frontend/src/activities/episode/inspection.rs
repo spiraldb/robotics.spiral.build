@@ -13,6 +13,7 @@ use super::{
     choices::StreamChoices,
     identity::Episode,
     plots::PlotsPanel,
+    remembered_layout::RememberedLayout,
     robot::{RobotModel, RobotStage},
     streams::{RecordedStream, StreamCatalog},
     timeline::{EpisodeTimeline, EvidenceTrack},
@@ -179,7 +180,14 @@ fn InspectedEpisode(
                 }
             },
             match loaded {
-                Ok(Some(loaded)) => rsx! { InspectionDock { loaded, evidence: tracks, featured_camera } },
+                Ok(Some(loaded)) => rsx! {
+                    InspectionDock {
+                        loaded,
+                        evidence: tracks,
+                        featured_camera,
+                        remembered: RememberedLayout::of(episode.dataset()),
+                    }
+                },
                 Ok(None) => rsx! { p { class: "episode-panel-status", role: "status", "Reading the recorded streams…" } },
                 Err(error) => rsx! {
                     div { class: "episode-panel-status", role: "alert",
@@ -201,6 +209,7 @@ fn InspectionDock(
     loaded: LoadedEpisode,
     evidence: Vec<EvidenceTrack>,
     featured_camera: FeaturedCamera,
+    remembered: RememberedLayout,
 ) -> Element {
     let mut room = use_signal(|| None::<Size>);
     let choices = loaded.choices();
@@ -284,18 +293,32 @@ fn InspectionDock(
                 }
             },
             if let Some(room) = room() {
-                ArrangedPanels { panels, arranged: arrangement.layout(room), choices }
+                ArrangedPanels {
+                    panels,
+                    designed: arrangement.layout(room),
+                    remembered,
+                    choices,
+                }
             }
         }
     }
 }
 
-/// The panels in the arrangement chosen for their room, where the operator
-/// may rearrange them until the room calls for another arrangement — a new
-/// arrangement is a new scope, which the dock takes up whole.
+/// The panels in the arrangement the operator last made of this dataset's
+/// episodes, or else the one designed for their room. Until the operator
+/// rearranges them, the designed arrangement follows the room — a new one is
+/// a new scope, which the dock takes up whole. Once they do, what they made
+/// is kept for the dataset and outlasts every change of room.
 #[component]
-fn ArrangedPanels(panels: Vec<Panel>, arranged: PanelLayout, choices: StreamChoices) -> Element {
-    let mut layout = use_signal(|| arranged.clone());
+fn ArrangedPanels(
+    panels: Vec<Panel>,
+    designed: PanelLayout,
+    remembered: RememberedLayout,
+    choices: StreamChoices,
+) -> Element {
+    let kept = use_hook(|| remembered.read());
+    let mut arranged_by_hand = use_signal(|| kept.is_some());
+    let mut layout = use_signal(|| kept.unwrap_or_else(|| designed.clone()));
     // Asking for a plot brings Plots forward when it waits behind a camera.
     let asks = choices.plot_asks();
     use_effect(use_reactive(&asks, move |asks| {
@@ -306,12 +329,26 @@ fn ArrangedPanels(panels: Vec<Panel>, arranged: PanelLayout, choices: StreamChoi
         }
     }));
     let mut closing = choices;
+    // Taking up the dataset's scope loads the layout as it stands, so the
+    // change that made it the operator's is not undone.
+    let (scope, initial) = if arranged_by_hand() {
+        (Some(remembered.scope()), layout.peek().clone())
+    } else {
+        (designed.encode(), designed.clone())
+    };
     rsx! {
         PanelWorkspace {
             panels,
             layout,
-            layout_scope: arranged.encode(),
-            initial_layout: arranged,
+            layout_scope: scope,
+            initial_layout: initial,
+            reset_layout: designed,
+            on_layout_change: move |changed: PanelLayout| {
+                remembered.keep(&changed);
+                if !arranged_by_hand() {
+                    arranged_by_hand.set(true);
+                }
+            },
             on_panel_close: move |panel: PanelId| {
                 if let Some(camera) = EpisodeArrangement::camera_key(&panel) {
                     closing.set_camera(camera, false);

@@ -813,7 +813,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                         key: "{rows[row].episode()}-{rows[row].start_time()}",
                                         row: rows[row].clone(),
                                         standing: SubtaskStanding::scored(probability, true, chosen == Some(row)),
-                                        episode: Episode::name_of(rows[row].episode()),
+                                        episode: Episode::listed_name_of(rows[row].episode()),
                                         frames,
                                         on_select: move |()| open_row(row),
                                         on_find_similar: {

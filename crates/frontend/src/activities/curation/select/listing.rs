@@ -131,7 +131,7 @@ pub(super) fn EpisodeListing(
                             rsx! {
                                 SliceEntry {
                                     key: "{id}",
-                                    title: Episode::name_of(&id),
+                                    title: Episode::listed_name_of(&id),
                                     facts,
                                     score,
                                     score_meaning: fact.map(|fact| fact.label().to_owned()),
@@ -232,7 +232,7 @@ pub(super) fn SubtaskListing(
                             rsx! {
                                 SubtaskEntry {
                                     key: "{row.episode()}-{row.start_time()}",
-                                    episode: Episode::name_of(row.episode()),
+                                    episode: Episode::listed_name_of(row.episode()),
                                     row,
                                     standing,
                                     frames,
@@ -370,7 +370,7 @@ pub(super) fn MomentListing(
                             rsx! {
                                 SliceEntry {
                                     key: "{stretch.episode}-{start}",
-                                    title: Episode::name_of(&stretch.episode),
+                                    title: Episode::listed_name_of(&stretch.episode),
                                     facts: vec![format!("{} – {}", start.clock_label(), end.clock_label())],
                                     place: Some((start / duration, end / duration)),
                                     score: stretch.mean.map(|mean| format!("{mean:.2}")),

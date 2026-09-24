@@ -244,7 +244,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                                 rsx! {
                                     SliceEntry {
                                         key: "{id}",
-                                        title: Episode::name_of(&id),
+                                        title: Episode::listed_name_of(&id),
                                         facts,
                                         score: MomentShare::of(&moments).label(),
                                         score_meaning: MomentShare::MEANING.to_owned(),

@@ -300,14 +300,14 @@ fn DatasetEpisodes(
                                         Some(head) => rsx! {
                                             span { class: "data-episode-head", "{head}" }
                                             span { class: "data-episode-sub",
-                                                span { class: "data-episode-id", title: "{episode.id()}", "…{episode.id().short()}" }
+                                                span { class: "data-episode-id", title: "{episode.id()}", "{Episode::listed_name_of(episode.id())}" }
                                                 if facts.message_start_time().is_some_and(|start| start.has_wall_clock()) {
                                                     span { "{facts.recorded_date_label()}" }
                                                 }
                                             }
                                         },
                                         None => rsx! {
-                                            span { class: "data-episode-head data-episode-id", title: "{episode.id()}", "…{episode.id().short()}" }
+                                            span { class: "data-episode-head data-episode-id", title: "{episode.id()}", "{Episode::listed_name_of(episode.id())}" }
                                         },
                                     }
                                     span { class: "data-episode-length", "aria-hidden": "true",

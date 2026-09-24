@@ -4,7 +4,8 @@
 //! [`Episode`] is which recording it is and what every heading calls it;
 //! [`EpisodeInspection`] shows it whole — cameras, robot, plots and the
 //! timeline of its streams, docked on a clock of its own and arranged for the
-//! room a surface gives it.
+//! room a surface gives it, or as the operator last arranged the dataset's
+//! episodes.
 
 mod arrangement;
 mod camera;
@@ -14,6 +15,7 @@ mod identity;
 mod inspection;
 mod messages;
 mod plots;
+mod remembered_layout;
 mod robot;
 mod streams;
 mod timeline;

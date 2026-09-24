@@ -166,11 +166,11 @@ fn DatasetEpisodeList(
                             // tells more than its id; the id follows it.
                             let (title, named) = match label.head() {
                                 Some(head) => (head.to_owned(), true),
-                                None => (episode.name(), false),
+                                None => (Episode::listed_name_of(episode.id()), false),
                             };
                             let mut facts = Vec::new();
                             if named {
-                                facts.push(episode.name());
+                                facts.push(Episode::listed_name_of(episode.id()));
                             }
                             facts.extend(EpisodeFact::DurationSeconds.reading(episode));
                             facts.extend(EpisodeFact::Messages.reading(episode).map(|count| format!("{count} messages")));

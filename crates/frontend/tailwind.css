@@ -4044,6 +4044,12 @@ button.studio-status-fact:hover {
   pointer-events: none;
 }
 
+/* A camera sharing its tile with other panels is named by its tab. Only a
+   lone panel's host carries the workbench's grabber hint. */
+.wb-panel-host:not(:has(> .wb-grabber-hint)) .camera-caption {
+  display: none;
+}
+
 /* Catalog rows on the shared tree. A dataset row names the dataset; an
    episode row leads with what tells it apart and draws its length against
    the longest one listed, so a runaway take or an aborted one shows without

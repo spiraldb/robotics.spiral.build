@@ -592,7 +592,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                                     key: "{rows[row].episode()}-{rows[row].start_time()}",
                                     row: rows[row].clone(),
                                     standing,
-                                    episode: Episode::name_of(rows[row].episode()),
+                                    episode: Episode::listed_name_of(rows[row].episode()),
                                     frames,
                                     on_select: {
                                         let choose = choose.clone();

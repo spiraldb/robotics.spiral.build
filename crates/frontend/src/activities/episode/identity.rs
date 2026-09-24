@@ -206,6 +206,11 @@ impl Episode {
     pub(in crate::activities) fn name_of(id: &EpisodeId) -> String {
         format!("Episode …{}", id.short())
     }
+    /// What a list of episodes calls one: its id alone, since the list
+    /// already says what its rows are.
+    pub(in crate::activities) fn listed_name_of(id: &EpisodeId) -> String {
+        format!("…{}", id.short())
+    }
     /// The recorded span, from the first message to the last.
     pub(in crate::activities) fn range(&self) -> Option<EpisodeTimeRange> {
         let start = self.facts.message_start_time()?;

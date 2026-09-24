@@ -1,17 +1,19 @@
-//! Where an inspected episode's panels sit in the room a surface gives it.
+//! Where an inspected episode's panels sit in the room a surface gives it,
+//! until the operator arranges them otherwise.
 //!
-//! Three bands share one clock, top to bottom: the recording's views — its
-//! cameras, the leading one first, then its robot — then Plots, then the
-//! timeline. Plots and the timeline span the same width and give their names
-//! the same column, so one vertical line through both is one instant.
+//! Two bands share one clock: the recording above, the timeline below. The
+//! recording's band holds its cameras, the leading one first, and beside
+//! them one tile of its robot's Scene with Plots as the tab behind it. The
+//! timeline — where streams are chosen — is never hidden behind another
+//! panel.
 //!
-//! The views take only the height their pictures can use, in whichever grid
-//! leaves the smallest picture largest and spends the least on camera mat. A
-//! view is never shrunk below a readable size to make it fit: when the room
-//! runs out, the views that do not fit join the last tile as tabs, still full
-//! size one click away. A room too short for a Plots band sends Plots to that
-//! tile too, so the timeline — where streams are chosen — is never hidden
-//! behind a plot of them.
+//! The cameras take the width their pictures can use at the band's height,
+//! in whichever grid leaves the smallest picture largest and spends the least
+//! on camera mat; the Scene takes the rest. A camera is never shrunk below a
+//! readable size to make it fit: when the room runs out, the cameras that do
+//! not fit join the last camera's tile as tabs, still full size one click
+//! away. A room too narrow for a column beside the cameras sends the Scene
+//! and Plots to that tile too.
 //!
 //! Every share is rounded to a step, so a room that grows or shrinks a little
 //! keeps the same arrangement — and with it whatever the operator dragged.
@@ -25,18 +27,16 @@ const LEAST_TIMELINE_SHARE: f64 = 0.3;
 /// progress, its subtasks — because those rows are what the surface is
 /// about, and the pictures give way first.
 const LEAST_EVIDENCE_TIMELINE_SHARE: f64 = 0.46;
-/// The least height a Plots band is worth: its tab, its ruler, a stream's
-/// heading and one lane.
-const LEAST_PLOTS_BAND: f64 = 200.0;
+/// The least width the column beside the cameras is worth: the Scene's view
+/// controls and a plot's time axis still read.
+const LEAST_SIDE_WIDTH: f64 = 280.0;
 /// Shares move in steps of this size, so a small change of room is no change.
 const SHARE_STEP: f64 = 0.02;
-/// The smallest tile a view is drawn in, tab bar included: a picture about
-/// 225 px wide, where an arm, a gripper and what it holds still read.
-const SMALLEST_VIEW: Size = Size {
-    width: 256.0,
-    height: 200.0,
-};
-/// The workbench's tab bar above every tile's content.
+/// The narrowest picture a camera is drawn at: about 160 × 120, where an arm,
+/// a gripper and what it holds still read.
+const SMALLEST_PICTURE_WIDTH: f64 = 160.0;
+/// The workbench's tab bar, above the content of a tile that holds more than
+/// one panel. A lone panel's tile has none: its content fills the tile.
 const TAB_BAR: f64 = 32.0;
 /// The shape recorded cameras usually have. It decides which grid gives the
 /// pictures the most area, not how any picture is drawn.
@@ -53,23 +53,40 @@ impl Size {
     pub(super) fn new(width: f64, height: f64) -> Self {
         Self { width, height }
     }
-    fn fits(self, smallest: Self) -> bool {
-        self.width >= smallest.width && self.height >= smallest.height
-    }
-    /// The area of a picture of the usual camera shape drawn as large as
-    /// this tile allows below its tab bar.
-    fn picture_area(self) -> f64 {
-        let width = self
+}
+
+/// One camera's tile in a grid, and whether it also holds the cameras that
+/// did not fit — the one tile whose tab bar takes from its picture.
+#[derive(Clone, Copy, Debug)]
+struct ViewTile {
+    size: Size,
+    tabbed: bool,
+}
+
+impl ViewTile {
+    /// The width of a picture of the usual camera shape drawn as large as
+    /// this tile allows.
+    fn picture_width(self) -> f64 {
+        let header = if self.tabbed { TAB_BAR } else { 0.0 };
+        self.size
             .width
-            .min((self.height - TAB_BAR).max(0.0) * PICTURE_ASPECT);
-        width * width / PICTURE_ASPECT
+            .min((self.size.height - header).max(0.0) * PICTURE_ASPECT)
+    }
+    fn readable(self) -> bool {
+        self.picture_width() >= SMALLEST_PICTURE_WIDTH
+    }
+    fn picture_area(self) -> f64 {
+        self.picture_width().powi(2) / PICTURE_ASPECT
+    }
+    fn area(self) -> f64 {
+        self.size.width * self.size.height
     }
 }
 
 /// The panels of one inspected episode and where they go.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct EpisodeArrangement {
-    /// Cameras, the leading one first, then the robot.
+    /// Cameras, the leading one first, then the robot's Scene if it has one.
     views: Vec<PanelId>,
     /// The least share of the room the timeline keeps.
     least_timeline: f64,
@@ -103,40 +120,45 @@ impl EpisodeArrangement {
         panel.as_str().strip_prefix(Self::CAMERA_PREFIX)
     }
 
+    /// The designed arrangement for `room`.
     pub(super) fn layout(&self, room: Size) -> PanelLayout {
         let timeline = LayoutNode::tile("episode-timeline", [Self::TIMELINE]);
-        let plots = LayoutNode::tile("episode-plots", [Self::PLOTS]);
-        if self.views.is_empty() {
-            // Nothing to watch: the plots take the space the pictures would.
-            return Self::rows(0.5, plots, timeline);
+        let band_share = Self::step(1.0 - self.least_timeline);
+        let (cameras, side): (Vec<PanelId>, Vec<PanelId>) = self
+            .views
+            .iter()
+            .cloned()
+            .partition(|view| Self::camera_key(view).is_some());
+        let side = side
+            .into_iter()
+            .chain(iter::once(PanelId::new(Self::PLOTS)))
+            .collect::<Vec<_>>();
+        if cameras.is_empty() {
+            // Nothing to watch: the Scene and Plots take the pictures' band.
+            return Self::rows(band_share, LayoutNode::tile("episode-side", side), timeline);
         }
-        let least_timeline = room.height * self.least_timeline;
-        let tallest = Size::new(room.width, room.height - least_timeline);
-        let plan = ViewPlan::for_room(self.views.len(), tallest);
-        let rest = room.height - plan.height;
-        let views_share = plan.height / room.height;
-        if rest - least_timeline < LEAST_PLOTS_BAND {
-            return Self::rows(
-                views_share,
-                plan.node(&self.views, Some(Self::PLOTS)),
-                timeline,
-            );
+        let band = Size::new(room.width, room.height * band_share);
+        let widest = room.width - LEAST_SIDE_WIDTH;
+        if widest < SMALLEST_PICTURE_WIDTH {
+            let plan = ViewPlan::for_room(cameras.len(), band, TieBreak::LeastMat);
+            return Self::rows(band_share, plan.node(&cameras, &side), timeline);
         }
-        // Plots and the timeline split what the pictures leave evenly, and
-        // the timeline never keeps less than its least.
-        let plots_height = (rest / 2.0)
-            .min(rest - least_timeline)
-            .max(LEAST_PLOTS_BAND);
+        let plan = ViewPlan::for_room(
+            cameras.len(),
+            Size::new(widest, band.height),
+            TieBreak::LeastWidth,
+        );
+        let width = plan.width_to_fill(band.height).min(widest);
         Self::rows(
-            views_share,
-            plan.node(&self.views, None),
+            band_share,
             LayoutNode::split(
-                "episode-plots-timeline",
-                SplitAxis::Vertical,
-                Self::step(plots_height / rest),
-                plots,
-                timeline,
+                "episode-views",
+                SplitAxis::Horizontal,
+                Self::step(width / room.width),
+                plan.node(&cameras, &[]),
+                LayoutNode::tile("episode-side", side),
             ),
+            timeline,
         )
     }
     fn rows(upper_share: f64, upper: LayoutNode, lower: LayoutNode) -> PanelLayout {
@@ -186,19 +208,30 @@ impl ViewGrid {
             }
         }
     }
+    /// The width at which every shown picture fills its tile's height: the
+    /// longest row's worth, since a short row's pictures are the larger.
+    fn width_to_fill(self, shown: usize, height: f64) -> f64 {
+        let picture_width = |rows: usize| height / rows as f64 * PICTURE_ASPECT;
+        match self {
+            Self::Rows { columns } => columns as f64 * picture_width(shown.div_ceil(columns)),
+            // The leading column is one of `columns + 1` equal shares, and
+            // its full-height picture is the widest in the grid.
+            Self::Leading { columns } => (columns + 1) as f64 * picture_width(1),
+        }
+    }
     /// The height at which every shown picture fills its tile's width.
     fn height_to_fill(self, shown: usize, width: f64) -> f64 {
         let rows = |count: usize, columns: usize, width: f64| {
             Self::row_lengths(count, columns)
                 .iter()
-                .map(|&length| width / length as f64 / PICTURE_ASPECT + TAB_BAR)
+                .map(|&length| width / length as f64 / PICTURE_ASPECT)
                 .sum::<f64>()
         };
         match self {
             Self::Rows { columns } => rows(shown, columns, width),
             Self::Leading { columns } => {
                 let lead = width / (columns + 1) as f64;
-                (lead / PICTURE_ASPECT + TAB_BAR).max(rows(shown - 1, columns, width - lead))
+                (lead / PICTURE_ASPECT).max(rows(shown - 1, columns, width - lead))
             }
         }
     }
@@ -233,22 +266,30 @@ struct ViewPlan {
 
 impl ViewPlan {
     /// The plan that shows the most views at a readable size, and among
-    /// those the one whose smallest picture is largest. A room too small for
-    /// any grid still gets one tile, with every view a tab in it.
-    fn for_room(count: usize, tallest: Size) -> Self {
+    /// those the one whose smallest picture is largest, `tie` deciding
+    /// between equals. A room too small for any grid still gets one tile,
+    /// with every view a tab in it.
+    fn for_room(count: usize, tallest: Size, tie: TieBreak) -> Self {
         (2..=count)
             .rev()
             .find_map(|shown| {
                 ViewGrid::candidates(shown)
                     .map(|grid| Self::fitted(grid, shown, tallest))
                     .filter_map(|plan| {
-                        let tiles = plan.tiles(tallest.width);
+                        let tiles = plan.tiles(tallest.width, count);
+                        let width = plan.width_to_fill(tallest.height).min(tallest.width);
                         tiles
                             .iter()
-                            .all(|tile| tile.fits(SMALLEST_VIEW))
-                            .then(|| (plan, PictureScore::of(&tiles)))
+                            .all(|tile| tile.readable())
+                            .then(|| (plan, PictureScore::of(&tiles, width)))
                     })
-                    .reduce(|best, next| if next.1.beats(best.1) { next } else { best })
+                    .reduce(|best, next| {
+                        if next.1.beats(best.1, tie) {
+                            next
+                        } else {
+                            best
+                        }
+                    })
                     .map(|(plan, _)| plan)
             })
             .unwrap_or_else(|| Self::fitted(ViewGrid::Rows { columns: 1 }, 1, tallest))
@@ -263,12 +304,26 @@ impl ViewPlan {
                 .min(tallest.height),
         }
     }
-    fn tiles(self, width: f64) -> Vec<Size> {
-        self.grid.tiles(self.shown, Size::new(width, self.height))
+    /// The shown tiles of a grid `width` wide; with fewer shown than
+    /// `count`, the last one holds the rest as tabs.
+    fn tiles(self, width: f64, count: usize) -> Vec<ViewTile> {
+        let sizes = self.grid.tiles(self.shown, Size::new(width, self.height));
+        let last = sizes.len() - 1;
+        sizes
+            .into_iter()
+            .enumerate()
+            .map(|(place, size)| ViewTile {
+                size,
+                tabbed: place == last && self.shown < count,
+            })
+            .collect()
+    }
+    fn width_to_fill(self, height: f64) -> f64 {
+        self.grid.width_to_fill(self.shown, height)
     }
     /// The views as tiles; the last tile also holds the views that did not
     /// fit, and `extra`, as tabs.
-    fn node(self, views: &[PanelId], extra: Option<&str>) -> LayoutNode {
+    fn node(self, views: &[PanelId], extra: &[PanelId]) -> LayoutNode {
         let (shown, hidden) = views.split_at(self.shown);
         let mut tiles = shown
             .iter()
@@ -277,7 +332,7 @@ impl ViewPlan {
                 let mut tabs = vec![view.clone()];
                 if place + 1 == self.shown {
                     tabs.extend(hidden.iter().cloned());
-                    tabs.extend(extra.map(PanelId::new));
+                    tabs.extend(extra.iter().cloned());
                 }
                 LayoutNode::tile(format!("episode-view-{place}"), tabs)
             })
@@ -329,35 +384,48 @@ impl ViewPlan {
     }
 }
 
+/// What decides between grids whose smallest pictures are as large.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TieBreak {
+    /// The grid has its room to itself: the one with less camera mat.
+    LeastMat,
+    /// A column beside the grid gets whatever width it leaves: the
+    /// narrowest.
+    LeastWidth,
+}
+
 /// How well a grid serves its pictures: the smallest one first, then how
-/// much of the grid is picture rather than camera mat.
+/// much of the grid is picture rather than camera mat, and the width it
+/// needs for its pictures to fill their height.
 #[derive(Clone, Copy, Debug)]
 struct PictureScore {
     smallest: f64,
     filled: f64,
+    width: f64,
 }
 
 impl PictureScore {
-    fn of(tiles: &[Size]) -> Self {
+    fn of(tiles: &[ViewTile], width: f64) -> Self {
         let areas = tiles.iter().map(|tile| tile.picture_area());
-        let room = tiles
-            .iter()
-            .map(|tile| tile.width * tile.height)
-            .sum::<f64>();
+        let room = tiles.iter().map(|tile| tile.area()).sum::<f64>();
         Self {
             smallest: areas.clone().fold(f64::INFINITY, f64::min),
             filled: areas.sum::<f64>() / room,
+            width,
         }
     }
     /// Smallest pictures within a percent of each other are a tie, which
-    /// the grid with less mat breaks.
-    fn beats(self, other: Self) -> bool {
+    /// `tie` breaks.
+    fn beats(self, other: Self, tie: TieBreak) -> bool {
         if self.smallest > other.smallest * 1.01 {
             true
         } else if other.smallest > self.smallest * 1.01 {
             false
         } else {
-            self.filled > other.filled
+            match tie {
+                TieBreak::LeastMat => self.filled > other.filled,
+                TieBreak::LeastWidth => self.width < other.width,
+            }
         }
     }
 }
@@ -387,35 +455,99 @@ mod tests {
             .collect()
     }
 
+    fn with_scene(mut views: Vec<PanelId>) -> Vec<PanelId> {
+        views.push(PanelId::new(EpisodeArrangement::STAGE));
+        views
+    }
+
     #[test]
-    fn a_wide_room_sets_the_cameras_across_over_plots_over_the_timeline() {
+    fn the_cameras_sit_beside_the_scene_with_plots_behind_it() {
         let cameras = views(3);
-        let layout = EpisodeArrangement::new(cameras.clone()).layout(Size::new(1140.0, 800.0));
-        let LayoutNode::Split { ratio, second, .. } = &layout.root else {
-            panic!("views over the rest")
+        let layout =
+            EpisodeArrangement::new(with_scene(cameras.clone())).layout(Size::new(1140.0, 800.0));
+        let LayoutNode::Split { ratio, first, .. } = &layout.root else {
+            panic!("the recording over the timeline")
         };
-        // Three pictures 380 px wide need 317 px of the 800.
-        assert_eq!(*ratio, 0.4);
+        assert!((ratio - 0.7).abs() < 1e-9, "the recording takes {ratio}");
         assert!(matches!(
-            second.as_ref(),
-            LayoutNode::Split { id, ratio, .. } if id.as_str() == "episode-plots-timeline" && *ratio == 0.5
+            first.as_ref(),
+            LayoutNode::Split { id, .. } if id.as_str() == "episode-views"
         ));
         assert_eq!(tiles_of(&layout, &cameras).len(), 3);
-        assert_ne!(
-            tile_of(&layout, EpisodeArrangement::PLOTS),
-            tile_of(&layout, EpisodeArrangement::TIMELINE)
+        let side = layout
+            .tile(&tile_of(&layout, EpisodeArrangement::STAGE))
+            .unwrap();
+        assert_eq!(
+            side.panels,
+            [
+                PanelId::new(EpisodeArrangement::STAGE),
+                PanelId::new(EpisodeArrangement::PLOTS)
+            ]
+        );
+        assert_eq!(
+            side.active.as_ref().map(PanelId::as_str),
+            Some(EpisodeArrangement::STAGE),
+            "the Scene is in front"
         );
     }
 
     #[test]
-    fn views_that_would_be_too_small_become_tabs_of_the_last_tile_with_plots() {
+    fn three_cameras_set_the_leading_one_over_the_other_two() {
+        // A curation node's evidence at a 1440 × 900 window: the leading
+        // camera across the top, the other two under it, and the Scene the
+        // width the grid leaves.
+        let cameras = views(3);
+        let layout = EpisodeArrangement::new(with_scene(cameras.clone()))
+            .led_by_evidence(true)
+            .layout(Size::new(708.0, 752.0));
+        let LayoutNode::Split { first, .. } = &layout.root else {
+            panic!("the recording over the timeline")
+        };
+        let LayoutNode::Split { ratio, .. } = first.as_ref() else {
+            panic!("the cameras beside the Scene")
+        };
+        assert!(
+            (0.5..0.62).contains(ratio),
+            "the cameras take {ratio} of the width"
+        );
+        assert_eq!(tiles_of(&layout, &cameras).len(), 3);
+        let plan = ViewPlan::for_room(3, Size::new(584.0, 405.0), TieBreak::LeastWidth);
+        assert_eq!(plan.grid, ViewGrid::Rows { columns: 2 });
+        assert_eq!(plan.shown, 3);
+    }
+
+    #[test]
+    fn three_cameras_keep_one_over_two_in_every_room_a_surface_gives() {
+        // Break down's evidence and Select's, shorter, at a 1440 × 900
+        // window, and Data's. A lone camera's tile has no tab bar, so two
+        // rows of pictures fit where two rows of tabbed tiles did not.
+        for (room, led) in [
+            (Size::new(708.0, 752.0), true),
+            (Size::new(737.0, 513.0), true),
+            (Size::new(1137.0, 782.0), false),
+        ] {
+            let cameras = views(3);
+            let layout = EpisodeArrangement::new(with_scene(cameras.clone()))
+                .led_by_evidence(led)
+                .layout(room);
+            assert_eq!(tiles_of(&layout, &cameras).len(), 3, "{room:?}");
+            let splits = layout.split_ids();
+            assert!(
+                splits.iter().any(|id| id.as_str() == "episode-row-1-2"),
+                "the other two share the second row in {room:?}: {splits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_room_sends_the_scene_and_plots_to_the_last_camera() {
         let four = views(4);
-        let layout = EpisodeArrangement::new(four.clone()).layout(Size::new(600.0, 550.0));
-        let last = tile_of(&layout, four[1].as_str());
-        assert_ne!(tile_of(&layout, four[0].as_str()), last);
-        assert_eq!(tile_of(&layout, four[2].as_str()), last);
-        assert_eq!(tile_of(&layout, four[3].as_str()), last);
+        let layout =
+            EpisodeArrangement::new(with_scene(four.clone())).layout(Size::new(420.0, 800.0));
+        let last = tile_of(&layout, four[3].as_str());
+        assert_eq!(tile_of(&layout, EpisodeArrangement::STAGE), last);
         assert_eq!(tile_of(&layout, EpisodeArrangement::PLOTS), last);
+        assert_ne!(tile_of(&layout, four[0].as_str()), last);
     }
 
     #[test]
@@ -445,7 +577,8 @@ mod tests {
             (0, 800.0, 600.0),
             (4, 996.0, 544.0),
         ] {
-            let layout = EpisodeArrangement::new(views(count)).layout(Size::new(width, height));
+            let layout =
+                EpisodeArrangement::new(with_scene(views(count))).layout(Size::new(width, height));
             let tile = layout
                 .tile(&tile_of(&layout, EpisodeArrangement::TIMELINE))
                 .unwrap();
@@ -471,27 +604,28 @@ mod tests {
     #[test]
     fn four_views_in_a_generous_room_make_two_rows_of_two() {
         let four = views(4);
-        let plan = ViewPlan::for_room(4, Size::new(700.0, 630.0));
+        let plan = ViewPlan::for_room(4, Size::new(700.0, 630.0), TieBreak::LeastMat);
         assert_eq!(plan.grid, ViewGrid::Rows { columns: 2 });
         assert_eq!(plan.shown, 4);
-        let layout = EpisodeArrangement::new(four.clone()).layout(Size::new(700.0, 900.0));
+        let layout = EpisodeArrangement::new(four.clone()).layout(Size::new(1020.0, 900.0));
         assert_eq!(tiles_of(&layout, &four).len(), 4);
     }
 
     #[test]
-    fn the_leading_camera_takes_a_column_only_where_its_picture_is_the_larger() {
-        // Data at a 1024 px window: a column beats a full-width first row
-        // whose picture would sit between two slabs of mat.
-        let narrow = ViewPlan::for_room(3, Size::new(760.0, 472.0));
-        assert_eq!(narrow.grid, ViewGrid::Leading { columns: 1 });
-        // Wide enough for three across, nobody leads.
-        let wide = ViewPlan::for_room(3, Size::new(1089.0, 561.0));
-        assert_eq!(wide.grid, ViewGrid::Rows { columns: 3 });
+    fn equal_pictures_go_to_less_mat_alone_and_to_less_width_beside_the_scene() {
+        // Both grids draw the other two cameras as large; a lead column
+        // spends less on mat, the one-over-two grid leaves the Scene more.
+        let room = Size::new(760.0, 472.0);
+        let alone = ViewPlan::for_room(3, room, TieBreak::LeastMat);
+        assert_eq!(alone.grid, ViewGrid::Leading { columns: 1 });
+        let beside = ViewPlan::for_room(3, room, TieBreak::LeastWidth);
+        assert_eq!(beside.grid, ViewGrid::Rows { columns: 2 });
     }
 
     #[test]
     fn an_episode_without_views_gives_the_plots_their_space() {
         let layout = EpisodeArrangement::new(vec![]).layout(Size::new(800.0, 600.0));
+        assert_eq!(layout.tile_count(), 2);
         assert_ne!(
             tile_of(&layout, EpisodeArrangement::PLOTS),
             tile_of(&layout, EpisodeArrangement::TIMELINE)

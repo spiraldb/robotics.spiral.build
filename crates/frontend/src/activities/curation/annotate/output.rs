@@ -394,7 +394,7 @@ fn IndexSearch(
                 },
                 option { value: "", "Go to episode" }
                 for episode in jumps {
-                    option { key: "{episode}", value: "{episode}", "{Episode::name_of(&episode)}" }
+                    option { key: "{episode}", value: "{episode}", "{Episode::listed_name_of(&episode)}" }
                 }
             }
         }

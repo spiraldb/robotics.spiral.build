@@ -7354,6 +7354,9 @@ button.studio-status-fact:hover {
   white-space: nowrap;
   pointer-events: none;
 }
+.wb-panel-host:not(:has(> .wb-grabber-hint)) .camera-caption {
+  display: none;
+}
 .data-rail-search {
   position: relative;
   min-width: 0;
