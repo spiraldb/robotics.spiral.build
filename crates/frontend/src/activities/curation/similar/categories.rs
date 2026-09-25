@@ -1,13 +1,10 @@
-//! The category pass: what the LLM is asked, what it must answer with, and
-//! how jev's Choice answers become saved assignments.
+//! The category proposal: what the LLM is asked, what it must answer with,
+//! and how the operator's edits change the list.
 //!
 //! The categories come from the descriptions themselves, so the list is
-//! complete by construction: every row joins its highest-probability
-//! category, with no "other" option and no confidence gate. The probability
-//! and confidence are kept to order members and to let ambiguous rows show.
-use super::questions::QuestionBatch;
-use crate::activities::curation::document::{SubtaskAssignment, SubtaskCategory, SubtaskRow};
-use crate::client::decisions::DecisionResponse;
+//! complete by construction: `spql.ai.classify` puts every subtask in its
+//! most probable category, with no "other" option and no confidence gate.
+use crate::activities::curation::document::SubtaskCategory;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -108,8 +105,9 @@ impl ProposedCategories {
             .into_iter()
             .map(|category| SubtaskCategory::new(category.name, category.definition))
             .collect::<Result<Vec<_>, _>>()?;
-        // jev reads the names as the options of one Choice, so two names
-        // that differ only in case would be two indistinguishable options.
+        // The classifier reads the names as the options of one choice, so two
+        // names that differ only in case would be two indistinguishable
+        // options.
         let mut names = categories
             .iter()
             .map(|category| category.name().to_lowercase())
@@ -170,9 +168,9 @@ impl CategoryEdit {
     }
 }
 
-/// Changes to a grouping's category list. Each returns a new list to assign
-/// rows against: an edited category only reruns the jev pass, never the LLM
-/// one, because the categories themselves are the operator's now.
+/// Changes to a grouping's category list. Each returns a new list to group
+/// rows by: an edited category only reruns the classification, never the
+/// proposal, because the categories themselves are the operator's now.
 pub(super) struct CategoryEdits<'a> {
     categories: &'a [SubtaskCategory],
 }
@@ -233,64 +231,9 @@ impl<'a> CategoryEdits<'a> {
     }
 }
 
-/// Turns jev's Choice answers into the assignments a grouping saves.
-pub(super) struct AssignmentReader<'a> {
-    rows: &'a [SubtaskRow],
-    categories: &'a [SubtaskCategory],
-}
-impl<'a> AssignmentReader<'a> {
-    pub(super) fn new(rows: &'a [SubtaskRow], categories: &'a [SubtaskCategory]) -> Self {
-        Self { rows, categories }
-    }
-    /// One batch's assignments, in row order. A row without a usable answer
-    /// is left unassigned rather than guessed at; the caller counts them.
-    pub(super) fn read(
-        &self,
-        batch: &QuestionBatch,
-        answers: &DecisionResponse,
-    ) -> Vec<SubtaskAssignment> {
-        batch
-            .rows()
-            .filter_map(|row| self.assignment(row, answers))
-            .collect()
-    }
-    fn assignment(&self, row: usize, answers: &DecisionResponse) -> Option<SubtaskAssignment> {
-        let subtask = self.rows.get(row)?;
-        let distribution = answers.choice_distribution(&QuestionBatch::row_key(row))?;
-        let category = self
-            .categories
-            .iter()
-            .find(|category| category.name() == distribution.choice())?;
-        let assignment = SubtaskAssignment::new(
-            subtask.episode().clone(),
-            subtask.start_time(),
-            category.name(),
-            distribution.probability(category.name()),
-            distribution.confidence().unwrap_or(0.0),
-        )
-        .ok()?;
-        // A runner-up jev named that is not one of these categories is a
-        // stray option, not a second choice worth keeping.
-        let runner_up = distribution.runner_up().and_then(|(name, probability)| {
-            let known = self
-                .categories
-                .iter()
-                .find(|category| category.name() == name)?;
-            Some((known.name(), probability))
-        });
-        match runner_up {
-            Some((name, probability)) => assignment.with_runner_up(name, probability).ok(),
-            None => Some(assignment),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activities::curation::document::RunnerUp;
-    use crate::activities::curation::similar::questions::AssignmentQuestions;
-    use spiral_robotics_common::datasets::EpisodeId;
 
     fn categories(names: &[&str]) -> Vec<SubtaskCategory> {
         names
@@ -420,45 +363,5 @@ mod tests {
                 .merged("fold", "gone")
                 .is_err()
         );
-    }
-
-    #[test]
-    fn every_answered_row_joins_its_argmax_category_without_a_confidence_gate() {
-        let categories = categories(&["fold", "grasp", "smooth"]);
-        let rows = vec![
-            SubtaskRow::new("annotate-1", EpisodeId::fixture(0xa), 0.0, 1.0, "fold it").unwrap(),
-            SubtaskRow::new("annotate-1", EpisodeId::fixture(0xa), 2.0, 3.0, "grab it").unwrap(),
-            SubtaskRow::new("annotate-1", EpisodeId::fixture(0xb), 0.5, 1.5, "wipe it").unwrap(),
-        ];
-        let descriptions = rows.iter().map(SubtaskRow::description).collect::<Vec<_>>();
-        let batch = &AssignmentQuestions::new(&categories)
-            .unwrap()
-            .batches(&descriptions)[0];
-        let answers = serde_json::from_str::<DecisionResponse>(
-            r#"{"answers":{
-                "r0":{"type":"choice","choice":"fold","confidence":0.2,
-                      "probabilities":{"fold":0.7,"grasp":0.2,"smooth":0.1}},
-                "r1":{"type":"choice","choice":"grasp",
-                      "probabilities":{"fold":0.1,"grasp":0.8,"smooth":0.1}},
-                "r2":{"type":"choice","choice":"polish","confidence":0.9,
-                      "probabilities":{"polish":1.0}}}}"#,
-        )
-        .unwrap();
-        let assignments = AssignmentReader::new(&rows, &categories).read(batch, &answers);
-
-        assert_eq!(assignments.len(), 2, "an unknown category is not an answer");
-        assert_eq!(assignments[0].episode(), &EpisodeId::fixture(0xa));
-        assert_eq!(assignments[0].start_time(), 0.0);
-        assert_eq!(assignments[0].category(), "fold");
-        assert_eq!(assignments[0].probability(), 0.7);
-        // Low confidence still assigns; the doc keeps confidence to show
-        // ambiguity, not to withhold a row.
-        assert_eq!(assignments[0].confidence(), 0.2);
-        assert_eq!(
-            assignments[0].runner_up().map(RunnerUp::category),
-            Some("grasp")
-        );
-        assert_eq!(assignments[1].category(), "grasp");
-        assert_eq!(assignments[1].confidence(), 0.0);
     }
 }

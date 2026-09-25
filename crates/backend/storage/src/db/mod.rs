@@ -24,7 +24,7 @@ pub(crate) use schema::{Table, column};
 pub(crate) use sql::ProjectQueries;
 pub use sql::SpiralSql;
 
-pub use adbc_database::AdbcDatabase;
+pub use adbc_database::{AdbcDatabase, ModelCredentials};
 
 #[cfg(test)]
 mod contract_tests;

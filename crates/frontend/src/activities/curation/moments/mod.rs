@@ -5,18 +5,18 @@
 //! This node measures and never decides. What counts as unproductive is the
 //! threshold of a Select placed after it, which reads the same moments and
 //! draws them with `MomentEvidence`, the one recording view both share. What
-//! the node reads is its path's statement run on one episode at a time, held
-//! for the session.
+//! the node reads is its own step run over each episode's intervals that
+//! reach it, held for the session.
 mod moment;
 mod scoring;
 
 pub(super) use moment::Moment;
-pub(super) use scoring::ProgressScorer;
+pub(super) use scoring::{MAX_MOMENTS, ProgressScorer};
 
 use super::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
-use super::path::{CurationPath, PathSource};
 use super::population::Population;
 use super::poster::{PosterCut, PosterFrames, PosterStill};
+use super::preview::{PreviewPlan, PreviewProgress};
 use super::review::{
     Counted, EvidenceHeading, FailedEpisodes, IndexBar, NodeBar, NodeNotes, NodeReach, RowStanding,
     SliceEntry, SliceFace, SliceShape, SubtaskReview, TabStop, TraceLine,
@@ -30,7 +30,6 @@ use crate::components::timeline::{
 };
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
-use scoring::MomentPass;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone};
 use std::collections::BTreeMap;
@@ -42,8 +41,7 @@ use std::collections::BTreeMap;
 struct DetectionInput {
     episodes: Vec<Episode>,
     moments: BTreeMap<EpisodeId, Vec<Moment>>,
-    read: Vec<EpisodeId>,
-    failed: Vec<(EpisodeId, String)>,
+    progress: PreviewProgress,
 }
 
 impl DetectionInput {
@@ -55,22 +53,6 @@ impl DetectionInput {
             .iter()
             .filter_map(|id| sample.episode(id).cloned())
             .collect::<Vec<_>>();
-        let (read, failed) = controller.with_reads(|reads| {
-            let read = episodes
-                .iter()
-                .map(Episode::id)
-                .filter(|id| reads.has_read(node, id))
-                .cloned()
-                .collect();
-            let failed = episodes
-                .iter()
-                .filter_map(|episode| {
-                    let reason = reads.failure(node, episode.id())?;
-                    Some((episode.id().clone(), reason.to_owned()))
-                })
-                .collect();
-            (read, failed)
-        });
         let mut moments = BTreeMap::<EpisodeId, Vec<Moment>>::new();
         if let Population::Moments(read) = output {
             for moment in read {
@@ -83,22 +65,28 @@ impl DetectionInput {
         Some(Self {
             episodes,
             moments,
-            read,
-            failed,
+            progress: controller.progress(node)?,
         })
     }
-    /// The episodes the preview has not read yet, failed ones included.
+    /// The episodes a Run scores: not read yet, or read from intervals that
+    /// have changed since.
     fn pending(&self) -> Vec<Episode> {
+        let pending = self.progress.pending();
         self.episodes
             .iter()
-            .filter(|episode| !self.read.contains(episode.id()))
+            .filter(|episode| pending.contains(episode.id()))
             .cloned()
             .collect()
     }
     fn failed(&self) -> Vec<Episode> {
         self.episodes
             .iter()
-            .filter(|episode| self.failed.iter().any(|(id, _)| id == episode.id()))
+            .filter(|episode| {
+                self.progress
+                    .failed()
+                    .iter()
+                    .any(|(id, _)| id == episode.id())
+            })
             .cloned()
             .collect()
     }
@@ -131,13 +119,17 @@ impl DetectionInput {
         let mut failed = Vec::new();
         let mut scored = Vec::new();
         for episode in &self.episodes {
-            let failure = self.failed.iter().find(|(id, _)| id == episode.id());
+            let failure = self
+                .progress
+                .failed()
+                .iter()
+                .find(|(id, _)| id == episode.id());
             if let Some((_, reason)) = failure {
                 failed.push(ListedEpisode::Failed {
                     episode: episode.clone(),
                     reason: reason.clone(),
                 });
-            } else if self.read.contains(episode.id()) {
+            } else if self.moments.contains_key(episode.id()) {
                 scored.push(ListedEpisode::Scored {
                     episode: episode.clone(),
                     pace: Pace::mean(self.moments_of(episode.id())),
@@ -190,27 +182,23 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
         });
         tabs.open_first(opening.map(|episode| (episode, None)));
     });
-    // The preview reads this node's path, the same statement a published
-    // view would run, with one episode bound at a time.
-    let statement = controller.with_payload(|payload| {
-        CurationPath::to(payload, &node).and_then(|path| path.statement(PathSource::Preview))
-    });
-    // The pass is the curation's, not this view's: choosing another node
-    // leaves it scoring. Stop asks it to score no further episode, and the
-    // recording being scored still lands.
+    // The preview runs this node's step, the one a published view chains,
+    // over the intervals that reach it, one episode bound at a time. The
+    // pass is the curation's, not this view's: choosing another node leaves
+    // it scoring. Stop scores no further episode; the ones in flight land.
     let run = controller.run_state(&node);
+    let problem = use_signal(|| Option::<String>::None);
     let start = {
         let node = node.clone();
-        let statement = statement.clone().ok();
         move |episodes: Vec<Episode>| {
-            let Some(statement) = statement.clone().filter(|_| !episodes.is_empty()) else {
-                return;
-            };
-            controller.start_run(&node, move |run| async move {
-                MomentPass::new(controller, run, statement)
-                    .run(episodes)
-                    .await;
-            });
+            let episodes = episodes
+                .iter()
+                .map(|episode| episode.id().clone())
+                .collect::<Vec<_>>();
+            if !episodes.is_empty() {
+                let mut problem = problem;
+                problem.set(controller.run_preview(&node, &episodes).err());
+            }
         }
     };
     let running = run != RunState::Idle;
@@ -226,7 +214,10 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     )
     .filter(|cameras| !cameras.iter().any(|topic| topic == camera))
     .map(|_| format!("Pace is read from {camera}, which this dataset does not record"));
-    let uncompiled = statement.as_ref().err().map(|error| error.message());
+    let uncompiled = controller
+        .with_payload(|payload| PreviewPlan::check(payload, &node))
+        .err()
+        .map(|error| error.message().to_owned());
     let listed = input
         .as_ref()
         .map(DetectionInput::listed)
@@ -262,7 +253,11 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     };
     let pending = input.pending();
     let failed = input.failed();
-    let unscored = pending.len() - failed.len().min(pending.len());
+    let unscored = pending.len();
+    let stale = input
+        .progress
+        .is_stale()
+        .then(|| "Out of date: what reaches this node changed since it ran".to_owned());
     let blocked = unsupported.is_some() || uncompiled.is_some();
     let shown = tabs.front().map(|tab| tab.episode().clone());
     let chosen = listed
@@ -279,7 +274,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                         code { "{camera}" }
                     }
                 },
-                note: NodeNotes::join([unsupported.clone(), uncompiled.clone(), FailedEpisodes::note(failed.len())]),
+                note: NodeNotes::join([unsupported.clone(), uncompiled.clone(), problem(), stale, FailedEpisodes::note(failed.len())]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
                     if running {
@@ -309,18 +304,14 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                         }
                         // Scoring runs on this machine and costs nothing; what
                         // it reads is held until the page reloads.
-                        if pending.len() > failed.len() {
+                        if !pending.is_empty() {
                             Button {
                                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
                                 disabled: blocked,
                                 title: "Score the {unscored} episodes not yet scored",
                                 onclick: {
                                     let start = start.clone();
-                                    let fresh = pending
-                                        .iter()
-                                        .filter(|episode| !failed.contains(episode))
-                                        .cloned()
-                                        .collect::<Vec<_>>();
+                                    let fresh = pending.clone();
                                     move |_| start(fresh.clone())
                                 },
                                 if unscored < input.episodes.len() { "Run {unscored} left" } else { "Run" }

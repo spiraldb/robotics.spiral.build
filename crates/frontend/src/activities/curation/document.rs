@@ -1,9 +1,8 @@
-//! The curation payload: the graph, per-node configuration, the outputs
-//! published as catalog views, and what the measurements Spiral cannot run yet
-//! produced, encoded as JSON text in `CurationDocument::payload`. What a
-//! compiled node reads is a preview held for the session only (see
-//! `preview`). Node positions are not stored; the canvas lays the graph out
-//! from its edges every time.
+//! The curation payload: the graph, per-node configuration, and the outputs
+//! published as catalog views, encoded as JSON text in
+//! `CurationDocument::payload`. It is the recipe only: what a node reads is a
+//! preview held for the session (see `preview`). Node positions are not
+//! stored; the canvas lays the graph out from its edges every time.
 //!
 //! The graph's grammar lives here too. Every node hands on a population of
 //! one kind — episodes, subtasks, or moments (see `population`) — and what
@@ -16,6 +15,7 @@ mod selection;
 #[cfg(test)]
 mod tests;
 
+use super::annotate::SubtaskRow;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,8 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use publication::PublishedOutput;
 pub(crate) use selection::{Comparison, EpisodeFact, Selection, SelectionBasis};
 
-/// Encoding 2 keeps a recipe only for the nodes that compile to Spiral SQL.
-/// Encoding 1 stored what they measured and is not converted.
+/// Encoding 2 keeps only the recipe, since every node compiles to Spiral SQL.
+/// Encoding 1 stored what the nodes measured and is not converted.
 pub(crate) const CURATION_ENCODING_VERSION: u32 = 2;
 /// The root node every curation starts with.
 pub(crate) const DATASET_NODE_ID: &str = "dataset";
@@ -43,12 +43,6 @@ pub(crate) struct CurationGraph {
     nodes: Vec<CurationNode>,
     #[serde(default)]
     edges: Vec<CurationEdge>,
-    #[serde(default)]
-    subtasks: Vec<SubtaskRow>,
-    #[serde(default)]
-    groupings: Vec<SubtaskGrouping>,
-    #[serde(default)]
-    rankings: Vec<SubtaskRanking>,
     #[serde(default)]
     published: Vec<PublishedOutput>,
 }
@@ -96,7 +90,7 @@ pub(crate) enum CurationNodeKind {
     Dataset,
     BreakDownSubtasks(SubtaskAnnotation),
     FindSimilarSubtasks(SubtaskSearch),
-    GroupSimilarSubtasks,
+    GroupSimilarSubtasks(SubtaskGrouping),
     IdentifyUnproductiveMoments(MomentDetection),
     Select(Selection),
 }
@@ -106,7 +100,7 @@ impl CurationNodeKind {
             Self::Dataset => "dataset",
             Self::BreakDownSubtasks(_) => "break_down_subtasks",
             Self::FindSimilarSubtasks(_) => "find_similar_subtasks",
-            Self::GroupSimilarSubtasks => "group_similar_subtasks",
+            Self::GroupSimilarSubtasks(_) => "group_similar_subtasks",
             Self::IdentifyUnproductiveMoments(_) => "identify_unproductive_moments",
             Self::Select(_) => "select",
         }
@@ -116,7 +110,7 @@ impl CurationNodeKind {
             Self::Dataset => "Dataset",
             Self::BreakDownSubtasks(_) => "Break down subtasks",
             Self::FindSimilarSubtasks(_) => "Find similar subtasks",
-            Self::GroupSimilarSubtasks => "Group similar subtasks",
+            Self::GroupSimilarSubtasks(_) => "Group similar subtasks",
             Self::IdentifyUnproductiveMoments(_) => "Identify unproductive moments",
             Self::Select(_) => "Select",
         }
@@ -127,7 +121,7 @@ impl CurationNodeKind {
         match self {
             Self::Dataset => Some(SelectionBasis::EpisodeFacts),
             Self::FindSimilarSubtasks(_) => Some(SelectionBasis::Similarity),
-            Self::GroupSimilarSubtasks => Some(SelectionBasis::Categories),
+            Self::GroupSimilarSubtasks(_) => Some(SelectionBasis::Categories),
             Self::IdentifyUnproductiveMoments(_) => Some(SelectionBasis::Progress),
             Self::BreakDownSubtasks(_) | Self::Select(_) => None,
         }
@@ -135,11 +129,11 @@ impl CurationNodeKind {
     fn validate(&self) -> Result<(), String> {
         match self {
             Self::BreakDownSubtasks(annotation) => annotation.validate(),
+            Self::GroupSimilarSubtasks(grouping) => grouping.validate(),
             Self::Select(selection) => selection.validate(),
-            Self::Dataset
-            | Self::FindSimilarSubtasks(_)
-            | Self::GroupSimilarSubtasks
-            | Self::IdentifyUnproductiveMoments(_) => Ok(()),
+            Self::Dataset | Self::FindSimilarSubtasks(_) | Self::IdentifyUnproductiveMoments(_) => {
+                Ok(())
+            }
         }
     }
 }
@@ -153,7 +147,7 @@ pub(crate) enum PopulationKind {
     Moments,
 }
 
-/// Configuration and progress of one Break down subtasks node.
+/// Configuration of one Break down subtasks node.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskAnnotation {
@@ -163,12 +157,10 @@ pub(crate) struct SubtaskAnnotation {
     /// Fully qualified provider model id.
     model: String,
     sample_interval_seconds: f64,
-    /// Episodes whose rows are persisted, including episodes with no subtasks.
-    #[serde(default)]
-    completed_episodes: Vec<EpisodeId>,
-    /// Episodes whose last annotation attempt failed; a rerun replaces the entry.
-    #[serde(default)]
-    failed_episodes: Vec<EpisodeFailure>,
+    /// The topic each episode records the operator's instruction on, read as
+    /// the episode's task; unset for a dataset that records none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_topic: Option<String>,
 }
 impl Default for SubtaskAnnotation {
     fn default() -> Self {
@@ -176,8 +168,7 @@ impl Default for SubtaskAnnotation {
             camera: None,
             model: DEFAULT_ANNOTATION_MODEL.to_owned(),
             sample_interval_seconds: DEFAULT_SAMPLE_INTERVAL_SECONDS,
-            completed_episodes: Vec::new(),
-            failed_episodes: Vec::new(),
+            task_topic: None,
         }
     }
 }
@@ -209,14 +200,11 @@ impl SubtaskAnnotation {
         self.sample_interval_seconds = seconds;
         Ok(())
     }
-    pub(crate) fn completed_episodes(&self) -> &[EpisodeId] {
-        &self.completed_episodes
+    pub(crate) fn task_topic(&self) -> Option<&str> {
+        self.task_topic.as_deref()
     }
-    pub(crate) fn failed_episodes(&self) -> &[EpisodeFailure] {
-        &self.failed_episodes
-    }
-    pub(crate) fn is_completed(&self, episode: &EpisodeId) -> bool {
-        self.completed_episodes.contains(episode)
+    pub(crate) fn set_task_topic(&mut self, topic: Option<String>) {
+        self.task_topic = topic.filter(|value| !value.trim().is_empty());
     }
     fn validate(&self) -> Result<(), String> {
         if self.model.trim().is_empty() {
@@ -229,61 +217,14 @@ impl SubtaskAnnotation {
     }
 }
 
-impl EpisodeLedger for SubtaskAnnotation {
-    fn completed_mut(&mut self) -> &mut Vec<EpisodeId> {
-        &mut self.completed_episodes
-    }
-    fn failed_mut(&mut self) -> &mut Vec<EpisodeFailure> {
-        &mut self.failed_episodes
-    }
-}
-
-/// A measurement that reads its input one episode at a time, and so keeps
-/// which episodes it has read and which it could not. A later success
-/// replaces an earlier failure.
-trait EpisodeLedger {
-    fn completed_mut(&mut self) -> &mut Vec<EpisodeId>;
-    fn failed_mut(&mut self) -> &mut Vec<EpisodeFailure>;
-    fn mark_completed(&mut self, episode: &EpisodeId) {
-        if !self.completed_mut().contains(episode) {
-            self.completed_mut().push(episode.clone());
-        }
-        self.failed_mut()
-            .retain(|failure| &failure.episode != episode);
-    }
-    fn mark_failed(&mut self, episode: &EpisodeId, reason: impl Into<String>) {
-        self.failed_mut()
-            .retain(|failure| &failure.episode != episode);
-        self.failed_mut().push(EpisodeFailure {
-            episode: episode.clone(),
-            reason: reason.into(),
-        });
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct EpisodeFailure {
-    episode: EpisodeId,
-    reason: String,
-}
-impl EpisodeFailure {
-    pub(crate) fn episode(&self) -> &EpisodeId {
-        &self.episode
-    }
-    pub(crate) fn reason(&self) -> &str {
-        &self.reason
-    }
-}
-
 /// One Identify unproductive moments node. Its scorer is pinned, so there is
 /// nothing to configure; what it reads is the preview's, never the document's.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MomentDetection {}
 
-/// The last query of a Find similar subtasks node. Its ranking is stored
-/// beside it as a `SubtaskRanking`, which names the query it answers.
+/// The query of one Find similar subtasks node, which its step asks about
+/// every subtask that reaches it.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskSearch {
@@ -312,13 +253,13 @@ impl SubtaskSearch {
     }
     /// Ask about one row, in its own words.
     fn ask_about(&mut self, row: &SubtaskRow) {
-        self.query = row.description.clone();
+        self.query = row.description().to_owned();
         self.source = Some(row.key());
     }
 }
 
 /// Which row something refers to: its episode and where it starts, which no
-/// two rows of one annotation share.
+/// two subtasks of one episode share.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskKey {
@@ -326,172 +267,18 @@ pub(crate) struct SubtaskKey {
     start_time: f64,
 }
 impl SubtaskKey {
-    fn is(&self, row: &SubtaskRow) -> bool {
+    pub(crate) fn new(episode: EpisodeId, start_time: f64) -> Self {
+        Self {
+            episode,
+            start_time,
+        }
+    }
+    pub(super) fn is(&self, row: &SubtaskRow) -> bool {
         row.is(&self.episode, self.start_time)
     }
 }
 
-/// What one Find similar node found: the query it answered and jev's
-/// probability for each row it scored. A row without a score was not answered.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SubtaskRanking {
-    node: String,
-    query: String,
-    scores: Vec<SubtaskScore>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SubtaskScore {
-    row: SubtaskKey,
-    probability: f64,
-}
-
-impl SubtaskRanking {
-    pub(crate) fn new(
-        node: impl Into<String>,
-        query: impl Into<String>,
-        scores: impl IntoIterator<Item = (SubtaskKey, f64)>,
-    ) -> Result<Self, String> {
-        let ranking = Self {
-            node: node.into(),
-            query: query.into(),
-            scores: scores
-                .into_iter()
-                .map(|(row, probability)| SubtaskScore { row, probability })
-                .collect(),
-        };
-        if ranking
-            .scores
-            .iter()
-            .any(|score| !(0.0..=1.0).contains(&score.probability))
-        {
-            return Err("A similarity must be between 0 and 1.".into());
-        }
-        Ok(ranking)
-    }
-    pub(crate) fn query(&self) -> &str {
-        &self.query
-    }
-    /// jev's probability for one row, when it answered for it.
-    pub(crate) fn probability(&self, row: &SubtaskRow) -> Option<f64> {
-        self.scores
-            .iter()
-            .find(|score| score.row.is(row))
-            .map(|score| score.probability)
-    }
-}
-
-/// One subtask interval of one episode, produced by one annotation node.
-/// `start_time` is inclusive and `end_time` exclusive, in seconds from the
-/// start of the episode.
-///
-/// The row carries the still an index shows it as. The annotation pass has
-/// already decoded that picture — it is one of the frames it drew onto the
-/// contact sheets the model read — so cutting it there costs nothing and saves
-/// every later reader a decode. It is optional because rows annotated before
-/// posters were stored have none; those are cut on demand instead.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SubtaskRow {
-    node: String,
-    episode: EpisodeId,
-    start_time: f64,
-    end_time: f64,
-    description: String,
-    /// A `data:image/jpeg;base64,…` still of this interval's middle, about
-    /// 5.5 kB: 311 of them are 1.7 MB, five per cent of what one curation
-    /// may carry (`MAX_CURATION_PAYLOAD_BYTES`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    poster: Option<String>,
-}
-impl SubtaskRow {
-    pub(crate) fn new(
-        node: impl Into<String>,
-        episode: EpisodeId,
-        start_time: f64,
-        end_time: f64,
-        description: impl Into<String>,
-    ) -> Result<Self, String> {
-        let row = Self {
-            node: node.into(),
-            episode,
-            start_time,
-            end_time,
-            description: description.into().trim().to_owned(),
-            poster: None,
-        };
-        row.validate()?;
-        Ok(row)
-    }
-    /// The still this row shows, as the annotation pass cut it. An empty
-    /// picture is no picture.
-    pub(crate) fn with_poster(mut self, poster: String) -> Self {
-        self.poster = Some(poster).filter(|poster| !poster.is_empty());
-        self
-    }
-    pub(crate) fn poster(&self) -> Option<&str> {
-        self.poster.as_deref()
-    }
-    /// Where in the interval its poster is cut from. The middle shows the
-    /// action under way rather than the reach into it or the release out of
-    /// it, which is what tells two similar subtasks apart.
-    pub(crate) fn midpoint(&self) -> f64 {
-        f64::midpoint(self.start_time, self.end_time)
-    }
-    #[cfg(test)]
-    pub(crate) fn node(&self) -> &str {
-        &self.node
-    }
-    pub(crate) fn episode(&self) -> &EpisodeId {
-        &self.episode
-    }
-    pub(crate) fn start_time(&self) -> f64 {
-        self.start_time
-    }
-    pub(crate) fn end_time(&self) -> f64 {
-        self.end_time
-    }
-    #[cfg(test)]
-    pub(crate) fn duration(&self) -> f64 {
-        self.end_time - self.start_time
-    }
-    pub(crate) fn description(&self) -> &str {
-        &self.description
-    }
-    /// Whether this is the row an assignment or focus refers to.
-    pub(crate) fn is(&self, episode: &EpisodeId, start_time: f64) -> bool {
-        &self.episode == episode && self.start_time == start_time
-    }
-    pub(crate) fn key(&self) -> SubtaskKey {
-        SubtaskKey {
-            episode: self.episode.clone(),
-            start_time: self.start_time,
-        }
-    }
-    fn validate(&self) -> Result<(), String> {
-        if self.node.is_empty() {
-            return Err("A subtask row needs its node.".into());
-        }
-        if !self.start_time.is_finite()
-            || !self.end_time.is_finite()
-            || self.start_time < 0.0
-            || self.end_time <= self.start_time
-        {
-            return Err(format!(
-                "Subtask interval [{}, {}) is not a valid time range.",
-                self.start_time, self.end_time
-            ));
-        }
-        if self.description.trim().is_empty() {
-            return Err("A subtask description is empty.".into());
-        }
-        Ok(())
-    }
-}
-
-/// One LLM-proposed category: a short name and the definition jev reads.
+/// One category: a short name and the definition the classifier reads.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskCategory {
@@ -520,161 +307,40 @@ impl SubtaskCategory {
     }
 }
 
-/// jev's Choice answer for one subtask row: the winning category, its
-/// probability, the distribution's confidence, and the category it would
-/// otherwise have joined.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SubtaskAssignment {
-    episode: EpisodeId,
-    start_time: f64,
-    category: String,
-    probability: f64,
-    confidence: f64,
-    /// Absent for groupings assigned before runner-ups were kept, and for a
-    /// grouping of one category.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    runner_up: Option<RunnerUp>,
-}
+/// How many categories one grouping may name: what `spql.ai.classify` takes.
+const MAX_CATEGORIES: usize = 255;
 
-/// The second most probable category of one row.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RunnerUp {
-    category: String,
-    probability: f64,
-}
-impl RunnerUp {
-    pub(crate) fn category(&self) -> &str {
-        &self.category
-    }
-}
-impl SubtaskAssignment {
-    pub(crate) fn new(
-        episode: EpisodeId,
-        start_time: f64,
-        category: impl Into<String>,
-        probability: f64,
-        confidence: f64,
-    ) -> Result<Self, String> {
-        let assignment = Self {
-            episode,
-            start_time,
-            category: category.into(),
-            probability,
-            confidence,
-            runner_up: None,
-        };
-        assignment.validate()?;
-        Ok(assignment)
-    }
-    /// The category this row came second in.
-    pub(crate) fn with_runner_up(
-        mut self,
-        category: impl Into<String>,
-        probability: f64,
-    ) -> Result<Self, String> {
-        self.runner_up = Some(RunnerUp {
-            category: category.into(),
-            probability,
-        });
-        self.validate()?;
-        Ok(self)
-    }
-    pub(crate) fn episode(&self) -> &EpisodeId {
-        &self.episode
-    }
-    pub(crate) fn start_time(&self) -> f64 {
-        self.start_time
-    }
-    pub(crate) fn category(&self) -> &str {
-        &self.category
-    }
-    pub(crate) fn probability(&self) -> f64 {
-        self.probability
-    }
-    pub(crate) fn confidence(&self) -> f64 {
-        self.confidence
-    }
-    pub(crate) fn runner_up(&self) -> Option<&RunnerUp> {
-        self.runner_up.as_ref()
-    }
-    fn validate(&self) -> Result<(), String> {
-        let unit = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
-        if !self.start_time.is_finite() || self.category.is_empty() {
-            return Err("A subtask assignment needs its row and category.".into());
-        }
-        if !unit(self.probability) || !unit(self.confidence) {
-            return Err("Assignment probability and confidence must be between 0 and 1.".into());
-        }
-        if let Some(runner_up) = &self.runner_up {
-            if runner_up.category.is_empty() || runner_up.category == self.category {
-                return Err("A runner-up must be a different category.".into());
-            }
-            if !unit(runner_up.probability) {
-                return Err("A runner-up probability must be between 0 and 1.".into());
-            }
-        }
-        Ok(())
-    }
-}
-
-/// The saved output of one Group similar subtasks node over its parent
-/// annotation's rows.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// The categories one Group similar subtasks node puts every subtask that
+/// reaches it in. A model proposes them in the browser and the operator may
+/// rename or merge them; either way they are the node's configuration, and
+/// its step names them in the statement.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskGrouping {
-    node: String,
-    /// The annotation node whose rows were grouped.
-    source: String,
+    #[serde(default)]
     categories: Vec<SubtaskCategory>,
-    assignments: Vec<SubtaskAssignment>,
 }
 impl SubtaskGrouping {
-    pub(crate) fn new(
-        node: impl Into<String>,
-        source: impl Into<String>,
-        categories: Vec<SubtaskCategory>,
-        assignments: Vec<SubtaskAssignment>,
-    ) -> Result<Self, String> {
-        let grouping = Self {
-            node: node.into(),
-            source: source.into(),
-            categories,
-            assignments,
-        };
-        grouping.validate()?;
-        Ok(grouping)
-    }
     pub(crate) fn categories(&self) -> &[SubtaskCategory] {
         &self.categories
     }
-    pub(crate) fn assignments(&self) -> &[SubtaskAssignment] {
-        &self.assignments
+    /// Replace the categories, refusing a list the classifier would.
+    pub(crate) fn set_categories(
+        &mut self,
+        categories: Vec<SubtaskCategory>,
+    ) -> Result<(), String> {
+        let candidate = Self { categories };
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
     }
-    /// The category one row joined, when this grouping placed it.
-    pub(crate) fn category_of(&self, row: &SubtaskRow) -> Option<&str> {
-        self.assignments
-            .iter()
-            .find(|assignment| row.is(&assignment.episode, assignment.start_time))
-            .map(|assignment| assignment.category.as_str())
-    }
-    /// A category's rows, most typical first.
-    pub(crate) fn members(&self, category: &str) -> Vec<&SubtaskAssignment> {
-        let mut members = self
-            .assignments
-            .iter()
-            .filter(|assignment| assignment.category == category)
-            .collect::<Vec<_>>();
-        members.sort_by(|left, right| right.probability.total_cmp(&left.probability));
-        members
-    }
+    /// No categories yet, or up to 255 distinct names, each with its
+    /// definition.
     fn validate(&self) -> Result<(), String> {
-        if self.node.is_empty() || self.source.is_empty() {
-            return Err("A grouping needs its node and source annotation.".into());
-        }
-        if self.categories.is_empty() {
-            return Err("A grouping needs at least one category.".into());
+        if self.categories.len() > MAX_CATEGORIES {
+            return Err(format!(
+                "A grouping names at most {MAX_CATEGORIES} categories."
+            ));
         }
         let mut names = BTreeSet::new();
         for category in &self.categories {
@@ -683,17 +349,6 @@ impl SubtaskGrouping {
             }
             if !names.insert(category.name.as_str()) {
                 return Err(format!("Category “{}” appears twice.", category.name));
-            }
-        }
-        for assignment in &self.assignments {
-            assignment.validate()?;
-            let runner_up = assignment.runner_up.as_ref().map(RunnerUp::category);
-            for category in std::iter::once(assignment.category.as_str()).chain(runner_up) {
-                if !names.contains(category) {
-                    return Err(format!(
-                        "Assignment refers to unknown category “{category}”."
-                    ));
-                }
             }
         }
         Ok(())
@@ -710,9 +365,6 @@ impl CurationGraph {
                 kind: CurationNodeKind::Dataset,
             }],
             edges: Vec::new(),
-            subtasks: Vec::new(),
-            groupings: Vec::new(),
-            rankings: Vec::new(),
             published: Vec::new(),
         }
     }
@@ -765,7 +417,7 @@ impl CurationGraph {
             CurationNodeKind::Dataset => Some(PopulationKind::Episodes),
             CurationNodeKind::BreakDownSubtasks(_)
             | CurationNodeKind::FindSimilarSubtasks(_)
-            | CurationNodeKind::GroupSimilarSubtasks => Some(PopulationKind::Subtasks),
+            | CurationNodeKind::GroupSimilarSubtasks(_) => Some(PopulationKind::Subtasks),
             CurationNodeKind::IdentifyUnproductiveMoments(_) => Some(PopulationKind::Moments),
             CurationNodeKind::Select(_) => self.population_kind(self.parent_of(node)?),
         }
@@ -802,7 +454,7 @@ impl CurationGraph {
                 CurationNodeKind::BreakDownSubtasks(_) | CurationNodeKind::Select(_),
             ) => vec![
                 CurationNodeKind::FindSimilarSubtasks(SubtaskSearch::default()),
-                CurationNodeKind::GroupSimilarSubtasks,
+                CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
             ],
             _ => Vec::new(),
         };
@@ -830,17 +482,18 @@ impl CurationGraph {
             match self.node(current)?.kind() {
                 CurationNodeKind::BreakDownSubtasks(_) => return Some(current),
                 CurationNodeKind::FindSimilarSubtasks(_)
-                | CurationNodeKind::GroupSimilarSubtasks
+                | CurationNodeKind::GroupSimilarSubtasks(_)
                 | CurationNodeKind::Select(_) => current = self.parent_of(current)?,
                 _ => return None,
             }
         }
         None
     }
-    /// The node a Select's rule is stated in terms of: the nearest one above
-    /// it that is not itself a Select.
-    pub(crate) fn selection_measure(&self, select: &str) -> Option<&CurationNode> {
-        let mut current = self.parent_of(select)?;
+    /// The nearest node above `node` that is not a Select: what a Select's
+    /// rule is stated in terms of, and what a measurement's preview reads
+    /// the output of, through any Selects between.
+    pub(crate) fn measure_above(&self, node: &str) -> Option<&CurationNode> {
+        let mut current = self.parent_of(node)?;
         for _ in 0..self.nodes.len() {
             let node = self.node(current)?;
             match node.kind() {
@@ -891,14 +544,11 @@ impl CurationGraph {
     /// node if the annotation has none, and return the node's id. The first
     /// search node is reused, so asking about row after row does not grow the
     /// graph by a node each time.
-    pub(crate) fn search_for(
+    pub(super) fn search_for(
         &mut self,
         annotation: &str,
         row: &SubtaskRow,
     ) -> Result<String, String> {
-        if row.node != annotation {
-            return Err("That subtask belongs to another annotation.".into());
-        }
         let existing = self
             .children_of(annotation)
             .into_iter()
@@ -917,7 +567,7 @@ impl CurationGraph {
         }
         Ok(node)
     }
-    /// Remove a node, its descendants, and everything they produced. A branch
+    /// Remove a node and its descendants. A branch
     /// holding a published output stays until the view is unpublished, so no
     /// view outlives the recipe it was compiled from.
     pub(crate) fn remove_node(&mut self, id: &str) -> Result<(), String> {
@@ -949,125 +599,11 @@ impl CurationGraph {
         self.nodes.retain(|node| !doomed.contains(&node.id));
         self.edges
             .retain(|edge| !doomed.contains(&edge.from) && !doomed.contains(&edge.to));
-        self.subtasks.retain(|row| !doomed.contains(&row.node));
-        self.groupings
-            .retain(|grouping| !doomed.contains(&grouping.node));
-        self.rankings
-            .retain(|ranking| !doomed.contains(&ranking.node));
-        Ok(())
-    }
-    /// An annotation node's rows, in episode order then time order as stored.
-    pub(crate) fn subtasks_for<'a>(
-        &'a self,
-        node: &'a str,
-    ) -> impl Iterator<Item = &'a SubtaskRow> + 'a {
-        self.subtasks.iter().filter(move |row| row.node == node)
-    }
-    /// Replace one episode's rows for an annotation node and record the
-    /// episode as completed. Rows may arrive in any order; they must not
-    /// overlap, and an empty list records an episode with no subtasks.
-    pub(crate) fn replace_episode_subtasks(
-        &mut self,
-        node: &str,
-        episode: &EpisodeId,
-        mut rows: Vec<SubtaskRow>,
-    ) -> Result<(), String> {
-        let annotation = self.annotation_mut(node)?;
-        if rows
-            .iter()
-            .any(|row| row.node != node || &row.episode != episode)
-        {
-            return Err("Subtask rows belong to another node or episode.".into());
-        }
-        for row in &rows {
-            row.validate()?;
-        }
-        rows.sort_by(|left, right| left.start_time.total_cmp(&right.start_time));
-        Self::check_sequence(&rows)?;
-        annotation.mark_completed(episode);
-        self.subtasks
-            .retain(|row| !(row.node == node && &row.episode == episode));
-        self.subtasks.extend(rows);
-        Ok(())
-    }
-    /// Record a failed attempt at one episode of a Break down subtasks node;
-    /// what it stored for the episode before stays.
-    pub(crate) fn record_episode_failure(
-        &mut self,
-        node: &str,
-        episode: &EpisodeId,
-        reason: impl Into<String>,
-    ) -> Result<(), String> {
-        self.annotation_mut(node)?.mark_failed(episode, reason);
-        Ok(())
-    }
-    /// What a Find similar node last found, whatever it was asked.
-    pub(crate) fn ranking_for(&self, node: &str) -> Option<&SubtaskRanking> {
-        self.rankings.iter().find(|ranking| ranking.node == node)
-    }
-    /// A search's stored ranking while it still answers the search's query. A
-    /// ranking of an earlier question says nothing about this one.
-    pub(crate) fn current_ranking(&self, node: &str) -> Option<&SubtaskRanking> {
-        let CurationNodeKind::FindSimilarSubtasks(search) = self.node(node)?.kind() else {
-            return None;
-        };
-        self.ranking_for(node)
-            .filter(|ranking| ranking.query().trim() == search.query().trim())
-    }
-    /// Store a Find similar node's ranking, replacing any earlier one.
-    pub(crate) fn set_ranking(&mut self, ranking: SubtaskRanking) -> Result<(), String> {
-        match self.node(&ranking.node).map(CurationNode::kind) {
-            Some(CurationNodeKind::FindSimilarSubtasks(_)) => {}
-            Some(_) => return Err("That node does not search subtasks.".into()),
-            None => return Err("Unknown node.".into()),
-        }
-        self.rankings
-            .retain(|existing| existing.node != ranking.node);
-        self.rankings.push(ranking);
-        Ok(())
-    }
-    fn annotation_mut(&mut self, node: &str) -> Result<&mut SubtaskAnnotation, String> {
-        match self.node_mut(node).map(|node| &mut node.kind) {
-            Some(CurationNodeKind::BreakDownSubtasks(annotation)) => Ok(annotation),
-            Some(_) => Err("That node does not annotate subtasks.".into()),
-            None => Err("Unknown node.".into()),
-        }
-    }
-    fn check_sequence(sorted: &[SubtaskRow]) -> Result<(), String> {
-        for pair in sorted.windows(2) {
-            if pair[1].start_time < pair[0].end_time {
-                return Err(format!(
-                    "Subtasks [{}, {}) and [{}, {}) overlap.",
-                    pair[0].start_time, pair[0].end_time, pair[1].start_time, pair[1].end_time
-                ));
-            }
-        }
-        Ok(())
-    }
-    pub(crate) fn grouping_for(&self, node: &str) -> Option<&SubtaskGrouping> {
-        self.groupings.iter().find(|grouping| grouping.node == node)
-    }
-    /// Store a grouping node's output, replacing any earlier output.
-    pub(crate) fn set_grouping(&mut self, grouping: SubtaskGrouping) -> Result<(), String> {
-        grouping.validate()?;
-        match self.node(&grouping.node).map(CurationNode::kind) {
-            Some(CurationNodeKind::GroupSimilarSubtasks) => {}
-            Some(_) => return Err("That node does not group subtasks.".into()),
-            None => return Err("Unknown node.".into()),
-        }
-        if self.subtask_source(&grouping.node) != Some(grouping.source.as_str()) {
-            return Err("A grouping's source must be the annotation its rows come from.".into());
-        }
-        self.groupings
-            .retain(|existing| existing.node != grouping.node);
-        self.groupings.push(grouping);
         Ok(())
     }
     pub(crate) fn validate(&self) -> Result<(), String> {
         self.validate_nodes()?;
         self.validate_edges()?;
-        self.validate_subtasks()?;
-        self.validate_stored_outputs()?;
         self.validate_publications()
     }
     fn validate_nodes(&self) -> Result<(), String> {
@@ -1151,78 +687,6 @@ impl CurationGraph {
                     "{} cannot follow {}.",
                     to.kind.label(),
                     from.kind.label()
-                ));
-            }
-        }
-        Ok(())
-    }
-    fn validate_subtasks(&self) -> Result<(), String> {
-        let mut by_episode: BTreeMap<(&str, &EpisodeId), Vec<&SubtaskRow>> = BTreeMap::new();
-        for row in &self.subtasks {
-            row.validate()?;
-            match self.node(&row.node).map(CurationNode::kind) {
-                Some(CurationNodeKind::BreakDownSubtasks(_)) => {}
-                _ => {
-                    return Err(format!(
-                        "Subtask rows refer to unknown node “{}”.",
-                        row.node
-                    ));
-                }
-            }
-            by_episode
-                .entry((row.node.as_str(), &row.episode))
-                .or_default()
-                .push(row);
-        }
-        for rows in by_episode.values() {
-            for pair in rows.windows(2) {
-                if pair[1].start_time < pair[0].end_time {
-                    return Err(format!(
-                        "Subtasks of episode {} are out of order or overlap.",
-                        pair[0].episode
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-    /// What the searches and groupings stored belongs to a node of their own
-    /// kind, once per node.
-    fn validate_stored_outputs(&self) -> Result<(), String> {
-        let mut grouped = BTreeSet::new();
-        for grouping in &self.groupings {
-            grouping.validate()?;
-            if !grouped.insert(grouping.node.as_str()) {
-                return Err(format!("Node “{}” has two groupings.", grouping.node));
-            }
-            match self.node(&grouping.node).map(CurationNode::kind) {
-                Some(CurationNodeKind::GroupSimilarSubtasks) => {}
-                _ => {
-                    return Err(format!(
-                        "Grouping refers to unknown node “{}”.",
-                        grouping.node
-                    ));
-                }
-            }
-            if self.subtask_source(&grouping.node) != Some(grouping.source.as_str()) {
-                return Err(format!(
-                    "Grouping “{}” does not read the annotation above it.",
-                    grouping.node
-                ));
-            }
-        }
-        let mut ranked = BTreeSet::new();
-        for ranking in &self.rankings {
-            if !ranked.insert(ranking.node.as_str()) {
-                return Err(format!("Node “{}” has two rankings.", ranking.node));
-            }
-            if !matches!(
-                self.node(&ranking.node).map(CurationNode::kind),
-                Some(CurationNodeKind::FindSimilarSubtasks(_))
-            ) {
-                return Err(format!(
-                    "Ranking refers to unknown node “{}”.",
-                    ranking.node
                 ));
             }
         }

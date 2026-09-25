@@ -1,6 +1,11 @@
 use spiral_robotics_common::providers::{LlmProvider, StudioProviders};
-use spiral_robotics_storage::SpiralConnectionSettings;
-use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
+use spiral_robotics_storage::{ModelCredentials, SpiralConnectionSettings};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 use url::Url;
 
 const LLM_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -20,11 +25,19 @@ impl ProviderCredentials {
     /// The LLM key comes from the environment or `.env.local`; the Hugging
     /// Face token from the saved connection.
     pub(super) fn load(saved: &SpiralConnectionSettings) -> Self {
-        let local_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.local");
         Self {
-            llm: Self::llm(|name| std::env::var(name).ok(), &local_path),
+            llm: Self::configured_llm(),
             hugging_face: saved.huggingface_token().map(str::to_owned),
         }
+    }
+
+    /// The LLM provider as the environment and `.env.local` configure it now.
+    fn configured_llm() -> Result<Option<LlmCredentials>, String> {
+        Self::llm(|name| std::env::var(name).ok(), &Self::local_path())
+    }
+
+    fn local_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.local")
     }
 
     /// What the browser may know about the providers.
@@ -148,6 +161,23 @@ struct LlmCredentials {
     base_url: String,
     api_key: String,
     default_model: String,
+}
+
+/// The LLM key as Spiral's model functions read it through the driver: the
+/// provider is OpenRouter, so its key is the OpenRouter key. It is read again
+/// for every new database connection, as the relay reads it for every
+/// request, so a changed key reaches the driver without a restart. A
+/// configuration that cannot be read gives the driver no key, and the model
+/// functions say so.
+pub(crate) struct DriverCredentials;
+
+impl ModelCredentials for DriverCredentials {
+    fn openrouter_api_key(&self) -> Option<String> {
+        ProviderCredentials::configured_llm()
+            .ok()
+            .flatten()
+            .map(|llm| llm.api_key)
+    }
 }
 
 #[cfg(test)]

@@ -9,13 +9,14 @@ use spiral_robotics_common::providers::{LlmProvider, ProviderMessage, ProviderTo
 use std::collections::BTreeSet;
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// How much a provider may think before answering. Providers reject
+/// disabling reasoning outright, so there is no "none".
+const REASONING_EFFORT: &str = "medium";
 
 pub(crate) struct ModelRequest {
     messages: Vec<ProviderMessage>,
     tools: Vec<Value>,
     model: Option<String>,
-    response_format: Option<Value>,
-    reasoning: ReasoningEffort,
 }
 impl ModelRequest {
     pub(crate) fn new(messages: Vec<ProviderMessage>, tools: Vec<Value>) -> Self {
@@ -23,51 +24,17 @@ impl ModelRequest {
             messages,
             tools,
             model: None,
-            response_format: None,
-            reasoning: ReasoningEffort::default(),
         }
     }
     pub(crate) fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
     }
-    pub(crate) fn with_reasoning(mut self, reasoning: ReasoningEffort) -> Self {
-        self.reasoning = reasoning;
-        self
-    }
-    /// Ask the provider to answer in a fixed JSON shape, as a chat-completions
-    /// `response_format` value. A provider that ignores it still answers as
-    /// text, so callers validate what comes back either way.
-    pub(crate) fn with_response_format(mut self, response_format: Value) -> Self {
-        self.response_format = Some(response_format);
-        self
-    }
 }
 
-/// How much a provider may think before answering. The chat agent plans SQL
-/// and keeps the default; a fixed-schema annotation over pictures does not
-/// need it, and Gemini bills thinking as output: on one ABC-130k episode,
-/// medium cost $0.059 and 33 s, low $0.0066 and 2.5 s, for comparable
-/// subtasks. Providers reject disabling reasoning outright, so there is no
-/// "none".
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum ReasoningEffort {
-    Low,
-    #[default]
-    Medium,
-}
-impl ReasoningEffort {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-        }
-    }
-}
-
-/// The provider the operator configured: chat completions here, jev
-/// Decisions in `client::decisions`. Its requests go through `/proxy`, so they
-/// name no project; a view that stops caring cancels them by unmounting.
+/// The chat-completions provider the operator configured. Its requests go
+/// through `/proxy`, so they name no project; a view that stops caring
+/// cancels them by unmounting.
 pub(crate) struct ModelClient;
 impl ModelClient {
     pub(crate) async fn complete(
@@ -84,15 +51,12 @@ impl ModelClient {
             .as_deref()
             .map(|model| Self::provider_model(llm, model))
             .unwrap_or_else(|| llm.default_model().to_owned());
-        let mut payload = json!({"model":model,"reasoning_effort":request.reasoning.as_str(),"service_tier":"priority","messages":request.messages,"stream":true});
+        let mut payload = json!({"model":model,"reasoning_effort":REASONING_EFFORT,"service_tier":"priority","messages":request.messages,"stream":true});
         // A request without tools omits the tool fields: providers that accept
         // images and a response schema reject `tool_choice` with no tools.
         if !request.tools.is_empty() {
             payload["tools"] = Value::Array(request.tools);
             payload["tool_choice"] = json!("auto");
-        }
-        if let Some(response_format) = request.response_format {
-            payload["response_format"] = response_format;
         }
         let body = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
         let (response, _cancel) = ProxyClient::request("POST", &endpoint)

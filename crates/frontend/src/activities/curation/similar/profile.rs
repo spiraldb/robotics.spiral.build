@@ -6,7 +6,7 @@
 //! saved subtask table and the episodes' recorded lengths — nothing here asks a
 //! model — and every dot the profile draws is a member the operator can play.
 use super::grouping::CategoryHues;
-use crate::activities::curation::document::SubtaskRow;
+use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::episode_map::EpisodeSpans;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;
@@ -491,14 +491,7 @@ mod tests {
     use super::*;
 
     fn row(episode: u32, start: f64, end: f64) -> SubtaskRow {
-        SubtaskRow::new(
-            "annotate-1",
-            EpisodeId::fixture(episode),
-            start,
-            end,
-            "step",
-        )
-        .unwrap()
+        SubtaskRow::new(EpisodeId::fixture(episode), (start, end), "step").unwrap()
     }
 
     #[test]

@@ -3,20 +3,14 @@
 //!
 //! A ranking of 270 sentences is a ranking you have to read. A ranking of 270
 //! pictures is one you can scan, which is the only reason to rank them at all.
-//! So every row carries a poster — and the cheapest poster is the one nobody
-//! has to fetch.
+//! So every row carries a poster.
 //!
-//! The annotation pass has already decoded every frame it drew onto the
-//! contact sheets the model read, so it cuts each row's poster out of the
-//! frames it is still holding and stores it on the row. An index of a measured
-//! curation therefore costs no queries at all.
-//!
-//! What is left here is the backfill: rows annotated before posters were
-//! stored. Those are cut on demand, one query per episode, into a cache the
+//! Posters are cut on demand, one query per episode, into a cache the
 //! curation owns rather than the view, so moving between the annotation,
 //! search and grouping nodes never decodes a frame twice. Viewing never
-//! changes the document; only the annotation pass persists a poster.
-use super::document::{CurationGraph, SubtaskRow};
+//! changes the document.
+use super::annotate::SubtaskRow;
+use super::document::CurationGraph;
 use super::frames::{FrameMoments, MAX_FRAMES_PER_QUERY, NativeFrame};
 use super::review::SubtaskContext;
 use super::state::CurationController;
@@ -29,20 +23,15 @@ use spiral_robotics_common::relations::EpisodeQueryRequest;
 use std::collections::BTreeMap;
 use wasm_bindgen::{JsCast as _, JsValue};
 
-/// How wide a poster is stored. A row draws it at 96 css pixels, so this is a
+/// How wide a poster is cut. A row draws it at 96 css pixels, so this is a
 /// retina still with nothing to spare. At this quality a 640-pixel frame
-/// shrinks from about 44 kB to about 5.5 kB, which is what makes keeping one
-/// on every row affordable.
+/// shrinks from about 44 kB to about 5.5 kB, which is what makes caching one
+/// for every row affordable.
 const POSTER_WIDTH: u32 = 192;
 const POSTER_QUALITY: f64 = 0.7;
 
-/// The picture a subtask row shows, encoded the one way posters are encoded.
-///
-/// Both paths that produce one come through here — the annotation pass, which
-/// already holds the frames it drew onto the contact sheets, and the backfill
-/// that cuts a poster for a row measured before posters were stored — so a
-/// row's still looks the same however it was cut, and keeps the recording's
-/// own shape rather than one we assumed.
+/// The picture a subtask row shows, encoded the one way posters are encoded,
+/// keeping the recording's own shape rather than one we assumed.
 pub(super) struct PosterImage(String);
 
 impl PosterImage {
@@ -53,7 +42,7 @@ impl PosterImage {
         if recorded_width == 0 || recorded_height == 0 {
             return Err("A decoded frame has no size to cut a poster from.".into());
         }
-        // Never upscale: a camera that records smaller than a poster is stored
+        // Never upscale: a camera that records smaller than a poster is cut
         // at the size it recorded.
         let width = POSTER_WIDTH.min(recorded_width);
         let height = (f64::from(recorded_height) * f64::from(width) / f64::from(recorded_width))
@@ -70,7 +59,7 @@ impl PosterImage {
 }
 
 /// The canvas one poster is redrawn onto. It is never added to the page: a
-/// poster is encoded and stored, not shown from here.
+/// poster is encoded and cached, not shown from here.
 struct PosterCanvas {
     surface: web_sys::HtmlCanvasElement,
     context: web_sys::CanvasRenderingContext2d,
@@ -118,8 +107,7 @@ impl PosterCanvas {
     }
 }
 
-/// One still an index row shows: an instant of one episode, and the picture
-/// the annotation pass already cut for it, when it cut one.
+/// One still an index row shows: an instant of one episode.
 ///
 /// Every index leads each row with one — a subtask's middle, a stretch's
 /// middle, an episode's middle — so a list of episodes is as scannable as a
@@ -129,16 +117,14 @@ pub(super) struct PosterStill {
     episode: EpisodeId,
     /// Seconds from the episode's start.
     at: f64,
-    stored: Option<String>,
 }
 
 impl PosterStill {
-    /// A subtask's still: its middle, as the annotation pass stored it.
+    /// A subtask's still: its middle.
     pub(super) fn of_subtask(row: &SubtaskRow) -> Self {
         Self {
             episode: row.episode().clone(),
             at: row.midpoint(),
-            stored: row.poster().map(str::to_owned),
         }
     }
     /// The middle of `span` of `episode` — a stretch of it, or all of it.
@@ -146,7 +132,6 @@ impl PosterStill {
         Self {
             episode: episode.clone(),
             at: f64::midpoint(start, end.max(start)),
-            stored: None,
         }
     }
     fn key(&self, camera: &str) -> StillKey {
@@ -178,7 +163,7 @@ impl PosterTargets {
         Self(
             stills
                 .iter()
-                .filter(|still| still.stored.is_none() && still.at.is_finite())
+                .filter(|still| still.at.is_finite())
                 .map(|still| (still.episode.clone(), still.at))
                 .collect(),
         )
@@ -205,7 +190,7 @@ enum CutStill {
 /// and the instants its rows sit at.
 ///
 /// The client is held rather than read inside the task, because a cut outlives
-/// the render that started it, exactly as an annotation pass does.
+/// the render that started it.
 #[derive(Clone)]
 pub(super) struct PosterCut {
     datasets: DatasetClient,
@@ -245,9 +230,7 @@ impl PosterCut {
         Self::of(context.dataset(), context.camera(), &stills)
     }
 
-    /// `instants` of one episode, cut in one query per batch. The picture
-    /// goes through the same encoder the annotation pass uses, so a
-    /// backfilled row is indistinguishable from a measured one.
+    /// `instants` of one episode, cut in one query per batch.
     async fn decode(
         &self,
         episode: &EpisodeId,
@@ -357,13 +340,8 @@ impl PosterFrames {
         Self { cache, cut }
     }
 
-    /// What one row's poster slot shows. A row that was annotated with its
-    /// poster answers from itself and never reads the cache, so filling the
-    /// cache re-renders only the rows that are waiting on it.
+    /// What one row's poster slot shows.
     pub(super) fn shown(&self, still: &PosterStill) -> ShownPoster {
-        if let Some(poster) = &still.stored {
-            return ShownPoster::Picture(poster.clone());
-        }
         let Some(camera) = self.cut.read().as_ref().map(|cut| cut.camera.clone()) else {
             return ShownPoster::Waiting;
         };
@@ -540,50 +518,21 @@ mod tests {
     use spiral_robotics_common::datasets::EpisodeId;
 
     fn row(episode: EpisodeId, start: f64, end: f64) -> SubtaskRow {
-        SubtaskRow::new("break_down_subtasks-1", episode, start, end, "fold").expect("a valid row")
-    }
-
-    #[test]
-    fn only_a_still_without_a_stored_picture_is_something_to_fetch() {
-        let waiting = PosterStill::of_subtask(&row(EpisodeId::fixture(1), 4.0, 9.0));
-        assert_eq!(waiting.at, 6.5);
-        let stored = PosterStill::of_subtask(
-            &row(EpisodeId::fixture(1), 4.0, 9.0)
-                .with_poster("data:image/jpeg;base64,AAAA".to_owned()),
-        );
-        assert_eq!(
-            PosterTargets::of(&[waiting.clone(), stored]).0,
-            [(EpisodeId::fixture(1), 6.5)]
-        );
-        // An episode's still is its middle.
-        assert_eq!(
-            PosterStill::within(&EpisodeId::fixture(2), (0.0, 30.0)).at,
-            15.0
-        );
+        SubtaskRow::new(episode, (start, end), "fold").expect("a valid row")
     }
 
     #[test]
     fn one_query_covers_the_instants_one_episode_owes() {
-        let (measured, older) = (EpisodeId::fixture(1), EpisodeId::fixture(2));
-        let posted = |episode: &EpisodeId, start: f64| {
-            PosterStill::of_subtask(
-                &row(episode.clone(), start, start + 2.0)
-                    .with_poster("data:image/jpeg;base64,AAAA".to_owned()),
-            )
-        };
+        let (first, second) = (EpisodeId::fixture(1), EpisodeId::fixture(2));
+        // A subtask's still is its middle, and an episode's is too.
         let targets = PosterTargets::of(&[
-            posted(&measured, 0.0),
-            posted(&measured, 4.0),
-            PosterStill::of_subtask(&row(older.clone(), 0.0, 3.0)),
-            PosterStill::within(&older, (3.0, 8.0)),
+            PosterStill::of_subtask(&row(first.clone(), 4.0, 9.0)),
+            PosterStill::of_subtask(&row(second.clone(), 0.0, 3.0)),
+            PosterStill::within(&second, (3.0, 8.0)),
         ]);
-        assert!(targets.of_episode(&measured).is_empty());
-        assert_eq!(targets.of_episode(&older), [1.5, 5.5]);
-        // A whole measurement carrying its posters has nothing to fetch.
-        assert_eq!(
-            PosterTargets::of(&[posted(&measured, 0.0)]),
-            PosterTargets::default()
-        );
+        assert_eq!(targets.of_episode(&first), [6.5]);
+        assert_eq!(targets.of_episode(&second), [1.5, 5.5]);
+        assert!(targets.of_episode(&EpisodeId::fixture(3)).is_empty());
     }
 
     #[test]

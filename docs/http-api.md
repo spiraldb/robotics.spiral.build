@@ -224,8 +224,8 @@ twice the payload limit so a document's JSON framing always fits.
 identifier at the catalog root, and the read-only `SELECT` or `WITH` the
 browser compiled from an output. The backend refuses an invalid name or
 statement with `invalid_input` and a name held by a table or Dataset with
-`conflict`, then drops any view of that name and creates it again in one
-transaction. `POST /curations/unpublish` takes `{name}` and drops the view.
+`conflict`, then creates the view with one `CREATE OR REPLACE VIEW`.
+`POST /curations/unpublish` takes `{name}` and drops the view.
 Both answer `null`. See [curation](curation.md).
 
 ## Files and media

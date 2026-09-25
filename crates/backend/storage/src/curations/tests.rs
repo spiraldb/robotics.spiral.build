@@ -140,17 +140,23 @@ fn a_view_name_held_by_a_root_table_or_dataset_is_refused_whatever_its_case() {
 }
 
 /// Spiral's in-memory engine gives every connection its own catalog, so this
-/// reads the view inside the transaction that defines it. That a committed
-/// view reaches other connections, and that a refused one rolls back to the
-/// view before, is Spiral's to keep and is checked live.
+/// reads the view on the connection that defines it. That a published view
+/// reaches other connections is Spiral's to keep and is checked live.
 #[tokio::test]
 async fn publishing_replaces_the_view_whole_and_a_broken_statement_is_refused() {
     use super::CuratedViews;
     use spiral_robotics_common::curation::ViewName;
     let store = crate::ProjectStore::in_memory();
     let mut connection = store.connect_exclusive().await.unwrap();
-    connection.begin_transaction().await.unwrap();
     let name = ViewName::try_from("curated_folds").unwrap();
+    let read = async |connection: &mut crate::ProjectConnection| {
+        let read = connection
+            .query_rows("SELECT episode_id FROM curated_folds", 10)
+            .await
+            .unwrap();
+        assert_eq!(read.rows().len(), 1);
+        read.rows()[0]["episode_id"].clone()
+    };
     for value in [1, 2] {
         CuratedViews::define(
             &mut connection,
@@ -160,16 +166,11 @@ async fn publishing_replaces_the_view_whole_and_a_broken_statement_is_refused() 
         .await
         .unwrap();
     }
-    let read = connection
-        .query_rows("SELECT episode_id FROM curated_folds", 10)
-        .await
-        .unwrap();
-    assert_eq!(read.rows().len(), 1);
-    assert_eq!(read.rows()[0]["episode_id"], 2);
+    assert_eq!(read(&mut connection).await, 2);
     assert!(
         CuratedViews::define(&mut connection, &name, "SELECT missing FROM nowhere")
             .await
             .is_err()
     );
-    connection.rollback().await.unwrap();
+    assert_eq!(read(&mut connection).await, 2);
 }

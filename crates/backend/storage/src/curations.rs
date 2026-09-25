@@ -153,27 +153,26 @@ impl<'a> CuratedViews<'a> {
             .map(|resource| resource.kind().to_owned())
     }
 
-    /// Define `name` as `statement`, replacing the view it named before, in
-    /// one transaction so a reader sees the old view or the new one.
+    /// Define `name` as `statement`, replacing the view it named before.
     pub async fn replace(&self, name: &ViewName, statement: &str) -> Result<(), String> {
-        let mut connection = self.project_store.connect_exclusive().await?;
-        connection.begin_transaction().await?;
-        let replaced = Self::define(&mut connection, name, statement).await;
-        connection
-            .finish_transaction(replaced, "curation view publication")
-            .await
+        Self::define(
+            &mut self.project_store.connect_exclusive().await?,
+            name,
+            statement,
+        )
+        .await
     }
 
+    /// One statement, so a reader sees the old view or the new one. Spiral
+    /// refuses a `DROP VIEW` and a `CREATE VIEW` of one name in one
+    /// transaction as a namespace conflict once the view exists.
     async fn define(
         connection: &mut ProjectConnection,
         name: &ViewName,
         statement: &str,
     ) -> Result<(), String> {
         connection
-            .execute_update_sql(&format!("DROP VIEW IF EXISTS {name}"))
-            .await?;
-        connection
-            .execute_update_sql(&format!("CREATE VIEW {name} AS {statement}"))
+            .execute_update_sql(&format!("CREATE OR REPLACE VIEW {name} AS {statement}"))
             .await
     }
 

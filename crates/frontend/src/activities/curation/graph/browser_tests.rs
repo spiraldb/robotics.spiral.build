@@ -141,7 +141,7 @@ async fn the_canvas_lists_saved_curations_and_grows_the_graph_from_a_nodes_menu(
     let cards = controller.with_payload(|payload| NodeCard::all(payload, None));
     let annotation = cards.iter().find(|card| card.id() == added).unwrap();
     // Counts wait for the sample, which a graph without a dataset never reads.
-    assert_eq!(annotation.summary(), "0 subtasks");
+    assert_eq!(annotation.summary(), "Subtasks of every episode");
     assert_eq!(
         annotation
             .menu()

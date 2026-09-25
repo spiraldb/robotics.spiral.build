@@ -11,7 +11,7 @@ use adbc_core::options::OptionConnection;
 use adbc_core::{Connection as _, Optionable as _, Statement as _};
 use arrow_schema::Schema;
 use futures::FutureExt as _;
-use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use super::database::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseFuture, DatabaseResult,
@@ -22,35 +22,82 @@ use crate::SpiralConnection;
 use driver::{DriverConfiguration, LoadedDatabase};
 use worker::ConnectionWorker;
 
+/// Where a database reads the OpenRouter key Spiral's model functions call
+/// with. The driver takes the key only when a database is created, so the
+/// database asks again for every new connection and reopens itself when the
+/// answer has changed.
+pub trait ModelCredentials: Send + Sync {
+    fn openrouter_api_key(&self) -> Option<String>;
+}
+
+/// The driver database a new connection opens on, and the key it was
+/// created with.
+struct OpenedDatabase {
+    openrouter_api_key: Option<String>,
+    database: Arc<LoadedDatabase>,
+}
+
 /// Lazily loads a standalone Spiral ADBC library. No driver work runs in `new`.
 pub struct AdbcDatabase {
     configuration: DriverConfiguration,
-    database: OnceCell<Arc<LoadedDatabase>>,
+    credentials: Option<Arc<dyn ModelCredentials>>,
+    opened: Mutex<Option<OpenedDatabase>>,
 }
 
 impl AdbcDatabase {
     pub fn new(connection: SpiralConnection) -> Self {
+        Self::of(DriverConfiguration::hosted(connection))
+    }
+
+    fn of(configuration: DriverConfiguration) -> Self {
         Self {
-            configuration: DriverConfiguration::hosted(connection),
-            database: OnceCell::new(),
+            configuration,
+            credentials: None,
+            opened: Mutex::new(None),
         }
+    }
+
+    /// The same database, handing Spiral's model functions the key
+    /// `credentials` holds.
+    pub fn with_model_credentials(mut self, credentials: Arc<dyn ModelCredentials>) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    /// The driver database for a new connection: the open one while the key
+    /// is the one it was created with, else a new one. Connections already
+    /// open keep the database they opened on until they close.
+    async fn current(&self) -> DatabaseResult<Arc<LoadedDatabase>> {
+        let key = self
+            .credentials
+            .as_ref()
+            .and_then(|credentials| credentials.openrouter_api_key());
+        let mut opened = self.opened.lock().await;
+        if let Some(open) = opened
+            .as_ref()
+            .filter(|open| open.openrouter_api_key == key)
+        {
+            return Ok(open.database.clone());
+        }
+        let configuration = self
+            .configuration
+            .clone()
+            .with_openrouter_api_key(key.clone());
+        let database = tokio::task::spawn_blocking(move || configuration.load())
+            .await
+            .map_err(DatabaseError::from_worker)??;
+        *opened = Some(OpenedDatabase {
+            openrouter_api_key: key,
+            database: database.clone(),
+        });
+        Ok(database)
     }
 }
 
 impl Database for AdbcDatabase {
     fn connect(&self) -> DatabaseFuture<'_, Box<dyn DatabaseConnection>> {
         async move {
-            let database = self
-                .database
-                .get_or_try_init(|| async {
-                    let configuration = self.configuration.clone();
-                    tokio::task::spawn_blocking(move || configuration.load())
-                        .await
-                        .map_err(DatabaseError::from_worker)?
-                })
-                .await?
-                .clone();
-            let worker = ConnectionWorker::connect(database).await?;
+            let worker = ConnectionWorker::connect(self.current().await?).await?;
             Ok(Box::new(AdbcConnection::new(worker)) as Box<dyn DatabaseConnection>)
         }
         .boxed()
@@ -223,9 +270,6 @@ mod tests;
 #[cfg(any(test, feature = "test-support"))]
 impl AdbcDatabase {
     pub(crate) fn memory() -> Self {
-        Self {
-            configuration: DriverConfiguration::memory(),
-            database: OnceCell::new(),
-        }
+        Self::of(DriverConfiguration::memory())
     }
 }

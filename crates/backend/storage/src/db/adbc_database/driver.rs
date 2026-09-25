@@ -13,6 +13,9 @@ use crate::{SpiralAccess, SpiralConnection};
 
 /// The driver option carrying the signed-in user's token; the driver never refreshes it.
 const ACCESS_TOKEN_OPTION: &str = "spiral.access_token";
+/// The driver option carrying the OpenRouter key Spiral's model functions
+/// call with. The driver takes it only when a database is created.
+const OPENROUTER_API_KEY_OPTION: &str = "spiral.openrouter_api_key";
 
 #[derive(Clone)]
 pub(super) struct DriverConfiguration {
@@ -53,6 +56,17 @@ impl DriverConfiguration {
             options,
             access: Some(connection.access().clone()),
         }
+    }
+
+    /// The same database with the OpenRouter key its model functions use.
+    pub(super) fn with_openrouter_api_key(mut self, key: Option<String>) -> Self {
+        if let Some(key) = key {
+            self.options.push((
+                OptionDatabase::Other(OPENROUTER_API_KEY_OPTION.into()),
+                key.into(),
+            ));
+        }
+        self
     }
 
     /// Open the database as the user signed in now, and give it every later
@@ -236,6 +250,22 @@ mod tests {
         assert_eq!(error.status, adbc_core::error::Status::InvalidState);
         assert!(error.message.contains("write-only"));
         assert!(!error.message.contains("hf_test_only"));
+    }
+
+    #[tokio::test]
+    async fn the_openrouter_key_reaches_the_native_driver_as_a_write_only_option() {
+        let connection = SpiralConnection::new(settings(), SpiralAccess::fixed("token".into()));
+        let database = DriverConfiguration::hosted(connection)
+            .with_openrouter_api_key(Some("sk-or-test-only".into()))
+            .load()
+            .unwrap();
+        let error = database
+            .database()
+            .get_option_string(OptionDatabase::Other(OPENROUTER_API_KEY_OPTION.into()))
+            .unwrap_err();
+        assert_eq!(error.status, adbc_core::error::Status::InvalidState);
+        assert!(error.message.contains("write-only"));
+        assert!(!error.message.contains("sk-or-test-only"));
     }
 
     /// Spiral's API as the driver reaches it, recording each request's bearer token.

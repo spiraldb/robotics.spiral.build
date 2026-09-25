@@ -5,7 +5,8 @@
 //! same number the map and the strip use, so choosing an item anywhere opens
 //! its episode in a tab beside the list.
 use super::SelectView;
-use crate::activities::curation::document::{CurationNodeKind, EpisodeFact, Selection, SubtaskRow};
+use crate::activities::curation::annotate::SubtaskRow;
+use crate::activities::curation::document::{CurationNodeKind, EpisodeFact, Selection};
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::moments::{Moment, MomentEvidence, Pace, ProgressScorer};
 use crate::activities::curation::population::Population;
@@ -110,16 +111,11 @@ impl ListedSide {
     /// This side's items in the order the listing shows them: subtasks after
     /// a search closest first, as the search lists them; the rest in input
     /// order.
-    fn listed(&self, controller: CurationController, chosen: Option<usize>) -> ListedItems {
+    fn listed(&self, chosen: Option<usize>) -> ListedItems {
         match &self.view.input {
-            Population::Subtasks { rows, .. } => {
-                let ranking = controller.with_payload(|payload| {
-                    payload.current_ranking(self.view.measure.id()).cloned()
-                });
+            Population::Subtasks(rows) => {
                 ListedItems::best_first(&self.kept, self.listed_kept, chosen, |item| {
-                    ranking
-                        .as_ref()
-                        .and_then(|ranking| ranking.probability(&rows[item]))
+                    rows[item].similarity()
                 })
             }
             _ => ListedItems::of(&self.kept, self.listed_kept, chosen),
@@ -127,8 +123,8 @@ impl ListedSide {
     }
     /// How many rows this side lists: its items, or for moments the
     /// stretches they run into — a moment is a frame, not a row.
-    pub(super) fn rows(&self, controller: CurationController) -> usize {
-        let listed = self.listed(controller, None);
+    pub(super) fn rows(&self) -> usize {
+        let listed = self.listed(None);
         match &self.view.input {
             Population::Moments(rows) => Stretch::of(rows, &listed.items).len(),
             _ => listed.items.len(),
@@ -136,11 +132,8 @@ impl ListedSide {
     }
     /// Where this side's first row plays: an episode whole, or a subtask's or
     /// a stretch's span.
-    pub(super) fn opening(
-        &self,
-        controller: CurationController,
-    ) -> Option<(EpisodeId, Option<(f64, f64)>)> {
-        let listed = self.listed(controller, None);
+    pub(super) fn opening(&self) -> Option<(EpisodeId, Option<(f64, f64)>)> {
+        let listed = self.listed(None);
         match &self.view.input {
             Population::Moments(rows) => Stretch::of(rows, &listed.items)
                 .first()
@@ -159,8 +152,8 @@ pub(super) fn EpisodeListing(
 ) -> Element {
     let view = side.view.clone();
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
-    let listed = side.listed(controller, chosen);
-    let first = side.opening(controller);
+    let listed = side.listed(chosen);
+    let first = side.opening();
     use_effect(use_reactive((&first,), move |(first,)| {
         tabs.open_first(first)
     }));
@@ -260,11 +253,9 @@ pub(super) fn SubtaskListing(
 ) -> Element {
     let view = side.view.clone();
     let rows = view.input.subtasks().to_vec();
-    let ranking =
-        controller.with_payload(|payload| payload.current_ranking(view.measure.id()).cloned());
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
-    let listed = side.listed(controller, chosen);
-    let first = side.opening(controller);
+    let listed = side.listed(chosen);
+    let first = side.opening();
     use_effect(use_reactive((&first,), move |(first,)| {
         tabs.open_first(first)
     }));
@@ -302,7 +293,7 @@ pub(super) fn SubtaskListing(
                     for (position, item) in listed.items.iter().copied().enumerate() {
                         {
                             let row = rows[item].clone();
-                            let standing = match ranking.as_ref().and_then(|ranking| ranking.probability(&row)) {
+                            let standing = match row.similarity() {
                                 Some(probability) => RowStanding::scored(probability, true, listed.chosen == Some(item)),
                                 None => RowStanding::plain(listed.chosen == Some(item)),
                             }
@@ -457,11 +448,11 @@ pub(super) fn MomentListing(
         _ => Vec::new(),
     };
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
-    let listed = side.listed(controller, chosen);
+    let listed = side.listed(chosen);
     let stretches = Stretch::of(&rows, &listed.items);
     // A stretch opens whole, so the first one plays from its start rather
     // than a single moment's.
-    let first = side.opening(controller);
+    let first = side.opening();
     use_effect(use_reactive((&first,), move |(first,)| {
         tabs.open_first(first)
     }));

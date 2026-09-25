@@ -1,7 +1,6 @@
 //! Shared HTTP transport, project request contexts, and polling policy. Feature clients live with their UI.
 
 pub(crate) mod completions;
-pub(crate) mod decisions;
 pub(crate) mod documents;
 pub(crate) mod http;
 pub(crate) mod project;

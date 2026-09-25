@@ -2,11 +2,13 @@
 //! preview has read over the sample, node selection, episode focus, and
 //! saves. The controller is passed as a prop; every Curation view reads and
 //! edits through it. Shared contract: extend it, never change what is here.
-use super::document::{CURATION_ENCODING_VERSION, CurationGraph, DATASET_NODE_ID, SubtaskRow};
-use super::moments::Moment;
+use super::annotate::SubtaskRow;
+use super::document::{CURATION_ENCODING_VERSION, CurationGraph, CurationNode, DATASET_NODE_ID};
 use super::population::{EpisodeSample, Population, PopulationReader};
 use super::poster::PosterCache;
-use super::preview::PreviewReads;
+use super::preview::{
+    PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows, ReadInput,
+};
 use crate::components::document_session::{
     DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
 };
@@ -23,7 +25,7 @@ use std::collections::BTreeMap;
 const UNTITLED: &str = "Untitled curation";
 
 /// A save is refused while the document has another command in flight, so a
-/// measurement's save waits for it rather than dropping what it measured.
+/// publication's save waits for it rather than dropping what it recorded.
 const SAVE_WAIT_MS: u32 = 50;
 const SAVE_WAIT_ROUNDS: usize = 200;
 
@@ -52,7 +54,7 @@ struct OwnedRun {
 ///
 /// A run a workspace spawned was the workspace's, so choosing another node —
 /// which unmounts it — ended an annotation part way and left its card saying
-/// "Annotating 12 of 40 episodes" forever. Annotation and scoring therefore
+/// "Annotating 12 of 40 episodes" forever. Previews and publishing therefore
 /// run as the curation's own tasks and outlive the view that started them;
 /// opening another document cancels them, since their node ids mean nothing
 /// in it.
@@ -340,21 +342,18 @@ impl CurationController {
             read(payload, reader.as_ref())
         })
     }
-    /// What the preview has read this session.
-    pub(super) fn with_reads<R>(&self, read: impl FnOnce(&PreviewReads) -> R) -> R {
-        read(&self.interpretation.reads.read())
-    }
-    /// Hold what `node`'s preview of one episode answered, for the session.
-    pub(super) fn record_moments(
+    /// Hold what `node`'s preview of one episode answered from what went
+    /// into it, for the session.
+    pub(super) fn record_preview(
         mut self,
-        node: &str,
-        episode: &EpisodeId,
-        read: Result<Vec<Moment>, String>,
+        node: &CurationNode,
+        read_from: (&EpisodeId, ReadInput),
+        read: Result<PreviewRows, String>,
     ) {
         self.interpretation
             .reads
             .write()
-            .record(node, episode, read);
+            .record(node, read_from, read);
     }
     /// The revision Studio holds the open curation at; 0 before its first save.
     pub(super) fn saved_revision(&self) -> u64 {
@@ -472,6 +471,24 @@ impl CurationController {
             .write()
             .insert(node.to_owned(), OwnedRun { task, wanted: true });
     }
+    /// Run `node`'s preview of `episodes` as the curation's own run, from
+    /// the rows its parent's preview holds now; or say why it cannot run. A
+    /// node already running is left alone.
+    pub(super) fn run_preview(self, node: &str, episodes: &[EpisodeId]) -> Result<(), String> {
+        let plan = self.with_reading(|_, reader| {
+            let reader = reader.ok_or("The episodes are still being read.")?;
+            PreviewPlan::of(reader, node, episodes).map_err(|error| error.message().to_owned())
+        })?;
+        self.start_run(node, move |run| async move {
+            PreviewPass::new(self, run, plan).run().await;
+        });
+        Ok(())
+    }
+    /// Where `node`'s preview stands over the episodes that reach it, once
+    /// the sample is read.
+    pub(super) fn progress(&self, node: &str) -> Option<PreviewProgress> {
+        self.with_reading(|_, reader| reader.map(|reader| PreviewProgress::of(reader, node)))
+    }
     /// Where `node`'s own run stands.
     pub(super) fn run_state(&self, node: &str) -> RunState {
         self.runs.state(node)
@@ -495,7 +512,7 @@ impl CurationController {
     /// Ask the annotation's Find similar node about one of its rows and show
     /// that node, which runs the question as soon as it reads it. `from` is
     /// where the row was on screen, so the question can be seen arriving.
-    pub(crate) fn find_similar(mut self, annotation: &str, row: &SubtaskRow, from: Option<Place>) {
+    pub(super) fn find_similar(mut self, annotation: &str, row: &SubtaskRow, from: Option<Place>) {
         if let Ok(node) = self.edit(|payload| payload.search_for(annotation, row)) {
             self.launch.set(from);
             self.selected_node.set(Some(node));
@@ -561,7 +578,7 @@ impl CurationController {
         self.session.save(studio);
     }
     /// Save once the document has no other command in flight, so what a
-    /// measurement just wrote reaches Studio even while a save is running.
+    /// publish just recorded reaches Studio even while a save is running.
     pub(super) async fn save_when_idle(self, studio: StudioProjectState) {
         for _ in 0..SAVE_WAIT_ROUNDS {
             if self.command().is_none() {

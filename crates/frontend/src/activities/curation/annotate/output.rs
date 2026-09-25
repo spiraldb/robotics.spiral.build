@@ -1,7 +1,7 @@
 //! What one annotation node produced: the index of intervals it wrote, and
 //! the episode one of them belongs to, playing beside it.
 use super::episodes::AnnotationEpisode;
-use crate::activities::curation::document::{EpisodeFailure, SubtaskRow};
+use super::subtask::SubtaskRow;
 use crate::activities::curation::episode_tabs::{OpenEpisode, OpenEpisodes};
 use crate::activities::curation::poster::PosterFrames;
 use crate::activities::curation::review::{
@@ -18,6 +18,28 @@ use spiral_robotics_ui::{
     TextInputKind,
 };
 
+/// One episode the preview could not break down, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct EpisodeFailure {
+    episode: EpisodeId,
+    reason: String,
+}
+
+impl EpisodeFailure {
+    pub(super) fn new(episode: EpisodeId, reason: impl Into<String>) -> Self {
+        Self {
+            episode,
+            reason: reason.into(),
+        }
+    }
+    pub(super) fn episode(&self) -> &EpisodeId {
+        &self.episode
+    }
+    fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
 /// One episode's rows, in time order.
 #[derive(Clone, PartialEq)]
 pub(super) struct EpisodeSubtasks {
@@ -27,7 +49,7 @@ pub(super) struct EpisodeSubtasks {
 
 impl EpisodeSubtasks {
     /// Group an annotation node's rows by episode, keeping the order the
-    /// document stores them in.
+    /// preview read them in.
     pub(super) fn group(rows: impl Iterator<Item = SubtaskRow>) -> Vec<Self> {
         let mut grouped = Vec::<Self>::new();
         for row in rows {
@@ -137,8 +159,8 @@ impl ChosenSubtask {
     }
 }
 
-/// What one annotation node produced, as its index shows it: the rows it
-/// wrote, the episodes it could not read, and what to call them.
+/// What one annotation node's preview read, as its index shows it: the rows
+/// it read, the episodes it could not read, and what to call them.
 ///
 /// Failure travels with success because it belongs in the same list: an
 /// episode named only in a band above the index had no heading, no row, and no
@@ -236,7 +258,7 @@ pub(super) fn SubtaskIndex(
     output: AnnotationOutput,
     frames: PosterFrames,
     chosen: ChosenSubtask,
-    /// Annotate one failed episode again.
+    /// Break down one failed episode again.
     on_retry: EventHandler<EpisodeId>,
     /// Ask for subtasks like one row, from where its poster sits.
     on_find_similar: EventHandler<(SubtaskRow, Option<Place>)>,
@@ -253,7 +275,7 @@ pub(super) fn SubtaskIndex(
     if output.rows() == 0 && output.failures.is_empty() {
         return rsx! {
             p { class: "curation-annotate-empty", role: "status",
-                "No subtasks yet. Run the annotation to fill this list." }
+                "No subtasks yet. Run Break down to preview them." }
         };
     }
     rsx! {
@@ -321,8 +343,8 @@ pub(super) fn SubtaskIndex(
     }
 }
 
-/// The one row an episode nobody could annotate gets: what went wrong, and the
-/// one action that could change it.
+/// The one row an episode the preview could not break down gets: what went
+/// wrong, and the one action that could change it.
 #[component]
 fn FailedEpisode(failure: EpisodeFailure, on_retry: EventHandler<EpisodeId>) -> Element {
     let episode = failure.episode().clone();
@@ -332,7 +354,7 @@ fn FailedEpisode(failure: EpisodeFailure, on_retry: EventHandler<EpisodeId>) -> 
                 div { class: "curation-entries-heading curation-entries-heading-failed",
                     span { class: "curation-entries-heading-name", title: "{failure.episode()}",
                         "{Episode::name_of(failure.episode())}" }
-                    span { class: "curation-entries-heading-count", "not annotated" }
+                    span { class: "curation-entries-heading-count", "not broken down" }
                 }
             }
             p { class: "curation-entry-failure",
@@ -491,7 +513,7 @@ mod tests {
     use super::*;
 
     fn row(episode: EpisodeId, start: f64, end: f64) -> SubtaskRow {
-        SubtaskRow::new("break_down_subtasks-1", episode, start, end, "fold").expect("a valid row")
+        SubtaskRow::new(episode, (start, end), "fold").expect("a valid row")
     }
 
     /// The regression for the click that did nothing.
@@ -535,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_group_by_episode_in_the_order_the_document_stores_them() {
+    fn rows_group_by_episode_in_the_order_the_preview_read_them() {
         let groups = EpisodeSubtasks::group(
             [
                 row(EpisodeId::fixture(1), 0.0, 8.0),
@@ -556,22 +578,8 @@ mod tests {
         let group = EpisodeSubtasks {
             episode: EpisodeId::fixture(1),
             rows: vec![
-                SubtaskRow::new(
-                    "break_down_subtasks-1",
-                    EpisodeId::fixture(1),
-                    0.0,
-                    4.0,
-                    "Fold the skirt",
-                )
-                .unwrap(),
-                SubtaskRow::new(
-                    "break_down_subtasks-1",
-                    EpisodeId::fixture(1),
-                    4.0,
-                    8.0,
-                    "Grasp the edge",
-                )
-                .unwrap(),
+                SubtaskRow::new(EpisodeId::fixture(1), (0.0, 4.0), "Fold the skirt").unwrap(),
+                SubtaskRow::new(EpisodeId::fixture(1), (4.0, 8.0), "Grasp the edge").unwrap(),
             ],
         };
         let folded = group.with_rows_saying("fold").expect("one row says it");

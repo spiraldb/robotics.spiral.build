@@ -133,13 +133,9 @@ pub(super) enum SegmentPaint {
     Kept(bool),
     /// How likely a search thinks this row is the same operation.
     Match(f64),
-    /// The category the row joined, as its hue; whether jev hesitated over
-    /// it; and whether another category is open, which fades this one.
-    Category {
-        hue: usize,
-        hesitant: bool,
-        faded: bool,
-    },
+    /// The category the row joined, as its hue, and whether another
+    /// category is open, which fades this one.
+    Category { hue: usize, faded: bool },
 }
 
 impl SegmentPaint {
@@ -153,9 +149,6 @@ impl SegmentPaint {
             ),
             Self::Category { hue, .. } => format!("--paint: var(--tone-category-{})", hue + 1),
         }
-    }
-    fn hesitant(self) -> bool {
-        matches!(self, Self::Category { hesitant: true, .. })
     }
     fn faded(self) -> bool {
         matches!(self, Self::Category { faded: true, .. } | Self::Kept(false))
@@ -312,7 +305,6 @@ pub(super) fn EpisodeMap(
                                             // category waits the same beat.
                                             "data-delay": "{delay:.0}",
                                             "data-source": (paint.source == Some(row)).then_some("true"),
-                                            "data-hesitant": look.hesitant().then_some("true"),
                                             "data-faded": look.faded().then_some("true"),
                                             onclick: move |_| on_select.call(row),
                                         }
@@ -330,18 +322,11 @@ pub(super) fn EpisodeMap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activities::curation::document::SubtaskRow;
+    use crate::activities::curation::annotate::SubtaskRow;
 
     fn row(episode: u32, start: f64, end: f64) -> Slice {
         Slice::of_subtask(
-            &SubtaskRow::new(
-                "annotate-1",
-                EpisodeId::fixture(episode),
-                start,
-                end,
-                "fold",
-            )
-            .unwrap(),
+            &SubtaskRow::new(EpisodeId::fixture(episode), (start, end), "fold").unwrap(),
         )
     }
 

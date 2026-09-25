@@ -59,7 +59,10 @@ impl Moment {
     /// One episode's moments from the Arrow stream its preview answered, in
     /// time order. The relation's times are the recording's clock; the
     /// browser reads them from the episode's first message.
-    pub(super) fn read(stream: &[u8], episode: &Episode) -> Result<Vec<Self>, String> {
+    pub(in crate::activities::curation) fn read(
+        stream: &[u8],
+        episode: &Episode,
+    ) -> Result<Vec<Self>, String> {
         let origin = episode
             .facts()
             .message_start_time()

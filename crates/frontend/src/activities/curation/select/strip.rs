@@ -4,9 +4,9 @@
 //! between the values beside the line says how firm the choice is, which the
 //! count alone cannot, and dragging the line re-divides kept from left out.
 use super::SelectView;
+use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::Selection;
 use crate::activities::curation::population::Population;
-use crate::activities::curation::state::CurationController;
 use dioxus::prelude::*;
 
 /// The most dots one strip draws. Moments come one per frame, sixty thousand
@@ -27,23 +27,15 @@ impl StripDot {
     /// The values a numeric rule judges, one per item that has one: an
     /// episode's recorded fact, a subtask's similarity, a moment's pace, every
     /// nth of them past `MAX_STRIP_DOTS`. A rule of categories has no axis.
-    pub(super) fn for_view(
-        view: &SelectView,
-        controller: CurationController,
-        kept: &[bool],
-    ) -> Option<Vec<Self>> {
+    pub(super) fn for_view(view: &SelectView, kept: &[bool]) -> Option<Vec<Self>> {
         let values: Vec<Option<f64>> = match (&view.selection, &view.input) {
             (Selection::Episodes { fact, .. }, Population::Episodes(episodes)) => episodes
                 .iter()
                 .map(|id| view.sample.episode(id).and_then(|episode| fact.of(episode)))
                 .collect(),
-            (Selection::Similar { .. }, Population::Subtasks { rows, .. }) => controller
-                .with_payload(|payload| {
-                    let ranking = payload.current_ranking(view.measure.id());
-                    rows.iter()
-                        .map(|row| ranking.and_then(|ranking| ranking.probability(row)))
-                        .collect()
-                }),
+            (Selection::Similar { .. }, Population::Subtasks(rows)) => {
+                rows.iter().map(SubtaskRow::similarity).collect()
+            }
             (Selection::Progressing { .. }, Population::Moments(rows)) => {
                 rows.iter().map(|row| row.pace()).collect()
             }

@@ -1,16 +1,53 @@
-//! The episodes one annotation node walks: what the pass needs to sample them
-//! and what the player needs to show them.
+//! The episodes one annotation node reads, and what their recordings hold
+//! that its step reads: the cameras, and the operator's instruction.
 use crate::activities::curation::state::CurationController;
-use crate::activities::data::DatasetClient;
-use crate::activities::episode::Episode;
+use crate::activities::episode::{Episode, StreamCatalog};
 use dioxus::prelude::*;
-use serde_json::Value;
 use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
-use spiral_robotics_common::relations::EpisodeQueryRequest;
-use spiral_robotics_common::sql::SqlLiteral;
 
 /// The topic a dataset records the operator's own words on, when it has one.
 const INSTRUCTION_TOPIC: &str = "/instruction";
+
+/// What one of a dataset's recordings holds that Break down reads: its
+/// camera topics, and whether it records the operator's instruction. Every
+/// episode of one recording session carries the same topics, so one episode
+/// answers for the sample.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RecordedTopics {
+    cameras: Vec<String>,
+    instructed: bool,
+}
+
+impl RecordedTopics {
+    /// What `episode` recorded: `None` until it is read, or when it cannot be.
+    pub(super) fn use_topics(episode: Option<EpisodeSelection>) -> Option<Self> {
+        let topics = use_resource(use_reactive(&episode, move |episode| async move {
+            let catalog = StreamCatalog::load(episode?).await.ok()?;
+            Some(Self {
+                cameras: catalog
+                    .videos()
+                    .map(|stream| stream.name().to_owned())
+                    .collect(),
+                instructed: catalog
+                    .streams()
+                    .iter()
+                    .any(|stream| stream.name() == INSTRUCTION_TOPIC),
+            })
+        }));
+        topics.read().clone().flatten()
+    }
+    pub(super) fn cameras(&self) -> Vec<String> {
+        self.cameras.clone()
+    }
+    /// The camera that shows the whole workspace best.
+    pub(super) fn overview_camera(&self) -> Option<String> {
+        StreamCatalog::overview_camera(&self.cameras).map(str::to_owned)
+    }
+    /// Where each episode's task is read, when the dataset records one.
+    pub(super) fn task_topic(&self) -> Option<String> {
+        self.instructed.then(|| INSTRUCTION_TOPIC.to_owned())
+    }
+}
 
 /// One episode a pass annotates: an episode with a recorded span, since
 /// camera packets are read over that span and timed from its start.
@@ -41,39 +78,12 @@ impl AnnotationEpisode {
             .collect()
     }
 
-    /// What the operator asked the robot to do, when the dataset records it on
-    /// an instruction topic. A dataset without one simply has no task text, so
-    /// a missing topic or an unreadable row is silence rather than a failure.
-    pub(super) async fn task(&self, datasets: &DatasetClient) -> Option<String> {
-        let selection = self.selection();
-        let statement = format!(
-            "SELECT r.value.data AS instruction FROM spql.mcap.read_topic({}, {}) r \
-             WHERE r.id = $1",
-            SqlLiteral::text(&selection.dataset().sql_name()),
-            SqlLiteral::text(INSTRUCTION_TOPIC)
-        );
-        let snapshot = datasets
-            .run_episode_query(&EpisodeQueryRequest::new(selection, statement, 1))
-            .await
-            .ok()?;
-        snapshot
-            .rows()
-            .first()?
-            .get("instruction")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|task| !task.is_empty())
-            .map(str::to_owned)
-    }
-
     pub(super) fn id(&self) -> &EpisodeId {
         self.0.id()
     }
-    pub(super) fn selection(&self) -> EpisodeSelection {
-        self.0.selection()
-    }
     /// Seconds from the first recorded message to the last.
-    pub(super) fn duration(&self) -> f64 {
+    #[cfg(test)]
+    fn duration(&self) -> f64 {
         self.0.facts().duration_seconds().unwrap_or_default()
     }
     pub(super) fn episode(&self) -> &Episode {
@@ -83,7 +93,7 @@ impl AnnotationEpisode {
     /// The fixture episode `ordinal`, of a fixed length, for tests that only
     /// need its identity and duration.
     #[cfg(test)]
-    pub(super) fn fixture(ordinal: u32, duration_ns: u64) -> Self {
+    fn fixture(ordinal: u32, duration_ns: u64) -> Self {
         Self::new(Episode::fixture(&EpisodeId::fixture(ordinal), duration_ns))
             .expect("a fixture has a recorded span")
     }

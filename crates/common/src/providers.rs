@@ -49,7 +49,7 @@ impl LlmProvider {
 pub struct ProviderMessage {
     role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    content: Option<ProviderContent>,
+    content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -60,7 +60,7 @@ impl ProviderMessage {
     pub fn text(role: &str, content: impl Into<String>) -> Self {
         Self {
             role: role.to_owned(),
-            content: Some(ProviderContent::Text(content.into())),
+            content: Some(content.into()),
             tool_call_id: None,
             tool_calls: Vec::new(),
         }
@@ -69,7 +69,7 @@ impl ProviderMessage {
     pub fn tool(call_id: String, content: String) -> Self {
         Self {
             role: "tool".to_owned(),
-            content: Some(ProviderContent::Text(content)),
+            content: Some(content),
             tool_call_id: Some(call_id),
             tool_calls: Vec::new(),
         }
@@ -78,60 +78,18 @@ impl ProviderMessage {
     pub fn assistant(content: Option<String>, tool_calls: Vec<ProviderToolCall>) -> Self {
         Self {
             role: "assistant".to_owned(),
-            content: content.map(ProviderContent::Text),
+            content,
             tool_call_id: None,
             tool_calls,
         }
     }
 
-    /// A captioned picture for the model to read, sent as an encoded JPEG or
-    /// PNG data URL.
-    pub fn image_evidence(caption: String, data_url: String) -> Result<Self, String> {
-        if !data_url.starts_with("data:image/jpeg;base64,")
-            && !data_url.starts_with("data:image/png;base64,")
-        {
-            return Err("Evidence must be an encoded JPEG or PNG from a query result.".into());
-        }
-        Ok(Self {
-            role: "user".into(),
-            content: Some(ProviderContent::Parts(vec![
-                ProviderPart::Text { text: caption },
-                ProviderPart::ImageUrl {
-                    image_url: ProviderImageUrl { url: data_url },
-                },
-            ])),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        })
-    }
-
     pub fn content(&self) -> Option<&str> {
-        match &self.content {
-            Some(ProviderContent::Text(text)) => Some(text),
-            _ => None,
-        }
+        self.content.as_deref()
     }
     pub fn tool_calls(&self) -> &[ProviderToolCall] {
         &self.tool_calls
     }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(untagged)]
-enum ProviderContent {
-    Text(String),
-    Parts(Vec<ProviderPart>),
-}
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum ProviderPart {
-    Text { text: String },
-    ImageUrl { image_url: ProviderImageUrl },
-}
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderImageUrl {
-    url: String,
 }
 
 /// One function call the provider asked for in an assistant message.
@@ -189,31 +147,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn image_evidence_travels_as_text_and_image_parts() {
-        let image = ProviderMessage::image_evidence(
-            "Run one, row zero".into(),
-            "data:image/png;base64,aW1hZ2U=".into(),
-        )
-        .unwrap();
-        let encoded = serde_json::to_value(&image).unwrap();
-        assert_eq!(encoded["content"][0]["type"], "text");
-        assert_eq!(encoded["content"][1]["type"], "image_url");
+    fn text_travels_as_the_content_string() {
+        let message = ProviderMessage::text("user", "hello");
+        let encoded = serde_json::to_value(&message).unwrap();
+        assert_eq!(encoded["content"], "hello");
         assert_eq!(
             serde_json::from_value::<ProviderMessage>(encoded).unwrap(),
-            image
+            message
         );
-        assert_eq!(image.content(), None);
-        assert!(
-            ProviderMessage::image_evidence(
-                "remote".into(),
-                "https://example.com/image.jpg".into()
-            )
-            .is_err()
-        );
-        assert_eq!(
-            serde_json::to_value(ProviderMessage::text("user", "hello")).unwrap()["content"],
-            "hello"
-        );
+        assert_eq!(message.content(), Some("hello"));
     }
 
     #[test]

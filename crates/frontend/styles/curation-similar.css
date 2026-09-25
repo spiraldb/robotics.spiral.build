@@ -88,16 +88,6 @@
     opacity: 0.2;
   }
 
-  /* jev was torn over this row, and the segment says so for as long as the
-     grouping stands. */
-  .curation-map-segment[data-hesitant="true"] {
-    background-image: repeating-linear-gradient(
-      135deg,
-      transparent 0 2px,
-      rgb(255 255 255 / 0.65) 2px 3.5px
-    );
-  }
-
   /* The row a search asked about is its question, drawn in ink. */
   .curation-map-segment[data-source="true"] {
     @apply z-[2];
@@ -275,20 +265,6 @@
   .curation-similar-chip::before {
     @apply size-2 shrink-0 rounded-full content-[''];
     background: var(--hue, var(--tone-line-strong));
-  }
-
-  /* A bin the model named and jev has not filled yet: dashed, quiet, and
-     arriving one after another. */
-  .curation-similar-chip[data-pending="true"] {
-    @apply cursor-default border-dashed;
-    animation: curation-bin-arrive 320ms calc(var(--order, 0) * 70ms) backwards ease-out;
-  }
-
-  @keyframes curation-bin-arrive {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
   }
 
   .curation-similar-chip[data-selected="true"] {
@@ -555,7 +531,6 @@
     .curation-match-dot,
     .curation-similar-category,
     .curation-similar-chip,
-    .curation-similar-chip[data-pending="true"],
     .curation-profile,
     .curation-profile-dot,
     .curation-profile-lane[data-side="members"] .curation-profile-dot {

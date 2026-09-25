@@ -20,7 +20,7 @@ const UNTITLED: &str = "Untitled curation";
 const COPY: DocumentBarCopy = DocumentBarCopy::new(
     "curation",
     "New blank curation",
-    "Save the graph and everything it has measured",
+    "Save the graph",
     "Return to the saved graph",
 );
 

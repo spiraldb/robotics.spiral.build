@@ -517,7 +517,10 @@ mod tests {
             )
             .unwrap();
         let group = payload
-            .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks)
+            .add_child(
+                &annotate,
+                CurationNodeKind::GroupSimilarSubtasks(Default::default()),
+            )
             .unwrap();
         let flow = GraphFlow::new(&payload, None, Some(&search), &NodeActivity::new());
         let node = |id: &str| {

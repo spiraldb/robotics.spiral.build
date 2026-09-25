@@ -26,6 +26,12 @@ Endpoints and the signed-in user's access token are passed as database options,
 without changing process environment variables. The driver never refreshes the
 token: Studio replaces `spiral.access_token` on every open database whenever it
 refreshes the session, which requires a driver with that option.
+Studio's model-provider key (`LLM_API_KEY`), when one is configured, is passed
+as the write-only option `spiral.openrouter_api_key`, which the `spql.ai`
+model functions read. The key is read from process state or `.env.local` on
+each use, so `AdbcDatabase` asks for it on every new connection and reopens the
+database when it has changed; connections already open keep the database they
+started on.
 
 `flake.nix` pins the official version and SHA-256 archive digests in
 `adbcVersion` and `adbcArchiveHashes`.

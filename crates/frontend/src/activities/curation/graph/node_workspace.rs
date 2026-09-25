@@ -35,7 +35,7 @@ pub(in crate::activities::curation) fn NodeWorkspace(controller: CurationControl
                     CurationNodeKind::FindSimilarSubtasks(_) => rsx! {
                         similar::SearchWorkspace { controller, node: node.clone() }
                     },
-                    CurationNodeKind::GroupSimilarSubtasks => rsx! {
+                    CurationNodeKind::GroupSimilarSubtasks(_) => rsx! {
                         similar::GroupingWorkspace { controller, node: node.clone() }
                     },
                     CurationNodeKind::IdentifyUnproductiveMoments(_) => rsx! {

@@ -1225,10 +1225,10 @@ every row of every node — a subtask, a whole episode, a stretch of one — is
 one anatomy at one height: a 96×54 still on the camera mat, the name over a
 mono facts line, and the measure in a fixed right-hand column.
 
-- **Still:** a subtask's middle as the annotation pass stored it; an
-  episode's or a stretch's middle cut on demand on the camera its node read
-  (else the configured camera, else the overview camera), one query per
-  episode, cached per camera, episode and instant for the whole curation.
+- **Still:** a subtask's, an episode's, or a stretch's middle, cut on demand
+  on the camera its node read (else the configured camera, else the overview
+  camera), one query per episode, cached per camera, episode and instant for
+  the whole curation.
   Waiting is a shimmer on the recess; failure says why on the mat.
 - **Name:** a subtask's words, clamped to two lines; a recording's label
   when its path gives one; otherwise its id tail ("…206c08ff") in mono.

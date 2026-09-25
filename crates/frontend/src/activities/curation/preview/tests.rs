@@ -1,0 +1,302 @@
+use super::input::PreviewInput;
+use super::*;
+use crate::activities::curation::annotate::{CategoryPlacement, JudgmentValue, SubtaskRow};
+use crate::activities::curation::document::{
+    CurationGraph, CurationNodeKind, DATASET_NODE_ID, MomentDetection, Selection,
+    SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
+};
+use crate::activities::curation::moments::Moment;
+use crate::activities::curation::path::CurationPath;
+use crate::activities::curation::population::{EpisodeSample, PopulationReader};
+use crate::activities::episode::Episode;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+
+/// Two episodes of 20 and 12 seconds, whose first messages are at one second
+/// of log time.
+fn sample() -> EpisodeSample {
+    EpisodeSample::fixture(vec![
+        Episode::fixture(&EpisodeId::fixture(1), 20_000_000_000),
+        Episode::fixture(&EpisodeId::fixture(2), 12_000_000_000),
+    ])
+}
+
+fn graph() -> CurationGraph {
+    CurationGraph::new(Some(
+        DatasetSelection::new(vec!["folding".to_owned()]).unwrap(),
+    ))
+}
+
+fn breakdown() -> CurationNodeKind {
+    let mut annotation = SubtaskAnnotation::default();
+    annotation.set_camera(Some("/top-camera".into()));
+    CurationNodeKind::BreakDownSubtasks(annotation)
+}
+
+fn searching(query: &str) -> CurationNodeKind {
+    let mut search = SubtaskSearch::default();
+    search.set_query(query);
+    CurationNodeKind::FindSimilarSubtasks(search)
+}
+
+/// Record what `node` read of `episode` from what reaches it now, as a run
+/// would.
+fn record_current(
+    graph: &CurationGraph,
+    reads: &mut PreviewReads,
+    (node, episode): (&str, &EpisodeId),
+    rows: PreviewRows,
+) {
+    let sample = sample();
+    let input = ReadInput::current(&PopulationReader::new(graph, &sample, reads), node, episode);
+    reads.record(graph.node(node).unwrap(), (episode, input), Ok(rows));
+}
+
+fn subtask(episode: u32, (start, end): (f64, f64), description: &str) -> SubtaskRow {
+    SubtaskRow::new(EpisodeId::fixture(episode), (start, end), description).unwrap()
+}
+
+#[test]
+fn a_later_read_replaces_an_earlier_one_and_a_reconfigured_node_has_read_nothing() {
+    let mut graph = graph();
+    let annotate = graph.add_child(DATASET_NODE_ID, breakdown()).unwrap();
+    let node = graph.node(&annotate).unwrap().clone();
+    let episode = EpisodeId::fixture(1);
+    let mut reads = PreviewReads::default();
+    reads.record(
+        &node,
+        (&episode, ReadInput::untracked()),
+        Err("timed out".into()),
+    );
+    assert!(reads.subtasks(&node, &episode).is_empty());
+    let row = subtask(1, (0.0, 2.0), "fold it");
+    reads.record(
+        &node,
+        (&episode, ReadInput::untracked()),
+        Ok(PreviewRows::Subtasks(vec![row.clone()])),
+    );
+    assert_eq!(reads.subtasks(&node, &episode), std::slice::from_ref(&row));
+    // Another camera: what it read answered the first.
+    if let CurationNodeKind::BreakDownSubtasks(annotation) =
+        graph.node_mut(&annotate).unwrap().kind_mut()
+    {
+        annotation.set_camera(Some("/wrist-camera".into()));
+    }
+    let moved = graph.node(&annotate).unwrap().clone();
+    assert!(reads.subtasks(&moved, &episode).is_empty());
+    reads.forget_removed(&CurationGraph::new(None));
+    assert!(reads.subtasks(&node, &episode).is_empty());
+}
+
+#[test]
+fn a_recording_is_handed_the_intervals_that_reach_it_in_the_recordings_clock() {
+    let mut graph = graph();
+    let annotate = graph.add_child(DATASET_NODE_ID, breakdown()).unwrap();
+    let (sample, reads) = (sample(), PreviewReads::default());
+    let reader = PopulationReader::new(&graph, &sample, &reads);
+    let input = PreviewInput::of(&graph, &annotate).unwrap();
+    let rows = input.rows(&reader.input(&annotate), &sample).unwrap();
+    // A whole episode, from its first message to its last, exactly.
+    assert_eq!(
+        rows[&EpisodeId::fixture(2)].rows(),
+        ["($1, CAST(1000000000 AS BIGINT), CAST(13000000000 AS BIGINT))"]
+    );
+    let statement = CurationPath::to(&graph, &annotate)
+        .unwrap()
+        .preview(input.step_input(rows[&EpisodeId::fixture(2)].rows().iter()))
+        .unwrap();
+    assert!(statement.starts_with(
+        "WITH\n  preview_input(episode_id, start_ns, end_ns) AS (VALUES ($1, CAST(1000000000 AS BIGINT), CAST(13000000000 AS BIGINT))),"
+    ));
+}
+
+#[test]
+fn after_a_select_of_moments_a_recording_is_handed_the_stretches_it_keeps() {
+    let mut graph = graph();
+    let detect = graph
+        .add_child(
+            DATASET_NODE_ID,
+            CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+        )
+        .unwrap();
+    let moving = graph
+        .add_child(
+            &detect,
+            CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
+        )
+        .unwrap();
+    let annotate = graph.add_child(&moving, breakdown()).unwrap();
+    let episode = EpisodeId::fixture(1);
+    let moments = [0.5, 0.4, 0.1, 0.3]
+        .into_iter()
+        .enumerate()
+        .map(|(second, pace)| {
+            Moment::new(
+                episode.clone(),
+                (second as f64, second as f64 + 1.0),
+                Some(pace),
+            )
+            .unwrap()
+        })
+        .collect();
+    let mut reads = PreviewReads::default();
+    record_current(
+        &graph,
+        &mut reads,
+        (&detect, &episode),
+        PreviewRows::Moments(moments),
+    );
+    let sample = sample();
+    let reader = PopulationReader::new(&graph, &sample, &reads);
+    let rows = PreviewInput::of(&graph, &annotate)
+        .unwrap()
+        .rows(&reader.input(&annotate), &sample)
+        .unwrap();
+    // Seconds 0–2 and 3–4 progress, as the Select's own step joins them.
+    assert_eq!(
+        rows[&episode].rows(),
+        [
+            "($1, CAST(1000000000 AS BIGINT), CAST(3000000000 AS BIGINT))",
+            "($1, CAST(4000000000 AS BIGINT), CAST(5000000000 AS BIGINT))"
+        ]
+    );
+}
+
+#[test]
+fn a_node_below_a_changed_one_is_stale_and_reads_again_only_what_changed() {
+    let mut graph = graph();
+    let annotate = graph.add_child(DATASET_NODE_ID, breakdown()).unwrap();
+    let search = graph
+        .add_child(&annotate, searching("fold the towel"))
+        .unwrap();
+    let (first, second) = (EpisodeId::fixture(1), EpisodeId::fixture(2));
+    let mut reads = PreviewReads::default();
+    for (episode, description) in [(1, "fold the towel"), (2, "grasp the corner")] {
+        record_current(
+            &graph,
+            &mut reads,
+            (&annotate, &EpisodeId::fixture(episode)),
+            PreviewRows::Subtasks(vec![subtask(episode, (0.0, 4.0), description)]),
+        );
+    }
+    let judged = |episode: u32, description: &str| {
+        subtask(episode, (0.0, 4.0), description)
+            .judged(SubtaskRow::SIMILARITY, JudgmentValue::Similarity(Some(0.9)))
+    };
+    for (episode, description) in [(1, "fold the towel"), (2, "grasp the corner")] {
+        record_current(
+            &graph,
+            &mut reads,
+            (&search, &EpisodeId::fixture(episode)),
+            PreviewRows::Subtasks(vec![judged(episode, description)]),
+        );
+    }
+    let sample = sample();
+    let progress = |reads: &PreviewReads, graph: &CurationGraph, node: &str| {
+        PreviewProgress::of(&PopulationReader::new(graph, &sample, reads), node)
+    };
+    assert!(!progress(&reads, &graph, &search).is_stale());
+    assert_eq!(
+        progress(&reads, &graph, &search).read(),
+        [first.clone(), second.clone()]
+    );
+
+    // Break down runs again on one episode and answers differently: the
+    // search below is stale there, and only there.
+    record_current(
+        &graph,
+        &mut reads,
+        (&annotate, &second),
+        PreviewRows::Subtasks(vec![subtask(2, (0.0, 3.0), "pinch the corner")]),
+    );
+    let stale = progress(&reads, &graph, &search);
+    assert!(stale.is_stale());
+    assert_eq!(stale.pending(), std::slice::from_ref(&second));
+    assert_eq!(stale.read(), std::slice::from_ref(&first));
+
+    // Another camera for Break down leaves it having read nothing, and the
+    // search below it stale.
+    if let CurationNodeKind::BreakDownSubtasks(annotation) =
+        graph.node_mut(&annotate).unwrap().kind_mut()
+    {
+        annotation.set_camera(Some("/wrist-camera".into()));
+    }
+    assert_eq!(
+        progress(&reads, &graph, &annotate).pending(),
+        [first.clone(), second.clone()]
+    );
+    assert!(progress(&reads, &graph, &search).is_stale());
+}
+
+#[test]
+fn a_judgment_asks_about_as_many_episodes_as_one_query_carries() {
+    let mut graph = graph();
+    let annotate = graph.add_child(DATASET_NODE_ID, breakdown()).unwrap();
+    let mut grouping = SubtaskGrouping::default();
+    grouping
+        .set_categories(vec![
+            SubtaskCategory::new("fold", "Folding cloth.").unwrap(),
+        ])
+        .unwrap();
+    let group = graph
+        .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks(grouping))
+        .unwrap();
+    let mut reads = PreviewReads::default();
+    // Episode 1's descriptions are long enough that the two episodes cannot
+    // share one query; episode 2's are short.
+    let long = "fold ".repeat(400);
+    record_current(
+        &graph,
+        &mut reads,
+        (&annotate, &EpisodeId::fixture(1)),
+        PreviewRows::Subtasks(
+            (0..30)
+                .map(|second| subtask(1, (second as f64 * 0.5, second as f64 * 0.5 + 0.5), &long))
+                .collect(),
+        ),
+    );
+    record_current(
+        &graph,
+        &mut reads,
+        (&annotate, &EpisodeId::fixture(2)),
+        PreviewRows::Subtasks(vec![subtask(2, (0.0, 3.0), "grasp")]),
+    );
+    let sample = sample();
+    let reader = PopulationReader::new(&graph, &sample, &reads);
+    let plan = PreviewPlan::of(
+        &reader,
+        &group,
+        &[EpisodeId::fixture(1), EpisodeId::fixture(2)],
+    )
+    .unwrap();
+    assert_eq!(plan.statements().len(), 2);
+    assert!(
+        plan.statements()
+            .iter()
+            .all(|statement| statement.len() < 64 * 1024)
+    );
+    assert!(plan.statements()[1].contains("'grasp'"));
+    assert!(
+        !plan.statements()[1].contains("$1"),
+        "a judgment spells ids as text"
+    );
+
+    // Short descriptions share one query.
+    let mut reads = PreviewReads::default();
+    for episode in [1, 2] {
+        record_current(
+            &graph,
+            &mut reads,
+            (&annotate, &EpisodeId::fixture(episode)),
+            PreviewRows::Subtasks(vec![subtask(episode, (0.0, 3.0), "grasp")]),
+        );
+    }
+    let reader = PopulationReader::new(&graph, &sample, &reads);
+    let plan = PreviewPlan::of(
+        &reader,
+        &group,
+        &[EpisodeId::fixture(1), EpisodeId::fixture(2)],
+    )
+    .unwrap();
+    assert_eq!(plan.statements().len(), 1);
+    let _ = CategoryPlacement::new("fold", 0.5).unwrap();
+}

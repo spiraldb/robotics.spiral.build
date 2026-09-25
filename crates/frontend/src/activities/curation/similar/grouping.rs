@@ -1,23 +1,22 @@
-//! Group similar subtasks: one LLM pass proposes the categories, one jev
-//! Choice per row fills them.
+//! Group similar subtasks: one LLM pass in the browser proposes the
+//! categories, which become the node's configuration, and the node's step puts
+//! every subtask that reaches it in one of them with `spql.ai.classify`. Its
+//! preview runs that step over the subtasks Break down's preview holds, many
+//! episodes to a query, as the curation's own run.
 //!
 //! Rows are grouped, not episodes, so one episode can appear in several
-//! categories. The categories are derived from these same descriptions, so
-//! the list is complete by construction: every row joins its most probable
-//! category, with no "other" option and no confidence gate. Renaming,
-//! redefining, or merging a category reruns only the jev pass — the LLM
-//! pass runs again only when the operator asks for new categories.
-use super::categories::{
-    AssignmentReader, CategoryEdit, CategoryEdits, DescriptionCounts, ProposedCategories,
-};
+//! categories. The categories are derived from these same descriptions, so the
+//! list is complete by construction: every row joins its most probable
+//! category, with no "other" option and no confidence gate. Renaming or
+//! merging a category runs only the classification again — the LLM pass runs
+//! again only when the operator asks for new categories.
+use super::categories::{CategoryEdit, CategoryEdits, DescriptionCounts, ProposedCategories};
 use super::coverage::{CoverageMeasure, EpisodeCoverage, SubtaskList};
-use super::decisions::DecisionRun;
 use super::profile::{CategoryProfile, ProfilePanel};
-use super::questions::AssignmentQuestions;
 use super::source::SubtaskSource;
+use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{
-    CurationNodeKind, DEFAULT_ANNOTATION_MODEL, SubtaskAssignment, SubtaskCategory,
-    SubtaskGrouping, SubtaskRow,
+    CurationNode, CurationNodeKind, DEFAULT_ANNOTATION_MODEL, SubtaskCategory,
 };
 use crate::activities::curation::episode_map::{
     EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
@@ -29,18 +28,17 @@ use crate::activities::curation::population::Slice;
 use crate::activities::curation::poster::{PosterCut, PosterFrames};
 use crate::activities::curation::rerun::ConfirmedRerun;
 use crate::activities::curation::review::{
-    Counted, NodeBar, NodeReach, RowStanding, SubtaskEntry, SubtaskEvidence, SubtaskIntervals,
-    SubtaskReview, TabStop,
+    Counted, FailedEpisodes, NodeBar, NodeNotes, NodeReach, RowStanding, SubtaskEntry,
+    SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
-use crate::activities::curation::state::{CurationController, EpisodeFocus};
+use crate::activities::curation::state::{CurationController, EpisodeFocus, RunState};
 use crate::activities::episode::Episode;
 use crate::client::completions::{ModelClient, ModelRequest};
-use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use spiral_robotics_common::providers::ProviderMessage;
 use spiral_robotics_ui::{
-    ActionPurpose, Arrangement, Button, ButtonVariant, Disclosure, EmptyState, Field, FieldLayout,
-    Flight, Motion, Notice, NoticeTone, Place, Select, TextInput,
+    ActionPurpose, Button, ButtonVariant, Disclosure, EmptyState, Field, FieldLayout, Flight,
+    Motion, Notice, NoticeTone, Place, Select, TextInput,
 };
 
 /// How many members a category card names before it is opened.
@@ -55,18 +53,49 @@ const DEALT_TONES: [usize; CATEGORY_HUES] = [2, 4, 3, 5, 6, 1];
 const CATEGORY_ROLE: &str = "You name the categories of manipulation subtasks in a robot \
                              dataset. You answer with JSON and nothing else.";
 
-/// One grouping run over one annotation's rows.
-struct GroupingPass {
-    node: String,
-    annotation: String,
-    rows: Vec<SubtaskRow>,
-    /// The model the parent annotation used; grouping asks the same one.
-    annotation_model: String,
+/// One Group similar subtasks node, read and configured through the
+/// controller.
+#[derive(Clone, PartialEq)]
+struct GroupingNode {
+    id: String,
+    controller: CurationController,
 }
-impl GroupingPass {
-    /// The LLM pass: 4 to 8 categories over the deduped descriptions.
-    async fn propose(&self) -> Result<Vec<SubtaskCategory>, String> {
-        let counts = DescriptionCounts::of(&self.descriptions());
+
+impl GroupingNode {
+    /// The categories the node groups by; none before any are proposed.
+    fn categories(&self) -> Vec<SubtaskCategory> {
+        self.controller.with_payload(|payload| {
+            match payload.node(&self.id).map(CurationNode::kind) {
+                Some(CurationNodeKind::GroupSimilarSubtasks(grouping)) => {
+                    grouping.categories().to_vec()
+                }
+                _ => Vec::new(),
+            }
+        })
+    }
+    /// The model the annotation above used; proposing asks the same one.
+    fn proposal_model(&self, source: &SubtaskSource) -> String {
+        self.controller.with_payload(|payload| {
+            match source
+                .annotation()
+                .and_then(|annotation| payload.node(annotation))
+                .map(CurationNode::kind)
+            {
+                Some(CurationNodeKind::BreakDownSubtasks(annotation)) => {
+                    annotation.model().to_owned()
+                }
+                _ => DEFAULT_ANNOTATION_MODEL.to_owned(),
+            }
+        })
+    }
+    /// The LLM pass: 4 to 8 categories over the deduped descriptions of the
+    /// subtasks that reach the node.
+    async fn propose(
+        model: String,
+        descriptions: Vec<String>,
+    ) -> Result<Vec<SubtaskCategory>, String> {
+        let borrowed = descriptions.iter().map(String::as_str).collect::<Vec<_>>();
+        let counts = DescriptionCounts::of(&borrowed);
         if counts.is_empty() {
             return Err("These rows have no descriptions to group.".into());
         }
@@ -77,79 +106,39 @@ impl GroupingPass {
             ],
             Vec::new(),
         )
-        .with_model(self.annotation_model.clone());
+        .with_model(model);
         let reply = ModelClient::complete(request, |_| {}).await?;
         let text = reply
             .content()
             .ok_or("The model answered the category prompt without any text.")?;
         Ok(ProposedCategories::parse(text)?.into_categories())
     }
-    /// The jev pass: one Choice per row, batched, and the output to save.
-    async fn assign(
-        &self,
-        categories: Vec<SubtaskCategory>,
-        mut progress: impl FnMut(usize, usize),
-    ) -> Result<SubtaskGrouping, String> {
-        let run =
-            DecisionRun::new(AssignmentQuestions::new(&categories)?.batches(&self.descriptions()));
-        let requests = run.batches();
-        let reader = AssignmentReader::new(&self.rows, &categories);
-        let mut assignments = Vec::with_capacity(self.rows.len());
-        let mut answered = 0;
-        progress(0, requests);
-        run.run(|batch, answers| {
-            assignments.extend(reader.read(batch, &answers));
-            answered += 1;
-            progress(answered, requests);
-        })
-        .await?;
-        SubtaskGrouping::new(
-            self.node.clone(),
-            self.annotation.clone(),
-            categories,
-            assignments,
-        )
-    }
-    fn descriptions(&self) -> Vec<&str> {
-        self.rows.iter().map(SubtaskRow::description).collect()
-    }
-}
-
-/// What a grouping run is doing, or why it stopped.
-#[derive(Clone, PartialEq)]
-enum GroupingStage {
-    Proposing,
-    Assigning { answered: usize, requests: usize },
-    Failed(String),
-}
-impl GroupingStage {
-    fn busy(&self) -> bool {
-        !matches!(self, Self::Failed(_))
-    }
-    fn label(&self) -> Option<String> {
-        match self {
-            Self::Proposing => Some("Reading the subtask descriptions…".to_owned()),
-            Self::Assigning { answered, requests } => Some(format!(
-                "Putting rows in categories · {answered} of {requests} batches answered"
-            )),
-            Self::Failed(_) => None,
-        }
-    }
-    fn problem(&self) -> Option<&str> {
-        match self {
-            Self::Failed(problem) => Some(problem),
-            Self::Proposing | Self::Assigning { .. } => None,
-        }
-    }
-    /// The line the node's card and the top bar carry while the grouping runs.
-    fn activity(&self) -> Option<String> {
-        match self {
-            Self::Proposing => Some("Proposing categories".to_owned()),
-            Self::Assigning { answered, requests } => {
-                Some(format!("Grouping · {answered} of {requests} batches"))
+    /// Group by `categories`, then run the node's step on every episode that
+    /// reaches it: a new list has classified nothing yet.
+    fn group_by(&self, categories: Vec<SubtaskCategory>) -> Result<(), String> {
+        let id = self.id.clone();
+        self.controller.edit(|payload| {
+            match payload.node_mut(&id).map(CurationNode::kind_mut) {
+                Some(CurationNodeKind::GroupSimilarSubtasks(grouping)) => {
+                    grouping.set_categories(categories)
+                }
+                _ => Err("This node no longer groups subtasks.".into()),
             }
-            Self::Failed(_) => None,
+        })?;
+        self.run()
+    }
+    /// Classify the subtasks of every episode that reaches the node and has
+    /// not been grouped from them, or whose grouping failed.
+    fn run(&self) -> Result<(), String> {
+        let Some(progress) = self.controller.progress(&self.id) else {
+            return Ok(());
+        };
+        let mut episodes = progress.pending();
+        episodes.extend(progress.failed().iter().map(|(episode, _)| episode.clone()));
+        if episodes.is_empty() {
+            return Ok(());
         }
+        self.controller.run_preview(&self.id, &episodes)
     }
 }
 
@@ -160,22 +149,18 @@ impl GroupingStage {
 pub(in crate::activities::curation) struct CategoryHues(Vec<String>);
 
 impl CategoryHues {
-    fn of(grouping: &SubtaskGrouping, source: &SubtaskSource) -> Self {
-        Self::of_rows(grouping, source.rows())
-    }
-    /// The hues of a grouping's categories, ranked by how many of `rows` each
-    /// holds, so a Select after the grouping wears the grouping's colours.
+    /// The hues of `categories`, ranked by how many of `rows` joined each, so
+    /// a Select after the grouping wears the grouping's colours.
     pub(in crate::activities::curation) fn of_rows(
-        grouping: &SubtaskGrouping,
+        categories: &[SubtaskCategory],
         rows: &[SubtaskRow],
     ) -> Self {
-        let mut sized = grouping
-            .categories()
+        let mut sized = categories
             .iter()
             .map(|category| {
                 let members = rows
                     .iter()
-                    .filter(|row| grouping.category_of(row) == Some(category.name()))
+                    .filter(|row| row.category() == Some(category.name()))
                     .count();
                 (category.name().to_owned(), members)
             })
@@ -204,55 +189,17 @@ impl CategoryHues {
     }
 }
 
-/// Below this confidence jev was torn between categories, and the row says so:
-/// its flight bends toward the runner-up and its segment keeps a hatched edge.
-const HESITANT_BELOW: f64 = 0.9;
-
-/// One row leaving the map for its category.
-#[derive(Clone, Debug, PartialEq)]
-struct PourToken {
-    row: usize,
-    category: String,
-    /// The runner-up a hesitant row bends toward on the way.
-    detour: Option<String>,
-}
-
-/// The rows a landed grouping sends flying: every row of a first grouping, and
-/// only the rows whose category changed when an existing one was reassigned —
-/// the motion is the difference the run made.
+/// The rows a finished grouping sends flying, each from its segment of the
+/// map to its category's place in the band: the motion is the run landing.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct PourPlan(Vec<PourToken>);
+struct PourPlan(Vec<(usize, String)>);
 
 impl PourPlan {
-    fn of(
-        before: Option<&SubtaskGrouping>,
-        after: &SubtaskGrouping,
-        source: &SubtaskSource,
-    ) -> Self {
-        let earlier = before.map(|before| source.assignments(before));
+    fn of(rows: &[SubtaskRow]) -> Self {
         Self(
-            source
-                .assignments(after)
-                .into_iter()
+            rows.iter()
                 .enumerate()
-                .filter_map(|(row, assignment)| {
-                    let assignment = assignment?;
-                    let unchanged = earlier
-                        .as_ref()
-                        .and_then(|earlier| earlier[row])
-                        .is_some_and(|earlier| earlier.category() == assignment.category());
-                    (!unchanged).then(|| PourToken {
-                        row,
-                        category: assignment.category().to_owned(),
-                        detour: (assignment.confidence() < HESITANT_BELOW)
-                            .then(|| {
-                                assignment
-                                    .runner_up()
-                                    .map(|runner| runner.category().to_owned())
-                            })
-                            .flatten(),
-                    })
-                })
+                .filter_map(|(row, subtask)| Some((row, subtask.category()?.to_owned())))
                 .collect(),
         )
     }
@@ -262,39 +209,25 @@ impl PourPlan {
             return;
         };
         let find = |selector: String| workspace.query_selector(&selector).ok().flatten();
-        let bin = |category: &str| {
-            hues.rank(category)
-                .and_then(|rank| find(format!("[data-bin=\"{rank}\"]")))
-                .map(|bin| Place::of(&bin).center())
-        };
-        for token in &self.0 {
+        for (row, category) in &self.0 {
             let (Some(segment), Some(to)) = (
-                find(format!(".curation-map-segment[data-row=\"{}\"]", token.row)),
-                bin(&token.category),
+                find(format!(".curation-map-segment[data-row=\"{row}\"]")),
+                hues.rank(category)
+                    .and_then(|rank| find(format!("[data-bin=\"{rank}\"]")))
+                    .map(|bin| Place::of(&bin).center()),
             ) else {
                 continue;
             };
             let from = Place::of(&segment).center();
-            let middle = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
-            // A sure row arcs straight up into its bin; a torn one is pulled
-            // most of the way toward the bin it nearly joined first.
-            let via = match token.detour.as_deref().and_then(bin) {
-                Some(detour) => (
-                    middle.0 + 0.8 * (detour.0 - middle.0),
-                    middle.1 + 0.8 * (detour.1 - middle.1),
-                ),
-                None => (middle.0, from.1.min(to.1) - 48.0),
-            };
+            // Each row arcs up into its bin.
+            let via = ((from.0 + to.0) / 2.0, from.1.min(to.1) - 48.0);
             let delay = segment
                 .get_attribute("data-delay")
                 .and_then(|delay| delay.parse::<f64>().ok())
                 .unwrap_or_default();
             Flight::arc(from, via, to)
                 .after(delay)
-                .token(
-                    "curation-flight-token",
-                    &hues.tint_of(Some(&token.category)),
-                )
+                .token("curation-flight-token", &hues.tint_of(Some(category)))
                 .launch(&layer);
         }
     }
@@ -320,6 +253,52 @@ struct CategorySummary {
 }
 
 impl CategorySummary {
+    /// Every category's card, biggest first, over the rows the node judged.
+    fn all(
+        categories: &[SubtaskCategory],
+        rows: &[SubtaskRow],
+        source: &SubtaskSource,
+    ) -> Vec<Self> {
+        let hues = CategoryHues::of_rows(categories, rows);
+        let mut cards = categories
+            .iter()
+            .map(|category| {
+                let mut members = rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row, subtask)| {
+                        let placed = subtask.placement()?;
+                        (placed.category() == category.name()).then(|| (row, placed.probability()))
+                    })
+                    .collect::<Vec<_>>();
+                members.sort_by(|left, right| right.1.total_cmp(&left.1));
+                Self {
+                    category: category.clone(),
+                    share: if rows.is_empty() {
+                        0.0
+                    } else {
+                        members.len() as f64 / rows.len() as f64
+                    },
+                    rank: hues.rank(category.name()).unwrap_or_default(),
+                    coverage: EpisodeCoverage::of(
+                        &source.measured(),
+                        members
+                            .iter()
+                            .map(|(row, probability)| (rows[*row].episode(), *probability)),
+                        CoverageMeasure::Members,
+                    ),
+                    representatives: members
+                        .iter()
+                        .take(REPRESENTATIVES)
+                        .map(|(row, _)| rows[*row].description().to_owned())
+                        .collect(),
+                    members,
+                }
+            })
+            .collect::<Vec<_>>();
+        cards.sort_by_key(|card| card.rank);
+        cards
+    }
     /// Both counts a category is: how many rows joined it, and how much of the
     /// dataset they came from.
     fn counted(&self) -> String {
@@ -350,174 +329,166 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     controller: CurationController,
     node: String,
 ) -> Element {
-    let studio = StudioProjectState::current();
-    let source = use_memo(use_reactive((&node,), move |(node,)| {
-        SubtaskSource::of(controller, &node)
-    }));
-    let saved = use_memo(use_reactive((&node,), move |(node,)| {
-        controller.with_payload(|payload| payload.grouping_for(&node).cloned())
-    }));
+    let grouping = GroupingNode {
+        id: node.clone(),
+        controller,
+    };
+    let source = SubtaskSource::of(controller, &node);
+    let categories = grouping.categories();
     let spans = controller.sample().as_ref().map(EpisodeSpans::of);
-    let mut stage = use_signal(|| Option::<GroupingStage>::None);
-    // The categories the model proposed, shown as empty bins while jev fills
-    // them.
-    let mut pending = use_signal(|| Option::<Vec<SubtaskCategory>>::None);
+    // The categories are being proposed, or why proposing or running failed.
+    let mut proposing = use_signal(|| false);
+    let mut problem = use_signal(|| Option::<String>::None);
     let mut opened = use_signal(|| Option::<CategoryEdit>::None);
+    let run = controller.run_state(&node);
+    let running = run != RunState::Idle;
+    let busy = proposing() || running;
     // The members a click opens, one tab per episode; the row chosen is the
     // one playing in the tab in front.
     let tabs = OpenEpisodes::use_open();
-    let open_row = move |row: usize| {
-        if let Some(row) = source.peek().rows().get(row) {
-            tabs.open(row.episode(), Some((row.start_time(), row.end_time())));
+    let rows = source.judged().to_vec();
+    let open_row = {
+        let rows = rows.clone();
+        move |row: usize| {
+            if let Some(row) = rows.get(row) {
+                tabs.open(row.episode(), Some((row.start_time(), row.end_time())));
+            }
         }
     };
     let mut reveal = use_signal(|| MapReveal::Still);
     let mut generation = use_signal(|| 0_u32);
     let mut workspace = use_signal(|| None::<web_sys::Element>);
+    let cards = CategorySummary::all(&categories, &rows, &source);
+    let hues = CategoryHues::of_rows(&categories, &rows);
+
     // A grouping with nothing open is a band of cards over an empty half-pane,
     // which says nothing about the rows it just sorted. Arriving on one — a new
-    // node, or a run that just finished — opens its biggest category on its
-    // most typical member. Closing it afterwards stays closed. The rows come
-    // with the episode sample, so a node opened before it arrives waits for
-    // them rather than opening a category of nothing.
-    let row_count = source.read().rows().len();
-    use_effect(use_reactive(
-        (&saved(), &row_count),
-        move |(grouping, rows)| {
-            if rows == 0 {
-                return;
-            }
-            let biggest = grouping.as_ref().and_then(|grouping| {
-                let reading = source.peek();
-                let hues = CategoryHues::of(grouping, &reading);
-                let name = hues.0.first()?.clone();
-                let category = grouping
-                    .categories()
-                    .iter()
-                    .find(|category| category.name() == name)?;
-                Some((category.clone(), reading.listed(&grouping.members(&name))))
-            });
-            match biggest {
-                Some((category, members)) => {
-                    opened.set(Some(CategoryEdit::of(&category)));
-                    if let Some((row, _)) = members.first() {
-                        open_row(*row);
-                    }
-                }
-                None => opened.set(None),
-            }
-        },
-    ));
-
-    // A grouping runs for a minute or more, so its card and the top bar say
-    // so. Its requests belong to this workspace, so leaving the node ends
-    // them and the line with them.
-    let reported = node.clone();
-    let activity = stage.read().as_ref().and_then(GroupingStage::activity);
-    use_effect(use_reactive((&activity,), move |(activity,)| {
-        controller.report_activity(&reported, activity);
+    // node, a new list, or the first rows landing — opens its biggest category
+    // on its most typical member. Closing it afterwards stays closed.
+    let biggest = cards
+        .first()
+        .filter(|card| !card.members.is_empty())
+        .map(|card| (card.category.clone(), card.most_typical()));
+    let landed = !rows.is_empty();
+    let opening = open_row.clone();
+    use_effect(use_reactive((&categories, &landed), move |(_, landed)| {
+        let Some((category, typical)) = biggest.clone().filter(|_| landed) else {
+            opened.set(None);
+            return;
+        };
+        opened.set(Some(CategoryEdit::of(&category)));
+        if let Some(row) = typical {
+            opening(row);
+        }
     }));
-    let dropped = node.clone();
-    use_drop(move || controller.report_activity(&dropped, None));
-    let grouped_node = node.clone();
-    let group = use_callback(move |categories: Option<Vec<SubtaskCategory>>| {
-        if stage.peek().as_ref().is_some_and(GroupingStage::busy) {
+    // A run that finishes while the grouping is on screen pours its rows from
+    // the map into their categories.
+    let mut was_running = use_signal(|| false);
+    let poured = node.clone();
+    use_effect(use_reactive((&running,), move |(running,)| {
+        let finished = *was_running.peek() && !running;
+        was_running.set(running);
+        if !finished {
             return;
         }
-        let annotation = source.peek().annotation().map(str::to_owned);
-        let Some(annotation) = annotation else {
-            stage.set(Some(GroupingStage::Failed(
-                "This grouping is not connected to a Break down subtasks node.".to_owned(),
-            )));
-            return;
-        };
-        let rows = source.peek().rows().to_vec();
-        if rows.is_empty() {
-            stage.set(Some(GroupingStage::Failed(
-                "Run Break down subtasks first; grouping reads the rows it saved.".to_owned(),
-            )));
-            return;
-        }
-        let pass = GroupingPass {
-            node: grouped_node.clone(),
-            annotation_model: controller.with_payload(|payload| {
-                match payload.node(&annotation).map(|node| node.kind()) {
-                    Some(CurationNodeKind::BreakDownSubtasks(annotation)) => {
-                        annotation.model().to_owned()
-                    }
-                    _ => DEFAULT_ANNOTATION_MODEL.to_owned(),
-                }
-            }),
-            annotation,
-            rows,
-        };
-        stage.set(Some(match categories {
-            Some(_) => GroupingStage::Assigning {
-                answered: 0,
-                requests: 0,
-            },
-            None => GroupingStage::Proposing,
-        }));
-        reveal.set(MapReveal::Reading);
+        reveal.set(MapReveal::Pour);
+        generation += 1;
+        let poured = poured.clone();
         spawn(async move {
-            let categories = match categories {
-                Some(categories) => categories,
-                None => match pass.propose().await {
-                    Ok(categories) => categories,
-                    Err(problem) => {
-                        reveal.set(MapReveal::Still);
-                        stage.set(Some(GroupingStage::Failed(problem)));
-                        return;
-                    }
-                },
-            };
-            pending.set(Some(categories.clone()));
-            let assigned = pass
-                .assign(categories, |answered, requests| {
-                    stage.set(Some(GroupingStage::Assigning { answered, requests }));
-                })
-                .await;
-            // Where the bins stand before they re-sort, and what each row
-            // belonged to before this run, so the landing can show both
-            // changing.
-            let band = workspace.peek().as_ref().and_then(|workspace| {
-                workspace
-                    .query_selector(".curation-similar-band")
-                    .ok()
-                    .flatten()
-            });
-            let arranged = band.as_ref().map(Arrangement::measure);
-            let before = saved.peek().clone();
-            match assigned.and_then(|grouping| {
-                controller.edit(|payload| payload.set_grouping(grouping.clone()))?;
-                Ok(grouping)
-            }) {
-                Ok(grouping) => {
-                    controller.save(studio);
-                    stage.set(None);
-                    pending.set(None);
-                    reveal.set(MapReveal::Pour);
-                    generation += 1;
-                    let plan = PourPlan::of(before.as_ref(), &grouping, &source.peek());
-                    Motion::after_render().await;
-                    if let (Some(band), Some(arranged)) = (band, arranged) {
-                        arranged.settle(&band, 40.0);
-                    }
-                    if let Some(workspace) = workspace.peek().as_ref() {
-                        plan.launch(workspace, &CategoryHues::of(&grouping, &source.peek()));
-                    }
-                }
-                Err(problem) => {
-                    reveal.set(MapReveal::Still);
-                    pending.set(None);
-                    stage.set(Some(GroupingStage::Failed(problem)));
-                }
+            Motion::after_render().await;
+            let source = SubtaskSource::of(controller, &poured);
+            let rows = source.judged();
+            let categories = GroupingNode {
+                id: poured.clone(),
+                controller,
+            }
+            .categories();
+            if let Some(workspace) = workspace.peek().as_ref() {
+                PourPlan::of(rows).launch(workspace, &CategoryHues::of_rows(&categories, rows));
             }
         });
+    }));
+    // Proposing takes a few seconds, so the card and the top bar say so; a
+    // run says what it is doing itself. Proposing belongs to this workspace,
+    // so leaving the node ends it and the line with it.
+    let reported = node.clone();
+    use_effect(use_reactive((&proposing(),), move |(proposing,)| {
+        if proposing {
+            controller.report_activity(&reported, Some("Proposing categories".to_owned()));
+        } else if controller.run_state(&reported) == RunState::Idle {
+            controller.report_activity(&reported, None);
+        }
+    }));
+    // Grouping costs one judgment of each subtask, so categories the node has
+    // not grouped the subtasks that reach it now by are grouped at once: on
+    // opening a grouping whose answer is gone or out of date. A grouping
+    // whose last run failed waits for Run.
+    let regroup = grouping.clone();
+    use_effect(move || {
+        let Some(progress) = controller.progress(&regroup.id) else {
+            return;
+        };
+        if !regroup.categories().is_empty()
+            && !progress.pending().is_empty()
+            && progress.failed().is_empty()
+            && !*proposing.peek()
+            && controller.run_state(&regroup.id) == RunState::Idle
+        {
+            problem.set(regroup.run().err());
+        }
+    });
+    let dropped = node.clone();
+    use_drop(move || {
+        if controller.run_state(&dropped) == RunState::Idle {
+            controller.report_activity(&dropped, None);
+        }
     });
 
-    let reading = source.read();
-    if reading.annotation().is_none() {
+    // Propose categories from the subtasks that reach the node, or take the
+    // edited ones, then classify every episode by them.
+    let group = {
+        let grouping = grouping.clone();
+        let source = source.clone();
+        use_callback(move |edited: Option<Vec<SubtaskCategory>>| {
+            if *proposing.peek() || controller.run_state(&grouping.id) != RunState::Idle {
+                return;
+            }
+            problem.set(None);
+            let grouping = grouping.clone();
+            match edited {
+                Some(categories) => problem.set(grouping.group_by(categories).err()),
+                None => {
+                    let descriptions = source
+                        .reaching()
+                        .iter()
+                        .map(|row| row.description().to_owned())
+                        .collect::<Vec<_>>();
+                    if descriptions.is_empty() {
+                        problem.set(Some(
+                            "Run Break down subtasks first; grouping reads the subtasks its preview read."
+                                .to_owned(),
+                        ));
+                        return;
+                    }
+                    let model = grouping.proposal_model(&source);
+                    proposing.set(true);
+                    reveal.set(MapReveal::Reading);
+                    spawn(async move {
+                        let proposed = GroupingNode::propose(model, descriptions).await;
+                        proposing.set(false);
+                        reveal.set(MapReveal::Still);
+                        problem.set(
+                            proposed
+                                .and_then(|categories| grouping.group_by(categories))
+                                .err(),
+                        );
+                    });
+                }
+            }
+        })
+    };
+
+    let Some(annotation) = source.annotation().map(str::to_owned) else {
         return rsx! {
             section { class: "curation-similar-workspace",
                 Notice { tone: NoticeTone::Danger,
@@ -525,64 +496,22 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                 }
             }
         };
-    }
-    let rows = reading.rows().to_vec();
-    let context = reading.context();
-    let measured = reading.measured();
-    let annotation = reading.annotation().unwrap_or_default().to_owned();
-    let grouping = saved.read().clone();
-    let hues = grouping
-        .as_ref()
-        .map(|grouping| CategoryHues::of(grouping, &reading))
-        .unwrap_or_default();
-    let placed = grouping
-        .as_ref()
-        .map(|grouping| {
-            reading
-                .assignments(grouping)
-                .into_iter()
-                .map(|assignment| assignment.cloned())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| vec![None; rows.len()]);
+    };
+    let reaching = source.reaching().len();
+    let context = source.context();
+    let measured = source.measured();
+    let failed = source.progress().failed().len();
+    let reason = source
+        .progress()
+        .failed()
+        .first()
+        .map(|(_, reason)| reason.clone());
+    let stale = source
+        .progress()
+        .is_stale()
+        .then(|| "Out of date: the subtasks that reach this node changed since it ran".to_owned());
+    let pending = source.progress().pending().len();
     let open = opened.read().clone();
-    let cards = grouping
-        .as_ref()
-        .map(|grouping| {
-            let mut cards = grouping
-                .categories()
-                .iter()
-                .map(|category| {
-                    let members = reading.listed(&grouping.members(category.name()));
-                    CategorySummary {
-                        category: category.clone(),
-                        share: if rows.is_empty() {
-                            0.0
-                        } else {
-                            members.len() as f64 / rows.len() as f64
-                        },
-                        rank: hues.rank(category.name()).unwrap_or_default(),
-                        coverage: EpisodeCoverage::of(
-                            &measured,
-                            members
-                                .iter()
-                                .map(|(row, probability)| (rows[*row].episode(), *probability)),
-                            CoverageMeasure::Members,
-                        ),
-                        representatives: members
-                            .iter()
-                            .take(REPRESENTATIVES)
-                            .map(|(row, _)| rows[*row].description().to_owned())
-                            .collect(),
-                        members,
-                    }
-                })
-                .collect::<Vec<_>>();
-            cards.sort_by_key(|card| card.rank);
-            cards
-        })
-        .unwrap_or_default();
-    drop(reading);
     let open_card = open
         .as_ref()
         .and_then(|edit| {
@@ -595,41 +524,24 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         .as_ref()
         .map(|card| card.category.name().to_owned());
     let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
-    let busy = stage.read().as_ref().is_some_and(GroupingStage::busy);
-    let running = stage.read().as_ref().and_then(GroupingStage::label);
-    let problem = stage
-        .read()
-        .as_ref()
-        .and_then(GroupingStage::problem)
-        .map(str::to_owned);
-    let categories = cards
-        .iter()
-        .map(|card| card.category.clone())
-        .collect::<Vec<_>>();
     let chosen = tabs.front().and_then(|tab| {
         rows.iter()
             .position(|row| tab.holds(row.episode(), row.start_time()))
     });
-    let waiting = pending.read().clone();
-    // An open category needs the height for its members and their footage, and
-    // bins waiting to be filled have nothing to say but their names, so both
-    // step the band back to one row of chips.
-    let collapsed = open_card.is_some() || waiting.is_some();
+    // An open category needs the height for its members and their footage,
+    // so the band steps back to one row of chips.
+    let collapsed = open_card.is_some();
     let slices = rows.iter().map(Slice::of_subtask).collect::<Vec<_>>();
     let lanes = spans
         .as_ref()
         .map(|spans| EpisodeLanes::of(measured.episodes(), &slices, spans))
         .unwrap_or_default();
     let paint = MapPaint::new(
-        placed
-            .iter()
-            .map(|assignment| match assignment {
-                Some(assignment) => SegmentPaint::Category {
-                    hue: hues.hue(assignment.category()).unwrap_or_default(),
-                    hesitant: assignment.confidence() < HESITANT_BELOW,
-                    faded: open_name
-                        .as_deref()
-                        .is_some_and(|open| open != assignment.category()),
+        rows.iter()
+            .map(|row| match row.category() {
+                Some(category) => SegmentPaint::Category {
+                    hue: hues.hue(category).unwrap_or_default(),
+                    faded: open_name.as_deref().is_some_and(|open| open != category),
                 },
                 None => SegmentPaint::Unasked,
             })
@@ -647,25 +559,34 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             Counted::episodes(measured.len())
         ),
     };
+    let status = if proposing() {
+        Some("Reading the subtask descriptions…".to_owned())
+    } else {
+        running
+            .then(|| controller.activity().get(&node).cloned())
+            .flatten()
+    };
     let profile = open_name.as_deref().map(|name| {
-        let joined = placed
-            .iter()
-            .map(|assignment| assignment.as_ref().map(SubtaskAssignment::category))
-            .collect::<Vec<_>>();
+        let joined = rows.iter().map(SubtaskRow::category).collect::<Vec<_>>();
         CategoryProfile::of(name, &rows, &joined, &spans.clone().unwrap_or_default())
     });
     // Choosing a segment of another category opens that category, so the row
     // is always one of the members listed beside it.
     let jump = {
-        let placed = placed.clone();
+        let rows = rows.clone();
         let cards = cards.clone();
+        let open_row = open_row.clone();
         move |row: usize| {
-            let Some(card) = placed.get(row).cloned().flatten().and_then(|assignment| {
-                cards
-                    .iter()
-                    .find(|card| card.category.name() == assignment.category())
-                    .cloned()
-            }) else {
+            let Some(card) = rows
+                .get(row)
+                .and_then(SubtaskRow::category)
+                .and_then(|category| {
+                    cards
+                        .iter()
+                        .find(|card| card.category.name() == category)
+                        .cloned()
+                })
+            else {
                 return;
             };
             let place = card.members.iter().position(|(member, _)| *member == row);
@@ -711,31 +632,57 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                 }
             },
             div { class: "curation-flights", "aria-hidden": "true" }
-            if !cards.is_empty() || waiting.is_some() {
+            if !cards.is_empty() {
                 // What the grouping reads — the annotation's words, not its
-                // pictures — or how far a run has got, and Regenerate. The
-                // categories are the chips below and their count is on the card.
+                // pictures — or how far a run has got, and the ways to run it.
+                // The categories are the chips below and their count is on
+                // the card.
                 NodeBar {
                     lead: rsx! {
                         p { class: "curation-node-bar-reads", role: "status",
-                            match running.clone() {
-                                Some(running) => rsx! { "{running}" },
-                                None => rsx! { "Groups the words of {Counted::subtasks(rows.len())} by what the robot does" },
+                            match status.clone() {
+                                Some(status) => rsx! { "{status}" },
+                                None => rsx! { "Groups the words of {Counted::subtasks(reaching)} by what the robot does" },
                             }
                         }
                     },
+                    note: NodeNotes::join([stale, FailedEpisodes::note(failed)]),
                     reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                     actions: rsx! {
-                        ConfirmedRerun {
-                            id: "curation-similar-regenerate".to_owned(),
-                            label: "Regenerate".to_owned(),
-                            disabled: busy,
-                            question: format!(
-                                "Propose categories again? This replaces the {} categories and all {} assignments below.",
-                                cards.len(),
-                                rows.len(),
-                            ),
-                            on_confirm: move |()| group.call(None),
+                        if running {
+                            Button {
+                                purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
+                                disabled: run == RunState::Stopping,
+                                title: "Group no further episode; the one in flight still lands",
+                                onclick: {
+                                    let node = node.clone();
+                                    move |_| controller.stop_run(&node)
+                                },
+                                if run == RunState::Stopping { "Stopping…" } else { "Stop" }
+                            }
+                        } else {
+                            ConfirmedRerun {
+                                id: "curation-similar-regenerate".to_owned(),
+                                label: "Regenerate".to_owned(),
+                                disabled: busy,
+                                question: format!(
+                                    "Propose categories again? This replaces the {} categories and groups every subtask again.",
+                                    cards.len(),
+                                ),
+                                on_confirm: move |()| group.call(None),
+                            }
+                            if pending + failed > 0 {
+                                Button {
+                                    purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
+                                    disabled: busy,
+                                    title: "Group the subtasks of {Counted::episodes(pending)} by these categories",
+                                    onclick: {
+                                        let grouping = grouping.clone();
+                                        move |_| problem.set(grouping.run().err())
+                                    },
+                                    if pending + failed < measured.len() { "Run {pending + failed} left" } else { "Run" }
+                                }
+                            }
                         }
                     },
                 }
@@ -748,45 +695,34 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                     EpisodeMap { lanes, paint, summary, on_select: jump }
                 }
             }
-            if cards.is_empty() && waiting.is_none() {
+            if cards.is_empty() {
                 EmptyState { title: "No categories yet",
                     p {
-                        "One model pass reads the {rows.len()} saved descriptions and proposes four to eight categories, then every subtask is put in one of them."
+                        "One model pass reads the {reaching} descriptions and proposes four to eight categories, then every subtask is put in one of them."
                     }
                     Button {
                         purpose: ActionPurpose::Start,
                         variant: ButtonVariant::Solid,
-                        disabled: busy || rows.is_empty(),
+                        disabled: busy || reaching == 0,
                         onclick: move |_| group.call(None),
                         if busy { "Generating…" } else { "Generate categories" }
                     }
-                    if let Some(running) = running.clone() {
-                        p { class: "curation-similar-note", role: "status", "{running}" }
+                    if let Some(status) = status.clone() {
+                        p { class: "curation-similar-note", role: "status", "{status}" }
                     }
                 }
             } else {
                 div {
                     class: if collapsed { "curation-similar-band curation-similar-chips" } else { "curation-similar-band curation-similar-categories" },
-                    if let Some(waiting) = waiting.clone() {
-                        for (rank , category) in waiting.into_iter().enumerate() {
-                            span {
-                                key: "{category.name()}",
-                                class: "curation-similar-chip",
-                                "data-pending": "true",
-                                "data-bin": "{rank}",
-                                style: "--order: {rank}",
-                                "data-motion-key": "{category.name()}",
-                                span { class: "curation-similar-chip-name", "{category.name()}" }
-                            }
-                        }
-                    } else {
-                        for summary in cards.clone() {
-                            CategoryCard {
-                                key: "{summary.category.name()}",
-                                summary: summary.clone(),
-                                opened: open.as_ref().map(CategoryEdit::original) == Some(summary.category.name()),
-                                collapsed,
-                                on_open: EventHandler::new(move |()| {
+                    for summary in cards.clone() {
+                        CategoryCard {
+                            key: "{summary.category.name()}",
+                            summary: summary.clone(),
+                            opened: open.as_ref().map(CategoryEdit::original) == Some(summary.category.name()),
+                            collapsed,
+                            on_open: {
+                                let open_row = open_row.clone();
+                                EventHandler::new(move |()| {
                                     let same = opened.peek().as_ref().map(CategoryEdit::original)
                                         == Some(summary.category.name());
                                     opened.set((!same).then(|| CategoryEdit::of(&summary.category)));
@@ -796,14 +732,17 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                     if let Some(row) = (!same).then(|| summary.most_typical()).flatten() {
                                         open_row(row);
                                     }
-                                }),
-                            }
+                                })
+                            },
                         }
                     }
                 }
             }
-            if let Some(problem) = problem {
+            if let Some(problem) = problem() {
                 Notice { tone: NoticeTone::Danger, "{problem}" }
+            }
+            if let Some(reason) = reason {
+                Notice { tone: NoticeTone::Danger, "An episode failed: {reason}" }
             }
             if let (Some(edit), Some(profile)) = (open, profile) {
                 SubtaskReview {
@@ -817,7 +756,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                 Disclosure { summary: rsx! { "Rename or merge" },
                                     CategoryDetail {
                                         edit: edit.clone(),
-                                        categories,
+                                        categories: categories.clone(),
                                         busy,
                                         on_apply: EventHandler::new(move |edited: Vec<SubtaskCategory>| {
                                             group.call(Some(edited));
@@ -837,7 +776,10 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                             .roving(TabStop::at(position, chosen_place)),
                                         episode: Episode::listed_name_of(rows[row].episode()),
                                         frames,
-                                        on_select: move |()| open_row(row),
+                                        on_select: {
+                                            let open_row = open_row.clone();
+                                            move |()| open_row(row)
+                                        },
                                         on_find_similar: {
                                             let find = find.clone();
                                             let asked = rows[row].clone();
@@ -860,7 +802,10 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                     profile,
                                     hues: hues.clone(),
                                     chosen,
-                                    on_select: move |row: usize| open_row(row),
+                                    on_select: {
+                                        let open_row = open_row.clone();
+                                        move |row: usize| open_row(row)
+                                    },
                                 }
                             }),
                             render: move |tab: OpenEpisode| {
@@ -878,7 +823,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                         // as the map above paints it.
                                         intervals: SubtaskIntervals::painted(
                                             &SubtaskIntervals::episode_of(&row, &rows),
-                                            |other| hues.tint_of(grouping.as_ref().and_then(|grouping| grouping.category_of(other))),
+                                            |other| hues.tint_of(other.category()),
                                         )
                                         .choosing(Some(&row)),
                                         context: context.clone(),
@@ -980,7 +925,7 @@ fn CategoryCard(
 }
 
 /// The open category's name, definition, and the merge that removes it.
-/// Both actions rerun only the jev assignment.
+/// Both actions run only the classification again.
 #[component]
 fn CategoryDetail(
     edit: CategoryEdit,
@@ -1032,7 +977,7 @@ fn CategoryDetail(
                 variant: ButtonVariant::Outline,
                 disabled: busy,
                 onclick: move |_| apply.call(CategoryEdits::new(&renaming).renamed(&draft.read())),
-                "Apply and reassign"
+                "Apply and regroup"
             }
             if !others.is_empty() {
                 Field { label: "Merge into", layout: FieldLayout::Stacked,
@@ -1050,7 +995,7 @@ fn CategoryDetail(
                     label: "Merge".to_owned(),
                     disabled: busy || chosen.is_empty(),
                     question: format!(
-                        "Merge “{}” into “{chosen}”? Its members are reassigned and the category is gone.",
+                        "Merge “{}” into “{chosen}”? Every subtask is grouped again and the category is gone.",
                         edit.original(),
                     ),
                     on_confirm: move |()| {

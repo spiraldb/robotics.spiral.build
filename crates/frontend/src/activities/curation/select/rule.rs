@@ -62,7 +62,7 @@ pub(super) fn SelectRule(
                 }
                 (Selection::Progressing { .. }, Some(threshold)) => rsx! { ProgressRule { threshold } },
                 (Selection::Categories { names }, _) => {
-                    let categories = CategoryChoice::of(controller, &view);
+                    let categories = CategoryChoice::of(&view);
                     rsx! { CategoryRule { node, names, categories } }
                 }
                 // A numeric rule's axis waits for the values it judges.
@@ -153,30 +153,27 @@ struct CategoryChoice {
 impl CategoryChoice {
     /// The categories of the grouping above, biggest first, as the grouping
     /// itself lists them.
-    fn of(controller: CurationController, view: &SelectView) -> Vec<Self> {
-        let Population::Subtasks { rows, .. } = &view.input else {
+    fn of(view: &SelectView) -> Vec<Self> {
+        let (Population::Subtasks(rows), CurationNodeKind::GroupSimilarSubtasks(grouping)) =
+            (&view.input, view.measure.kind())
+        else {
             return Vec::new();
         };
-        controller.with_payload(|payload| {
-            let Some(grouping) = payload.grouping_for(view.measure.id()) else {
-                return Vec::new();
-            };
-            let hues = CategoryHues::of_rows(grouping, rows);
-            let mut choices = grouping
-                .categories()
-                .iter()
-                .map(|category| Self {
-                    name: category.name().to_owned(),
-                    members: rows
-                        .iter()
-                        .filter(|row| grouping.category_of(row) == Some(category.name()))
-                        .count(),
-                    tint: hues.tint_of(Some(category.name())),
-                })
-                .collect::<Vec<_>>();
-            choices.sort_by_key(|choice| std::cmp::Reverse(choice.members));
-            choices
-        })
+        let hues = CategoryHues::of_rows(grouping.categories(), rows);
+        let mut choices = grouping
+            .categories()
+            .iter()
+            .map(|category| Self {
+                name: category.name().to_owned(),
+                members: rows
+                    .iter()
+                    .filter(|row| row.category() == Some(category.name()))
+                    .count(),
+                tint: hues.tint_of(Some(category.name())),
+            })
+            .collect::<Vec<_>>();
+        choices.sort_by_key(|choice| std::cmp::Reverse(choice.members));
+        choices
     }
 }
 

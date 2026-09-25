@@ -3,11 +3,12 @@
 //! A curation is shaped against an interpretive sample — the first hundred
 //! episodes its dataset lists — so every node answers while the graph is
 //! still being built. The dataset hands on those episodes whole; a
-//! measurement hands on what it measured over what it received — a compiled
-//! one, what its preview read; a Select hands on the part its rule keeps. Any
-//! population reads out as slices, one part of one episode each, which is what
-//! a published view holds one row per.
-use super::document::{CurationGraph, CurationNode, CurationNodeKind, Selection, SubtaskRow};
+//! measurement hands on what its preview read over the episodes it received,
+//! already cut to what reached it; a Select hands on the part its rule keeps.
+//! Any population reads out as slices, one part of one episode each, which is
+//! what a published view holds one row per.
+use super::annotate::SubtaskRow;
+use super::document::{CurationGraph, CurationNodeKind, Selection};
 use super::moments::Moment;
 use super::preview::PreviewReads;
 use crate::activities::episode::Episode;
@@ -55,6 +56,12 @@ impl EpisodeSample {
     pub(super) fn duration(&self, id: &EpisodeId) -> Option<f64> {
         self.episode(id)?.facts().duration_seconds()
     }
+    /// The log time of an episode's first message, which every time the
+    /// browser shows is counted from.
+    pub(super) fn origin_ns(&self, id: &EpisodeId) -> Option<i64> {
+        let start = self.episode(id)?.facts().message_start_time()?;
+        i64::try_from(start).ok()
+    }
     pub(super) fn is_partial(&self) -> bool {
         self.partial
     }
@@ -76,13 +83,9 @@ impl EpisodeSample {
 pub(super) enum Population {
     /// Whole episodes, in sample order.
     Episodes(Vec<EpisodeId>),
-    /// Subtask rows of one annotation, in the order it stored them. When
-    /// moments came before the annotation, `within` holds the productive
-    /// stretches that reached it, and the rows' slices are trimmed to them.
-    Subtasks {
-        rows: Vec<SubtaskRow>,
-        within: Option<Vec<Slice>>,
-    },
+    /// Subtasks, episode by episode in sample order, each episode's in time
+    /// order, with what the node that read them judged.
+    Subtasks(Vec<SubtaskRow>),
     /// Scored moments of one detection, episode by episode in sample order,
     /// each episode's in time order.
     Moments(Vec<Moment>),
@@ -93,7 +96,7 @@ impl Population {
     pub(super) fn episodes(&self) -> Vec<EpisodeId> {
         let mentioned: Vec<&EpisodeId> = match self {
             Self::Episodes(episodes) => episodes.iter().collect(),
-            Self::Subtasks { rows, .. } => rows.iter().map(SubtaskRow::episode).collect(),
+            Self::Subtasks(rows) => rows.iter().map(SubtaskRow::episode).collect(),
             Self::Moments(rows) => rows.iter().map(Moment::episode).collect(),
         };
         let mut episodes = Vec::<EpisodeId>::new();
@@ -107,7 +110,7 @@ impl Population {
     /// The subtask rows this population holds; none unless it holds subtasks.
     pub(super) fn subtasks(&self) -> &[SubtaskRow] {
         match self {
-            Self::Subtasks { rows, .. } => rows,
+            Self::Subtasks(rows) => rows,
             Self::Episodes(_) | Self::Moments(_) => &[],
         }
     }
@@ -115,13 +118,24 @@ impl Population {
     pub(super) fn len(&self) -> usize {
         match self {
             Self::Episodes(episodes) => episodes.len(),
-            Self::Subtasks { rows, .. } => rows.len(),
+            Self::Subtasks(rows) => rows.len(),
             Self::Moments(rows) => rows.len(),
         }
     }
+    /// One slice per thing it holds, as a published relation holds them:
+    /// whole episodes, each subtask, each moment.
+    pub(super) fn items(&self, sample: &EpisodeSample) -> Vec<Slice> {
+        match self {
+            Self::Episodes(episodes) => episodes
+                .iter()
+                .map(|episode| Slice::of_episode(episode, sample))
+                .collect(),
+            Self::Subtasks(rows) => rows.iter().map(Slice::of_subtask).collect(),
+            Self::Moments(rows) => rows.iter().map(Slice::of_moment).collect(),
+        }
+    }
     /// The population as training is given it: each episode's kept parts in
-    /// time order, with moments that touch joined into one stretch, and
-    /// subtasks cut to the productive stretches they were measured within.
+    /// time order, with moments that touch joined into one stretch.
     pub(super) fn slices(&self, sample: &EpisodeSample) -> Vec<Slice> {
         match self {
             Self::Episodes(episodes) => episodes
@@ -129,17 +143,7 @@ impl Population {
                 .map(|episode| Slice::of_episode(episode, sample))
                 .filter(|slice| slice.seconds() > 0.0)
                 .collect(),
-            Self::Subtasks { rows, within } => rows
-                .iter()
-                .map(Slice::of_subtask)
-                .flat_map(|whole| match within {
-                    None => vec![whole],
-                    Some(stretches) => stretches
-                        .iter()
-                        .filter_map(|stretch| whole.overlap(stretch))
-                        .collect(),
-                })
-                .collect(),
+            Self::Subtasks(rows) => rows.iter().map(Slice::of_subtask).collect(),
             Self::Moments(rows) => {
                 let mut slices = Vec::<Slice>::new();
                 for slice in rows.iter().map(Slice::of_moment) {
@@ -221,14 +225,6 @@ impl Slice {
     pub(super) fn extend_to(&mut self, next: &Self) {
         self.end = self.end.max(next.end);
     }
-    /// The part of this slice that `other` also covers, under this slice's
-    /// words; nothing when they share no time.
-    fn overlap(&self, other: &Self) -> Option<Self> {
-        let start = self.start.max(other.start);
-        let end = self.end.min(other.end);
-        (self.episode == other.episode && end > start)
-            .then(|| Self::new(self.episode.clone(), start, end, self.label.clone()))
-    }
 }
 
 /// Reads what each node of one graph hands on over one sample, and what the
@@ -251,6 +247,9 @@ impl<'a> PopulationReader<'a> {
             reads,
         }
     }
+    pub(super) fn graph(&self) -> &CurationGraph {
+        self.graph
+    }
     pub(super) fn sample(&self) -> &EpisodeSample {
         self.sample
     }
@@ -259,10 +258,10 @@ impl<'a> PopulationReader<'a> {
     }
     /// What `node` hands on. A node the graph does not hold hands on nothing.
     pub(super) fn of(&self, node: &str) -> Population {
-        let Some(kind) = self.graph.node(node).map(CurationNode::kind) else {
+        let Some(measured) = self.graph.node(node) else {
             return Population::Episodes(Vec::new());
         };
-        match kind {
+        match measured.kind() {
             CurationNodeKind::Dataset => Population::Episodes(
                 self.sample
                     .episodes()
@@ -270,42 +269,26 @@ impl<'a> PopulationReader<'a> {
                     .map(|episode| episode.id().clone())
                     .collect(),
             ),
-            // An annotation reads whole episodes, so what it stored survives
-            // any change above it. After moments it hands on only the
-            // subtasks that overlap the productive stretches reaching it.
-            CurationNodeKind::BreakDownSubtasks(_) => {
-                let input = self.input(node);
-                let within =
-                    matches!(input, Population::Moments(_)).then(|| input.slices(self.sample));
-                let episodes = input.episodes();
-                let rows = self
-                    .graph
-                    .subtasks_for(node)
-                    .filter(|row| episodes.contains(row.episode()))
-                    .filter(|row| {
-                        within.as_ref().is_none_or(|stretches| {
-                            let whole = Slice::of_subtask(row);
-                            stretches
-                                .iter()
-                                .any(|stretch| whole.overlap(stretch).is_some())
-                        })
-                    })
-                    .cloned()
-                    .collect();
-                Population::Subtasks { rows, within }
-            }
-            // A search scores its input and a grouping places it; both hand
-            // all of it on, for a Select to keep part of.
-            CurationNodeKind::FindSimilarSubtasks(_) | CurationNodeKind::GroupSimilarSubtasks => {
+            // A measurement of subtasks hands on what its own preview read of
+            // the episodes that reach it: Break down's cut to the intervals it
+            // received, a search's or a grouping's with their judgment.
+            CurationNodeKind::BreakDownSubtasks(_)
+            | CurationNodeKind::FindSimilarSubtasks(_)
+            | CurationNodeKind::GroupSimilarSubtasks(_) => Population::Subtasks(
                 self.input(node)
-            }
+                    .episodes()
+                    .iter()
+                    .flat_map(|episode| self.reads.subtasks(measured, episode))
+                    .cloned()
+                    .collect(),
+            ),
             // The preview already cut each episode's moments to what reached
             // the node; an episode it has not read yet holds none.
             CurationNodeKind::IdentifyUnproductiveMoments(_) => Population::Moments(
                 self.input(node)
                     .episodes()
                     .iter()
-                    .flat_map(|episode| self.reads.moments(node, episode))
+                    .flat_map(|episode| self.reads.moments(measured, episode))
                     .cloned()
                     .collect(),
             ),
@@ -331,23 +314,12 @@ impl<'a> PopulationReader<'a> {
                     })
                     .collect(),
             ),
-            Population::Subtasks { rows, within } => {
-                let measure = self.graph.selection_measure(node);
-                let ranking = measure.and_then(|measure| self.graph.current_ranking(measure.id()));
-                let grouping = measure.and_then(|measure| self.graph.grouping_for(measure.id()));
-                Population::Subtasks {
-                    rows: rows
-                        .into_iter()
-                        .filter(|row| {
-                            selection.keeps_subtask(
-                                ranking.and_then(|ranking| ranking.probability(row)),
-                                grouping.and_then(|grouping| grouping.category_of(row)),
-                            )
-                        })
-                        .collect(),
-                    within,
-                }
-            }
+            // Each subtask carries what the measure above judged it to be.
+            Population::Subtasks(rows) => Population::Subtasks(
+                rows.into_iter()
+                    .filter(|row| selection.keeps_subtask(row.similarity(), row.category()))
+                    .collect(),
+            ),
             Population::Moments(rows) => Population::Moments(
                 rows.into_iter()
                     .filter(|row| selection.keeps_moment(row.pace()))
@@ -359,10 +331,12 @@ impl<'a> PopulationReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::annotate::{CategoryPlacement, JudgmentValue};
     use super::super::document::{
-        Comparison, DATASET_NODE_ID, EpisodeFact, MomentDetection, SubtaskAnnotation,
-        SubtaskAssignment, SubtaskCategory, SubtaskGrouping, SubtaskRanking, SubtaskSearch,
+        Comparison, CurationNode, DATASET_NODE_ID, EpisodeFact, MomentDetection, SubtaskAnnotation,
+        SubtaskCategory, SubtaskGrouping, SubtaskSearch,
     };
+    use super::super::preview::{PreviewRows, ReadInput};
     use super::*;
 
     /// A preview that has read nothing.
@@ -370,25 +344,43 @@ mod tests {
         PreviewReads::default()
     }
 
-    /// A preview that read one episode's moments for `node`, one per
-    /// `(start, pace)`, each a second long.
-    fn moments_read(
-        node: &str,
+    fn node(graph: &CurationGraph, id: &str) -> CurationNode {
+        graph.node(id).expect("the node is in the graph").clone()
+    }
+
+    /// Record that `node` read one episode's moments, one per `(start, pace)`,
+    /// each a second long.
+    fn read_moments(
+        reads: &mut PreviewReads,
+        node: &CurationNode,
         episode: &EpisodeId,
         moments: &[(f64, Option<f64>)],
-    ) -> PreviewReads {
-        let mut reads = PreviewReads::default();
+    ) {
         reads.record(
             node,
-            episode,
-            Ok(moments
-                .iter()
-                .map(|(start, pace)| {
-                    Moment::new(episode.clone(), (*start, start + 1.0), *pace).unwrap()
-                })
-                .collect()),
+            (episode, ReadInput::untracked()),
+            Ok(PreviewRows::Moments(
+                moments
+                    .iter()
+                    .map(|(start, pace)| {
+                        Moment::new(episode.clone(), (*start, start + 1.0), *pace).unwrap()
+                    })
+                    .collect(),
+            )),
         );
-        reads
+    }
+
+    /// Record that `node` read these subtasks of their episode.
+    fn read_subtasks(reads: &mut PreviewReads, node: &CurationNode, rows: &[SubtaskRow]) {
+        reads.record(
+            node,
+            (rows[0].episode(), ReadInput::untracked()),
+            Ok(PreviewRows::Subtasks(rows.to_vec())),
+        );
+    }
+
+    fn subtask(episode: u32, (start, end): (f64, f64), description: &str) -> SubtaskRow {
+        SubtaskRow::new(EpisodeId::fixture(episode), (start, end), description).unwrap()
     }
 
     fn sample() -> EpisodeSample {
@@ -443,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn an_annotation_reads_only_the_episodes_that_reach_it() {
+    fn a_breakdown_hands_on_what_it_read_of_the_episodes_that_reach_it() {
         let mut graph = CurationGraph::new(None);
         let long = select(
             &mut graph,
@@ -460,30 +452,35 @@ mod tests {
                 CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
             )
             .unwrap();
+        let mut reads = unread();
         for ordinal in [1, 2] {
-            let episode = EpisodeId::fixture(ordinal);
-            graph
-                .replace_episode_subtasks(
-                    &annotate,
-                    &episode,
-                    vec![SubtaskRow::new(&annotate, episode.clone(), 0.0, 4.0, "grasp").unwrap()],
-                )
-                .unwrap();
+            read_subtasks(
+                &mut reads,
+                &node(&graph, &annotate),
+                &[subtask(ordinal, (0.0, 4.0), "grasp")],
+            );
         }
         let sample = sample();
-        let reads = unread();
         let reader = PopulationReader::new(&graph, &sample, &reads);
-        // Episode 2 was annotated before the Select above tightened; its rows
-        // are kept in the document but no longer reach anything.
+        // Episode 2 was read before the Select above tightened; it no longer
+        // reaches the node, so what it read there is not handed on.
         assert_eq!(reader.of(&annotate).episodes(), [EpisodeId::fixture(1)]);
         assert_eq!(
             reader.of(&annotate).slices(&sample)[0].label(),
             Some("grasp")
         );
+        // Asked with another camera, the node has read nothing yet.
+        if let CurationNodeKind::BreakDownSubtasks(annotation) =
+            graph.node_mut(&annotate).unwrap().kind_mut()
+        {
+            annotation.set_camera(Some("/top-camera".into()));
+        }
+        let reader = PopulationReader::new(&graph, &sample, &reads);
+        assert!(reader.of(&annotate).subtasks().is_empty());
     }
 
     #[test]
-    fn subtask_selects_keep_by_the_search_or_grouping_above_them() {
+    fn subtask_selects_keep_by_what_the_measure_above_judged() {
         let mut graph = CurationGraph::new(None);
         let annotate = graph
             .add_child(
@@ -491,33 +488,15 @@ mod tests {
                 CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
             )
             .unwrap();
-        let episode = EpisodeId::fixture(1);
-        let rows = vec![
-            SubtaskRow::new(&annotate, episode.clone(), 0.0, 5.0, "grasp the corner").unwrap(),
-            SubtaskRow::new(&annotate, episode.clone(), 5.0, 9.0, "fold in half").unwrap(),
-        ];
-        graph
-            .replace_episode_subtasks(&annotate, &episode, rows.clone())
+        let mut grouping = SubtaskGrouping::default();
+        grouping
+            .set_categories(vec![
+                SubtaskCategory::new("Grasp", "Take hold").unwrap(),
+                SubtaskCategory::new("Fold", "Bring over").unwrap(),
+            ])
             .unwrap();
         let group = graph
-            .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks)
-            .unwrap();
-        graph
-            .set_grouping(
-                SubtaskGrouping::new(
-                    &group,
-                    &annotate,
-                    vec![
-                        SubtaskCategory::new("Grasp", "Take hold").unwrap(),
-                        SubtaskCategory::new("Fold", "Bring over").unwrap(),
-                    ],
-                    vec![
-                        SubtaskAssignment::new(episode.clone(), 0.0, "Grasp", 0.9, 0.8).unwrap(),
-                        SubtaskAssignment::new(episode.clone(), 5.0, "Fold", 0.9, 0.8).unwrap(),
-                    ],
-                )
-                .unwrap(),
-            )
+            .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks(grouping))
             .unwrap();
         let folds = select(
             &mut graph,
@@ -527,39 +506,78 @@ mod tests {
             },
         );
         // A search inside the chosen category reads only its rows.
+        let mut query = SubtaskSearch::default();
+        query.set_query("fold the towel");
         let search = graph
-            .add_child(
-                &folds,
-                CurationNodeKind::FindSimilarSubtasks(SubtaskSearch::default()),
-            )
+            .add_child(&folds, CurationNodeKind::FindSimilarSubtasks(query))
             .unwrap();
         assert_eq!(graph.subtask_source(&search), Some(annotate.as_str()));
-        if let Some(CurationNodeKind::FindSimilarSubtasks(config)) =
-            graph.node_mut(&search).map(CurationNode::kind_mut)
-        {
-            config.set_query("fold the towel");
-        }
-        graph
-            .set_ranking(
-                SubtaskRanking::new(&search, "fold the towel", [(rows[1].key(), 0.8)]).unwrap(),
-            )
-            .unwrap();
         let close = select(&mut graph, &search, Selection::Similar { minimum: 0.5 });
 
-        let sample = sample();
-        let reads = unread();
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        assert_eq!(reader.of(&folds).subtasks(), &rows[1..]);
-        assert_eq!(reader.of(&search).subtasks(), &rows[1..]);
-        assert_eq!(reader.of(&close).subtasks(), &rows[1..]);
+        let placed = |row: SubtaskRow, category: Option<&str>| {
+            row.judged(
+                SubtaskRow::CATEGORY,
+                JudgmentValue::Category(
+                    category.map(|category| CategoryPlacement::new(category, 0.9).unwrap()),
+                ),
+            )
+        };
+        let similar = |row: SubtaskRow, similarity: Option<f64>| {
+            row.judged(
+                SubtaskRow::SIMILARITY,
+                JudgmentValue::Similarity(similarity),
+            )
+        };
+        let (grasp, fold, smooth) = (
+            subtask(1, (0.0, 5.0), "grasp the corner"),
+            subtask(1, (5.0, 9.0), "fold in half"),
+            subtask(1, (9.0, 12.0), "smooth the cloth"),
+        );
+        let mut reads = unread();
+        read_subtasks(
+            &mut reads,
+            &node(&graph, &annotate),
+            &[grasp.clone(), fold.clone(), smooth.clone()],
+        );
+        read_subtasks(
+            &mut reads,
+            &node(&graph, &group),
+            &[
+                placed(grasp, Some("Grasp")),
+                placed(fold.clone(), Some("Fold")),
+                // A row the model could not place joins no category.
+                placed(smooth, None),
+            ],
+        );
+        read_subtasks(
+            &mut reads,
+            &node(&graph, &search),
+            &[similar(fold.clone(), Some(0.8))],
+        );
 
-        // A new question makes the stored ranking an answer to another one.
+        let sample = sample();
+        let reader = PopulationReader::new(&graph, &sample, &reads);
+        assert_eq!(
+            reader
+                .of(&folds)
+                .subtasks()
+                .iter()
+                .map(SubtaskRow::description)
+                .collect::<Vec<_>>(),
+            ["fold in half"]
+        );
+        assert_eq!(
+            reader.of(&search).subtasks(),
+            [similar(fold.clone(), Some(0.8))]
+        );
+        assert_eq!(reader.of(&close).subtasks().len(), 1);
+
+        // A new question makes what the search read an answer to another one.
         if let Some(CurationNodeKind::FindSimilarSubtasks(config)) =
             graph.node_mut(&search).map(CurationNode::kind_mut)
         {
             config.set_query("smooth the cloth");
         }
-        let reads = unread();
         let reader = PopulationReader::new(&graph, &sample, &reads);
         assert!(reader.of(&close).subtasks().is_empty());
     }
@@ -574,8 +592,10 @@ mod tests {
             )
             .unwrap();
         let episode = EpisodeId::fixture(1);
-        let reads = moments_read(
-            &detect,
+        let mut reads = unread();
+        read_moments(
+            &mut reads,
+            &node(&graph, &detect),
             &episode,
             &[
                 (0.0, Some(0.4)),
@@ -609,73 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn subtasks_broken_down_after_moments_are_cut_to_the_productive_stretches() {
-        let mut graph = CurationGraph::new(None);
-        let detect = graph
-            .add_child(
-                DATASET_NODE_ID,
-                CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
-            )
-            .unwrap();
-        let episode = EpisodeId::fixture(1);
-        // Seconds 0–2 and 4–6 progress; 2–4 stall.
-        let reads = moments_read(
-            &detect,
-            &episode,
-            &[0.4, 0.3, -0.1, -0.2, 0.5, 0.6]
-                .into_iter()
-                .enumerate()
-                .map(|(second, pace)| (second as f64, Some(pace)))
-                .collect::<Vec<_>>(),
-        );
-        let moving = select(&mut graph, &detect, Selection::Progressing { minimum: 0.0 });
-        let annotate = graph
-            .add_child(
-                &moving,
-                CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
-            )
-            .unwrap();
-        let rows = vec![
-            SubtaskRow::new(&annotate, episode.clone(), 0.0, 3.0, "reach").unwrap(),
-            SubtaskRow::new(&annotate, episode.clone(), 3.0, 3.5, "pause").unwrap(),
-            SubtaskRow::new(&annotate, episode.clone(), 3.5, 6.0, "fold").unwrap(),
-        ];
-        graph
-            .replace_episode_subtasks(&annotate, &episode, rows.clone())
-            .unwrap();
-        // Grouping what was broken down still finds its annotation.
-        let group = graph
-            .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks)
-            .unwrap();
-        assert_eq!(graph.subtask_source(&group), Some(annotate.as_str()));
-
-        let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        let broken_down = reader.of(&annotate);
-        // The pause lies wholly in the stall, so it is not handed on.
-        assert_eq!(broken_down.subtasks(), [rows[0].clone(), rows[2].clone()]);
-        assert_eq!(
-            broken_down
-                .slices(&sample)
-                .iter()
-                .map(|slice| (
-                    slice.label().unwrap_or_default().to_owned(),
-                    slice.start(),
-                    slice.end()
-                ))
-                .collect::<Vec<_>>(),
-            [
-                ("reach".to_owned(), 0.0, 2.0),
-                ("fold".to_owned(), 4.0, 6.0),
-            ]
-        );
-        assert_eq!(
-            reader.of(&group).slices(&sample),
-            broken_down.slices(&sample)
-        );
-    }
-
-    #[test]
     fn moments_reach_only_the_episodes_that_reach_the_detection() {
         let mut graph = CurationGraph::new(None);
         let long = select(
@@ -695,13 +648,19 @@ mod tests {
             .unwrap();
         // Episode 2 was read before the Select above tightened; it no longer
         // reaches the detection, so its moments are not handed on.
-        let mut reads = moments_read(&detect, &EpisodeId::fixture(1), &[(0.0, Some(0.5))]);
-        reads.record(
-            &detect,
+        let detection = node(&graph, &detect);
+        let mut reads = unread();
+        read_moments(
+            &mut reads,
+            &detection,
+            &EpisodeId::fixture(1),
+            &[(0.0, Some(0.5))],
+        );
+        read_moments(
+            &mut reads,
+            &detection,
             &EpisodeId::fixture(2),
-            Ok(vec![
-                Moment::new(EpisodeId::fixture(2), (0.0, 1.0), None).unwrap(),
-            ]),
+            &[(0.0, None)],
         );
         let sample = sample();
         let moments = PopulationReader::new(&graph, &sample, &reads).of(&detect);

@@ -2,7 +2,7 @@
 //! as a catalog view under the name the operator types, then recorded in the
 //! curation, which saves. A view cannot be turned back into a graph, so the
 //! recipe stays in the curation and the view is what it produces.
-use crate::activities::curation::path::{CurationPath, PathSource};
+use crate::activities::curation::path::CurationPath;
 use crate::activities::curation::state::{CurationController, RunState};
 use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain;
@@ -85,20 +85,18 @@ impl ViewPublisher {
 }
 
 /// Publish, the name it is published under, and whether the saved recipe has
-/// moved on since. An output whose path runs through a node Spiral has no
-/// function for yet says which function it waits for instead.
+/// moved on since. An output whose path has no statement says why instead.
 #[component]
 pub(super) fn PublishControl(controller: CurationController, node: String) -> Element {
     let studio = StudioProjectState::current();
     let mut step = use_signal(|| PublishStep::Resting);
-    let statement = controller.with_payload(|payload| {
-        CurationPath::to(payload, &node).and_then(|path| path.statement(PathSource::Published))
-    });
+    let statement = controller
+        .with_payload(|payload| CurationPath::to(payload, &node).and_then(|path| path.statement()));
     let statement = match statement {
         Ok(statement) => statement,
-        Err(waiting) => {
+        Err(unwritten) => {
             return rsx! {
-                p { class: "curation-select-publish-note", role: "status", "{waiting.message()}" }
+                p { class: "curation-select-publish-note", role: "status", "{unwritten.message()}" }
             };
         }
     };

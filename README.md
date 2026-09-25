@@ -109,7 +109,9 @@ LLM_API_KEY=your-provider-key
 ```
 
 The key never reaches the browser: the relay attaches it to requests bound for
-the provider's origin. Credentials belong to Studio, independently of the
+the provider's origin, and Studio passes it to the Spiral driver as
+`spiral.openrouter_api_key` for the `spql.ai` model functions Curation
+compiles to. A changed key takes effect on the next database connection. Credentials belong to Studio, independently of the
 selected project; keep them out of saved curations, browser storage, and logs.
 
 The default is `openai/gpt-5.6-terra` through OpenRouter, with `medium` reasoning

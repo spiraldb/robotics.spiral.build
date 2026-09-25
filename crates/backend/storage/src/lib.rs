@@ -46,7 +46,7 @@ pub mod video {
 
 // Keep the cross-crate storage boundary flat and explicit. The modules behind
 // these exports describe implementation mechanisms, not product features.
-pub use db::{AdbcDatabase, SpiralSql};
+pub use db::{AdbcDatabase, ModelCredentials, SpiralSql};
 pub use db::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
     DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,

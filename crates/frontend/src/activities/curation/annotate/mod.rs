@@ -1,36 +1,34 @@
-//! Break down subtasks: browser-owned annotation of every episode that
-//! reaches the node, one model call per episode, rows persisted through the
-//! controller after each episode.
+//! Break down subtasks: the node's step splits every episode that reaches it
+//! into subtasks with `spql.ai.breakdown_task`, and its preview runs that step
+//! over each episode's intervals that reach it, as the curation's own run.
+//! What the preview read is held for the session, and every node below reads
+//! it.
+mod breakdown;
 mod episodes;
-mod journal;
-mod native;
 mod output;
-mod pipeline;
-mod provider;
-mod request;
-mod sheet;
+mod subtask;
 
-#[cfg(all(test, target_arch = "wasm32"))]
-mod browser_tests;
+#[cfg(test)]
+pub(super) use subtask::{CategoryPlacement, JudgmentValue};
+pub(super) use subtask::{MAX_SUBTASKS, SubtaskColumns, SubtaskRow};
 
-use super::document::{CurationNode, CurationNodeKind, SubtaskAnnotation, SubtaskRow};
+use super::document::{CurationNode, CurationNodeKind, SubtaskAnnotation};
 use super::episode_tabs::{EpisodeTabs, OpenEpisode};
 use super::poster::{PosterCut, PosterFrames};
+use super::preview::{PreviewPlan, PreviewProgress};
 use super::rerun::ConfirmedRerun;
 use super::review::{
-    EpisodeOrder, FailedEpisodes, NodeBar, NodeReach, SubtaskContext, SubtaskReview,
+    EpisodeOrder, FailedEpisodes, NodeBar, NodeNotes, NodeReach, SubtaskContext, SubtaskReview,
 };
 use super::state::{CurationController, RunState};
-use crate::activities::data::DatasetClient;
+use crate::activities::episode::Episode;
 use crate::components::icons::SettingsIcon;
-use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
-use episodes::AnnotationEpisode;
-use journal::CurationJournal;
-use native::NativeSheets;
-use output::{AnnotatedEpisode, AnnotationOutput, ChosenSubtask, EpisodeSubtasks, SubtaskIndex};
-use pipeline::{AnnotationPass, PassSettings};
-use provider::ProviderAnnotator;
+use episodes::{AnnotationEpisode, RecordedTopics};
+use output::{
+    AnnotatedEpisode, AnnotationOutput, ChosenSubtask, EpisodeFailure, EpisodeSubtasks,
+    SubtaskIndex,
+};
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Field, FieldLayout, Place,
@@ -40,11 +38,12 @@ use spiral_robotics_ui::{
 /// Which episodes one run covers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RunScope {
-    /// Everything not yet recorded as completed: the ordinary Run.
+    /// Everything the preview has not read yet, or read from rows that have
+    /// changed since: the ordinary Run.
     Pending,
-    /// Only the episodes whose last attempt failed.
+    /// Only the episodes whose last read failed.
     Failed,
-    /// Every episode, replacing the rows already stored.
+    /// Every episode, replacing what the preview holds.
     All,
 }
 
@@ -53,17 +52,17 @@ impl RunScope {
         match self {
             Self::Pending => "Run",
             Self::Failed => "Retry failed",
-            Self::All => "Re-annotate all",
+            Self::All => "Run all again",
         }
     }
     /// What pressing it does, in the operator's own terms.
     fn explanation(self, episodes: usize) -> String {
         match self {
-            Self::Pending => format!("Annotate the {episodes} episodes not yet done"),
-            Self::Failed => format!("Try the {episodes} episodes that failed again"),
-            Self::All => {
-                format!("Annotate all {episodes} episodes again, replacing what is stored")
+            Self::Pending => {
+                format!("Break down the {episodes} episodes not yet read, or out of date")
             }
+            Self::Failed => format!("Try the {episodes} episodes that failed again"),
+            Self::All => format!("Break down all {episodes} episodes again"),
         }
     }
     fn purpose(self) -> ActionPurpose {
@@ -73,20 +72,21 @@ impl RunScope {
             Self::All => ActionPurpose::Replace,
         }
     }
-    /// The episodes this run annotates, in recording order.
+    /// The episodes this run reads, in recording order.
     fn episodes(
         self,
         all: &[AnnotationEpisode],
-        settings: &SubtaskAnnotation,
+        progress: &PreviewProgress,
     ) -> Vec<AnnotationEpisode> {
+        let pending = progress.pending();
         all.iter()
             .filter(|episode| match self {
                 Self::All => true,
-                Self::Pending => !settings.is_completed(episode.id()),
-                Self::Failed => settings
-                    .failed_episodes()
+                Self::Pending => pending.contains(episode.id()),
+                Self::Failed => progress
+                    .failed()
                     .iter()
-                    .any(|failure| failure.episode() == episode.id()),
+                    .any(|(failed, _)| failed == episode.id()),
             })
             .cloned()
             .collect()
@@ -104,8 +104,8 @@ impl AnnotationNode {
     fn new(id: String, controller: CurationController) -> Self {
         Self { id, controller }
     }
-    /// The node's configuration and progress, or nothing when the selected
-    /// node is not an annotation after all.
+    /// The node's configuration, or nothing when the selected node is not an
+    /// annotation after all.
     fn settings(&self) -> Option<SubtaskAnnotation> {
         self.controller.with_payload(|payload| {
             match payload.node(&self.id).map(CurationNode::kind) {
@@ -114,7 +114,7 @@ impl AnnotationNode {
             }
         })
     }
-    /// The rows the node hands on: those of the episodes reaching it.
+    /// The rows the node hands on: its preview's, of the episodes reaching it.
     fn rows(&self) -> Vec<SubtaskRow> {
         self.controller
             .populations(&self.id)
@@ -139,40 +139,47 @@ impl AnnotationNode {
 /// The workspace shown for a selected Break down subtasks node.
 #[component]
 pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) -> Element {
-    let studio = StudioProjectState::current();
     let annotation = AnnotationNode::new(node.clone(), controller);
     let dataset = controller.with_payload(|payload| payload.dataset().cloned());
     let listed = AnnotationEpisode::reaching(controller, &node);
-    let cameras = crate::activities::episode::StreamCatalog::use_camera_topics(
-        listed.first().map(AnnotationEpisode::selection),
-    )
-    .unwrap_or_default();
+    // Every episode of a dataset records the same topics, and the first one
+    // is known before anything reaches the node.
+    let topics = RecordedTopics::use_topics(
+        controller
+            .sample()
+            .and_then(|sample| sample.episodes().first().map(Episode::selection)),
+    );
 
-    // A new node starts on the camera that shows the whole workspace, written
-    // into the node so the picker shows the choice and a run can start at once.
-    let default_camera = annotation.clone();
-    use_effect(use_reactive(&cameras, move |cameras| {
-        let Some(settings) = default_camera.settings() else {
+    // What the dataset records decides two settings, written into the node so
+    // its step can read them and a run can start at once: a new node starts
+    // on the camera that shows the whole workspace, and every node reads the
+    // operator's instruction when the dataset records one.
+    let recorded = annotation.clone();
+    use_effect(use_reactive(&topics, move |topics| {
+        let (Some(topics), Some(settings)) = (topics, recorded.settings()) else {
             return;
         };
-        if settings.camera().is_some() {
+        let camera = settings
+            .camera()
+            .map(str::to_owned)
+            .or_else(|| topics.overview_camera());
+        let task_topic = topics.task_topic();
+        if settings.camera().map(str::to_owned) == camera
+            && settings.task_topic().map(str::to_owned) == task_topic
+        {
             return;
         }
-        let Some(camera) =
-            crate::activities::episode::StreamCatalog::overview_camera(&cameras).map(str::to_owned)
-        else {
-            return;
-        };
-        let _ = default_camera.configure(|annotation| {
-            annotation.set_camera(Some(camera));
+        let _ = recorded.configure(|annotation| {
+            annotation.set_camera(camera);
+            annotation.set_task_topic(task_topic);
             Ok(())
         });
     }));
 
     let chosen = ChosenSubtask::use_chosen();
-    // The first annotated episode the index lists, or the first episode at
-    // all, opens by itself, so the recording column is never an empty half
-    // and what it shows is the index's first heading.
+    // The first episode the index lists, or the first episode at all, opens
+    // by itself, so the recording column is never an empty half and what it
+    // shows is the index's first heading.
     let first = annotation.clone();
     use_effect(move || {
         let rows = first.rows();
@@ -198,47 +205,23 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
         chosen.focus(focus.episode(), focus.interval());
     });
 
-    // The client belongs to this mount, and a pass outlives the click that
-    // started it, so it is captured here rather than read inside its task.
-    let datasets = DatasetClient::current();
-    // The pass is the curation's, not this view's: choosing another node
-    // leaves it annotating. Stop only asks it to start no further episode;
-    // the episodes already paid for finish and save, and the node reads
-    // "Stopping…" until they have, so a second pass cannot start underneath.
+    // The preview runs this node's step, the one a published view chains,
+    // over the intervals that reach it, one query per episode. The pass is
+    // the curation's, not this view's: choosing another node leaves it
+    // reading. Stop starts no further episode; the ones in flight land.
     let run = controller.run_state(&node);
+    let problem = use_signal(|| Option::<String>::None);
     let start = {
-        let annotation = annotation.clone();
+        let node = node.clone();
         move |chosen: Vec<AnnotationEpisode>| {
-            let Some(settings) = annotation.settings() else {
-                return;
-            };
-            let Some(camera) = settings.camera().map(str::to_owned) else {
-                return;
-            };
-            if chosen.is_empty() {
-                return;
+            let episodes = chosen
+                .iter()
+                .map(|episode| episode.id().clone())
+                .collect::<Vec<_>>();
+            if !episodes.is_empty() {
+                let mut problem = problem;
+                problem.set(controller.run_preview(&node, &episodes).err());
             }
-            let interval = settings.sample_interval_seconds();
-            let node = annotation.id.clone();
-            let model_name = settings.model().to_owned();
-            let datasets = datasets.clone();
-            controller.start_run(&node.clone(), move |run| async move {
-                let total = chosen.len();
-                // The dataset's own words for the job, when it records them,
-                // are worth more to the model than any of our phrasing.
-                let task = match chosen.first() {
-                    Some(episode) => episode.task(&datasets).await,
-                    None => None,
-                };
-                AnnotationPass::new(
-                    PassSettings::new(node, model_name, interval).with_task(task),
-                    NativeSheets::new(datasets, camera, interval),
-                    ProviderAnnotator,
-                    CurationJournal::new(controller, studio, run, total),
-                )
-                .run(chosen)
-                .await;
-            });
         }
     };
     let running = run != RunState::Idle;
@@ -251,6 +234,19 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                 "This node does not break down subtasks." }
         };
     };
+    let uncompiled = controller
+        .with_payload(|payload| PreviewPlan::check(payload, &node))
+        .err()
+        .map(|error| error.message().to_owned());
+    let progress = controller.progress(&node).unwrap_or_default();
+    let failures = progress
+        .failed()
+        .iter()
+        .map(|(episode, reason)| EpisodeFailure::new(episode.clone(), reason))
+        .collect::<Vec<_>>();
+    let stale = progress
+        .is_stale()
+        .then(|| "Out of date: what reaches this node changed since it ran".to_owned());
     let rows = annotation.rows();
     let groups = EpisodeSubtasks::group(rows.clone().into_iter());
     let context = SubtaskContext::new(
@@ -260,11 +256,8 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     );
     let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
     let evidence = (listed.clone(), groups.clone(), context.clone());
-    let done = listed
-        .iter()
-        .filter(|episode| settings.is_completed(episode.id()))
-        .count();
-    let replaceable = RunScope::All.episodes(&listed, &settings).len();
+    let done = progress.read().len();
+    let replaceable = RunScope::All.episodes(&listed, &progress).len();
     let retry = {
         let listed = listed.clone();
         let start = start.clone();
@@ -288,18 +281,18 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                     AnnotationSettings {
                         annotation: annotation.clone(),
                         settings: settings.clone(),
-                        cameras,
+                        cameras: topics.as_ref().map(RecordedTopics::cameras).unwrap_or_default(),
                         disabled: running,
                         reannotate: {
                             let start = start.clone();
-                            let episodes = RunScope::All.episodes(&listed, &settings);
+                            let episodes = RunScope::All.episodes(&listed, &progress);
                             rsx! {
-                                if replaceable > 0 && !running {
+                                if replaceable > 0 && !running && uncompiled.is_none() {
                                     ConfirmedRerun {
                                         id: "curation-annotate-replace".to_owned(),
                                         label: RunScope::All.label().to_owned(),
                                         question: format!(
-                                            "Annotate all {replaceable} episodes again? This replaces the {} subtasks already stored, and costs another full run.",
+                                            "Break down all {replaceable} episodes again? This replaces the {} subtasks the preview holds, and costs another full run.",
                                             rows.len(),
                                         ),
                                         on_confirm: move |()| start(episodes.clone()),
@@ -309,14 +302,14 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                         },
                     }
                 },
-                note: FailedEpisodes::note(settings.failed_episodes().len()),
+                note: NodeNotes::join([uncompiled.clone(), problem(), stale, FailedEpisodes::note(failures.len())]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
                     if running {
                         Button {
                             purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
                             disabled: run == RunState::Stopping,
-                            title: "Start no further episode; the ones already in flight finish and are saved",
+                            title: "Start no further episode; the one in flight still lands",
                             onclick: {
                                 let node = node.clone();
                                 move |_| controller.stop_run(&node)
@@ -326,8 +319,8 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                     } else {
                         for scope in [RunScope::Failed, RunScope::Pending] {
                             {
-                                let count = scope.episodes(&listed, &settings).len();
-                                let episodes = scope.episodes(&listed, &settings);
+                                let episodes = scope.episodes(&listed, &progress);
+                                let count = episodes.len();
                                 let start = start.clone();
                                 rsx! {
                                     if count > 0 {
@@ -335,7 +328,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                                             key: "{scope.label()}",
                                             purpose: scope.purpose(),
                                             variant: if scope == RunScope::Pending { ButtonVariant::Solid } else { ButtonVariant::Outline },
-                                            disabled: settings.camera().is_none(),
+                                            disabled: uncompiled.is_some(),
                                             title: scope.explanation(count),
                                             onclick: move |_| start(episodes.clone()),
                                             if scope == RunScope::Pending && done > 0 {
@@ -361,11 +354,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
             SubtaskReview {
                 index: rsx! {
                     SubtaskIndex {
-                        output: AnnotationOutput::new(
-                            groups.clone(),
-                            settings.failed_episodes().to_vec(),
-                            context.clone(),
-                        ),
+                        output: AnnotationOutput::new(groups.clone(), failures.clone(), context.clone()),
                         frames,
                         chosen,
                         on_retry: retry,
@@ -409,13 +398,13 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     }
 }
 
-/// The camera, model, and sampling one pass runs with, said on the node's
-/// bar as the button that changes them, plus the run that replaces what they
-/// already produced.
 /// The settings dialog answers Escape and the backdrop, so it needs a name
 /// focus can reach it by.
 const SETTINGS_DIALOG_ID: &str = "curation-annotate-settings";
 
+/// The camera, model, and sampling one pass runs with, said on the node's
+/// bar as the button that changes them, plus the run that replaces what they
+/// already produced.
 #[component]
 fn AnnotationSettings(
     annotation: AnnotationNode,
@@ -454,6 +443,9 @@ fn AnnotationSettings(
                     code { "{camera}" }
                     code { "{settings.model()}" }
                     code { "every {settings.sample_interval_seconds()} s" }
+                    if let Some(topic) = settings.task_topic() {
+                        code { title: "Each episode's task is the instruction it records here", "task from {topic}" }
+                    }
                 }
                 ChevronIcon { open: open() }
             }

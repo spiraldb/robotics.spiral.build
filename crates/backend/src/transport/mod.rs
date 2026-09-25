@@ -2,3 +2,5 @@
 
 mod credentials;
 pub(crate) mod http;
+
+pub(crate) use credentials::DriverCredentials;

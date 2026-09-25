@@ -1,12 +1,13 @@
 //! What one node of the curation graph says, and what its + offers. Everything
 //! here reads the payload and the sample it is interpreted over, so the
 //! canvas keeps no second copy of the graph.
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::DatasetSelection;
 
 use super::super::document::{
     CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PopulationKind, PublishedOutput,
 };
 use super::super::population::{EpisodeSample, Population, PopulationReader, Slice};
+use super::super::preview::PreviewProgress;
 use super::super::review::Counted;
 use super::super::state::CurationController;
 use crate::format::ClockPresentation as _;
@@ -28,7 +29,7 @@ impl NodeFace {
             CurationNodeKind::Dataset => Self::Dataset,
             CurationNodeKind::BreakDownSubtasks(_) => Self::Annotation,
             CurationNodeKind::FindSimilarSubtasks(_) => Self::Search,
-            CurationNodeKind::GroupSimilarSubtasks => Self::Grouping,
+            CurationNodeKind::GroupSimilarSubtasks(_) => Self::Grouping,
             CurationNodeKind::IdentifyUnproductiveMoments(_) => Self::Detection,
             CurationNodeKind::Select(_) => Self::Select,
         }
@@ -177,42 +178,54 @@ impl NodeCard {
             }
             // What the node holds, not what it runs with: the camera and model
             // are the workspace's status line.
-            CurationNodeKind::BreakDownSubtasks(annotation) => match counts {
-                Some((input, output)) => format!(
-                    "{} of {} · {}",
-                    Self::measured(annotation.completed_episodes(), &input),
-                    Counted::episodes(input.episodes().len()),
-                    Counted::subtasks(output.len()),
+            CurationNodeKind::BreakDownSubtasks(_) => match (counts, reader) {
+                (Some((input, output)), Some(reader)) => Self::stale(
+                    format!(
+                        "{} of {} · {}",
+                        PreviewProgress::of(reader, node.id()).read().len(),
+                        Counted::episodes(input.episodes().len()),
+                        Counted::subtasks(output.len()),
+                    ),
+                    node,
+                    reader,
                 ),
-                None => Counted::subtasks(payload.subtasks_for(node.id()).count()).to_string(),
+                _ => "Subtasks of every episode".to_owned(),
             },
             CurationNodeKind::FindSimilarSubtasks(search) => {
                 let query = search.query().trim();
-                if query.is_empty() {
+                let line = if query.is_empty() {
                     "No query yet".to_owned()
                 } else {
                     format!("“{query}”")
-                }
+                };
+                reader.map_or_else(
+                    || line.clone(),
+                    |reader| Self::stale(line.clone(), node, reader),
+                )
             }
-            CurationNodeKind::GroupSimilarSubtasks => payload.grouping_for(node.id()).map_or_else(
-                || "No categories yet".to_owned(),
-                |grouping| Counted::categories(grouping.categories().len()).to_string(),
-            ),
+            CurationNodeKind::GroupSimilarSubtasks(grouping) => {
+                let line = match grouping.categories().len() {
+                    0 => "No categories yet".to_owned(),
+                    categories => Counted::categories(categories).to_string(),
+                };
+                reader.map_or_else(
+                    || line.clone(),
+                    |reader| Self::stale(line.clone(), node, reader),
+                )
+            }
             // A moment is one frame, so what the detection holds is said as
             // the recording it scored rather than a count of frames.
             CurationNodeKind::IdentifyUnproductiveMoments(_) => match (counts, reader) {
-                (Some((input, output)), Some(reader)) => {
-                    let scored = input
-                        .episodes()
-                        .iter()
-                        .filter(|episode| reader.reads().has_read(node.id(), episode))
-                        .count();
+                (Some((input, output)), Some(reader)) => Self::stale(
                     format!(
-                        "{scored} of {} · {} scored",
+                        "{} of {} · {} scored",
+                        PreviewProgress::of(reader, node.id()).read().len(),
                         Counted::episodes(input.len()),
                         Self::recorded(&output, reader.sample()),
-                    )
-                }
+                    ),
+                    node,
+                    reader,
+                ),
                 _ => "Pace per frame of recording".to_owned(),
             },
             CurationNodeKind::Select(selection) => match (counts, sample) {
@@ -250,13 +263,14 @@ impl NodeCard {
             .sum::<f64>()
             .clock_label()
     }
-    /// How many of the episodes reaching a measurement it has read.
-    fn measured(completed: &[EpisodeId], input: &Population) -> usize {
-        let input = input.episodes();
-        completed
-            .iter()
-            .filter(|episode| input.contains(episode))
-            .count()
+    /// A measurement's line, saying when what reaches it changed since its
+    /// preview ran.
+    fn stale(line: String, node: &CurationNode, reader: &PopulationReader<'_>) -> String {
+        if PreviewProgress::of(reader, node.id()).is_stale() {
+            format!("{line} · out of date")
+        } else {
+            line
+        }
     }
     pub(super) fn with_order(mut self, order: usize) -> Self {
         self.order = order;
@@ -306,11 +320,14 @@ impl NodeCard {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::annotate::SubtaskRow;
     use super::super::super::document::{
-        Comparison, EpisodeFact, Selection, SubtaskAnnotation, SubtaskRow, SubtaskSearch,
+        Comparison, EpisodeFact, Selection, SubtaskAnnotation, SubtaskGrouping, SubtaskSearch,
     };
+    use super::super::super::preview::{PreviewReads, PreviewRows, ReadInput};
     use super::*;
     use crate::activities::episode::Episode;
+    use spiral_robotics_common::datasets::EpisodeId;
 
     fn card<'a>(cards: &'a [NodeCard], id: &str) -> &'a NodeCard {
         cards.iter().find(|card| card.id() == id).expect("card")
@@ -347,13 +364,23 @@ mod tests {
                 CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
             )
             .unwrap();
-        payload
-            .replace_episode_subtasks(
-                &annotate,
-                &EpisodeId::fixture(1),
-                vec![SubtaskRow::new(&annotate, EpisodeId::fixture(1), 0.0, 8.0, "grasp").unwrap()],
-            )
-            .unwrap();
+        let sample = EpisodeSample::fixture(vec![
+            Episode::fixture(&EpisodeId::fixture(1), 30_000_000_000),
+            Episode::fixture(&EpisodeId::fixture(2), 10_000_000_000),
+        ]);
+        let mut reads = PreviewReads::default();
+        let input = ReadInput::current(
+            &PopulationReader::new(&payload, &sample, &reads),
+            &annotate,
+            &EpisodeId::fixture(1),
+        );
+        reads.record(
+            payload.node(&annotate).unwrap(),
+            (&EpisodeId::fixture(1), input),
+            Ok(PreviewRows::Subtasks(vec![
+                SubtaskRow::new(EpisodeId::fixture(1), (0.0, 8.0), "grasp").unwrap(),
+            ])),
+        );
         let search = payload
             .add_child(
                 &annotate,
@@ -361,7 +388,10 @@ mod tests {
             )
             .unwrap();
         let group = payload
-            .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks)
+            .add_child(
+                &annotate,
+                CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
+            )
             .unwrap();
         let long = payload
             .add_child(
@@ -373,12 +403,6 @@ mod tests {
                 }),
             )
             .unwrap();
-        let sample = EpisodeSample::fixture(vec![
-            Episode::fixture(&EpisodeId::fixture(1), 30_000_000_000),
-            Episode::fixture(&EpisodeId::fixture(2), 10_000_000_000),
-        ]);
-
-        let reads = crate::activities::curation::preview::PreviewReads::default();
         let reader = PopulationReader::new(&payload, &sample, &reads);
         let cards = NodeCard::all(&payload, Some(&reader));
         assert_eq!(
@@ -419,7 +443,17 @@ mod tests {
             config.set_query("make the first fold");
         }
         let cards = NodeCard::all(&payload, None);
-        assert_eq!(card(&cards, &annotate).summary(), "1 subtask");
+        assert_eq!(
+            card(&cards, &annotate).summary(),
+            "Subtasks of every episode"
+        );
         assert_eq!(card(&cards, &search).summary(), "“make the first fold”");
+        // With another camera the node has read nothing, as the preview says.
+        let reader = PopulationReader::new(&payload, &sample, &reads);
+        let cards = NodeCard::all(&payload, Some(&reader));
+        assert_eq!(
+            card(&cards, &annotate).summary(),
+            "0 of 2 episodes · 0 subtasks"
+        );
     }
 }

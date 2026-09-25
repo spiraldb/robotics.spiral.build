@@ -1,6 +1,6 @@
 # Merging Workflow into Curation
 
-*Plan, 2026-09-24. Nothing here is implemented yet.*
+*Plan, 2026-09-24. Phases 0 to 2 are implemented; see [Phasing](#phasing).*
 
 Studio has two ways to shape data for training, and both end in the same
 thing: part of a dataset. Workflow is free-form SQL with an Assistant.
@@ -71,9 +71,11 @@ Dataset abc130k
 
 It has two invariants:
 
-1. **Intervals of one episode never overlap.** Otherwise a reader would use
-   the same moment twice. Measures only cut intervals and Selects only drop
-   them, and `breakdown_task` must return ordered, non-overlapping subtasks.
+1. **Intervals are ordered by start and may overlap.** Two subtasks can
+   happen at once, such as each arm doing something different, so
+   `breakdown_task` keeps overlapping subtasks rather than refusing them
+   (decided 2026-09-25). A reader that samples moments decides what an
+   instant inside two intervals means.
 2. **The view holds no stream data.** Cameras and joint states stay in the
    recording at their native rates. Aligning them is the reader's job.
 
@@ -109,7 +111,7 @@ Agreed:
 | D2 | Every node compiles to Spiral SQL, and a published view is the whole curation | One executable form. Every reader sees exactly what was curated. | Studio materializing results itself |
 | D3 | Per-row model work becomes `spql.ai.*` functions (Break down, similarity, classification). Authoring-time LLM calls, such as proposing categories, stay in the browser, and their answer becomes a literal in the node's SQL. | Spiral alone must be able to evaluate the view. An authoring suggestion is configuration, not data. | Browser-orchestrated calls per episode (today) |
 | D4 | Caching model results is Spiral's concern: an optimization, done later | Correctness first. Users shouldn't manage cost. | Studio-side caches |
-| D5 | Preview recomputes the whole path for each episode it shows | Same SQL as the published view, so there is no second execution model | Handing preview rows from node to node |
+| D5 | A node's preview runs only its own step, over the rows its parent's preview holds, written into the statement as `VALUES`. Editing or re-running a node leaves every node below it out of date, and each re-runs from its parent's current rows. (Revised 2026-09-24; it was: preview recomputes the whole path.) | Each step is still written once and runs the same SQL in both readings, but a search or a grouping makes only its own text calls instead of running Break down again for every episode | Recomputing the whole path per episode, which repeats every model call above the node; a table-parameter endpoint, which does not exist |
 | D6 | Preview uses the first ≤100 episodes in recording order | This is the sample today, and it is fast enough to iterate on | A random sample |
 | D7 | Outputs are the leaf Selects | Current behaviour. No extra node kind. | An explicit Output node |
 | D8 | An output is one row per kept interval | It is what the graph already carries, so publishing converts nothing. Rows stay flat, and each label stays on its own interval. | One row per episode with nested ranges (derivable with `GROUP BY`); one row per moment (rate is a training choice) |
@@ -121,7 +123,7 @@ Proposed here, pending your agreement:
 
 | # | Proposal | Why | Rejected |
 | --- | --- | --- | --- |
-| P1 | Measures that read frames read the whole episode, and their rows are clipped to the input intervals | Keeps today's behaviour (subtasks keep full-episode context). The model call then depends only on the episode, so editing an upstream threshold never changes what the model is asked, which is good for the later cache. | The model reads only the kept intervals |
+| P1 | Measures that read frames read the whole episode, and their rows are clipped to the input intervals (agreed 2026-09-25) | Keeps today's behaviour (subtasks keep full-episode context). The model call then depends only on the episode, so editing an upstream threshold never changes what the model is asked, which is good for the later cache. | The model reads only the kept intervals |
 | P2 | Interval times are MCAP log time in ns | Readers join streams directly | Times relative to episode start |
 | P3 | The frontend compiles. The backend's Publish takes a name and a read-only `SELECT`, admits it with the existing read-only policy, and wraps it in `CREATE VIEW`. | The backend stays thin and provides only DDL. The browser never sends arbitrary DDL. | The backend compiles the graph |
 | P4 | Property columns are named by node kind (`subtask`, `subtask_category`, `similarity`), with a suffix on repeats | Stable across renames and readable by readers | Node ids; user labels |
@@ -177,17 +179,22 @@ Proposed here, pending your agreement:
   module. There is no `sql.rs` bucket. One path type walks root → node and
   composes the CTEs.
 - Literals go through the existing `SqlLiteral` quoting path.
-- Preview and published SQL differ only in the Dataset node's source. Preview
-  binds one episode as `$1` through the existing `/api/queries/episode`.
+- Each step is written once over an abstract input relation. Published, the
+  input is the parent's `WITH` entry. Previewed, it is the parent's preview
+  rows as `VALUES`; a step that reads a recording binds its episode as `$1`
+  through `/api/queries/episode`, and the text judgments batch many episodes
+  in one `/api/queries` statement (D5).
 - A Select's slider filters the parent's preview rows in the browser. The same
   `Selection` value renders the `WHERE` clause, and a test asserts the two
   agree on the sample.
 
 ### 4. The preview runner
 
-- One query per episode through `CurationController::start_run`. That gives
-  "12 of 100" progress, a Stop between episodes (Spiral cannot cancel a
-  running query yet), and a failed episode never stops the rest.
+- One query per episode for the measures that read a recording, eight in
+  flight, and as few batches as fit for the text judgments, through
+  `CurationController::start_run`. That gives "12 of 100" progress; Stop
+  starts no further query and lets those in flight finish (Spiral cannot
+  cancel a running query yet), and a failed episode never stops the rest.
 - Rows are held in memory for the session and lost on reload (D3, D5).
 
 ### 5. Node changes
@@ -214,8 +221,9 @@ Proposed here, pending your agreement:
   - validates the identifier;
   - admits the statement with `ReadOnlyQuery`;
   - refuses a name held by a table or Dataset;
-  - runs `DROP VIEW IF EXISTS` then `CREATE VIEW` in one transaction, the
-    same pattern the `dataset_source_<name>` views use.
+  - runs one `CREATE OR REPLACE VIEW`. (Implemented so: `DROP VIEW IF EXISTS`
+    then `CREATE VIEW` in one transaction fails with a namespace
+    compare-and-swap conflict once the view exists.)
 
 ### 7. Docs
 
@@ -229,8 +237,8 @@ rule recipe.
 1. **`spql.ai.breakdown_task`: split one episode's camera video into subtasks.**
    - Input: one camera's packet video (the type `score_progress` takes), a
      sampling interval, and a model id with a pinned revision.
-   - Output: an ordered, non-overlapping
-     `list<struct{start_ns, end_ns, description}>` in MCAP log time.
+   - Output: `list<struct{start_ns, end_ns, description}>` ordered by start,
+     possibly overlapping, on the video's presentation timeline.
    - For now it calls a remote multimodal LLM through OpenRouter. Spiral takes
      over the prompt and contact-sheet composition that Studio does today;
      `annotate/request.rs` and `annotate/sheet.rs` are the reference.
@@ -358,13 +366,13 @@ image normalization and frame alignment, and rollout checks them.
 
 ## Phasing
 
-| Phase | Spiral Robotics | SpiralDB | Result |
-| --- | --- | --- | --- |
-| 0 | Remove Workflow | none | One authoring surface |
-| 1 | Compiler, per-episode preview and Publish, for Dataset, Select and Moments | Item 4 | Curations without LLM nodes publish. Break down, Find similar and Group work as today, but a path through them cannot publish and names the function it waits for. |
-| 2 | Break down, Find similar and Group similar compile. Delete the browser pipelines, the jev client and stored results. | Items 1–3 | Every node publishes |
-| 3 | none | Items 5–6 | Fast, deterministic re-reads |
-| Later | Training resamples a published curation (see above) | Its SpiralDB needs | Train on curated data |
+| Phase | Spiral Robotics | SpiralDB | Result | Status |
+| --- | --- | --- | --- | --- |
+| 0 | Remove Workflow | none | One authoring surface | Done |
+| 1 | Compiler, per-episode preview and Publish, for Dataset, Select and Moments | Item 4 | Curations without LLM nodes publish. Break down, Find similar and Group work as today, but a path through them cannot publish and names the function it waits for. | Done |
+| 2 | Break down, Find similar and Group similar compile. Delete the browser pipelines, the jev client and stored results. | Items 1–3 | Every node publishes | Done, 2026-09-24. Studio passes `LLM_API_KEY` as `spiral.openrouter_api_key`, and previews read their parent's rows (D5). |
+| 3 | none | Items 5–6 | Fast, deterministic re-reads | |
+| Later | Training resamples a published curation (see above) | Its SpiralDB needs | Train on curated data | |
 
 ## Open questions
 
@@ -374,4 +382,4 @@ image normalization and frame alignment, and rollout checks them.
 2. **Dataset refreshes.** A view is live, so recordings added to its dataset
    appear in it. Should a training run pin its data, or accept the view as it
    reads it? This can wait for the Training phase.
-3. **P1–P4.** Agree or amend.
+3. **P2–P4.** Agree or amend. (P1 was agreed on 2026-09-25.)

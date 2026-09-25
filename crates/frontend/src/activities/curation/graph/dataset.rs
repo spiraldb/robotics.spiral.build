@@ -27,7 +27,9 @@ use crate::components::icons::SpinnerIcon;
 const UNTITLED: &str = "Untitled curation";
 
 /// Every episode of the dataset as one whole interval, from its first message
-/// to its last, with the facts Spiral records for it.
+/// to its last, with the facts Spiral records for it. Only the published view
+/// reads the dataset this way; a preview is given the episodes the sample
+/// already listed.
 impl PathFragment for DatasetSelection {
     fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let facts = EpisodeFact::ALL
@@ -35,15 +37,10 @@ impl PathFragment for DatasetSelection {
             .map(|fact| format!("{} AS {}", fact.expression(), fact.key()))
             .collect::<Vec<_>>()
             .join(", ");
-        let members = step
-            .source()
-            .members("id")
-            .map(|admits| format!(" WHERE {admits}"))
-            .unwrap_or_default();
         let entry = format!(
             "{} AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, \
              CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts} \
-             FROM ({}) listed{members})",
+             FROM ({}) listed)",
             step.name(),
             Episode::listing_sql(self),
         );

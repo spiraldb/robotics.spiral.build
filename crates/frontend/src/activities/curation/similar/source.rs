@@ -1,165 +1,120 @@
-//! What a similarity node reads from the curation.
-//!
-//! Both similarity nodes read a saved subtask table and never rerun annotation,
-//! so one snapshot — the rows that reach the node, the annotation that wrote
-//! them, the dataset they were recorded in — is all either of them needs.
+//! What a similarity node reads from the curation: the subtasks a Break down
+//! above it read that reach the node, and what the node's own preview has
+//! judged of them.
 use super::coverage::MeasuredEpisodes;
-use crate::activities::curation::document::{
-    CurationGraph, CurationNode, CurationNodeKind, SubtaskAssignment, SubtaskGrouping, SubtaskRow,
-    SubtaskSearch,
-};
+use crate::activities::curation::annotate::SubtaskRow;
+use crate::activities::curation::document::{CurationNode, CurationNodeKind, SubtaskSearch};
+use crate::activities::curation::preview::PreviewProgress;
 use crate::activities::curation::review::{EpisodeOrder, SubtaskContext};
 use crate::activities::curation::state::CurationController;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::EpisodeId;
 
 #[derive(Clone, PartialEq)]
 pub(super) struct SubtaskSource {
     annotation: Option<String>,
-    /// The rows that reach this node: the annotation's, less whatever a
+    /// The subtasks that reach this node: the annotation's, less whatever a
     /// Select above it left out.
-    rows: Vec<SubtaskRow>,
-    dataset: Option<DatasetSelection>,
-    /// The camera the parent annotation sampled, so a result plays the footage
-    /// the description was written from.
-    camera: Option<String>,
-    /// The episodes the annotation actually read of those reaching it, in the
-    /// order it read them. An episode it failed on is not one of them.
+    reaching: Vec<SubtaskRow>,
+    /// The recordings, the camera the annotation read, and the order the
+    /// episodes list in.
+    context: SubtaskContext,
+    /// The episodes the annotation read of those reaching it, in the order
+    /// it read them. An episode it failed on is not one of them.
     measured: Vec<EpisodeId>,
-    /// The query a search node remembers; a grouping node has none.
-    query: String,
-    /// The row that query was taken from, when it came from one the table
-    /// still holds.
-    asked_about: Option<usize>,
+    /// The search a Find similar node asks; a grouping node has none.
+    search: Option<SubtaskSearch>,
+    /// What the node's own preview judged of those subtasks.
+    judged: Vec<SubtaskRow>,
+    progress: PreviewProgress,
 }
+
 impl SubtaskSource {
     pub(super) fn of(controller: CurationController, node: &str) -> Self {
-        let rows = controller
+        let (reaching, judged) = controller
             .populations(node)
-            .map(|(input, _)| input.subtasks().to_vec())
+            .map(|(input, output)| (input.subtasks().to_vec(), output.subtasks().to_vec()))
             .unwrap_or_default();
-        let annotation =
-            controller.with_payload(|payload| payload.subtask_source(node).map(str::to_owned));
-        let annotated = annotation
-            .as_deref()
-            .and_then(|source| controller.populations(source))
-            .map(|(input, _)| input.episodes());
-        controller.with_payload(|payload| {
-            let (camera, mut measured) = annotation
-                .as_deref()
-                .map(|source| Self::measurement(payload, source))
-                .unwrap_or_default();
-            if let Some(annotated) = annotated {
-                measured.retain(|episode| annotated.contains(episode));
-            }
-            let search = Self::saved_search(payload, node);
-            let asked_about = search
-                .and_then(SubtaskSearch::source)
-                .and_then(|key| rows.iter().position(|row| &row.key() == key));
-            Self {
-                rows,
+        let annotation = controller.with_payload(|payload| {
+            payload
+                .subtask_source(node)
+                .and_then(|annotation| payload.node(annotation))
+                .cloned()
+        });
+        let measured = annotation
+            .as_ref()
+            .map(|annotation| Self::measured_by(controller, annotation))
+            .unwrap_or_default();
+        let camera = annotation
+            .as_ref()
+            .and_then(|annotation| match annotation.kind() {
+                CurationNodeKind::BreakDownSubtasks(settings) => {
+                    settings.camera().map(str::to_owned)
+                }
+                _ => None,
+            });
+        let (dataset, search) = controller.with_payload(|payload| {
+            let search = match payload.node(node).map(CurationNode::kind) {
+                Some(CurationNodeKind::FindSimilarSubtasks(search)) => Some(search.clone()),
+                _ => None,
+            };
+            (payload.dataset().cloned(), search)
+        });
+        Self {
+            annotation: annotation.map(|annotation| annotation.id().to_owned()),
+            context: SubtaskContext::new(
+                dataset,
                 camera,
-                measured,
-                annotation,
-                dataset: payload.dataset().cloned(),
-                query: search
-                    .map(|search| search.query().to_owned())
-                    .unwrap_or_default(),
-                asked_about,
-            }
-        })
-    }
-    /// What the annotation says about its own run: the camera it
-    /// sampled and the episodes it completed.
-    fn measurement(payload: &CurationGraph, annotation: &str) -> (Option<String>, Vec<EpisodeId>) {
-        match payload.node(annotation).map(CurationNode::kind) {
-            Some(CurationNodeKind::BreakDownSubtasks(settings)) => (
-                settings.camera().map(str::to_owned),
-                settings.completed_episodes().to_vec(),
+                EpisodeOrder::of(
+                    measured
+                        .iter()
+                        .chain(reaching.iter().map(SubtaskRow::episode)),
+                ),
             ),
-            _ => (None, Vec::new()),
+            reaching,
+            measured,
+            search,
+            judged,
+            progress: controller.progress(node).unwrap_or_default(),
         }
     }
-    fn saved_search<'a>(payload: &'a CurationGraph, node: &str) -> Option<&'a SubtaskSearch> {
-        match payload.node(node).map(|node| node.kind()) {
-            Some(CurationNodeKind::FindSimilarSubtasks(search)) => Some(search),
-            _ => None,
-        }
+    /// The episodes the annotation's preview read of those reaching it.
+    fn measured_by(controller: CurationController, annotation: &CurationNode) -> Vec<EpisodeId> {
+        controller
+            .progress(annotation.id())
+            .map(|progress| progress.read().to_vec())
+            .unwrap_or_default()
     }
-    /// The annotation node whose rows this node reads, when its
-    /// parent is one.
+    /// The annotation node whose rows this node reads.
     pub(super) fn annotation(&self) -> Option<&str> {
         self.annotation.as_deref()
     }
-    pub(super) fn rows(&self) -> &[SubtaskRow] {
-        &self.rows
+    pub(super) fn reaching(&self) -> &[SubtaskRow] {
+        &self.reaching
     }
+    /// The subtasks the node's own preview judged.
+    pub(super) fn judged(&self) -> &[SubtaskRow] {
+        &self.judged
+    }
+    /// Where the node's own preview stands.
+    pub(super) fn progress(&self) -> &PreviewProgress {
+        &self.progress
+    }
+    /// The query a search node asks.
     pub(super) fn query(&self) -> &str {
-        &self.query
+        self.search.as_ref().map_or("", SubtaskSearch::query)
     }
-    /// Which row the saved query was taken from.
-    pub(super) fn asked_about(&self) -> Option<usize> {
-        self.asked_about
+    /// The subtask the query was taken from, among those reaching the node.
+    pub(super) fn asked_about(&self) -> Option<&SubtaskRow> {
+        let key = self.search.as_ref()?.source()?;
+        self.reaching.iter().find(|row| key.is(row))
     }
-    /// Everything a view needs to show these rows: the recordings, the camera
-    /// they were read from, and the order the episodes list in — the order the
-    /// annotation measured them, then any episode only the rows mention.
+    /// Everything a view needs to show these rows.
     pub(super) fn context(&self) -> SubtaskContext {
-        SubtaskContext::new(
-            self.dataset.clone(),
-            self.camera.clone(),
-            EpisodeOrder::of(
-                self.measured
-                    .iter()
-                    .chain(self.rows.iter().map(SubtaskRow::episode)),
-            ),
-        )
+        self.context.clone()
     }
     /// The episodes this node's answer is measured against: what the
-    /// parent annotation read.
+    /// annotation read.
     pub(super) fn measured(&self) -> MeasuredEpisodes {
         MeasuredEpisodes::of(&self.measured)
-    }
-    pub(super) fn descriptions(&self) -> Vec<&str> {
-        self.rows.iter().map(SubtaskRow::description).collect()
-    }
-    /// Where an assignment's row sits in the table it was assigned from.
-    fn row_of(&self, assignment: &SubtaskAssignment) -> Option<usize> {
-        self.rows
-            .iter()
-            .position(|row| row.is(assignment.episode(), assignment.start_time()))
-    }
-    /// Each row's assignment in `grouping`, in table order; `None` for a row
-    /// the grouping has not placed.
-    pub(super) fn assignments<'a>(
-        &self,
-        grouping: &'a SubtaskGrouping,
-    ) -> Vec<Option<&'a SubtaskAssignment>> {
-        let placed = grouping
-            .assignments()
-            .iter()
-            .map(|assignment| {
-                (
-                    (assignment.episode(), assignment.start_time().to_bits()),
-                    assignment,
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        self.rows
-            .iter()
-            .map(|row| {
-                placed
-                    .get(&(row.episode(), row.start_time().to_bits()))
-                    .copied()
-            })
-            .collect()
-    }
-    /// One category's members as an index lists them: in the order given, each
-    /// with the row it is and the probability that put it there. An assignment
-    /// whose row has since gone is left out rather than drawn as a gap.
-    pub(super) fn listed(&self, members: &[&SubtaskAssignment]) -> Vec<(usize, f64)> {
-        members
-            .iter()
-            .filter_map(|member| Some((self.row_of(member)?, member.probability())))
-            .collect()
     }
 }

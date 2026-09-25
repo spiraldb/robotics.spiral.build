@@ -102,7 +102,7 @@ async fn result_columns_retain_the_driver_after_database_drop() {
         .await
         .unwrap();
     let batch = records.next().await.unwrap().unwrap();
-    let database_owner = Arc::downgrade(database.database.get().unwrap());
+    let database_owner = Arc::downgrade(&database.current().await.unwrap());
     let column = batch.column(1).slice(0, 1);
     drop(batch);
     drop(records);
@@ -530,4 +530,38 @@ async fn temporary_arrow_inputs_preserve_image_type_for_schema_planning() {
             .map(String::as_str),
         Some("spql.image.Image")
     );
+}
+
+/// A key that can change while the database is open, as a key read from the
+/// environment can.
+struct ChangingKey(std::sync::Mutex<Option<String>>);
+
+impl ModelCredentials for ChangingKey {
+    fn openrouter_api_key(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[tokio::test]
+async fn a_changed_openrouter_key_reopens_the_database_for_new_connections() {
+    let key = Arc::new(ChangingKey(std::sync::Mutex::new(Some("first".into()))));
+    let database = AdbcDatabase::memory().with_model_credentials(key.clone());
+    let first = database.current().await.unwrap();
+    // The same key keeps the database it opened.
+    assert!(Arc::ptr_eq(&first, &database.current().await.unwrap()));
+    let mut open = database.connect().await.unwrap();
+    *key.0.lock().unwrap() = Some("second".into());
+    let second = database.current().await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    // A connection opened before the change still answers.
+    let rows = open
+        .query(SqlStatement::from("SELECT 1 AS one"))
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    *key.0.lock().unwrap() = None;
+    assert!(!Arc::ptr_eq(&second, &database.current().await.unwrap()));
 }

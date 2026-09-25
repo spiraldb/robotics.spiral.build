@@ -192,13 +192,13 @@ never becomes the motor-control runtime.
     intervals: measures (Break down subtasks, Find similar, Group similar,
     Identify unproductive moments) add properties or cut intervals, and
     Selects keep the intervals that pass a rule. A path compiles to one
-    read-only Spiral statement, previewed one episode at a time over the
-    first 100 episodes, and a leaf Select publishes as a named catalog view
-    with one row per kept interval. The Dataset, Select, and moments nodes
-    compile today; the other measures run in the browser until Spiral has
-    their functions. Graphs persist in the Studio SQLite `curations` table
-    with optimistic revisions and travel in project bundles. See
-    `docs/curation.md`.
+    read-only Spiral statement. Each measure previews its own step over the
+    rows its parent's preview holds, from the first 100 episodes, and a leaf
+    Select publishes as a named catalog view
+    with one row per kept interval. Every node compiles, the model
+    judgments to `spql.ai` functions. Graphs persist in the Studio SQLite
+    `curations` table with optimistic revisions and travel in project
+    bundles. See `docs/curation.md`.
   - **Training** retains remote HTTP runtime selection, vision ACT
     configuration, historical learning/resource telemetry, and checkpoint
     inspection/downloads. Starting MCAP camera training is disabled until
@@ -309,7 +309,9 @@ today, and nothing below may be presented as existing behavior:
   `LLM_MODEL` and `LLM_BASE_URL` are optional developer overrides; with only
   the key, the prototype defaults to Terra through OpenRouter's OpenAI-compatible endpoint. A
   custom endpoint must use HTTPS, except localhost may use HTTP. The key is
-  used only by the backend transport and never enters browser state, Spiral
+  used only by the backend: its transport, and the Spiral driver, which
+  receives it as the write-only database option `spiral.openrouter_api_key`
+  for the `spql.ai` model functions. It never enters browser state, Spiral
   persistence, or provider prompts. Browser readiness leaves provider and model
   fields empty, and the product never asks an operator to configure them.
 - **Nix flake** provides the development environment and web toolchain (`dx`,

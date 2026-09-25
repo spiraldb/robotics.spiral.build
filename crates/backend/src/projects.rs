@@ -108,9 +108,10 @@ impl ProjectFactory {
         settings: SpiralConnectionSettings,
     ) -> Result<Arc<OpenProject>, OperationError> {
         let connection = SpiralConnection::new(settings, self.data.spiral.clone());
-        let database = Arc::new(spiral_robotics_storage::AdbcDatabase::new(
-            connection.clone(),
-        ));
+        let database = Arc::new(
+            spiral_robotics_storage::AdbcDatabase::new(connection.clone())
+                .with_model_credentials(Arc::new(crate::transport::DriverCredentials)),
+        );
         let store = Arc::new(
             ProjectStore::new(connection, self.data.table_prefix.clone(), database)
                 .map_err(OperationError::External)?,

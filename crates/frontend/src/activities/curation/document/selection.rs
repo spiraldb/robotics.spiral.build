@@ -9,8 +9,9 @@
 //! One rule has two readings that must agree: the browser keeps what the
 //! preview read as the threshold slides (`keeps_*`), and the path compiles it
 //! to the `WHERE` the published view keeps by (`predicate`).
+use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::moments::Moment;
-use crate::activities::curation::path::{PathError, PathFragment, PathStep, StepSql};
+use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
 use crate::activities::episode::Episode;
 use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
@@ -281,12 +282,18 @@ impl Selection {
             Self::Progressing { minimum } => format!("Pace at least {minimum:.2}×"),
         }
     }
-    /// The rule as the predicate over its input's columns: what `keeps_*`
-    /// keep, in SQL. A moment the scorer could not read is kept here too.
-    fn predicate(&self) -> Result<String, PathError> {
+    /// The rule as the predicate over the columns of `input`: what
+    /// `keeps_*` keep, in SQL. A moment the scorer could not read is kept
+    /// here too; a subtask the model could not judge is not.
+    fn predicate(&self, input: &Relation) -> Result<String, PathError> {
         let literal = |value: f64| {
             SqlLiteral::double(value)
-                .ok_or_else(|| PathError::Invalid("A Select's threshold must be a number.".into()))
+                .ok_or_else(|| PathError::new("A Select's threshold must be a number."))
+        };
+        let measured = |measure: &str| {
+            input.measured(measure).ok_or_else(|| {
+                PathError::new(format!("Nothing above this Select measures {measure}."))
+            })
         };
         match self {
             Self::Episodes {
@@ -304,8 +311,26 @@ impl Selection {
                 literal(*minimum)?,
                 pace = Moment::PACE
             )),
-            Self::Similar { .. } => Err(PathError::waiting("spql.ai.similarity")),
-            Self::Categories { .. } => Err(PathError::waiting("spql.ai.classify")),
+            Self::Similar { minimum } => Ok(format!(
+                "{} >= {}",
+                measured(SubtaskRow::SIMILARITY)?,
+                literal(*minimum)?
+            )),
+            Self::Categories { names } if names.is_empty() => {
+                Err(PathError::new("Choose the categories to keep."))
+            }
+            // The column is qualified by its relation, so the field is read
+            // from the column rather than the column from a table.
+            Self::Categories { names } => Ok(format!(
+                "{}.{}.category IN ({})",
+                input.name(),
+                measured(SubtaskRow::CATEGORY)?,
+                names
+                    .iter()
+                    .map(|name| SqlLiteral::text(name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         }
     }
     pub(super) fn validate(&self) -> Result<(), String> {
@@ -340,9 +365,7 @@ impl PathFragment for Selection {
     fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let input = step.input()?;
         let name = step.name();
-        // A Select by similarity or category waits here, for its measure's
-        // function.
-        let predicate = self.predicate()?;
+        let predicate = self.predicate(input)?;
         let kept = format!(
             "{name} AS (SELECT {} FROM {} WHERE {predicate})",
             input.columns(),
@@ -390,11 +413,49 @@ mod tests {
     use super::*;
     use spiral_robotics_common::datasets::EpisodeId;
 
+    /// What reaches a Select below Break down and a search: the subtask and
+    /// its similarity.
+    fn searched() -> Relation {
+        Relation::new("breakdown", vec![SubtaskRow::DESCRIPTION])
+            .measuring("search", SubtaskRow::SIMILARITY)
+    }
+
+    /// The same below a grouping: the subtask and its category.
+    fn grouped() -> Relation {
+        Relation::new("breakdown", vec![SubtaskRow::DESCRIPTION])
+            .measuring("grouping", SubtaskRow::CATEGORY)
+    }
+
     /// The predicate as rendered, read back: `column >= CAST(n AS DOUBLE)`,
     /// `column <= …`, or the moments' `(column IS NULL OR column >= …)`, over
     /// one row's value of that column. Anything else is not a predicate this
     /// module renders, and fails the test that reads it.
     struct RenderedPredicate(String);
+
+    /// A rule of categories as rendered, read back:
+    /// `relation.column.category IN ('a', 'b')`, over one row's category. A
+    /// row without one is NULL in SQL, which `IN` never keeps.
+    struct RenderedCategories(String);
+
+    impl RenderedCategories {
+        fn keeps(&self, qualified: &str, category: Option<&str>) -> bool {
+            let names = self
+                .0
+                .strip_prefix(&format!("{qualified}.category IN ("))
+                .and_then(|rest| rest.strip_suffix(')'))
+                .unwrap_or_else(|| panic!("a list of categories: {}", self.0));
+            let names = names
+                .split(", ")
+                .map(|name| {
+                    name.strip_prefix('\'')
+                        .and_then(|name| name.strip_suffix('\''))
+                        .expect("a quoted name")
+                        .replace("''", "'")
+                })
+                .collect::<Vec<_>>();
+            category.is_some_and(|category| names.iter().any(|name| name == category))
+        }
+    }
 
     impl RenderedPredicate {
         fn keeps(&self, column: &str, value: Option<f64>) -> bool {
@@ -462,7 +523,7 @@ mod tests {
             let Selection::Episodes { fact, .. } = &rule else {
                 unreachable!("an episode rule")
             };
-            let rendered = RenderedPredicate(rule.predicate().unwrap());
+            let rendered = RenderedPredicate(rule.predicate(&searched()).unwrap());
             for episode in &episodes {
                 assert_eq!(
                     rule.keeps_episode(episode),
@@ -476,7 +537,7 @@ mod tests {
         // Moments below, on, and above the threshold, and one never read.
         for minimum in [-0.5, 0.0, 0.2] {
             let rule = Selection::Progressing { minimum };
-            let rendered = RenderedPredicate(rule.predicate().unwrap());
+            let rendered = RenderedPredicate(rule.predicate(&searched()).unwrap());
             for pace in [
                 Some(-0.6),
                 Some(-0.5),
@@ -494,10 +555,64 @@ mod tests {
                 );
             }
         }
-        // Rules over measurements Spiral cannot run yet render nothing.
+        // Subtasks below, on, and above a similarity, and one the model could
+        // not judge, which neither side keeps.
+        for minimum in [0.0, 0.5, 0.7] {
+            let rule = Selection::Similar { minimum };
+            let rendered = RenderedPredicate(rule.predicate(&searched()).unwrap());
+            for similarity in [None, Some(0.0), Some(0.49), Some(0.5), Some(0.7), Some(1.0)] {
+                assert_eq!(
+                    rule.keeps_subtask(similarity, None),
+                    rendered.keeps(SubtaskRow::SIMILARITY, similarity),
+                    "{} on {similarity:?}",
+                    rendered.0
+                );
+            }
+        }
+        // Subtasks in a kept category, in another, and in none; a name with a
+        // quote in it survives the quoting.
+        let rule = Selection::Categories {
+            names: vec!["fold".into(), "fold's edge".into()],
+        };
+        let rendered = RenderedCategories(rule.predicate(&grouped()).unwrap());
+        for category in [
+            None,
+            Some("fold"),
+            Some("fold's edge"),
+            Some("grasp"),
+            Some("Fold"),
+        ] {
+            assert_eq!(
+                rule.keeps_subtask(None, category),
+                rendered.keeps("grouping.subtask_category", category),
+                "{} on {category:?}",
+                rendered.0
+            );
+        }
+        // Choosing no category keeps nothing, so there is nothing to publish.
+        assert!(
+            Selection::Categories { names: Vec::new() }
+                .predicate(&grouped())
+                .is_err()
+        );
+        // A rule over a measure nothing above took has no column to read.
+        assert!(
+            Selection::Similar { minimum: 0.5 }
+                .predicate(&grouped())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_rule_reads_the_nearest_measure_of_its_kind() {
+        // A second search below the first writes its own column, and the
+        // Select below it reads that one.
+        let twice = searched().measuring("again", SubtaskRow::SIMILARITY);
         assert_eq!(
-            Selection::Similar { minimum: 0.5 }.predicate(),
-            Err(PathError::waiting("spql.ai.similarity"))
+            Selection::Similar { minimum: 0.5 }
+                .predicate(&twice)
+                .unwrap(),
+            "similarity_2 >= CAST(0.5 AS DOUBLE)"
         );
     }
 

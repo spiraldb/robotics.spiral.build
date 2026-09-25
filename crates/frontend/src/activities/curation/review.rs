@@ -7,7 +7,8 @@
 //! subtask had nothing visible to show for itself. One frame owns that
 //! proportion now: the index owns the scroll, the evidence column never
 //! moves, and the row the operator chose is always beside its own footage.
-use super::document::{CurationNodeKind, PopulationKind, SubtaskRow};
+use super::annotate::SubtaskRow;
+use super::document::{CurationNodeKind, PopulationKind};
 use super::poster::{PosterFrame, PosterFrames, PosterStill};
 use super::state::CurationController;
 use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
@@ -860,29 +861,19 @@ impl NodeReach {
         let mut above =
             controller.with_payload(|payload| payload.parent_of(node).map(str::to_owned));
         while let Some(id) = above {
-            let (input, _) = controller.populations(&id)?;
-            let finished = controller.with_payload(|payload| {
-                match payload.node(&id).map(|node| node.kind()) {
-                    Some(CurationNodeKind::IdentifyUnproductiveMoments(_)) => Some((
-                        controller.with_reads(|reads| {
-                            input
-                                .episodes()
-                                .iter()
-                                .all(|episode| reads.has_read(&id, episode))
-                        }),
-                        "Score the rest",
-                    )),
-                    Some(CurationNodeKind::BreakDownSubtasks(annotation)) => Some((
-                        input
-                            .episodes()
-                            .iter()
-                            .all(|episode| annotation.is_completed(episode)),
-                        "Annotate the rest",
-                    )),
-                    _ => None,
-                }
-            });
-            if let Some((false, verb)) = finished {
+            let kind = controller
+                .with_payload(|payload| payload.node(&id).map(|node| node.kind().clone()))?;
+            let verb = match kind {
+                CurationNodeKind::IdentifyUnproductiveMoments(_) => Some("Score the rest"),
+                CurationNodeKind::BreakDownSubtasks(_) => Some("Break down the rest"),
+                CurationNodeKind::FindSimilarSubtasks(_) => Some("Search the rest"),
+                CurationNodeKind::GroupSimilarSubtasks(_) => Some("Group the rest"),
+                CurationNodeKind::Dataset | CurationNodeKind::Select(_) => None,
+            };
+            let finished = controller
+                .progress(&id)
+                .is_some_and(|progress| progress.pending().is_empty());
+            if let Some(verb) = verb.filter(|_| !finished) {
                 return Some((id, verb));
             }
             above = controller.with_payload(|payload| payload.parent_of(&id).map(str::to_owned));

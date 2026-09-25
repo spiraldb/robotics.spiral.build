@@ -1,6 +1,5 @@
-//! Scoring progress: the pinned scorer, the step an Identify unproductive
-//! moments node adds to a path, and the preview pass that runs it one
-//! recording at a time.
+//! Scoring progress: the pinned scorer, and the step an Identify unproductive
+//! moments node adds to a path.
 //!
 //! The node compiles to `spql.ai.score_progress` over the episode's camera,
 //! which answers with a velocity for every frame. Each frame becomes one
@@ -10,17 +9,13 @@
 use super::moment::Moment;
 use crate::activities::curation::document::MomentDetection;
 use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
-use crate::activities::curation::state::{CurationController, RunHandle};
-use crate::activities::data::DatasetClient;
-use crate::activities::episode::Episode;
 use spiral_robotics_common::datasets::CameraVideo;
-use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::SqlLiteral;
 
 /// The most moments one recording's preview reads: every frame of five and a
 /// half minutes at 30 Hz, the Arrow episode query's own bound. A longer
 /// recording is refused rather than cut short.
-const MAX_MOMENTS: usize = 10_000;
+pub(in crate::activities::curation) const MAX_MOMENTS: usize = 10_000;
 
 /// The released, task-specific WARP checkpoint. Its velocity is progress per
 /// unit time relative to expert demonstrations; progress is normalized within
@@ -104,58 +99,5 @@ impl PathFragment for MomentDetection {
             entries,
             Relation::new(name, vec![pace]).publishing(pace),
         ))
-    }
-}
-
-/// One node's preview, one recording at a time: the path's statement with the
-/// episode bound, read back as its moments. The model runs on the backend's
-/// hardware, so a second request would only queue behind the first; and
-/// Spiral cannot cancel a running query, so Stop takes effect between
-/// episodes.
-pub(in crate::activities::curation) struct MomentPass {
-    controller: CurationController,
-    run: RunHandle,
-    statement: String,
-}
-
-impl MomentPass {
-    pub(in crate::activities::curation) fn new(
-        controller: CurationController,
-        run: RunHandle,
-        statement: String,
-    ) -> Self {
-        Self {
-            controller,
-            run,
-            statement,
-        }
-    }
-
-    /// Read each episode and hold what it answered, or why it failed, for the
-    /// session. A failed episode never stops the rest.
-    pub(in crate::activities::curation) async fn run(self, episodes: Vec<Episode>) {
-        let total = episodes.len();
-        for (done, episode) in episodes.iter().enumerate() {
-            if !self.run.wanted() {
-                break;
-            }
-            self.run
-                .report(format!("Scoring {} of {total} episodes", done + 1));
-            let read = self.read(episode).await;
-            self.controller
-                .record_moments(self.run.node(), episode.id(), read);
-        }
-    }
-
-    async fn read(&self, episode: &Episode) -> Result<Vec<Moment>, String> {
-        let stream = DatasetClient::current()
-            .run_episode_arrow_query(&EpisodeQueryRequest::new(
-                episode.selection(),
-                self.statement.clone(),
-                MAX_MOMENTS,
-            ))
-            .await
-            .map_err(|error| error.to_string())?;
-        Moment::read(&stream, episode)
     }
 }

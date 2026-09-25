@@ -13,6 +13,12 @@ impl SqlLiteral {
             .is_finite()
             .then(|| format!("CAST({value} AS DOUBLE)"))
     }
+    /// A finite number as a bare numeric literal, for a function parameter
+    /// that must be a constant: Spiral types a `CAST` as nullable, which such
+    /// a parameter refuses.
+    pub fn number(value: f64) -> Option<String> {
+        value.is_finite().then(|| value.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -31,6 +37,9 @@ mod tests {
         );
         assert_eq!(SqlLiteral::double(f64::NAN), None);
         assert_eq!(SqlLiteral::double(f64::INFINITY), None);
+        assert_eq!(SqlLiteral::number(0.5).as_deref(), Some("0.5"));
+        assert_eq!(SqlLiteral::number(2.0).as_deref(), Some("2"));
+        assert_eq!(SqlLiteral::number(f64::NAN), None);
         assert_eq!(SqlLiteral::text("owner's"), "'owner''s'");
     }
 }

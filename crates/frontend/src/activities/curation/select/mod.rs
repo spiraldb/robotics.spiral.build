@@ -57,7 +57,7 @@ impl SelectView {
             Some(Self {
                 node: node.to_owned(),
                 selection: selection.clone(),
-                measure: payload.selection_measure(node)?.clone(),
+                measure: payload.measure_above(node)?.clone(),
                 input,
                 output,
                 sample,
@@ -70,10 +70,9 @@ impl SelectView {
             (Population::Episodes(input), Population::Episodes(output)) => {
                 input.iter().map(|id| output.contains(id)).collect()
             }
-            (
-                Population::Subtasks { rows: input, .. },
-                Population::Subtasks { rows: output, .. },
-            ) => input.iter().map(|row| output.contains(row)).collect(),
+            (Population::Subtasks(input), Population::Subtasks(output)) => {
+                input.iter().map(|row| output.contains(row)).collect()
+            }
             // Moments come one per frame, too many to look each up in what
             // the rule kept; the rule itself says.
             (Population::Moments(input), Population::Moments(_)) => input
@@ -86,14 +85,7 @@ impl SelectView {
     /// One slice per item that reaches the rule, in input order: moments one
     /// frame at a time, as they were judged.
     fn item_slices(&self) -> Vec<Slice> {
-        match &self.input {
-            Population::Episodes(episodes) => episodes
-                .iter()
-                .map(|episode| Slice::of_episode(episode, &self.sample))
-                .collect(),
-            Population::Subtasks { rows, .. } => rows.iter().map(Slice::of_subtask).collect(),
-            Population::Moments(rows) => rows.iter().map(Slice::of_moment).collect(),
-        }
+        self.input.items(&self.sample)
     }
     fn kept_seconds(&self) -> f64 {
         self.output
@@ -143,7 +135,7 @@ impl SelectView {
     fn place(&self, item: usize) -> Option<(EpisodeId, Option<(f64, f64)>)> {
         match &self.input {
             Population::Episodes(episodes) => episodes.get(item).map(|id| (id.clone(), None)),
-            Population::Subtasks { rows, .. } => rows.get(item).map(|row| {
+            Population::Subtasks(rows) => rows.get(item).map(|row| {
                 (
                     row.episode().clone(),
                     Some((row.start_time(), row.end_time())),
@@ -166,7 +158,7 @@ impl SelectView {
                 .is_none()
                 .then(|| episodes.iter().position(|id| id == tab.episode()))
                 .flatten(),
-            Population::Subtasks { rows, .. } => rows
+            Population::Subtasks(rows) => rows
                 .iter()
                 .position(|row| tab.holds(row.episode(), row.start_time())),
             Population::Moments(rows) => rows
@@ -190,18 +182,14 @@ impl SelectView {
             (_, false) => "Nothing is left out: everything that reaches this rule passes it.",
         }
     }
-    /// Why nothing can be judged yet, when the node above has not measured.
-    fn unmeasured(&self, controller: CurationController) -> Option<String> {
-        let measured = controller.with_payload(|payload| match self.measure.kind() {
-            CurationNodeKind::FindSimilarSubtasks(_) => {
-                payload.current_ranking(self.measure.id()).is_some()
-            }
-            CurationNodeKind::GroupSimilarSubtasks => {
-                payload.grouping_for(self.measure.id()).is_some()
-            }
-            _ => true,
-        });
-        (!measured).then(|| match self.selection.basis() {
+    /// Why nothing can be judged yet, when the search or grouping above has
+    /// not read any episode.
+    fn unmeasured(&self) -> Option<String> {
+        let judging = matches!(
+            self.measure.kind(),
+            CurationNodeKind::FindSimilarSubtasks(_) | CurationNodeKind::GroupSimilarSubtasks(_)
+        );
+        (judging && self.input.len() == 0).then(|| match self.selection.basis() {
             SelectionBasis::Similarity => {
                 "The search above has not answered its question yet. Run it, then choose how close a subtask must be.".to_owned()
             }
@@ -289,7 +277,7 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
             });
         }
     };
-    let dots = StripDot::for_view(&view, controller, &kept);
+    let dots = StripDot::for_view(&view, &kept);
     // One axis for the strip and the slider on it, so the thumb is always
     // where the threshold line stands.
     let threshold = view.selection.threshold().map(|value| {
@@ -312,7 +300,7 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
     // the list is always one of the rows it lists.
     let kept_side = ListedSide::new(view.clone(), kept.clone(), true);
     let left_side = ListedSide::new(view.clone(), kept.clone(), false);
-    let (kept_rows, left_rows) = (kept_side.rows(controller), left_side.rows(controller));
+    let (kept_rows, left_rows) = (kept_side.rows(), left_side.rows());
     let sides = rsx! {
         ModeGroup { label: "Which side of the rule to list".to_owned(), class: "curation-select-sides".to_owned(),
             ModeButton {
@@ -321,7 +309,7 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
                 onclick: move |_| {
                     if showing() != Showing::Kept {
                         showing.set(Showing::Kept);
-                        if let Some((episode, span)) = kept_side.opening(controller) {
+                        if let Some((episode, span)) = kept_side.opening() {
                             tabs.open(&episode, span);
                         }
                     }
@@ -334,7 +322,7 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
                 onclick: move |_| {
                     if showing() != Showing::LeftOut {
                         showing.set(Showing::LeftOut);
-                        if let Some((episode, span)) = left_side.opening(controller) {
+                        if let Some((episode, span)) = left_side.opening() {
                             tabs.open(&episode, span);
                         }
                     }
@@ -348,7 +336,7 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
         section { class: "curation-select-workspace", "aria-label": "Select",
             NodeBar {
                 lead: rsx! { SelectRule { controller, view: view.clone(), threshold } },
-                note: view.unmeasured(controller),
+                note: view.unmeasured(),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 // Whether this is an output is the card's flag in the graph;
                 // the bar ends with what the rule gives training, and an
@@ -405,7 +393,7 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
                 Population::Episodes(_) => rsx! {
                     EpisodeListing { controller, side, tabs, sides }
                 },
-                Population::Subtasks { .. } => rsx! {
+                Population::Subtasks(_) => rsx! {
                     SubtaskListing { controller, side, tabs, sides }
                 },
                 Population::Moments(_) => rsx! {
