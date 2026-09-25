@@ -4,7 +4,7 @@ use crate::activities::curation::document::{
     Comparison, DATASET_NODE_ID, EpisodeFact, MomentDetection, Selection, SubtaskAnnotation,
     SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
-use crate::activities::curation::moments::Moment;
+use crate::activities::curation::moments::{Moment, ProgressScorer};
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::preview::{PreviewReads, PreviewRows, ReadInput};
 use crate::activities::episode::Episode;
@@ -138,27 +138,32 @@ fn a_progress_select_scores_every_frame_and_joins_the_moments_it_keeps() {
     for step in [
         "FROM spql.mcap.read_topic('abc130k', '/cameras/top_camera-images-rgb') r",
         "WHERE r.id IN (SELECT episode_id FROM dataset_0))",
-        "spql.ai.score_progress(source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores FROM identify_unproductive_moments_1_videos)",
-        "CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS pace FROM identify_unproductive_moments_1_scores s CROSS JOIN LATERAL UNNEST(s.scores) p)",
-        "FROM identify_unproductive_moments_1_moments m JOIN dataset_0 i ON i.episode_id = m.episode_id",
+        // Each episode's scores are a column of its row, whose start is its
+        // first message.
+        "episodes AS (SELECT i.episode_id, i.start_ns, i.end_ns, i.duration_seconds, i.messages, i.channels, i.size_megabytes, i.start_ns AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores FROM dataset_0 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
+        "r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns, p.frame_index AS frame_index, CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS pace FROM episodes r CROSS JOIN LATERAL UNNEST(r.scores) p)",
+        "COALESCE(LEAD(start_ns) OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index), start_ns + (start_ns - LAG(start_ns) OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index))) AS end_ns",
+        "identify_unproductive_moments_1 AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, LEAST(end_ns, reached_end_ns) AS end_ns, pace FROM identify_unproductive_moments_1_moments WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns AND end_ns > start_ns)",
         "FROM select_2_numbered WHERE (pace IS NULL OR pace >= CAST(0.2 AS DOUBLE)))",
-        "select_2 AS (SELECT episode_id, MIN(start_ns) AS start_ns, MAX(end_ns) AS end_ns, AVG(pace) AS pace FROM select_2_kept GROUP BY episode_id, stretch)",
+        "select_2_stretches AS (SELECT episode_id, MIN(start_ns) OVER (PARTITION BY episode_id, stretch) AS start_ns, MAX(end_ns) OVER (PARTITION BY episode_id, stretch) AS end_ns, AVG(pace) OVER (PARTITION BY episode_id, stretch) AS pace, ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place FROM select_2_kept)",
+        "select_2 AS (SELECT episode_id, start_ns, end_ns, pace FROM select_2_stretches WHERE place = 1)",
     ] {
         assert!(published.contains(step), "{step}\n{published}");
     }
     assert!(published.ends_with("\nSELECT episode_id, start_ns, end_ns, pace FROM select_2"));
-    // Spiral admits only aggregates and ranking functions over a window.
-    assert!(!published.contains("LAG(") && !published.contains("LEAD("));
-    // The preview scores only the bound episode, over the intervals the
-    // dataset's preview hands on rather than the dataset read again.
+    // The preview scores only the bound episode, and unnests its scores over
+    // the intervals the dataset's preview hands on rather than the dataset
+    // read again.
     let scoring = preview(&graph, &detect, intervals());
-    assert!(
-        scoring.starts_with("WITH\n  preview_input(episode_id, start_ns, end_ns) AS (VALUES ($1, ")
-    );
-    assert!(
-        scoring.contains("WHERE r.id IN (SELECT episode_id FROM preview_input) AND r.id = $1)")
-    );
-    assert!(scoring.contains("JOIN preview_input i ON i.episode_id = m.episode_id"));
+    for step in [
+        "WITH\n  preview_input(episode_id, start_ns, end_ns) AS (VALUES ($1, ",
+        "FROM spql.mcap.read_topic('abc130k', '/cameras/top_camera-images-rgb') r JOIN spql.mcap.episodes('abc130k') e ON e.id = r.id WHERE r.id = $1)",
+        "episodes AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores FROM spql.mcap.episodes('abc130k') e JOIN camera_video_1 ON camera_video_1.id = e.id WHERE e.id = $1)",
+        "preview_reached AS (SELECT i.episode_id, i.start_ns, i.end_ns, e.origin_ns, e.scores FROM preview_input i JOIN episodes e ON e.episode_id = i.episode_id)",
+        "FROM preview_reached r CROSS JOIN LATERAL UNNEST(r.scores) p)",
+    ] {
+        assert!(scoring.contains(step), "{step}\n{scoring}");
+    }
     assert!(!scoring.contains("dataset_0"));
     assert!(scoring.ends_with(
         "\nSELECT episode_id, start_ns, end_ns, pace FROM identify_unproductive_moments_1"
@@ -184,14 +189,14 @@ fn a_breakdown_reads_each_episode_whole_and_cuts_its_subtasks_to_what_reached_it
         // The chosen camera's packets of the episodes that reach the node.
         "FROM spql.mcap.read_topic('abc130k', '/top-camera') r JOIN spql.mcap.episodes('abc130k') e ON e.id = r.id WHERE r.id IN (SELECT episode_id FROM select_1))",
         // Each episode's first instruction is its task.
-        "break_down_subtasks_2_tasks AS (SELECT id, task FROM (SELECT r.id, r.value.data AS task, ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.log_time) AS position FROM spql.mcap.read_topic('abc130k', '/instruction') r WHERE r.id IN (SELECT episode_id FROM select_1)) instructions WHERE position = 1)",
-        "break_down_subtasks_2_breakdowns AS (SELECT v.id AS episode_id, spql.ai.breakdown_task(v.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash', task => t.task) AS subtasks FROM break_down_subtasks_2_videos v LEFT JOIN break_down_subtasks_2_tasks t ON t.id = v.id)",
-        // Unnested straight from the call, before any join.
-        "FROM break_down_subtasks_2_breakdowns b CROSS JOIN LATERAL UNNEST(b.subtasks) AS s)",
-        // Presentation time counts from the episode's first message.
-        "e.origin_ns + o.start_offset_ns AS start_ns, e.origin_ns + o.end_offset_ns AS end_ns",
-        // Cut to the intervals that reached the node.
-        "break_down_subtasks_2 AS (SELECT s.episode_id, GREATEST(s.start_ns, i.start_ns) AS start_ns, LEAST(s.end_ns, i.end_ns) AS end_ns, s.subtask FROM break_down_subtasks_2_subtasks s JOIN select_1 i ON i.episode_id = s.episode_id AND s.start_ns < i.end_ns AND s.end_ns > i.start_ns)",
+        "instruction_1 AS (SELECT id, task FROM (SELECT r.id, r.value.data AS task, ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.log_time) AS position FROM spql.mcap.read_topic('abc130k', '/instruction') r WHERE r.id IN (SELECT episode_id FROM select_1)) instructions WHERE position = 1)",
+        // The subtasks are a column of the episode's row, kept by the Select.
+        "spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash', task => instruction_1.task) AS subtasks FROM select_1 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id LEFT JOIN instruction_1 ON instruction_1.id = i.episode_id)",
+        // Unnested from the row, and moved to log time: presentation time
+        // counts from the episode's first message.
+        "r.origin_ns + CAST(s.start_ns AS BIGINT) AS start_ns, r.origin_ns + CAST(s.end_ns AS BIGINT) AS end_ns, s.description AS subtask FROM episodes r CROSS JOIN LATERAL UNNEST(r.subtasks) AS s)",
+        // Cut to the interval of the row they came on.
+        "break_down_subtasks_2 AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, LEAST(end_ns, reached_end_ns) AS end_ns, subtask FROM break_down_subtasks_2_subtasks WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns)",
     ] {
         assert!(published.contains(step), "{step}\n{published}");
     }
@@ -203,11 +208,11 @@ fn a_breakdown_reads_each_episode_whole_and_cuts_its_subtasks_to_what_reached_it
     // the intervals its parent's preview handed on, and fails an episode the
     // model cannot break down with the reason.
     let breaking = preview(&graph, &annotate, intervals());
-    assert!(breaking.contains(
-        "WHERE r.id IN (SELECT episode_id FROM preview_input) AND r.id = $1) instructions"
-    ));
-    assert!(breaking.contains("task => t.task, on_error => 'fail') AS subtasks"));
-    assert!(breaking.contains("FROM break_down_subtasks_2_subtasks s JOIN preview_input i ON"));
+    assert!(breaking.contains("WHERE r.id = $1) instructions"));
+    assert!(breaking.contains("task => instruction_1.task, on_error => 'fail') AS subtasks"));
+    assert!(
+        breaking.contains("FROM preview_reached r CROSS JOIN LATERAL UNNEST(r.subtasks) AS s)")
+    );
     assert!(!breaking.contains("select_1") && !breaking.contains("dataset_0"));
     admitted(&published, &breaking);
 
@@ -218,10 +223,55 @@ fn a_breakdown_reads_each_episode_whole_and_cuts_its_subtasks_to_what_reached_it
         annotation.set_task_topic(None);
     }
     let published = self::published(&graph, &annotate);
-    assert!(!published.contains("_tasks"));
+    assert!(!published.contains("instruction_"));
     assert!(published.contains(
-        "model => 'google/gemini-3.8-flash') AS subtasks FROM break_down_subtasks_2_videos v)"
+        "model => 'google/gemini-3.8-flash') AS subtasks FROM select_1 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)"
     ));
+}
+
+/// Dataset, moments, the Select of the moving ones, then Break down on the
+/// scorer's own camera: one video feeds both models, and the subtasks ride
+/// on every moment and stretch until Break down unnests them.
+#[test]
+fn both_models_answer_on_the_episode_row_and_the_subtasks_ride_to_their_step() {
+    let mut graph = graph();
+    let detect = child(
+        &mut graph,
+        DATASET_NODE_ID,
+        CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+    );
+    let moving = child(
+        &mut graph,
+        &detect,
+        CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
+    );
+    let mut annotation = SubtaskAnnotation::default();
+    annotation.set_camera(Some(ProgressScorer::WarpSimBottles.camera().to_owned()));
+    let annotate = child(
+        &mut graph,
+        &moving,
+        CurationNodeKind::BreakDownSubtasks(annotation),
+    );
+    let published = published(&graph, &annotate);
+    assert_eq!(published.matches("spql.mcap.read_topic(").count(), 1);
+    for step in [
+        "i.start_ns AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores, spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash') AS subtasks FROM dataset_0 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
+        "identify_unproductive_moments_1_frames AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns, r.subtasks, r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns,",
+        "LEAST(end_ns, reached_end_ns) AS end_ns, pace, origin_ns, subtasks FROM identify_unproductive_moments_1_moments",
+        "AVG(pace) OVER (PARTITION BY episode_id, stretch) AS pace, origin_ns, subtasks, ROW_NUMBER()",
+        "select_2 AS (SELECT episode_id, start_ns, end_ns, pace, origin_ns, subtasks FROM select_2_stretches WHERE place = 1)",
+        "break_down_subtasks_3_subtasks AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns + CAST(s.start_ns AS BIGINT) AS start_ns, r.origin_ns + CAST(s.end_ns AS BIGINT) AS end_ns, s.description AS subtask FROM select_2 r CROSS JOIN LATERAL UNNEST(r.subtasks) AS s)",
+    ] {
+        assert!(published.contains(step), "{step}\n{published}");
+    }
+    // The preview's rows are flat: Break down asks the bound episode for its
+    // own subtasks beside the stretches it is handed.
+    let breaking = preview(&graph, &annotate, intervals());
+    assert!(!breaking.contains("score_progress"));
+    assert!(breaking.contains(
+        "preview_reached AS (SELECT i.episode_id, i.start_ns, i.end_ns, e.origin_ns, e.subtasks FROM preview_input i JOIN episodes e ON e.episode_id = i.episode_id)"
+    ));
+    admitted(&published, &breaking);
 }
 
 /// The example the plan names: fold subtasks, grouped from Break down.
@@ -393,33 +443,219 @@ fn each_measures_preview_is_its_published_step_over_its_parents_rows() {
         CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
     );
     let annotate_moving = child(&mut graph, &moving, breakdown());
-    for (node, input) in [
-        (&annotate, intervals()),
-        (&detect, intervals()),
-        (&annotate_moving, intervals()),
-        (&search, rows_of(&graph, &annotate)),
-        (&group, rows_of(&graph, &annotate)),
-    ] {
-        let parent = graph.parent_of(node).unwrap();
-        let above = CurationPath::to(&graph, parent)
+    let name = |node: &str| {
+        CurationPath::to(&graph, node)
             .unwrap()
             .relation()
-            .unwrap();
-        let own = CurationPath::to(&graph, node).unwrap().relation().unwrap();
+            .unwrap()
+            .name()
+            .to_owned()
+    };
+    // What each step reads: published, the episode rows where the path
+    // leaves whole episodes and the entry above it after that; previewed,
+    // the rows the parent's preview holds, beside the node's own episode row
+    // when it asks the episode anything.
+    for (node, input, (published_input, previewed_input)) in [
+        (
+            &annotate,
+            intervals(),
+            ("episodes".to_owned(), "preview_reached"),
+        ),
+        (
+            &detect,
+            intervals(),
+            ("episodes".to_owned(), "preview_reached"),
+        ),
+        (
+            &annotate_moving,
+            intervals(),
+            (name(&moving), "preview_reached"),
+        ),
+        (
+            &search,
+            rows_of(&graph, &annotate),
+            (name(&annotate), "preview_input"),
+        ),
+        (
+            &group,
+            rows_of(&graph, &annotate),
+            (name(&annotate), "preview_input"),
+        ),
+    ] {
+        let own = name(node);
         // The node's own entries and the final SELECT, from its first entry.
         let step = |statement: &str| {
-            let first = statement.find(&format!("\n  {}", own.name())).unwrap();
+            let first = statement.find(&format!("\n  {own}")).unwrap();
             statement[first..].to_owned()
         };
-        // Published, the step reads the parent's entry; previewed, the rows
-        // the parent's preview holds, for the bound episode only, failing
-        // where the view answers NULL.
-        let published = step(&published(&graph, node)).replace(above.name(), "preview_input");
-        let previewed = step(&preview(&graph, node, input))
-            .replace(" AND r.id = $1", "")
-            .replace(", on_error => 'fail'", "");
+        // The same step over either input, failing where the view answers
+        // NULL.
+        let published = step(&published(&graph, node)).replace(&published_input, previewed_input);
+        let previewed = step(&preview(&graph, node, input)).replace(", on_error => 'fail'", "");
         assert_eq!(previewed, published);
     }
+}
+
+/// A compiled statement read back as its `WITH` entries, by name, and the
+/// final `SELECT`, for counting where each entry is read.
+struct CompiledEntries {
+    entries: Vec<(String, String)>,
+    select: String,
+}
+
+impl CompiledEntries {
+    fn of(statement: &str) -> Self {
+        let body = statement
+            .strip_prefix("WITH\n  ")
+            .expect("a WITH statement");
+        let (with, select) = body.rsplit_once("\nSELECT ").expect("a final SELECT");
+        // Entries end at a comma outside every parenthesis and quote.
+        let (mut entries, mut depth, mut quoted, mut start) = (Vec::new(), 0, false, 0);
+        for (index, character) in with.char_indices() {
+            match character {
+                '\'' => quoted = !quoted,
+                '(' if !quoted => depth += 1,
+                ')' if !quoted => depth -= 1,
+                ',' if !quoted && depth == 0 => {
+                    entries.push(with[start..index].trim());
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        entries.push(with[start..].trim());
+        let entries = entries
+            .into_iter()
+            .map(|entry| {
+                let name = entry
+                    .split(|character: char| {
+                        !(character.is_ascii_alphanumeric() || character == '_')
+                    })
+                    .next()
+                    .expect("a named entry");
+                (name.to_owned(), entry.to_owned())
+            })
+            .collect();
+        Self {
+            entries,
+            select: select.to_owned(),
+        }
+    }
+
+    /// How many times `name` is read, as the relation of a `FROM` or a
+    /// `JOIN`, anywhere in the statement.
+    fn reads(&self, name: &str) -> usize {
+        self.entries
+            .iter()
+            .map(|(_, entry)| Self::reads_within(entry, name))
+            .sum::<usize>()
+            + Self::reads_within(&self.select, name)
+    }
+
+    fn reads_within(text: &str, name: &str) -> usize {
+        ["FROM ", "JOIN "]
+            .iter()
+            .map(|keyword| {
+                let read = format!("{keyword}{name}");
+                text.match_indices(&read)
+                    .filter(|(at, _)| {
+                        text[at + read.len()..]
+                            .chars()
+                            .next()
+                            .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '_'))
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Every entry that asks a model, itself or through an entry it reads.
+    fn asking(&self) -> Vec<&str> {
+        let mut asking = Vec::<&str>::new();
+        for (name, entry) in &self.entries {
+            if entry.contains("spql.ai.")
+                || asking
+                    .iter()
+                    .any(|above| Self::reads_within(entry, above) > 0)
+            {
+                asking.push(name);
+            }
+        }
+        asking
+    }
+}
+
+/// Every kind the grammar offers after a node, configured to compile, with
+/// Break down both on a camera of its own and on the scorer's.
+fn configured(kind: CurationNodeKind) -> Vec<CurationNodeKind> {
+    match kind {
+        CurationNodeKind::BreakDownSubtasks(_) => {
+            let mut scorers = SubtaskAnnotation::default();
+            scorers.set_camera(Some(ProgressScorer::WarpSimBottles.camera().to_owned()));
+            vec![breakdown(), CurationNodeKind::BreakDownSubtasks(scorers)]
+        }
+        CurationNodeKind::FindSimilarSubtasks(_) => vec![searching("fold the towel")],
+        CurationNodeKind::GroupSimilarSubtasks(_) => vec![grouping(&["fold", "grasp"])],
+        CurationNodeKind::Select(Selection::Categories { .. }) => {
+            vec![CurationNodeKind::Select(Selection::Categories {
+                names: vec!["fold".into()],
+            })]
+        }
+        kind => vec![kind],
+    }
+}
+
+/// Every path of up to `below` nodes under `node` the grammar allows, each
+/// checked by `check` once it is in `graph`.
+fn every_path(
+    graph: &mut CurationGraph,
+    (node, below): (&str, usize),
+    check: &mut impl FnMut(&CurationGraph, &str),
+) {
+    if below == 0 {
+        return;
+    }
+    for kind in graph.child_kinds(node).into_iter().flat_map(configured) {
+        let added = child(graph, node, kind);
+        check(graph, &added);
+        every_path(graph, (&added, below - 1), check);
+        graph.remove_node(&added).unwrap();
+    }
+}
+
+/// Spiral pastes an entry into every place that reads it, so an entry read
+/// twice runs twice. No published path reads an entry that asks a model more
+/// than once, and each model node's call is written once.
+#[test]
+fn no_published_path_asks_a_model_twice() {
+    let mut graph = graph();
+    let mut most_models = 0;
+    every_path(&mut graph, (DATASET_NODE_ID, 6), &mut |graph, node| {
+        let statement = published(graph, node);
+        let compiled = CompiledEntries::of(&statement);
+        for asking in compiled.asking() {
+            assert!(
+                compiled.reads(asking) <= 1,
+                "{asking} is read {} times\n{statement}",
+                compiled.reads(asking)
+            );
+        }
+        let models = CurationPath::to(graph, node)
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|node| {
+                !matches!(
+                    node.kind(),
+                    CurationNodeKind::Dataset | CurationNodeKind::Select(_)
+                )
+            })
+            .count();
+        assert_eq!(statement.matches("spql.ai.").count(), models, "{statement}");
+        most_models = most_models.max(models);
+    });
+    // Some path asks all four: moments, Break down, and both judgments.
+    assert_eq!(most_models, 4);
 }
 
 #[test]

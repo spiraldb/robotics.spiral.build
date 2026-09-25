@@ -118,6 +118,7 @@ Agreed:
 | D9 | Curation only chooses data. Sample rate, cameras, image size, normalization and augmentation belong to Training. | These are the policy's input contract, and rollout must replay it on live frames, so they travel with the checkpoint | Shape nodes in Curation; a separate Shape tab |
 | D10 | Publish is explicit and named. Save stays local. | Exploratory leaves must not create catalog resources, and readers need a stable name | Auto-publishing every leaf |
 | D11 | No curation Assistant yet. The + menu adds nodes. A jev-style composer inside a node comes later. | Keeps the concept small | A Workflow-style chat column |
+| D12 | A published view is one stream of episode rows (decided 2026-09-25). Each per-episode model call is a column of the episode's row, built once where the path leaves whole episodes; its answer rides on the interval rows until the node's own step unnests it, and every step reads the entry above it once. | Spiral pastes a CTE into every place that reads it, so a model step read twice ran twice: moments → Select → Break down ran `score_progress` twice per episode. The cost: only a Select of episodes spares an episode a model call, so that view asks Break down of episodes no stretch of which reaches it. Its rows still equal the preview's. | Each node's CTEs re-reading the one above; SpiralDB computing a CTE read in several places once, not pursued for now |
 
 Proposed here, pending your agreement:
 
@@ -179,11 +180,12 @@ Proposed here, pending your agreement:
   module. There is no `sql.rs` bucket. One path type walks root → node and
   composes the CTEs.
 - Literals go through the existing `SqlLiteral` quoting path.
-- Each step is written once over an abstract input relation. Published, the
-  input is the parent's `WITH` entry. Previewed, it is the parent's preview
-  rows as `VALUES`; a step that reads a recording binds its episode as `$1`
-  through `/api/queries/episode`, and the text judgments batch many episodes
-  in one `/api/queries` statement (D5).
+- Each node writes what it asks of each episode's row and its step over the
+  interval rows that reach it, each once (D12). Published, the step reads the
+  entry above it. Previewed, it reads the parent's preview rows as `VALUES`,
+  beside the node's own row for the episode bound as `$1` through
+  `/api/queries/episode`; the text judgments batch many episodes in one
+  `/api/queries` statement (D5).
 - A Select's slider filters the parent's preview rows in the browser. The same
   `Selection` value renders the `WHERE` clause, and a test asserts the two
   agree on the sample.

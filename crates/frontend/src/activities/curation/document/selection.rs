@@ -362,7 +362,7 @@ impl Selection {
 /// moments keeps the moments that pass and joins the ones that touch into
 /// stretches, each carrying its mean pace.
 impl PathFragment for Selection {
-    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let input = step.input()?;
         let name = step.name();
         let predicate = self.predicate(input)?;
@@ -378,24 +378,33 @@ impl PathFragment for Selection {
             // Moments tile their episode, so kept moments with none left out
             // between them touch: numbering every moment and then the kept
             // ones, a stretch is where the two numbers keep one difference.
-            // Spiral has no LAG, and ROW_NUMBER is enough.
+            // Each stretch is measured over a window rather than grouped, and
+            // its first moment stands for it, so the answers riding on every
+            // moment of an episode ride on with its stretches.
             Self::Progressing { .. } => {
-                let pace = Moment::PACE;
+                let (pace, columns) = (Moment::PACE, input.columns());
+                let stretch = "OVER (PARTITION BY episode_id, stretch)";
                 StepSql::new(
                     vec![
                         format!(
-                            "{name}_numbered AS (SELECT episode_id, start_ns, end_ns, {pace}, \
+                            "{name}_numbered AS (SELECT {columns}, \
                              ROW_NUMBER() OVER (PARTITION BY episode_id ORDER BY start_ns) AS position FROM {})",
                             input.name()
                         ),
                         format!(
-                            "{name}_kept AS (SELECT episode_id, start_ns, end_ns, {pace}, \
+                            "{name}_kept AS (SELECT {columns}, \
                              position - ROW_NUMBER() OVER (PARTITION BY episode_id ORDER BY start_ns) AS stretch \
                              FROM {name}_numbered WHERE {predicate})"
                         ),
                         format!(
-                            "{name} AS (SELECT episode_id, MIN(start_ns) AS start_ns, MAX(end_ns) AS end_ns, AVG({pace}) AS {pace} \
-                             FROM {name}_kept GROUP BY episode_id, stretch)"
+                            "{name}_stretches AS (SELECT episode_id, MIN(start_ns) {stretch} AS start_ns, \
+                             MAX(end_ns) {stretch} AS end_ns, AVG({pace}) {stretch} AS {pace}{}, \
+                             ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place \
+                             FROM {name}_kept)",
+                            input.answers().following("")
+                        ),
+                        format!(
+                            "{name} AS (SELECT {columns} FROM {name}_stretches WHERE place = 1)"
                         ),
                     ],
                     input.renamed(name).publishing(pace),

@@ -1,89 +1,70 @@
-//! The step a Break down subtasks node adds to a path.
+//! What a Break down subtasks node adds to a path.
 //!
-//! The node compiles to `spql.ai.breakdown_task` over each episode's video of
-//! the chosen camera, with the episode's recorded instruction as its task when
-//! the dataset records one. The model reads each episode whole, so what it is
-//! asked never depends on anything above the node; its subtasks are then cut
-//! to the intervals that reach the node. The function answers on the video's
-//! presentation timeline, which Studio's packets count from the episode's
-//! first message, so a subtask's log time is that message's time plus its own.
+//! The node asks each episode's row for `spql.ai.breakdown_task` over the
+//! chosen camera's video, with the episode's recorded instruction as its task
+//! when the dataset records one. The model reads each episode whole, so what
+//! it is asked never depends on anything above the node. Its step unnests
+//! the subtasks from every row that reaches the node and cuts them to that
+//! row's interval. The function answers on the video's presentation
+//! timeline, which Studio's packets count from the episode's first message,
+//! so a subtask's log time is that message's time plus its own.
 use super::subtask::SubtaskRow;
 use crate::activities::curation::document::SubtaskAnnotation;
-use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
-use spiral_robotics_common::datasets::CameraVideo;
+use crate::activities::curation::path::{
+    EpisodeRow, PathError, PathFragment, PathStep, Relation, StepSql,
+};
 use spiral_robotics_common::sql::SqlLiteral;
 
-/// Every subtask the model found in every episode that reaches the node, cut
-/// to the intervals it reached the node in.
+/// The column each episode's subtasks ride in until the node's step unnests
+/// them.
+const SUBTASKS: &str = "subtasks";
+
 impl PathFragment for SubtaskAnnotation {
-    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
-        let input = step.input()?;
+    fn episode_columns(&self, row: &mut EpisodeRow) -> Result<(), PathError> {
         let camera = self
             .camera()
             .ok_or_else(|| PathError::new("Choose the camera Break down reads."))?;
         let interval = SqlLiteral::number(self.sample_interval_seconds())
             .ok_or_else(|| PathError::new("The sample interval must be a number."))?;
-        let (name, from) = (step.name(), input.name());
-        let dataset = step.dataset().sql_name();
-        let listed = SqlLiteral::text(&dataset);
-        // Only the episodes that reach the node are read, and a preview reads
-        // only its own.
-        let members = std::iter::once(format!("r.id IN (SELECT episode_id FROM {from})"))
-            .chain(step.source().members("r.id"))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        let mut entries = vec![CameraVideo::new(&dataset, camera).videos(
-            (&format!("{name}_packets"), &format!("{name}_videos")),
-            &members,
-        )];
-        // The first instruction an episode records is its task. The videos
-        // are joined to it before the call: Spiral joins scalar columns, not
-        // the list of structs the call answers with.
-        let (task, tasks) = match self.task_topic() {
-            Some(topic) => {
-                entries.push(format!(
-                    "{name}_tasks AS (SELECT id, task FROM (SELECT r.id, r.value.data AS task, \
-                     ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.log_time) AS position \
-                     FROM spql.mcap.read_topic({listed}, {}) r WHERE {members}) instructions WHERE position = 1)",
-                    SqlLiteral::text(topic)
-                ));
-                (
-                    ", task => t.task",
-                    format!(" LEFT JOIN {name}_tasks t ON t.id = v.id"),
-                )
-            }
-            None => ("", String::new()),
-        };
-        entries.extend([
+        let video = row.video(camera);
+        let task = self
+            .task_topic()
+            .map(|topic| format!(", task => {}", row.instruction(topic)))
+            .unwrap_or_default();
+        let call = format!(
+            "spql.ai.breakdown_task({video}, sample_interval => {interval}, model => {}{task}{})",
+            SqlLiteral::text(self.model()),
+            row.on_error()
+        );
+        row.ask(SUBTASKS, call)
+    }
+
+    /// Every subtask the model found in the episode of every row that
+    /// reaches the node, cut to that row's interval.
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+        let input = step.input()?;
+        let rides = input.answers().without(SUBTASKS)?;
+        let (name, subtask, origin) = (step.name(), SubtaskRow::DESCRIPTION, EpisodeRow::ORIGIN);
+        let entries = vec![
             format!(
-                "{name}_breakdowns AS (SELECT v.id AS episode_id, spql.ai.breakdown_task(v.source, \
-                 sample_interval => {interval}, model => {}{task}{}) AS subtasks FROM {name}_videos v{tasks})",
-                SqlLiteral::text(self.model()),
-                step.source().on_error()
+                "{name}_subtasks AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns{}, \
+                 r.{origin} + CAST(s.start_ns AS BIGINT) AS start_ns, r.{origin} + CAST(s.end_ns AS BIGINT) AS end_ns, \
+                 s.description AS {subtask} FROM {} r CROSS JOIN LATERAL UNNEST(r.{SUBTASKS}) AS s)",
+                rides.following("r."),
+                input.name()
             ),
             format!(
-                "{name}_offsets AS (SELECT b.episode_id, CAST(s.start_ns AS BIGINT) AS start_offset_ns, \
-                 CAST(s.end_ns AS BIGINT) AS end_offset_ns, s.description AS {subtask} \
-                 FROM {name}_breakdowns b CROSS JOIN LATERAL UNNEST(b.subtasks) AS s)",
-                subtask = SubtaskRow::DESCRIPTION
+                "{name} AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, \
+                 LEAST(end_ns, reached_end_ns) AS end_ns, {subtask}{} FROM {name}_subtasks \
+                 WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns)",
+                rides.following("")
             ),
-            format!(
-                "{name}_subtasks AS (SELECT o.episode_id, e.origin_ns + o.start_offset_ns AS start_ns, \
-                 e.origin_ns + o.end_offset_ns AS end_ns, o.{subtask} FROM {name}_offsets o \
-                 JOIN (SELECT id, CAST(message_start_time AS BIGINT) AS origin_ns FROM spql.mcap.episodes({listed})) e \
-                 ON e.id = o.episode_id)",
-                subtask = SubtaskRow::DESCRIPTION
-            ),
-            format!(
-                "{name} AS (SELECT s.episode_id, GREATEST(s.start_ns, i.start_ns) AS start_ns, \
-                 LEAST(s.end_ns, i.end_ns) AS end_ns, s.{subtask} FROM {name}_subtasks s JOIN {from} i \
-                 ON i.episode_id = s.episode_id AND s.start_ns < i.end_ns AND s.end_ns > i.start_ns)",
-                subtask = SubtaskRow::DESCRIPTION
-            ),
-        ]);
+        ];
         Ok(StepSql::new(
             entries,
-            Relation::new(name, vec![SubtaskRow::DESCRIPTION]).publishing(SubtaskRow::DESCRIPTION),
+            Relation::new(name, vec![subtask])
+                .publishing(subtask)
+                .carrying(rides),
         ))
     }
 }

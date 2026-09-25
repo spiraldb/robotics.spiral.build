@@ -1,15 +1,17 @@
-//! Scoring progress: the pinned scorer, and the step an Identify unproductive
+//! Scoring progress: the pinned scorer, and what an Identify unproductive
 //! moments node adds to a path.
 //!
-//! The node compiles to `spql.ai.score_progress` over the episode's camera,
-//! which answers with a velocity for every frame. Each frame becomes one
-//! moment, from its time to the next frame's, cut to the intervals that reach
-//! the node. The scorer reads whole episodes, so what it is asked never
-//! depends on anything above the node.
+//! The node asks each episode's row for `spql.ai.score_progress` over the
+//! scorer's camera, which answers with a velocity for every frame. Its step
+//! unnests those scores from every row that reaches the node: each frame
+//! becomes one moment, from its time to the next frame's, cut to the
+//! interval of the row it arrived on. The scorer reads whole episodes, so
+//! what it is asked never depends on anything above the node.
 use super::moment::Moment;
 use crate::activities::curation::document::MomentDetection;
-use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
-use spiral_robotics_common::datasets::CameraVideo;
+use crate::activities::curation::path::{
+    EpisodeRow, PathError, PathFragment, PathStep, Relation, StepSql,
+};
 use spiral_robotics_common::sql::SqlLiteral;
 
 /// The most moments one recording's preview reads: every frame of five and a
@@ -42,62 +44,63 @@ impl ProgressScorer {
     }
 }
 
-/// Every scored frame of every episode that reaches the node, as a moment
-/// carrying its pace; a frame the scorer had no support for carries none.
+/// The column each episode's scores ride in until the node's step unnests
+/// them.
+const SCORES: &str = "scores";
+
 impl PathFragment for MomentDetection {
-    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
-        let input = step.input()?;
-        let (name, from) = (step.name(), input.name());
+    fn episode_columns(&self, row: &mut EpisodeRow) -> Result<(), PathError> {
         let scorer = ProgressScorer::WarpSimBottles;
-        let dataset = step.dataset().sql_name();
-        let episodes = format!("spql.mcap.episodes({})", SqlLiteral::text(&dataset));
-        let pace = Moment::PACE;
-        let members = std::iter::once(format!("r.id IN (SELECT episode_id FROM {from})"))
-            .chain(step.source().members("r.id"))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        let videos = CameraVideo::new(&dataset, scorer.camera()).videos(
-            (&format!("{name}_packets"), &format!("{name}_videos")),
-            &members,
+        let call = format!(
+            "spql.ai.score_progress({}, model => {})",
+            row.video(scorer.camera()),
+            SqlLiteral::text(scorer.model())
         );
-        // Scores are read straight from the videos and unnested before any
-        // join, as `score_progress` is read everywhere else; Spiral joins
-        // scalar columns, not lists of structs. Spiral has no LEAD or LAG,
-        // so the next frame's time is an aggregate over a one-row window.
-        let next = "MIN(f.offset_ns) OVER (PARTITION BY f.episode_id ORDER BY f.frame_index ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING)";
-        let previous = "MIN(f.offset_ns) OVER (PARTITION BY f.episode_id ORDER BY f.frame_index ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)";
+        row.ask(SCORES, call)
+    }
+
+    /// Every scored frame of every row that reaches the node, as a moment
+    /// carrying its pace; a frame the scorer had no support for carries none.
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+        let input = step.input()?;
+        let rides = input.answers().without(SCORES)?;
+        let (name, pace, origin) = (step.name(), Moment::PACE, EpisodeRow::ORIGIN);
+        // Each row that reaches the node brings every frame of its episode,
+        // and a frame's next is the next one the same row brought. The frames
+        // and the window over them are separate entries.
+        let frames =
+            "OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index)";
         let entries = vec![
-            videos,
+            // Frame times count from the episode's first message, and the
+            // relation carries the recording's clock.
             format!(
-                "{name}_scores AS (SELECT id AS episode_id, \
-                 spql.ai.score_progress(source, model => {}) AS scores FROM {name}_videos)",
-                SqlLiteral::text(scorer.model())
-            ),
-            format!(
-                "{name}_frames AS (SELECT s.episode_id, CAST(p.timestamp_ns AS BIGINT) AS offset_ns, \
-                 p.frame_index AS frame_index, \
+                "{name}_frames AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns{}, \
+                 r.{origin} + CAST(p.timestamp_ns AS BIGINT) AS start_ns, p.frame_index AS frame_index, \
                  CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS {pace} \
-                 FROM {name}_scores s CROSS JOIN LATERAL UNNEST(s.scores) p)"
+                 FROM {} r CROSS JOIN LATERAL UNNEST(r.{SCORES}) p)",
+                rides.following("r."),
+                input.name()
             ),
             // A frame lasts until the next one; the last lasts as long as the
-            // one before it did. Frame times count from the episode's first
-            // message, and the relation carries the recording's clock.
+            // one before it did.
             format!(
-                "{name}_moments AS (SELECT f.episode_id, e.origin_ns + f.offset_ns AS start_ns, \
-                 e.origin_ns + COALESCE({next}, 2 * f.offset_ns - {previous}) AS end_ns, f.{pace} \
-                 FROM {name}_frames f \
-                 JOIN (SELECT id, CAST(message_start_time AS BIGINT) AS origin_ns FROM {episodes}) e ON e.id = f.episode_id)"
+                "{name}_moments AS (SELECT episode_id, reached_start_ns, reached_end_ns{}, start_ns, \
+                 COALESCE(LEAD(start_ns) {frames}, start_ns + (start_ns - LAG(start_ns) {frames})) AS end_ns, {pace} \
+                 FROM {name}_frames)",
+                rides.following("")
             ),
             format!(
-                "{name} AS (SELECT m.episode_id, GREATEST(m.start_ns, i.start_ns) AS start_ns, \
-                 LEAST(m.end_ns, i.end_ns) AS end_ns, m.{pace} \
-                 FROM {name}_moments m JOIN {from} i \
-                 ON i.episode_id = m.episode_id AND m.start_ns < i.end_ns AND m.end_ns > i.start_ns AND m.end_ns > m.start_ns)"
+                "{name} AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, \
+                 LEAST(end_ns, reached_end_ns) AS end_ns, {pace}{} FROM {name}_moments \
+                 WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns AND end_ns > start_ns)",
+                rides.following("")
             ),
         ];
         Ok(StepSql::new(
             entries,
-            Relation::new(name, vec![pace]).publishing(pace),
+            Relation::new(name, vec![pace])
+                .publishing(pace)
+                .carrying(rides),
         ))
     }
 }

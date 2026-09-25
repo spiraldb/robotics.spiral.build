@@ -2,42 +2,45 @@
 //!
 //! Every edge carries episode intervals as a relation: `episode_id`,
 //! `start_ns`, `end_ns` in the recording's clock (MCAP log time), then the
-//! properties the nodes above measured. Each node kind writes its own step as
-//! `WITH` entries over the relation that reaches it ([`PathFragment`]); the
-//! path chains the steps from the dataset down and selects the interval and
-//! the published properties from the last one.
+//! properties the nodes above measured. A node adds to a path in two parts
+//! ([`PathFragment`]). What it asks a model about each whole episode is a
+//! column of that episode's row ([`EpisodeRow`]), beside the camera videos
+//! and the instruction the call reads. Its step then works over the interval
+//! rows that reach it: a Select filters them, a judgment adds a column, and
+//! the node that asked the episode unnests the answer and cuts it to the
+//! interval of the row it arrived on.
 //!
-//! Each step is written once, over whatever relation reaches it, and is read
-//! two ways. The published view chains every step from the dataset down into
-//! one statement that Spiral runs over the whole dataset whenever it is read.
-//! A preview writes only the last node's step, over the rows its parent's
-//! preview already holds, supplied to Spiral as `VALUES` ([`StepInput`]), so
-//! no model call above the node is made again. A previewed step that reads
-//! an episode's recording admits only the episode bound as `$1`, and a model
-//! call that cannot answer fails the preview with its reason where the view
-//! answers NULL for that row.
-use super::document::{CurationGraph, CurationNode, CurationNodeKind};
+//! Each step is written once and read two ways. The published view is one
+//! stream of rows over every episode of the dataset. Where the path leaves
+//! whole episodes, each episode's row is built once with every answer the
+//! nodes below ask for, and the answers ride on the interval rows until the
+//! step that unnests them. Every step reads the one before it exactly once,
+//! so Spiral, which pastes a `WITH` entry into every place that reads it,
+//! never asks a model twice. A preview writes only the last node, over the
+//! rows its parent's preview already holds, supplied to Spiral as `VALUES`
+//! ([`StepInput`]): the node's own row for the episode bound as `$1` alone,
+//! joined to those rows, then the same step. No model call above the node is
+//! made again, and one that cannot answer fails the preview with its reason
+//! where the view answers NULL for that row.
+mod episode_row;
+
+pub(super) use episode_row::EpisodeRow;
+
+use super::document::{CurationGraph, CurationNode, CurationNodeKind, PopulationKind};
+use episode_row::RowAnswers;
 use spiral_robotics_common::datasets::DatasetSelection;
 
-/// Which reading of a step.
+/// Which reading of a path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PathSource {
-    /// Over the rows a parent's preview holds; a step that reads a
-    /// recording reads the episode bound as `$1`.
+    /// Over the rows a parent's preview holds; the node's own episode row
+    /// reads the episode bound as `$1`.
     Preview,
     /// Chained into the view over every episode of the dataset.
     Published,
 }
 
 impl PathSource {
-    /// The predicate admitting only the previewed episode by `column`, or
-    /// nothing when every episode is read.
-    pub(super) fn members(self, column: &str) -> Option<String> {
-        match self {
-            Self::Preview => Some(format!("{column} = $1")),
-            Self::Published => None,
-        }
-    }
     /// The trailing argument of a `spql.ai` call: a preview reads one episode
     /// and shows why it failed, while a view over thousands of episodes must
     /// not die on one, so it keeps the functions' own NULL.
@@ -59,12 +62,14 @@ struct Property {
 }
 
 /// What one edge carries: the `WITH` entry naming it, the properties after
-/// the interval, and which of them the output view shows.
+/// the interval, which of them the output view shows, and the answers riding
+/// on for the steps below.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Relation {
     name: String,
     properties: Vec<Property>,
     published: Vec<String>,
+    answers: RowAnswers,
 }
 
 impl Relation {
@@ -81,6 +86,7 @@ impl Relation {
                 })
                 .collect(),
             published: Vec::new(),
+            answers: RowAnswers::default(),
         }
     }
     pub(super) fn name(&self) -> &str {
@@ -99,6 +105,15 @@ impl Relation {
             self.published.push(column.to_owned());
         }
         self
+    }
+    /// These columns, with `answers` riding on for the steps below.
+    pub(super) fn carrying(mut self, answers: RowAnswers) -> Self {
+        self.answers = answers;
+        self
+    }
+    /// The answers riding on these rows.
+    pub(super) fn answers(&self) -> &RowAnswers {
+        &self.answers
     }
     /// These columns under `name`, plus one more `measure` wrote, which the
     /// output view shows. The column is named for the measure, with a suffix
@@ -132,13 +147,26 @@ impl Relation {
             .find(|property| property.measure == measure)
             .map(|property| property.column.as_str())
     }
-    /// Every column: the interval, then the properties.
+    /// Every column: the interval, the properties, then the answers riding
+    /// on.
     pub(super) fn columns(&self) -> String {
-        Self::interval_and(
-            self.properties
-                .iter()
-                .map(|property| property.column.as_str()),
-        )
+        self.columns_of("")
+    }
+    /// The same, each after `qualifier`.
+    fn columns_of(&self, qualifier: &str) -> String {
+        let interval = ["episode_id", "start_ns", "end_ns"].map(String::from);
+        let properties = self
+            .properties
+            .iter()
+            .map(|property| property.column.clone());
+        let answers = self.answers.columns().map(String::from);
+        interval
+            .into_iter()
+            .chain(properties)
+            .chain(answers)
+            .map(|column| format!("{qualifier}{column}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
     fn interval_and<'a>(properties: impl Iterator<Item = &'a str>) -> String {
         std::iter::once("episode_id, start_ns, end_ns")
@@ -175,11 +203,10 @@ impl StepInput {
 }
 
 /// Where one node's step is written: the name its relation takes, what
-/// reaches it, the dataset the path reads, and which reading this is.
+/// reaches it, and which reading this is.
 pub(super) struct PathStep<'a> {
     name: String,
     input: Option<&'a Relation>,
-    dataset: &'a DatasetSelection,
     source: PathSource,
 }
 
@@ -194,17 +221,20 @@ impl PathStep<'_> {
         self.input
             .ok_or_else(|| PathError::new("Only the dataset starts a path."))
     }
-    pub(super) fn dataset(&self) -> &DatasetSelection {
-        self.dataset
-    }
     pub(super) fn source(&self) -> PathSource {
         self.source
     }
 }
 
-/// A node configuration that writes its own step of a path.
+/// A node configuration that writes its own part of a path.
 pub(super) trait PathFragment {
-    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError>;
+    /// What the node asks a model about each whole episode, as columns of
+    /// its row. Most nodes ask nothing.
+    fn episode_columns(&self, _row: &mut EpisodeRow) -> Result<(), PathError> {
+        Ok(())
+    }
+    /// Its step over the interval rows that reach it.
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError>;
 }
 
 /// Why a path has no statement, in the words a workspace shows.
@@ -251,38 +281,49 @@ impl<'a> CurationPath<'a> {
     /// interval of every row the last node hands on, and the properties it
     /// publishes.
     pub(super) fn statement(&self) -> Result<String, PathError> {
-        let (entries, relation) = self.compile()?;
-        Ok(Self::select(&entries, &relation))
+        let compiled = self.compile()?;
+        Ok(Self::select(&compiled.entries, &compiled.relation))
     }
 
-    /// The last node's step alone, over `input`: the statement its preview
-    /// runs on the rows its parent's preview holds.
+    /// The last node alone, over `input`: the statement its preview runs on
+    /// the rows its parent's preview holds, with the node's own episode row
+    /// beside them.
     pub(super) fn preview(&self, input: StepInput) -> Result<String, PathError> {
-        let node = self.nodes[self.nodes.len() - 1];
-        let step = PathStep {
-            name: format!("{}_{}", node.kind().key(), self.nodes.len() - 1),
-            input: Some(&input.relation),
-            dataset: self.dataset()?,
-            source: PathSource::Preview,
+        let depth = self.nodes.len() - 1;
+        let dataset = self.dataset()?;
+        let fragment = Self::fragment(self.nodes[depth].kind(), dataset);
+        let mut row = EpisodeRow::new(dataset, PathSource::Preview);
+        fragment.episode_columns(&mut row)?;
+        let mut entries = input.entries;
+        let reached = match row.over(&input.relation) {
+            Some(built) => {
+                entries.extend(built.entries);
+                built.relation
+            }
+            None => input.relation,
         };
-        let written = Self::step_sql(node.kind(), &step)?;
-        let entries = input
-            .entries
-            .into_iter()
-            .chain(written.entries)
-            .collect::<Vec<_>>();
+        let written = fragment.interval_step(&PathStep {
+            name: self.step_name(depth),
+            input: Some(&reached),
+            source: PathSource::Preview,
+        })?;
+        entries.extend(written.entries);
         Ok(Self::select(&entries, &written.relation))
     }
 
     /// The relation the last node hands on in the published view.
     pub(super) fn relation(&self) -> Result<Relation, PathError> {
-        self.compile().map(|(_, relation)| relation)
+        self.compile().map(|compiled| compiled.relation)
     }
 
     fn dataset(&self) -> Result<&'a DatasetSelection, PathError> {
         self.graph
             .dataset()
             .ok_or_else(|| PathError::new("Choose the dataset this curation reads."))
+    }
+
+    fn step_name(&self, depth: usize) -> String {
+        format!("{}_{depth}", self.nodes[depth].kind().key())
     }
 
     fn select(entries: &[String], relation: &Relation) -> String {
@@ -294,34 +335,53 @@ impl<'a> CurationPath<'a> {
         )
     }
 
-    fn compile(&self) -> Result<(Vec<String>, Relation), PathError> {
+    /// Every node's step from the dataset down, with the episode row built
+    /// once, before the first node below the dataset's own Selects: until
+    /// then every row is a whole episode.
+    fn compile(&self) -> Result<StepSql, PathError> {
         let dataset = self.dataset()?;
+        let mut row = EpisodeRow::new(dataset, PathSource::Published);
+        for node in &self.nodes {
+            Self::fragment(node.kind(), dataset).episode_columns(&mut row)?;
+        }
+        let mut row = Some(row);
         let mut entries = Vec::new();
         let mut relation = None::<Relation>;
         for (depth, node) in self.nodes.iter().enumerate() {
-            let step = PathStep {
-                name: format!("{}_{depth}", node.kind().key()),
+            let whole_episodes =
+                self.graph.population_kind(node.id()) == Some(PopulationKind::Episodes);
+            if !whole_episodes
+                && let Some(built) = relation
+                    .as_ref()
+                    .and_then(|episodes| row.take()?.over(episodes))
+            {
+                entries.extend(built.entries);
+                relation = Some(built.relation);
+            }
+            let written = Self::fragment(node.kind(), dataset).interval_step(&PathStep {
+                name: self.step_name(depth),
                 input: relation.as_ref(),
-                dataset,
                 source: PathSource::Published,
-            };
-            let written = Self::step_sql(node.kind(), &step)?;
+            })?;
             entries.extend(written.entries);
             relation = Some(written.relation);
         }
         let relation = relation.ok_or_else(|| PathError::new("The path compiled to nothing."))?;
-        Ok((entries, relation))
+        Ok(StepSql::new(entries, relation))
     }
 
-    /// One node's step, written by its kind.
-    fn step_sql(kind: &CurationNodeKind, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+    /// The configuration that writes a node's part, by its kind.
+    fn fragment<'k>(
+        kind: &'k CurationNodeKind,
+        dataset: &'k DatasetSelection,
+    ) -> &'k dyn PathFragment {
         match kind {
-            CurationNodeKind::Dataset => step.dataset().step_sql(step),
-            CurationNodeKind::Select(selection) => selection.step_sql(step),
-            CurationNodeKind::IdentifyUnproductiveMoments(detection) => detection.step_sql(step),
-            CurationNodeKind::BreakDownSubtasks(annotation) => annotation.step_sql(step),
-            CurationNodeKind::FindSimilarSubtasks(search) => search.step_sql(step),
-            CurationNodeKind::GroupSimilarSubtasks(grouping) => grouping.step_sql(step),
+            CurationNodeKind::Dataset => dataset,
+            CurationNodeKind::Select(selection) => selection,
+            CurationNodeKind::IdentifyUnproductiveMoments(detection) => detection,
+            CurationNodeKind::BreakDownSubtasks(annotation) => annotation,
+            CurationNodeKind::FindSimilarSubtasks(search) => search,
+            CurationNodeKind::GroupSimilarSubtasks(grouping) => grouping,
         }
     }
 }

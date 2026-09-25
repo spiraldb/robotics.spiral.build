@@ -63,7 +63,7 @@ impl<'a> JudgedStep<'a> {
 /// Every subtask that reaches the node, with how likely it is the operation
 /// the query names.
 impl PathFragment for SubtaskSearch {
-    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let query = self.query().trim();
         if query.is_empty() {
             return Err(PathError::new("Type the subtask to search for."));
@@ -83,7 +83,7 @@ impl PathFragment for SubtaskSearch {
 /// Every subtask that reaches the node, with the category it fits best and
 /// how probable that is.
 impl PathFragment for SubtaskGrouping {
-    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         if self.categories().is_empty() {
             return Err(PathError::new(
                 "Generate the categories, or write them, before grouping.",

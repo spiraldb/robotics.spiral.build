@@ -50,74 +50,111 @@ recording.
 ## Compiling a path
 
 `CurationPath` in `activities/curation/path.rs` walks from the dataset down to
-one node and chains each node's step as `WITH` entries. Each node kind writes
-its own step beside its configuration:
+one node. Each node kind writes its own part beside its configuration, in two
+halves (`PathFragment`): what it asks a model about each whole episode, as a
+column of that episode's row (`EpisodeRow`), and its step over the interval
+rows that reach it.
 
-| Node | Step | Where |
-| --- | --- | --- |
-| Dataset | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
-| Select | A `WHERE` from the same `Selection` the browser filters with. A pace rule keeps moments with no pace too, then joins touching moments into stretches carrying their mean pace | `document/selection.rs` |
-| Identify unproductive moments | `spql.ai.score_progress` over the top camera's packet video, one moment per scored frame from its time to the next frame's, cut to the intervals that reach the node | `moments/scoring.rs` |
-| Break down subtasks | `spql.ai.breakdown_task` over the chosen camera's packet video, with the configured model and sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one; its subtasks unnested, moved from the video's timeline to log time, and cut to the intervals that reach the node | `annotate/breakdown.rs` |
-| Find similar subtasks | `spql.ai.similarity(subtask, query)` as `similarity` | `similar/judgment.rs` |
-| Group similar subtasks | `spql.ai.classify(subtask, categories)` as `subtask_category`, the categories written into the statement as a literal list | `similar/judgment.rs` |
+| Node | On the episode row | Step over the rows that reach it | Where |
+| --- | --- | --- | --- |
+| Dataset | | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
+| Select | | A `WHERE` from the same `Selection` the browser filters with. A pace rule keeps moments with no pace too, then joins touching moments into stretches carrying their mean pace | `document/selection.rs` |
+| Identify unproductive moments | `scores`: `spql.ai.score_progress` over the top camera's packet video | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on | `moments/scoring.rs` |
+| Break down subtasks | `subtasks`: `spql.ai.breakdown_task` over the chosen camera's packet video, with the configured model and sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks unnested, moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
+| Find similar subtasks | | `spql.ai.similarity(subtask, query)` as `similarity` | `similar/judgment.rs` |
+| Group similar subtasks | | `spql.ai.classify(subtask, categories)` as `subtask_category`, the categories written into the statement as a literal list | `similar/judgment.rs` |
+
+A published view is one stream of episode rows (decided 2026-09-25). The
+dataset's listing and its Selects of episodes come first; a Select keeps by
+the nearest measure above it, so these are the only Selects that can come
+before the first measure, and they are the `WHERE` on the episode rows.
+Where the path leaves whole episodes, it builds each episode's row once:
+
+```text
+dataset_0, select_1       the listing with its facts, and the Selects of episodes
+camera_video_1            each camera a model on the path watches, read once
+instruction_1             each episode's first instruction, when Break down reads one
+episodes                  one row per episode: origin_ns, scores, subtasks; no video
+identify_…, select_…      each step reads the entry above it once
+break_down_…, find_…      unnesting the answer it asked for when it reaches it
+```
+
+The row carries the episode's first message as `origin_ns` and one column per
+model answer. The answers ride on the interval rows until the step of the
+node that asked for them unnests them: on Dataset → Identify unproductive
+moments → Select → Break down, `subtasks` rides on every moment and every
+stretch. Spiral joins and windows rows that carry these lists of structs as
+readily as scalar ones.
 
 The scorer and Break down read each episode whole, so what they are asked
 never depends on anything above the node. Studio's packets carry presentation
 times counted from the episode's first message, so a subtask's log time is
-that message's time plus its own. `breakdown_task` answers with a list of
-structs, which is unnested straight from the call; the instruction is joined
-to the videos before it, since Spiral joins scalar columns only. The text
-judgments are asked of `typesafe/jev-1.13`, named in the statement so every
-answer names the model that gave it. Every model function is paid for with
-Studio's `LLM_API_KEY`, which the backend passes to the driver as
-`spiral.openrouter_api_key` (see [the database boundary](database-boundary.md)).
-Literals go through `SqlLiteral`; a
-function parameter that must be a constant, such as `sample_interval`, takes a
-bare number, because Spiral types a `CAST` as nullable.
+that message's time plus its own. The text judgments are asked of
+`typesafe/jev-1.13`, named in the statement so every answer names the model
+that gave it. Every model function is paid for with Studio's `LLM_API_KEY`,
+which the backend passes to the driver as `spiral.openrouter_api_key` (see
+[the database boundary](database-boundary.md)). Literals go through
+`SqlLiteral`; a function parameter that must be a constant, such as
+`sample_interval`, takes a bare number, because Spiral types a `CAST` as
+nullable.
 
-Each step is written once, over whatever relation reaches it, and is read two
-ways. The **published** view chains every step from the dataset down into one
-statement over every episode. A **preview** writes only the node's own step,
-over the rows its parent's preview already holds, supplied as `VALUES` in
-place of the parent's entry (`CurationPath::preview`), so nothing above the
-node runs again. Two more things differ. A previewed step that reads a
-recording admits only the episode bound as `$1` wherever a topic is read. And
-the preview passes `on_error => 'fail'` to every `spql.ai` call that takes it,
-so an episode the model cannot answer fails with its reason; the view keeps
-the functions' default, a NULL for that row, so one episode never ends a read
-of thousands.
+Each step is written once and read two ways. The **published** view chains
+every step from the dataset down into one statement over every episode. A
+**preview** writes only the node, over the rows its parent's preview already
+holds, supplied as `VALUES` in place of the parent's entry
+(`CurationPath::preview`), so nothing above the node runs again. Those rows
+are flat: a previewed node that asks each episode anything builds its own row
+for the episode bound as `$1`, reading the bound episode wherever a topic is
+read, and joins it to them before the same step. And the preview passes
+`on_error => 'fail'` to every `spql.ai` call that takes it, so an episode the
+model cannot answer fails with its reason; the view keeps the functions'
+default, a NULL for that row, so one episode never ends a read of thousands.
 
-The next frame's time is `MIN(…) OVER (… ROWS BETWEEN 1 FOLLOWING AND 1
-FOLLOWING)`, which returns exactly what `LEAD` does (SpiralDB has `LEAD` and
-`LAG` since spiraldb#7387), and stretches are found by the difference of two
-`ROW_NUMBER`s. Scores are unnested straight from `score_progress`.
+The next frame's time is `LEAD`, and the last frame lasts as long as the one
+before it (`LAG`); the frames and the window over them are separate entries.
+Stretches are found by the difference of two `ROW_NUMBER`s, and each is
+measured with `MIN`, `MAX` and `AVG` over a window of the stretch, its first
+moment standing for it, so the answers riding on the moments ride on with
+their stretches. `GROUP BY` cannot carry them: Spiral has no `ANY_VALUE`, and
+refuses `MIN` of a list and `FIRST` in a grouped aggregate.
 
 ### Rules the compiler keeps
 
 A CTE is a name, not a stored result: Spiral pastes a copy of a step into
-every place that uses it, so a step used twice runs twice. For a cheap step,
-such as the episode listing, that is harmless and keeps each use's filters
-pushed down to the scan. For a step with a model call it doubles the model's
-work: on Dataset → Identify unproductive moments → Select → Break down, the
-moments Select is read once to decide which episodes Break down sees and once
-to clip its subtasks, and the plan runs `spql.ai.score_progress` twice per
-episode (three times with an `/instruction` topic).
+every place that reads it, so a step read twice runs twice. For a cheap step,
+such as the episode listing, that is harmless and keeps each read's filters
+pushed down to the scan; the episode row reads the Selects of episodes once
+for its rows and once for each topic it reads. For a step with a model call
+it repeats the model's work. Until 2026-09-25 each model step read the
+relation that reached it twice, to choose the episodes it read and to clip
+its answers, and Dataset → Identify unproductive moments → Select → Break
+down ran `spql.ai.score_progress` twice per episode and read the camera
+three times. Having SpiralDB compute a CTE read in several places once is not
+pursued for now; the compiler keeps these rules instead.
 
-- **A step containing a model call is used once.** When a path needs its
-  result in two places, keep the result as a column on the episode rows
-  instead of re-reading the step, or rely on the engine computing a
-  multiply-used expensive CTE once (the CTE-materialization change in
-  SpiralDB, pending).
-- **Per-episode work stays on the episode rows.** A model call over one
-  episode's video is a column in the projection over `spql.mcap.episodes`;
-  the episode's start time and instruction ride along as columns rather than
-  being joined back in after the model call.
-- **Change grain once, as late as possible.** Unnesting to subtask or moment
-  rows comes after the per-episode columns, and Find similar and Group similar
-  add their columns on those rows. Spiral has no correlated `LATERAL`
-  subqueries and no list filter or map functions, so work over one row's list
-  is written as unnest, compute, then `GROUP BY` the episode.
+- **An entry containing a model call is read once.** Every step reads the
+  entry above it once. A test compiles every path of up to six nodes the
+  grammar allows and counts the reads of each such entry, and each model
+  node's call.
+- **Per-episode work stays on the episode row.** A model call over one
+  episode's video is a column of the episode's row, built on the episode
+  listing; the episode's first message and instruction are columns there
+  too, rather than joined back in after the call. A camera two models watch
+  is read once.
+- **Change grain once, as late as possible.** Unnesting to moment or subtask
+  rows comes after the episode row, and the answers a later step needs ride
+  along as list columns. Find similar and Group similar add their columns on
+  subtask rows. Spiral has no correlated `LATERAL` subqueries and no list
+  filter or map functions (`spql.list` has `contains`, `get`, `is_empty`,
+  `len`, `sum`, and the aggregate `collect`), so work over one row's list is
+  written as unnest, then compute over the rows.
+- **Only a Select of episodes spares an episode its model calls.** A model's
+  column is on the episode row, before any interval is cut, so a Select below
+  a measure keeps rows but never skips a call. On Identify unproductive
+  moments → Select → Break down, the view asks `breakdown_task` of every
+  episode, including one where no frame passes the pace rule. Its rows are
+  still the preview's, which asks only the episodes that reach Break down;
+  only the cost differs.
 
 ## Preview
 

@@ -31,7 +31,7 @@ const UNTITLED: &str = "Untitled curation";
 /// reads the dataset this way; a preview is given the episodes the sample
 /// already listed.
 impl PathFragment for DatasetSelection {
-    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let facts = EpisodeFact::ALL
             .iter()
             .map(|fact| format!("{} AS {}", fact.expression(), fact.key()))
