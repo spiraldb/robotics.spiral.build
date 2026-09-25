@@ -6,7 +6,7 @@ use spiral_robotics_ui::{EmptyState, Remount};
 
 use super::super::document::CurationNodeKind;
 use super::super::state::CurationController;
-use super::super::{annotate, moments, select, similar};
+use super::super::{annotate, score_progress, select, similar};
 use super::dataset::DatasetWorkspace;
 
 #[component]
@@ -38,8 +38,8 @@ pub(in crate::activities::curation) fn NodeWorkspace(controller: CurationControl
                     CurationNodeKind::GroupSimilarSubtasks(_) => rsx! {
                         similar::GroupingWorkspace { controller, node: node.clone() }
                     },
-                    CurationNodeKind::IdentifyUnproductiveMoments(_) => rsx! {
-                        moments::DetectionWorkspace { controller, node: node.clone() }
+                    CurationNodeKind::ScoreProgress(_) => rsx! {
+                        score_progress::ScoringWorkspace { controller, node: node.clone() }
                     },
                     CurationNodeKind::Select(_) => rsx! {
                         select::SelectWorkspace { controller, node: node.clone() }

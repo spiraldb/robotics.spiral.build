@@ -12,12 +12,12 @@ use spiral_robotics_ui::{
 use super::super::document::{CurationGraph, EpisodeFact};
 use super::super::episode_tabs::{EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes};
 use super::super::path::{PathError, PathFragment, PathStep, Relation, StepSql};
-use super::super::poster::{PosterCut, PosterFrames, StillCamera};
 use super::super::review::{
     Counted, EvidenceHeading, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SliceShape,
     SubtaskReview, TabStop,
 };
 use super::super::state::CurationController;
+use super::super::thumbnail::Thumbnails;
 use crate::activities::data::{DatasetClient, DatasetOverview};
 use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels, FeaturedCamera};
 use crate::components::dataset_picker::DatasetPicker;
@@ -197,13 +197,7 @@ fn DatasetEpisodeList(
         })
         .filter(|(_, face)| face.says(&wanted()))
         .collect::<Vec<_>>();
-    let camera = StillCamera::use_camera(controller, None);
-    let stills = faces
-        .iter()
-        .map(|(_, face)| face.still().clone())
-        .collect::<Vec<_>>();
-    let frames =
-        PosterFrames::use_frames(PosterCut::of(Some(&dataset), camera.as_deref(), &stills));
+    let thumbnails = Thumbnails::use_camera(controller, None);
     let front = tabs.front().map(|tab| tab.episode().clone());
     let chosen = faces.iter().position(|(id, _)| front.as_ref() == Some(id));
     // Every count below the Dataset card is over these episodes, so the bar
@@ -243,7 +237,7 @@ fn DatasetEpisodeList(
                         SliceEntry {
                             key: "{id}",
                             face,
-                            frames,
+                            thumbnails,
                             standing: RowStanding::plain(chosen == Some(position))
                                 .roving(TabStop::at(position, chosen)),
                             on_select: move |()| tabs.open(&id, None),

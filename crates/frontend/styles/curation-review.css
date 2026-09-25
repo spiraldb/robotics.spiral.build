@@ -1,6 +1,6 @@
 /* Curation › review styles: the proportion every measurement's output is read in,
    and the row it is read as. Prefix every class with `curation-review-`,
-   `curation-entries-`, `curation-entry-` or `curation-poster`. Use @layer components
+   `curation-entries-`, `curation-entry-` or `curation-thumbnail`. Use @layer components
    like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
    must be unlayered too. */
 
@@ -95,10 +95,10 @@
   }
 
   /* An index that scrolls beside a recording that holds still. The index is
-     a column of rows to pick from and takes what a still and two lines of
+     a column of rows to pick from and takes what a thumbnail and two lines of
      words need; the recording is what is studied and takes the rest. Only
      the index scrolls — the whole point is that the video stays put. Every
-     row of every index leads with a still, so every node's index is one
+     row of every index leads with a thumbnail, so every node's index is one
      width and the divider holds still as the operator moves between nodes. */
   .curation-review {
     display: grid;
@@ -632,11 +632,12 @@
     color: var(--tone-ink-faint);
   }
 
-  /* The still. It holds its box from the first render so a list filling with
-     pictures never reflows. A row waiting for its frame rests on the sunken
-     surface — a screenful of black rectangles read as failure rather than as a
-     list still arriving — and the camera mat comes with the picture. */
-  .curation-poster {
+  /* The thumbnail. It holds its box from the first render so a list filling
+     with pictures never reflows. A row waiting for its frame rests on the
+     sunken surface — a screenful of black rectangles read as failure rather
+     than as a list still arriving — and the camera mat comes with the
+     picture. */
+  .curation-thumbnail {
     position: relative;
     width: 96px;
     height: 54px;
@@ -646,34 +647,34 @@
     background: var(--tone-sunken);
   }
 
-  .curation-poster:is([data-state="ready"], [data-state="failed"]) {
+  .curation-thumbnail:is([data-state="ready"], [data-state="failed"]) {
     background: var(--tone-camera);
   }
 
-  .curation-poster img {
+  .curation-thumbnail img {
     width: 100%;
     height: 100%;
     object-fit: cover;
   }
 
-  .curation-poster[data-state="ready"] img {
-    animation: curation-poster-arrive 160ms ease-out;
+  .curation-thumbnail[data-state="ready"] img {
+    animation: curation-thumbnail-arrive 160ms ease-out;
   }
 
-  @keyframes curation-poster-arrive {
+  @keyframes curation-thumbnail-arrive {
     from {
       opacity: 0;
     }
   }
 
-  .curation-poster-empty {
+  .curation-thumbnail-empty {
     position: absolute;
     inset: 0;
   }
 
-  /* A frame still being cut says so, because a grey box that means "waiting"
+  /* A frame still being decoded says so, because a grey box that means "waiting"
      and a grey box that means "this failed" are the same box otherwise. */
-  .curation-poster[data-state="waiting"] .curation-poster-empty {
+  .curation-thumbnail[data-state="waiting"] .curation-thumbnail-empty {
     background: linear-gradient(
       100deg,
       transparent 20%,
@@ -681,10 +682,10 @@
       transparent 60%
     );
     background-size: 300% 100%;
-    animation: curation-poster-cutting 1.4s linear infinite;
+    animation: curation-thumbnail-loading 1.4s linear infinite;
   }
 
-  @keyframes curation-poster-cutting {
+  @keyframes curation-thumbnail-loading {
     from {
       background-position: 150% 0;
     }
@@ -693,7 +694,7 @@
     }
   }
 
-  .curation-poster[data-state="failed"] .curation-poster-empty {
+  .curation-thumbnail[data-state="failed"] .curation-thumbnail-empty {
     display: flex;
     align-items: flex-end;
     overflow: hidden;
@@ -718,7 +719,7 @@
   /* A narrow index spends its width on the words. The picture and the score
      are the two things that read at any size, so they give first. */
   @container curation-index (max-width: 22rem) {
-    .curation-poster {
+    .curation-thumbnail {
       width: 72px;
       height: 40px;
     }
@@ -750,8 +751,8 @@
      than fade in. The selection transitions stay: they are 100ms of colour,
      which is feedback, not movement. */
   @media (prefers-reduced-motion: reduce) {
-    .curation-poster[data-state="ready"] img,
-    .curation-poster[data-state="waiting"] .curation-poster-empty,
+    .curation-thumbnail[data-state="ready"] img,
+    .curation-thumbnail[data-state="waiting"] .curation-thumbnail-empty,
     .curation-review-player {
       animation: none;
     }

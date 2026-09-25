@@ -189,12 +189,12 @@
   }
 
   /* The row a search asks about, first in the band its answers fill: its
-     still and where it came from. Its words are already in the query. */
+     thumbnail and where it came from. Its words are already in the query. */
   .curation-similar-asked {
     @apply flex items-center gap-2;
   }
 
-  .curation-similar-asked .curation-poster {
+  .curation-similar-asked .curation-thumbnail {
     width: 48px;
     height: 27px;
   }

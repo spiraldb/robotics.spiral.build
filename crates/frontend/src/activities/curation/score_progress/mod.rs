@@ -1,8 +1,8 @@
-//! Identify unproductive moments: score every episode that reaches the node
-//! with the native progress model, and keep each scored frame as a moment
-//! with the pace it made.
+//! Score progress: score every episode that reaches the node with the native
+//! progress model, and keep each scored frame as a moment with the progress
+//! rate it made.
 //!
-//! This node measures and never decides. What counts as unproductive is the
+//! This node measures and never decides. How slow is too slow is the
 //! threshold of a Select placed after it, which reads the same moments and
 //! draws them with `MomentEvidence`, the one recording view both share. What
 //! the node reads is its own step run over each episode's intervals that
@@ -15,13 +15,13 @@ pub(super) use scoring::{MAX_MOMENTS, ProgressScorer};
 
 use super::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use super::population::Population;
-use super::poster::{PosterCut, PosterFrames, PosterStill};
 use super::preview::{PreviewPlan, PreviewProgress};
 use super::review::{
     Counted, EvidenceHeading, FailedEpisodes, IndexBar, NodeBar, NodeNotes, NodeReach, RowStanding,
     SliceEntry, SliceFace, SliceShape, SubtaskReview, TabStop, TraceLine,
 };
 use super::state::{CurationController, RunState};
+use super::thumbnail::Thumbnails;
 use crate::activities::episode::{
     Episode, EpisodeInspection, EpisodeLabels, PlayRequest, StreamCatalog,
 };
@@ -34,17 +34,17 @@ use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone};
 use std::collections::BTreeMap;
 
-/// The episodes reaching one detection node, and what its preview holds for
-/// each: the moments it read, by episode, and the episodes it read or could
-/// not.
+/// The episodes reaching one Score progress node, and what its preview holds
+/// for each: the moments it read, by episode, and the episodes it read or
+/// could not.
 #[derive(Clone, PartialEq)]
-struct DetectionInput {
+struct ScoringInput {
     episodes: Vec<Episode>,
     moments: BTreeMap<EpisodeId, Vec<Moment>>,
-    progress: PreviewProgress,
+    preview: PreviewProgress,
 }
 
-impl DetectionInput {
+impl ScoringInput {
     fn of(controller: CurationController, node: &str) -> Option<Self> {
         let sample = controller.sample()?;
         let (input, output) = controller.populations(node)?;
@@ -65,13 +65,13 @@ impl DetectionInput {
         Some(Self {
             episodes,
             moments,
-            progress: controller.progress(node)?,
+            preview: controller.progress(node)?,
         })
     }
     /// The episodes a Run scores: not read yet, or read from intervals that
     /// have changed since.
     fn pending(&self) -> Vec<Episode> {
-        let pending = self.progress.pending();
+        let pending = self.preview.pending();
         self.episodes
             .iter()
             .filter(|episode| pending.contains(episode.id()))
@@ -82,7 +82,7 @@ impl DetectionInput {
         self.episodes
             .iter()
             .filter(|episode| {
-                self.progress
+                self.preview
                     .failed()
                     .iter()
                     .any(|(id, _)| id == episode.id())
@@ -98,8 +98,14 @@ impl DetectionInput {
 /// One episode as the index lists it: scored, failed, or neither yet.
 #[derive(Clone, PartialEq)]
 enum ListedEpisode {
-    Scored { episode: Episode, pace: Option<f64> },
-    Failed { episode: Episode, reason: String },
+    Scored {
+        episode: Episode,
+        progress_rate: Option<f64>,
+    },
+    Failed {
+        episode: Episode,
+        reason: String,
+    },
 }
 
 impl ListedEpisode {
@@ -110,7 +116,7 @@ impl ListedEpisode {
     }
 }
 
-impl DetectionInput {
+impl ScoringInput {
     /// The index in the order it is read: failures first, since they need
     /// something done, then the scored episodes slowest first — where the
     /// time a training set would waste is. Episodes not scored yet are only
@@ -120,7 +126,7 @@ impl DetectionInput {
         let mut scored = Vec::new();
         for episode in &self.episodes {
             let failure = self
-                .progress
+                .preview
                 .failed()
                 .iter()
                 .find(|(id, _)| id == episode.id());
@@ -132,18 +138,19 @@ impl DetectionInput {
             } else if self.moments.contains_key(episode.id()) {
                 scored.push(ListedEpisode::Scored {
                     episode: episode.clone(),
-                    pace: Pace::mean(self.moments_of(episode.id())),
+                    progress_rate: ProgressRate::mean(self.moments_of(episode.id())),
                 });
             }
         }
         let slowest = |listed: &ListedEpisode| match listed {
-            ListedEpisode::Scored { pace, .. } => pace.unwrap_or(f64::INFINITY),
+            ListedEpisode::Scored { progress_rate, .. } => progress_rate.unwrap_or(f64::INFINITY),
             ListedEpisode::Failed { .. } => f64::NEG_INFINITY,
         };
         scored.sort_by(|left, right| slowest(left).total_cmp(&slowest(right)));
         failed.into_iter().chain(scored).collect()
     }
-    /// The episode's pace across its recording, drawn small in its row.
+    /// The episode's progress rate across its recording, drawn small in its
+    /// row.
     fn trace(&self, episode: &Episode) -> TraceLine {
         let duration = episode
             .facts()
@@ -156,24 +163,24 @@ impl DetectionInput {
             .map(|row| {
                 (
                     f64::midpoint(row.start_time(), row.end_time()) / duration,
-                    row.pace(),
+                    row.progress_rate(),
                 )
             })
             .collect();
-        TraceLine::new(points, Pace::TRACE_DOMAIN, 1.0)
+        TraceLine::new(points, ProgressRate::TRACE_DOMAIN, 1.0)
     }
 }
 
-/// The workspace shown for a selected Identify unproductive moments node.
+/// The workspace shown for a selected Score progress node.
 #[component]
-pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -> Element {
+pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> Element {
     let tabs = OpenEpisodes::use_open();
     // The first episode listed — the slowest scored one, or before anything
     // is scored the first episode at all — opens by itself, so the recording
     // column is never an empty half beside the index.
     let first = node.clone();
     use_effect(move || {
-        let opening = DetectionInput::of(controller, &first).and_then(|input| {
+        let opening = ScoringInput::of(controller, &first).and_then(|input| {
             input
                 .listed()
                 .first()
@@ -202,7 +209,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
         }
     };
     let running = run != RunState::Idle;
-    let input = DetectionInput::of(controller, &node);
+    let input = ScoringInput::of(controller, &node);
     // The scorer reads the camera it was trained on, which only some datasets
     // record; elsewhere the node says so rather than failing per episode.
     let camera = ProgressScorer::WarpSimBottles.camera();
@@ -213,35 +220,16 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
             .map(Episode::selection),
     )
     .filter(|cameras| !cameras.iter().any(|topic| topic == camera))
-    .map(|_| format!("Pace is read from {camera}, which this dataset does not record"));
+    .map(|_| format!("Progress is scored from {camera}, which this dataset does not record"));
     let uncompiled = controller
         .with_payload(|payload| PreviewPlan::check(payload, &node))
         .err()
         .map(|error| error.message().to_owned());
-    let listed = input
-        .as_ref()
-        .map(DetectionInput::listed)
-        .unwrap_or_default();
-    let stills = listed
-        .iter()
-        .map(|listed| {
-            let episode = listed.episode();
-            PosterStill::within(
-                episode.id(),
-                (0.0, episode.facts().duration_seconds().unwrap_or_default()),
-            )
-        })
-        .collect::<Vec<_>>();
-    let frames = PosterFrames::use_frames(PosterCut::of(
-        controller
-            .with_payload(|payload| payload.dataset().cloned())
-            .as_ref(),
-        Some(camera),
-        &stills,
-    ));
+    let listed = input.as_ref().map(ScoringInput::listed).unwrap_or_default();
+    let thumbnails = Thumbnails::use_camera(controller, Some(camera));
     let Some(input) = input else {
         return rsx! {
-            section { class: "curation-moments-workspace",
+            section { class: "curation-score-progress-workspace",
                 match controller.sample_error() {
                     Some(error) => rsx! {
                         Notice { tone: NoticeTone::Danger, "The episodes could not be read: {error}" }
@@ -255,7 +243,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     let failed = input.failed();
     let unscored = pending.len();
     let stale = input
-        .progress
+        .preview
         .is_stale()
         .then(|| "Out of date: what reaches this node changed since it ran".to_owned());
     let blocked = unsupported.is_some() || uncompiled.is_some();
@@ -266,11 +254,11 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     let labels = EpisodeLabels::of(input.episodes.iter().map(Episode::facts));
     let evidence = input.clone();
     rsx! {
-        section { class: "curation-moments-workspace", "aria-label": "Identify unproductive moments",
+        section { class: "curation-score-progress-workspace", "aria-label": "Score progress",
             NodeBar {
                 lead: rsx! {
                     p { class: "curation-node-bar-reads",
-                        "Pace against expert demonstrations, read from "
+                        "Progress rate against expert demonstrations, read from "
                         code { "{camera}" }
                     }
                 },
@@ -327,7 +315,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                             p { class: "curation-index-caption", "{Counted::episodes(listed.len())} · slowest first" }
                         }
                     }
-                    ol { class: "curation-entries", "aria-label": "Scored episodes, slowest first; each row ends with its mean pace",
+                    ol { class: "curation-entries", "aria-label": "Scored episodes, slowest first; each row ends with its mean progress rate",
                         for (position, listed) in listed.iter().enumerate() {
                             {
                                 let episode = listed.episode().clone();
@@ -335,16 +323,16 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                                 let label = labels.label(episode.facts());
                                 let face = SliceFace::episode(&episode, label.head());
                                 let face = match listed {
-                                    ListedEpisode::Scored { pace, .. } => face
+                                    ListedEpisode::Scored { progress_rate, .. } => face
                                         .shaped(SliceShape::Trace(input.trace(&episode)))
-                                        .measured(pace.map(Pace::label).unwrap_or_else(|| "—".to_owned()), Pace::MEANING),
+                                        .measured(progress_rate.map(ProgressRate::label).unwrap_or_else(|| "—".to_owned()), ProgressRate::MEANING),
                                     ListedEpisode::Failed { reason, .. } => face.saying(vec![format!("Failed: {reason}")]),
                                 };
                                 rsx! {
                                     SliceEntry {
                                         key: "{id}",
                                         face,
-                                        frames,
+                                        thumbnails,
                                         standing: RowStanding::plain(chosen == Some(position))
                                             .roving(TabStop::at(position, chosen)),
                                         on_select: move |()| tabs.open(&id, None),
@@ -366,7 +354,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                 evidence: rsx! {
                     EpisodeTabs {
                         open: tabs,
-                        empty: "Choose an episode to watch its pace.".to_owned(),
+                        empty: "Choose an episode to watch its progress rate.".to_owned(),
                         render: move |tab: OpenEpisode| {
                             let Some(episode) = evidence.episodes.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
                                 return rsx! {};
@@ -375,7 +363,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                             let mut facts = vec![
                                 episode.facts().duration_seconds().unwrap_or_default().clock_label(),
                             ];
-                            facts.extend(Pace::mean(&moments).map(|pace| format!("mean pace {}", Pace::label(pace))));
+                            facts.extend(ProgressRate::mean(&moments).map(|rate| format!("mean progress rate {}", ProgressRate::label(rate))));
                             rsx! { MomentEvidence { moments, episode, facts } }
                         },
                     }
@@ -385,25 +373,28 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     }
 }
 
-/// Pace: progress per unit time against the expert demonstrations the
-/// scorer was trained on, so 1× is expert pace, below it slower, and below
-/// zero the task went backwards.
-pub(super) struct Pace;
+/// Progress rate: the scorer's `velocity`, progress per unit time against the
+/// expert demonstrations it was trained on, so 1× is the expert rate, below
+/// it slower, and below zero the task went backwards.
+pub(super) struct ProgressRate;
 
-impl Pace {
-    /// How pace is printed wherever it is read.
+impl ProgressRate {
+    /// How a progress rate is printed wherever it is read.
     pub(super) const READING: NumericReading = NumericReading::new(2, "×");
-    /// The span every row's small pace line shares, so rows compare: a
-    /// little below standing still to about twice expert pace.
+    /// The span every row's small progress line shares, so rows compare: a
+    /// little below standing still to about twice the expert rate.
     const TRACE_DOMAIN: (f64, f64) = (-0.5, 2.0);
-    const MEANING: &'static str = "Mean pace against expert demonstrations: 1× is expert pace, below 0 the task went backwards";
+    const MEANING: &'static str = "Mean progress rate against expert demonstrations: 1× is the expert rate, below 0 the task went backwards";
     /// The mean over the moments the scorer could read.
     pub(super) fn mean(moments: &[Moment]) -> Option<f64> {
-        let read = moments.iter().filter_map(Moment::pace).collect::<Vec<_>>();
+        let read = moments
+            .iter()
+            .filter_map(Moment::progress_rate)
+            .collect::<Vec<_>>();
         (!read.is_empty()).then(|| read.iter().sum::<f64>() / read.len() as f64)
     }
-    pub(super) fn label(pace: f64) -> String {
-        format!("{pace:.2}×")
+    pub(super) fn label(rate: f64) -> String {
+        format!("{rate:.2}×")
     }
 }
 
@@ -417,10 +408,10 @@ enum MomentMark {
 }
 
 impl MomentMark {
-    fn of(pace: Option<f64>, cutoff: Option<f64>) -> Option<Self> {
-        match (pace, cutoff) {
+    fn of(rate: Option<f64>, cutoff: Option<f64>) -> Option<Self> {
+        match (rate, cutoff) {
             (None, _) => Some(Self::Unread),
-            (Some(pace), Some(cutoff)) if pace < cutoff => Some(Self::Below),
+            (Some(rate), Some(cutoff)) if rate < cutoff => Some(Self::Below),
             _ => None,
         }
     }
@@ -429,7 +420,7 @@ impl MomentMark {
     fn intervals(moments: &[Moment], cutoff: Option<f64>) -> Vec<TimelineInterval> {
         let mut runs = Vec::<(Self, f64, f64)>::new();
         for moment in moments {
-            let Some(mark) = Self::of(moment.pace(), cutoff) else {
+            let Some(mark) = Self::of(moment.progress_rate(), cutoff) else {
                 continue;
             };
             match runs.last_mut() {
@@ -447,14 +438,15 @@ impl MomentMark {
                 (Self::Below, cutoff) => TimelineInterval::excluded(
                     start,
                     end,
-                    format!("Pace below {:.2}×", cutoff.unwrap_or_default()),
+                    format!("Progress rate below {:.2}×", cutoff.unwrap_or_default()),
                 ),
             })
             .collect()
     }
 }
 
-/// One episode as its moments measured it: the recording with its pace drawn
+/// One episode as its moments measured it: the recording with its progress
+/// rate drawn
 /// on the timeline, the stretches below `cutoff` marked as left out, and the
 /// frames the scorer could not read marked as unknown.
 #[component]
@@ -475,16 +467,16 @@ pub(super) fn MomentEvidence(
         .iter()
         .filter_map(|row| {
             let middle = f64::midpoint(row.start_time(), row.end_time());
-            Some(TimelineSample::new(middle, row.pace()?))
+            Some(TimelineSample::new(middle, row.progress_rate()?))
         })
         .collect();
     let intervals = MomentMark::intervals(&moments, cutoff);
     let track = TimelineTrack::new(
         "curation-progress",
-        "Pace",
+        "Progress rate",
         NumericTrack::new(samples, cutoff, intervals)
-            .read_as(Pace::READING)
-            .with_reference(1.0, "1×", "1× is expert pace"),
+            .read_as(ProgressRate::READING)
+            .with_reference(1.0, "1×", "1× is the expert rate"),
     );
     rsx! {
         EvidenceHeading { subject: episode.name(), episode: Some(episode.id().clone()), facts }
@@ -505,8 +497,8 @@ mod tests {
     #[test]
     fn touching_moments_marked_alike_are_one_interval() {
         let episode = EpisodeId::fixture(1);
-        let moment = |start: f64, pace: Option<f64>| {
-            Moment::new(episode.clone(), (start, start + 0.5), pace).unwrap()
+        let moment = |start: f64, rate: Option<f64>| {
+            Moment::new(episode.clone(), (start, start + 0.5), rate).unwrap()
         };
         let moments = [
             moment(0.0, Some(0.1)),

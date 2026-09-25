@@ -18,11 +18,11 @@ intervals with properties. Every node is one of two kinds:
 
 - **Measures** add a property to each interval, or cut intervals into finer
   ones: Break down subtasks, Find similar subtasks, Group similar subtasks,
-  and Identify unproductive moments.
+  and Score progress.
 - **Selects** keep the intervals whose property passes their rule. What a
   Select keeps by comes from the nearest node above it that is not a Select:
   the dataset's episode facts, a search's similarity, a grouping's category,
-  or the moments' pace.
+  or the moments' progress rate.
 
 Every Select that nothing follows is an **output**. Its relation is what a
 published view holds.
@@ -32,12 +32,12 @@ published view holds.
 An edge is a relation with the columns `episode_id`, `start_ns`, `end_ns`,
 and then one column per property. Times are MCAP log time in nanoseconds, so a
 reader can join the recording's streams without converting them. Properties
-are named by what measured them: `pace`, `subtask`, `similarity`, and
+are named by what measured them: `progress_rate`, `subtask`, `similarity`, and
 `subtask_category`, which holds the category and its probability. A measure
 repeated on one path writes `similarity_2`, `similarity_3`, and so on, and a
 Select reads the column of the nearest measure of its kind. An episode-level
 output shows the facts its Selects read, such as `duration_seconds`; Break
-down and Identify unproductive moments start their own properties, and the
+down and Score progress start their own properties, and the
 text judgments add theirs to what reaches them.
 
 Intervals of one episode may overlap: Break down can return subtasks that
@@ -58,8 +58,8 @@ rows that reach it.
 | Node | On the episode row | Step over the rows that reach it | Where |
 | --- | --- | --- | --- |
 | Dataset | | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
-| Select | | A `WHERE` from the same `Selection` the browser filters with. A pace rule keeps moments with no pace too, then joins touching moments into stretches carrying their mean pace | `document/selection.rs` |
-| Identify unproductive moments | `scores`: `spql.ai.score_progress` over the top camera's packet video | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on | `moments/scoring.rs` |
+| Select | | A `WHERE` from the same `Selection` the browser filters with. A progress-rate rule keeps moments with no progress rate too, then joins touching moments into stretches carrying their mean progress rate | `document/selection.rs` |
+| Score progress | `scores`: `spql.ai.score_progress` over the top camera's packet video | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on | `score_progress/scoring.rs` |
 | Break down subtasks | `subtasks`: `spql.ai.breakdown_task` over the chosen camera's packet video, with the configured model and sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks unnested, moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
 | Find similar subtasks | | `spql.ai.similarity(subtask, query)` as `similarity` | `similar/judgment.rs` |
 | Group similar subtasks | | `spql.ai.classify(subtask, categories)` as `subtask_category`, the categories written into the statement as a literal list | `similar/judgment.rs` |
@@ -81,8 +81,8 @@ break_down_…, find_…      unnesting the answer it asked for when it reaches 
 
 The row carries the episode's first message as `origin_ns` and one column per
 model answer. The answers ride on the interval rows until the step of the
-node that asked for them unnests them: on Dataset → Identify unproductive
-moments → Select → Break down, `subtasks` rides on every moment and every
+node that asked for them unnests them: on Dataset → Score progress →
+Select → Break down, `subtasks` rides on every moment and every
 stretch. Spiral joins and windows rows that carry these lists of structs as
 readily as scalar ones.
 
@@ -127,7 +127,7 @@ pushed down to the scan; the episode row reads the Selects of episodes once
 for its rows and once for each topic it reads. For a step with a model call
 it repeats the model's work. Until 2026-09-25 each model step read the
 relation that reached it twice, to choose the episodes it read and to clip
-its answers, and Dataset → Identify unproductive moments → Select → Break
+its answers, and Dataset → Score progress → Select → Break
 down ran `spql.ai.score_progress` twice per episode and read the camera
 three times. Having SpiralDB compute a CTE read in several places once is not
 pursued for now; the compiler keeps these rules instead.
@@ -150,9 +150,9 @@ pursued for now; the compiler keeps these rules instead.
   written as unnest, then compute over the rows.
 - **Only a Select of episodes spares an episode its model calls.** A model's
   column is on the episode row, before any interval is cut, so a Select below
-  a measure keeps rows but never skips a call. On Identify unproductive
-  moments → Select → Break down, the view asks `breakdown_task` of every
-  episode, including one where no frame passes the pace rule. Its rows are
+  a measure keeps rows but never skips a call. On Score progress →
+  Select → Break down, the view asks `breakdown_task` of every
+  episode, including one where no frame passes the progress-rate rule. Its rows are
   still the preview's, which asks only the episodes that reach Break down;
   only the cost differs.
 
@@ -163,7 +163,7 @@ reach the node as the curation's own run, and the node card and the top bar
 say how far it has got ("Breaking down 3 of 5 episodes"). What reaches the
 node is its parent's preview rows, written into the statement (`preview/`):
 
-- **Break down and Identify unproductive moments** read one recording per
+- **Break down and Score progress** read one recording per
   query, eight queries in flight. Each is handed the intervals of its episode
   that reach the node, with the episode bound as `$1`, through
   `/api/queries/episode` (subtasks) or `/api/queries/episode/arrow` (moments).

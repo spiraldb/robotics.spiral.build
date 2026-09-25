@@ -3,7 +3,7 @@
 use super::input::InputPrint;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{CurationGraph, CurationNode, CurationNodeKind};
-use crate::activities::curation::moments::Moment;
+use crate::activities::curation::score_progress::Moment;
 use spiral_robotics_common::datasets::EpisodeId;
 use std::collections::BTreeMap;
 

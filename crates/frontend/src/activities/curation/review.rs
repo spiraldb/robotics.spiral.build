@@ -9,8 +9,8 @@
 //! moves, and the row the operator chose is always beside its own footage.
 use super::annotate::SubtaskRow;
 use super::document::{CurationNodeKind, PopulationKind};
-use super::poster::{PosterFrame, PosterFrames, PosterStill};
 use super::state::CurationController;
+use super::thumbnail::{Thumbnail, ThumbnailMoment, Thumbnails};
 use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
 use crate::components::icons::FindSimilarIcon;
 use crate::components::timeline::{IntervalTrack, TimelineInterval};
@@ -250,7 +250,7 @@ impl IndexFocus {
     }
 }
 
-/// One row of an index: its poster, what jev made of it, its words, and where
+/// One row of an index: its thumbnail, what jev made of it, its words, and where
 /// in the dataset it happened, with the action that asks for more like it.
 ///
 /// The same row in all three views, because it is the same thing in all three.
@@ -261,9 +261,9 @@ pub(super) fn SubtaskEntry(
     /// What to call the episode, for an index that is not already grouped by
     /// one. Grouped indexes leave it out rather than repeat their heading.
     episode: Option<String>,
-    frames: PosterFrames,
+    thumbnails: Thumbnails,
     on_select: EventHandler<()>,
-    /// Ask for subtasks like this one, handing over where its poster sits on
+    /// Ask for subtasks like this one, handing over where its thumbnail sits on
     /// screen so the question can be seen leaving it.
     #[props(default)]
     on_find_similar: Option<EventHandler<Option<Place>>>,
@@ -290,7 +290,7 @@ pub(super) fn SubtaskEntry(
                 "aria-current": standing.chosen.then_some("true"),
                 onclick: move |_| on_select.call(()),
                 onkeydown: move |event: KeyboardEvent| IndexFocus::handle(&event, on_select),
-                PosterFrame { still: PosterStill::of_subtask(&row), frames }
+                Thumbnail { moment: ThumbnailMoment::of_subtask(&row), thumbnails }
                 span { class: "curation-entry-words",
                     span { class: "curation-entry-description", "{row.description()}" }
                     span { class: "curation-entry-facts",
@@ -322,12 +322,12 @@ pub(super) fn SubtaskEntry(
                     title: "Find subtasks like this one",
                     "aria-label": "Find subtasks like “{row.description()}”",
                     onclick: move |_| {
-                        let poster = item
+                        let thumbnail = item
                             .peek()
                             .as_ref()
-                            .and_then(|item| item.query_selector(".curation-poster").ok().flatten())
-                            .map(|poster| Place::of(&poster));
-                        find.call(poster);
+                            .and_then(|item| item.query_selector(".curation-thumbnail").ok().flatten())
+                            .map(|thumbnail| Place::of(&thumbnail));
+                        find.call(thumbnail);
                     },
                     FindSimilarIcon {}
                 }
@@ -416,12 +416,12 @@ struct RowMeasure {
 }
 
 /// One row of an index of whole episodes or stretches, in the anatomy every
-/// index row shares: a still, a name over a line of facts, and the measure.
+/// index row shares: a thumbnail, a name over a line of facts, and the measure.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SliceFace {
     title: SliceTitle,
     facts: Vec<String>,
-    still: PosterStill,
+    thumbnail: ThumbnailMoment,
     shape: Option<SliceShape>,
     measure: Option<RowMeasure>,
 }
@@ -452,7 +452,7 @@ impl SliceFace {
         Self {
             title,
             facts,
-            still: PosterStill::within(episode.id(), (0.0, seconds.unwrap_or_default())),
+            thumbnail: ThumbnailMoment::opening(episode.id()),
             shape: None,
             measure: None,
         }
@@ -469,7 +469,7 @@ impl SliceFace {
                 is_id: true,
             },
             facts: vec![format!("{:.1} s", (end - start).max(0.0))],
-            still: PosterStill::within(episode, (start, end)),
+            thumbnail: ThumbnailMoment::of_stretch(episode, (start, end)),
             shape: Some(SliceShape::Within(start / duration, end / duration)),
             measure: None,
         }
@@ -499,9 +499,6 @@ impl SliceFace {
                 .facts
                 .iter()
                 .any(|fact| fact.to_lowercase().contains(&needle))
-    }
-    pub(super) fn still(&self) -> &PosterStill {
-        &self.still
     }
 }
 
@@ -545,7 +542,7 @@ fn SliceDrawing(shape: SliceShape) -> Element {
 #[component]
 pub(super) fn SliceEntry(
     face: SliceFace,
-    frames: PosterFrames,
+    thumbnails: Thumbnails,
     standing: RowStanding,
     on_select: EventHandler<()>,
 ) -> Element {
@@ -558,7 +555,7 @@ pub(super) fn SliceEntry(
                 "aria-current": standing.chosen.then_some("true"),
                 onclick: move |_| on_select.call(()),
                 onkeydown: move |event: KeyboardEvent| IndexFocus::handle(&event, on_select),
-                PosterFrame { still: face.still.clone(), frames }
+                Thumbnail { moment: face.thumbnail.clone(), thumbnails }
                 span { class: "curation-entry-words",
                     span {
                         class: "curation-entry-description",
@@ -864,7 +861,7 @@ impl NodeReach {
             let kind = controller
                 .with_payload(|payload| payload.node(&id).map(|node| node.kind().clone()))?;
             let verb = match kind {
-                CurationNodeKind::IdentifyUnproductiveMoments(_) => Some("Score the rest"),
+                CurationNodeKind::ScoreProgress(_) => Some("Score the rest"),
                 CurationNodeKind::BreakDownSubtasks(_) => Some("Break down the rest"),
                 CurationNodeKind::FindSimilarSubtasks(_) => Some("Search the rest"),
                 CurationNodeKind::GroupSimilarSubtasks(_) => Some("Group the rest"),

@@ -77,7 +77,7 @@ impl SelectView {
             // the rule kept; the rule itself says.
             (Population::Moments(input), Population::Moments(_)) => input
                 .iter()
-                .map(|row| self.selection.keeps_moment(row.pace()))
+                .map(|row| self.selection.keeps_moment(row.progress_rate()))
                 .collect(),
             _ => Vec::new(),
         }
@@ -126,7 +126,7 @@ impl SelectView {
     fn unit(&self) -> AxisUnit {
         match self.selection.basis() {
             SelectionBasis::Similarity => AxisUnit::Percent,
-            SelectionBasis::Progress => AxisUnit::Pace,
+            SelectionBasis::Progress => AxisUnit::ProgressRate,
             SelectionBasis::EpisodeFacts | SelectionBasis::Categories => AxisUnit::Plain,
         }
     }

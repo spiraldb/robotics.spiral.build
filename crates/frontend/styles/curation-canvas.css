@@ -154,8 +154,8 @@
   animation-name: curation-canvas-node-enter;
 }
 
-/* A node's name is its kind, and the long ones ("Identify unproductive
-   moments") take a second line rather than an ellipsis. */
+/* A node's name is its kind, and a long one takes a second line rather
+   than an ellipsis. */
 .curation-canvas-node .workflow-stage-heading {
   align-items: flex-start;
 }

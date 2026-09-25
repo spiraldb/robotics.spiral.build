@@ -25,7 +25,7 @@ pub(super) struct StripDot {
 
 impl StripDot {
     /// The values a numeric rule judges, one per item that has one: an
-    /// episode's recorded fact, a subtask's similarity, a moment's pace, every
+    /// episode's recorded fact, a subtask's similarity, a moment's progress rate, every
     /// nth of them past `MAX_STRIP_DOTS`. A rule of categories has no axis.
     pub(super) fn for_view(view: &SelectView, kept: &[bool]) -> Option<Vec<Self>> {
         let values: Vec<Option<f64>> = match (&view.selection, &view.input) {
@@ -37,7 +37,7 @@ impl StripDot {
                 rows.iter().map(SubtaskRow::similarity).collect()
             }
             (Selection::Progressing { .. }, Population::Moments(rows)) => {
-                rows.iter().map(|row| row.pace()).collect()
+                rows.iter().map(|row| row.progress_rate()).collect()
             }
             _ => return None,
         };
@@ -64,8 +64,8 @@ impl StripDot {
 pub(super) enum AxisUnit {
     /// A probability, 0% to 100%.
     Percent,
-    /// Pace against expert demonstrations, as "0.90×".
-    Pace,
+    /// Progress rate against expert demonstrations, as "0.90×".
+    ProgressRate,
     /// A recorded fact, whose unit the rule's sentence says after it.
     Plain,
 }
@@ -150,13 +150,14 @@ impl ThresholdScale {
     fn label(self, value: f64) -> String {
         match self.unit {
             AxisUnit::Percent => format!("{:.0}%", value * 100.0),
-            AxisUnit::Pace => format!("{value:.*}×", self.step.decimals().max(2)),
+            AxisUnit::ProgressRate => format!("{value:.*}×", self.step.decimals().max(2)),
             AxisUnit::Plain => format!("{value:.*}", self.step.decimals()),
         }
     }
-    /// Expert pace, on a pace axis that reaches it.
+    /// The expert rate, on a progress-rate axis that reaches it.
     fn reference(self) -> Option<f64> {
-        (self.unit == AxisUnit::Pace && (self.low..=self.high).contains(&1.0)).then_some(1.0)
+        (self.unit == AxisUnit::ProgressRate && (self.low..=self.high).contains(&1.0))
+            .then_some(1.0)
     }
     /// Where `value` falls across the strip, 0–100.
     fn place(self, value: f64) -> f64 {
@@ -261,7 +262,7 @@ pub(super) fn ThresholdStrip(
                 },
             }
             // The axis's ends, the threshold's value under its handle, and
-            // on a pace axis where expert pace falls.
+            // on a progress-rate axis where the expert rate falls.
             span { class: "curation-select-strip-axis", "aria-hidden": "true",
                 span { "{scale.label(scale.low)}" }
                 if let Some(reference) = scale.reference() {
@@ -299,7 +300,7 @@ mod tests {
 
     #[test]
     fn a_scale_prints_values_in_its_own_steps() {
-        let progress = ThresholdScale::of(&[], 0.89, AxisUnit::Pace);
+        let progress = ThresholdScale::of(&[], 0.89, AxisUnit::ProgressRate);
         assert_eq!(progress.label(0.8912), "0.89×");
         // With nothing judged the axis spans one unit either side, in
         // hundredths, and a recorded fact carries no unit of its own.

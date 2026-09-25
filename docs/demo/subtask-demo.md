@@ -124,7 +124,7 @@ The map sits between the question and the rows. In search it follows the query a
 
 **Spiral gaps found while measuring.** Window functions accept only aggregates and ranking functions, so Spiral has no `LAG`, and the `ROW_NUMBER()` self-join above works around that gap. Before building, decide whether to keep the self-join or add `LAG` to Spiral first. A UUID cannot be written as a literal or cast to text, so one statement cannot name several episodes. Per-episode statements are how the episode endpoint works anyway. `[]` indexing and `power` are unsupported; `spql.list.get` reads list elements with zero-based indices.
 
-**Motion summaries are saved per row, like posters.** The annotation pass computes an episode's motion summaries right after its rows validate, with one more statement for that episode, and saves them on each `SubtaskRow`. Rows annotated earlier are backfilled the first time a profile opens. A summary is about 20 numbers per row. Profiles are derived on the fly and never saved.
+**Motion summaries are saved per row.** The annotation pass computes an episode's motion summaries right after its rows validate, with one more statement for that episode, and saves them on each `SubtaskRow`. Rows annotated earlier are backfilled the first time a profile opens. A summary is about 20 numbers per row. Profiles are derived on the fly and never saved.
 
 ### Animation
 
@@ -150,7 +150,7 @@ One animation primitive serves both explorations: `crates/ui/src/foundation/moti
 
 **Find similar: the operation lights up across the dataset.**
 
-1. Clicking **Find similar** lifts the row's poster and carries it to the query card at the top of the search workspace. On the canvas, the search node is selected, or enters with its edge drawing in.
+1. Clicking **Find similar** lifts the row's thumbnail and carries it to the query card at the top of the search workspace. On the canvas, the search node is selected, or enters with its edge drawing in.
 2. While jev answers, the source segment pulses on the map.
 3. When answers land, the list reorders: each row slides from its old place to its rank. Rows out of view before and after move without animating.
 4. The map lights each segment by its probability, rippling outward from the source segment, so matches in other episodes appear like echoes. Where the matches sit in their rows shows when in an episode this operation usually happens.

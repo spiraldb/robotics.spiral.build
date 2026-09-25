@@ -3,15 +3,15 @@
 //! A Select narrows; it never measures. What it can keep by is decided by the
 //! nearest node above it that is not itself a Select — its basis: the
 //! dataset's recorded episode facts, a search's probabilities, a grouping's
-//! categories, or a detection's progress. The rule is stored in those terms,
+//! categories, or a Score progress node's progress rate. The rule is stored in those terms,
 //! so a Select reads as one sentence about the node it follows.
 //!
 //! One rule has two readings that must agree: the browser keeps what the
 //! preview read as the threshold slides (`keeps_*`), and the path compiles it
 //! to the `WHERE` the published view keeps by (`predicate`).
 use crate::activities::curation::annotate::SubtaskRow;
-use crate::activities::curation::moments::Moment;
 use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
+use crate::activities::curation::score_progress::Moment;
 use crate::activities::episode::Episode;
 use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,7 @@ pub(crate) enum SelectionBasis {
     Similarity,
     /// A Group similar node's category for each subtask.
     Categories,
-    /// An Identify unproductive moments node's progress for each moment.
+    /// A Score progress node's progress rate for each moment.
     Progress,
 }
 
@@ -164,7 +164,7 @@ pub(crate) enum Selection {
     /// Subtasks in any of these categories.
     Categories { names: Vec<String> },
     /// Moments progressing at least this fast. A moment the scorer could not
-    /// read is kept: an unread moment is not an unproductive one.
+    /// read is kept: an unread moment is not a slow one.
     Progressing { minimum: f64 },
 }
 
@@ -217,7 +217,7 @@ impl Selection {
             _ => false,
         }
     }
-    /// Whether a moment is kept, by its pace.
+    /// Whether a moment is kept, by its progress rate.
     pub(crate) fn keeps_moment(&self, velocity: Option<f64>) -> bool {
         match self {
             Self::Progressing { minimum } => velocity.is_none_or(|value| value >= *minimum),
@@ -279,7 +279,7 @@ impl Selection {
             Self::Similar { minimum } => format!("At least {:.0}% similar", minimum * 100.0),
             Self::Categories { names } if names.is_empty() => "No category chosen".to_owned(),
             Self::Categories { names } => names.join(", "),
-            Self::Progressing { minimum } => format!("Pace at least {minimum:.2}×"),
+            Self::Progressing { minimum } => format!("Progress rate at least {minimum:.2}×"),
         }
     }
     /// The rule as the predicate over the columns of `input`: what
@@ -307,9 +307,9 @@ impl Selection {
                 literal(*value)?
             )),
             Self::Progressing { minimum } => Ok(format!(
-                "({pace} IS NULL OR {pace} >= {})",
+                "({rate} IS NULL OR {rate} >= {})",
                 literal(*minimum)?,
-                pace = Moment::PACE
+                rate = Moment::PROGRESS_RATE
             )),
             Self::Similar { minimum } => Ok(format!(
                 "{} >= {}",
@@ -360,7 +360,7 @@ impl Selection {
 
 /// A Select of episodes keeps the rows whose fact passes; a Select of
 /// moments keeps the moments that pass and joins the ones that touch into
-/// stretches, each carrying its mean pace.
+/// stretches, each carrying its mean progress rate.
 impl PathFragment for Selection {
     fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let input = step.input()?;
@@ -382,7 +382,7 @@ impl PathFragment for Selection {
             // its first moment stands for it, so the answers riding on every
             // moment of an episode ride on with its stretches.
             Self::Progressing { .. } => {
-                let (pace, columns) = (Moment::PACE, input.columns());
+                let (rate, columns) = (Moment::PROGRESS_RATE, input.columns());
                 let stretch = "OVER (PARTITION BY episode_id, stretch)";
                 StepSql::new(
                     vec![
@@ -398,7 +398,7 @@ impl PathFragment for Selection {
                         ),
                         format!(
                             "{name}_stretches AS (SELECT episode_id, MIN(start_ns) {stretch} AS start_ns, \
-                             MAX(end_ns) {stretch} AS end_ns, AVG({pace}) {stretch} AS {pace}{}, \
+                             MAX(end_ns) {stretch} AS end_ns, AVG({rate}) {stretch} AS {rate}{}, \
                              ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place \
                              FROM {name}_kept)",
                             input.answers().following("")
@@ -407,7 +407,7 @@ impl PathFragment for Selection {
                             "{name} AS (SELECT {columns} FROM {name}_stretches WHERE place = 1)"
                         ),
                     ],
-                    input.renamed(name).publishing(pace),
+                    input.renamed(name).publishing(rate),
                 )
             }
             Self::Similar { .. } | Self::Categories { .. } => {
@@ -547,7 +547,7 @@ mod tests {
         for minimum in [-0.5, 0.0, 0.2] {
             let rule = Selection::Progressing { minimum };
             let rendered = RenderedPredicate(rule.predicate(&searched()).unwrap());
-            for pace in [
+            for rate in [
                 Some(-0.6),
                 Some(-0.5),
                 Some(0.0),
@@ -557,9 +557,9 @@ mod tests {
                 None,
             ] {
                 assert_eq!(
-                    rule.keeps_moment(pace),
-                    rendered.keeps(Moment::PACE, pace),
-                    "{} on {pace:?}",
+                    rule.keeps_moment(rate),
+                    rendered.keeps(Moment::PROGRESS_RATE, rate),
+                    "{} on {rate:?}",
                     rendered.0
                 );
             }

@@ -1,5 +1,5 @@
 //! One side of a Select's rule, one item at a time beside its recording:
-//! whole episodes, subtasks with their stills, or stretches of moments.
+//! whole episodes, subtasks with their thumbnails, or stretches of moments.
 //!
 //! Every listing names its items by their place in the Select's input, the
 //! same number the map and the strip use, so choosing an item anywhere opens
@@ -8,14 +8,16 @@ use super::SelectView;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{CurationNodeKind, EpisodeFact, Selection};
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
-use crate::activities::curation::moments::{Moment, MomentEvidence, Pace, ProgressScorer};
 use crate::activities::curation::population::Population;
-use crate::activities::curation::poster::{PosterCut, PosterFrames, StillCamera};
 use crate::activities::curation::review::{
     EpisodeOrder, EvidenceHeading, IndexBar, RowStanding, SliceEntry, SliceFace, SubtaskContext,
     SubtaskEntry, SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
+use crate::activities::curation::score_progress::{
+    Moment, MomentEvidence, ProgressRate, ProgressScorer,
+};
 use crate::activities::curation::state::{CurationController, EpisodeFocus};
+use crate::activities::curation::thumbnail::Thumbnails;
 use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
@@ -188,16 +190,7 @@ pub(super) fn EpisodeListing(
             Some((*item, episode.id().clone(), face))
         })
         .collect::<Vec<_>>();
-    let camera = StillCamera::use_camera(controller, None);
-    let stills = faces
-        .iter()
-        .map(|(_, _, face)| face.still().clone())
-        .collect::<Vec<_>>();
-    let frames = PosterFrames::use_frames(PosterCut::of(
-        Some(view.sample.dataset()),
-        camera.as_deref(),
-        &stills,
-    ));
+    let thumbnails = Thumbnails::use_camera(controller, None);
     let featured = controller.with_payload(|payload| payload.configured_camera());
     let sample = view.sample.clone();
     let stop = listed.chosen_position();
@@ -211,7 +204,7 @@ pub(super) fn EpisodeListing(
                         SliceEntry {
                             key: "{id}",
                             face,
-                            frames,
+                            thumbnails,
                             standing: RowStanding::plain(listed.chosen == Some(item))
                                 .roving(TabStop::at(position, stop)),
                             on_select: move |()| tabs.open(&id, None),
@@ -276,12 +269,7 @@ pub(super) fn SubtaskListing(
         camera,
         EpisodeOrder::of(rows.iter().map(SubtaskRow::episode)),
     );
-    let listed_rows = listed
-        .items
-        .iter()
-        .map(|item| rows[*item].clone())
-        .collect::<Vec<_>>();
-    let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &listed_rows));
+    let thumbnails = Thumbnails::use_camera(controller, context.camera());
     let stop = listed.chosen_position();
     let opening = view.clone();
     rsx! {
@@ -305,7 +293,7 @@ pub(super) fn SubtaskListing(
                                     episode: Episode::listed_name_of(row.episode()),
                                     row,
                                     standing,
-                                    frames,
+                                    thumbnails,
                                     on_select: move |()| opening.open(tabs, item),
                                 }
                             }
@@ -353,7 +341,7 @@ pub(super) fn SubtaskListing(
 /// One stretch of moments on one side of the rule: a run of the input's
 /// moments with no moment of the other side between them.
 ///
-/// A detection stores each episode's moments in time order and touching, so
+/// A Score progress node stores each episode's moments in time order and touching, so
 /// a run of consecutive moments of one episode is one stretch of recording.
 struct Stretch {
     episode: EpisodeId,
@@ -379,7 +367,7 @@ impl Stretch {
                 let (first, last) = (&rows[items[0]], &rows[items[items.len() - 1]]);
                 let read = items
                     .iter()
-                    .filter_map(|item| rows[*item].pace())
+                    .filter_map(|item| rows[*item].progress_rate())
                     .collect::<Vec<_>>();
                 Self {
                     episode: first.episode().clone(),
@@ -472,24 +460,16 @@ pub(super) fn MomentListing(
             let face = SliceFace::stretch(&stretch.episode, stretch.span, duration);
             match stretch.mean {
                 Some(mean) => face.measured(
-                    Pace::label(mean),
-                    "Mean pace over this stretch; 1× is expert pace",
+                    ProgressRate::label(mean),
+                    "Mean progress rate over this stretch; 1× is the expert rate",
                 ),
                 None => face,
             }
         })
         .collect::<Vec<_>>();
-    // The stills are of the camera the pace was read from.
-    let camera = StillCamera::use_camera(controller, Some(ProgressScorer::WarpSimBottles.camera()));
-    let stills = faces
-        .iter()
-        .map(|face| face.still().clone())
-        .collect::<Vec<_>>();
-    let frames = PosterFrames::use_frames(PosterCut::of(
-        Some(view.sample.dataset()),
-        camera.as_deref(),
-        &stills,
-    ));
+    // The thumbnails are of the camera the progress was scored from.
+    let thumbnails =
+        Thumbnails::use_camera(controller, Some(ProgressScorer::WarpSimBottles.camera()));
     let front = tabs.front().map(|tab| tab.episode().clone());
     let cutoff = view.selection.threshold();
     let evidence = view.clone();
@@ -523,7 +503,7 @@ pub(super) fn MomentListing(
                                             SliceEntry {
                                                 key: "{start}",
                                                 face: faces[position].clone(),
-                                                frames,
+                                                thumbnails,
                                                 standing: RowStanding::plain(shown == Some(position))
                                                     .roving(TabStop::at(position, shown)),
                                                 on_select: move |()| tabs.open(&episode, Some((start, end))),
@@ -549,7 +529,7 @@ pub(super) fn MomentListing(
                             .filter(|row| row.episode() == tab.episode())
                             .cloned()
                             .collect::<Vec<_>>();
-                        // The stretch's span and its pace, as its row says them.
+                        // The stretch's span and its progress rate, as its row says them.
                         let facts = tab
                             .interval()
                             .map(|(start, end)| {
@@ -559,7 +539,7 @@ pub(super) fn MomentListing(
                                     .cloned()
                                     .collect::<Vec<_>>();
                                 let mut facts = vec![format!("{} – {}", start.clock_label(), end.clock_label())];
-                                facts.extend(Pace::mean(&within).map(|pace| format!("mean pace {}", Pace::label(pace))));
+                                facts.extend(ProgressRate::mean(&within).map(|rate| format!("mean progress rate {}", ProgressRate::label(rate))));
                                 facts
                             })
                             .unwrap_or_default();

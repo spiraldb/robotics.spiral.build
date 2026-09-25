@@ -1,5 +1,5 @@
-//! Scoring progress: the pinned scorer, and what an Identify unproductive
-//! moments node adds to a path.
+//! The pinned progress scorer, and what a Score progress node adds to a
+//! path.
 //!
 //! The node asks each episode's row for `spql.ai.score_progress` over the
 //! scorer's camera, which answers with a velocity for every frame. Its step
@@ -8,7 +8,7 @@
 //! interval of the row it arrived on. The scorer reads whole episodes, so
 //! what it is asked never depends on anything above the node.
 use super::moment::Moment;
-use crate::activities::curation::document::MomentDetection;
+use crate::activities::curation::document::ProgressScoring;
 use crate::activities::curation::path::{
     EpisodeRow, PathError, PathFragment, PathStep, Relation, StepSql,
 };
@@ -48,7 +48,7 @@ impl ProgressScorer {
 /// them.
 const SCORES: &str = "scores";
 
-impl PathFragment for MomentDetection {
+impl PathFragment for ProgressScoring {
     fn episode_columns(&self, row: &mut EpisodeRow) -> Result<(), PathError> {
         let scorer = ProgressScorer::WarpSimBottles;
         let call = format!(
@@ -60,11 +60,12 @@ impl PathFragment for MomentDetection {
     }
 
     /// Every scored frame of every row that reaches the node, as a moment
-    /// carrying its pace; a frame the scorer had no support for carries none.
+    /// carrying its progress rate; a frame the scorer had no support for
+    /// carries none.
     fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let input = step.input()?;
         let rides = input.answers().without(SCORES)?;
-        let (name, pace, origin) = (step.name(), Moment::PACE, EpisodeRow::ORIGIN);
+        let (name, rate, origin) = (step.name(), Moment::PROGRESS_RATE, EpisodeRow::ORIGIN);
         // Each row that reaches the node brings every frame of its episode,
         // and a frame's next is the next one the same row brought. The frames
         // and the window over them are separate entries.
@@ -76,7 +77,7 @@ impl PathFragment for MomentDetection {
             format!(
                 "{name}_frames AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns{}, \
                  r.{origin} + CAST(p.timestamp_ns AS BIGINT) AS start_ns, p.frame_index AS frame_index, \
-                 CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS {pace} \
+                 CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS {rate} \
                  FROM {} r CROSS JOIN LATERAL UNNEST(r.{SCORES}) p)",
                 rides.following("r."),
                 input.name()
@@ -85,21 +86,21 @@ impl PathFragment for MomentDetection {
             // one before it did.
             format!(
                 "{name}_moments AS (SELECT episode_id, reached_start_ns, reached_end_ns{}, start_ns, \
-                 COALESCE(LEAD(start_ns) {frames}, start_ns + (start_ns - LAG(start_ns) {frames})) AS end_ns, {pace} \
+                 COALESCE(LEAD(start_ns) {frames}, start_ns + (start_ns - LAG(start_ns) {frames})) AS end_ns, {rate} \
                  FROM {name}_frames)",
                 rides.following("")
             ),
             format!(
                 "{name} AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, \
-                 LEAST(end_ns, reached_end_ns) AS end_ns, {pace}{} FROM {name}_moments \
+                 LEAST(end_ns, reached_end_ns) AS end_ns, {rate}{} FROM {name}_moments \
                  WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns AND end_ns > start_ns)",
                 rides.following("")
             ),
         ];
         Ok(StepSql::new(
             entries,
-            Relation::new(name, vec![pace])
-                .publishing(pace)
+            Relation::new(name, vec![rate])
+                .publishing(rate)
                 .carrying(rides),
         ))
     }

@@ -25,13 +25,13 @@ use crate::activities::curation::episode_tabs::{
     EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes,
 };
 use crate::activities::curation::population::Slice;
-use crate::activities::curation::poster::{PosterCut, PosterFrames};
 use crate::activities::curation::rerun::ConfirmedRerun;
 use crate::activities::curation::review::{
     Counted, FailedEpisodes, NodeBar, NodeNotes, NodeReach, RowStanding, SubtaskEntry,
     SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus, RunState};
+use crate::activities::curation::thumbnail::Thumbnails;
 use crate::activities::episode::Episode;
 use crate::client::completions::{ModelClient, ModelRequest};
 use dioxus::prelude::*;
@@ -523,7 +523,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     let open_name = open_card
         .as_ref()
         .map(|card| card.category.name().to_owned());
-    let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
+    let thumbnails = Thumbnails::use_camera(controller, context.camera());
     let chosen = tabs.front().and_then(|tab| {
         rows.iter()
             .position(|row| tab.holds(row.episode(), row.start_time()))
@@ -775,7 +775,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                         standing: RowStanding::scored(probability, true, chosen == Some(row))
                                             .roving(TabStop::at(position, chosen_place)),
                                         episode: Episode::listed_name_of(rows[row].episode()),
-                                        frames,
+                                        thumbnails,
                                         on_select: {
                                             let open_row = open_row.clone();
                                             move |()| open_row(row)

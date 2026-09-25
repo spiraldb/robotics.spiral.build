@@ -119,11 +119,7 @@ async fn the_canvas_lists_saved_curations_and_grows_the_graph_from_a_nodes_menu(
         .expect("the dataset accepts children");
     assert_eq!(
         menu.labels(),
-        [
-            "Break down subtasks",
-            "Identify unproductive moments",
-            "Select"
-        ]
+        ["Break down subtasks", "Score progress", "Select"]
     );
     let added = dom
         .in_scope(ScopeId::ROOT, || menu.choose(controller, 0))

@@ -5,7 +5,6 @@
 use super::annotate::SubtaskRow;
 use super::document::{CURATION_ENCODING_VERSION, CurationGraph, CurationNode, DATASET_NODE_ID};
 use super::population::{EpisodeSample, Population, PopulationReader};
-use super::poster::PosterCache;
 use super::preview::{
     PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows, ReadInput,
 };
@@ -261,12 +260,6 @@ pub(crate) struct CurationController {
 
 impl CurationController {
     pub(crate) fn use_controller() -> Self {
-        // A subtask's poster is the same picture whichever of the curation's
-        // nodes is selected, so the cache the backfilled ones are cut into
-        // belongs to the curation, not to the view that first asked. It is
-        // provided here, beside the payload, and read by the poster frames
-        // themselves; nothing in it ever reaches the saved document.
-        use_context_provider(PosterCache::new);
         let session = DocumentSession::use_session();
         let payload = use_signal(|| CurationGraph::new(None));
         // Only a new dataset reads a new sample; editing the graph never does.

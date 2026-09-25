@@ -378,7 +378,7 @@ impl<'a> CurationPath<'a> {
         match kind {
             CurationNodeKind::Dataset => dataset,
             CurationNodeKind::Select(selection) => selection,
-            CurationNodeKind::IdentifyUnproductiveMoments(detection) => detection,
+            CurationNodeKind::ScoreProgress(scoring) => scoring,
             CurationNodeKind::BreakDownSubtasks(annotation) => annotation,
             CurationNodeKind::FindSimilarSubtasks(search) => search,
             CurationNodeKind::GroupSimilarSubtasks(grouping) => grouping,

@@ -19,7 +19,7 @@ pub(in crate::activities::curation) enum NodeFace {
     Annotation,
     Search,
     Grouping,
-    Detection,
+    Scoring,
     Select,
 }
 
@@ -30,14 +30,14 @@ impl NodeFace {
             CurationNodeKind::BreakDownSubtasks(_) => Self::Annotation,
             CurationNodeKind::FindSimilarSubtasks(_) => Self::Search,
             CurationNodeKind::GroupSimilarSubtasks(_) => Self::Grouping,
-            CurationNodeKind::IdentifyUnproductiveMoments(_) => Self::Detection,
+            CurationNodeKind::ScoreProgress(_) => Self::Scoring,
             CurationNodeKind::Select(_) => Self::Select,
         }
     }
     pub(super) const fn class_name(self) -> &'static str {
         match self {
             Self::Dataset => "workflow-stage-source",
-            Self::Annotation | Self::Detection => "workflow-stage-model",
+            Self::Annotation | Self::Scoring => "workflow-stage-model",
             Self::Search => "workflow-stage-media",
             Self::Grouping => "workflow-stage-join",
             Self::Select => "workflow-stage-shape",
@@ -213,9 +213,9 @@ impl NodeCard {
                     |reader| Self::stale(line.clone(), node, reader),
                 )
             }
-            // A moment is one frame, so what the detection holds is said as
+            // A moment is one frame, so what the node holds is said as
             // the recording it scored rather than a count of frames.
-            CurationNodeKind::IdentifyUnproductiveMoments(_) => match (counts, reader) {
+            CurationNodeKind::ScoreProgress(_) => match (counts, reader) {
                 (Some((input, output)), Some(reader)) => Self::stale(
                     format!(
                         "{} of {} · {} scored",
@@ -226,7 +226,7 @@ impl NodeCard {
                     node,
                     reader,
                 ),
-                _ => "Pace per frame of recording".to_owned(),
+                _ => "Progress rate per frame of recording".to_owned(),
             },
             CurationNodeKind::Select(selection) => match (counts, sample) {
                 // A moment is a frame, so what a rule over moments keeps is
@@ -346,11 +346,7 @@ mod tests {
                 .menu()
                 .expect("the dataset accepts children")
                 .labels(),
-            [
-                "Break down subtasks",
-                "Identify unproductive moments",
-                "Select"
-            ]
+            ["Break down subtasks", "Score progress", "Select"]
         );
     }
 

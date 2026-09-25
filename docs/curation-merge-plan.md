@@ -28,7 +28,7 @@ is one of two kinds:
 
 | Kind | What it does | Nodes |
 | --- | --- | --- |
-| Measure | Adds a property to each interval, or cuts intervals into finer ones | Break down subtasks, Find similar, Group similar, Identify unproductive moments |
+| Measure | Adds a property to each interval, or cuts intervals into finer ones | Break down subtasks, Find similar, Group similar, Score progress |
 | Select | Keeps the intervals whose property passes its rule | Episodes ≥ 10 s; category is *fold*; moving stretches |
 
 **Output.** Every leaf Select is an output. Its relation is published as it
@@ -135,7 +135,7 @@ Proposed here, pending your agreement:
 | --- | --- | --- | --- |
 | Dataset | dataset | Whole-episode intervals and episode facts from `spql.mcap.episodes`; in preview, only the episode bound as `$1` | exists |
 | Select | rule on its basis property | `WHERE` on facts, similarity or category. For progress: keep moving moments and merge adjacent ones into stretches (window functions). | exists |
-| Identify unproductive moments | none (scorer pinned) | `spql.ai.score_progress` over the episode's top camera, giving one short interval per scored frame | exists (experimental) |
+| Score progress | none (scorer pinned) | `spql.ai.score_progress` over the episode's top camera, giving one short interval per scored frame | exists (experimental) |
 | Break down subtasks | camera, model, sample interval | `UNNEST` of `spql.ai.breakdown_task` over the episode, clipped to input intervals | **new** |
 | Find similar subtasks | query text | `spql.ai.similarity(subtask, query)` | **new** |
 | Group similar subtasks | categories (name → definition), proposed in the browser, editable | `spql.ai.classify(subtask, categories)` | **new** |
@@ -209,7 +209,7 @@ Proposed here, pending your agreement:
   (`similar/questions.rs`, `similar/decisions.rs`) and `client/decisions.rs`.
   Category proposal (`similar/categories.rs`) stays in the browser through
   `ModelClient`.
-- **Identify unproductive moments:** compiles to `spql.ai.score_progress`.
+- **Score progress:** compiles to `spql.ai.score_progress`.
   Delete `/api/curations/progress-score` and
   `backend/src/curation/episode_progress.rs`.
 

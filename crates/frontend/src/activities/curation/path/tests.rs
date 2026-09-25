@@ -1,12 +1,12 @@
 use super::*;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{
-    Comparison, DATASET_NODE_ID, EpisodeFact, MomentDetection, Selection, SubtaskAnnotation,
+    Comparison, DATASET_NODE_ID, EpisodeFact, ProgressScoring, Selection, SubtaskAnnotation,
     SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
-use crate::activities::curation::moments::{Moment, ProgressScorer};
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::preview::{PreviewReads, PreviewRows, ReadInput};
+use crate::activities::curation::score_progress::{Moment, ProgressScorer};
 use crate::activities::episode::Episode;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
@@ -124,14 +124,14 @@ SELECT episode_id, start_ns, end_ns, duration_seconds FROM select_1"
 #[test]
 fn a_progress_select_scores_every_frame_and_joins_the_moments_it_keeps() {
     let mut graph = graph();
-    let detect = child(
+    let score = child(
         &mut graph,
         DATASET_NODE_ID,
-        CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
     );
     let moving = child(
         &mut graph,
-        &detect,
+        &score,
         CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
     );
     let published = published(&graph, &moving);
@@ -141,20 +141,22 @@ fn a_progress_select_scores_every_frame_and_joins_the_moments_it_keeps() {
         // Each episode's scores are a column of its row, whose start is its
         // first message.
         "episodes AS (SELECT i.episode_id, i.start_ns, i.end_ns, i.duration_seconds, i.messages, i.channels, i.size_megabytes, i.start_ns AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores FROM dataset_0 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
-        "r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns, p.frame_index AS frame_index, CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS pace FROM episodes r CROSS JOIN LATERAL UNNEST(r.scores) p)",
+        "r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns, p.frame_index AS frame_index, CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS progress_rate FROM episodes r CROSS JOIN LATERAL UNNEST(r.scores) p)",
         "COALESCE(LEAD(start_ns) OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index), start_ns + (start_ns - LAG(start_ns) OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index))) AS end_ns",
-        "identify_unproductive_moments_1 AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, LEAST(end_ns, reached_end_ns) AS end_ns, pace FROM identify_unproductive_moments_1_moments WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns AND end_ns > start_ns)",
-        "FROM select_2_numbered WHERE (pace IS NULL OR pace >= CAST(0.2 AS DOUBLE)))",
-        "select_2_stretches AS (SELECT episode_id, MIN(start_ns) OVER (PARTITION BY episode_id, stretch) AS start_ns, MAX(end_ns) OVER (PARTITION BY episode_id, stretch) AS end_ns, AVG(pace) OVER (PARTITION BY episode_id, stretch) AS pace, ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place FROM select_2_kept)",
-        "select_2 AS (SELECT episode_id, start_ns, end_ns, pace FROM select_2_stretches WHERE place = 1)",
+        "score_progress_1 AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, LEAST(end_ns, reached_end_ns) AS end_ns, progress_rate FROM score_progress_1_moments WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns AND end_ns > start_ns)",
+        "FROM select_2_numbered WHERE (progress_rate IS NULL OR progress_rate >= CAST(0.2 AS DOUBLE)))",
+        "select_2_stretches AS (SELECT episode_id, MIN(start_ns) OVER (PARTITION BY episode_id, stretch) AS start_ns, MAX(end_ns) OVER (PARTITION BY episode_id, stretch) AS end_ns, AVG(progress_rate) OVER (PARTITION BY episode_id, stretch) AS progress_rate, ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place FROM select_2_kept)",
+        "select_2 AS (SELECT episode_id, start_ns, end_ns, progress_rate FROM select_2_stretches WHERE place = 1)",
     ] {
         assert!(published.contains(step), "{step}\n{published}");
     }
-    assert!(published.ends_with("\nSELECT episode_id, start_ns, end_ns, pace FROM select_2"));
+    assert!(
+        published.ends_with("\nSELECT episode_id, start_ns, end_ns, progress_rate FROM select_2")
+    );
     // The preview scores only the bound episode, and unnests its scores over
     // the intervals the dataset's preview hands on rather than the dataset
     // read again.
-    let scoring = preview(&graph, &detect, intervals());
+    let scoring = preview(&graph, &score, intervals());
     for step in [
         "WITH\n  preview_input(episode_id, start_ns, end_ns) AS (VALUES ($1, ",
         "FROM spql.mcap.read_topic('abc130k', '/cameras/top_camera-images-rgb') r JOIN spql.mcap.episodes('abc130k') e ON e.id = r.id WHERE r.id = $1)",
@@ -165,9 +167,11 @@ fn a_progress_select_scores_every_frame_and_joins_the_moments_it_keeps() {
         assert!(scoring.contains(step), "{step}\n{scoring}");
     }
     assert!(!scoring.contains("dataset_0"));
-    assert!(scoring.ends_with(
-        "\nSELECT episode_id, start_ns, end_ns, pace FROM identify_unproductive_moments_1"
-    ));
+    assert!(
+        scoring.ends_with(
+            "\nSELECT episode_id, start_ns, end_ns, progress_rate FROM score_progress_1"
+        )
+    );
     admitted(&published, &scoring);
 }
 
@@ -235,14 +239,14 @@ fn a_breakdown_reads_each_episode_whole_and_cuts_its_subtasks_to_what_reached_it
 #[test]
 fn both_models_answer_on_the_episode_row_and_the_subtasks_ride_to_their_step() {
     let mut graph = graph();
-    let detect = child(
+    let score = child(
         &mut graph,
         DATASET_NODE_ID,
-        CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
     );
     let moving = child(
         &mut graph,
-        &detect,
+        &score,
         CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
     );
     let mut annotation = SubtaskAnnotation::default();
@@ -256,10 +260,10 @@ fn both_models_answer_on_the_episode_row_and_the_subtasks_ride_to_their_step() {
     assert_eq!(published.matches("spql.mcap.read_topic(").count(), 1);
     for step in [
         "i.start_ns AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores, spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash') AS subtasks FROM dataset_0 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
-        "identify_unproductive_moments_1_frames AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns, r.subtasks, r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns,",
-        "LEAST(end_ns, reached_end_ns) AS end_ns, pace, origin_ns, subtasks FROM identify_unproductive_moments_1_moments",
-        "AVG(pace) OVER (PARTITION BY episode_id, stretch) AS pace, origin_ns, subtasks, ROW_NUMBER()",
-        "select_2 AS (SELECT episode_id, start_ns, end_ns, pace, origin_ns, subtasks FROM select_2_stretches WHERE place = 1)",
+        "score_progress_1_frames AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns, r.subtasks, r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns,",
+        "LEAST(end_ns, reached_end_ns) AS end_ns, progress_rate, origin_ns, subtasks FROM score_progress_1_moments",
+        "AVG(progress_rate) OVER (PARTITION BY episode_id, stretch) AS progress_rate, origin_ns, subtasks, ROW_NUMBER()",
+        "select_2 AS (SELECT episode_id, start_ns, end_ns, progress_rate, origin_ns, subtasks FROM select_2_stretches WHERE place = 1)",
         "break_down_subtasks_3_subtasks AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns + CAST(s.start_ns AS BIGINT) AS start_ns, r.origin_ns + CAST(s.end_ns AS BIGINT) AS end_ns, s.description AS subtask FROM select_2 r CROSS JOIN LATERAL UNNEST(r.subtasks) AS s)",
     ] {
         assert!(published.contains(step), "{step}\n{published}");
@@ -432,14 +436,14 @@ fn each_measures_preview_is_its_published_step_over_its_parents_rows() {
     let annotate = child(&mut graph, &short, breakdown());
     let search = child(&mut graph, &annotate, searching("fold the skirt"));
     let group = child(&mut graph, &annotate, grouping(&["fold", "grasp"]));
-    let detect = child(
+    let score = child(
         &mut graph,
         &short,
-        CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
     );
     let moving = child(
         &mut graph,
-        &detect,
+        &score,
         CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
     );
     let annotate_moving = child(&mut graph, &moving, breakdown());
@@ -462,7 +466,7 @@ fn each_measures_preview_is_its_published_step_over_its_parents_rows() {
             ("episodes".to_owned(), "preview_reached"),
         ),
         (
-            &detect,
+            &score,
             intervals(),
             ("episodes".to_owned(), "preview_reached"),
         ),
@@ -681,14 +685,14 @@ fn a_graph_without_a_dataset_has_nothing_to_read() {
 #[test]
 fn the_browser_keeps_the_stretches_the_statement_keeps() {
     let mut graph = graph();
-    let detect = child(
+    let score = child(
         &mut graph,
         DATASET_NODE_ID,
-        CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
     );
     let moving = child(
         &mut graph,
-        &detect,
+        &score,
         CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
     );
     let (first, second) = (EpisodeId::fixture(1), EpisodeId::fixture(2));
@@ -701,20 +705,20 @@ fn the_browser_keeps_the_stretches_the_statement_keeps() {
     let frames = |episode: &EpisodeId, frames: &[(i64, i64, Option<f64>)]| {
         frames
             .iter()
-            .map(|(start, end, pace)| {
+            .map(|(start, end, progress_rate)| {
                 Moment::new(
                     episode.clone(),
                     (*start as f64 / 1e3, *end as f64 / 1e3),
-                    *pace,
+                    *progress_rate,
                 )
                 .unwrap()
             })
             .collect::<Vec<_>>()
     };
-    let detection = graph.node(&detect).unwrap().clone();
+    let score_node = graph.node(&score).unwrap().clone();
     let mut reads = PreviewReads::default();
     reads.record(
-        &detection,
+        &score_node,
         (&first, ReadInput::untracked()),
         Ok(PreviewRows::Moments(frames(
             &first,
@@ -729,7 +733,7 @@ fn the_browser_keeps_the_stretches_the_statement_keeps() {
         ))),
     );
     reads.record(
-        &detection,
+        &score_node,
         (&second, ReadInput::untracked()),
         Ok(PreviewRows::Moments(frames(
             &second,

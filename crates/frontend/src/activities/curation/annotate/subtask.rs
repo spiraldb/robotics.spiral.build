@@ -134,7 +134,7 @@ impl SubtaskRow {
     pub(in crate::activities::curation) fn description(&self) -> &str {
         &self.description
     }
-    /// Where in the interval its still is cut from. The middle shows the
+    /// Where in the interval its thumbnail is taken. The middle shows the
     /// action under way rather than the reach into it or the release out of
     /// it, which is what tells two similar subtasks apart.
     pub(in crate::activities::curation) fn midpoint(&self) -> f64 {

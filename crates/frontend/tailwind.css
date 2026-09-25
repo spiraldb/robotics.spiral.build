@@ -17,7 +17,7 @@
 @import "./styles/curation-review.css";
 @import "./styles/curation-similar.css";
 @import "./styles/curation-select.css";
-@import "./styles/curation-moments.css";
+@import "./styles/curation-score-progress.css";
 
 /*
   One palette, named by role rather than by hue. A colour is only ever spelled

@@ -24,8 +24,7 @@ use crate::components::icons::{
 
 /// A node's size, so the layout can place it before it mounts: the graph
 /// pane is a fifth of the window, two branches side by side have to stay
-/// readable in it, and the longest name ("Identify unproductive moments")
-/// takes a second line rather than the card taking more width.
+/// readable in it, and a long name takes a second line rather than the card taking more width.
 const NODE_WIDTH: f64 = 192.0;
 const NODE_HEIGHT: f64 = 100.0;
 /// How far under a card's bottom edge its popovers hang, clear of the +.
@@ -242,7 +241,7 @@ pub(in crate::activities::curation) fn NodeGlyph(face: NodeFace) -> Element {
         NodeFace::Annotation => rsx! { ModelStageIcon {} },
         NodeFace::Search => rsx! { MediaStageIcon {} },
         NodeFace::Grouping => rsx! { JoinStageIcon {} },
-        NodeFace::Detection => rsx! { SignalStreamIcon {} },
+        NodeFace::Scoring => rsx! { SignalStreamIcon {} },
         NodeFace::Select => rsx! { QueryNodeIcon {} },
     }
 }

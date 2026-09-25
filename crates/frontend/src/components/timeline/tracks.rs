@@ -91,7 +91,7 @@ pub(crate) struct NumericTrack {
     cutoff: Option<f64>,
     intervals: Vec<TimelineInterval>,
     reading: NumericReading,
-    /// A level the values are read against, such as expert pace: drawn
+    /// A level the values are read against, such as the expert rate: drawn
     /// across the plot with its mark at the edge, and explained under the
     /// readout.
     reference: Option<TrackReference>,
@@ -303,12 +303,12 @@ mod tests {
         assert_eq!(track.at(1.5), None);
         assert_eq!(track.at(2.0), Some(3.0));
         assert_eq!(track.domain(), (0.0, 4.0));
-        let paced = track
+        let rated = track
             .clone()
             .with_reference(6.0, "6×", "expert")
             .read_as(NumericReading::new(2, "×"));
-        assert_eq!(paced.domain(), (0.0, 6.0));
-        assert_eq!(paced.reading.print(0.7249), "0.72×");
+        assert_eq!(rated.domain(), (0.0, 6.0));
+        assert_eq!(rated.reading.print(0.7249), "0.72×");
         assert_eq!(track.path().matches('M').count(), 2);
     }
 }

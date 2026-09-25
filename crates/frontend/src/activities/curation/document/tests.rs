@@ -208,19 +208,19 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
     payload
         .add_child(
             DATASET_NODE_ID,
-            CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
         )
         .unwrap();
     let json: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
     assert_eq!(
         json["nodes"][1]["kind"],
-        serde_json::json!({"type": "identify_unproductive_moments"})
+        serde_json::json!({"type": "score_progress"})
     );
     assert!(json.get("moments").is_none());
     // What encoding 2 used to store for the nodes that did not compile yet is
     // refused rather than carried: the preview reads it again.
     for stored in [
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"identify_unproductive_moments","completed_episodes":[]}}],"edges":[{"from":"dataset","to":"m"}]}"#,
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress","completed_episodes":[]}}],"edges":[{"from":"dataset","to":"m"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5,"completed_episodes":[]}}],"edges":[{"from":"dataset","to":"a"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"subtasks":[]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"groupings":[]}"#,

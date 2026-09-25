@@ -5,9 +5,9 @@ use super::input::{EpisodeRows, PreviewInput};
 use super::reads::{PreviewRows, ReadInput};
 use crate::activities::curation::annotate::{MAX_SUBTASKS, SubtaskColumns};
 use crate::activities::curation::document::{CurationGraph, CurationNode, CurationNodeKind};
-use crate::activities::curation::moments::{MAX_MOMENTS, Moment};
 use crate::activities::curation::path::{CurationPath, PathError};
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
+use crate::activities::curation::score_progress::{MAX_MOMENTS, Moment};
 use crate::activities::curation::state::{CurationController, RunHandle};
 use crate::activities::data::DatasetClient;
 use futures_util::StreamExt as _;
@@ -93,7 +93,7 @@ impl PreviewPlan {
             upstream: &upstream,
         };
         let (reading, jobs) = match measured.kind() {
-            CurationNodeKind::IdentifyUnproductiveMoments(_) => (
+            CurationNodeKind::ScoreProgress(_) => (
                 PreviewReading::Moments,
                 batch.per_episode(&wanted, reader.sample())?,
             ),
@@ -126,7 +126,7 @@ impl PreviewPlan {
     /// What a pass of this preview says it is doing, and what it counts.
     fn doing(&self) -> (&'static str, &'static str) {
         let verb = match self.node.kind() {
-            CurationNodeKind::IdentifyUnproductiveMoments(_) => "Scoring",
+            CurationNodeKind::ScoreProgress(_) => "Scoring",
             CurationNodeKind::BreakDownSubtasks(_) => "Breaking down",
             CurationNodeKind::FindSimilarSubtasks(_) => "Searching",
             CurationNodeKind::GroupSimilarSubtasks(_) => "Grouping",

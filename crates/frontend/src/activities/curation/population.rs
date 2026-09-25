@@ -9,8 +9,8 @@
 //! what a published view holds one row per.
 use super::annotate::SubtaskRow;
 use super::document::{CurationGraph, CurationNodeKind, Selection};
-use super::moments::Moment;
 use super::preview::PreviewReads;
+use super::score_progress::Moment;
 use crate::activities::episode::Episode;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
@@ -86,7 +86,8 @@ pub(super) enum Population {
     /// Subtasks, episode by episode in sample order, each episode's in time
     /// order, with what the node that read them judged.
     Subtasks(Vec<SubtaskRow>),
-    /// Scored moments of one detection, episode by episode in sample order,
+    /// Scored moments of one Score progress node, episode by episode in sample
+    /// order,
     /// each episode's in time order.
     Moments(Vec<Moment>),
 }
@@ -284,7 +285,7 @@ impl<'a> PopulationReader<'a> {
             ),
             // The preview already cut each episode's moments to what reached
             // the node; an episode it has not read yet holds none.
-            CurationNodeKind::IdentifyUnproductiveMoments(_) => Population::Moments(
+            CurationNodeKind::ScoreProgress(_) => Population::Moments(
                 self.input(node)
                     .episodes()
                     .iter()
@@ -322,7 +323,7 @@ impl<'a> PopulationReader<'a> {
             ),
             Population::Moments(rows) => Population::Moments(
                 rows.into_iter()
-                    .filter(|row| selection.keeps_moment(row.pace()))
+                    .filter(|row| selection.keeps_moment(row.progress_rate()))
                     .collect(),
             ),
         }
@@ -333,7 +334,7 @@ impl<'a> PopulationReader<'a> {
 mod tests {
     use super::super::annotate::{CategoryPlacement, JudgmentValue};
     use super::super::document::{
-        Comparison, CurationNode, DATASET_NODE_ID, EpisodeFact, MomentDetection, SubtaskAnnotation,
+        Comparison, CurationNode, DATASET_NODE_ID, EpisodeFact, ProgressScoring, SubtaskAnnotation,
         SubtaskCategory, SubtaskGrouping, SubtaskSearch,
     };
     use super::super::preview::{PreviewRows, ReadInput};
@@ -348,7 +349,7 @@ mod tests {
         graph.node(id).expect("the node is in the graph").clone()
     }
 
-    /// Record that `node` read one episode's moments, one per `(start, pace)`,
+    /// Record that `node` read one episode's moments, one per `(start, rate)`,
     /// each a second long.
     fn read_moments(
         reads: &mut PreviewReads,
@@ -362,8 +363,8 @@ mod tests {
             Ok(PreviewRows::Moments(
                 moments
                     .iter()
-                    .map(|(start, pace)| {
-                        Moment::new(episode.clone(), (*start, start + 1.0), *pace).unwrap()
+                    .map(|(start, rate)| {
+                        Moment::new(episode.clone(), (*start, start + 1.0), *rate).unwrap()
                     })
                     .collect(),
             )),
@@ -585,17 +586,17 @@ mod tests {
     #[test]
     fn a_progress_select_keeps_moving_and_unread_moments_and_joins_them() {
         let mut graph = CurationGraph::new(None);
-        let detect = graph
+        let score = graph
             .add_child(
                 DATASET_NODE_ID,
-                CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+                CurationNodeKind::ScoreProgress(ProgressScoring::default()),
             )
             .unwrap();
         let episode = EpisodeId::fixture(1);
         let mut reads = unread();
         read_moments(
             &mut reads,
-            &node(&graph, &detect),
+            &node(&graph, &score),
             &episode,
             &[
                 (0.0, Some(0.4)),
@@ -604,7 +605,7 @@ mod tests {
                 (3.0, Some(0.2)),
             ],
         );
-        let moving = select(&mut graph, &detect, Selection::Progressing { minimum: 0.0 });
+        let moving = select(&mut graph, &score, Selection::Progressing { minimum: 0.0 });
         // A second Select of the same progress would only repeat this one;
         // breaking down what is left is what follows.
         assert_eq!(
@@ -629,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn moments_reach_only_the_episodes_that_reach_the_detection() {
+    fn moments_reach_only_the_episodes_that_reach_the_score_node() {
         let mut graph = CurationGraph::new(None);
         let long = select(
             &mut graph,
@@ -640,30 +641,30 @@ mod tests {
                 value: 20.0,
             },
         );
-        let detect = graph
+        let score = graph
             .add_child(
                 &long,
-                CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+                CurationNodeKind::ScoreProgress(ProgressScoring::default()),
             )
             .unwrap();
         // Episode 2 was read before the Select above tightened; it no longer
-        // reaches the detection, so its moments are not handed on.
-        let detection = node(&graph, &detect);
+        // reaches the Score progress node, so its moments are not handed on.
+        let score_node = node(&graph, &score);
         let mut reads = unread();
         read_moments(
             &mut reads,
-            &detection,
+            &score_node,
             &EpisodeId::fixture(1),
             &[(0.0, Some(0.5))],
         );
         read_moments(
             &mut reads,
-            &detection,
+            &score_node,
             &EpisodeId::fixture(2),
             &[(0.0, None)],
         );
         let sample = sample();
-        let moments = PopulationReader::new(&graph, &sample, &reads).of(&detect);
+        let moments = PopulationReader::new(&graph, &sample, &reads).of(&score);
         assert_eq!(moments.episodes(), [EpisodeId::fixture(1)]);
         assert_eq!(moments.len(), 1);
     }

@@ -91,7 +91,7 @@ pub(crate) enum CurationNodeKind {
     BreakDownSubtasks(SubtaskAnnotation),
     FindSimilarSubtasks(SubtaskSearch),
     GroupSimilarSubtasks(SubtaskGrouping),
-    IdentifyUnproductiveMoments(MomentDetection),
+    ScoreProgress(ProgressScoring),
     Select(Selection),
 }
 impl CurationNodeKind {
@@ -101,7 +101,7 @@ impl CurationNodeKind {
             Self::BreakDownSubtasks(_) => "break_down_subtasks",
             Self::FindSimilarSubtasks(_) => "find_similar_subtasks",
             Self::GroupSimilarSubtasks(_) => "group_similar_subtasks",
-            Self::IdentifyUnproductiveMoments(_) => "identify_unproductive_moments",
+            Self::ScoreProgress(_) => "score_progress",
             Self::Select(_) => "select",
         }
     }
@@ -111,7 +111,7 @@ impl CurationNodeKind {
             Self::BreakDownSubtasks(_) => "Break down subtasks",
             Self::FindSimilarSubtasks(_) => "Find similar subtasks",
             Self::GroupSimilarSubtasks(_) => "Group similar subtasks",
-            Self::IdentifyUnproductiveMoments(_) => "Identify unproductive moments",
+            Self::ScoreProgress(_) => "Score progress",
             Self::Select(_) => "Select",
         }
     }
@@ -122,7 +122,7 @@ impl CurationNodeKind {
             Self::Dataset => Some(SelectionBasis::EpisodeFacts),
             Self::FindSimilarSubtasks(_) => Some(SelectionBasis::Similarity),
             Self::GroupSimilarSubtasks(_) => Some(SelectionBasis::Categories),
-            Self::IdentifyUnproductiveMoments(_) => Some(SelectionBasis::Progress),
+            Self::ScoreProgress(_) => Some(SelectionBasis::Progress),
             Self::BreakDownSubtasks(_) | Self::Select(_) => None,
         }
     }
@@ -131,9 +131,7 @@ impl CurationNodeKind {
             Self::BreakDownSubtasks(annotation) => annotation.validate(),
             Self::GroupSimilarSubtasks(grouping) => grouping.validate(),
             Self::Select(selection) => selection.validate(),
-            Self::Dataset | Self::FindSimilarSubtasks(_) | Self::IdentifyUnproductiveMoments(_) => {
-                Ok(())
-            }
+            Self::Dataset | Self::FindSimilarSubtasks(_) | Self::ScoreProgress(_) => Ok(()),
         }
     }
 }
@@ -217,11 +215,11 @@ impl SubtaskAnnotation {
     }
 }
 
-/// One Identify unproductive moments node. Its scorer is pinned, so there is
+/// One Score progress node. Its scorer is pinned, so there is
 /// nothing to configure; what it reads is the preview's, never the document's.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MomentDetection {}
+pub(crate) struct ProgressScoring {}
 
 /// The query of one Find similar subtasks node, which its step asks about
 /// every subtask that reaches it.
@@ -418,7 +416,7 @@ impl CurationGraph {
             CurationNodeKind::BreakDownSubtasks(_)
             | CurationNodeKind::FindSimilarSubtasks(_)
             | CurationNodeKind::GroupSimilarSubtasks(_) => Some(PopulationKind::Subtasks),
-            CurationNodeKind::IdentifyUnproductiveMoments(_) => Some(PopulationKind::Moments),
+            CurationNodeKind::ScoreProgress(_) => Some(PopulationKind::Moments),
             CurationNodeKind::Select(_) => self.population_kind(self.parent_of(node)?),
         }
     }
@@ -443,9 +441,9 @@ impl CurationGraph {
         let mut kinds = match (self.population_kind(node), parent.kind()) {
             (Some(PopulationKind::Episodes), _) => vec![
                 CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
-                CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+                CurationNodeKind::ScoreProgress(ProgressScoring::default()),
             ],
-            // Break down what is left once the unproductive moments are out.
+            // Break down what is left once the slow moments are out.
             (Some(PopulationKind::Moments), _) => vec![CurationNodeKind::BreakDownSubtasks(
                 SubtaskAnnotation::default(),
             )],

@@ -14,13 +14,13 @@ pub(super) use subtask::{MAX_SUBTASKS, SubtaskColumns, SubtaskRow};
 
 use super::document::{CurationNode, CurationNodeKind, SubtaskAnnotation};
 use super::episode_tabs::{EpisodeTabs, OpenEpisode};
-use super::poster::{PosterCut, PosterFrames};
 use super::preview::{PreviewPlan, PreviewProgress};
 use super::rerun::ConfirmedRerun;
 use super::review::{
     EpisodeOrder, FailedEpisodes, NodeBar, NodeNotes, NodeReach, SubtaskContext, SubtaskReview,
 };
 use super::state::{CurationController, RunState};
+use super::thumbnail::Thumbnails;
 use crate::activities::episode::Episode;
 use crate::components::icons::SettingsIcon;
 use dioxus::prelude::*;
@@ -254,7 +254,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
         settings.camera().map(str::to_owned),
         EpisodeOrder::of(listed.iter().map(AnnotationEpisode::id)),
     );
-    let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
+    let thumbnails = Thumbnails::use_camera(controller, context.camera());
     let evidence = (listed.clone(), groups.clone(), context.clone());
     let done = progress.read().len();
     let replaceable = RunScope::All.episodes(&listed, &progress).len();
@@ -355,7 +355,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                 index: rsx! {
                     SubtaskIndex {
                         output: AnnotationOutput::new(groups.clone(), failures.clone(), context.clone()),
-                        frames,
+                        thumbnails,
                         chosen,
                         on_retry: retry,
                         on_find_similar: {
@@ -425,7 +425,7 @@ fn AnnotationSettings(
     let known = cameras.contains(&camera);
     let pick = annotation.clone();
     let name = annotation.clone();
-    let pace = annotation.clone();
+    let interval = annotation.clone();
     rsx! {
         span { class: "curation-annotate-settings-slot",
             Button {
@@ -497,7 +497,7 @@ fn AnnotationSettings(
                             min: "0.1", step: "0.1",
                             oninput: move |value: String| {
                                 if let Ok(seconds) = value.trim().parse::<f64>() {
-                                    let _ = pace.configure(|annotation| {
+                                    let _ = interval.configure(|annotation| {
                                         annotation.set_sample_interval_seconds(seconds)
                                     });
                                 }

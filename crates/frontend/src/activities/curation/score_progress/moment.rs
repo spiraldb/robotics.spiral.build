@@ -8,24 +8,25 @@ use std::io::Cursor;
 
 /// One moment: the stretch of recording one scored frame stands for, from its
 /// own time to the next frame's, in seconds from the episode's first message,
-/// and the pace the scorer read there. `pace` is `None` where the scorer had
-/// no support for the frame.
+/// and the progress rate the scorer read there. `progress_rate` is `None`
+/// where the scorer had no support for the frame.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::activities::curation) struct Moment {
     episode: EpisodeId,
     start_time: f64,
     end_time: f64,
-    pace: Option<f64>,
+    progress_rate: Option<f64>,
 }
 
 impl Moment {
-    /// The column a moment's pace travels in, on every edge below the node.
-    pub(in crate::activities::curation) const PACE: &'static str = "pace";
+    /// The column a moment's progress rate travels in, on every edge below
+    /// the node.
+    pub(in crate::activities::curation) const PROGRESS_RATE: &'static str = "progress_rate";
 
     pub(in crate::activities::curation) fn new(
         episode: EpisodeId,
         (start_time, end_time): (f64, f64),
-        pace: Option<f64>,
+        progress_rate: Option<f64>,
     ) -> Result<Self, String> {
         if !start_time.is_finite()
             || !end_time.is_finite()
@@ -40,7 +41,7 @@ impl Moment {
             episode,
             start_time,
             end_time,
-            pace: pace.filter(|value| value.is_finite()),
+            progress_rate: progress_rate.filter(|value| value.is_finite()),
         })
     }
     pub(in crate::activities::curation) fn episode(&self) -> &EpisodeId {
@@ -52,8 +53,8 @@ impl Moment {
     pub(in crate::activities::curation) fn end_time(&self) -> f64 {
         self.end_time
     }
-    pub(in crate::activities::curation) fn pace(&self) -> Option<f64> {
-        self.pace
+    pub(in crate::activities::curation) fn progress_rate(&self) -> Option<f64> {
+        self.progress_rate
     }
 
     /// One episode's moments from the Arrow stream its preview answered, in
@@ -80,15 +81,15 @@ impl Moment {
                     .ok_or_else(|| format!("The preview has no {name} column."))?;
                 arrow_cast::cast(column, kind).map_err(|error| error.to_string())
             };
-            let (starts, ends, paces) = (
+            let (starts, ends, rates) = (
                 column("start_ns", &DataType::Int64)?,
                 column("end_ns", &DataType::Int64)?,
-                column(Self::PACE, &DataType::Float64)?,
+                column(Self::PROGRESS_RATE, &DataType::Float64)?,
             );
-            let (Some(starts), Some(ends), Some(paces)) = (
+            let (Some(starts), Some(ends), Some(rates)) = (
                 starts.as_any().downcast_ref::<Int64Array>(),
                 ends.as_any().downcast_ref::<Int64Array>(),
-                paces.as_any().downcast_ref::<Float64Array>(),
+                rates.as_any().downcast_ref::<Float64Array>(),
             ) else {
                 return Err("The preview's columns are not the moments' types.".into());
             };
@@ -99,7 +100,7 @@ impl Moment {
                 moments.push(Self::new(
                     episode.id().clone(),
                     (seconds(starts.value(row)), seconds(ends.value(row))),
-                    (!paces.is_null(row)).then(|| paces.value(row)),
+                    (!rates.is_null(row)).then(|| rates.value(row)),
                 )?);
             }
         }
@@ -126,7 +127,7 @@ mod tests {
             Field::new("episode_id", DataType::Utf8, false),
             Field::new("start_ns", DataType::Int64, false),
             Field::new("end_ns", DataType::Int64, false),
-            Field::new(Moment::PACE, DataType::Float64, true),
+            Field::new(Moment::PROGRESS_RATE, DataType::Float64, true),
         ]));
         let columns: Vec<ArrayRef> = vec![
             Arc::new(arrow_array::StringArray::from(vec!["e"; rows.len()])),
@@ -156,8 +157,12 @@ mod tests {
         assert_eq!(moments.len(), 2);
         assert_eq!(moments[0].start_time(), 0.0);
         assert_eq!(moments[0].end_time(), moments[1].start_time());
-        assert_eq!(moments[0].pace(), Some(0.4));
-        assert_eq!(moments[1].pace(), None, "an unsupported frame is unread");
+        assert_eq!(moments[0].progress_rate(), Some(0.4));
+        assert_eq!(
+            moments[1].progress_rate(),
+            None,
+            "an unsupported frame is unread"
+        );
         assert!(
             Moment::read(&stream(&[]), &episode)
                 .unwrap_err()

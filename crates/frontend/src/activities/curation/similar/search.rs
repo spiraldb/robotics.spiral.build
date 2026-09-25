@@ -15,12 +15,12 @@ use crate::activities::curation::episode_map::{
 };
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::population::Slice;
-use crate::activities::curation::poster::{PosterCut, PosterFrame, PosterFrames, PosterStill};
 use crate::activities::curation::review::{
     Counted, FailedEpisodes, IndexBar, NodeBar, NodeNotes, NodeReach, RowStanding, SubtaskEntry,
     SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus, RunState};
+use crate::activities::curation::thumbnail::{Thumbnail, ThumbnailMoment, Thumbnails};
 use crate::activities::episode::Episode;
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
@@ -194,7 +194,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
         }
     });
 
-    // A row that asked from elsewhere also left where it was, so its poster
+    // A row that asked from elsewhere also left where it was, so its thumbnail
     // is carried from there into the question it became.
     use_effect(move || {
         let Some(from) = controller.take_launch() else {
@@ -202,17 +202,17 @@ pub(in crate::activities::curation) fn SearchWorkspace(
         };
         spawn(async move {
             Motion::after_render().await;
-            if let Some(poster) = SubtaskList::RANKED
+            if let Some(thumbnail) = SubtaskList::RANKED
                 .element()
                 .and_then(|list| list.closest(".curation-similar-search").ok().flatten())
                 .and_then(|workspace| {
                     workspace
-                        .query_selector(".curation-similar-asked .curation-poster")
+                        .query_selector(".curation-similar-asked .curation-thumbnail")
                         .ok()
                         .flatten()
                 })
             {
-                Motion::arrive_from(&poster, from);
+                Motion::arrive_from(&thumbnail, from);
             }
         });
     });
@@ -241,7 +241,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     let rows = table.rows.clone();
     let context = source.context();
     let measured = source.measured();
-    let frames = PosterFrames::use_frames(PosterCut::of_rows(&context, &rows));
+    let thumbnails = Thumbnails::use_camera(controller, context.camera());
     let slices = rows.iter().map(Slice::of_subtask).collect::<Vec<_>>();
     let lanes = spans
         .as_ref()
@@ -408,7 +408,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
             if !rows.is_empty() {
                 div { class: "curation-similar-overview",
                     if let Some(row) = asked_row {
-                        AskedAbout { row, frames }
+                        AskedAbout { row, thumbnails }
                     }
                     EpisodeMap {
                         lanes,
@@ -476,7 +476,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                                     row: rows[row].clone(),
                                     standing: standing.roving(TabStop::at(position, chosen_place)),
                                     episode: Episode::listed_name_of(rows[row].episode()),
-                                    frames,
+                                    thumbnails,
                                     on_select: {
                                         let choose = choose.clone();
                                         move |()| choose(row)
@@ -533,13 +533,14 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     }
 }
 
-/// The row a search is asking about, pinned above its answers: its still and
-/// where it came from, in one line. Its words are already in the box above it.
+/// The row a search is asking about, pinned above its answers: its thumbnail
+/// and where it came from, in one line. Its words are already in the box above
+/// it.
 #[component]
-fn AskedAbout(row: SubtaskRow, frames: PosterFrames) -> Element {
+fn AskedAbout(row: SubtaskRow, thumbnails: Thumbnails) -> Element {
     rsx! {
         div { class: "curation-similar-asked",
-            PosterFrame { still: PosterStill::of_subtask(&row), frames }
+            Thumbnail { moment: ThumbnailMoment::of_subtask(&row), thumbnails }
             p { class: "curation-similar-asked-facts",
                 "Asked from "
                 code { "{Episode::listed_name_of(row.episode())}" }

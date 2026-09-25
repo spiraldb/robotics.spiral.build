@@ -131,13 +131,13 @@ fn SimilarRule(threshold: Threshold, query: String) -> Element {
     }
 }
 
-/// "Keep moments progressing at least 0.89× expert pace".
+/// "Keep moments progressing at least 0.89× the expert rate".
 #[component]
 fn ProgressRule(threshold: Threshold) -> Element {
     rsx! {
         span { "Keep moments progressing at least" }
         output { class: "curation-select-rule-readout", "{threshold.label()}" }
-        span { "expert pace" }
+        span { "the expert rate" }
     }
 }
 

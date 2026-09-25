@@ -3,10 +3,10 @@
 use super::episodes::AnnotationEpisode;
 use super::subtask::SubtaskRow;
 use crate::activities::curation::episode_tabs::{OpenEpisode, OpenEpisodes};
-use crate::activities::curation::poster::PosterFrames;
 use crate::activities::curation::review::{
     Counted, EvidenceHeading, IndexBar, RowStanding, SubtaskContext, SubtaskEntry, SubtaskIntervals,
 };
+use crate::activities::curation::thumbnail::Thumbnails;
 #[cfg(all(test, target_arch = "wasm32"))]
 use crate::activities::episode::PlayRequest;
 use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera};
@@ -256,11 +256,11 @@ impl AnnotationOutput {
 #[component]
 pub(super) fn SubtaskIndex(
     output: AnnotationOutput,
-    frames: PosterFrames,
+    thumbnails: Thumbnails,
     chosen: ChosenSubtask,
     /// Break down one failed episode again.
     on_retry: EventHandler<EpisodeId>,
-    /// Ask for subtasks like one row, from where its poster sits.
+    /// Ask for subtasks like one row, from where its thumbnail sits.
     on_find_similar: EventHandler<(SubtaskRow, Option<Place>)>,
 ) -> Element {
     let mut wanted = use_signal(String::new);
@@ -320,7 +320,7 @@ pub(super) fn SubtaskIndex(
                                         row: row.clone(),
                                         standing: RowStanding::plain(chosen.holds(row))
                                             .roving(chosen.holds(row) || resting_stop.as_ref() == Some(row)),
-                                        frames,
+                                        thumbnails,
                                         on_select: {
                                             let row = row.clone();
                                             move |()| chosen.play_row(&row)

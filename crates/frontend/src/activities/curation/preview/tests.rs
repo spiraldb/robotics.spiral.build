@@ -2,12 +2,12 @@ use super::input::PreviewInput;
 use super::*;
 use crate::activities::curation::annotate::{CategoryPlacement, JudgmentValue, SubtaskRow};
 use crate::activities::curation::document::{
-    CurationGraph, CurationNodeKind, DATASET_NODE_ID, MomentDetection, Selection,
+    CurationGraph, CurationNodeKind, DATASET_NODE_ID, ProgressScoring, Selection,
     SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
-use crate::activities::curation::moments::Moment;
 use crate::activities::curation::path::CurationPath;
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
+use crate::activities::curation::score_progress::Moment;
 use crate::activities::episode::Episode;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
@@ -112,15 +112,15 @@ fn a_recording_is_handed_the_intervals_that_reach_it_in_the_recordings_clock() {
 #[test]
 fn after_a_select_of_moments_a_recording_is_handed_the_stretches_it_keeps() {
     let mut graph = graph();
-    let detect = graph
+    let score = graph
         .add_child(
             DATASET_NODE_ID,
-            CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
         )
         .unwrap();
     let moving = graph
         .add_child(
-            &detect,
+            &score,
             CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
         )
         .unwrap();
@@ -129,11 +129,11 @@ fn after_a_select_of_moments_a_recording_is_handed_the_stretches_it_keeps() {
     let moments = [0.5, 0.4, 0.1, 0.3]
         .into_iter()
         .enumerate()
-        .map(|(second, pace)| {
+        .map(|(second, rate)| {
             Moment::new(
                 episode.clone(),
                 (second as f64, second as f64 + 1.0),
-                Some(pace),
+                Some(rate),
             )
             .unwrap()
         })
@@ -142,7 +142,7 @@ fn after_a_select_of_moments_a_recording_is_handed_the_stretches_it_keeps() {
     record_current(
         &graph,
         &mut reads,
-        (&detect, &episode),
+        (&score, &episode),
         PreviewRows::Moments(moments),
     );
     let sample = sample();
