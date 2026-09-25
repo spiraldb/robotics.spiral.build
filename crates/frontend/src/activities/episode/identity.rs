@@ -158,7 +158,7 @@ impl Episode {
     }
 
     /// Every episode of `dataset` with the facts every surface shows.
-    fn listing_sql(dataset: &DatasetSelection) -> String {
+    pub(in crate::activities) fn listing_sql(dataset: &DatasetSelection) -> String {
         format!(
             "SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, \
              message_start_time, duration_ns, channel_count FROM spql.mcap.episodes({})",

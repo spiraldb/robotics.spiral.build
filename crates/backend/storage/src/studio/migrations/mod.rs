@@ -16,6 +16,7 @@ impl MigratorTrait for Migrator {
             Box::new(TypedRobotConfigs),
             Box::new(WorkerOwnedTraining),
             Box::new(CurationGraphs),
+            Box::new(RetireWorkflowAndOldCurations),
         ]
     }
 }
@@ -238,6 +239,30 @@ impl MigrationTrait for CurationGraphs {
         manager
             .get_connection()
             .execute_unprepared(include_str!("m20260923_000010_curation_graphs.sql"))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+/// Workflow is removed; Curation is the one authoring surface. Curations
+/// saved in the retired encoding go with it.
+struct RetireWorkflowAndOldCurations;
+impl MigrationName for RetireWorkflowAndOldCurations {
+    fn name(&self) -> &str {
+        "m20260924_000011_drop_workflows_and_old_curations"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for RetireWorkflowAndOldCurations {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260924_000011_drop_workflows_and_old_curations.sql"))
             .await?;
         Ok(())
     }

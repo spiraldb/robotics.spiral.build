@@ -28,6 +28,7 @@ impl DatasetQueryEndpoints {
             .route("/data-catalog", get(Self::project_resources))
             .route("/datasets/inspect", post(Self::inspect_dataset))
             .route("/datasets/robot", post(Self::dataset_robot))
+            .route("/datasets/cameras", post(Self::dataset_cameras))
             .route("/datasets/episode-topics", post(Self::episode_topics))
             .route("/datasets/episode-coverage", post(Self::episode_coverage))
             .route("/relations", get(Self::relation_catalog))
@@ -102,6 +103,24 @@ impl DatasetQueryEndpoints {
             .await
             .map_err(OperationError::External)?;
         Ok(Json(inspection))
+    }
+    /// A dataset with the camera topics that can be read as video.
+    async fn dataset_cameras(
+        Project(project): Project,
+        ApiJson(selection): ApiJson<DatasetSelection>,
+    ) -> Result<Json<serde_json::Value>, OperationError> {
+        let storage = project.storage();
+        let inspection = storage
+            .inspect_dataset(selection)
+            .await
+            .map_err(OperationError::External)?;
+        let cameras = storage
+            .dataset_cameras(&inspection)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(
+            serde_json::json!({"dataset": inspection, "cameras": cameras}),
+        ))
     }
     async fn episode_topics(
         Project(project): Project,

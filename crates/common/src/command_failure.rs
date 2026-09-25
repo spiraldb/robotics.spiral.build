@@ -9,7 +9,6 @@ pub enum CommandFailureCode {
     NotFound,
     Conflict,
     StaleProject,
-    IncompatibleWorkflow,
     External,
     Transport,
     #[serde(other)]
@@ -22,7 +21,6 @@ impl CommandFailureCode {
             Self::InvalidInput => 400,
             Self::NotFound => 404,
             Self::Conflict | Self::StaleProject => 409,
-            Self::IncompatibleWorkflow => 422,
             Self::Transport => 503,
             Self::External => 502,
             Self::Internal => 500,

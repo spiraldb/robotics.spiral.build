@@ -1,14 +1,16 @@
-//! Curations: one opaque, versioned JSON graph per document, and the native
-//! progress scorer one of its nodes asks the backend to run.
+//! Curations: one opaque, versioned JSON graph per document, and the catalog
+//! views their outputs are published as.
 //!
 //! The frontend owns the payload schema and its encoding version; the backend
 //! stores, lists, and loads documents by identity without reading the payload.
-//! Saves follow the workflow rule: a save carries the revision it was loaded
-//! at (0 for a new document) and the stored document comes back one higher.
-//! A mismatch is a `conflict` failure.
-pub mod progress;
-
+//! A save carries the revision it was loaded at (0 for a new document) and the
+//! stored document comes back one higher. A mismatch is a `conflict` failure.
+//!
+//! The frontend also compiles each output to one read-only statement; the
+//! backend publishes it under a plain name at the catalog root.
+use crate::sql::UnquotedSqlIdentifier;
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 /// Largest payload the backend accepts, in bytes of JSON text.
 pub const MAX_CURATION_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
@@ -115,9 +117,87 @@ impl CurationDocument {
     }
 }
 
+/// The name a published curation view is read by: one plain identifier at
+/// the catalog root, spelled as the reader types it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ViewName(String);
+
+impl TryFrom<&str> for ViewName {
+    type Error = String;
+
+    fn try_from(name: &str) -> Result<Self, Self::Error> {
+        UnquotedSqlIdentifier::try_from(name)
+            .map(|_| Self(name.to_owned()))
+            .map_err(|_| {
+                "A view name is letters, digits, and underscores, and does not start with a digit."
+                    .to_owned()
+            })
+    }
+}
+
+impl ViewName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for ViewName {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Publish one curation output: the view's name and the read-only statement
+/// the view is defined as.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishRequest {
+    name: String,
+    statement: String,
+}
+impl PublishRequest {
+    pub fn new(name: impl Into<String>, statement: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            statement: statement.into(),
+        }
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
+}
+
+/// Drop one published curation view.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnpublishRequest {
+    name: String,
+}
+impl UnpublishRequest {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_name_is_one_plain_identifier() {
+        for valid in ["folds", "_draft", "Moving2"] {
+            assert_eq!(ViewName::try_from(valid).unwrap().as_str(), valid);
+        }
+        for invalid in ["", "2folds", "my folds", "public.folds", "folds;", "fold-s"] {
+            assert!(ViewName::try_from(invalid).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn identity_rules_reject_blank_and_oversized_values() {

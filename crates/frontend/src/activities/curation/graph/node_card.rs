@@ -4,15 +4,14 @@
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
 use super::super::document::{
-    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PopulationKind,
+    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PopulationKind, PublishedOutput,
 };
 use super::super::population::{EpisodeSample, Population, PopulationReader, Slice};
 use super::super::review::Counted;
 use super::super::state::CurationController;
 use crate::format::ClockPresentation as _;
 
-/// What a node does to the data; drives its glyph and identity tint, in the
-/// same vocabulary the Workflow graph speaks.
+/// What a node does to the data; drives its glyph and identity tint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::activities::curation) enum NodeFace {
     Dataset,
@@ -93,6 +92,13 @@ enum CardLine {
     Running(String),
 }
 
+/// Whether an output is published, and as what.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum OutputFlag {
+    Unpublished,
+    Published(PublishedOutput),
+}
+
 /// One node as the canvas draws it: what it is, one line of what it holds or
 /// is doing, whether it is one of the curation's outputs, and what may follow
 /// it.
@@ -106,20 +112,19 @@ pub(super) struct NodeCard {
     face: NodeFace,
     label: &'static str,
     line: CardLine,
-    output: bool,
+    output: Option<OutputFlag>,
     menu: Option<ChildMenu>,
     order: usize,
 }
 
 impl NodeCard {
     /// Every node of the graph, in payload order. Counts wait for the sample.
-    pub(super) fn all(payload: &CurationGraph, sample: Option<&EpisodeSample>) -> Vec<Self> {
+    pub(super) fn all(payload: &CurationGraph, reader: Option<&PopulationReader<'_>>) -> Vec<Self> {
         let outputs = payload
             .outputs()
             .into_iter()
             .map(|node| node.id().to_owned())
             .collect::<Vec<_>>();
-        let reader = sample.map(|sample| PopulationReader::new(payload, sample));
         payload
             .nodes()
             .iter()
@@ -127,8 +132,13 @@ impl NodeCard {
                 id: node.id().to_owned(),
                 face: NodeFace::of(node.kind()),
                 label: node.kind().label(),
-                line: CardLine::Holds(Self::describe(payload, node, sample, reader.as_ref())),
-                output: outputs.iter().any(|output| output == node.id()),
+                line: CardLine::Holds(Self::describe(payload, node, reader)),
+                output: outputs.iter().any(|output| output == node.id()).then(|| {
+                    payload
+                        .publication(node.id())
+                        .cloned()
+                        .map_or(OutputFlag::Unpublished, OutputFlag::Published)
+                }),
                 menu: ChildMenu::of(payload, node),
                 order: 0,
             })
@@ -140,9 +150,9 @@ impl NodeCard {
     fn describe(
         payload: &CurationGraph,
         node: &CurationNode,
-        sample: Option<&EpisodeSample>,
         reader: Option<&PopulationReader<'_>>,
     ) -> String {
+        let sample = reader.map(PopulationReader::sample);
         let counts = reader.map(|reader| (reader.input(node.id()), reader.of(node.id())));
         match node.kind() {
             CurationNodeKind::Dataset => {
@@ -188,19 +198,25 @@ impl NodeCard {
                 || "No categories yet".to_owned(),
                 |grouping| Counted::categories(grouping.categories().len()).to_string(),
             ),
-            // A moment is one second, so what the detection holds is said as
-            // the recording it scored rather than a count of seconds.
-            CurationNodeKind::IdentifyUnproductiveMoments(detection) => match (counts, sample) {
-                (Some((input, output)), Some(sample)) => format!(
-                    "{} of {} · {} scored",
-                    Self::measured(detection.completed_episodes(), &input),
-                    Counted::episodes(input.len()),
-                    Self::recorded(&output, sample),
-                ),
-                _ => "Pace per second of recording".to_owned(),
+            // A moment is one frame, so what the detection holds is said as
+            // the recording it scored rather than a count of frames.
+            CurationNodeKind::IdentifyUnproductiveMoments(_) => match (counts, reader) {
+                (Some((input, output)), Some(reader)) => {
+                    let scored = input
+                        .episodes()
+                        .iter()
+                        .filter(|episode| reader.reads().has_read(node.id(), episode))
+                        .count();
+                    format!(
+                        "{scored} of {} · {} scored",
+                        Counted::episodes(input.len()),
+                        Self::recorded(&output, reader.sample()),
+                    )
+                }
+                _ => "Pace per frame of recording".to_owned(),
             },
             CurationNodeKind::Select(selection) => match (counts, sample) {
-                // A moment is a second, so what a rule over moments keeps is
+                // A moment is a frame, so what a rule over moments keeps is
                 // said as the recording it adds up to: what training gets.
                 (Some((input, output)), Some(sample))
                     if payload.population_kind(node.id()) == Some(PopulationKind::Moments) =>
@@ -272,9 +288,9 @@ impl NodeCard {
     pub(super) fn is_running(&self) -> bool {
         matches!(self.line, CardLine::Running(_))
     }
-    /// Whether this node is one of the curation's outputs.
-    pub(super) fn is_output(&self) -> bool {
-        self.output
+    /// Whether this node is one of the curation's outputs, and published.
+    pub(super) fn output(&self) -> Option<&OutputFlag> {
+        self.output.as_ref()
     }
     pub(super) fn menu(&self) -> Option<&ChildMenu> {
         self.menu.as_ref()
@@ -362,7 +378,9 @@ mod tests {
             Episode::fixture(&EpisodeId::fixture(2), 10_000_000_000),
         ]);
 
-        let cards = NodeCard::all(&payload, Some(&sample));
+        let reads = crate::activities::curation::preview::PreviewReads::default();
+        let reader = PopulationReader::new(&payload, &sample, &reads);
+        let cards = NodeCard::all(&payload, Some(&reader));
         assert_eq!(
             card(&cards, DATASET_NODE_ID).summary(),
             "cloth_fold_demo · 2 episodes"
@@ -377,8 +395,8 @@ mod tests {
             card(&cards, &long).summary(),
             "Duration at least 20 s · 1 of 2 episodes"
         );
-        assert!(card(&cards, &long).is_output());
-        assert!(!card(&cards, &annotate).is_output());
+        assert_eq!(card(&cards, &long).output(), Some(&OutputFlag::Unpublished));
+        assert_eq!(card(&cards, &annotate).output(), None);
         assert_eq!(card(&cards, &long).face(), NodeFace::Select);
         assert_eq!(
             card(&cards, &annotate).menu().expect("menu").labels(),

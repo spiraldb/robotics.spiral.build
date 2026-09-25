@@ -10,7 +10,6 @@ pub(crate) enum OperationError {
     NotFound(String),
     Conflict(String),
     StaleProject(String),
-    IncompatibleWorkflow(String),
     External(String),
     Internal(String),
 }
@@ -30,7 +29,6 @@ impl OperationError {
             | Self::NotFound(message)
             | Self::Conflict(message)
             | Self::StaleProject(message)
-            | Self::IncompatibleWorkflow(message)
             | Self::External(message)
             | Self::Internal(message) => message,
         }
@@ -42,7 +40,6 @@ impl OperationError {
             Self::NotFound(_) => CommandFailureCode::NotFound,
             Self::Conflict(_) => CommandFailureCode::Conflict,
             Self::StaleProject(_) => CommandFailureCode::StaleProject,
-            Self::IncompatibleWorkflow(_) => CommandFailureCode::IncompatibleWorkflow,
             Self::External(_) => CommandFailureCode::External,
             Self::Internal(_) => CommandFailureCode::Internal,
         }
@@ -83,11 +80,6 @@ mod tests {
     #[test]
     fn failures_preserve_error_categories() {
         for (error, expected, status) in [
-            (
-                OperationError::IncompatibleWorkflow("arbitrary text".into()),
-                CommandFailureCode::IncompatibleWorkflow,
-                422,
-            ),
             (
                 OperationError::Internal("arbitrary text".into()),
                 CommandFailureCode::Internal,

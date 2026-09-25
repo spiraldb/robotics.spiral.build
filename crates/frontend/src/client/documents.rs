@@ -1,9 +1,8 @@
 //! One client for every Studio document endpoint.
 //!
-//! Workflows and curations are stored the same three ways — list
-//! the saved ones, load one by id, store one back — so this owns those three
-//! requests once. An activity's own client keeps only the calls that are its
-//! alone (`preview`, `plan`, `start`, `capabilities`).
+//! Documents are stored three ways — list the saved ones, load one by id,
+//! store one back — so this owns those three requests once. An activity's own
+//! client keeps only the calls that are its alone.
 
 use std::marker::PhantomData;
 
@@ -23,6 +22,7 @@ pub(crate) struct DocumentSummary {
 }
 
 impl DocumentSummary {
+    #[cfg(test)]
     pub(crate) fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -61,7 +61,7 @@ impl<Doc> Clone for DocumentClient<Doc> {
 
 impl<Doc: Serialize + DeserializeOwned + 'static> DocumentClient<Doc> {
     /// The client for `collection`, the path segment the documents live under,
-    /// such as `workflows`.
+    /// such as `curations`.
     pub(crate) fn current(collection: &'static str) -> Self {
         Self {
             project: ProjectClient::current(),

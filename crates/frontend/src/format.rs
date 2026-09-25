@@ -187,17 +187,6 @@ impl CivilDateTime {
             second: 0,
         }
     }
-
-    // The three accessors below are what the timestamp column reads.
-    pub(crate) const fn year(&self) -> i64 {
-        self.year
-    }
-    pub(crate) const fn month(&self) -> u32 {
-        self.month
-    }
-    pub(crate) const fn day(&self) -> u32 {
-        self.day
-    }
 }
 
 impl UtcTimestampPresentation for u64 {
@@ -297,7 +286,7 @@ mod tests {
             "17:28:55 UTC"
         );
         let leap = CivilDateTime::from_unix_days(11_016);
-        assert_eq!((leap.year(), leap.month(), leap.day()), (2000, 2, 29));
+        assert_eq!((leap.year, leap.month, leap.day), (2000, 2, 29));
         // A rig counting from zero has no wall clock; a recording made in 2000
         // or later has one.
         assert!(!5_000_000_000_u64.has_wall_clock());

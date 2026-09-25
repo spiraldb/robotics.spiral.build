@@ -45,9 +45,7 @@ impl SettingsClient {
         update: SettingsUpdate,
     ) -> impl Future<Output = Result<DataSettings, CommandError>> + use<> {
         self.project.mutate(
-            &[
-                Project, Settings, RobotSetup, Training, Assistant, Catalog, Data,
-            ],
+            &[Project, Settings, RobotSetup, Training, Catalog, Data],
             HttpRequest::new("PUT", "/api/settings").json(&update),
         )
     }
@@ -75,7 +73,7 @@ impl SettingsClient {
         document: FileData,
     ) -> impl Future<Output = Result<ProjectImportSummary, CommandError>> + use<> {
         self.project.mutate(
-            &[Project, Settings, Catalog, Data, Training, Assistant],
+            &[Project, Settings, Catalog, Data, Training],
             HttpRequest::new("POST", "/api/project/import").upload(document),
         )
     }

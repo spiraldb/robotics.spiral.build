@@ -7,7 +7,7 @@ use dioxus_workbench::{LayoutNode, Panel, PanelLayout, PanelWorkspace, SplitAxis
 use super::document::CurationNodeKind;
 use super::graph::{CurationDocumentBar, CurationGraphCanvas, NodeFace, NodeGlyph, NodeWorkspace};
 use super::state::CurationController;
-use crate::components::icons::WorkflowIcon;
+use crate::components::icons::GraphIcon;
 
 const GRAPH_PANEL_ID: &str = "curation-graph";
 const WORKSPACE_PANEL_ID: &str = "curation-workspace";
@@ -27,7 +27,7 @@ fn CurationPanels(controller: CurationController) -> Element {
             rsx! { CurationGraphCanvas { controller } },
         )
         .with_class("curation-canvas-graph-editor")
-        .with_tab_icon(rsx! { WorkflowIcon {} }),
+        .with_tab_icon(rsx! { GraphIcon {} }),
         Panel::new(
             WORKSPACE_PANEL_ID,
             kind.as_ref().map_or("Workspace", CurationNodeKind::label),

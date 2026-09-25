@@ -5,11 +5,13 @@
 //! words of the node it follows; how much it keeps; where the threshold falls
 //! among the values it judges; where in the episodes the kept parts lie; and
 //! then the kept (or left-out) parts one at a time beside their recording.
+//! A Select nothing follows is an output, and publishes from here.
 mod listing;
+mod publish;
 mod rule;
 mod strip;
 
-use super::document::{CurationNode, CurationNodeKind, ProgressCurve, Selection, SelectionBasis};
+use super::document::{CurationNode, CurationNodeKind, Selection, SelectionBasis};
 use super::episode_map::{EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, SegmentPaint};
 use super::episode_tabs::{OpenEpisode, OpenEpisodes};
 use super::population::{EpisodeSample, Population, Slice};
@@ -18,6 +20,7 @@ use super::state::CurationController;
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use listing::{EpisodeListing, ListedSide, MomentListing, SubtaskListing};
+use publish::PublishControl;
 use rule::{SelectNode, SelectRule};
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{ActionPurpose, EmptyState, ModeButton, ModeGroup, Notice, NoticeTone};
@@ -71,14 +74,17 @@ impl SelectView {
                 Population::Subtasks { rows: input, .. },
                 Population::Subtasks { rows: output, .. },
             ) => input.iter().map(|row| output.contains(row)).collect(),
-            (Population::Moments(input), Population::Moments(output)) => {
-                input.iter().map(|row| output.contains(row)).collect()
-            }
+            // Moments come one per frame, too many to look each up in what
+            // the rule kept; the rule itself says.
+            (Population::Moments(input), Population::Moments(_)) => input
+                .iter()
+                .map(|row| self.selection.keeps_moment(row.pace()))
+                .collect(),
             _ => Vec::new(),
         }
     }
     /// One slice per item that reaches the rule, in input order: moments one
-    /// second at a time, as they were judged.
+    /// frame at a time, as they were judged.
     fn item_slices(&self) -> Vec<Slice> {
         match &self.input {
             Population::Episodes(episodes) => episodes
@@ -174,15 +180,6 @@ impl SelectView {
             tabs.open(&episode, interval);
         }
     }
-    /// The finer progress curve the detection above kept for `episode`.
-    fn curve(&self, episode: &EpisodeId) -> Option<ProgressCurve> {
-        match self.measure.kind() {
-            CurationNodeKind::IdentifyUnproductiveMoments(detection) => {
-                detection.curve(episode).cloned()
-            }
-            _ => None,
-        }
-    }
     /// What an empty side of the rule says in place of its list.
     fn empty_side(&self, listed_kept: bool) -> &'static str {
         match (&self.selection, listed_kept) {
@@ -210,6 +207,49 @@ impl SelectView {
             }
             _ => "Group the subtasks above first, then choose the categories to keep.".to_owned(),
         })
+    }
+}
+
+/// What the episode map draws for a Select: one segment per item, except
+/// that moments — one per frame, thousands to an episode — are drawn as the
+/// runs they make on one side of the rule, each opening at its first moment.
+struct MapSegments {
+    slices: Vec<Slice>,
+    first_items: Vec<usize>,
+    kept: Vec<bool>,
+}
+
+impl MapSegments {
+    fn of(view: &SelectView, kept: &[bool]) -> Self {
+        let items = view.item_slices();
+        let mut segments = Self {
+            slices: Vec::new(),
+            first_items: Vec::new(),
+            kept: Vec::new(),
+        };
+        let joins_runs = matches!(view.input, Population::Moments(_));
+        for (item, slice) in items.into_iter().enumerate() {
+            let side = kept.get(item).copied().unwrap_or(false);
+            match (segments.slices.last_mut(), segments.kept.last()) {
+                (Some(last), Some(last_side))
+                    if joins_runs && *last_side == side && last.continues_into(&slice) =>
+                {
+                    last.extend_to(&slice);
+                }
+                _ => {
+                    segments.slices.push(slice);
+                    segments.first_items.push(item);
+                    segments.kept.push(side);
+                }
+            }
+        }
+        segments
+    }
+    /// The segment an item is drawn in.
+    fn segment_of(&self, item: usize) -> usize {
+        self.first_items
+            .partition_point(|first| *first <= item)
+            .saturating_sub(1)
     }
 }
 
@@ -260,6 +300,13 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
         )
     });
     let rule = SelectNode::new(view.node.clone(), controller);
+    let segments = MapSegments::of(&view, &kept);
+    let is_output = controller.with_payload(|payload| {
+        payload
+            .outputs()
+            .iter()
+            .any(|output| output.id() == node.as_str())
+    });
     let selection = view.selection.clone();
     // Switching sides plays that side's first row, so the recording beside
     // the list is always one of the rows it lists.
@@ -304,9 +351,13 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
                 note: view.unmeasured(controller),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 // Whether this is an output is the card's flag in the graph;
-                // the bar ends with what the rule gives training.
+                // the bar ends with what the rule gives training, and an
+                // output with where it is published.
                 actions: rsx! {
                     p { class: "curation-select-tally", role: "status", "{view.tally()}" }
+                    if is_output {
+                        PublishControl { controller, node: node.clone() }
+                    }
                 },
             }
             if dots.is_some() || !matches!(view.input, Population::Episodes(_)) {
@@ -329,14 +380,22 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
                     // counts already say.
                     if !matches!(view.input, Population::Episodes(_)) {
                         EpisodeMap {
-                            lanes: EpisodeLanes::of(&view.input.episodes(), &view.item_slices(), &spans),
+                            lanes: EpisodeLanes::of(&view.input.episodes(), &segments.slices, &spans),
                             // Kept in ink, left out faded; the Kept and Left out
                             // segments over the index say the same in words.
-                            paint: MapPaint::new(kept.iter().map(|kept| SegmentPaint::Kept(*kept)).collect(), chosen),
+                            paint: MapPaint::new(
+                                segments.kept.iter().map(|kept| SegmentPaint::Kept(*kept)).collect(),
+                                chosen.map(|item| segments.segment_of(item)),
+                            ),
                             summary: view.kept_in(),
                             on_select: {
                                 let mut open = open.clone();
-                                move |item| open(item)
+                                let firsts = segments.first_items.clone();
+                                move |segment: usize| {
+                                    if let Some(item) = firsts.get(segment) {
+                                        open(*item);
+                                    }
+                                }
                             },
                         }
                     }

@@ -1,142 +1,120 @@
 # Curation
 
-Curation prepares a dataset's episodes for training. A curation is a saved
-recipe over one dataset: what to measure about each episode, which rules
-exclude an episode, and which transforms the kept episodes receive. Running
-the recipe judges every episode with one read-only Spiral query and lays the
-verdicts out on a contact sheet: kept episodes in full ink, excluded episodes
-dimmed under the rule that removed them.
+Curation chooses the data to train on: which stretches of which episodes, and
+what to call them. A curation is a graph rooted at one dataset. You build it
+against a preview of the dataset's first 100 episodes, and you publish what it
+selects as a named view in the Spiral catalog. The view is a read-only query
+Spiral runs over the whole dataset whenever it is read, with one row per kept
+interval of an episode.
 
-Curation is a specialization of Workflow. Workflow authors arbitrary SQL over
-relations; Curation compiles a typed recipe to SQL whose input and output are
-episodes. Both run through the same native executor, the same read-only
-policy, the same document revisions, and the same awaited runs.
+How a model sees that data (sample rate, cameras, image size, normalization)
+is Training's concern, not Curation's. See
+[the merge plan](curation-merge-plan.md) for the decisions behind this model.
 
-## The recipe
+## The graph
 
-- **Source.** One dataset, addressed by its catalog name. The population is
-  `spql.mcap.episodes('<dataset>')`; nothing is copied or changed.
-- **Measurements.** Every episode already carries five facts: duration in
-  seconds, message count, channel count, file size in megabytes, and source
-  path. A recipe may declare more, each with a lowercase key rules refer to:
-  - *Camera brightness*: mean relative luminance of sampled frames of one
-    camera topic, decoded natively from the recorded packets
-    (`spql.video.from_packets` → `spql.video.frames` with explicit frame
-    indices → `spql.video.decode` → `spql.image.mean_luminance`).
-  - *Camera score*: `spql.ai.score` of the sampled frames against a prompt.
-  - *Topic field*: one message field folded per episode (first, last,
-    minimum, maximum, average, or count), such as a recorded success flag;
-    declared as a number or text.
-  - *SQL*: any read-only `SELECT`/`WITH` returning `id` and `value` per
-    episode, admitted by the same policy as Workflow SQL.
-- **Rules.** `If <fact> <operator> <value> then exclude as <reason>`. Number
-  facts compare with below / at most / above / at least / is / is not; text
-  facts with contains / does not contain (case-insensitive) / is / is not.
-  Either kind may test is missing / is present. A rule whose fact is NULL
-  does not fire unless it tests for missing. Every firing rule is named on
-  the episode it removed; a rule may be kept in the recipe but switched off.
-- **Transforms.** Camera colour profile (`spql.image.to_rgb` assumption),
-  camera resize, or a trim of episode time, applied to every kept episode
-  or only to the kept episodes a condition picks. Transforms are recorded
-  with the recipe and counted on the sheet; applying them requires
-  materializing the kept episodes as a dataset, which Studio does not do yet.
+Every node except the dataset has one parent, and each edge carries episode
+intervals with properties. Every node is one of two kinds:
 
-Validation names each problem with its way out: a missing dataset, an
-unknown fact, an operator that does not fit the fact's kind, a comparison
-without a value, a SQL measurement that is not read-only. A recipe with
-errors never becomes a run.
+- **Measures** add a property to each interval, or cut intervals into finer
+  ones: Break down subtasks, Find similar subtasks, Group similar subtasks,
+  and Identify unproductive moments.
+- **Selects** keep the intervals whose property passes their rule. What a
+  Select keeps by comes from the nearest node above it that is not a Select:
+  the dataset's episode facts, a search's similarity, a grouping's category,
+  or the moments' pace.
 
-## Compilation
+Every Select that nothing follows is an **output**. Its relation is what a
+published view holds.
 
-`CurationSpec::compile` in `spiral-robotics-common` produces two statements
-from one `WITH` chain: `episodes` (the population with its statistics), one
-CTE group per declared fact yielding `(id, value)`, `facts` (episodes left
-joined to every fact), `judged` (every enabled rule and transform as a
-boolean column), and `verdicts` (`kept = NOT (COALESCE(rule_0, false) OR …)`).
-Facts, rules, and transforms use positional aliases (`fact_0`, `rule_0`,
-`transform_0`), so identities never enter SQL; the compiled statement maps
-them back when reading rows. Literals travel through one quoting path.
+## What an edge carries
 
-The **roster** statement lists one row per episode ordered by recording
-time and is bounded by the query preview limit (1,000 rows). When Spiral
-truncates it, the **totals** statement runs the same chain again to count
-episodes, kept episodes, and each rule's and transform's population exactly.
-The sheet then says it is truncated while the counts stay whole.
+An edge is a relation with the columns `episode_id`, `start_ns`, `end_ns`,
+and then one column per property. Times are MCAP log time in nanoseconds, so a
+reader can join the recording's streams without converting them. Properties
+are named by what measured them (`pace`, and later `subtask`,
+`subtask_category`, `similarity`). An episode-level output shows the facts its
+Selects read, such as `duration_seconds`.
 
-## Runs
+Intervals of one episode never overlap: Measures only cut intervals, and
+Selects only drop them. The view holds no stream data; cameras and joint
+states stay in the recording.
 
-`POST /api/curation-runs` compiles the submitted recipe, unsaved edits
-included, judges it, and answers when the run ends. The run holds the exact
-recipe, the compiled SQL, a phase (running, complete, failed), and on
-completion an outcome: totals, per-rule and per-transform counts, and one
-verdict per listed episode with its statistics, fact values, the rules that
-fired, and the transforms it would receive. Runs are not persisted: the
-browser shows a running placeholder while it awaits the request and keeps the
-answered runs until the page reloads. Starting a run takes the catalog lease
-so it cannot overlap recording or import.
+## Compiling a path
 
-Verdicts stay current while the judged recipe definition is unchanged;
-renaming or saving does not invalidate them, any recipe edit marks them as a
-previous run.
+`CurationPath` in `activities/curation/path.rs` walks from the dataset down to
+one node and chains each node's step as `WITH` entries. Each node kind writes
+its own step beside its configuration:
+
+| Node | Step | Where |
+| --- | --- | --- |
+| Dataset | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
+| Select | A `WHERE` from the same `Selection` the browser filters with. A pace rule keeps moments with no pace too, then joins touching moments into stretches carrying their mean pace | `document/selection.rs` |
+| Identify unproductive moments | `spql.ai.score_progress` over the top camera's packet video, one moment per scored frame from its time to the next frame's, cut to the intervals that reach the node | `moments/scoring.rs` |
+| Break down, Find similar, Group similar | Not compiled yet. They wait for `spql.ai.breakdown_task`, `spql.ai.similarity`, and `spql.ai.classify` | |
+
+The scorer reads each episode whole, so what it is asked never depends on
+anything above the node. Literals go through `SqlLiteral`.
+
+The same statement runs two ways. The **preview** binds one episode as `$1`
+through `/api/queries/episode/arrow`. The **published** view reads every
+episode. Only the dataset's source differs: the preview admits the bound
+episode where the dataset is listed and where a camera topic is read, so it
+never reads the rest of the dataset.
+
+Spiral's SQL is not plain DataFusion. Only aggregate and ranking functions
+take `OVER`, so the next frame's time is `MIN(…) OVER (… ROWS BETWEEN 1
+FOLLOWING AND 1 FOLLOWING)` and stretches are found by the difference of two
+`ROW_NUMBER`s. Scores are unnested straight from `score_progress`, before any
+join, because the engine does not join lists of structs.
+
+## Preview
+
+Selecting Identify unproductive moments and pressing Run scores the episodes
+that reach it, one query per episode, as the curation's own run. The node card
+and the top bar say how far it has got ("Scoring 12 of 100 episodes"). Stop
+takes effect between episodes, since Spiral cannot cancel a running query yet.
+A failed episode is listed with its reason and never stops the rest. What the
+preview reads is held in the browser for the session and is gone after a
+reload.
+
+A Select's slider filters the preview rows of the node above it in the
+browser, so it answers at once. The same `Selection` renders the `WHERE` the
+published view keeps by, and a test holds the two to the same rows.
+
+## Publishing
+
+On an output's workspace, Publish asks for a view name: one plain identifier,
+at the catalog root. With unsaved edits it asks you to save first, because the
+view is compiled from the saved recipe. Studio then sends the compiled
+statement to `POST /api/curations/publish`, records `node → view name,
+revision` in the curation, and saves.
+
+The backend checks the name, admits the statement as one read-only query,
+refuses a name that a table or a Dataset holds, and runs `DROP VIEW IF EXISTS`
+then `CREATE VIEW` in one transaction. Unpublish drops the view.
+
+A later save that changes the recipe moves the curation past the published
+revision, and the output's card then reads "Out of date" until it is
+published again. A published output stays an output: adding a step after it,
+or removing its branch, waits until it is unpublished.
 
 ## Documents
 
-Recipes live in the Studio SQLite table `curations` (project, id, name,
-revision, JSON document, updated time), saved only on explicit Save with the
-same optimistic revision check as workflows: the submitted revision must
-equal the stored one, and the saved copy carries the next. The stored
-document is versioned independently of the wire type; an unsupported
-version is refused and preserved. Project bundles include the table, and a
-restored snapshot validates each row before staging it.
+Curations live in the Studio SQLite table `curations` and are saved only on an
+explicit Save, with an optimistic revision check: the submitted revision must
+equal the stored one, and the saved copy carries the next. The payload is
+opaque to the backend and versioned by the frontend. Encoding 2 keeps only the
+recipe for compiled nodes, plus the published outputs. Break down subtasks,
+Find similar, and Group similar still store what they measured until they
+compile. Curations saved in encoding 1 were deleted, with the saved
+workflows, by the migration that retired Workflow.
 
-## The Studio surface
+## Not yet
 
-Curation is the fourth primary activity. Its default layout keeps the
-**Recipe** in a 26% column at the left and the **Sheet** at the right, both
-dockable workbench panels. The selected episode's evidence is not a third
-panel: it docks inside the Sheet as a side sheet, so nothing sits empty at
-rest.
-
-- The document bar names the curation and its saved state and holds
-  Discard, Save, and Run. Run stays enabled while the recipe is merely
-  incomplete; pressing it then says what is missing instead of hiding the
-  reason in a tooltip. ⌘/Ctrl+Enter runs from anywhere in the recipe.
-- The Recipe's Source section lists catalog datasets (or accepts a typed
-  catalog name when the list is unavailable) and reports the episode count
-  and recorded time of the chosen one. Measurements rest as one line each,
-  the name and what tells it from another of its kind; the five builtin
-  facts are offered inside every rule's fact list under "Every episode".
-  Rules read as two lines: *If ⟨fact⟩ ⟨op⟩ ⟨value⟩* and *exclude as
-  ⟨reason⟩*. The mark leading a rule is its handle: hovering it lights the
-  tiles the rule struck, pressing it pauses the rule. Transforms rest the
-  same way as measurements.
-- The Sheet's run strip reads the phase, an All / Kept / Excluded filter
-  whose segments carry the totals, a lens naming the measurement every tile
-  prints (with a dataset-order / lowest-first / highest-first toggle so the
-  episodes near a threshold sit together), Spiral's judging time, a run
-  selector once there is more than one run, and the executed SQL. Tiles
-  show the ordinal, the distinguishing part of the source path on up to two
-  lines, the duration as a 2px baseline against the longest episode, the
-  lensed value, and, when excluded, the reasons in the removing rule's tint.
-- Opening a tile docks the episode's evidence beside the sheet: its
-  statistics, every fact value, each rule's verdict, each transform's reach,
-  and, for camera measurements, the sampled frames decoded immediately
-  through `POST /api/queries/episode`, which binds the episode UUID as an
-  Arrow parameter (`$1`) because Spiral compares member ids only against
-  bound UUIDs. ↑ and ↓ step through the tiles on view; Escape returns focus
-  to the tile.
-
-Rule tints are the six result-category washes dealt in recipe order. They
-carry identity, never health, and every chip prints the rule's words.
-Renaming the curation, a measurement, or a rule's reason never invalidates
-the visible run; any edit that could change a verdict does.
-
-## Limits
-
-- Kept episodes are not yet materialized as a derived dataset; that remains
-  the committed direction. The compiled SQL is shown so the selection can be
-  reused in Workflow or Data.
-- `spql.image.resize` requires non-null `u32` literals that SQL cannot spell
-  from Studio today, so the resize transform is recorded but has no preview.
-- Dataset and camera discovery use the existing catalog endpoints; when they
-  fail, the recipe accepts a typed dataset name and free-text topic.
+- Break down subtasks, Find similar subtasks, and Group similar subtasks run
+  as before, in the browser, and a path through them cannot be published
+  until Spiral has their functions.
+- Every read of a published view repeats its model calls; caching them is
+  Spiral's to add.
+- Training does not read published views yet.

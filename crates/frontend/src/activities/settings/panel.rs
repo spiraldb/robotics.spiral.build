@@ -488,7 +488,7 @@ fn SettingsPanel(
             BlockingConfirmation {
                 id: "project-import-confirmation",
                 title: format!("Replace project {}?", current().spiral().project_id()),
-                consequence: "This project’s Studio records and managed data will be replaced, including robots, recordings, preferences, workflows, training history, checkpoints, and rollouts. Connected robots will disconnect first; imported robots will then connect automatically.".to_owned(),
+                consequence: "This project’s Studio records and managed data will be replaced, including robots, recordings, preferences, curations, training history, checkpoints, and rollouts. Connected robots will disconnect first; imported robots will then connect automatically.".to_owned(),
                 copy: ConfirmationCopy::new(
                     format!("Import {} into the active project.", file.name()),
                     if import_project.pending() { "Restoring…" } else { "Import and replace project" },

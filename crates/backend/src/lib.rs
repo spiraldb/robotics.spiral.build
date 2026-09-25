@@ -21,7 +21,6 @@ mod rollout;
 mod sync;
 mod training;
 mod transport;
-mod workflow;
 
 pub(crate) use error::OperationError;
 pub use http::server::StudioServer;

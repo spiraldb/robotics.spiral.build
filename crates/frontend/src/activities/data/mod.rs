@@ -1,6 +1,5 @@
 //! Data: browse datasets and inspect one episode at a time.
 
-pub(crate) mod query_result;
 pub(crate) mod screen;
 
 mod catalog_rail;

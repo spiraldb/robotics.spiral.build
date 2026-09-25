@@ -61,7 +61,6 @@ tests are removed. Dataset reads and schema decoding go through Spiral.
 | --- | --- |
 | Data browser, topic inspection, cameras, numeric timelines | Dataset/member/topic APIs; no capture-header or source-filename lookup |
 | Live take inspection, seeking, camera preview | Recording-owned APIs and an in-memory current-session buffer |
-| Workflow | Reads Spiral relations; source provenance is not a workflow contract |
 | Training | Worker owns dataset reads; unavailable MCAP image decoding remains explicit, with no Studio decoder fallback |
 | Local capture and Hugging Face import | Shared dataset definition, Blob representation, refresh, and membership validation |
 | Project transfer | Preserves managed source files and dataset definitions, without decoding capture headers |
@@ -73,5 +72,4 @@ an arbitrary nested source key without an extension, verifies idempotent retries
 and verifies the same key in another dataset survives removal from the first.
 
 This cleanup does not change the stored source-table layout or convert existing
-files. Workflow-model unification and the tool-trait refactor are separate follow-up
-work.
+files.

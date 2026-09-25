@@ -103,7 +103,7 @@ mod tests {
             "/",
             "/live",
             "/data",
-            "/workflow",
+            "/curation",
             "/training",
             "/rollout",
             "/settings",

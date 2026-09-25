@@ -12,9 +12,9 @@ use spiral_robotics_ui::{
 };
 
 use super::super::document::CurationGraph;
-use super::super::population::EpisodeSample;
+use super::super::population::PopulationReader;
 use super::super::state::{CurationController, NodeActivity};
-use super::node_card::{ChildMenu, NodeCard, NodeFace};
+use super::node_card::{ChildMenu, NodeCard, NodeFace, OutputFlag};
 use crate::components::flow_canvas::{
     CanvasControls, CardGraph, FlowFit, FlowMargins, ReadableViewport,
 };
@@ -22,11 +22,10 @@ use crate::components::icons::{
     DataIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon, SignalStreamIcon,
 };
 
-/// A node's size, so the layout can place it before it mounts. The Workflow
-/// graph's stage width, and taller: the graph pane is a fifth of the window,
-/// two branches side by side have to stay readable in it, and the longest
-/// name ("Identify unproductive moments") takes a second line rather than the
-/// card taking more width.
+/// A node's size, so the layout can place it before it mounts: the graph
+/// pane is a fifth of the window, two branches side by side have to stay
+/// readable in it, and the longest name ("Identify unproductive moments")
+/// takes a second line rather than the card taking more width.
 const NODE_WIDTH: f64 = 192.0;
 const NODE_HEIGHT: f64 = 100.0;
 /// How far under a card's bottom edge its popovers hang, clear of the +.
@@ -52,11 +51,11 @@ struct GraphFlow {
 impl GraphFlow {
     fn new(
         payload: &CurationGraph,
-        sample: Option<&EpisodeSample>,
+        reader: Option<&PopulationReader<'_>>,
         selected: Option<&str>,
         activity: &NodeActivity,
     ) -> Self {
-        let mut nodes = NodeCard::all(payload, sample)
+        let mut nodes = NodeCard::all(payload, reader)
             .into_iter()
             .map(|card| {
                 let status = activity.get(card.id()).cloned();
@@ -175,10 +174,10 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
 ) -> Element {
     let hand = CanvasHand::use_hand(controller);
     let initial = use_hook(|| {
-        controller.with_payload(|payload| {
+        controller.with_reading(|payload, reader| {
             GraphFlow::new(
                 payload,
-                controller.sample().as_ref(),
+                reader,
                 controller.selected_node().as_deref(),
                 &controller.activity(),
             )
@@ -189,10 +188,10 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
     // The payload, the selection, and what is running are the truth; the
     // canvas follows them.
     use_effect(move || {
-        let flow = controller.with_payload(|payload| {
+        let flow = controller.with_reading(|payload, reader| {
             GraphFlow::new(
                 payload,
-                controller.sample().as_ref(),
+                reader,
                 controller.selected_node().as_deref(),
                 &controller.activity(),
             )
@@ -213,8 +212,8 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
             Flow { id: "curation-graph-flow", class: "workflow-flow curation-canvas-flow",
                 nodes, edges, fit_view: false, fit_view_padding: 0.14,
                 min_zoom: 0.4, max_zoom: 1.0, nodes_draggable: false, delete_key: false,
-                // Two fingers pan as they do on the Workflow graph; a pinch
-                // (or ctrl/⌘ + wheel) and the controls zoom.
+                // Two fingers pan; a pinch (or ctrl/⌘ + wheel) and the controls
+                // zoom.
                 pan_on_scroll: true, zoom_on_scroll: false,
                 is_valid_connection: move |_| false,
                 on_pane_click: move |_| hand.close_menu(),
@@ -324,12 +323,29 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
             // An output wears its flag on the card's edge rather than in the
             // heading, so the name keeps the heading's width and the flag
             // never sits under the card's remove control.
-            if card.is_output() {
-                span {
-                    class: "workflow-stage-output-flag curation-canvas-output",
-                    title: "One of this curation's outputs: the data a training run can use",
-                    "Output"
-                }
+            match card.output() {
+                Some(OutputFlag::Unpublished) => rsx! {
+                    span {
+                        class: "workflow-stage-output-flag curation-canvas-output",
+                        title: "One of this curation's outputs: publish it from its workspace",
+                        "Output"
+                    }
+                },
+                Some(OutputFlag::Published(published)) if published.is_current(hand.controller.saved_revision()) => rsx! {
+                    span {
+                        class: "workflow-stage-output-flag curation-canvas-output",
+                        title: "Published as the catalog view {published.view()}",
+                        "Published"
+                    }
+                },
+                Some(OutputFlag::Published(published)) => rsx! {
+                    span {
+                        class: "workflow-stage-output-flag curation-canvas-output is-stale",
+                        title: "The saved curation has changed since {published.view()} was published; publish it again from its workspace",
+                        "Out of date"
+                    }
+                },
+                None => rsx! {},
             }
             div { class: "workflow-stage-heading",
                 span { class: "workflow-stage-mark", "aria-hidden": "true",

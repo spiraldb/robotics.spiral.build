@@ -9,6 +9,11 @@ use crate::activities::curation::population::Population;
 use crate::activities::curation::state::CurationController;
 use dioxus::prelude::*;
 
+/// The most dots one strip draws. Moments come one per frame, sixty thousand
+/// over a sample; past a few thousand the strip reads the same with every nth
+/// value, and the page stays responsive.
+const MAX_STRIP_DOTS: usize = 2_400;
+
 /// One item's value on the strip.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct StripDot {
@@ -20,8 +25,8 @@ pub(super) struct StripDot {
 
 impl StripDot {
     /// The values a numeric rule judges, one per item that has one: an
-    /// episode's recorded fact, a subtask's similarity, a moment's progress.
-    /// A rule of categories has no axis.
+    /// episode's recorded fact, a subtask's similarity, a moment's pace, every
+    /// nth of them past `MAX_STRIP_DOTS`. A rule of categories has no axis.
     pub(super) fn for_view(
         view: &SelectView,
         controller: CurationController,
@@ -40,14 +45,16 @@ impl StripDot {
                         .collect()
                 }),
             (Selection::Progressing { .. }, Population::Moments(rows)) => {
-                rows.iter().map(|row| row.velocity()).collect()
+                rows.iter().map(|row| row.pace()).collect()
             }
             _ => return None,
         };
+        let every = values.len().div_ceil(MAX_STRIP_DOTS).max(1);
         Some(
             values
                 .into_iter()
                 .enumerate()
+                .step_by(every)
                 .filter_map(|(item, value)| {
                     Some(Self {
                         item,

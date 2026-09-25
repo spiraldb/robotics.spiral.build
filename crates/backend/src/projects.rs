@@ -31,7 +31,6 @@ use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::{RolloutHardwareResources, RolloutManager};
 use crate::sync::MutexRecovery;
 use crate::training::manager::TrainingManager;
-use crate::workflow::manager::WorkflowManager;
 
 /// The storage and running work of one project. Its connection never changes.
 pub(crate) struct OpenProject {
@@ -49,7 +48,6 @@ struct ProjectCatalog {
 struct ProjectActivities {
     training: Arc<TrainingManager>,
     rollout: Arc<RolloutManager>,
-    workflow: Arc<WorkflowManager>,
     curation: Arc<CurationManager>,
 }
 
@@ -126,7 +124,6 @@ impl ProjectFactory {
         let recording_buffer = Arc::new(RecordingBuffer::new());
         let storage = Arc::new(StorageManager::new(store, studio));
         let training = Arc::new(TrainingManager::new(storage.clone()));
-        let workflow = Arc::new(WorkflowManager::new(storage.clone()));
         let curation = Arc::new(CurationManager::new(storage.clone()));
         let rollout = RolloutManager::new(
             storage.clone(),
@@ -145,7 +142,6 @@ impl ProjectFactory {
             activities: ProjectActivities {
                 training,
                 rollout,
-                workflow,
                 curation,
             },
             recording: Arc::new(RecordingSession::default()),
@@ -202,9 +198,6 @@ impl OpenProject {
     }
     fn rollout(&self) -> &Arc<RolloutManager> {
         &self.activities.rollout
-    }
-    fn workflow(&self) -> &Arc<WorkflowManager> {
-        &self.activities.workflow
     }
     fn curation(&self) -> &Arc<CurationManager> {
         &self.activities.curation
@@ -271,7 +264,6 @@ impl OpenProject {
     }
 
     pub(crate) async fn shutdown(&self) {
-        self.workflow().shutdown().await;
         self.rollout().shutdown().await;
     }
 }

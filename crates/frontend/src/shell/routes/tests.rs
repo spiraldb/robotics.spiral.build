@@ -4,7 +4,6 @@ use super::*;
 fn every_primary_screen_has_a_stable_route() {
     assert_eq!(StudioRoute::Live {}.to_string(), "/live");
     assert_eq!(StudioRoute::Data {}.to_string(), "/data");
-    assert_eq!(StudioRoute::Workflow {}.to_string(), "/workflow");
     assert_eq!(StudioRoute::Curation {}.to_string(), "/curation");
     assert_eq!(StudioRoute::Training {}.to_string(), "/training");
     assert_eq!(StudioRoute::Rollout {}.to_string(), "/rollout");

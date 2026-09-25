@@ -77,24 +77,18 @@ writing glue code or operating a second data stack.
   workbench: viewers show files, the Studio owns a queryable project.
 - **One trusted Rust backend, one portable browser frontend.** The backend owns
   hardware, safety, recording, ingestion, media encoding, and data services.
-  It also owns Workflow's OpenAI-compatible Assistant transport,
-  credentials, tool loop, and durable project-scoped conversations. The browser is
-  an interchangeable operating surface that talks only to that backend; it
+  It also holds model-provider credentials and relays the browser's provider
+  requests. The browser is an interchangeable operating surface that talks only to that backend; it
   never holds service credentials or drives hardware directly.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
-  interface are Rust. Workflow runs its one advertised enrichment model as
-  pinned SigLIP safetensors through candle inside the backend over SQL-defined
-  candidate image cohorts, and atomically publishes Studio-owned source-scoped
-  feature caches plus registry provenance. Its Assistant uses backend-owned,
-  OpenAI-compatible tool calling to inspect existing relations and propose,
-  save, run, and iterate the same bounded relation-first graph. MCAP camera training
+  interface are Rust. MCAP camera training
   is unavailable until Spiral supports native decoding into training images.
   The legacy registry/MP4 loader is removed. The selected remote ACT/CVAE
   compute runtime retains Arrow transport and PyTorch policy sessions for
   rollout inference, subject to exact checkpoint-schema compatibility. Rust owns lifecycle,
-  cancellation, validation, remote telemetry, feature-cache persistence,
-  and SafeTensors checkpoint persistence without linking the Studio server to
+  cancellation, validation, remote telemetry, and SafeTensors checkpoint
+  persistence without linking the Studio server to
   LibTorch.
 - **One arm is one robot instance in SpiralDB.** Serial port, cameras, motors,
   and calibration live in one versioned configuration row. JSON is an explicit
@@ -110,8 +104,8 @@ writing glue code or operating a second data stack.
   conditional capability an episode has when its streams match a configured
   robot's contract. Ingested episodes without a
   matching robot remain full citizens of the catalog.
-- **SpiralDB owns the queryable project.** Robots, settings, saved workflows,
-  training runs, and checkpoints use the shared ADBC repository. Each completed Live episode is first saved and synced as one
+- **SpiralDB owns the queryable project.** Robots, settings, training runs,
+  and checkpoints use the shared ADBC repository. Each completed Live episode is first saved and synced as one
   immutable local MCAP file, then imported as a native Blob into the selected
   Dataset. A failed import reports the retained file path; restart recovery
   and a local-file retry UI are not yet available. Backend bootstrap pointers
@@ -134,8 +128,8 @@ Spiral Robotics backend
       ├── robot connections and safety
       ├── MCAP recording and H.264 encoding
       ├── SpiralDB persistence and read-only queries
-      ├── pinned Workflow SigLIP enrichment and source-scoped feature caches
-      ├── bounded Workflow Assistant and tool supervision
+      ├── curation view publication
+      ├── model-provider relay
       │        └── HTTPS ──► configured OpenAI-compatible provider
       ├── policy-training supervision and checkpoint persistence
       ├── episode validation and bounded follower control
@@ -151,11 +145,8 @@ Spiral Robotics backend
   arms and owns all hardware connections, the control loop, safety decisions,
   camera capture, video encoding, and SpiralDB credentials and persistence.
   As ingestion arrives, it also owns external-source
-  credentials and ingestion jobs. It already owns Workflow's pinned model
-  artifact resolution, local candle execution, cancellation, and derived
-  relation lifecycle. It also owns Workflow provider configuration, the
-  bounded tool loop, durable bounded Assistant conversations, and provider cancellation; the
-  browser composes turns and observes secret-free state.
+  credentials and ingestion jobs, and model-provider configuration; the
+  browser composes provider requests and never sees the credential.
 - **The wire API is a product boundary.** The Dioxus browser is the current
   client, not a privileged bypass. Hardware and safety behavior must remain
   correct for any client that uses the API.
@@ -194,61 +185,20 @@ never becomes the motor-control runtime.
     MCAP files as chronological episodes; selecting a dataset shows its
     overview, and opening an episode shows it in the shared episode
     inspection: its recorded cameras, plots of chosen numeric fields, and one
-    Timeline that lists every stream with its message density. Curation and
-    Explore show episodes through the same inspection. Import opens as a peer
+    Timeline that lists every stream with its message density. Curation
+    shows episodes through the same inspection. Import opens as a peer
     tab.
-  - **Workflow** owns relation discovery and a persisted, revision-safe
-    Table → Query → optional Model/backfill → final Query → Result editor over existing qualified
-    Spiral relations. The backend runs bounded read-only SQL and one executable
-    model capability: `siglip-base`, backed by
-    `google/siglip-base-patch16-224` at exact revision
-    `7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed`. Read-only Query nodes define
-    exact candidate cohorts with five stable frame keys plus decoded
-    `spql.image.Image` fields. Typed feature definitions then backfill only
-    missing applicable cells in a Studio-owned wide cache derived from the
-    authoritative source relation. A Studio feature registry binds every
-    `_feature` column to its description, concept, applicability, source, and
-    pinned producer provenance; the cache and registry publish atomically.
-    Compatible cells are reusable across workflows over the same source, while
-    different sources cannot collide. Metal is preferred
-    where available and an actual CPU fallback is reported rather than hidden.
-    The Model inspector owns typed configuration, measured run state, controlled
-    insertion/removal, and topology-aware layout. A compact Assistant shares
-    the 30% left lane with Node and uses backend-owned OpenAI-compatible tool
-    calling to inspect the active catalog, draft and save valid relation-first
-    graphs, start them, wait for bounded or long runs, inspect bounded query
-    results, and iterate. Periodic frame selection is ordinary read-only Spiral
-    SQL authored in a candidate Query, not a special tool or Model setting; the
-    pinned application-side bicubic processor still owns SigLIP resizing.
-    Up to 20 project-scoped conversations retain 80 public messages each
-    without silently erasing older chats; only the selected conversation enters
-    provider context. The server persists them in one versioned schema-v2
-    envelope and preserves valid current-format history. Unsupported or unreadable
-    history is preserved and reported as unavailable; conversation mutations
-    remain blocked. Its durable selected thread safely renders compact structured text
-    and exposes bounded graph/run/result receipts as explicit navigation,
-    while the canvas, authoritative run snapshot, and Results remain the source
-    of truth; the canvas continues to own the manual Run/Cancel controls.
-    Image-bearing query results stay in the shared table: each decoded image is
-    rendered in its own schema column beside the matching identity, feature,
-    and joint values. Compact type-aware headers, numeric alignment, explicit
-    nulls, and one result metadata strip keep Data and Workflow on the same
-    ordinary result format.
-    Workflow still has no ingestion controls. Hugging Face is used here only to
-    resolve the pinned model artifacts.
-  - **Curation** owns saved recipes that judge one dataset's episodes for
-    training: builtin episode statistics plus declared measurements (camera
-    brightness, camera score, a folded topic field, or read-only SQL), rules
-    of the form *if fact · operator · value then exclude as reason*, and
-    transforms (camera colour profile, camera resize, time trim) recorded for
-    the kept episodes. A recipe compiles to one read-only Spiral query with
-    positional aliases and runs through the same native executor and run
-    polling as Workflow; the sheet lays every episode out as a tile, kept in
-    full ink and excluded dimmed under the removing rule's words, with exact
-    totals even when the listed roster is bounded, and docks the selected
-    episode's evidence beside the tiles. Recipes persist in the
-    Studio SQLite `curations` table with optimistic revisions and travel in
-    project bundles. Kept episodes are not yet materialized as a dataset.
+  - **Curation** owns graphs rooted at one dataset whose edges carry episode
+    intervals: measures (Break down subtasks, Find similar, Group similar,
+    Identify unproductive moments) add properties or cut intervals, and
+    Selects keep the intervals that pass a rule. A path compiles to one
+    read-only Spiral statement, previewed one episode at a time over the
+    first 100 episodes, and a leaf Select publishes as a named catalog view
+    with one row per kept interval. The Dataset, Select, and moments nodes
+    compile today; the other measures run in the browser until Spiral has
+    their functions. Graphs persist in the Studio SQLite `curations` table
+    with optimistic revisions and travel in project bundles. See
+    `docs/curation.md`.
   - **Training** retains remote HTTP runtime selection, vision ACT
     configuration, historical learning/resource telemetry, and checkpoint
     inspection/downloads. Starting MCAP camera training is disabled until
@@ -264,7 +214,7 @@ never becomes the motor-control runtime.
 - The external [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) crate supplies
   tabbed tiles, horizontal and vertical splits, drag docking with five-zone
   previews, split resizing, keyboard equivalents, session-state panel
-  reconciliation, and compact shared chrome. Live, Data, Workflow, Training, and Rollout keep independent session
+  reconciliation, and compact shared chrome. Live, Data, Curation, Training, and Rollout keep independent session
   layouts. Live defaults to a one-third workbench beside a two-thirds
   visualization with movable Scene, camera, and Timeline panels. Data defaults
   to a 21% Datasets rail beside one subject panel; an open episode's
@@ -295,7 +245,7 @@ never becomes the motor-control runtime.
   require a calibration snapshot.
 - Settings imports and exports the active project as versioned
   `.spiral-project` format 2, including original MCAP bytes, Dataset names
-  (including empty datasets), checkpoints, and Studio-owned Workflow caches.
+  (including empty datasets), checkpoints, and Studio's local records.
   Restore rebuilds native Dataset populations with Studio state in one
   transaction. Format-1 backups require the old application.
 - Native recording import writes a Blob source row, creates the filtered
@@ -333,10 +283,9 @@ today, and nothing below may be presented as existing behavior:
 
 - **More ingestion sources.** Local-file uploads and object-storage import
   interfaces extend the shipped native MCAP ingestion path.
-- **Curated datasets.** Materializing a curation's kept episodes, with their
-  recorded transforms, as a new derived dataset. The Curation activity ships
-  the recipe, the judgement, and the sheet; the derived dataset does not
-  exist yet.
+- **Training on curated data.** Training reads a published curation view
+  and resamples its intervals. Curation publishes the views; Training does
+  not read them yet.
 - **Generalized episodes.** Episode schema loosened so robot-specific
   semantics (arms, follow error) are optional capabilities rather
   than required fields.
@@ -353,10 +302,8 @@ today, and nothing below may be presented as existing behavior:
   retains Arrow transport and ACT model inference for schema-compatible
   checkpoints. MCAP dataset training jobs remain unavailable pending native
   Spiral image decoding. Studio owns queries, run history, checkpoint ingest,
-  and bounded hardware control. Workflow enrichment
-  is separate: its one pinned SigLIP capability runs locally in the trusted Rust
-  backend and does not become another configurable policy endpoint.
-- **Backend-scoped Workflow provider.** The trusted backend can obtain
+  and bounded hardware control.
+- **Backend-scoped model provider.** The trusted backend can obtain
   `LLM_API_KEY` from explicit process state or the ignored, owner-only
   repository-root `.env.local`; the application loads that fallback itself.
   `LLM_MODEL` and `LLM_BASE_URL` are optional developer overrides; with only
@@ -398,7 +345,7 @@ today, and nothing below may be presented as existing behavior:
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*
 (the browser interface),
-*workbench* (Live, Data, Workflow, Curation, Training, or Rollout operating panel),
+*workbench* (Live, Data, Curation, Training, or Rollout operating panel),
 *panel* (one registered content surface), *tile* (a tab group in the layout
 tree), *dataset* (a collection of episodes), *episode* / *take* (one kept
 multi-stream trajectory, recorded or ingested; *episode* is canonical in data
@@ -415,7 +362,7 @@ rollout, export), *ingestion*
   Studio**.
 - The interface follows a compact, information-dense Notion/Rerun direction,
   while its panel mechanics use familiar VS Code tab-and-tile behavior. Live,
-  Data, Workflow, Curation, Training, and Rollout are the primary activities;
+  Data, Curation, Training, and Rollout are the primary activities;
   panels are
   spatial composition, not a proliferation of navigation modes.
 - **Distribution:** public open source eventually, but not on the current
@@ -439,33 +386,19 @@ Real, in-repo:
 - `docs/recording-mcap.md` — recording, playback, calibration, backup, and
   training limits. Native import/retry/playback/delete checks and browser seek
   pixel tests passed; physical robot/camera capture still needs a smoke test.
-- `crates/backend/src/workflow/model.rs` — the
-  pinned SigLIP runner, SQL-candidate contract, source-derived feature cache,
-  Studio feature registry, atomic publication, bounded pipeline, quarantine,
-  cancellation, and cross-workflow reuse.
-- `crates/backend/src/curation/sql.rs` — the recipe-to-SQL compiler and
-  verdict reader, with `crates/backend/src/curation/manager.rs` owning saved
-  recipes and judged runs.
-- `crates/backend/src/workflow/agent.rs` and
-  `crates/backend/src/workflow/provider.rs` — the bounded relation-first tool loop, project-scoped durable
-  session, long-run continuation, and OpenAI-compatible streaming transport.
+- `crates/frontend/src/activities/curation/path.rs` — the compiler that
+  chains each node's step into one statement, with
+  `crates/backend/src/curation/manager.rs` owning saved curations and view
+  publication.
 - A detailed `README.md` maintained in the repository.
 
 Deliberately absent, and not to be fabricated: there are **no users,
 testimonials, case studies, published benchmarks, performance guarantees,
-pricing, or deployment/endorsement claims**. Development tests do retain
-measured SigLIP timing and golden-score evidence, but those observations are
-not product performance claims. The project has not been released. There is
+pricing, or deployment/endorsement claims**. The project has not been released. There is
 **no ingestion implementation yet**; ingestion is a committed direction, not
 a shipped capability. No provider credential is shipped as a distributable
 product fixture; a developer supplies one in the ignored local secret file or
 production secret manager, after which provider setup is invisible in Studio.
-Development verification has used a private backend-only OpenRouter
-configuration for a bounded Terra smoke and configured-provider screenshot;
-that evidence is not a release, endorsement, availability guarantee, or bundled
-credential. Local mocked OpenAI-compatible transport tests cover streaming
-text, fragmented multiple tool calls, bounded 429 retry, malformed and
-oversized streams, cancellation, and secret redaction.
 
 ## Product Principles
 

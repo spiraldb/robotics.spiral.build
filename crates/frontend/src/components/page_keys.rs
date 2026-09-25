@@ -46,15 +46,6 @@ impl PageKeys {
             .is_some_and(|element| matches!(element.tag_name().as_str(), "BODY" | "HTML"))
     }
 
-    /// The modifier a shortcut names on this platform: ⌘ on a Mac, Ctrl
-    /// elsewhere.
-    pub(crate) fn command_symbol() -> &'static str {
-        let mac = web_sys::window()
-            .and_then(|window| window.navigator().platform().ok())
-            .is_some_and(|platform| platform.starts_with("Mac"));
-        if mac { "⌘" } else { "Ctrl " }
-    }
-
     /// A plain key press — no modifier, not typed into a field — that a
     /// shortcut may claim.
     pub(crate) fn is_shortcut(event: &web_sys::KeyboardEvent) -> bool {

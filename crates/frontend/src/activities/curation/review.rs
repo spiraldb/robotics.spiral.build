@@ -863,11 +863,13 @@ impl NodeReach {
             let (input, _) = controller.populations(&id)?;
             let finished = controller.with_payload(|payload| {
                 match payload.node(&id).map(|node| node.kind()) {
-                    Some(CurationNodeKind::IdentifyUnproductiveMoments(detection)) => Some((
-                        input
-                            .episodes()
-                            .iter()
-                            .all(|episode| detection.is_completed(episode)),
+                    Some(CurationNodeKind::IdentifyUnproductiveMoments(_)) => Some((
+                        controller.with_reads(|reads| {
+                            input
+                                .episodes()
+                                .iter()
+                                .all(|episode| reads.has_read(&id, episode))
+                        }),
                         "Score the rest",
                     )),
                     Some(CurationNodeKind::BreakDownSubtasks(annotation)) => Some((

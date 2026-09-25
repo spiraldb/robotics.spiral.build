@@ -2,19 +2,17 @@
 //! changed, what Studio has stored, and the commands that move between them —
 //! open, save, discard.
 //!
-//! Workflow and Curation each open one saved document at a time, edit it in
-//! the browser, and save it back. That lifecycle is this module; an
-//! activity's controller keeps only what is its own — the agent conversation,
-//! the graph's selection and focus — and holds a [`DocumentSession`] beside
-//! it.
+//! Curation opens one saved document at a time, edits it in the browser, and
+//! saves it back. That lifecycle is this module; the activity's controller
+//! keeps only what is its own — the graph's selection and focus — and holds a
+//! [`DocumentSession`] beside it.
 //!
 //! A controller wires itself in by implementing [`StudioDocument`] for the value
 //! it edits and calling [`DocumentSession::use_session`] once at mount. Every
 //! command that replaces what is open takes an `on_install` hook, because the
-//! document is never the whole of what an activity shows: Workflow reinstalls
-//! its assistant conversation there, and Curation decodes the graph payload —
-//! and refuses the document by returning `Err` when that payload cannot be
-//! read.
+//! document is never the whole of what an activity shows: Curation decodes the
+//! graph payload there, and refuses the document by returning `Err` when that
+//! payload cannot be read.
 
 use dioxus::prelude::*;
 use serde::Serialize;
@@ -36,10 +34,10 @@ use crate::shell::state::StudioProjectState;
 pub(crate) trait StudioDocument:
     Clone + PartialEq + Serialize + DeserializeOwned + 'static
 {
-    /// What Studio calls one of these: `workflow` or `curation`.
+    /// What Studio calls one of these, such as `curation`.
     /// A browser-minted id begins with it and the session's own messages use it.
     const NOUN: &'static str;
-    /// The path segment these are served under, such as `workflows`. See
+    /// The path segment these are served under, such as `curations`. See
     /// [`DocumentClient`] for the three requests it spells.
     const COLLECTION: &'static str;
     /// Which activity a failed save is reported as coming from.
@@ -133,7 +131,6 @@ pub(crate) struct DocumentSession<Doc: StudioDocument> {
     command: Signal<Option<DocumentCommand>>,
     /// The last list or load failure, cleared by the next success.
     load_error: Signal<Option<String>>,
-    loaded: Signal<bool>,
 }
 
 impl<Doc: StudioDocument> Clone for DocumentSession<Doc> {
@@ -149,14 +146,12 @@ impl<Doc: StudioDocument> PartialEq for DocumentSession<Doc> {
             && self.summaries == other.summaries
             && self.command == other.command
             && self.load_error == other.load_error
-            && self.loaded == other.loaded
     }
 }
 
 impl<Doc: StudioDocument> DocumentSession<Doc> {
     /// One session per mounted activity. It starts on a fresh, never-saved
-    /// document and stays unloaded until [`Self::load_initial`] runs, so a
-    /// workspace has something to draw before Studio answers.
+    /// document, so a workspace has something to draw before Studio answers.
     pub(crate) fn use_session() -> Self {
         let initial = use_hook(Self::fresh);
         use_hook(|| Self {
@@ -165,7 +160,6 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
             summaries: Signal::new(Vec::new()),
             command: Signal::new(None),
             load_error: Signal::new(None),
-            loaded: Signal::new(false),
         })
     }
 
@@ -196,10 +190,6 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
 
     pub(crate) fn summaries(&self) -> Vec<DocumentSummary> {
         self.summaries.read().clone()
-    }
-
-    pub(crate) fn loaded(&self) -> bool {
-        *self.loaded.read()
     }
 
     pub(crate) fn load_error(&self) -> Option<String> {
@@ -236,7 +226,6 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
         }
         self.draft.set(document.clone());
         self.baseline.set(document);
-        self.loaded.set(true);
         self.load_error.set(None);
     }
 
@@ -264,36 +253,6 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
         });
     }
 
-    /// The first read of a mounted workspace: list what is saved and open the
-    /// first of them, or a fresh document when nothing is saved yet.
-    pub(crate) fn load_initial(
-        mut self,
-        on_install: impl FnOnce(&Doc) -> Result<(), String> + 'static,
-    ) {
-        self.load_error.set(None);
-        self.command.set(Some(DocumentCommand::Opening));
-        self.spawn(async move {
-            let client = DocumentClient::<Doc>::current(Doc::COLLECTION);
-            let opened = async {
-                let summaries = client.list().await?;
-                let document = match summaries.first() {
-                    Some(summary) => client.load(summary.id()).await?,
-                    None => Self::fresh(),
-                };
-                Ok::<_, crate::client::CommandError>((summaries, document))
-            }
-            .await;
-            match opened {
-                Ok((summaries, document)) => {
-                    self.summaries.set(summaries);
-                    self.install(document, on_install);
-                }
-                Err(error) => self.load_error.set(Some(error.to_string())),
-            }
-            self.command.set(None);
-        });
-    }
-
     /// List what is saved without opening any of it: the first read of a
     /// workspace that starts on a blank document rather than on the most
     /// recent one, as Curation does.
@@ -305,10 +264,7 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
         self.command.set(Some(DocumentCommand::Opening));
         self.spawn(async move {
             match DocumentClient::<Doc>::current(Doc::COLLECTION).list().await {
-                Ok(summaries) => {
-                    self.summaries.set(summaries);
-                    self.loaded.set(true);
-                }
+                Ok(summaries) => self.summaries.set(summaries),
                 Err(error) => self.load_error.set(Some(error.to_string())),
             }
             self.command.set(None);
@@ -357,27 +313,17 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
 mod tests {
     use super::*;
 
-    /// One summary type reads every collection's list. The two things a
-    /// switcher shows are the two every document endpoint sends, and the extra
-    /// field a curation carries is simply not one of them.
+    /// The summary a switcher reads is the two things every document endpoint
+    /// sends; the revision a curation also carries is not one of them.
     #[test]
-    fn one_summary_reads_every_collection() {
-        let listed = [
-            serde_json::to_string(&spiral_robotics_common::workflow::WorkflowSummary::new(
-                "w1",
-                "Throughput",
-            ))
-            .unwrap(),
-            serde_json::to_string(&spiral_robotics_common::curation::CurationSummary::new(
-                "w1",
-                "Throughput",
-                7,
-            ))
-            .unwrap(),
-        ];
-        for body in listed {
-            let summary = serde_json::from_str::<DocumentSummary>(&body).unwrap();
-            assert_eq!(summary, DocumentSummary::new("w1", "Throughput"), "{body}");
-        }
+    fn a_summary_reads_a_curation_listing() {
+        let body = serde_json::to_string(&spiral_robotics_common::curation::CurationSummary::new(
+            "c1",
+            "Throughput",
+            7,
+        ))
+        .unwrap();
+        let summary = serde_json::from_str::<DocumentSummary>(&body).unwrap();
+        assert_eq!(summary, DocumentSummary::new("c1", "Throughput"));
     }
 }

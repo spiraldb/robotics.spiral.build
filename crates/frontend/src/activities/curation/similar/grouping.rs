@@ -37,7 +37,7 @@ use crate::activities::episode::Episode;
 use crate::client::completions::{ModelClient, ModelRequest};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
-use spiral_robotics_common::workflow::conversation::ProviderMessage;
+use spiral_robotics_common::providers::ProviderMessage;
 use spiral_robotics_ui::{
     ActionPurpose, Arrangement, Button, ButtonVariant, Disclosure, EmptyState, Field, FieldLayout,
     Flight, Motion, Notice, NoticeTone, Place, Select, TextInput,

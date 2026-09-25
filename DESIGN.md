@@ -307,10 +307,6 @@ components:
   curation-index-row-chosen:
     backgroundColor: "{colors.selected}"
     textColor: "{colors.ink}"
-  side-sheet:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.ink}"
-    width: "320px"
   popover:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
@@ -348,9 +344,8 @@ becoming a grey slab. Camera pixels alone keep a dark mat for honest
 letterboxing. It replaced a washed-out grey workbench with blue selection, a
 left activity rail, and a bottom status bar; none of those return.
 
-The Studio has six activities, reached from one 44px top bar and the keys
-1–6 in this order: **Data** (catalog, episodes, import; the home route),
-**Workflow** (deriving and querying Spiral relations: Explore and Agent),
+The Studio has five activities, reached from one 44px top bar and the keys
+1–5 in this order: **Data** (catalog, episodes, import; the home route),
 **Curation** (a graph of measurements and selections over one dataset's
 episodes, ending in the parts worth training on),
 **Training** (configuring and observing policy runs), **Rollout** (staging a
@@ -418,9 +413,8 @@ line colour.
 
 - **Focus Blue** (`{colors.info}`, text `{colors.info-ink}`): The 2px
   keyboard focus outline everywhere (field focus adds a 3px halo at 18%),
-  text links and quiet text actions, and work in progress: the pulsing run
-  and tool dots and the marching edges of a running workflow graph. It never
-  marks selection.
+  text links and quiet text actions, and work in progress: the pulsing dot
+  of a running node. It never marks selection.
 - **Danger Red** (`{colors.danger}` on `{colors.danger-soft}` behind
   `{colors.danger-line}`): Destructive consequences, recording, faults,
   energized torque, reconnecting. In the status line a danger fact is red and
@@ -439,13 +433,12 @@ line colour.
   `{colors.kind-stream}`, `{colors.kind-camera}`): The outline and letter of a
   kind mark, and the camera glyph in stream lists. Identity, not state.
 - **Stage kinds** (`{colors.stage-source}` … `{colors.stage-output}`): What a
-  workflow stage does to the data. Each paints only the stage's outlined
+  graph node does to the data. Each paints only the stage's outlined
   glyph mark, the one-word upper-case kind in the card footer, and a 14% wash
   where a tile needs one.
 - **Result categories** (`{colors.category-1}` … `{colors.category-6}`):
-  Washes for repeated string values in a result table, assigned by rank
-  within that result: hue at 13% wash, text mixed 55% toward ink. Curation
-  deals the same six to a grouping's categories, biggest first, as
+  hue at 13% wash, text mixed 55% toward ink. Curation deals the six to a
+  grouping's categories, biggest first, as
   `category-2, 4, 3, 5, 6, 1`, so blue comes last; a search's matches wear
   its node's own `stage-media` hue rather than focus blue.
 - **Arm identity** (`{colors.arm-1}` … `{colors.arm-4}`), **joint signals**
@@ -571,8 +564,8 @@ The first viewport is a full-height shell:
 - transient toasts floating at the lower right, never inserting a row.
 
 The brand is the Spiral mark and the two-weight "spiral robotics" wordmark,
-closed by a hairline. The nav lists Data · Workflow · Curation · Training ·
-Rollout · Live as glyph-plus-word items the full height of the bar; keys 1–6
+closed by a hairline. The nav lists Data · Curation · Training · Rollout ·
+Live as glyph-plus-word items the full height of the bar; keys 1–5
 open them in that order and `/` routes to Data. Each activity registers its
 own panel set and independent session layout scope, so switching activity
 never moves content between them.
@@ -717,8 +710,9 @@ document bar, the `curation-graph-v1` layout scope opens as two tiles: a 23%
 Graph of 190px stage cards on the dotted bench (Dataset, then the
 measurements and Selects it feeds, joined by edges that carry populations),
 beside the node's Workspace. A card says what the node holds, or while it
-runs what it is doing; a leaf Select wears the Output flag, and a Select over
-moments says the recording it keeps ("keeps 1:53.9 of 2:26.9") because that
+runs what it is doing; a leaf Select wears the Output flag (Published once
+it is a catalog view, Out of date in caution once the saved curation has moved
+past it), and a Select over moments says the recording it keeps ("keeps 1:53.9 of 2:26.9") because that
 is the training budget. Every count below the Dataset is over the first 100
 episodes the curation reads.
 
@@ -741,8 +735,9 @@ Every node's workspace has the same anatomy, top to bottom:
   note for what needs attention (a missing setting, failed episodes), a
   quiet line for how many episodes reach the node when fewer than all do,
   with a link to the measurement they wait on ("Score the rest"), and the
-  node's actions (Run N left, Retry failed, Stop, Re-score all, Regenerate)
-  or a Select's tally ("Keeps 1:53.9 of 2:26.9").
+  node's actions (Run N left, Retry failed, Stop, Regenerate) or a Select's
+  tally ("Keeps 1:53.9 of 2:26.9"), followed on an output by where it is
+  published and Publish, which asks for the view's name on the same line.
 - **Overview band:** Select's threshold strip — every judged value as a dot,
   the threshold as a line running into the handle of a real slider under
   them (a 4px track filled in ink on the side the rule keeps, a 16px round
@@ -770,12 +765,9 @@ Every node's workspace has the same anatomy, top to bottom:
   plays from its start and keeps playing. The node's rows lead the timeline
   and the recorded streams fold behind one row.
 
-### Workflow, Training, Rollout
+### Training, Rollout
 
-Workflow's Agent view puts the graph first: one document bar, then a 24%
-Assistant column beside the Graph over a Results shelf in the lower 54%;
-stage details float over the graph beside the selected card rather than
-holding a tile. Training is curve-first: Setup above Runs in a left rail, and
+Training is curve-first: Setup above Runs in a left rail, and
 one tab group of opened runs. Rollout is a compact physical-policy bench: a
 27% workbench beside a dominant live Scene, every follower camera recorded
 for the policy, and one low Inference lane; the Run policy area anchors to
@@ -787,7 +779,7 @@ the bottom of a tall workbench.
 focus, or sizing needs, register it as a panel. Do not add another fixed
 shell region or let one component mutate another tile's tabs.
 
-**The Timeline-Is-One-Clock Rule.** Live, Data, Curation, Explore, camera
+**The Timeline-Is-One-Clock Rule.** Live, Data, Curation, camera
 media, scene, and plots share one playhead contract. Do not create a second
 timeline with different geometry or ownership.
 
@@ -822,7 +814,7 @@ component means or which behavior it owns.
 
 ```text
 StudioShell
-├── StudioTopBar                              brand; activity nav (1–6); shortcuts;
+├── StudioTopBar                              brand; activity nav (1–5); shortcuts;
 │   ├── WorkspaceStatusLine                   connection + ranked activity facts
 │   ├── NotificationCenter                    popover of messages
 │   └── ShortcutSheet                         `?` dialog
@@ -831,33 +823,24 @@ StudioShell
 │       ├── SemanticWorkbenchPanel
 │       │   ├── LiveWorkbench                 operate / record semantics
 │       │   ├── DataCatalogRail               dataset / episode selection
-│       │   ├── WorkflowInspectorPanels       saved graph / node-edit semantics
 │       │   ├── CurationGraph                 node cards, edges, + menus
 │       │   ├── TrainingWorkbench             train / observe semantics
 │       │   └── RolloutWorkbench              fixed-follower policy semantics
 │       ├── PrimaryVisualizationPanel
 │       │   ├── Scene
 │       │   ├── DataSubject                   Overview tab + one tab per episode
-│       │   ├── WorkflowCanvas
 │       │   ├── CurationNodeWorkspace         node bar, index, episode tabs
 │       │   ├── TrainingEvidence
 │       │   └── EmptyOrLoadingState
 │       ├── CameraPanel(s)
 │       └── EvidencePanel
 │           ├── TimelinePanel                 one shared episode-clock contract
-│           ├── WorkflowResultsPanel          bounded media-aware SQL results
 │           └── RolloutInferencePanel         measured policy-loop evidence
 └── Toast                                     newest message, lower right
 ```
 
-`SideSheet` is a shared component, not a panel: the docked inspector that
-opens beside a table or grid for the one selected item. It owns the heading,
-the previous / next / close controls, the keyboard (Escape closes, ↑ and ↓
-step), and the entering motion; the caller owns the body. Workflow's result
-table mounts it as the row inspector.
-
 `StudioShell` owns the application frame. `StudioTopBar` chooses the active
-activity (including the Settings entry) and owns the global keys 1–6, `,`,
+activity (including the Settings entry) and owns the global keys 1–5, `,`,
 and `?`. `PanelWorkspace` owns tabs, docking, splits, resizing,
 reconciliation, and session layout state; it does not know what an episode,
 camera, robot, query, or playhead means.
@@ -951,9 +934,7 @@ Plots, and the Timeline itself.
 | Live robot and camera selection | Live Activity Controller | Live Workbench, Scene, Live camera registry |
 | Live recording and review subject | Live Activity Controller, reconciled with backend truth | Live Workbench, Timeline, status line |
 | Catalog, Overview dataset, opened episode tabs, front tab | Data workspace selection | Catalog rail, subject tabs, episode inspection |
-| Workflow saved graph, local draft, run snapshot, terminal result | Workflow Activity Controller, reconciled with backend truth | Node panel, canvas, Results, Assistant, status line |
-| Workflow Assistant conversations and tool receipts | Backend Workflow agent, reconciled by the Workflow controller | Assistant panel |
-| Curation saved graph, draft, measurements, runs, episode sample, selected node | Curation Controller (browser-owned passes, saved through the backend) | Graph, node workspace, document bar, status line |
+| Curation saved graph and published outputs, draft, runs, episode sample, preview reads, selected node | Curation Controller (browser-owned passes; the graph saved and views published through the backend; preview reads held for the session) | Graph, node workspace, document bar, status line |
 | Curation open episode tabs, chosen row, index filter, listed side | The node workspace that shows them | Index, episode tabs, timeline tracks |
 | Rollout checkpoint, execution inputs, fixed follower, readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, Scene, follower cameras, Inference lane |
 | Timeline subject, playhead, playback, Follow Live | Timeline Controller within the active activity | Scene, Cameras, Plots, Timeline |
@@ -965,17 +946,6 @@ Plots, and the Timeline itself.
 **Open an episode:** `Catalog rail → open(episode) → Data selection → episode
 tab in front + inspection (cameras, Plots, Timeline) on one clock`. J/K moves
 the front tab to the neighbour; Esc brings the dataset forward in Overview.
-
-**Apply and run a Workflow:** `Node inspector edits → revision-checked Apply →
-Workflow backend → read-only Query → refetched run/cancel state → Canvas +
-bounded media-aware Results`, while browser-owned node geometry and panel
-focus remain stable.
-
-**Ask the Workflow Assistant:** `Composer → backend-owned provider turn →
-relation/model inspection → read-only SQL candidate → validated graph save →
-optional run → bounded query inspection → durable thread`. Saved canvas state,
-run snapshots, and Results are authoritative throughout; Assistant activity
-never creates a browser-local graph or a second Run control.
 
 **Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity
 Controller → one synchronized recorded projection`.
@@ -1130,7 +1100,7 @@ verb first; visual presentation never changes the verb.
   its condition matters.
 - **Kbd:** A shortcut named beside the action it takes: 18px, 4px radius,
   10px mono, faint ink on the recess behind a line-strong edge. It appears in
-  the rail filter (`/`), inside a solid action (⌘↵), beside step hints (J K),
+  the rail filter (`/`), beside step hints (J K),
   and in the shortcut sheet.
 - **Kind mark:** `KindMark` — one mono letter (D dataset, E episode) in a
   1.5px outline of its kind hue, 16px, 4px radius; 14px in tab strips and the
@@ -1152,7 +1122,7 @@ verb first; visual presentation never changes the verb.
   open reads pressed (ink on the recess). The notification count is a lime
   pill with a paper ring, 9px mono.
 - **Shortcut sheet:** A 40rem dialog grouping keys by where they work
-  (Anywhere, Data, Episode playback, Workflow and Curation, Live).
+  (Anywhere, Data, Episode playback, Live).
 
 ### Panel Tabs, Tiles, and Splits
 
@@ -1218,18 +1188,6 @@ parent.
 - **Invalid / Disabled:** Danger border; disabled fields sit on the recess in
   faint ink.
 
-### Side Sheet
-
-- **Geometry:** 320px, at most 45% of its tile, a left hairline, paper, its
-  own scroll. It takes width from the table or grid it inspects; it never
-  overlays.
-- **Heading:** Sticky, a tabular title ("Row N", "Episode N") with a faint
-  "of M", then the `↑ ↓ ×` actions. Focus lands on the title when it opens.
-- **Keyboard:** Escape closes and returns focus to the invoking tile or row;
-  ↑ and ↓ step to the neighbour.
-- **Motion:** Enters over 220ms on the expo ease from 8px right; a 120ms fade
-  under reduced motion.
-
 ### Popovers, Dialogs, Notifications, and Toasts
 
 - **Popover:** 320px paper sheets at 10px with the popover shadow, entering
@@ -1246,40 +1204,19 @@ parent.
   optional glyph in an 8px paper tile, one 13px title, and a faint sentence
   or two.
 
-### Workflow Graph and Document Bar
+### Graph and Document Bar
 
-- **Document bar:** Shared by Workflow and Curation: the glyph, the Explore |
-  Agent segments (Workflow), the name as a quiet button with a turning
+- **Document bar:** The glyph, the name as a quiet button with a turning
   chevron that opens the 320px switcher popover, then at right the state chip
   (Saved · good dot, Unsaved changes · caution, Changed in another session ·
-  danger), Discard while dirty, outlined Save, and the solid Run with its ⌘↵
-  kbd chip. A longer state grows leftwards without moving Save or Run.
-- **Stage card:** 224×92 paper, hairline, 8px radius, resting bench lift: an
-  18px outlined stage mark beside a semibold title, a two-line summary, and a
-  footer naming the kind in upper-case in its tint, then the native function
-  or folded operations in mono. Hover firms the hairline and lifts 1px with
-  the float shadow; selection is the lime halo. Cards enter left to right,
-  320ms each and 45ms apart.
+  danger), Discard while dirty, and outlined Save. A longer state grows
+  leftwards without moving Save.
+- **Stage card:** 192×100 paper, hairline, 8px radius, resting bench lift: an
+  18px outlined stage mark beside a semibold title and a one-line summary.
+  Hover firms the hairline and lifts 1px with the float shadow; selection is
+  the lime halo. Cards enter in reading order, 320ms each and 45ms apart.
 - **Graph canvas:** The pale bench with a dot grid; zoom in, zoom out, and fit
-  share one hairline group at bottom left. While a run is admitted every edge
-  turns blue and carries marching dashes; run and tool dots pulse blue.
-- **Stage details:** On demand, never a tile: one 320px popover beside the
-  selected card, following it through pan and zoom; Escape or deselection
-  removes it.
-- **Results:** One run strip (phase dot, run selector only when more than one
-  run exists, mono row count and elapsed), then the shared result table:
-  image previews (88×50 on the camera mat) lead, repeated strings become
-  category chips, varying numbers carry a bar between the column's extremes,
-  timestamps read as UTC clock time, identifiers step back into faint mono.
-  The row inspector is the shared side sheet.
-- **Assistant:** The thread and composer share the tall column; the composer
-  is one bordered field with a square send at bottom right and a blue focus
-  border and halo. The placeholder carries the Assistant's state.
-
-**The Display-Only-Inference Rule.** A cell's kind (image, chip, bar, clock
-time, identity) changes how a stored value is drawn, never what it is. The
-exact value stays in the tooltip and the inspector, and the presentation
-never invents a count, class, or total.
+  share one hairline group at bottom left.
 
 ### Curation Index Rows
 
@@ -1386,13 +1323,13 @@ summarizes run progress keys that evidence to optimizer step.
 
 Everything that enters moves on one easing, `--ease-out-expo`
 (`cubic-bezier(0.16, 1, 0.3, 1)`). Colour and hover changes take 120ms
-ease-out. Entrances: popovers 180–220ms, dialogs 200–220ms, side sheet 220ms,
+ease-out. Entrances: popovers 180–220ms, dialogs 200–220ms,
 subject panels 260ms with a 4px rise, toast 320ms, stage cards 320ms. Lists
 deal in with short staggers (tree rows 12ms, dataset rows 40ms, tiles 12ms,
 stage cards 45ms) and the length histogram rises over 520ms, 9ms per bar.
 Only work in progress loops: the 900ms pulse on run and tool dots, the
 reconnecting dot's 1.2s pulse, the spinner, and the 1.4s loading shimmer.
-Under `prefers-reduced-motion`, dialogs and the side sheet keep a 120ms fade
+Under `prefers-reduced-motion`, dialogs keep a 120ms fade
 and every rise, stagger, bar growth, and loop is removed.
 
 **The One-Easing Rule.** Entrances use `--ease-out-expo`; loops exist only
@@ -1424,8 +1361,8 @@ while work is in progress; reduced motion keeps fades and nothing else.
   danger, caution, plain, and let narrow widths drop the lowest facts whole.
 - **Do** name datasets without the `dataset_` prefix and keep the SQL name in
   the tooltip and footer.
-- **Do** lead catalog rows and tabs with a kind mark (D, E) and workflow
-  stages with an outlined stage mark.
+- **Do** lead catalog rows and tabs with a kind mark (D, E) and graph
+  nodes with an outlined stage mark.
 - **Do** follow the radius ladder: 4 chips/kbd, 5 rows/segments, 6
   buttons/fields, 8 cards/strips/toast, 10 dialogs and floating sheets.
 - **Do** open episodes as tabs beside Overview, step the front tab with J/K,

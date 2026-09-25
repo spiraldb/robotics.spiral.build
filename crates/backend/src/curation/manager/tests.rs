@@ -6,7 +6,7 @@ struct CurationFixture {
 }
 impl CurationFixture {
     fn new() -> Self {
-        let store = Arc::new(ProjectStore::workflow_test());
+        let store = Arc::new(ProjectStore::in_memory());
         let studio = StudioStore::in_memory().project(&store.connection_settings());
         Self {
             manager: CurationManager::new(Arc::new(StorageManager::new(store, studio))),
@@ -68,4 +68,44 @@ async fn each_save_returns_the_next_revision_and_a_stale_one_conflicts() {
         );
     }
     assert_eq!(fixture.manager.load("folding").await.unwrap(), next);
+}
+
+#[tokio::test]
+async fn a_publish_is_refused_before_the_catalog_when_its_name_is_not_an_identifier() {
+    let fixture = CurationFixture::new();
+    for name in ["", "2folds", "folds; DROP TABLE robots", "my folds"] {
+        assert!(matches!(
+            fixture
+                .manager
+                .publish(PublishRequest::new(name, "SELECT 1"))
+                .await,
+            Err(OperationError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            fixture.manager.unpublish(UnpublishRequest::new(name)).await,
+            Err(OperationError::InvalidInput(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn a_publish_admits_only_one_read_only_query() {
+    let fixture = CurationFixture::new();
+    for statement in [
+        "DROP TABLE robots",
+        "SELECT 1; SELECT 2",
+        "EXPLAIN SELECT 1",
+        "WITH gone AS (DELETE FROM robots RETURNING *) SELECT * FROM gone",
+    ] {
+        assert!(
+            matches!(
+                fixture
+                    .manager
+                    .publish(PublishRequest::new("folds", statement))
+                    .await,
+                Err(OperationError::InvalidInput(_))
+            ),
+            "{statement}"
+        );
+    }
 }

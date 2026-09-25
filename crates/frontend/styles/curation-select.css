@@ -54,6 +54,40 @@
     @apply m-0 font-mono text-[11.5px] text-ink tabular-nums;
   }
 
+  /* An output publishes from the bar's far end, after its tally: the view it
+     is published as, then what can be done about it. Naming the view takes
+     the same line, so the bar never grows a second row. */
+  .curation-select-publish {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .curation-select-publish-status,
+  .curation-select-publish-note {
+    margin: 0;
+    color: var(--tone-ink-soft);
+    font-size: 11.5px;
+    white-space: nowrap;
+  }
+
+  .curation-select-publish-status code {
+    color: var(--tone-ink);
+    font-family: var(--font-mono);
+  }
+
+  .curation-select-publish-status.is-stale,
+  .curation-select-publish-status.is-stale code {
+    color: var(--tone-caution);
+  }
+
+  .curation-select-publish-problem {
+    margin: 0;
+    color: var(--tone-danger);
+    font-size: 11.5px;
+  }
+
   /* Every judged value as a dot on one track, the threshold as a line down
      it, and the slider's thumb at the foot of the line. The track is inset
      by half the thumb at either end, as a range input insets its own, so a
@@ -210,4 +244,10 @@
   .curation-select-strip-slider::-webkit-slider-thumb {
     transition: none;
   }
+}
+
+/* The kit's input is unlayered, so its width for a view name is too. */
+.curation-select-publish .curation-select-publish-name {
+  width: 12rem;
+  font-family: var(--font-mono);
 }

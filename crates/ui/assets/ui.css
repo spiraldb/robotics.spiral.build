@@ -600,14 +600,6 @@
   }
 }
 
-/* A square action keeps whatever fill its variant gave it; only the box
-   changes. */
-.ui-button--square {
-  width: var(--ui-target-compact);
-  min-width: var(--ui-target-compact);
-  padding: 0;
-}
-
 /* Work in progress spins; nothing else here moves on its own. */
 .ui-icon--spin {
   animation: ui-icon-spin 900ms linear infinite;
@@ -944,44 +936,6 @@
   overflow-wrap: anywhere;
 }
 
-/* Chip --------------------------------------------------------------------
-   One word of state: mono on a tinted wash behind a hairline of the same
-   hue. Rendered only while its condition matters. */
-.ui-chip {
-  display: inline-flex;
-  min-height: 20px;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid var(--ui-line);
-  border-radius: var(--ui-radius-small);
-  padding: 0 6px;
-  color: var(--ui-ink-soft);
-  background: var(--ui-surface);
-  font-family: var(--ui-font-mono);
-  font-size: 11px;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
-.ui-chip--accent,
-.ui-chip--good {
-  border-color: var(--ui-accent-line);
-  color: var(--ui-accent-ink);
-  background: var(--ui-accent-wash);
-}
-
-.ui-chip--caution {
-  border-color: var(--ui-caution-line);
-  color: var(--ui-caution);
-  background: var(--ui-caution-soft);
-}
-
-.ui-chip--danger {
-  border-color: var(--ui-danger-line);
-  color: var(--ui-danger);
-  background: var(--ui-danger-soft);
-}
-
 /* Kind mark ---------------------------------------------------------------
    One mono letter in a thin rounded outline of its hue. */
 .ui-kind-mark {
@@ -1071,81 +1025,7 @@
   margin-top: 10px;
 }
 
-/* Side sheet --------------------------------------------------------------
-   The docked inspector: 320px, at most 45% of its tile, a left hairline,
-   its own scroll, entering from 8px right. */
-.ui-side-sheet {
-  display: flex;
-  width: 20rem;
-  max-width: 45%;
-  flex: 0 0 auto;
-  flex-direction: column;
-  overflow-y: auto;
-  border-left: 1px solid var(--ui-line);
-  background: var(--ui-surface);
-  animation: ui-side-sheet-enter 220ms var(--ui-ease-out) both;
-}
-
-@keyframes ui-side-sheet-enter {
-  from {
-    opacity: 0;
-    translate: 8px 0;
-  }
-}
-
-.ui-side-sheet-heading {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  display: flex;
-  min-height: 40px;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  border-bottom: 1px solid var(--ui-line);
-  padding: 0 8px 0 14px;
-  background: color-mix(in srgb, var(--ui-surface) 94%, transparent);
-  backdrop-filter: blur(8px);
-}
-
-.ui-side-sheet-heading h3 {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-}
-
-.ui-side-sheet-heading h3:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 3px;
-  border-radius: var(--ui-radius-small);
-}
-
-.ui-side-sheet-count {
-  color: var(--ui-ink-faint);
-  font-family: var(--ui-font-mono);
-  font-size: 11px;
-  font-weight: 400;
-}
-
-.ui-side-sheet-nav {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 2px;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .ui-side-sheet {
-    animation: ui-fade-in 120ms ease-out both;
-  }
-
   .ui-empty,
   .ui-dialog-backdrop {
     animation: none;

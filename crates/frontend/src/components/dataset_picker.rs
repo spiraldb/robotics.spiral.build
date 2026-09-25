@@ -1,7 +1,7 @@
 //! Naming a dataset, once, for every surface that asks for one.
 //!
-//! Workflow's and Curation's "from dataset" creation, the
-//! dataset node's empty workspace, and Training's and Live's session setup all
+//! Curation's "from dataset" creation, the dataset node's empty workspace,
+//! and Training's and Live's session setup all
 //! ask the same question and all need the same three answers: the catalog is
 //! still loading, the catalog could not be read, or here are the datasets.
 //!

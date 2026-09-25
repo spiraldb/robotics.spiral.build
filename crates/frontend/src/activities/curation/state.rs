@@ -1,10 +1,12 @@
-//! Browser-owned curation: the loaded graph, its decoded payload,
-//! node selection, episode focus, and saves. The controller is passed as a
-//! prop like `WorkflowController`; every Curation view reads and edits through
-//! it. Shared contract: extend it, never change what is here.
+//! Browser-owned curation: the loaded graph, its decoded payload, what the
+//! preview has read over the sample, node selection, episode focus, and
+//! saves. The controller is passed as a prop; every Curation view reads and
+//! edits through it. Shared contract: extend it, never change what is here.
 use super::document::{CURATION_ENCODING_VERSION, CurationGraph, DATASET_NODE_ID, SubtaskRow};
+use super::moments::Moment;
 use super::population::{EpisodeSample, Population, PopulationReader};
 use super::poster::PosterCache;
+use super::preview::PreviewReads;
 use crate::components::document_session::{
     DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
 };
@@ -198,6 +200,14 @@ impl CurationDraft for CurationDocument {
     }
 }
 
+/// What every node is interpreted over: the sample of episodes, read once per
+/// dataset, and what the preview has read over it this session.
+#[derive(Clone, Copy, PartialEq)]
+struct Interpretation {
+    sample: Resource<Result<Option<EpisodeSample>, String>>,
+    reads: Signal<PreviewReads>,
+}
+
 /// Where a curation asks the annotation view to look: one episode of one
 /// annotation node, and optionally one interval within it.
 #[derive(Clone, Debug, PartialEq)]
@@ -244,8 +254,7 @@ pub(crate) struct CurationController {
     /// Where on screen the last Find similar was asked from, until the search
     /// it opened has carried its query card in from there.
     launch: Signal<Option<Place>>,
-    /// The episodes every node is interpreted over, read once per dataset.
-    sample: Resource<Result<Option<EpisodeSample>, String>>,
+    interpretation: Interpretation,
 }
 
 impl CurationController {
@@ -273,7 +282,10 @@ impl CurationController {
             focus: Signal::new(None),
             runs: RunBook::new(),
             launch: Signal::new(None),
-            sample,
+            interpretation: Interpretation {
+                sample,
+                reads: Signal::new(PreviewReads::default()),
+            },
         })
     }
 
@@ -284,6 +296,7 @@ impl CurationController {
     /// listed as this one's.
     pub(super) fn sample(&self) -> Option<EpisodeSample> {
         let sample = self
+            .interpretation
             .sample
             .read()
             .as_ref()
@@ -295,22 +308,57 @@ impl CurationController {
     }
     /// Why the sample could not be read, when it could not.
     pub(super) fn sample_error(&self) -> Option<String> {
-        self.sample
+        self.interpretation
+            .sample
             .read()
             .as_ref()
             .and_then(|loaded| loaded.as_ref().err())
             .cloned()
     }
     pub(super) fn reload_sample(mut self) {
-        self.sample.restart();
+        self.interpretation.sample.restart();
     }
     /// What `node` hands on, and what reaches it, once the sample is read.
     pub(super) fn populations(&self, node: &str) -> Option<(Population, Population)> {
-        let sample = self.sample()?;
-        self.with_payload(|payload| {
-            let reader = PopulationReader::new(payload, &sample);
+        self.with_reading(|_, reader| {
+            let reader = reader?;
             Some((reader.input(node), reader.of(node)))
         })
+    }
+    /// Read the graph together with what it is interpreted over, once the
+    /// sample is read.
+    pub(super) fn with_reading<R>(
+        &self,
+        read: impl FnOnce(&CurationGraph, Option<&PopulationReader<'_>>) -> R,
+    ) -> R {
+        let sample = self.sample();
+        let reads = self.interpretation.reads.read();
+        self.with_payload(|payload| {
+            let reader = sample
+                .as_ref()
+                .map(|sample| PopulationReader::new(payload, sample, &reads));
+            read(payload, reader.as_ref())
+        })
+    }
+    /// What the preview has read this session.
+    pub(super) fn with_reads<R>(&self, read: impl FnOnce(&PreviewReads) -> R) -> R {
+        read(&self.interpretation.reads.read())
+    }
+    /// Hold what `node`'s preview of one episode answered, for the session.
+    pub(super) fn record_moments(
+        mut self,
+        node: &str,
+        episode: &EpisodeId,
+        read: Result<Vec<Moment>, String>,
+    ) {
+        self.interpretation
+            .reads
+            .write()
+            .record(node, episode, read);
+    }
+    /// The revision Studio holds the open curation at; 0 before its first save.
+    pub(super) fn saved_revision(&self) -> u64 {
+        self.session.with_draft(CurationDocument::revision)
     }
 
     pub(crate) fn id(&self) -> String {
@@ -354,6 +402,7 @@ impl CurationController {
         if outcome.is_ok() {
             self.record_payload();
             self.runs.cancel_removed(&self.payload.peek());
+            self.forget_removed_reads();
             let selection_gone = self
                 .selected_node
                 .peek()
@@ -364,6 +413,11 @@ impl CurationController {
             }
         }
         outcome
+    }
+    /// Let go of what the preview read for nodes the graph no longer holds.
+    fn forget_removed_reads(mut self) {
+        let payload = self.payload.peek();
+        self.interpretation.reads.write().forget_removed(&payload);
     }
     /// Carry the edited graph into the draft document, which is what a save
     /// sends and what "Unsaved changes" is measured against.
@@ -492,6 +546,7 @@ impl CurationController {
     fn adopt(mut self, document: &CurationDocument) -> Result<(), String> {
         let graph = Self::graph_of(document)?;
         self.runs.cancel_all();
+        self.interpretation.reads.set(PreviewReads::default());
         self.payload.set(graph);
         self.selected_node.set(Some(DATASET_NODE_ID.to_owned()));
         self.focus.set(None);
@@ -522,6 +577,7 @@ impl CurationController {
         self.session.discard(|baseline| {
             self.payload.set(Self::graph_of(baseline)?);
             self.runs.cancel_removed(&self.payload.peek());
+            self.forget_removed_reads();
             let selection_gone = self
                 .selected_node
                 .peek()

@@ -49,7 +49,6 @@ JSON endpoint failures have this shape:
 | `not_found` | 404 | Missing resource or endpoint |
 | `conflict` | 409 | Operation conflicts with current activity |
 | `stale_project` | 409 | Request names an endpoint Studio no longer uses |
-| `incompatible_workflow` | 422 | Stored Workflow is incompatible |
 | `external` | 502 | An upstream operation failed |
 | `internal` | 500 | Backend failure |
 
@@ -120,23 +119,9 @@ to backend hardware and activity validation.
 
 Training polling accepts `?selected=<run-id>` to include bounded full history for
 one run. Omit it when only the run catalog and current metrics are needed.
-Workflow authoring is local to the browser. Save sends a `WorkflowDocument` whose
-document revision is the expected saved version. Its optional `planned_sql` field
-contains `{sql, plan}`: the exact SQL and the plan used for display. Save/load preserves this snapshot alongside SQL and conversation; a plan
-for different SQL is rejected. Documents without a snapshot remain supported.
-Run sends a complete `WorkflowSpec`
-and returns a `WorkflowRun` containing that exact SQL definition and a run snapshot.
-`WorkflowSpec` contains `id`, `name`, `revision`, and `sql`. The browser plans
-by sending `EXPLAIN (FORMAT JSON) <sql>` to `/queries` and reading the native JSON
-report (EXPLAIN schema version 2) from the single result cell.
-The report contains logical, optimized logical, and physical diagnostic graphs,
-plus the native report metadata. Logical graphs remain available if physical
-lowering fails. Studio displays these with Dioxus Flow. The installed native AI
-function catalog is likewise a `/queries` read of `spql.meta.scalar_functions()`.
-Read executions by their run IDs. Workflow cancellation is not exposed.
 The frontend builds model requests for the provider `/providers` names and sends
-them through `/proxy`, which authenticates them. It parses provider streams, owns retry decisions,
-conversation history, and tool execution. Disconnecting cancels the proxied request.
+them through `/proxy`, which authenticates them. It parses provider streams and
+owns retry decisions and tool execution. Disconnecting cancels the proxied request.
 
 ## Feature notes
 
@@ -226,20 +211,22 @@ separate Studio dataset registry. Project snapshot restore is a separate operati
 
 ### Curation
 
-A curation is a typed recipe over one dataset (measurements, exclusion rules,
-transforms) compiled to one read-only query; see [curation](curation.md).
-A run is one request that answers when the run ends, like a workflow run; the
-browser keeps the run list. Save is the only write and uses optimistic revisions.
+A curation is one opaque, versioned JSON payload per graph: the frontend owns
+its schema and `encoding` version, and the backend stores, lists, and loads it
+by identity without reading it (`GET /curations`, `GET /curations/{id}`). Save
+(`POST /curations/save`) carries the revision the document was loaded at, 0
+for one never saved, and returns the stored copy one revision higher; a
+mismatch fails with `conflict`. A payload over 32 MiB fails with
+`invalid_input`. This is the only JSON route with a raised request-body bound,
+twice the payload limit so a document's JSON framing always fits.
 
-### Explorations
-
-An exploration is one opaque, versioned JSON payload per graph: the
-frontend owns its schema and `encoding` version, and the backend stores, lists,
-and loads it by identity without reading it. Save carries the revision the
-document was loaded at, 0 for one never saved, and returns the stored copy one
-revision higher; a mismatch fails with `conflict`. A payload over 32 MiB fails
-with `invalid_input`. This is the only JSON route with a raised request-body
-bound, twice the payload limit so a document's JSON framing always fits.
+`POST /curations/publish` takes `{name, statement}`: a view name, one plain
+identifier at the catalog root, and the read-only `SELECT` or `WITH` the
+browser compiled from an output. The backend refuses an invalid name or
+statement with `invalid_input` and a name held by a table or Dataset with
+`conflict`, then drops any view of that name and creates it again in one
+transaction. `POST /curations/unpublish` takes `{name}` and drops the view.
+Both answer `null`. See [curation](curation.md).
 
 ## Files and media
 
@@ -267,8 +254,8 @@ There is no browser event stream or `/api/events` endpoint.
 ## Maintaining the boundary
 
 Each backend feature owns its HTTP adapter, `http.rs`, beside the code it calls:
-a manager for features with runtime state (training, rollout, workflow,
-curation, explorations), or an operations type over the request's
+a manager for features with runtime state (training, rollout, curation), or
+an operations type over the request's
 `ProjectContext` (`robots/operations.rs`, `recording/take.rs`,
 `recording/catalog.rs`). Handlers extract the request, call that owner, and
 return its result; `OperationError` is the failure response. `Project` opens the
@@ -278,7 +265,7 @@ Each adapter returns two plain Axum routers, `reads()` and `commands()`.
 `http/routes.rs` merges them and applies the one lifetime rule: commands run to
 completion in their own task, reads stay in the request. `Created<T>` declares a
 201 JSON response. A route that needs its own request bound sets it with Axum's
-`DefaultBodyLimit` layer, as `/explorations/save` and `/project/import` do.
+`DefaultBodyLimit` layer, as `/curations/save` and `/project/import` do.
 
 Shared message types live in the corresponding features of `crates/common`.
 Named responses stay named through application operations and UI presentation.
@@ -293,12 +280,3 @@ central component knows the set of feature operations.
 
 Dioxus renders the UI and serves the application shell; it does not define or
 implement the wire protocol.
-
-Workflow Assistant execution uses the same `POST /workflow-runs` as the Run button;
-the request answers when the query ends, and the browser keeps each run's exact
-submitted SQL and bounded preview. The browser agent can page those previews,
-attach selected native image previews to the next model request, and select a completed
-run for presentation. The frontend model client sends text or standard text/image
-content parts through `/proxy`; transient image messages are not allowed in persisted
-conversation history.
-Stopping the Assistant does not cancel an admitted native query.

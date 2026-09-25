@@ -57,26 +57,6 @@ pub fn UnassignIcon() -> Element {
     }
 }
 
-/// Step to the previous row.
-#[component]
-pub fn ArrowUpIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M8 12.5v-9M4.5 7 8 3.5 11.5 7" }
-        }
-    }
-}
-
-/// Step to the next row.
-#[component]
-pub fn ArrowDownIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M8 3.5v9M4.5 9 8 12.5 11.5 9" }
-        }
-    }
-}
-
 /// Six dots: the handle a row is picked up by.
 #[component]
 pub fn GripIcon() -> Element {

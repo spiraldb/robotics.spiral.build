@@ -426,3 +426,115 @@ fn encoding_round_trips_and_rejects_other_versions_and_broken_graphs() {
     let unknown_field = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"colour":"blue"}"#;
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, unknown_field).is_err());
 }
+
+#[test]
+fn a_moments_node_saves_its_recipe_and_nothing_it_read() {
+    let mut payload = CurationGraph::new(None);
+    payload
+        .add_child(
+            DATASET_NODE_ID,
+            CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+        )
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
+    assert_eq!(
+        json["nodes"][1]["kind"],
+        serde_json::json!({"type": "identify_unproductive_moments"})
+    );
+    assert!(json.get("moments").is_none());
+    let with_results = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"identify_unproductive_moments","completed_episodes":[]}}],"edges":[{"from":"dataset","to":"m"}]}"#;
+    assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, with_results).is_err());
+}
+
+/// A graph with two outputs over whole episodes: longer and shorter ones.
+fn two_outputs() -> (CurationGraph, String, String) {
+    let mut payload = CurationGraph::new(None);
+    let rule = |comparison| {
+        CurationNodeKind::Select(Selection::Episodes {
+            fact: EpisodeFact::DurationSeconds,
+            comparison,
+            value: 10.0,
+        })
+    };
+    let long = payload
+        .add_child(DATASET_NODE_ID, rule(Comparison::AtLeast))
+        .unwrap();
+    let short = payload
+        .add_child(DATASET_NODE_ID, rule(Comparison::AtMost))
+        .unwrap();
+    (payload, long, short)
+}
+
+#[test]
+fn a_view_is_current_until_a_later_save_changes_the_recipe() {
+    let (mut payload, long, short) = two_outputs();
+    // Published from the recipe saved at 3; the save recording it is 4.
+    payload
+        .record_publication(&long, "long_episodes", 3)
+        .unwrap();
+    let published = payload.publication(&long).unwrap().clone();
+    assert_eq!(published.view(), "long_episodes");
+    assert!(published.is_current(3) && published.is_current(4));
+    // An edit saved as 5 moves the recipe past the view.
+    assert!(!published.is_current(5));
+    // Publishing the other output records nothing new about the first: a
+    // view current before stays current, and one out of date stays so.
+    let mut current = payload.clone();
+    current
+        .record_publication(&short, "short_episodes", 4)
+        .unwrap();
+    assert!(current.publication(&long).unwrap().is_current(5));
+    payload
+        .record_publication(&short, "short_episodes", 5)
+        .unwrap();
+    assert!(!payload.publication(&long).unwrap().is_current(6));
+    assert!(payload.publication(&short).unwrap().is_current(6));
+    // Unpublishing forgets the output, and only a published one.
+    payload.remove_publication(&short, 6).unwrap();
+    assert!(payload.publication(&short).is_none());
+    assert!(payload.remove_publication(&short, 7).is_err());
+}
+
+#[test]
+fn a_publication_names_one_output_by_one_view_name() {
+    let (mut payload, long, short) = two_outputs();
+    assert!(
+        payload
+            .record_publication(DATASET_NODE_ID, "episodes", 1)
+            .is_err()
+    );
+    assert!(
+        payload
+            .record_publication(&long, "long episodes", 1)
+            .is_err()
+    );
+    payload.record_publication(&long, "episodes", 1).unwrap();
+    assert!(payload.record_publication(&short, "episodes", 2).is_err());
+    assert_eq!(payload.validate(), Ok(()));
+}
+
+#[test]
+fn a_published_output_stays_an_output_until_it_is_unpublished() {
+    let (mut payload, long, _) = two_outputs();
+    payload
+        .record_publication(&long, "long_episodes", 1)
+        .unwrap();
+    // A step after it would make it no longer an output.
+    let longer = CurationNodeKind::Select(Selection::Episodes {
+        fact: EpisodeFact::DurationSeconds,
+        comparison: Comparison::AtLeast,
+        value: 20.0,
+    });
+    let mut attempt = payload.clone();
+    attempt.add_child(&long, longer).unwrap();
+    assert!(attempt.validate().unwrap_err().contains("unpublish it"));
+    // Nor does its branch go while the view is there.
+    assert!(
+        payload
+            .remove_node(&long)
+            .unwrap_err()
+            .contains("long_episodes")
+    );
+    payload.remove_publication(&long, 2).unwrap();
+    payload.remove_node(&long).unwrap();
+}

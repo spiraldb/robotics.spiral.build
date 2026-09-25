@@ -1,12 +1,9 @@
-//! What every node canvas in Studio does with a graph of cards: rank it, park
-//! the viewport where it can be read, and hang a detail sheet off a selection.
+//! What a node canvas in Studio does with a graph of cards: rank it and park
+//! the viewport where it can be read.
 //!
-//! Workflow's query plan and Curation's graph both draw the same card on the
-//! same `dioxus_flow` canvas. They differ in
-//! what a card says, never in how the canvas behaves, and that behaviour is
-//! here: [`CardGraph`] places the cards and hands back their reading order,
-//! [`FlowFit`] decides what the pane shows, and [`PopoverPlacement`] puts the
-//! sheet somewhere it fits.
+//! Curation's graph draws its cards on a `dioxus_flow` canvas; how the canvas
+//! behaves is here: [`CardGraph`] places the cards and hands back their
+//! reading order, and [`FlowFit`] decides what the pane shows.
 //!
 //! [`CanvasControls`] — the zoom and fit group at the bottom left — is
 //! re-exported here so a canvas reaches for one module, not two.
@@ -29,16 +26,6 @@ pub(crate) struct CardGraph {
 }
 
 impl CardGraph {
-    /// Ranks running left to right: sources at the left, the output at the
-    /// right, the way a pipeline reads.
-    pub(crate) const fn left_to_right(node_gap: f64, rank_gap: f64) -> Self {
-        Self {
-            direction: LayoutDirection::LeftToRight,
-            node_gap,
-            rank_gap,
-        }
-    }
-
     /// Ranks running top to bottom: the root above, what it feeds below.
     pub(crate) const fn top_to_bottom(node_gap: f64, rank_gap: f64) -> Self {
         Self {
@@ -316,54 +303,6 @@ pub(crate) fn FlowFit(
     rsx! {}
 }
 
-/// Where a detail sheet sits over a canvas, as inline style.
-pub(crate) struct PopoverPlacement;
-
-impl PopoverPlacement {
-    const WIDTH: f64 = 320.0;
-    const GAP: f64 = 8.0;
-    /// Room enough that the sheet does not have to be scrolled to be read.
-    const COMFORTABLE: f64 = 240.0;
-    const MIN_HEIGHT: f64 = 120.0;
-
-    /// Left-aligned with the selected cards, below them when the pane has room,
-    /// above them when only that side has room, and over them from the top of a
-    /// pane too short for either — always inside the pane. `anchor` and
-    /// `container` are both in screen pixels.
-    ///
-    /// Every placement names `top` and `bottom`, one of them `auto`: the style
-    /// attribute is diffed property by property, so a declaration that merely
-    /// disappears stays applied, and a sheet moving from above to below would
-    /// otherwise keep both edges and collapse to a line.
-    pub(crate) fn of(anchor: Rect, container: Rect) -> String {
-        let left = anchor
-            .x
-            .min(container.width - Self::GAP - Self::WIDTH)
-            .max(Self::GAP);
-        let below_top = (anchor.max_y() + Self::GAP).max(Self::GAP);
-        let below_space = container.height - Self::GAP - below_top;
-        let above_bottom = (container.height - anchor.y + Self::GAP).max(Self::GAP);
-        let above_space = container.height - Self::GAP - above_bottom;
-        if below_space >= Self::COMFORTABLE
-            || (below_space >= above_space && below_space >= Self::MIN_HEIGHT)
-        {
-            format!(
-                "left:{left:.0}px;top:{below_top:.0}px;bottom:auto;max-height:{below_space:.0}px"
-            )
-        } else if above_space >= Self::MIN_HEIGHT {
-            format!(
-                "left:{left:.0}px;top:auto;bottom:{above_bottom:.0}px;max-height:{above_space:.0}px"
-            )
-        } else {
-            let space = (container.height - 2.0 * Self::GAP).max(Self::GAP);
-            format!(
-                "left:{left:.0}px;top:{:.0}px;bottom:auto;max-height:{space:.0}px",
-                Self::GAP
-            )
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,13 +313,7 @@ mod tests {
 
     #[test]
     fn ranks_run_along_the_layout_direction_and_so_does_the_reading() {
-        let mut nodes = vec![card("source"), card("shape"), card("output")];
         let edges = vec![Edge::new("source", "shape"), Edge::new("shape", "output")];
-        let order = CardGraph::left_to_right(28.0, 56.0).rank_layout(&mut nodes, &edges);
-        assert_eq!(order, vec![0, 1, 2]);
-        assert!(nodes[0].position.x < nodes[1].position.x);
-        assert!(nodes[1].position.x < nodes[2].position.x);
-
         let mut nodes = vec![card("output"), card("source"), card("shape")];
         let order = CardGraph::top_to_bottom(28.0, 76.0).rank_layout(&mut nodes, &edges);
         // The order is reported in the order the nodes were given, so the node
@@ -426,25 +359,5 @@ mod tests {
         // The last card ends at the pane's right margin; no further.
         assert_eq!(far.x, 800.0 - 24.0 - 2_000.0);
         assert_eq!(far.zoom, 1.0);
-    }
-
-    #[test]
-    fn a_sheet_names_both_edges_wherever_it_lands() {
-        let container = Rect::new(0.0, 0.0, 900.0, 600.0);
-        let roomy = PopoverPlacement::of(Rect::new(40.0, 40.0, 224.0, 92.0), container);
-        assert!(roomy.contains("top:140px"), "{roomy}");
-        assert!(roomy.contains("bottom:auto"), "{roomy}");
-
-        let low = PopoverPlacement::of(Rect::new(40.0, 500.0, 224.0, 92.0), container);
-        assert!(low.contains("top:auto"), "{low}");
-        assert!(low.contains("bottom:108px"), "{low}");
-
-        // A pane with room on neither side still places the sheet inside it.
-        let cramped = PopoverPlacement::of(
-            Rect::new(40.0, 60.0, 224.0, 92.0),
-            Rect::new(0.0, 0.0, 900.0, 200.0),
-        );
-        assert!(cramped.contains("top:8px"), "{cramped}");
-        assert!(cramped.contains("max-height:184px"), "{cramped}");
     }
 }

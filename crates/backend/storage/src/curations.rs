@@ -4,10 +4,15 @@
 //! Storage never parses the payload. Its only rules are the ones
 //! [`CurationDocument::validate`] states plus the revision guard below, so a
 //! change to the frontend's document schema never needs a migration here.
+//!
+//! A published output is a view at the Spiral catalog root, replaced whole
+//! on every publish; [`CuratedViews`] owns that DDL.
 
-use spiral_robotics_common::curation::{CurationDocument, CurationSummary};
+use spiral_robotics_common::curation::{CurationDocument, CurationSummary, ViewName};
+use spiral_robotics_common::datasets::ProjectResource;
 
 use crate::db::StorageClock;
+use crate::{ProjectConnection, ProjectStore};
 
 pub struct CurationPersistence<'a> {
     project_store: &'a crate::StudioProject,
@@ -117,6 +122,67 @@ impl<'a> CurationPersistence<'a> {
                 .map_err(|error| error.to_string())?;
             Ok(result.rows_affected == 1)
         }
+    }
+}
+
+/// The views curation outputs are published as, at the catalog root.
+pub struct CuratedViews<'a> {
+    project_store: &'a ProjectStore,
+}
+
+impl<'a> CuratedViews<'a> {
+    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
+        Self { project_store }
+    }
+
+    /// The kind of resource other than a view that already holds `name` at
+    /// the catalog root: a table or a Dataset, which a publish must not
+    /// replace.
+    pub async fn holder(&self, name: &ViewName) -> Result<Option<String>, String> {
+        let resources = self.project_store.dataset_catalog().resources().await?;
+        Ok(Self::held_by(&resources, name))
+    }
+
+    fn held_by(resources: &[ProjectResource], name: &ViewName) -> Option<String> {
+        resources
+            .iter()
+            .filter(|resource| matches!(resource.kind(), "table" | "dataset"))
+            .find(|resource| {
+                matches!(resource.selection().path(), [root] if root.eq_ignore_ascii_case(name.as_str()))
+            })
+            .map(|resource| resource.kind().to_owned())
+    }
+
+    /// Define `name` as `statement`, replacing the view it named before, in
+    /// one transaction so a reader sees the old view or the new one.
+    pub async fn replace(&self, name: &ViewName, statement: &str) -> Result<(), String> {
+        let mut connection = self.project_store.connect_exclusive().await?;
+        connection.begin_transaction().await?;
+        let replaced = Self::define(&mut connection, name, statement).await;
+        connection
+            .finish_transaction(replaced, "curation view publication")
+            .await
+    }
+
+    async fn define(
+        connection: &mut ProjectConnection,
+        name: &ViewName,
+        statement: &str,
+    ) -> Result<(), String> {
+        connection
+            .execute_update_sql(&format!("DROP VIEW IF EXISTS {name}"))
+            .await?;
+        connection
+            .execute_update_sql(&format!("CREATE VIEW {name} AS {statement}"))
+            .await
+    }
+
+    pub async fn drop(&self, name: &ViewName) -> Result<(), String> {
+        self.project_store
+            .connect_exclusive()
+            .await?
+            .execute_update_sql(&format!("DROP VIEW IF EXISTS {name}"))
+            .await
     }
 }
 

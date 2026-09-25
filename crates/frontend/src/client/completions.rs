@@ -1,14 +1,11 @@
 //! Browser-owned chat completions: one streamed provider request, decoded
 //! into the assistant message and tool calls it carried.
-use super::{CommandError, proxy::ProxyClient};
+use super::proxy::ProxyClient;
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use spiral_robotics_common::{
-    providers::LlmProvider,
-    workflow::conversation::{ProviderMessage, ProviderToolCall},
-};
+use spiral_robotics_common::providers::{LlmProvider, ProviderMessage, ProviderToolCall};
 use std::collections::BTreeSet;
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -73,10 +70,6 @@ impl ReasoningEffort {
 /// name no project; a view that stops caring cancels them by unmounting.
 pub(crate) struct ModelClient;
 impl ModelClient {
-    pub(crate) async fn configured() -> Result<bool, CommandError> {
-        Ok(ProxyClient::providers().await?.llm().is_some())
-    }
-
     pub(crate) async fn complete(
         request: ModelRequest,
         mut on_text: impl FnMut(&str),

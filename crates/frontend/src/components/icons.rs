@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 
 pub(crate) use spiral_robotics_ui::{
     CheckIcon, PauseIcon, PlayIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon,
-    StepForwardIcon, StopIcon, ZoomInIcon, ZoomOutIcon,
+    StepForwardIcon, ZoomInIcon, ZoomOutIcon,
 };
 
 /// The robot explorer: a compact arm silhouette rather than a generic sidebar.
@@ -56,9 +56,9 @@ pub(crate) fn DataIcon() -> Element {
     }
 }
 
-/// Relation lineage: two Spiral tables converging on a derived result.
+/// A graph: two sources converging on a derived result.
 #[component]
-pub(crate) fn WorkflowIcon() -> Element {
+pub(crate) fn GraphIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             circle { cx: "3", cy: "4", r: "1.5" }
@@ -88,16 +88,6 @@ pub(crate) fn QueryNodeIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M2.5 3h11L9.25 8v4l-2.5 1V8L2.5 3Z" }
-        }
-    }
-}
-
-#[component]
-pub(crate) fn ResultNodeIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            rect { x: "2.5", y: "2.5", width: "11", height: "11", rx: "1" }
-            path { d: "M2.5 6h11M2.5 9.75h11M6.25 6v7.5" }
         }
     }
 }
@@ -199,46 +189,6 @@ pub(crate) fn JoinStageIcon() -> Element {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             circle { cx: "6", cy: "8", r: "3.75" }
             circle { cx: "10", cy: "8", r: "3.75" }
-        }
-    }
-}
-
-/// Send a message: an upward arrow, the direction the thread grows.
-#[component]
-pub(crate) fn SendIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M8 12.75V3.5M4.25 7.25 8 3.5l3.75 3.75" }
-        }
-    }
-}
-
-/// The Assistant conversation.
-#[component]
-pub(crate) fn ConversationIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 11H7.5l-3 2.5V11H4a1.5 1.5 0 0 1-1.5-1.5v-5Z" }
-        }
-    }
-}
-
-/// The SQL definition.
-#[component]
-pub(crate) fn SqlIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M5.5 4 2.5 8l3 4M10.5 4l3 4-3 4M9 3 7 13" }
-        }
-    }
-}
-
-/// Stage details: a heading with two facts beneath it.
-#[component]
-pub(crate) fn DetailsIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M3 4h10M3 8h6M3 12h8" }
         }
     }
 }

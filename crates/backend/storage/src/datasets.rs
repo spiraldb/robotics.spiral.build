@@ -1,4 +1,5 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
+mod cameras;
 #[cfg(test)]
 mod catalog_tests;
 mod coverage;
@@ -65,7 +66,7 @@ impl DatasetCatalogClient {
             .map_err(|error| format!("Decoding Spiral dataset metadata: {error}"))
     }
 
-    async fn resources(&self) -> Result<Vec<ProjectResource>, String> {
+    pub(crate) async fn resources(&self) -> Result<Vec<ProjectResource>, String> {
         if self.project.is_empty() {
             return Err("Select a Spiral project".into());
         }

@@ -14,7 +14,6 @@ const MAX_MESSAGES: usize = 50;
 pub(crate) enum MessageSeverity {
     Info,
     Success,
-    Warning,
     Error,
 }
 
@@ -23,7 +22,6 @@ impl MessageSeverity {
         match self {
             Self::Info => "Info",
             Self::Success => "Success",
-            Self::Warning => "Warning",
             Self::Error => "Error",
         }
     }
@@ -32,7 +30,6 @@ impl MessageSeverity {
         match self {
             Self::Info => "message-info",
             Self::Success => "message-success",
-            Self::Warning => "message-warning",
             Self::Error => "message-error",
         }
     }
@@ -40,7 +37,7 @@ impl MessageSeverity {
     fn linger_ms(self, text: &str) -> u32 {
         let reading = 3_500 + (text.chars().count() as u32) * 55;
         let floor = match self {
-            Self::Error | Self::Warning => 8_000,
+            Self::Error => 8_000,
             Self::Info | Self::Success => 4_000,
         };
         reading.clamp(floor, 14_000)
@@ -51,7 +48,6 @@ impl MessageSeverity {
 pub(crate) enum MessageSource {
     Studio,
     Live,
-    Workflow,
     Curation,
     Training,
     Rollout,
@@ -63,7 +59,6 @@ impl MessageSource {
         match self {
             Self::Studio => "Studio",
             Self::Live => "Live",
-            Self::Workflow => "Workflow",
             Self::Curation => "Curation",
             Self::Training => "Training",
             Self::Rollout => "Rollout",

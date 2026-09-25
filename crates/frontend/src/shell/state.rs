@@ -86,13 +86,6 @@ impl StudioProjectState {
     pub(crate) fn report_info_from(&self, source: MessageSource, message: impl Into<String>) {
         self.notify(MessageNotice::new(message, MessageSeverity::Info, source));
     }
-    pub(crate) fn report_warning_from(&self, source: MessageSource, message: impl Into<String>) {
-        self.notify(MessageNotice::new(
-            message,
-            MessageSeverity::Warning,
-            source,
-        ));
-    }
     fn notify(&self, notice: MessageNotice) {
         let mut notifications = self.notifications;
         notifications.write().push(notice, Self::now_ms());

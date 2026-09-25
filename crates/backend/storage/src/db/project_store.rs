@@ -260,22 +260,6 @@ impl ProjectConnection {
             .map_err(|error| format!("checking Spiral table {target}: {error}"))
     }
 
-    /// Run a compiled read with one recording UUID bound as $1.
-    pub async fn execute_query_for_recording(
-        &mut self,
-        sql: &str,
-        episode: &spiral_robotics_common::datasets::EpisodeSelection,
-    ) -> Result<RecordBatchStream, String> {
-        let statement = crate::datasets::EpisodeTopicQuery::for_episode(
-            episode.dataset(),
-            episode.episode_id(),
-            sql.to_owned(),
-        )?
-        .into_statement();
-        self.query(statement)
-            .await
-            .map_err(|error| error.to_string())
-    }
     pub async fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
         self.execute_update(sql.into())
             .await
@@ -417,6 +401,25 @@ impl ProjectStore {
             database,
             async_operation_gate: Arc::new(tokio::sync::RwLock::new(())),
         })
+    }
+
+    /// A project whose Spiral is the driver's in-memory engine and whose
+    /// catalog endpoint is unreachable, so a test never touches a real project.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn in_memory() -> Self {
+        let settings = crate::SpiralConnectionSettings::new(
+            "http://localhost:1".into(),
+            "http://localhost:2".into(),
+        )
+        .expect("fixed test endpoints")
+        .with_project("contract")
+        .expect("a fixed test project");
+        Self::new(
+            crate::SpiralConnection::new(settings, crate::SpiralAccessPublisher::new().1),
+            "contract".into(),
+            Arc::new(crate::AdbcDatabase::memory()),
+        )
+        .expect("a fixed test prefix")
     }
 
     pub(crate) fn dataset_catalog(&self) -> &crate::datasets::DatasetCatalogClient {

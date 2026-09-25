@@ -1,6 +1,7 @@
-//! The dataset node's workspace: name the dataset the graph reads, then walk
-//! the episodes it is interpreted over and watch one with the Data view's own
-//! player, so a curation starts from the recording rather than from a table.
+//! The dataset node: the step it starts every path with, and its workspace —
+//! name the dataset the graph reads, then walk the episodes it is interpreted
+//! over and watch one with the Data view's own player, so a curation starts
+//! from the recording rather than from a table.
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, DatasetSummary};
 use spiral_robotics_ui::{
@@ -10,6 +11,7 @@ use spiral_robotics_ui::{
 
 use super::super::document::{CurationGraph, EpisodeFact};
 use super::super::episode_tabs::{EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes};
+use super::super::path::{PathError, PathFragment, PathStep, Relation, StepSql};
 use super::super::poster::{PosterCut, PosterFrames, StillCamera};
 use super::super::review::{
     Counted, EvidenceHeading, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SliceShape,
@@ -23,6 +25,35 @@ use crate::components::icons::SpinnerIcon;
 
 /// The name a graph carries until it has a dataset to take one from.
 const UNTITLED: &str = "Untitled curation";
+
+/// Every episode of the dataset as one whole interval, from its first message
+/// to its last, with the facts Spiral records for it.
+impl PathFragment for DatasetSelection {
+    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+        let facts = EpisodeFact::ALL
+            .iter()
+            .map(|fact| format!("{} AS {}", fact.expression(), fact.key()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let members = step
+            .source()
+            .members("id")
+            .map(|admits| format!(" WHERE {admits}"))
+            .unwrap_or_default();
+        let entry = format!(
+            "{} AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, \
+             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts} \
+             FROM ({}) listed{members})",
+            step.name(),
+            Episode::listing_sql(self),
+        );
+        let properties = EpisodeFact::ALL.iter().map(|fact| fact.key()).collect();
+        Ok(StepSql::new(
+            vec![entry],
+            Relation::new(step.name(), properties),
+        ))
+    }
+}
 
 #[component]
 pub(super) fn DatasetWorkspace(controller: CurationController) -> Element {
@@ -41,7 +72,7 @@ pub(super) fn DatasetWorkspace(controller: CurationController) -> Element {
 }
 
 /// A graph without a dataset measures nothing, so the empty workspace asks
-/// for one in the same words Curation and Workflow do.
+/// for one.
 #[component]
 fn DatasetChoice(controller: CurationController) -> Element {
     let chosen = use_signal(|| None::<DatasetSummary>);

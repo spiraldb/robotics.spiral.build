@@ -1,11 +1,30 @@
 //! Resolve native camera bindings using the dataset catalog and Arrow schemas.
 use crate::StorageManager;
 use arrow_schema::DataType;
-use spiral_robotics_common::datasets::DatasetInspection;
-use spiral_robotics_common::workflow::camera::CameraBinding;
+use serde::Serialize;
+use spiral_robotics_common::datasets::{DatasetInspection, TopicRevision};
+
+/// One recorded camera topic whose messages carry encoded video bytes, and
+/// where in each message they are.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CameraBinding {
+    topic: String,
+    revision: TopicRevision,
+    field: Vec<String>,
+}
+impl CameraBinding {
+    fn new(topic: String, revision: TopicRevision) -> Self {
+        Self {
+            topic,
+            revision,
+            field: vec!["value".into(), "data".into()],
+        }
+    }
+}
 
 impl StorageManager {
-    pub async fn workflow_cameras(
+    /// The camera topics of a dataset that can be read as video.
+    pub async fn dataset_cameras(
         &self,
         inspection: &DatasetInspection,
     ) -> Result<Vec<CameraBinding>, String> {

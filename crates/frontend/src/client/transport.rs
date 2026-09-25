@@ -17,9 +17,6 @@ impl CommandError {
 
     pub(crate) fn recovery_guidance(&self) -> &'static str {
         match self.code() {
-            CommandFailureCode::IncompatibleWorkflow => {
-                "This Studio build cannot open the saved Workflow. Update Studio before retrying."
-            }
             CommandFailureCode::StaleProject => {
                 "Studio's saved connection changed. Reload this view to continue."
             }

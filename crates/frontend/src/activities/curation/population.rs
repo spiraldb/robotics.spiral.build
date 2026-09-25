@@ -3,19 +3,22 @@
 //! A curation is shaped against an interpretive sample — the first hundred
 //! episodes its dataset lists — so every node answers while the graph is
 //! still being built. The dataset hands on those episodes whole; a
-//! measurement hands on what it measured over what it received; a Select
-//! hands on the part its rule keeps. Any population reads out as slices, one
-//! part of one episode each, which is what training is given.
-use super::document::{
-    CurationGraph, CurationNode, CurationNodeKind, MomentRow, Selection, SubtaskRow,
-};
+//! measurement hands on what it measured over what it received — a compiled
+//! one, what its preview read; a Select hands on the part its rule keeps. Any
+//! population reads out as slices, one part of one episode each, which is what
+//! a published view holds one row per.
+use super::document::{CurationGraph, CurationNode, CurationNodeKind, Selection, SubtaskRow};
+use super::moments::Moment;
+use super::preview::PreviewReads;
 use crate::activities::episode::Episode;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
 /// How many of a dataset's episodes interpretive execution reads.
 pub(super) const INTERPRETED_EPISODES: usize = 100;
 
-/// Two moments this close are one stretch of recording.
+/// Two moments this close are one stretch of recording. A moment ends where
+/// the next frame starts, so touching moments share their boundary exactly;
+/// the published view joins them on that equality.
 const TOUCHING_SECONDS: f64 = 1e-6;
 
 /// The episodes a curation is shaped against: the first the dataset lists,
@@ -80,8 +83,9 @@ pub(super) enum Population {
         rows: Vec<SubtaskRow>,
         within: Option<Vec<Slice>>,
     },
-    /// Scored moments of one detection, in the order it stored them.
-    Moments(Vec<MomentRow>),
+    /// Scored moments of one detection, episode by episode in sample order,
+    /// each episode's in time order.
+    Moments(Vec<Moment>),
 }
 
 impl Population {
@@ -90,7 +94,7 @@ impl Population {
         let mentioned: Vec<&EpisodeId> = match self {
             Self::Episodes(episodes) => episodes.iter().collect(),
             Self::Subtasks { rows, .. } => rows.iter().map(SubtaskRow::episode).collect(),
-            Self::Moments(rows) => rows.iter().map(MomentRow::episode).collect(),
+            Self::Moments(rows) => rows.iter().map(Moment::episode).collect(),
         };
         let mut episodes = Vec::<EpisodeId>::new();
         for episode in mentioned {
@@ -138,15 +142,10 @@ impl Population {
                 .collect(),
             Self::Moments(rows) => {
                 let mut slices = Vec::<Slice>::new();
-                for row in rows {
+                for slice in rows.iter().map(Slice::of_moment) {
                     match slices.last_mut() {
-                        Some(last)
-                            if last.episode == *row.episode()
-                                && row.start_time() - last.end <= TOUCHING_SECONDS =>
-                        {
-                            last.end = last.end.max(row.end_time());
-                        }
-                        _ => slices.push(Slice::of_moment(row)),
+                        Some(last) if last.continues_into(&slice) => last.extend_to(&slice),
+                        _ => slices.push(slice),
                     }
                 }
                 slices
@@ -181,8 +180,8 @@ impl Slice {
         let end = sample.duration(episode).unwrap_or_default().max(0.0);
         Self::new(episode.clone(), 0.0, end, None)
     }
-    /// One scored moment's second of recording.
-    pub(super) fn of_moment(row: &MomentRow) -> Self {
+    /// One scored moment's stretch of recording.
+    pub(super) fn of_moment(row: &Moment) -> Self {
         Self::new(
             row.episode().clone(),
             row.start_time(),
@@ -214,6 +213,14 @@ impl Slice {
     pub(super) fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
+    /// Whether `next` starts where this slice ends, in the same episode.
+    pub(super) fn continues_into(&self, next: &Self) -> bool {
+        self.episode == next.episode && next.start - self.end <= TOUCHING_SECONDS
+    }
+    /// Run this slice on to where `next` ends.
+    pub(super) fn extend_to(&mut self, next: &Self) {
+        self.end = self.end.max(next.end);
+    }
     /// The part of this slice that `other` also covers, under this slice's
     /// words; nothing when they share no time.
     fn overlap(&self, other: &Self) -> Option<Self> {
@@ -224,15 +231,31 @@ impl Slice {
     }
 }
 
-/// Reads what each node of one graph hands on over one sample.
+/// Reads what each node of one graph hands on over one sample, and what the
+/// preview has read over it.
 pub(super) struct PopulationReader<'a> {
     graph: &'a CurationGraph,
     sample: &'a EpisodeSample,
+    reads: &'a PreviewReads,
 }
 
 impl<'a> PopulationReader<'a> {
-    pub(super) fn new(graph: &'a CurationGraph, sample: &'a EpisodeSample) -> Self {
-        Self { graph, sample }
+    pub(super) fn new(
+        graph: &'a CurationGraph,
+        sample: &'a EpisodeSample,
+        reads: &'a PreviewReads,
+    ) -> Self {
+        Self {
+            graph,
+            sample,
+            reads,
+        }
+    }
+    pub(super) fn sample(&self) -> &EpisodeSample {
+        self.sample
+    }
+    pub(super) fn reads(&self) -> &PreviewReads {
+        self.reads
     }
     /// What `node` hands on. A node the graph does not hold hands on nothing.
     pub(super) fn of(&self, node: &str) -> Population {
@@ -276,16 +299,16 @@ impl<'a> PopulationReader<'a> {
             CurationNodeKind::FindSimilarSubtasks(_) | CurationNodeKind::GroupSimilarSubtasks => {
                 self.input(node)
             }
-            CurationNodeKind::IdentifyUnproductiveMoments(_) => {
-                let input = self.input(node).episodes();
-                Population::Moments(
-                    self.graph
-                        .moments_for(node)
-                        .filter(|row| input.contains(row.episode()))
-                        .cloned()
-                        .collect(),
-                )
-            }
+            // The preview already cut each episode's moments to what reached
+            // the node; an episode it has not read yet holds none.
+            CurationNodeKind::IdentifyUnproductiveMoments(_) => Population::Moments(
+                self.input(node)
+                    .episodes()
+                    .iter()
+                    .flat_map(|episode| self.reads.moments(node, episode))
+                    .cloned()
+                    .collect(),
+            ),
             CurationNodeKind::Select(selection) => self.select(node, selection),
         }
     }
@@ -327,7 +350,7 @@ impl<'a> PopulationReader<'a> {
             }
             Population::Moments(rows) => Population::Moments(
                 rows.into_iter()
-                    .filter(|row| selection.keeps_moment(row.velocity()))
+                    .filter(|row| selection.keeps_moment(row.pace()))
                     .collect(),
             ),
         }
@@ -341,6 +364,32 @@ mod tests {
         SubtaskAssignment, SubtaskCategory, SubtaskGrouping, SubtaskRanking, SubtaskSearch,
     };
     use super::*;
+
+    /// A preview that has read nothing.
+    fn unread() -> PreviewReads {
+        PreviewReads::default()
+    }
+
+    /// A preview that read one episode's moments for `node`, one per
+    /// `(start, pace)`, each a second long.
+    fn moments_read(
+        node: &str,
+        episode: &EpisodeId,
+        moments: &[(f64, Option<f64>)],
+    ) -> PreviewReads {
+        let mut reads = PreviewReads::default();
+        reads.record(
+            node,
+            episode,
+            Ok(moments
+                .iter()
+                .map(|(start, pace)| {
+                    Moment::new(episode.clone(), (*start, start + 1.0), *pace).unwrap()
+                })
+                .collect()),
+        );
+        reads
+    }
 
     fn sample() -> EpisodeSample {
         EpisodeSample::fixture(vec![
@@ -378,7 +427,8 @@ mod tests {
             },
         );
         let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample);
+        let reads = unread();
+        let reader = PopulationReader::new(&graph, &sample, &reads);
         assert_eq!(reader.of(DATASET_NODE_ID).len(), 3);
         assert_eq!(
             reader.of(&long).episodes(),
@@ -421,7 +471,8 @@ mod tests {
                 .unwrap();
         }
         let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample);
+        let reads = unread();
+        let reader = PopulationReader::new(&graph, &sample, &reads);
         // Episode 2 was annotated before the Select above tightened; its rows
         // are kept in the document but no longer reach anything.
         assert_eq!(reader.of(&annotate).episodes(), [EpisodeId::fixture(1)]);
@@ -496,7 +547,8 @@ mod tests {
         let close = select(&mut graph, &search, Selection::Similar { minimum: 0.5 });
 
         let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample);
+        let reads = unread();
+        let reader = PopulationReader::new(&graph, &sample, &reads);
         assert_eq!(reader.of(&folds).subtasks(), &rows[1..]);
         assert_eq!(reader.of(&search).subtasks(), &rows[1..]);
         assert_eq!(reader.of(&close).subtasks(), &rows[1..]);
@@ -507,7 +559,8 @@ mod tests {
         {
             config.set_query("smooth the cloth");
         }
-        let reader = PopulationReader::new(&graph, &sample);
+        let reads = unread();
+        let reader = PopulationReader::new(&graph, &sample, &reads);
         assert!(reader.of(&close).subtasks().is_empty());
     }
 
@@ -521,21 +574,16 @@ mod tests {
             )
             .unwrap();
         let episode = EpisodeId::fixture(1);
-        let moment = |start: f64, velocity: Option<f64>| {
-            MomentRow::new(&detect, episode.clone(), (start, start + 1.0), velocity).unwrap()
-        };
-        graph
-            .replace_episode_moments(
-                &detect,
-                &episode,
-                vec![
-                    moment(0.0, Some(0.4)),
-                    moment(1.0, None),
-                    moment(2.0, Some(-0.1)),
-                    moment(3.0, Some(0.2)),
-                ],
-            )
-            .unwrap();
+        let reads = moments_read(
+            &detect,
+            &episode,
+            &[
+                (0.0, Some(0.4)),
+                (1.0, None),
+                (2.0, Some(-0.1)),
+                (3.0, Some(0.2)),
+            ],
+        );
         let moving = select(&mut graph, &detect, Selection::Progressing { minimum: 0.0 });
         // A second Select of the same progress would only repeat this one;
         // breaking down what is left is what follows.
@@ -548,7 +596,7 @@ mod tests {
             ["Break down subtasks"]
         );
         let sample = sample();
-        let slices = PopulationReader::new(&graph, &sample)
+        let slices = PopulationReader::new(&graph, &sample, &reads)
             .of(&moving)
             .slices(&sample);
         assert_eq!(
@@ -570,27 +618,16 @@ mod tests {
             )
             .unwrap();
         let episode = EpisodeId::fixture(1);
-        let moment = |start: f64, velocity: f64| {
-            MomentRow::new(
-                &detect,
-                episode.clone(),
-                (start, start + 1.0),
-                Some(velocity),
-            )
-            .unwrap()
-        };
         // Seconds 0–2 and 4–6 progress; 2–4 stall.
-        graph
-            .replace_episode_moments(
-                &detect,
-                &episode,
-                [0.4, 0.3, -0.1, -0.2, 0.5, 0.6]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(second, velocity)| moment(second as f64, velocity))
-                    .collect(),
-            )
-            .unwrap();
+        let reads = moments_read(
+            &detect,
+            &episode,
+            &[0.4, 0.3, -0.1, -0.2, 0.5, 0.6]
+                .into_iter()
+                .enumerate()
+                .map(|(second, pace)| (second as f64, Some(pace)))
+                .collect::<Vec<_>>(),
+        );
         let moving = select(&mut graph, &detect, Selection::Progressing { minimum: 0.0 });
         let annotate = graph
             .add_child(
@@ -613,7 +650,7 @@ mod tests {
         assert_eq!(graph.subtask_source(&group), Some(annotate.as_str()));
 
         let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample);
+        let reader = PopulationReader::new(&graph, &sample, &reads);
         let broken_down = reader.of(&annotate);
         // The pause lies wholly in the stall, so it is not handed on.
         assert_eq!(broken_down.subtasks(), [rows[0].clone(), rows[2].clone()]);
@@ -636,5 +673,39 @@ mod tests {
             reader.of(&group).slices(&sample),
             broken_down.slices(&sample)
         );
+    }
+
+    #[test]
+    fn moments_reach_only_the_episodes_that_reach_the_detection() {
+        let mut graph = CurationGraph::new(None);
+        let long = select(
+            &mut graph,
+            DATASET_NODE_ID,
+            Selection::Episodes {
+                fact: EpisodeFact::DurationSeconds,
+                comparison: Comparison::AtLeast,
+                value: 20.0,
+            },
+        );
+        let detect = graph
+            .add_child(
+                &long,
+                CurationNodeKind::IdentifyUnproductiveMoments(MomentDetection::default()),
+            )
+            .unwrap();
+        // Episode 2 was read before the Select above tightened; it no longer
+        // reaches the detection, so its moments are not handed on.
+        let mut reads = moments_read(&detect, &EpisodeId::fixture(1), &[(0.0, Some(0.5))]);
+        reads.record(
+            &detect,
+            &EpisodeId::fixture(2),
+            Ok(vec![
+                Moment::new(EpisodeId::fixture(2), (0.0, 1.0), None).unwrap(),
+            ]),
+        );
+        let sample = sample();
+        let moments = PopulationReader::new(&graph, &sample, &reads).of(&detect);
+        assert_eq!(moments.episodes(), [EpisodeId::fixture(1)]);
+        assert_eq!(moments.len(), 1);
     }
 }

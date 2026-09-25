@@ -1,16 +1,22 @@
 //! Identify unproductive moments: score every episode that reaches the node
-//! with the native progress model, and keep each second of it as a moment
-//! with the progress it made.
+//! with the native progress model, and keep each scored frame as a moment
+//! with the pace it made.
 //!
 //! This node measures and never decides. What counts as unproductive is the
 //! threshold of a Select placed after it, which reads the same moments and
-//! draws them with `MomentEvidence`, the one recording view both share.
+//! draws them with `MomentEvidence`, the one recording view both share. What
+//! the node reads is its path's statement run on one episode at a time, held
+//! for the session.
+mod moment;
 mod scoring;
 
-use super::document::{CurationNode, CurationNodeKind, MomentDetection, MomentRow, ProgressCurve};
+pub(super) use moment::Moment;
+pub(super) use scoring::ProgressScorer;
+
 use super::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
+use super::path::{CurationPath, PathSource};
+use super::population::Population;
 use super::poster::{PosterCut, PosterFrames, PosterStill};
-use super::rerun::ConfirmedRerun;
 use super::review::{
     Counted, EvidenceHeading, FailedEpisodes, IndexBar, NodeBar, NodeNotes, NodeReach, RowStanding,
     SliceEntry, SliceFace, SliceShape, SubtaskReview, TabStop, TraceLine,
@@ -23,72 +29,81 @@ use crate::components::timeline::{
     NumericReading, NumericTrack, TimelineInterval, TimelineSample, TimelineTrack,
 };
 use crate::format::ClockPresentation as _;
-use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use scoring::MomentPass;
-use spiral_robotics_common::curation::progress::ProgressScorer;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone};
+use std::collections::BTreeMap;
 
-/// The episodes reaching one detection node, and what it holds for each.
+/// The episodes reaching one detection node, and what its preview holds for
+/// each: the moments it read, by episode, and the episodes it read or could
+/// not.
 #[derive(Clone, PartialEq)]
 struct DetectionInput {
     episodes: Vec<Episode>,
-    moments: Vec<MomentRow>,
-    settings: MomentDetection,
+    moments: BTreeMap<EpisodeId, Vec<Moment>>,
+    read: Vec<EpisodeId>,
+    failed: Vec<(EpisodeId, String)>,
 }
 
 impl DetectionInput {
     fn of(controller: CurationController, node: &str) -> Option<Self> {
         let sample = controller.sample()?;
-        let (input, _) = controller.populations(node)?;
-        controller.with_payload(|payload| {
-            let settings = match payload.node(node).map(CurationNode::kind) {
-                Some(CurationNodeKind::IdentifyUnproductiveMoments(settings)) => settings.clone(),
-                _ => return None,
-            };
-            let episodes = input
-                .episodes()
+        let (input, output) = controller.populations(node)?;
+        let episodes = input
+            .episodes()
+            .iter()
+            .filter_map(|id| sample.episode(id).cloned())
+            .collect::<Vec<_>>();
+        let (read, failed) = controller.with_reads(|reads| {
+            let read = episodes
                 .iter()
-                .filter_map(|id| sample.episode(id).cloned())
-                .collect::<Vec<_>>();
-            let moments = payload
-                .moments_for(node)
-                .filter(|row| episodes.iter().any(|episode| episode.id() == row.episode()))
+                .map(Episode::id)
+                .filter(|id| reads.has_read(node, id))
                 .cloned()
                 .collect();
-            Some(Self {
-                episodes,
-                moments,
-                settings,
-            })
+            let failed = episodes
+                .iter()
+                .filter_map(|episode| {
+                    let reason = reads.failure(node, episode.id())?;
+                    Some((episode.id().clone(), reason.to_owned()))
+                })
+                .collect();
+            (read, failed)
+        });
+        let mut moments = BTreeMap::<EpisodeId, Vec<Moment>>::new();
+        if let Population::Moments(read) = output {
+            for moment in read {
+                moments
+                    .entry(moment.episode().clone())
+                    .or_default()
+                    .push(moment);
+            }
+        }
+        Some(Self {
+            episodes,
+            moments,
+            read,
+            failed,
         })
     }
+    /// The episodes the preview has not read yet, failed ones included.
     fn pending(&self) -> Vec<Episode> {
         self.episodes
             .iter()
-            .filter(|episode| !self.settings.is_completed(episode.id()))
+            .filter(|episode| !self.read.contains(episode.id()))
             .cloned()
             .collect()
     }
     fn failed(&self) -> Vec<Episode> {
         self.episodes
             .iter()
-            .filter(|episode| {
-                self.settings
-                    .failed_episodes()
-                    .iter()
-                    .any(|failure| failure.episode() == episode.id())
-            })
+            .filter(|episode| self.failed.iter().any(|(id, _)| id == episode.id()))
             .cloned()
             .collect()
     }
-    fn moments_of(&self, episode: &EpisodeId) -> Vec<MomentRow> {
-        self.moments
-            .iter()
-            .filter(|row| row.episode() == episode)
-            .cloned()
-            .collect()
+    fn moments_of(&self, episode: &EpisodeId) -> &[Moment] {
+        self.moments.get(episode).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -116,20 +131,16 @@ impl DetectionInput {
         let mut failed = Vec::new();
         let mut scored = Vec::new();
         for episode in &self.episodes {
-            let failure = self
-                .settings
-                .failed_episodes()
-                .iter()
-                .find(|failure| failure.episode() == episode.id());
-            if let Some(failure) = failure {
+            let failure = self.failed.iter().find(|(id, _)| id == episode.id());
+            if let Some((_, reason)) = failure {
                 failed.push(ListedEpisode::Failed {
                     episode: episode.clone(),
-                    reason: failure.reason().to_owned(),
+                    reason: reason.clone(),
                 });
-            } else if self.settings.is_completed(episode.id()) {
+            } else if self.read.contains(episode.id()) {
                 scored.push(ListedEpisode::Scored {
                     episode: episode.clone(),
-                    pace: Pace::mean(&self.moments_of(episode.id())),
+                    pace: Pace::mean(self.moments_of(episode.id())),
                 });
             }
         }
@@ -140,30 +151,23 @@ impl DetectionInput {
         scored.sort_by(|left, right| slowest(left).total_cmp(&slowest(right)));
         failed.into_iter().chain(scored).collect()
     }
-    /// The episode's pace across its recording, drawn small in its row: its
-    /// finer curve when the detection kept one, else its moments.
+    /// The episode's pace across its recording, drawn small in its row.
     fn trace(&self, episode: &Episode) -> TraceLine {
         let duration = episode
             .facts()
             .duration_seconds()
             .unwrap_or_default()
             .max(f64::EPSILON);
-        let points = match self.settings.curve(episode.id()) {
-            Some(curve) => curve
-                .samples()
-                .map(|(seconds, value)| (seconds / duration, value))
-                .collect(),
-            None => self
-                .moments_of(episode.id())
-                .iter()
-                .map(|row| {
-                    (
-                        f64::midpoint(row.start_time(), row.end_time()) / duration,
-                        row.velocity(),
-                    )
-                })
-                .collect(),
-        };
+        let points = self
+            .moments_of(episode.id())
+            .iter()
+            .map(|row| {
+                (
+                    f64::midpoint(row.start_time(), row.end_time()) / duration,
+                    row.pace(),
+                )
+            })
+            .collect();
         TraceLine::new(points, Pace::TRACE_DOMAIN, 1.0)
     }
 }
@@ -171,7 +175,6 @@ impl DetectionInput {
 /// The workspace shown for a selected Identify unproductive moments node.
 #[component]
 pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -> Element {
-    let studio = StudioProjectState::current();
     let tabs = OpenEpisodes::use_open();
     // The first episode listed — the slowest scored one, or before anything
     // is scored the first episode at all — opens by itself, so the recording
@@ -187,18 +190,26 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
         });
         tabs.open_first(opening.map(|episode| (episode, None)));
     });
+    // The preview reads this node's path, the same statement a published
+    // view would run, with one episode bound at a time.
+    let statement = controller.with_payload(|payload| {
+        CurationPath::to(payload, &node).and_then(|path| path.statement(PathSource::Preview))
+    });
     // The pass is the curation's, not this view's: choosing another node
     // leaves it scoring. Stop asks it to score no further episode, and the
     // recording being scored still lands.
     let run = controller.run_state(&node);
     let start = {
         let node = node.clone();
+        let statement = statement.clone().ok();
         move |episodes: Vec<Episode>| {
-            if episodes.is_empty() {
+            let Some(statement) = statement.clone().filter(|_| !episodes.is_empty()) else {
                 return;
-            }
+            };
             controller.start_run(&node, move |run| async move {
-                MomentPass::new(controller, studio, run).run(episodes).await;
+                MomentPass::new(controller, run, statement)
+                    .run(episodes)
+                    .await;
             });
         }
     };
@@ -215,6 +226,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     )
     .filter(|cameras| !cameras.iter().any(|topic| topic == camera))
     .map(|_| format!("Pace is read from {camera}, which this dataset does not record"));
+    let uncompiled = statement.as_ref().err().map(|error| error.message());
     let listed = input
         .as_ref()
         .map(DetectionInput::listed)
@@ -250,13 +262,8 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
     };
     let pending = input.pending();
     let failed = input.failed();
-    let scored = input.episodes.len() - pending.len();
     let unscored = pending.len() - failed.len().min(pending.len());
-    let rescore = {
-        let start = start.clone();
-        let every = input.episodes.clone();
-        move |()| start(every.clone())
-    };
+    let blocked = unsupported.is_some() || uncompiled.is_some();
     let shown = tabs.front().map(|tab| tab.episode().clone());
     let chosen = listed
         .iter()
@@ -272,7 +279,7 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                         code { "{camera}" }
                     }
                 },
-                note: NodeNotes::join([unsupported.clone(), FailedEpisodes::note(failed.len())]),
+                note: NodeNotes::join([unsupported.clone(), uncompiled.clone(), FailedEpisodes::note(failed.len())]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
                     if running {
@@ -287,25 +294,10 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                             if run == RunState::Stopping { "Stopping…" } else { "Stop" }
                         }
                     } else {
-                        // Scoring runs on this machine and costs nothing, so
-                        // it can be asked again — which also draws the finer
-                        // pace line for episodes scored before it was kept.
-                        if scored > 0 && unsupported.is_none() {
-                            ConfirmedRerun {
-                                id: "curation-moments-rescore".to_owned(),
-                                label: "Re-score all".to_owned(),
-                                question: format!(
-                                    "Score all {} episodes again? This replaces the {} moments already stored.",
-                                    input.episodes.len(),
-                                    input.moments.len(),
-                                ),
-                                on_confirm: rescore,
-                            }
-                        }
                         if !failed.is_empty() {
                             Button {
                                 purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
-                                disabled: unsupported.is_some(),
+                                disabled: blocked,
                                 title: "Score the {failed.len()} episodes that failed again",
                                 onclick: {
                                     let start = start.clone();
@@ -315,17 +307,23 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                                 "Retry failed"
                             }
                         }
-                        if !pending.is_empty() {
+                        // Scoring runs on this machine and costs nothing; what
+                        // it reads is held until the page reloads.
+                        if pending.len() > failed.len() {
                             Button {
                                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
-                                disabled: unsupported.is_some(),
-                                title: "Score the {pending.len()} episodes not yet scored",
+                                disabled: blocked,
+                                title: "Score the {unscored} episodes not yet scored",
                                 onclick: {
                                     let start = start.clone();
-                                    let pending = pending.clone();
-                                    move |_| start(pending.clone())
+                                    let fresh = pending
+                                        .iter()
+                                        .filter(|episode| !failed.contains(episode))
+                                        .cloned()
+                                        .collect::<Vec<_>>();
+                                    move |_| start(fresh.clone())
                                 },
-                                if pending.len() < input.episodes.len() { "Run {pending.len()} left" } else { "Run" }
+                                if unscored < input.episodes.len() { "Run {unscored} left" } else { "Run" }
                             }
                         }
                     }
@@ -382,13 +380,12 @@ pub(super) fn DetectionWorkspace(controller: CurationController, node: String) -
                             let Some(episode) = evidence.episodes.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
                                 return rsx! {};
                             };
-                            let moments = evidence.moments_of(episode.id());
+                            let moments = evidence.moments_of(episode.id()).to_vec();
                             let mut facts = vec![
                                 episode.facts().duration_seconds().unwrap_or_default().clock_label(),
                             ];
                             facts.extend(Pace::mean(&moments).map(|pace| format!("mean pace {}", Pace::label(pace))));
-                            let curve = evidence.settings.curve(episode.id()).cloned();
-                            rsx! { MomentEvidence { moments, curve, episode, facts } }
+                            rsx! { MomentEvidence { moments, episode, facts } }
                         },
                     }
                 },
@@ -409,12 +406,9 @@ impl Pace {
     /// little below standing still to about twice expert pace.
     const TRACE_DOMAIN: (f64, f64) = (-0.5, 2.0);
     const MEANING: &'static str = "Mean pace against expert demonstrations: 1× is expert pace, below 0 the task went backwards";
-    /// The mean over the seconds the scorer could read.
-    pub(super) fn mean(moments: &[MomentRow]) -> Option<f64> {
-        let read = moments
-            .iter()
-            .filter_map(MomentRow::velocity)
-            .collect::<Vec<_>>();
+    /// The mean over the moments the scorer could read.
+    pub(super) fn mean(moments: &[Moment]) -> Option<f64> {
+        let read = moments.iter().filter_map(Moment::pace).collect::<Vec<_>>();
         (!read.is_empty()).then(|| read.iter().sum::<f64>() / read.len() as f64)
     }
     pub(super) fn label(pace: f64) -> String {
@@ -422,17 +416,60 @@ impl Pace {
     }
 }
 
-/// One episode as its moments measured it: the recording with its progress
-/// drawn on the timeline, the stretches below `cutoff` marked as left out,
-/// and the seconds the scorer could not read marked as unknown.
+/// How one moment reads against a Select's cutoff, for the timeline to mark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MomentMark {
+    /// Not read by the scorer, and so kept.
+    Unread,
+    /// Below the cutoff, and so left out.
+    Below,
+}
+
+impl MomentMark {
+    fn of(pace: Option<f64>, cutoff: Option<f64>) -> Option<Self> {
+        match (pace, cutoff) {
+            (None, _) => Some(Self::Unread),
+            (Some(pace), Some(cutoff)) if pace < cutoff => Some(Self::Below),
+            _ => None,
+        }
+    }
+    /// The timeline's intervals: each run of touching moments marked alike
+    /// as one interval, so an episode of thousands of frames draws a few.
+    fn intervals(moments: &[Moment], cutoff: Option<f64>) -> Vec<TimelineInterval> {
+        let mut runs = Vec::<(Self, f64, f64)>::new();
+        for moment in moments {
+            let Some(mark) = Self::of(moment.pace(), cutoff) else {
+                continue;
+            };
+            match runs.last_mut() {
+                Some((last, _, end)) if *last == mark && *end == moment.start_time() => {
+                    *end = moment.end_time();
+                }
+                _ => runs.push((mark, moment.start_time(), moment.end_time())),
+            }
+        }
+        runs.into_iter()
+            .map(|(mark, start, end)| match (mark, cutoff) {
+                (Self::Unread, _) => {
+                    TimelineInterval::unknown(start, end, "Not read by the scorer, so kept")
+                }
+                (Self::Below, cutoff) => TimelineInterval::excluded(
+                    start,
+                    end,
+                    format!("Pace below {:.2}×", cutoff.unwrap_or_default()),
+                ),
+            })
+            .collect()
+    }
+}
+
+/// One episode as its moments measured it: the recording with its pace drawn
+/// on the timeline, the stretches below `cutoff` marked as left out, and the
+/// frames the scorer could not read marked as unknown.
 #[component]
 pub(super) fn MomentEvidence(
     episode: Episode,
-    moments: Vec<MomentRow>,
-    /// The episode's finer progress, drawn in place of the moments' own
-    /// values when the detection kept it.
-    #[props(default)]
-    curve: Option<ProgressCurve>,
+    moments: Vec<Moment>,
     /// What places the recording, under its name.
     #[props(default)]
     facts: Vec<String>,
@@ -443,40 +480,14 @@ pub(super) fn MomentEvidence(
     #[props(default)]
     play: Option<PlayRequest>,
 ) -> Element {
-    let samples = match &curve {
-        Some(curve) => curve
-            .samples()
-            .map(|(seconds, value)| TimelineSample::new(seconds, value.unwrap_or(f64::NAN)))
-            .collect(),
-        None => moments
-            .iter()
-            .filter_map(|row| {
-                let middle = f64::midpoint(row.start_time(), row.end_time());
-                Some(TimelineSample::new(middle, row.velocity()?))
-            })
-            .collect(),
-    };
-    let intervals = moments
+    let samples = moments
         .iter()
         .filter_map(|row| {
-            let span = (row.start_time(), row.end_time());
-            match (row.velocity(), cutoff) {
-                (None, _) => Some(TimelineInterval::unknown(
-                    span.0,
-                    span.1,
-                    "Not read by the scorer, so kept",
-                )),
-                (Some(velocity), Some(cutoff)) if velocity < cutoff => {
-                    Some(TimelineInterval::excluded(
-                        span.0,
-                        span.1,
-                        format!("Pace {velocity:.2}×, below {cutoff:.2}×"),
-                    ))
-                }
-                _ => None,
-            }
+            let middle = f64::midpoint(row.start_time(), row.end_time());
+            Some(TimelineSample::new(middle, row.pace()?))
         })
         .collect();
+    let intervals = MomentMark::intervals(&moments, cutoff);
     let track = TimelineTrack::new(
         "curation-progress",
         "Pace",
@@ -493,5 +504,30 @@ pub(super) fn MomentEvidence(
                 focus: play,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touching_moments_marked_alike_are_one_interval() {
+        let episode = EpisodeId::fixture(1);
+        let moment = |start: f64, pace: Option<f64>| {
+            Moment::new(episode.clone(), (start, start + 0.5), pace).unwrap()
+        };
+        let moments = [
+            moment(0.0, Some(0.1)),
+            moment(0.5, Some(0.2)),
+            moment(1.0, None),
+            moment(1.5, Some(0.9)),
+            moment(2.0, Some(0.1)),
+        ];
+        let marks = |cutoff| MomentMark::intervals(&moments, cutoff).len();
+        // Below 0.5: [0, 1) and [2, 2.5); unread: [1, 1.5).
+        assert_eq!(marks(Some(0.5)), 3);
+        // Nothing decides, so only the unread frame is marked.
+        assert_eq!(marks(None), 1);
     }
 }

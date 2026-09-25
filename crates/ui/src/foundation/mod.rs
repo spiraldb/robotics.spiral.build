@@ -11,9 +11,9 @@ mod styles;
 pub use focus::BrowserFocus;
 pub(crate) use focus::{RovingGroup, RovingStep};
 pub use icons::{
-    ArrowDownIcon, ArrowUpIcon, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon,
-    GripIcon, PauseIcon, PlayIcon, RefreshIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon,
-    StepBackIcon, StepForwardIcon, StopIcon, UnassignIcon, ZoomInIcon, ZoomOutIcon,
+    CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon, GripIcon, PauseIcon, PlayIcon,
+    RefreshIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon,
+    StopIcon, UnassignIcon, ZoomInIcon, ZoomOutIcon,
 };
 pub use motion::{Arrangement, Flight, Motion, Place};
 pub use remount::Remount;

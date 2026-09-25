@@ -370,54 +370,6 @@ impl TryFrom<&str> for QualifiedRelation {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn internal_results_keep_frames_beyond_the_browser_preview_limit() {
-        use arrow_array::Int64Array;
-        let batch = RecordBatch::try_from_iter([(
-            "frame_index",
-            Arc::new(Int64Array::from_iter_values(0..1_019)) as arrow_array::ArrayRef,
-        )])
-        .unwrap();
-        let stream = || {
-            RecordBatchStream::new(
-                batch.schema(),
-                Box::pin(futures::stream::iter([Ok(batch.clone())])),
-            )
-        };
-        let frames = stream().into_internal_rows_drained(1_019).await.unwrap();
-        assert_eq!(frames.rows().len(), 1_019);
-        assert!(!frames.truncated());
-        assert_eq!(frames.rows()[1_018]["frame_index"], 1_018);
-
-        let preview = stream().into_preview_drained(1_019).await.unwrap();
-        assert_eq!(preview.rows().len(), 1_000);
-        assert!(preview.truncated());
-
-        let bounded = stream().into_internal_rows_drained(1_018).await.unwrap();
-        assert_eq!(bounded.rows().len(), 1_018);
-        assert!(bounded.truncated());
-    }
-
-    #[tokio::test]
-    async fn a_preview_limit_does_not_hide_a_late_query_failure() {
-        use crate::db::database::DatabaseError;
-        use arrow_array::Int64Array;
-        let batch = RecordBatch::try_from_iter([(
-            "value",
-            Arc::new(Int64Array::from(vec![1, 2, 3])) as arrow_array::ArrayRef,
-        )])
-        .unwrap();
-        let records = RecordBatchStream::new(
-            batch.schema(),
-            Box::pin(futures::stream::iter([
-                Ok(batch),
-                Err(DatabaseError::invalid_input("late inference failure")),
-            ])),
-        );
-        let error = records.into_preview_drained(1).await.unwrap_err();
-        assert!(error.contains("late inference failure"), "{error}");
-    }
-
     #[test]
     fn generated_values_are_escaped_in_one_place() {
         fn assert_single_literal(sql: &str, value: &str) {
@@ -542,42 +494,9 @@ impl RecordBatchStream {
         writer.finish().map_err(|error| error.to_string())?;
         writer.into_inner().map_err(|error| error.to_string())
     }
-
-    /// A preview limit bounds the browser payload, not query execution. Drain
-    /// the remaining batches to finish inference and surface late errors.
-    pub async fn into_preview_drained(
-        self,
-        max_rows: usize,
-    ) -> Result<SpiralQuerySnapshot, String> {
-        QueryLimits::new(max_rows.clamp(1, MAX_QUERY_ROWS), MAX_QUERY_RESPONSE_BYTES)
-            .collect_drained(self)
-            .await
-    }
-
-    /// Collect a bounded internal result without the browser preview's row cap.
-    /// Drain the query so late execution failures still reach the caller.
-    pub async fn into_internal_rows_drained(
-        self,
-        max_rows: usize,
-    ) -> Result<SpiralQuerySnapshot, String> {
-        QueryLimits::new(max_rows, MAX_INTERNAL_QUERY_RESPONSE_BYTES)
-            .collect_drained(self)
-            .await
-    }
 }
 
 impl QueryLimits {
-    async fn collect_drained(
-        self,
-        mut records: RecordBatchStream,
-    ) -> Result<SpiralQuerySnapshot, String> {
-        let result = self.collect_preview(&mut records).await?;
-        while let Some(batch) = records.next().await {
-            batch.map_err(|error| error.to_string())?;
-        }
-        Ok(result)
-    }
-
     async fn collect(self, mut records: RecordBatchStream) -> Result<SpiralQuerySnapshot, String> {
         self.collect_preview(&mut records).await
     }

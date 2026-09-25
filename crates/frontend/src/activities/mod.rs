@@ -7,4 +7,3 @@ pub(crate) mod live;
 pub(crate) mod rollout;
 pub(crate) mod settings;
 pub(crate) mod training;
-pub(crate) mod workflow;

@@ -51,9 +51,9 @@ frontend. `--fullstack` tells DX to build and watch both processes, without enab
 Dioxus SSR or hydration. The frontend and backend each own their executable;
 DX builds them together using the `@client` and `@server` package selections.
 
-Agent orchestration belongs to the frontend: Workflow authoring, imported robot
-discovery, and Curation rule interpretation own their prompts, model responses,
-and tool selection in the browser. `GET /api/providers` tells the frontend which
+Agent orchestration belongs to the frontend: imported robot discovery and
+Curation's model calls own their prompts, model responses, and tool selection
+in the browser. `GET /api/providers` tells the frontend which
 model provider is configured; it constructs provider requests and interprets
 responses. `/api/proxy` relays external HTTP requests, attaches the key Studio
 holds for the destination's origin, and streams the responses back.
@@ -69,9 +69,7 @@ dx bundle --fullstack --release --debug-symbols false \
   @server --package spiral-robotics-backend
 ```
 
-Keep the bundle's `public` directory beside the server binary. Workflow displays
-Spiral’s structured query plans using Dioxus Flow in the browser. See
-[SQL workflow authoring](docs/workflow-authoring.md).
+Keep the bundle's `public` directory beside the server binary.
 
 Keep `--debug-symbols false` on browser builds: DX enables WASM debug symbols by
 default, and the bundled Binaryen currently fails when processing that DWARF.
@@ -101,7 +99,7 @@ alongside the backend without changing the workspace target. It uses the same
 browser implementation; only WASM registers its unit tests, and the native
 Studio server does not depend on the frontend.
 
-For a developer-local Workflow Assistant, put the provider credential in
+For developer-local model calls, put the provider credential in
 the repository root's ignored `.env.local` file. Studio reads this file
 automatically when a corresponding process value is absent, so it works
 without direnv or manually exporting secrets:
@@ -112,7 +110,7 @@ LLM_API_KEY=your-provider-key
 
 The key never reaches the browser: the relay attaches it to requests bound for
 the provider's origin. Credentials belong to Studio, independently of the
-selected project; keep them out of saved workflows, browser storage, and logs.
+selected project; keep them out of saved curations, browser storage, and logs.
 
 The default is `openai/gpt-5.6-terra` through OpenRouter, with `medium` reasoning
 effort and fast mode requested using `service_tier: "priority"`. Priority

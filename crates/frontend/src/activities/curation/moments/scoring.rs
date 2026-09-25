@@ -1,142 +1,139 @@
-//! Scoring one recording's progress and folding it into moments.
+//! Scoring progress: the pinned scorer, the step an Identify unproductive
+//! moments node adds to a path, and the preview pass that runs it one
+//! recording at a time.
 //!
-//! The backend runs the native progress model over one recording and answers
-//! with a velocity for every frame. The browser folds those frames into
-//! moments of a fixed number of frames, which is what the curation stores and
-//! what a Select keeps or leaves out: a second of recording is the smallest
-//! stretch worth training on or throwing away.
-use crate::activities::curation::document::{MomentRow, ProgressCurve};
+//! The node compiles to `spql.ai.score_progress` over the episode's camera,
+//! which answers with a velocity for every frame. Each frame becomes one
+//! moment, from its time to the next frame's, cut to the intervals that reach
+//! the node. The scorer reads whole episodes, so what it is asked never
+//! depends on anything above the node.
+use super::moment::Moment;
+use crate::activities::curation::document::MomentDetection;
+use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
 use crate::activities::curation::state::{CurationController, RunHandle};
+use crate::activities::data::DatasetClient;
 use crate::activities::episode::Episode;
-use crate::client::project::ProjectClient;
-use crate::client::transport::HttpRequest;
-use crate::shell::state::StudioProjectState;
-use spiral_robotics_common::curation::progress::{
-    ProgressFrame, ProgressScoreRequest, ProgressScoreResult,
-};
+use spiral_robotics_common::datasets::CameraVideo;
+use spiral_robotics_common::relations::EpisodeQueryRequest;
+use spiral_robotics_common::sql::SqlLiteral;
 
-/// Frames per moment: one second of the 30 fps recordings the scorer reads.
-const MOMENT_FRAMES: usize = 30;
-/// Frames per sample of the progress curve the timeline draws: six a second,
-/// fine enough to read as a line rather than as strokes between seconds.
-const CURVE_FRAMES: usize = 5;
+/// The most moments one recording's preview reads: every frame of five and a
+/// half minutes at 30 Hz, the Arrow episode query's own bound. A longer
+/// recording is refused rather than cut short.
+const MAX_MOMENTS: usize = 10_000;
 
-/// One recording's frames, scored.
-pub(super) struct ScoredEpisode(Vec<ProgressFrame>);
+/// The released, task-specific WARP checkpoint. Its velocity is progress per
+/// unit time relative to expert demonstrations; progress is normalized within
+/// one episode, never a completion probability.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::activities::curation) enum ProgressScorer {
+    WarpSimBottles,
+}
 
-impl ScoredEpisode {
-    /// Ask the backend to score one recording.
-    async fn request(episode: &Episode) -> Result<Self, String> {
-        let selection = episode.selection();
-        let result: ProgressScoreResult = ProjectClient::current()
-            .request(
-                HttpRequest::new("POST", "/api/curations/progress-score")
-                    .json(&ProgressScoreRequest::new(selection.clone())),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        if result.episode() != &selection {
-            return Err("The score belongs to a different recording.".into());
-        }
-        Ok(Self(result.frames().to_vec()))
-    }
-
-    /// Seconds between two frames, read from the last two.
-    fn frame_period(&self) -> Result<f64, String> {
-        match self.0.as_slice() {
-            [.., before, last] => Ok(Self::seconds(last) - Self::seconds(before)),
-            _ => Err("The scorer returned too few frames to read.".into()),
+impl ProgressScorer {
+    const fn model(self) -> &'static str {
+        match self {
+            Self::WarpSimBottles => {
+                "uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f"
+            }
         }
     }
-    fn seconds(frame: &ProgressFrame) -> f64 {
-        frame.timestamp_ns() as f64 / 1e9
-    }
-    /// The recording's progress `CURVE_FRAMES` frames at a time, each sample
-    /// at the middle of its frames. A frame the scorer had no support for
-    /// leaves its sample unread, as it does its moment.
-    pub(super) fn curve(&self, episode: &Episode) -> Result<ProgressCurve, String> {
-        let period = self.frame_period()?;
-        let first = self.0.first().map(Self::seconds).unwrap_or_default();
-        let values = self
-            .0
-            .chunks(CURVE_FRAMES)
-            .map(|frames| {
-                let unread = frames
-                    .iter()
-                    .any(|frame| frame.support() == 0 || !frame.velocity().is_finite());
-                (!unread).then(|| {
-                    frames.iter().map(ProgressFrame::velocity).sum::<f64>() / frames.len() as f64
-                })
-            })
-            .collect();
-        let middle = (CURVE_FRAMES as f64 - 1.0) / 2.0 * period;
-        ProgressCurve::new(
-            episode.id().clone(),
-            (first + middle, CURVE_FRAMES as f64 * period),
-            values,
-        )
-    }
-
-    /// The recording as moments of `MOMENT_FRAMES` frames. A moment starts at
-    /// its first frame's time and ends where the next begins; the last one
-    /// ends one frame period after its last frame. A frame the scorer had no
-    /// support for makes its whole moment unread.
-    pub(super) fn moments(&self, node: &str, episode: &Episode) -> Result<Vec<MomentRow>, String> {
-        let seconds = Self::seconds;
-        let period = self.frame_period()?;
-        let chunks = self.0.chunks(MOMENT_FRAMES).collect::<Vec<_>>();
-        chunks
-            .iter()
-            .enumerate()
-            .map(|(index, frames)| {
-                let start = seconds(&frames[0]);
-                let end = chunks.get(index + 1).map_or_else(
-                    || seconds(&frames[frames.len() - 1]) + period,
-                    |next| seconds(&next[0]),
-                );
-                let unread = frames
-                    .iter()
-                    .any(|frame| frame.support() == 0 || !frame.velocity().is_finite());
-                let mean =
-                    frames.iter().map(ProgressFrame::velocity).sum::<f64>() / frames.len() as f64;
-                MomentRow::new(
-                    node,
-                    episode.id().clone(),
-                    (start, end),
-                    (!unread).then_some(mean),
-                )
-            })
-            .collect()
+    /// The camera topic the checkpoint was trained on. A dataset that does not
+    /// record it cannot be scored.
+    pub(in crate::activities::curation) const fn camera(self) -> &'static str {
+        match self {
+            Self::WarpSimBottles => "/cameras/top_camera-images-rgb",
+        }
     }
 }
 
-/// One pass over a detection node's episodes, one recording at a time: the
-/// model runs on the backend's hardware, and a second request would only
-/// queue behind the first.
-pub(super) struct MomentPass {
+/// Every scored frame of every episode that reaches the node, as a moment
+/// carrying its pace; a frame the scorer had no support for carries none.
+impl PathFragment for MomentDetection {
+    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+        let input = step.input()?;
+        let (name, from) = (step.name(), input.name());
+        let scorer = ProgressScorer::WarpSimBottles;
+        let dataset = step.dataset().sql_name();
+        let episodes = format!("spql.mcap.episodes({})", SqlLiteral::text(&dataset));
+        let pace = Moment::PACE;
+        let members = std::iter::once(format!("r.id IN (SELECT episode_id FROM {from})"))
+            .chain(step.source().members("r.id"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let videos = CameraVideo::new(&dataset, scorer.camera()).videos(
+            (&format!("{name}_packets"), &format!("{name}_videos")),
+            &members,
+        );
+        // Scores are read straight from the videos and unnested before any
+        // join, as `score_progress` is read everywhere else; Spiral joins
+        // scalar columns, not lists of structs. Spiral has no LEAD or LAG,
+        // so the next frame's time is an aggregate over a one-row window.
+        let next = "MIN(f.offset_ns) OVER (PARTITION BY f.episode_id ORDER BY f.frame_index ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING)";
+        let previous = "MIN(f.offset_ns) OVER (PARTITION BY f.episode_id ORDER BY f.frame_index ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)";
+        let entries = vec![
+            videos,
+            format!(
+                "{name}_scores AS (SELECT id AS episode_id, \
+                 spql.ai.score_progress(source, model => {}) AS scores FROM {name}_videos)",
+                SqlLiteral::text(scorer.model())
+            ),
+            format!(
+                "{name}_frames AS (SELECT s.episode_id, CAST(p.timestamp_ns AS BIGINT) AS offset_ns, \
+                 p.frame_index AS frame_index, \
+                 CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS {pace} \
+                 FROM {name}_scores s CROSS JOIN LATERAL UNNEST(s.scores) p)"
+            ),
+            // A frame lasts until the next one; the last lasts as long as the
+            // one before it did. Frame times count from the episode's first
+            // message, and the relation carries the recording's clock.
+            format!(
+                "{name}_moments AS (SELECT f.episode_id, e.origin_ns + f.offset_ns AS start_ns, \
+                 e.origin_ns + COALESCE({next}, 2 * f.offset_ns - {previous}) AS end_ns, f.{pace} \
+                 FROM {name}_frames f \
+                 JOIN (SELECT id, CAST(message_start_time AS BIGINT) AS origin_ns FROM {episodes}) e ON e.id = f.episode_id)"
+            ),
+            format!(
+                "{name} AS (SELECT m.episode_id, GREATEST(m.start_ns, i.start_ns) AS start_ns, \
+                 LEAST(m.end_ns, i.end_ns) AS end_ns, m.{pace} \
+                 FROM {name}_moments m JOIN {from} i \
+                 ON i.episode_id = m.episode_id AND m.start_ns < i.end_ns AND m.end_ns > i.start_ns AND m.end_ns > m.start_ns)"
+            ),
+        ];
+        Ok(StepSql::new(
+            entries,
+            Relation::new(name, vec![pace]).publishing(pace),
+        ))
+    }
+}
+
+/// One node's preview, one recording at a time: the path's statement with the
+/// episode bound, read back as its moments. The model runs on the backend's
+/// hardware, so a second request would only queue behind the first; and
+/// Spiral cannot cancel a running query, so Stop takes effect between
+/// episodes.
+pub(in crate::activities::curation) struct MomentPass {
     controller: CurationController,
-    studio: StudioProjectState,
-    /// The run as the curation holds it: Stop clears what it wants, after
-    /// which the pass scores no further episode.
     run: RunHandle,
+    statement: String,
 }
 
 impl MomentPass {
-    pub(super) fn new(
+    pub(in crate::activities::curation) fn new(
         controller: CurationController,
-        studio: StudioProjectState,
         run: RunHandle,
+        statement: String,
     ) -> Self {
         Self {
             controller,
-            studio,
             run,
+            statement,
         }
     }
 
-    /// Score each episode, write what it found, and save after every one, so
-    /// a reload keeps every episode already scored.
-    pub(super) async fn run(self, episodes: Vec<Episode>) {
+    /// Read each episode and hold what it answered, or why it failed, for the
+    /// session. A failed episode never stops the rest.
+    pub(in crate::activities::curation) async fn run(self, episodes: Vec<Episode>) {
         let total = episodes.len();
         for (done, episode) in episodes.iter().enumerate() {
             if !self.run.wanted() {
@@ -144,111 +141,21 @@ impl MomentPass {
             }
             self.run
                 .report(format!("Scoring {} of {total} episodes", done + 1));
-            let outcome = ScoredEpisode::request(episode).await.and_then(|scored| {
-                Ok((
-                    scored.moments(self.run.node(), episode)?,
-                    scored.curve(episode)?,
-                ))
-            });
-            self.record(episode, outcome);
-            self.controller.save_when_idle(self.studio).await;
+            let read = self.read(episode).await;
+            self.controller
+                .record_moments(self.run.node(), episode.id(), read);
         }
     }
 
-    fn record(&self, episode: &Episode, outcome: Result<(Vec<MomentRow>, ProgressCurve), String>) {
-        let node = self.run.node();
-        let id = episode.id();
-        let stored = match outcome {
-            Ok((rows, curve)) => self.controller.edit(|payload| {
-                payload.replace_episode_moments(node, id, rows)?;
-                payload.record_progress_curve(node, curve)
-            }),
-            Err(reason) => self
-                .controller
-                .edit(|payload| payload.record_episode_failure(node, id, reason)),
-        };
-        if let Err(refused) = stored {
-            let _ = self
-                .controller
-                .edit(|payload| payload.record_episode_failure(node, id, refused));
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use spiral_robotics_common::datasets::EpisodeId;
-
-    fn frame(index: u32, velocity: f64, support: u32) -> ProgressFrame {
-        serde_json::from_value(serde_json::json!({
-            "frame_index": index,
-            "timestamp_ns": u64::from(index) * 1_000_000_000 / 30,
-            "velocity": velocity,
-            "progress": null,
-            "window_stride": 1,
-            "support": support,
-        }))
-        .expect("a progress frame")
-    }
-
-    #[test]
-    fn frames_fold_into_touching_one_second_moments() {
-        let episode = Episode::fixture(&EpisodeId::fixture(1), 3_000_000_000);
-        // Two and a half seconds: two full moments and a half one.
-        let frames = (0..75)
-            .map(|index| frame(index, if index < 30 { 0.2 } else { 0.4 }, 3))
-            .collect();
-        let moments = ScoredEpisode(frames).moments("detect-1", &episode).unwrap();
-        assert_eq!(moments.len(), 3);
-        assert_eq!(moments[0].start_time(), 0.0);
-        assert_eq!(moments[0].end_time(), moments[1].start_time());
-        assert!((moments[1].start_time() - 1.0).abs() < 1e-9);
-        // Frame times are whole nanoseconds, so the last end is 2.5 s to within one.
-        assert!((moments[2].end_time() - 2.5).abs() < 1e-6);
-        assert!((moments[0].velocity().unwrap() - 0.2).abs() < 1e-9);
-        assert!((moments[1].velocity().unwrap() - 0.4).abs() < 1e-9);
-    }
-
-    #[test]
-    fn frames_fold_into_six_curve_samples_a_second() {
-        let episode = Episode::fixture(&EpisodeId::fixture(1), 1_000_000_000);
-        let frames = (0..30)
-            .map(|index| {
-                frame(
-                    index,
-                    if index < 5 { 0.6 } else { 0.3 },
-                    if index == 7 { 0 } else { 2 },
-                )
-            })
-            .collect();
-        let curve = ScoredEpisode(frames).curve(&episode).unwrap();
-        let samples = curve.samples().collect::<Vec<_>>();
-        assert_eq!(samples.len(), 6);
-        // Each sample sits at the middle of its five frames.
-        assert!((samples[0].0 - 2.0 / 30.0).abs() < 1e-6);
-        assert!((samples[1].0 - samples[0].0 - 5.0 / 30.0).abs() < 1e-6);
-        assert_eq!(samples[0].1, Some(0.6));
-        assert_eq!(
-            samples[1].1, None,
-            "a frame without support leaves its sample unread"
-        );
-        assert_eq!(samples[2].1, Some(0.3));
-    }
-
-    #[test]
-    fn a_frame_without_support_leaves_its_moment_unread() {
-        let episode = Episode::fixture(&EpisodeId::fixture(1), 2_000_000_000);
-        let frames = (0..60)
-            .map(|index| frame(index, 0.3, if index == 40 { 0 } else { 2 }))
-            .collect();
-        let moments = ScoredEpisode(frames).moments("detect-1", &episode).unwrap();
-        assert_eq!(moments[0].velocity(), Some(0.3));
-        assert_eq!(moments[1].velocity(), None);
-        assert!(
-            ScoredEpisode(vec![frame(0, 0.1, 1)])
-                .moments("detect-1", &episode)
-                .is_err()
-        );
+    async fn read(&self, episode: &Episode) -> Result<Vec<Moment>, String> {
+        let stream = DatasetClient::current()
+            .run_episode_arrow_query(&EpisodeQueryRequest::new(
+                episode.selection(),
+                self.statement.clone(),
+                MAX_MOMENTS,
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        Moment::read(&stream, episode)
     }
 }

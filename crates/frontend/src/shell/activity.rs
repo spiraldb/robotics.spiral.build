@@ -9,19 +9,17 @@ pub(crate) enum Activity {
     #[default]
     Data,
     Curation,
-    Workflow,
     Training,
     Rollout,
     Settings,
 }
 
 impl Activity {
-    pub(super) const fn all() -> [Self; 7] {
+    pub(super) const fn all() -> [Self; 6] {
         [
             Self::Live,
             Self::Data,
             Self::Curation,
-            Self::Workflow,
             Self::Training,
             Self::Rollout,
             Self::Settings,
@@ -31,11 +29,10 @@ impl Activity {
     /// The activities the top bar lists, in shortcut order: the data core
     /// first, what consumes it next, and the bench that records into it
     /// last. Settings sits apart at the end of the bar.
-    pub(super) const fn primary() -> [Self; 6] {
+    pub(super) const fn primary() -> [Self; 5] {
         [
             Self::Data,
             Self::Curation,
-            Self::Workflow,
             Self::Training,
             Self::Rollout,
             Self::Live,
@@ -47,10 +44,9 @@ impl Activity {
         match self {
             Self::Data => "1",
             Self::Curation => "2",
-            Self::Workflow => "3",
-            Self::Training => "4",
-            Self::Rollout => "5",
-            Self::Live => "6",
+            Self::Training => "3",
+            Self::Rollout => "4",
+            Self::Live => "5",
             Self::Settings => ",",
         }
     }
@@ -65,7 +61,6 @@ impl Activity {
         match self {
             Self::Live => "Live",
             Self::Data => "Data",
-            Self::Workflow => "Workflow",
             Self::Curation => "Curation",
             Self::Training => "Training",
             Self::Rollout => "Rollout",

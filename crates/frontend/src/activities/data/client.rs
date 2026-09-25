@@ -101,15 +101,6 @@ impl DatasetClient {
             .request(HttpRequest::new("GET", "/api/datasets"))
     }
 
-    /// Recorded camera topics and schema details for one dataset.
-    pub(in crate::activities) fn dataset_cameras(
-        &self,
-        selection: &DatasetSelection,
-    ) -> impl Future<Output = Result<serde_json::Value, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/cameras").json(selection))
-    }
-
     pub(in crate::activities) fn episode_topics(
         &self,
         request: spiral_robotics_common::datasets::EpisodeSelection,

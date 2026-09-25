@@ -5,7 +5,7 @@
 use super::pipeline::SubtaskAnnotator;
 use super::request::{AnnotationCall, AnnotationPrompt};
 use crate::client::completions::{ModelClient, ModelRequest, ReasoningEffort};
-use spiral_robotics_common::workflow::conversation::ProviderMessage;
+use spiral_robotics_common::providers::ProviderMessage;
 
 /// Annotation over the Studio-wide LLM credential.
 pub(super) struct ProviderAnnotator;

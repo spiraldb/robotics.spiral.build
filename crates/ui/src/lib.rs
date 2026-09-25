@@ -22,8 +22,8 @@ mod foundation;
 
 pub use containers::{
     Disclosure, DisclosureProps, Menu, MenuProps, Reorder, ReorderHandle, ReorderHandleProps,
-    ReorderList, ReorderListProps, ReorderMove, SheetHeading, SheetPosition, SideSheet,
-    SideSheetProps, Tree, TreeBranch, TreeItem, TreeItemProps, TreeProps,
+    ReorderList, ReorderListProps, ReorderMove, Tree, TreeBranch, TreeItem, TreeItemProps,
+    TreeProps,
 };
 pub use controls::{
     ActionPurpose, BlockingConfirmation, BlockingConfirmationProps, Button,
@@ -34,27 +34,26 @@ pub use controls::{
     TextInput, TextInputKind, TextInputProps, Toggle, ToggleProps,
 };
 pub use display::{
-    Chip, ChipProps, ChipTone, EmptyState, EmptyStateProps, Fact, FactLayout, FactList,
-    FactListProps, FactProps, KindMark, KindMarkProps, Notice, NoticeProps, NoticeTone,
+    EmptyState, EmptyStateProps, Fact, FactLayout, FactList, FactListProps, FactProps, KindMark,
+    KindMarkProps, Notice, NoticeProps, NoticeTone,
 };
 pub use foundation::{
-    Arrangement, ArrowDownIcon, ArrowUpIcon, BrowserFocus, CheckIcon, ChevronIcon,
-    ChevronIconProps, CloseIcon, DeleteIcon, Flight, GripIcon, Motion, PauseIcon, Place, PlayIcon,
-    RefreshIcon, Remount, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon,
-    StepForwardIcon, StopIcon, UiStyles, UnassignIcon, ZoomInIcon, ZoomOutIcon,
+    Arrangement, BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon,
+    Flight, GripIcon, Motion, PauseIcon, Place, PlayIcon, RefreshIcon, Remount, SkipToEndIcon,
+    SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon, StopIcon, UiStyles, UnassignIcon,
+    ZoomInIcon, ZoomOutIcon,
 };
 
 /// Everything a surface typically needs.
 pub mod prelude {
     pub use crate::{
         ActionPurpose, BlockingConfirmation, BrowserFocus, Button, ButtonAuxiliaryHandlers,
-        ButtonSize, ButtonVariant, CheckIcon, ChevronIcon, Chip, ChipTone, CloseIcon,
-        ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, DeleteIcon, Disclosure,
-        EmptyState, Fact, FactLayout, FactList, Field, FieldLayout, FileButton, FileInput,
-        InlineConfirmation, KindMark, LinkButton, ModeButton, ModeGroup, Notice, NoticeTone,
-        PauseIcon, PlayIcon, RefreshIcon, Reorder, ReorderHandle, ReorderList, ReorderMove, Select,
-        SheetHeading, SheetPosition, SideSheet, SkipToEndIcon, SkipToStartIcon, SpinnerIcon,
-        StepBackIcon, StepForwardIcon, StopIcon, TextInput, TextInputKind, Toggle, Tree,
-        TreeBranch, TreeItem, UnassignIcon, ZoomInIcon, ZoomOutIcon,
+        ButtonSize, ButtonVariant, CheckIcon, ChevronIcon, CloseIcon, ConfirmationCopy,
+        ConfirmationDismissal, ConfirmationResponse, DeleteIcon, Disclosure, EmptyState, Fact,
+        FactLayout, FactList, Field, FieldLayout, FileButton, FileInput, InlineConfirmation,
+        KindMark, LinkButton, ModeButton, ModeGroup, Notice, NoticeTone, PauseIcon, PlayIcon,
+        RefreshIcon, Reorder, ReorderHandle, ReorderList, ReorderMove, Select, SkipToEndIcon,
+        SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon, StopIcon, TextInput,
+        TextInputKind, Toggle, Tree, TreeBranch, TreeItem, UnassignIcon, ZoomInIcon, ZoomOutIcon,
     };
 }

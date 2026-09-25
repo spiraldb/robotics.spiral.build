@@ -1,12 +1,10 @@
 use super::*;
 use crate::settings::{StoredStudioPreferences, StudioPreferencePersistence};
 use crate::training::{TrainingRunPersistence, TrainingRunRecord};
-use crate::workflows::{WorkflowJson, WorkflowPersistence};
 use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, QueryFilter, Statement};
 use spiral_robotics_common::robots::PortSettings;
 use spiral_robotics_common::robots::config::RobotConfig;
 use spiral_robotics_common::training::{TrainingConfig, TrainingRunIdentity};
-use spiral_robotics_common::workflow::WorkflowSpec;
 
 struct Fixture;
 impl Fixture {
@@ -23,12 +21,6 @@ impl Fixture {
         RobotConfig::so101(id, "so101_follower")
             .and_then(|config| config.with_port(PortSettings::new("/dev/arm", 1_000_000)))
             .unwrap()
-    }
-    fn graph(workflow: &WorkflowSpec) -> WorkflowJson {
-        WorkflowJson::new(4, serde_json::json!({"workflow":workflow}).to_string())
-    }
-    fn conversation() -> WorkflowJson {
-        WorkflowJson::new(1, "[]".into())
     }
     async fn sql(store: &StudioStore, sql: &str) -> Result<(), String> {
         store
@@ -208,49 +200,6 @@ async fn concurrent_creations_and_stale_robot_updates_do_not_overwrite() {
 }
 
 #[tokio::test]
-async fn workflow_updates_are_atomic_and_scoped_to_one_revision_and_project() {
-    let store = StudioStore::in_memory();
-    let project = store.project(&Fixture::connection("bench"));
-    let workflow = WorkflowSpec::new("workflow", "First").with_revision(1);
-    let persistence = WorkflowPersistence::new(&project);
-    let graph = Fixture::graph(&workflow);
-    let conversation = Fixture::conversation();
-    assert!(
-        persistence
-            .save(&workflow, (&graph, &conversation))
-            .await
-            .unwrap()
-    );
-    let mut next = workflow.clone().with_revision(2);
-    next.set_name("Second");
-    let graph2 = Fixture::graph(&next);
-    let (one, two) = tokio::join!(
-        persistence.save(&next, (&graph2, &conversation)),
-        persistence.save(&next, (&graph2, &conversation))
-    );
-    assert_ne!(one.unwrap(), two.unwrap());
-    assert!(
-        !persistence
-            .save(&workflow, (&graph, &conversation))
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        persistence.load("workflow").await.unwrap().unwrap().graph(),
-        &graph2
-    );
-    assert_eq!(persistence.list().await.unwrap()[0].name(), "Second");
-    let other = store.project(&Fixture::connection("other"));
-    assert!(
-        WorkflowPersistence::new(&other)
-            .load("workflow")
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[tokio::test]
 async fn migration_runs_once_and_failed_schema_changes_roll_back() {
     let store = StudioStore::in_memory();
     store.initialize().await.unwrap();
@@ -264,7 +213,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 10);
+    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 11);
     // A conflict halfway through the actual initial migration must undo both
     // earlier CREATE TABLE statements and the migration journal itself.
     let directory = tempfile::tempdir().unwrap();

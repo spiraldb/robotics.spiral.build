@@ -14,9 +14,9 @@ use spiral_robotics_common::{
         DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetTopic, EpisodeId,
         EpisodeSelection, HuggingFaceDatasetInspection,
     },
+    providers::ProviderMessage,
     relations::EpisodeQueryRequest,
     sql::SqlLiteral,
-    workflow::conversation::ProviderMessage,
 };
 use spiral_robotics_viewport::RobotModel;
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};

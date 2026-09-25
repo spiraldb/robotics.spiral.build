@@ -11,8 +11,6 @@ mod studio;
 pub use studio::{StudioProject, StudioStore};
 mod training;
 mod transfer;
-pub mod workflow_assistant;
-pub mod workflows;
 
 pub mod bundle {
     //! Portable snapshots containing Studio metadata and Spiral data.

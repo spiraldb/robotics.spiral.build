@@ -25,7 +25,7 @@ suspending reads and playback that require visibility.
 
 The project shell owns the selected project, backend liveness, saved setup and settings,
 notifications, and cross-activity navigation. Live owns capture state; Data owns
-its resource selection and queries; Workflow owns its graph and Assistant drafts;
+its resource selection and queries; Curation owns its graph draft and preview;
 Training owns configuration and selected history; Rollout owns checkpoint and
 robot selection; Settings owns its unsaved configuration and calibration state.
 
@@ -43,10 +43,10 @@ changes. Polling waits for completion before its next delay, so a timer never
 cancels a slow request or overlaps another read. Changed inputs and invalidation
 cancel obsolete reads. Mutations are never automatically retried.
 
-Feature controllers choose their own intervals and visibility gates. Training,
-Rollout, and Workflow can refresh faster during active work. Inactive activities
+Feature controllers choose their own intervals and visibility gates. Training
+and Rollout can refresh faster during active work. Inactive activities
 stay idle; reactivation reads current inputs. Browser backgrounding slows polling.
-Data, Training, and Workflow do not poll hardware telemetry.
+Data, Curation, and Training do not poll hardware telemetry.
 
 ## Drafts and background work
 

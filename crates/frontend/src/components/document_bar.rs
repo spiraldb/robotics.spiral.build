@@ -1,20 +1,18 @@
-//! One document bar for every activity that opens documents: the name that
-//! opens the switcher, the saved state, the inline rename form, the
-//! switch/create/rename popover, Discard and Save — and Curation's
-//! executed-SQL disclosure.
+//! One document bar for an activity that opens documents: the name that opens
+//! the switcher, the saved state, the inline rename form, the
+//! switch/create/rename popover, Discard and Save.
 //!
-//! Workflow and Curation differ in four things only, and each is a
-//! value the caller supplies: the words for this kind of document
-//! ([`DocumentBarCopy`]), why an action is refused right now
-//! ([`DocumentBarGate`]), the extra creation control inside the switcher, and
-//! the activity's own Run button. Everything the operator presses arrives back
-//! as one [`DocumentBarCommand`], because opening and discarding reinstall
-//! whatever the activity keeps beside the document.
+//! What is the activity's own is a value the caller supplies: the words for
+//! this kind of document ([`DocumentBarCopy`]), why an action is refused right
+//! now ([`DocumentBarGate`]), and the extra creation control inside the
+//! switcher. Everything the operator presses arrives back as one
+//! [`DocumentBarCommand`], because opening and discarding reinstall whatever
+//! the activity keeps beside the document.
 
-use crate::components::icons::{CheckIcon, SqlIcon};
+use crate::components::icons::CheckIcon;
 use dioxus::prelude::*;
 use spiral_robotics_ui::{
-    ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Disclosure, Remount, TextInput,
+    ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Remount, TextInput,
 };
 
 /// The saved state the chip below reports now lives with the session that owns
@@ -210,7 +208,7 @@ pub(crate) struct DocumentBarGate {
     /// Renaming answers only to itself: a document with nothing left to save
     /// is still a document the operator may want to call something else.
     renaming: Option<String>,
-    /// Discard is refused while a command — or an assistant turn — is running.
+    /// Discard is refused while a command is running.
     discarding: bool,
 }
 
@@ -281,14 +279,10 @@ pub(crate) struct DocumentBarProps {
     on_command: EventHandler<DocumentBarCommand>,
     /// Extra creation controls inside the switcher, such as "From dataset".
     creation: Element,
-    /// The activity's own Run button, or nothing: Curation has no Run, because
-    /// each node runs from its own workspace.
-    run: Element,
 }
 
 /// The identity half and the action half of one document bar. The glyph and
-/// the surrounding `header` stay with the activity, because Workflow's two
-/// views share one header and one glyph between them.
+/// the surrounding `header` stay with the activity.
 #[component]
 pub(crate) fn DocumentBar(props: DocumentBarProps) -> Element {
     let mut renaming = use_signal(|| false);
@@ -361,7 +355,6 @@ pub(crate) fn DocumentBar(props: DocumentBarProps) -> Element {
                 onclick: move |_| on_command.call(DocumentBarCommand::Save),
                 if document.saving { "Saving…" } else { "Save" }
             }
-            {props.run}
         }
     }
 }
@@ -377,7 +370,7 @@ struct DocumentSwitcherProps {
     on_select: EventHandler<Option<String>>,
     on_rename: EventHandler<()>,
     on_close: EventHandler<()>,
-    /// Extra creation controls, such as Workflow's "From dataset".
+    /// Extra creation controls, such as "From dataset".
     #[props(default)]
     children: Element,
 }
@@ -485,16 +478,6 @@ fn DocumentSwitcher(props: DocumentSwitcherProps) -> Element {
                     "{props.copy.rename()}"
                 }
             }
-        }
-    }
-}
-
-/// The exact SQL a run executed, folded behind one line of the run strip.
-#[component]
-pub(crate) fn ExecutedSql(sql: String) -> Element {
-    rsx! {
-        Disclosure { class: "executed-sql", summary: rsx! { SqlIcon {} "Executed SQL" },
-            pre { code { "{sql}" } }
         }
     }
 }

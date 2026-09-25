@@ -2,14 +2,12 @@
 //! and the messages that float above the workspace.
 
 use crate::activities::curation::state::CurationRuns;
-use crate::activities::workflow::state::WorkflowEditorStatus;
 use dioxus::prelude::*;
-use spiral_robotics_common::workflow::WorkflowRunPhase;
 use spiral_robotics_ui::{ActionPurpose, BrowserFocus, Button, ButtonVariant, CloseIcon};
 
 use crate::components::icons::{
     CurationIcon, DataIcon, KeyboardIcon, NotificationIcon, RobotPanelIcon, RolloutIcon,
-    SettingsIcon, SpiralMark, TrainingIcon, WorkflowIcon,
+    SettingsIcon, SpiralMark, TrainingIcon,
 };
 use crate::components::page_keys::PageKeys;
 use crate::format::ClockPresentation;
@@ -102,7 +100,6 @@ fn ActivityGlyph(activity: Activity) -> Element {
     match activity {
         Activity::Live => rsx! { RobotPanelIcon {} },
         Activity::Data => rsx! { DataIcon {} },
-        Activity::Workflow => rsx! { WorkflowIcon {} },
         Activity::Curation => rsx! { CurationIcon {} },
         Activity::Training => rsx! { TrainingIcon {} },
         Activity::Rollout => rsx! { RolloutIcon {} },
@@ -113,14 +110,13 @@ fn ActivityGlyph(activity: Activity) -> Element {
 /// Every shortcut the Studio answers, grouped by where it works.
 #[component]
 fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
-    let command = PageKeys::command_symbol().trim();
-    let groups: [(&str, Vec<(String, &str)>); 5] = [
+    let groups: [(&str, Vec<(String, &str)>); 4] = [
         (
             "Anywhere",
             vec![
                 (
-                    "1 – 6".into(),
-                    "Open Data, Workflow, Curation, Training, Rollout, Live",
+                    "1 – 5".into(),
+                    "Open Data, Curation, Training, Rollout, Live",
                 ),
                 (",".into(), "Open Settings"),
                 ("?".into(), "Show or hide these shortcuts"),
@@ -142,10 +138,6 @@ fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
                 ("Home  End".into(), "Jump to the start or end"),
                 ("+  −  0".into(), "Zoom in, out, or to the whole episode"),
             ],
-        ),
-        (
-            "Workflow and Curation",
-            vec![(format!("{command}  ↵"), "Run the graph or the recipe")],
         ),
         (
             "Live",
@@ -197,7 +189,6 @@ pub(crate) enum WorkspaceStatus {
     General,
     Hardware(crate::robots::HardwareViewState),
     Training(crate::activities::training::history::TrainingHistory),
-    Workflow(Memo<Option<WorkflowEditorStatus>>),
     Curation(Memo<CurationRuns>),
 }
 
@@ -368,22 +359,6 @@ impl StatusFacts {
             WorkspaceStatus::Training(history) => {
                 TrainingStatus::from(&*history.snapshot().read()).facts()
             }
-            WorkspaceStatus::Workflow(snapshot) => snapshot
-                .read()
-                .as_ref()
-                .filter(|_| backend_connected)
-                .map(WorkflowStatusProjection::from)
-                .unwrap_or_else(|| {
-                    WorkflowStatusContext {
-                        state: None,
-                        backend_connected,
-                    }
-                    .project()
-                })
-                .headline()
-                .map(|phase| StatusFact::new(phase, StatusTone::Plain))
-                .into_iter()
-                .collect(),
             // A curation has no run of its own; each of its running nodes
             // reports itself, and a curation at rest says nothing.
             WorkspaceStatus::Curation(runs) => runs
@@ -602,29 +577,6 @@ fn StudioToast() -> Element {
     }
 }
 
-/// What the top bar says about the open workflow: its phase while it is news,
-/// and nothing for an idle graph.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WorkflowStatusProjection {
-    phase: Option<String>,
-}
-
-impl WorkflowStatusProjection {
-    fn headline(self) -> Option<String> {
-        self.phase
-    }
-}
-
-impl From<&WorkflowEditorStatus> for WorkflowStatusProjection {
-    fn from(state: &WorkflowEditorStatus) -> Self {
-        WorkflowStatusContext {
-            state: Some(state),
-            backend_connected: true,
-        }
-        .project()
-    }
-}
-
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct TrainingStatus {
     runs: usize,
@@ -661,69 +613,5 @@ impl TrainingStatus {
         };
         facts.push(StatusFact::new(runs, StatusTone::Plain));
         facts
-    }
-}
-
-struct WorkflowStatusContext<'a> {
-    state: Option<&'a WorkflowEditorStatus>,
-    backend_connected: bool,
-}
-
-impl WorkflowStatusContext<'_> {
-    fn project(&self) -> WorkflowStatusProjection {
-        let phase = if !self.backend_connected {
-            Some("Workflow unavailable".to_owned())
-        } else {
-            match self.state {
-                None => Some("Loading saved workflow…".to_owned()),
-                Some(agent) => match agent.snapshot().phase() {
-                    WorkflowRunPhase::Idle => None,
-                    WorkflowRunPhase::Running => Some("Running".to_owned()),
-                    WorkflowRunPhase::Completed => Some("Complete".to_owned()),
-                    WorkflowRunPhase::Failed => Some("Failed".to_owned()),
-                },
-            }
-        };
-        WorkflowStatusProjection { phase }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn workflow_status_projects_the_authoritative_run_phase() {
-        let mut run = spiral_robotics_common::workflow::WorkflowRunSnapshot::default();
-        run.set_phase(WorkflowRunPhase::Running);
-        let state = WorkflowEditorStatus::new(run);
-
-        let status = WorkflowStatusContext {
-            state: Some(&state),
-            backend_connected: true,
-        }
-        .project();
-
-        assert_eq!(status.phase.as_deref(), Some("Running"));
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn workflow_status_does_not_invent_state_while_loading_or_unavailable() {
-        let loading = WorkflowStatusContext {
-            state: None,
-            backend_connected: true,
-        }
-        .project();
-        assert_eq!(loading.phase.as_deref(), Some("Loading saved workflow…"));
-
-        let state = WorkflowEditorStatus::new(
-            spiral_robotics_common::workflow::WorkflowRunSnapshot::default(),
-        );
-        let unavailable = WorkflowStatusContext {
-            state: Some(&state),
-            backend_connected: false,
-        }
-        .project();
-        assert_eq!(unavailable.phase.as_deref(), Some("Workflow unavailable"));
     }
 }

@@ -3,9 +3,8 @@
    must be unlayered too. */
 
 @layer components {
-  /* The graph pane borrows the Workflow canvas wrap (pale dotted viewport,
-     zoom controls at the bottom left) and the stage card's anatomy, so a
-     graph node and a Workflow stage read as one vocabulary. What is
+  /* The graph pane uses the shared canvas wrap (pale dotted viewport, zoom
+     controls at the bottom left) and the stage card's anatomy. What is
      Curation's alone is the + on a node's bottom edge, the menu it opens,
      and the line a running measurement writes. */
   .curation-canvas-graph {
@@ -182,6 +181,12 @@
   line-height: 16px;
   font-family: var(--font-mono);
   font-size: 10px;
+}
+
+/* A published view the saved curation has moved past. */
+.curation-canvas-node .curation-canvas-output.is-stale {
+  border-color: color-mix(in srgb, var(--tone-caution) 45%, var(--tone-surface));
+  color: var(--tone-caution);
 }
 
 /* Selecting a node is the way into every workspace, so the card is the button

@@ -13,8 +13,6 @@ pub(crate) mod studio_settings;
 #[allow(unreachable_pub)]
 pub(crate) mod training_runs;
 mod transfer;
-#[allow(unreachable_pub)]
-pub(crate) mod workflows;
 pub(crate) use transfer::StudioSnapshot;
 #[allow(unreachable_pub)]
 mod dataset_robots;

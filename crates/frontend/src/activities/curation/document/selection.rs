@@ -5,9 +5,16 @@
 //! dataset's recorded episode facts, a search's probabilities, a grouping's
 //! categories, or a detection's progress. The rule is stored in those terms,
 //! so a Select reads as one sentence about the node it follows.
+//!
+//! One rule has two readings that must agree: the browser keeps what the
+//! preview read as the threshold slides (`keeps_*`), and the path compiles it
+//! to the `WHERE` the published view keeps by (`predicate`).
+use crate::activities::curation::moments::Moment;
+use crate::activities::curation::path::{PathError, PathFragment, PathStep, StepSql};
 use crate::activities::episode::Episode;
 use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
+use spiral_robotics_common::sql::SqlLiteral;
 
 /// What a Select's input was measured by, and so what its rule can name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +84,16 @@ impl EpisodeFact {
             Self::SizeMegabytes => format!("{value:.1} MB"),
         })
     }
+    /// The fact as a column of an episode listing, the same value `of` reads
+    /// in the browser.
+    pub(in crate::activities::curation) const fn expression(self) -> &'static str {
+        match self {
+            Self::DurationSeconds => "CAST(duration_ns AS DOUBLE) / 1e9",
+            Self::Messages => "message_count",
+            Self::Channels => "channel_count",
+            Self::SizeMegabytes => "CAST(source_bytes AS DOUBLE) / 1e6",
+        }
+    }
     /// The fact's value for one episode, when Spiral listed it.
     pub(in crate::activities::curation) fn of(self, episode: &Episode) -> Option<f64> {
         let facts = episode.facts();
@@ -120,6 +137,13 @@ impl Comparison {
         match self {
             Self::AtLeast => value >= threshold,
             Self::AtMost => value <= threshold,
+        }
+    }
+    /// The comparison as SQL spells it, as `holds` reads it.
+    const fn operator(self) -> &'static str {
+        match self {
+            Self::AtLeast => ">=",
+            Self::AtMost => "<=",
         }
     }
 }
@@ -192,7 +216,7 @@ impl Selection {
             _ => false,
         }
     }
-    /// Whether a moment is kept, by its mean progress.
+    /// Whether a moment is kept, by its pace.
     pub(crate) fn keeps_moment(&self, velocity: Option<f64>) -> bool {
         match self {
             Self::Progressing { minimum } => velocity.is_none_or(|value| value >= *minimum),
@@ -257,6 +281,33 @@ impl Selection {
             Self::Progressing { minimum } => format!("Pace at least {minimum:.2}×"),
         }
     }
+    /// The rule as the predicate over its input's columns: what `keeps_*`
+    /// keep, in SQL. A moment the scorer could not read is kept here too.
+    fn predicate(&self) -> Result<String, PathError> {
+        let literal = |value: f64| {
+            SqlLiteral::double(value)
+                .ok_or_else(|| PathError::Invalid("A Select's threshold must be a number.".into()))
+        };
+        match self {
+            Self::Episodes {
+                fact,
+                comparison,
+                value,
+            } => Ok(format!(
+                "{} {} {}",
+                fact.key(),
+                comparison.operator(),
+                literal(*value)?
+            )),
+            Self::Progressing { minimum } => Ok(format!(
+                "({pace} IS NULL OR {pace} >= {})",
+                literal(*minimum)?,
+                pace = Moment::PACE
+            )),
+            Self::Similar { .. } => Err(PathError::waiting("spql.ai.similarity")),
+            Self::Categories { .. } => Err(PathError::waiting("spql.ai.classify")),
+        }
+    }
     pub(super) fn validate(&self) -> Result<(), String> {
         match self {
             Self::Episodes { value, .. } if !value.is_finite() => {
@@ -282,10 +333,173 @@ impl Selection {
     }
 }
 
+/// A Select of episodes keeps the rows whose fact passes; a Select of
+/// moments keeps the moments that pass and joins the ones that touch into
+/// stretches, each carrying its mean pace.
+impl PathFragment for Selection {
+    fn step_sql(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+        let input = step.input()?;
+        let name = step.name();
+        // A Select by similarity or category waits here, for its measure's
+        // function.
+        let predicate = self.predicate()?;
+        let kept = format!(
+            "{name} AS (SELECT {} FROM {} WHERE {predicate})",
+            input.columns(),
+            input.name()
+        );
+        Ok(match self {
+            Self::Episodes { fact, .. } => {
+                StepSql::new(vec![kept], input.renamed(name).publishing(fact.key()))
+            }
+            // Moments tile their episode, so kept moments with none left out
+            // between them touch: numbering every moment and then the kept
+            // ones, a stretch is where the two numbers keep one difference.
+            // Spiral has no LAG, and ROW_NUMBER is enough.
+            Self::Progressing { .. } => {
+                let pace = Moment::PACE;
+                StepSql::new(
+                    vec![
+                        format!(
+                            "{name}_numbered AS (SELECT episode_id, start_ns, end_ns, {pace}, \
+                             ROW_NUMBER() OVER (PARTITION BY episode_id ORDER BY start_ns) AS position FROM {})",
+                            input.name()
+                        ),
+                        format!(
+                            "{name}_kept AS (SELECT episode_id, start_ns, end_ns, {pace}, \
+                             position - ROW_NUMBER() OVER (PARTITION BY episode_id ORDER BY start_ns) AS stretch \
+                             FROM {name}_numbered WHERE {predicate})"
+                        ),
+                        format!(
+                            "{name} AS (SELECT episode_id, MIN(start_ns) AS start_ns, MAX(end_ns) AS end_ns, AVG({pace}) AS {pace} \
+                             FROM {name}_kept GROUP BY episode_id, stretch)"
+                        ),
+                    ],
+                    input.renamed(name).publishing(pace),
+                )
+            }
+            Self::Similar { .. } | Self::Categories { .. } => {
+                StepSql::new(vec![kept], input.renamed(name))
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use spiral_robotics_common::datasets::EpisodeId;
+
+    /// The predicate as rendered, read back: `column >= CAST(n AS DOUBLE)`,
+    /// `column <= …`, or the moments' `(column IS NULL OR column >= …)`, over
+    /// one row's value of that column. Anything else is not a predicate this
+    /// module renders, and fails the test that reads it.
+    struct RenderedPredicate(String);
+
+    impl RenderedPredicate {
+        fn keeps(&self, column: &str, value: Option<f64>) -> bool {
+            let comparison = |text: &str| {
+                let (name, rest) = text.split_once(' ').expect("a column");
+                assert_eq!(name, column, "{}", self.0);
+                let (operator, literal) = rest.split_once(' ').expect("an operator");
+                let threshold = literal
+                    .strip_prefix("CAST(")
+                    .and_then(|literal| literal.strip_suffix(" AS DOUBLE)"))
+                    .expect("a double literal")
+                    .parse::<f64>()
+                    .expect("a number");
+                value.is_some_and(|value| match operator {
+                    ">=" => value >= threshold,
+                    "<=" => value <= threshold,
+                    other => panic!("operator {other}"),
+                })
+            };
+            match self
+                .0
+                .strip_prefix('(')
+                .and_then(|inner| inner.strip_suffix(')'))
+                .and_then(|inner| inner.split_once(" OR "))
+            {
+                Some((unread, rule)) => {
+                    assert_eq!(unread, format!("{column} IS NULL"), "{}", self.0);
+                    value.is_none() || comparison(rule)
+                }
+                None => comparison(&self.0),
+            }
+        }
+    }
+
+    #[test]
+    fn the_browser_filter_and_the_rendered_predicate_keep_the_same_rows() {
+        // Episodes either side of each threshold, on it, and without the fact.
+        let episodes = [
+            9_999_999_999_u64,
+            10_000_000_000,
+            10_000_000_001,
+            20_500_000_000,
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(duration, ordinal)| Episode::fixture(&EpisodeId::fixture(ordinal), duration))
+        .collect::<Vec<_>>();
+        for rule in [
+            Selection::Episodes {
+                fact: EpisodeFact::DurationSeconds,
+                comparison: Comparison::AtLeast,
+                value: 10.0,
+            },
+            Selection::Episodes {
+                fact: EpisodeFact::DurationSeconds,
+                comparison: Comparison::AtMost,
+                value: 10.000_000_001,
+            },
+            Selection::Episodes {
+                fact: EpisodeFact::Messages,
+                comparison: Comparison::AtLeast,
+                value: 0.0,
+            },
+        ] {
+            let Selection::Episodes { fact, .. } = &rule else {
+                unreachable!("an episode rule")
+            };
+            let rendered = RenderedPredicate(rule.predicate().unwrap());
+            for episode in &episodes {
+                assert_eq!(
+                    rule.keeps_episode(episode),
+                    rendered.keeps(fact.key(), fact.of(episode)),
+                    "{} on {:?}",
+                    rendered.0,
+                    fact.of(episode)
+                );
+            }
+        }
+        // Moments below, on, and above the threshold, and one never read.
+        for minimum in [-0.5, 0.0, 0.2] {
+            let rule = Selection::Progressing { minimum };
+            let rendered = RenderedPredicate(rule.predicate().unwrap());
+            for pace in [
+                Some(-0.6),
+                Some(-0.5),
+                Some(0.0),
+                Some(0.19),
+                Some(0.2),
+                Some(1.4),
+                None,
+            ] {
+                assert_eq!(
+                    rule.keeps_moment(pace),
+                    rendered.keeps(Moment::PACE, pace),
+                    "{} on {pace:?}",
+                    rendered.0
+                );
+            }
+        }
+        // Rules over measurements Spiral cannot run yet render nothing.
+        assert_eq!(
+            Selection::Similar { minimum: 0.5 }.predicate(),
+            Err(PathError::waiting("spql.ai.similarity"))
+        );
+    }
 
     #[test]
     fn a_new_select_keeps_everything_measured_and_says_so() {

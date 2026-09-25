@@ -15,8 +15,8 @@ pub enum ReadOnlyQueryMode {
     Preview,
     /// Training input selection, which must directly produce rows.
     Training,
-    /// A workflow submits one native query that directly produces rows.
-    Workflow,
+    /// A published curation view, which must directly produce rows.
+    Curation,
 }
 
 impl ReadOnlyQueryMode {
@@ -24,7 +24,7 @@ impl ReadOnlyQueryMode {
         match self {
             Self::Preview => "Spiral preview",
             Self::Training => "Training SQL",
-            Self::Workflow => "Workflow SQL",
+            Self::Curation => "Curation SQL",
         }
     }
 }
@@ -88,7 +88,7 @@ impl<'a> ReadOnlyQuery<'a> {
         let first = tokens.first().map(String::as_str).unwrap_or_default();
         let allowed = match self.mode {
             ReadOnlyQueryMode::Preview => matches!(first, "SELECT" | "WITH" | "EXPLAIN"),
-            ReadOnlyQueryMode::Training | ReadOnlyQueryMode::Workflow => {
+            ReadOnlyQueryMode::Training | ReadOnlyQueryMode::Curation => {
                 matches!(first, "SELECT" | "WITH")
             }
         };
@@ -100,8 +100,8 @@ impl<'a> ReadOnlyQuery<'a> {
                 ReadOnlyQueryMode::Training => {
                     "Training SQL must be a read-only SELECT or WITH query"
                 }
-                ReadOnlyQueryMode::Workflow => {
-                    "Workflow SQL must be a read-only SELECT or WITH query"
+                ReadOnlyQueryMode::Curation => {
+                    "Curation SQL must be a read-only SELECT or WITH query"
                 }
             }));
         }
@@ -280,7 +280,19 @@ mod tests {
                     .authorize()
                     .is_ok()
             );
+            assert!(
+                ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Curation)
+                    .authorize()
+                    .is_ok()
+            );
         }
+        assert_eq!(
+            ReadOnlyQuery::new("EXPLAIN SELECT 1", ReadOnlyQueryMode::Curation)
+                .authorize()
+                .unwrap_err()
+                .to_string(),
+            "Curation SQL must be a read-only SELECT or WITH query"
+        );
         assert!(
             ReadOnlyQuery::new("EXPLAIN SELECT 1", ReadOnlyQueryMode::Preview)
                 .authorize()

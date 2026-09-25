@@ -1,33 +1,29 @@
-//! Saved curations and the progress scores one of their nodes asks for. The
-//! manager owns identity, size, and revision policy; the payload passes
-//! through untouched.
+//! Saved curations and the views their outputs are published as. The manager
+//! owns identity, size, and revision policy; the payload passes through
+//! untouched. The browser compiles an output; publishing admits its statement
+//! as read-only and leaves the DDL to storage.
 //!
 //! There is no in-process save lock: the conditional write in storage is the
 //! single authority on which revision a document currently holds, so two tabs
 //! racing to save produce exactly one winner and one conflict.
-use super::episode_progress::EpisodeProgress;
 use crate::OperationError;
-use spiral_robotics_common::curation::progress::{ProgressScoreRequest, ProgressScoreResult};
-use spiral_robotics_common::curation::{CurationDocument, CurationSummary};
+use spiral_robotics_common::curation::{
+    CurationDocument, CurationSummary, PublishRequest, UnpublishRequest, ViewName,
+};
+use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use spiral_robotics_storage::StorageManager;
 use std::sync::Arc;
 
 /// The one message a losing save shows; reopening reloads the stored revision.
 const SAVED_ELSEWHERE: &str = "This curation was saved elsewhere. Reopen it before saving.";
 
-/// Shared per project, because a score in flight is shared: two views asking
-/// about one recording wait on one inference.
 pub(crate) struct CurationManager {
     storage: Arc<StorageManager>,
-    episode_progress: EpisodeProgress,
 }
 
 impl CurationManager {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
-        Self {
-            episode_progress: EpisodeProgress::new(storage.clone()),
-            storage,
-        }
+        Self { storage }
     }
 
     pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, OperationError> {
@@ -71,14 +67,47 @@ impl CurationManager {
         Ok(document.with_revision(stored))
     }
 
-    pub(super) async fn score_episode(
-        &self,
-        request: ProgressScoreRequest,
-    ) -> Result<ProgressScoreResult, OperationError> {
-        self.episode_progress
-            .score(request)
+    /// Publish one output under `name`, replacing the view it names. The
+    /// statement must be one read-only query, and the name must not belong to
+    /// a table or a Dataset.
+    pub(super) async fn publish(&self, request: PublishRequest) -> Result<(), OperationError> {
+        let name = ViewName::try_from(request.name()).map_err(OperationError::InvalidInput)?;
+        ReadOnlyQuery::new(request.statement(), ReadOnlyQueryMode::Curation)
+            .authorize()
+            .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
+        self.refuse_held(&name).await?;
+        self.storage
+            .curated_views()
+            .replace(&name, request.statement())
             .await
             .map_err(OperationError::External)
+    }
+
+    /// Drop the view `name`, if one exists.
+    pub(super) async fn unpublish(&self, request: UnpublishRequest) -> Result<(), OperationError> {
+        let name = ViewName::try_from(request.name()).map_err(OperationError::InvalidInput)?;
+        self.refuse_held(&name).await?;
+        self.storage
+            .curated_views()
+            .drop(&name)
+            .await
+            .map_err(OperationError::External)
+    }
+
+    /// Refuse a name a table or a Dataset holds: publishing replaces only views.
+    async fn refuse_held(&self, name: &ViewName) -> Result<(), OperationError> {
+        let holder = self
+            .storage
+            .curated_views()
+            .holder(name)
+            .await
+            .map_err(OperationError::External)?;
+        match holder {
+            Some(kind) => Err(OperationError::Conflict(format!(
+                "“{name}” is a {kind} in this project; choose another name."
+            ))),
+            None => Ok(()),
+        }
     }
 }
 

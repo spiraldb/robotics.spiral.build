@@ -7,14 +7,13 @@ use std::sync::Arc;
 
 use spiral_robotics_common::datasets::{DatasetRobot, DatasetRobotSave, DatasetSelection};
 
-use crate::curations::CurationPersistence;
+use crate::curations::{CuratedViews, CurationPersistence};
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
 use crate::settings::StudioPreferencePersistence;
 use crate::training::{TrainingCheckpointPersistence, TrainingRunPersistence};
 use crate::transfer::TransferPersistence;
-use crate::workflows::WorkflowPersistence;
 
 pub struct StorageManager {
     project_store: Arc<ProjectStore>,
@@ -32,10 +31,6 @@ impl StorageManager {
     /// The project's Spiral connection and its table names.
     pub fn project_store(&self) -> &ProjectStore {
         &self.project_store
-    }
-
-    pub fn workflow_store(&self) -> Arc<ProjectStore> {
-        self.project_store.clone()
     }
 
     pub fn database(&self) -> ProjectDatabasePersistence<'_> {
@@ -62,12 +57,12 @@ impl StorageManager {
         TrainingCheckpointPersistence::new(&self.project_store)
     }
 
-    pub fn workflows(&self) -> WorkflowPersistence<'_> {
-        WorkflowPersistence::new(&self.studio)
-    }
-
     pub fn curations(&self) -> CurationPersistence<'_> {
         CurationPersistence::new(&self.studio)
+    }
+
+    pub fn curated_views(&self) -> CuratedViews<'_> {
+        CuratedViews::new(&self.project_store)
     }
 
     /// The robot saved for the dataset version `selection` resolves to now.

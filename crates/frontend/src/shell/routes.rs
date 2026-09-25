@@ -8,7 +8,6 @@ use crate::activities::live::screen::LiveWorkspace;
 use crate::activities::rollout::screen::RolloutWorkspace;
 use crate::activities::settings::panel::SettingsWorkspace;
 use crate::activities::training::workspace::TrainingWorkspace;
-use crate::activities::workflow::workspace::WorkflowWorkspace;
 use crate::shell::activity::Activity;
 use crate::shell::frame::StudioTopBar;
 use crate::shell::project::ProjectSelection;
@@ -29,8 +28,6 @@ pub(crate) enum StudioRoute {
     Data {},
     #[route("/curation", SelectedActivityRoute)]
     Curation {},
-    #[route("/workflow", SelectedActivityRoute)]
-    Workflow {},
     #[route("/training", SelectedActivityRoute)]
     Training {},
     #[route("/rollout", SelectedActivityRoute)]
@@ -45,7 +42,6 @@ impl StudioRoute {
             Self::Live {} => Activity::Live,
             Self::Data {} => Activity::Data,
             Self::Curation {} => Activity::Curation,
-            Self::Workflow {} => Activity::Workflow,
             Self::Training {} => Activity::Training,
             Self::Rollout {} => Activity::Rollout,
             Self::Settings {} => Activity::Settings,
@@ -61,7 +57,6 @@ impl StudioRoute {
             Activity::Live => Self::Live {},
             Activity::Data => Self::Data {},
             Activity::Curation => Self::Curation {},
-            Activity::Workflow => Self::Workflow {},
             Activity::Training => Self::Training {},
             Activity::Rollout => Self::Rollout {},
             Activity::Settings => Self::Settings {},
@@ -69,12 +64,11 @@ impl StudioRoute {
     }
 
     #[cfg(test)]
-    fn all() -> [Self; 7] {
+    fn all() -> [Self; 6] {
         [
             Self::Live {},
             Self::Data {},
             Self::Curation {},
-            Self::Workflow {},
             Self::Training {},
             Self::Rollout {},
             Self::Settings {},
@@ -164,7 +158,6 @@ fn ActivityWorkspace(activity: Activity, selected_view: ReadSignal<Activity>) ->
                 Activity::Live => rsx! { LiveWorkspace { is_active } },
                 Activity::Data => rsx! { DataWorkspace { is_active } },
                 Activity::Curation => rsx! { CurationWorkspace { is_active } },
-                Activity::Workflow => rsx! { WorkflowWorkspace { is_active } },
                 Activity::Training => rsx! { TrainingWorkspace { is_active } },
                 Activity::Rollout => rsx! { RolloutWorkspace { is_active } },
                 Activity::Settings => rsx! { SettingsWorkspace { is_active } },

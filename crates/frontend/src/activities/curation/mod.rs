@@ -9,6 +9,10 @@
 //! measurement, `moments` Identify unproductive moments, `similar` the Find
 //! similar and Group similar subtasks nodes, and `select` the Select node.
 //!
+//! `path` compiles a path of the graph to one Spiral statement, each node
+//! kind writing its own step; `preview` holds what those statements read over
+//! the sample this session.
+//!
 //! `review` is the proportion every output is read in — an index that
 //! scrolls beside a recording that holds still — `frames` the native frame
 //! selection both the contact sheets and the poster stills are cut from, and
@@ -25,8 +29,10 @@ mod episode_tabs;
 mod frames;
 mod graph;
 mod moments;
+mod path;
 mod population;
 mod poster;
+mod preview;
 mod rerun;
 mod review;
 mod select;

@@ -1,7 +1,9 @@
-//! The curation payload: the graph, per-node configuration, and what every
-//! measurement produced, encoded as JSON text in `CurationDocument::payload`.
-//! Node positions are not stored; the canvas lays the graph out from its
-//! edges every time.
+//! The curation payload: the graph, per-node configuration, the outputs
+//! published as catalog views, and what the measurements Spiral cannot run yet
+//! produced, encoded as JSON text in `CurationDocument::payload`. What a
+//! compiled node reads is a preview held for the session only (see
+//! `preview`). Node positions are not stored; the canvas lays the graph out
+//! from its edges every time.
 //!
 //! The graph's grammar lives here too. Every node hands on a population of
 //! one kind — episodes, subtasks, or moments (see `population`) — and what
@@ -9,7 +11,7 @@
 //!
 //! This is the contract every Curation view shares. Add fields and helpers;
 //! never rename or remove what is here without checking the other views.
-mod progress;
+mod publication;
 mod selection;
 #[cfg(test)]
 mod tests;
@@ -18,10 +20,12 @@ use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) use progress::ProgressCurve;
+pub(crate) use publication::PublishedOutput;
 pub(crate) use selection::{Comparison, EpisodeFact, Selection, SelectionBasis};
 
-pub(crate) const CURATION_ENCODING_VERSION: u32 = 1;
+/// Encoding 2 keeps a recipe only for the nodes that compile to Spiral SQL.
+/// Encoding 1 stored what they measured and is not converted.
+pub(crate) const CURATION_ENCODING_VERSION: u32 = 2;
 /// The root node every curation starts with.
 pub(crate) const DATASET_NODE_ID: &str = "dataset";
 /// OpenRouter id of the newest Gemini Flash as of 2026-09-21; it accepts image
@@ -46,7 +50,7 @@ pub(crate) struct CurationGraph {
     #[serde(default)]
     rankings: Vec<SubtaskRanking>,
     #[serde(default)]
-    moments: Vec<MomentRow>,
+    published: Vec<PublishedOutput>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -272,104 +276,11 @@ impl EpisodeFailure {
     }
 }
 
-/// Progress of one Identify unproductive moments node. Its scorer has nothing
-/// to configure; what it keeps is which episodes it has scored, and each
-/// scored episode's finer progress curve. Episodes scored before curves were
-/// kept have none, and their timeline draws the moments instead.
+/// One Identify unproductive moments node. Its scorer is pinned, so there is
+/// nothing to configure; what it reads is the preview's, never the document's.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MomentDetection {
-    #[serde(default)]
-    completed_episodes: Vec<EpisodeId>,
-    #[serde(default)]
-    failed_episodes: Vec<EpisodeFailure>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    curves: Vec<ProgressCurve>,
-}
-impl MomentDetection {
-    /// The finer progress curve of one scored episode, when it was kept.
-    pub(crate) fn curve(&self, episode: &EpisodeId) -> Option<&ProgressCurve> {
-        self.curves.iter().find(|curve| curve.episode() == episode)
-    }
-    pub(crate) fn completed_episodes(&self) -> &[EpisodeId] {
-        &self.completed_episodes
-    }
-    pub(crate) fn failed_episodes(&self) -> &[EpisodeFailure] {
-        &self.failed_episodes
-    }
-    pub(crate) fn is_completed(&self, episode: &EpisodeId) -> bool {
-        self.completed_episodes.contains(episode)
-    }
-}
-impl EpisodeLedger for MomentDetection {
-    fn completed_mut(&mut self) -> &mut Vec<EpisodeId> {
-        &mut self.completed_episodes
-    }
-    fn failed_mut(&mut self) -> &mut Vec<EpisodeFailure> {
-        &mut self.failed_episodes
-    }
-}
-
-/// One scored moment of one episode: a fixed run of frames and the mean
-/// progress the scorer read across it, in seconds from the episode's start,
-/// `start_time` inclusive and `end_time` exclusive. `velocity` is `None` where
-/// the scorer had no support for a frame of it.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MomentRow {
-    node: String,
-    episode: EpisodeId,
-    start_time: f64,
-    end_time: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    velocity: Option<f64>,
-}
-impl MomentRow {
-    pub(crate) fn new(
-        node: impl Into<String>,
-        episode: EpisodeId,
-        (start_time, end_time): (f64, f64),
-        velocity: Option<f64>,
-    ) -> Result<Self, String> {
-        let row = Self {
-            node: node.into(),
-            episode,
-            start_time,
-            end_time,
-            velocity: velocity.filter(|value| value.is_finite()),
-        };
-        row.validate()?;
-        Ok(row)
-    }
-    pub(crate) fn episode(&self) -> &EpisodeId {
-        &self.episode
-    }
-    pub(crate) fn start_time(&self) -> f64 {
-        self.start_time
-    }
-    pub(crate) fn end_time(&self) -> f64 {
-        self.end_time
-    }
-    pub(crate) fn velocity(&self) -> Option<f64> {
-        self.velocity
-    }
-    fn validate(&self) -> Result<(), String> {
-        if self.node.is_empty() {
-            return Err("A moment needs its node.".into());
-        }
-        if !self.start_time.is_finite()
-            || !self.end_time.is_finite()
-            || self.start_time < 0.0
-            || self.end_time <= self.start_time
-        {
-            return Err(format!(
-                "Moment [{}, {}) is not a valid time range.",
-                self.start_time, self.end_time
-            ));
-        }
-        Ok(())
-    }
-}
+pub(crate) struct MomentDetection {}
 
 /// The last query of a Find similar subtasks node. Its ranking is stored
 /// beside it as a `SubtaskRanking`, which names the query it answers.
@@ -802,7 +713,7 @@ impl CurationGraph {
             subtasks: Vec::new(),
             groupings: Vec::new(),
             rankings: Vec::new(),
-            moments: Vec::new(),
+            published: Vec::new(),
         }
     }
     pub(crate) fn dataset(&self) -> Option<&DatasetSelection> {
@@ -1006,7 +917,9 @@ impl CurationGraph {
         }
         Ok(node)
     }
-    /// Remove a node, its descendants, and everything they produced.
+    /// Remove a node, its descendants, and everything they produced. A branch
+    /// holding a published output stays until the view is unpublished, so no
+    /// view outlives the recipe it was compiled from.
     pub(crate) fn remove_node(&mut self, id: &str) -> Result<(), String> {
         if id == DATASET_NODE_ID {
             return Err("The dataset node cannot be removed.".into());
@@ -1023,6 +936,16 @@ impl CurationGraph {
             );
             index += 1;
         }
+        if let Some(published) = self
+            .published
+            .iter()
+            .find(|published| doomed.iter().any(|node| node == published.node()))
+        {
+            return Err(format!(
+                "“{}” is published from this branch; unpublish it before removing the step.",
+                published.view()
+            ));
+        }
         self.nodes.retain(|node| !doomed.contains(&node.id));
         self.edges
             .retain(|edge| !doomed.contains(&edge.from) && !doomed.contains(&edge.to));
@@ -1031,7 +954,6 @@ impl CurationGraph {
             .retain(|grouping| !doomed.contains(&grouping.node));
         self.rankings
             .retain(|ranking| !doomed.contains(&ranking.node));
-        self.moments.retain(|row| !doomed.contains(&row.node));
         Ok(())
     }
     /// An annotation node's rows, in episode order then time order as stored.
@@ -1068,84 +990,15 @@ impl CurationGraph {
         self.subtasks.extend(rows);
         Ok(())
     }
-    /// Record a failed attempt at one episode of a Break down subtasks or an
-    /// Identify unproductive moments node; what it stored for the episode
-    /// before stays.
+    /// Record a failed attempt at one episode of a Break down subtasks node;
+    /// what it stored for the episode before stays.
     pub(crate) fn record_episode_failure(
         &mut self,
         node: &str,
         episode: &EpisodeId,
         reason: impl Into<String>,
     ) -> Result<(), String> {
-        match self.node_mut(node).map(CurationNode::kind_mut) {
-            Some(CurationNodeKind::BreakDownSubtasks(annotation)) => {
-                annotation.mark_failed(episode, reason);
-            }
-            Some(CurationNodeKind::IdentifyUnproductiveMoments(detection)) => {
-                detection.mark_failed(episode, reason);
-            }
-            Some(_) => return Err("That node does not measure episodes one at a time.".into()),
-            None => return Err("Unknown node.".into()),
-        }
-        Ok(())
-    }
-    /// A detection node's moments, in episode order then time order.
-    pub(crate) fn moments_for<'a>(
-        &'a self,
-        node: &'a str,
-    ) -> impl Iterator<Item = &'a MomentRow> + 'a {
-        self.moments.iter().filter(move |row| row.node == node)
-    }
-    /// Replace one episode's moments for a detection node and record the
-    /// episode as scored. The moments must be in order and must not overlap.
-    pub(crate) fn replace_episode_moments(
-        &mut self,
-        node: &str,
-        episode: &EpisodeId,
-        rows: Vec<MomentRow>,
-    ) -> Result<(), String> {
-        let detection = match self.node_mut(node).map(CurationNode::kind_mut) {
-            Some(CurationNodeKind::IdentifyUnproductiveMoments(detection)) => detection,
-            Some(_) => return Err("That node does not identify moments.".into()),
-            None => return Err("Unknown node.".into()),
-        };
-        if rows
-            .iter()
-            .any(|row| row.node != node || &row.episode != episode)
-        {
-            return Err("Moments belong to another node or episode.".into());
-        }
-        for row in &rows {
-            row.validate()?;
-        }
-        if rows
-            .windows(2)
-            .any(|pair| pair[1].start_time < pair[0].end_time)
-        {
-            return Err("Moments of one episode must be in order and not overlap.".into());
-        }
-        detection.mark_completed(episode);
-        self.moments
-            .retain(|row| !(row.node == node && &row.episode == episode));
-        self.moments.extend(rows);
-        Ok(())
-    }
-    /// Keep one episode's finer progress curve on the detection node that
-    /// scored it, replacing the one it had.
-    pub(crate) fn record_progress_curve(
-        &mut self,
-        node: &str,
-        curve: ProgressCurve,
-    ) -> Result<(), String> {
-        let detection = match self.node_mut(node).map(CurationNode::kind_mut) {
-            Some(CurationNodeKind::IdentifyUnproductiveMoments(detection)) => detection,
-            Some(_) => return Err("That node does not identify moments.".into()),
-            None => return Err("Unknown node.".into()),
-        };
-        detection
-            .curves
-            .retain(|kept| kept.episode() != curve.episode());
-        detection.curves.push(curve);
+        self.annotation_mut(node)?.mark_failed(episode, reason);
         Ok(())
     }
     /// What a Find similar node last found, whatever it was asked.
@@ -1214,7 +1067,8 @@ impl CurationGraph {
         self.validate_nodes()?;
         self.validate_edges()?;
         self.validate_subtasks()?;
-        self.validate_stored_outputs()
+        self.validate_stored_outputs()?;
+        self.validate_publications()
     }
     fn validate_nodes(&self) -> Result<(), String> {
         let mut ids = BTreeSet::new();
@@ -1332,8 +1186,8 @@ impl CurationGraph {
         }
         Ok(())
     }
-    /// What the searches, groupings, and detections stored belongs to a node
-    /// of their own kind, once per node.
+    /// What the searches and groupings stored belongs to a node of their own
+    /// kind, once per node.
     fn validate_stored_outputs(&self) -> Result<(), String> {
         let mut grouped = BTreeSet::new();
         for grouping in &self.groupings {
@@ -1372,15 +1226,6 @@ impl CurationGraph {
                 ));
             }
         }
-        for row in &self.moments {
-            row.validate()?;
-            if !matches!(
-                self.node(&row.node).map(CurationNode::kind),
-                Some(CurationNodeKind::IdentifyUnproductiveMoments(_))
-            ) {
-                return Err(format!("Moments refer to unknown node “{}”.", row.node));
-            }
-        }
         Ok(())
     }
     pub(crate) fn encode(&self) -> Result<String, String> {
@@ -1390,7 +1235,7 @@ impl CurationGraph {
     pub(crate) fn decode(encoding: u32, payload: &str) -> Result<Self, String> {
         if encoding != CURATION_ENCODING_VERSION {
             return Err(format!(
-                "This curation uses encoding {encoding}; this Studio reads {CURATION_ENCODING_VERSION}."
+                "This curation uses encoding {encoding}; this Studio reads encoding {CURATION_ENCODING_VERSION}."
             ));
         }
         let decoded: Self = serde_json::from_str(payload).map_err(|error| {

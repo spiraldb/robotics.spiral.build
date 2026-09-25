@@ -112,3 +112,64 @@ async fn documents_that_break_the_wire_contract_are_never_written() {
     }
     assert_eq!(documents.list().await.unwrap(), Vec::new());
 }
+
+#[test]
+fn a_view_name_held_by_a_root_table_or_dataset_is_refused_whatever_its_case() {
+    use super::CuratedViews;
+    use spiral_robotics_common::curation::ViewName;
+    use spiral_robotics_common::datasets::{DatasetSelection, ProjectResource};
+    let resource = |path: &[&str], kind: &str| {
+        ProjectResource::new(
+            DatasetSelection::new(path.iter().map(|part| (*part).to_owned()).collect()).unwrap(),
+            kind.to_owned(),
+            ("resource".to_owned(), "version".to_owned()),
+        )
+    };
+    let resources = [
+        resource(&["folds"], "table"),
+        resource(&["dataset_abc130k"], "dataset"),
+        resource(&["moving"], "view"),
+        resource(&["recordings", "nested"], "dataset"),
+    ];
+    let held = |name: &str| CuratedViews::held_by(&resources, &ViewName::try_from(name).unwrap());
+    assert_eq!(held("Folds").as_deref(), Some("table"));
+    assert_eq!(held("dataset_abc130k").as_deref(), Some("dataset"));
+    // A view is what publishing replaces, and a nested name is not at the root.
+    assert_eq!(held("moving"), None);
+    assert_eq!(held("nested"), None);
+}
+
+/// Spiral's in-memory engine gives every connection its own catalog, so this
+/// reads the view inside the transaction that defines it. That a committed
+/// view reaches other connections, and that a refused one rolls back to the
+/// view before, is Spiral's to keep and is checked live.
+#[tokio::test]
+async fn publishing_replaces_the_view_whole_and_a_broken_statement_is_refused() {
+    use super::CuratedViews;
+    use spiral_robotics_common::curation::ViewName;
+    let store = crate::ProjectStore::in_memory();
+    let mut connection = store.connect_exclusive().await.unwrap();
+    connection.begin_transaction().await.unwrap();
+    let name = ViewName::try_from("curated_folds").unwrap();
+    for value in [1, 2] {
+        CuratedViews::define(
+            &mut connection,
+            &name,
+            &format!("SELECT CAST({value} AS BIGINT) AS episode_id"),
+        )
+        .await
+        .unwrap();
+    }
+    let read = connection
+        .query_rows("SELECT episode_id FROM curated_folds", 10)
+        .await
+        .unwrap();
+    assert_eq!(read.rows().len(), 1);
+    assert_eq!(read.rows()[0]["episode_id"], 2);
+    assert!(
+        CuratedViews::define(&mut connection, &name, "SELECT missing FROM nowhere")
+            .await
+            .is_err()
+    );
+    connection.rollback().await.unwrap();
+}

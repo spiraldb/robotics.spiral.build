@@ -5,11 +5,9 @@
 //! same number the map and the strip use, so choosing an item anywhere opens
 //! its episode in a tab beside the list.
 use super::SelectView;
-use crate::activities::curation::document::{
-    CurationNodeKind, EpisodeFact, MomentRow, Selection, SubtaskRow,
-};
+use crate::activities::curation::document::{CurationNodeKind, EpisodeFact, Selection, SubtaskRow};
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
-use crate::activities::curation::moments::{MomentEvidence, Pace};
+use crate::activities::curation::moments::{Moment, MomentEvidence, Pace, ProgressScorer};
 use crate::activities::curation::population::Population;
 use crate::activities::curation::poster::{PosterCut, PosterFrames, StillCamera};
 use crate::activities::curation::review::{
@@ -20,7 +18,6 @@ use crate::activities::curation::state::{CurationController, EpisodeFocus};
 use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
-use spiral_robotics_common::curation::progress::ProgressScorer;
 use spiral_robotics_common::datasets::EpisodeId;
 
 /// The items on the listed side, by their place in the input, and the one
@@ -129,7 +126,7 @@ impl ListedSide {
         }
     }
     /// How many rows this side lists: its items, or for moments the
-    /// stretches they run into — a moment is a second, not a row.
+    /// stretches they run into — a moment is a frame, not a row.
     pub(super) fn rows(&self, controller: CurationController) -> usize {
         let listed = self.listed(controller, None);
         match &self.view.input {
@@ -375,7 +372,7 @@ struct Stretch {
 }
 
 impl Stretch {
-    fn of(rows: &[MomentRow], items: &[usize]) -> Vec<Self> {
+    fn of(rows: &[Moment], items: &[usize]) -> Vec<Self> {
         let mut runs = Vec::<Vec<usize>>::new();
         for item in items.iter().copied() {
             let follows = item
@@ -391,7 +388,7 @@ impl Stretch {
                 let (first, last) = (&rows[items[0]], &rows[items[items.len() - 1]]);
                 let read = items
                     .iter()
-                    .filter_map(|item| rows[*item].velocity())
+                    .filter_map(|item| rows[*item].pace())
                     .collect::<Vec<_>>();
                 Self {
                     episode: first.episode().clone(),
@@ -462,8 +459,8 @@ pub(super) fn MomentListing(
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
     let listed = side.listed(controller, chosen);
     let stretches = Stretch::of(&rows, &listed.items);
-    // A stretch opens whole, so the first one plays from its first second
-    // rather than a single moment's.
+    // A stretch opens whole, so the first one plays from its start rather
+    // than a single moment's.
     let first = side.opening(controller);
     use_effect(use_reactive((&first,), move |(first,)| {
         tabs.open_first(first)
@@ -577,7 +574,6 @@ pub(super) fn MomentListing(
                             .unwrap_or_default();
                         rsx! {
                             MomentEvidence {
-                                curve: evidence.curve(tab.episode()),
                                 episode,
                                 moments,
                                 facts,

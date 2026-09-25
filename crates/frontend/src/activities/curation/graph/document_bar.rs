@@ -1,7 +1,6 @@
 //! The document bar: which curation is open, whether it is saved, and what
-//! may be done to it. The bar itself is shared; what is Curation's alone is
-//! starting a graph from a dataset, and having no Run — each node runs from
-//! its own workspace.
+//! may be done to it. What is Curation's own is starting a graph from a
+//! dataset; there is no Run, because each node runs from its own workspace.
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::DatasetSummary;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
@@ -53,7 +52,6 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
                 gate: DocumentBarGate::new(waiting.clone(), waiting.clone(), command.is_some())
                     .renaming(waiting),
                 creation: rsx! { CurationDatasetCreation { controller } },
-                run: rsx! {},
                 on_command: move |command| match command {
                     DocumentBarCommand::Open(Some(id)) => controller.open(id),
                     DocumentBarCommand::Open(None) => controller.create(UNTITLED, None),
@@ -66,7 +64,7 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
     }
 }
 
-/// A new graph over a dataset, as Workflow creates one: the chosen dataset
+/// A new graph over a dataset: the chosen dataset
 /// names the document and becomes its source node.
 #[component]
 fn CurationDatasetCreation(controller: CurationController) -> Element {

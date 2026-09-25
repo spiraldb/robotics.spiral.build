@@ -3,11 +3,9 @@ use crate::curations::CurationPersistence;
 use crate::settings::StudioPreferencePersistence;
 use crate::studio::StudioStore;
 use crate::training::{TrainingRunPersistence, TrainingRunRecord};
-use crate::workflows::{WorkflowJson, WorkflowPersistence};
 use spiral_robotics_common::robots::PortSettings;
 use spiral_robotics_common::robots::config::RobotConfig;
 use spiral_robotics_common::training::{TrainingConfig, TrainingRunIdentity};
-use spiral_robotics_common::workflow::WorkflowSpec;
 
 struct Fixture;
 impl Fixture {
@@ -46,17 +44,6 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
             .await
             .unwrap();
     }
-    let workflow = WorkflowSpec::new("flow", "Stored workflow").with_revision(1);
-    let graph = WorkflowJson::new(4, serde_json::json!({"workflow":workflow}).to_string());
-    let conversation = crate::workflow_assistant::WorkflowConversation::new("flow")
-        .persisted()
-        .unwrap();
-    assert!(
-        WorkflowPersistence::new(&source)
-            .save(&workflow, (&graph, &conversation))
-            .await
-            .unwrap()
-    );
     let curation = spiral_robotics_common::curation::CurationDocument::new(
         "folding",
         "Cloth folding",
@@ -117,13 +104,6 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
             .unwrap()
             .is_some()
     );
-    let workflow = WorkflowPersistence::new(&target)
-        .load("flow")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(workflow.graph(), &graph);
-    assert_eq!(workflow.conversation(), Some(&conversation));
     assert_eq!(
         CurationPersistence::new(&target)
             .load("folding")
