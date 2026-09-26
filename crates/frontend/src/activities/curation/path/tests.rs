@@ -1,8 +1,8 @@
 use super::*;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{
-    Comparison, DATASET_NODE_ID, EpisodeFact, ProgressScoring, Selection, SubtaskAnnotation,
-    SubtaskCategory, SubtaskGrouping, SubtaskSearch,
+    Comparison, CurationNode, DATASET_NODE_ID, EpisodeFact, ProgressScoring, Selection,
+    SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::preview::{PreviewReads, PreviewRows, ReadInput};
@@ -21,6 +21,22 @@ fn child(graph: &mut CurationGraph, parent: &str, kind: CurationNodeKind) -> Str
     graph
         .add_child(parent, kind)
         .expect("the grammar allows it")
+}
+
+/// A child keeping by `rule` rather than the rule its kind starts with.
+fn keeping(
+    graph: &mut CurationGraph,
+    (parent, kind): (&str, CurationNodeKind),
+    rule: Selection,
+) -> String {
+    graph
+        .add_keeping(parent, kind, rule)
+        .expect("the grammar allows it")
+}
+
+/// Episodes lasting at least, or at most, `seconds`.
+fn lasting(comparison: Comparison, seconds: f64) -> Selection {
+    Selection::episodes_where(EpisodeFact::DurationSeconds, comparison, seconds)
 }
 
 fn published(graph: &CurationGraph, node: &str) -> String {
@@ -103,14 +119,10 @@ fn admitted(published: &str, preview: &str) {
 #[test]
 fn a_select_on_duration_keeps_whole_episodes_and_publishes_the_fact_it_read() {
     let mut graph = graph();
-    let long = child(
+    let long = keeping(
         &mut graph,
-        DATASET_NODE_ID,
-        CurationNodeKind::Select(Selection::Episodes {
-            fact: EpisodeFact::DurationSeconds,
-            comparison: Comparison::AtLeast,
-            value: 10.0,
-        }),
+        (DATASET_NODE_ID, CurationNodeKind::Select),
+        lasting(Comparison::AtLeast, 10.0),
     );
     assert_eq!(
         published(&graph, &long),
@@ -122,19 +134,17 @@ SELECT episode_id, start_ns, end_ns, duration_seconds FROM select_1"
 }
 
 #[test]
-fn a_progress_select_scores_every_frame_and_joins_the_moments_it_keeps() {
+fn score_progress_scores_every_frame_and_joins_the_moments_its_rule_keeps() {
     let mut graph = graph();
-    let score = child(
+    let score = keeping(
         &mut graph,
-        DATASET_NODE_ID,
-        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        (
+            DATASET_NODE_ID,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        ),
+        Selection::Progressing { minimum: 0.2 },
     );
-    let moving = child(
-        &mut graph,
-        &score,
-        CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
-    );
-    let published = published(&graph, &moving);
+    let published = published(&graph, &score);
     for step in [
         "FROM spql.mcap.read_topic('abc130k', '/cameras/top_camera-images-rgb') r",
         "WHERE r.id IN (SELECT episode_id FROM dataset_0))",
@@ -144,18 +154,20 @@ fn a_progress_select_scores_every_frame_and_joins_the_moments_it_keeps() {
         "r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns, p.frame_index AS frame_index, CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS progress_rate FROM episodes r CROSS JOIN LATERAL UNNEST(r.scores) p)",
         "COALESCE(LEAD(start_ns) OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index), start_ns + (start_ns - LAG(start_ns) OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index))) AS end_ns",
         "score_progress_1 AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, LEAST(end_ns, reached_end_ns) AS end_ns, progress_rate FROM score_progress_1_moments WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns AND end_ns > start_ns)",
-        "FROM select_2_numbered WHERE (progress_rate IS NULL OR progress_rate >= CAST(0.2 AS DOUBLE)))",
-        "select_2_stretches AS (SELECT episode_id, MIN(start_ns) OVER (PARTITION BY episode_id, stretch) AS start_ns, MAX(end_ns) OVER (PARTITION BY episode_id, stretch) AS end_ns, AVG(progress_rate) OVER (PARTITION BY episode_id, stretch) AS progress_rate, ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place FROM select_2_kept)",
-        "select_2 AS (SELECT episode_id, start_ns, end_ns, progress_rate FROM select_2_stretches WHERE place = 1)",
+        // The rule keeps from what the step wrote, under a name of its own.
+        "FROM score_progress_1_kept_numbered WHERE (progress_rate IS NULL OR progress_rate >= CAST(0.2 AS DOUBLE)))",
+        "score_progress_1_kept_stretches AS (SELECT episode_id, MIN(start_ns) OVER (PARTITION BY episode_id, stretch) AS start_ns, MAX(end_ns) OVER (PARTITION BY episode_id, stretch) AS end_ns, AVG(progress_rate) OVER (PARTITION BY episode_id, stretch) AS progress_rate, ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place FROM score_progress_1_kept_passing)",
+        "score_progress_1_kept AS (SELECT episode_id, start_ns, end_ns, progress_rate FROM score_progress_1_kept_stretches WHERE place = 1)",
     ] {
         assert!(published.contains(step), "{step}\n{published}");
     }
-    assert!(
-        published.ends_with("\nSELECT episode_id, start_ns, end_ns, progress_rate FROM select_2")
-    );
+    assert!(published.ends_with(
+        "\nSELECT episode_id, start_ns, end_ns, progress_rate FROM score_progress_1_kept"
+    ));
     // The preview scores only the bound episode, and unnests its scores over
     // the intervals the dataset's preview hands on rather than the dataset
-    // read again.
+    // read again. It leaves the rule out: the browser keeps by it over every
+    // frame the step read.
     let scoring = preview(&graph, &score, intervals());
     for step in [
         "WITH\n  preview_input(episode_id, start_ns, end_ns) AS (VALUES ($1, ",
@@ -166,7 +178,7 @@ fn a_progress_select_scores_every_frame_and_joins_the_moments_it_keeps() {
     ] {
         assert!(scoring.contains(step), "{step}\n{scoring}");
     }
-    assert!(!scoring.contains("dataset_0"));
+    assert!(!scoring.contains("dataset_0") && !scoring.contains("_kept"));
     assert!(
         scoring.ends_with(
             "\nSELECT episode_id, start_ns, end_ns, progress_rate FROM score_progress_1"
@@ -178,14 +190,10 @@ fn a_progress_select_scores_every_frame_and_joins_the_moments_it_keeps() {
 #[test]
 fn a_breakdown_reads_each_episode_whole_and_cuts_its_subtasks_to_what_reached_it() {
     let mut graph = graph();
-    let long = child(
+    let long = keeping(
         &mut graph,
-        DATASET_NODE_ID,
-        CurationNodeKind::Select(Selection::Episodes {
-            fact: EpisodeFact::DurationSeconds,
-            comparison: Comparison::AtLeast,
-            value: 10.0,
-        }),
+        (DATASET_NODE_ID, CurationNodeKind::Select),
+        lasting(Comparison::AtLeast, 10.0),
     );
     let annotate = child(&mut graph, &long, breakdown());
     let published = published(&graph, &annotate);
@@ -233,27 +241,25 @@ fn a_breakdown_reads_each_episode_whole_and_cuts_its_subtasks_to_what_reached_it
     ));
 }
 
-/// Dataset, moments, the Select of the moving ones, then Break down on the
-/// scorer's own camera: one video feeds both models, and the subtasks ride
-/// on every moment and stretch until Break down unnests them.
+/// Dataset, Score progress keeping the moving stretches, then Break down on
+/// the scorer's own camera: one video feeds both models, and the subtasks
+/// ride on every moment and stretch until Break down unnests them.
 #[test]
 fn both_models_answer_on_the_episode_row_and_the_subtasks_ride_to_their_step() {
     let mut graph = graph();
-    let score = child(
+    let score = keeping(
         &mut graph,
-        DATASET_NODE_ID,
-        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
-    );
-    let moving = child(
-        &mut graph,
-        &score,
-        CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
+        (
+            DATASET_NODE_ID,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        ),
+        Selection::Progressing { minimum: 0.2 },
     );
     let mut annotation = SubtaskAnnotation::default();
     annotation.set_camera(Some(ProgressScorer::WarpSimBottles.camera().to_owned()));
     let annotate = child(
         &mut graph,
-        &moving,
+        &score,
         CurationNodeKind::BreakDownSubtasks(annotation),
     );
     let published = published(&graph, &annotate);
@@ -263,8 +269,8 @@ fn both_models_answer_on_the_episode_row_and_the_subtasks_ride_to_their_step() {
         "score_progress_1_frames AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns, r.subtasks, r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns,",
         "LEAST(end_ns, reached_end_ns) AS end_ns, progress_rate, origin_ns, subtasks FROM score_progress_1_moments",
         "AVG(progress_rate) OVER (PARTITION BY episode_id, stretch) AS progress_rate, origin_ns, subtasks, ROW_NUMBER()",
-        "select_2 AS (SELECT episode_id, start_ns, end_ns, progress_rate, origin_ns, subtasks FROM select_2_stretches WHERE place = 1)",
-        "break_down_subtasks_3_subtasks AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns + CAST(s.start_ns AS BIGINT) AS start_ns, r.origin_ns + CAST(s.end_ns AS BIGINT) AS end_ns, s.description AS subtask FROM select_2 r CROSS JOIN LATERAL UNNEST(r.subtasks) AS s)",
+        "score_progress_1_kept AS (SELECT episode_id, start_ns, end_ns, progress_rate, origin_ns, subtasks FROM score_progress_1_kept_stretches WHERE place = 1)",
+        "break_down_subtasks_2_subtasks AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns + CAST(s.start_ns AS BIGINT) AS start_ns, r.origin_ns + CAST(s.end_ns AS BIGINT) AS end_ns, s.description AS subtask FROM score_progress_1_kept r CROSS JOIN LATERAL UNNEST(r.subtasks) AS s)",
     ] {
         assert!(published.contains(step), "{step}\n{published}");
     }
@@ -284,12 +290,12 @@ fn a_grouping_publishes_each_subtask_with_its_category_and_a_select_keeps_the_ch
     let mut graph = graph();
     let annotate = child(&mut graph, DATASET_NODE_ID, breakdown());
     let group = child(&mut graph, &annotate, grouping(&["fold", "flatten"]));
-    let folds = child(
+    let folds = keeping(
         &mut graph,
-        &group,
-        CurationNodeKind::Select(Selection::Categories {
+        (&group, CurationNodeKind::Select),
+        Selection::Categories {
             names: vec!["fold".into()],
-        }),
+        },
     );
     let published = published(&graph, &folds);
     assert!(
@@ -316,29 +322,25 @@ fn a_grouping_publishes_each_subtask_with_its_category_and_a_select_keeps_the_ch
 }
 
 #[test]
-fn a_search_publishes_each_subtask_with_its_similarity_and_a_repeat_writes_its_own_column() {
+fn a_search_publishes_the_subtasks_its_cutoff_keeps_and_a_repeat_writes_its_own_column() {
     let mut graph = graph();
     let annotate = child(&mut graph, DATASET_NODE_ID, breakdown());
     let search = child(&mut graph, &annotate, searching("fold the towel's edge"));
-    let close = child(
-        &mut graph,
-        &search,
-        CurationNodeKind::Select(Selection::Similar { minimum: 0.5 }),
-    );
-    let published = published(&graph, &close);
+    let published = published(&graph, &search);
     assert!(
         published.contains(
             "find_similar_subtasks_2 AS (SELECT episode_id, start_ns, end_ns, subtask, spql.ai.similarity(subtask, 'fold the towel''s edge', model => 'typesafe/jev-1.13') AS similarity FROM break_down_subtasks_1)"
         ),
         "{published}"
     );
-    assert!(
-        published.contains("FROM find_similar_subtasks_2 WHERE similarity >= CAST(0.5 AS DOUBLE))")
-    );
-    assert!(
-        published
-            .ends_with("\nSELECT episode_id, start_ns, end_ns, subtask, similarity FROM select_3")
-    );
+    // A new search keeps the subtasks more likely than not the same
+    // operation.
+    assert!(published.contains(
+        "find_similar_subtasks_2_kept AS (SELECT episode_id, start_ns, end_ns, subtask, similarity FROM find_similar_subtasks_2 WHERE similarity >= CAST(0.5 AS DOUBLE))"
+    ));
+    assert!(published.ends_with(
+        "\nSELECT episode_id, start_ns, end_ns, subtask, similarity FROM find_similar_subtasks_2_kept"
+    ));
     let asking = preview(&graph, &search, rows_of(&graph, &annotate));
     assert!(asking.contains(
         "spql.ai.similarity(subtask, 'fold the towel''s edge', model => 'typesafe/jev-1.13', on_error => 'fail') AS similarity FROM preview_input)"
@@ -346,21 +348,20 @@ fn a_search_publishes_each_subtask_with_its_similarity_and_a_repeat_writes_its_o
     admitted(&published, &asking);
 
     // A second search below the first keeps the first's column and writes
-    // its own, which the Select below it reads.
-    let again = child(&mut graph, &close, searching("smooth the cloth"));
-    let closer = child(
+    // its own, which its own cutoff reads.
+    let again = keeping(
         &mut graph,
-        &again,
-        CurationNodeKind::Select(Selection::Similar { minimum: 0.8 }),
+        (&search, searching("smooth the cloth")),
+        Selection::Similar { minimum: 0.8 },
     );
-    let published = self::published(&graph, &closer);
+    let published = self::published(&graph, &again);
     assert!(
-        published.contains("AS similarity_2 FROM select_3)"),
+        published.contains("AS similarity_2 FROM find_similar_subtasks_2_kept)"),
         "{published}"
     );
     assert!(published.contains("WHERE similarity_2 >= CAST(0.8 AS DOUBLE))"));
     assert!(published.ends_with(
-        "\nSELECT episode_id, start_ns, end_ns, subtask, similarity, similarity_2 FROM select_5"
+        "\nSELECT episode_id, start_ns, end_ns, subtask, similarity, similarity_2 FROM find_similar_subtasks_3_kept"
     ));
     let path = CurationPath::to(&graph, &again).unwrap();
     assert_eq!(
@@ -368,7 +369,7 @@ fn a_search_publishes_each_subtask_with_its_similarity_and_a_repeat_writes_its_o
         Some("similarity_2")
     );
     // Its preview is handed both columns, and passes the first on.
-    let again_searching = preview(&graph, &again, rows_of(&graph, &close));
+    let again_searching = preview(&graph, &again, rows_of(&graph, &search));
     assert!(again_searching.contains(
         "SELECT episode_id, start_ns, end_ns, subtask, similarity, spql.ai.similarity(subtask, 'smooth the cloth'"
     ));
@@ -406,11 +407,8 @@ fn a_node_missing_what_its_step_needs_says_so() {
         "Generate the categories, or write them, before grouping."
     );
     assert_eq!(reason(&graph, &search), "Type the subtask to search for.");
-    let nothing = child(
-        &mut graph,
-        &group,
-        CurationNodeKind::Select(Selection::Categories { names: Vec::new() }),
-    );
+    // A Select below a grouping starts with no category chosen.
+    let nothing = child(&mut graph, &group, CurationNodeKind::Select);
     if let CurationNodeKind::GroupSimilarSubtasks(grouping) =
         graph.node_mut(&group).unwrap().kind_mut()
     {
@@ -424,29 +422,23 @@ fn a_node_missing_what_its_step_needs_says_so() {
 #[test]
 fn each_measures_preview_is_its_published_step_over_its_parents_rows() {
     let mut graph = graph();
-    let short = child(
+    let short = keeping(
         &mut graph,
-        DATASET_NODE_ID,
-        CurationNodeKind::Select(Selection::Episodes {
-            fact: EpisodeFact::DurationSeconds,
-            comparison: Comparison::AtMost,
-            value: 22.0,
-        }),
+        (DATASET_NODE_ID, CurationNodeKind::Select),
+        lasting(Comparison::AtMost, 22.0),
     );
     let annotate = child(&mut graph, &short, breakdown());
     let search = child(&mut graph, &annotate, searching("fold the skirt"));
     let group = child(&mut graph, &annotate, grouping(&["fold", "grasp"]));
-    let score = child(
+    let score = keeping(
         &mut graph,
-        &short,
-        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        (
+            &short,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        ),
+        Selection::Progressing { minimum: 0.2 },
     );
-    let moving = child(
-        &mut graph,
-        &score,
-        CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
-    );
-    let annotate_moving = child(&mut graph, &moving, breakdown());
+    let annotate_moving = child(&mut graph, &score, breakdown());
     let name = |node: &str| {
         CurationPath::to(&graph, node)
             .unwrap()
@@ -473,7 +465,7 @@ fn each_measures_preview_is_its_published_step_over_its_parents_rows() {
         (
             &annotate_moving,
             intervals(),
-            (name(&moving), "preview_reached"),
+            (name(&score), "preview_reached"),
         ),
         (
             &search,
@@ -486,11 +478,19 @@ fn each_measures_preview_is_its_published_step_over_its_parents_rows() {
             (name(&annotate), "preview_input"),
         ),
     ] {
-        let own = name(node);
-        // The node's own entries and the final SELECT, from its first entry.
+        // The node's own step, whose rule the published view keeps by after
+        // it and the preview leaves to the browser.
+        let own = name(node).trim_end_matches("_kept").to_owned();
+        // The node's own entries, from its first to its rule's or the final
+        // SELECT.
         let step = |statement: &str| {
             let first = statement.find(&format!("\n  {own}")).unwrap();
-            statement[first..].to_owned()
+            let rest = &statement[first..];
+            let end = rest
+                .find(&format!(",\n  {own}_kept"))
+                .or_else(|| rest.find("\nSELECT "))
+                .unwrap();
+            rest[..end].to_owned()
         };
         // The same step over either input, failing where the view answers
         // NULL.
@@ -600,11 +600,6 @@ fn configured(kind: CurationNodeKind) -> Vec<CurationNodeKind> {
         }
         CurationNodeKind::FindSimilarSubtasks(_) => vec![searching("fold the towel")],
         CurationNodeKind::GroupSimilarSubtasks(_) => vec![grouping(&["fold", "grasp"])],
-        CurationNodeKind::Select(Selection::Categories { .. }) => {
-            vec![CurationNodeKind::Select(Selection::Categories {
-                names: vec!["fold".into()],
-            })]
-        }
         kind => vec![kind],
     }
 }
@@ -621,6 +616,16 @@ fn every_path(
     }
     for kind in graph.child_kinds(node).into_iter().flat_map(configured) {
         let added = child(graph, node, kind);
+        // A Select of categories compiles once it keeps one.
+        if let Some(Selection::Categories { names }) =
+            graph.node(&added).and_then(CurationNode::keeps)
+            && names.is_empty()
+        {
+            let fold = Selection::Categories {
+                names: vec!["fold".into()],
+            };
+            graph.set_rule(&added, fold).unwrap();
+        }
         check(graph, &added);
         every_path(graph, (&added, below - 1), check);
         graph.remove_node(&added).unwrap();
@@ -651,49 +656,42 @@ fn no_published_path_asks_a_model_twice() {
             .filter(|node| {
                 !matches!(
                     node.kind(),
-                    CurationNodeKind::Dataset | CurationNodeKind::Select(_)
+                    CurationNodeKind::Dataset | CurationNodeKind::Select
                 )
             })
             .count();
         assert_eq!(statement.matches("spql.ai.").count(), models, "{statement}");
         most_models = most_models.max(models);
     });
-    // Some path asks all four: moments, Break down, and both judgments.
-    assert_eq!(most_models, 4);
+    // Some path asks a model at every one of its six steps: moments, Break
+    // down, and a judgment of what each judgment before it kept.
+    assert_eq!(most_models, 6);
 }
 
 #[test]
 fn a_graph_without_a_dataset_has_nothing_to_read() {
     let mut graph = CurationGraph::new(None);
-    let long = child(
-        &mut graph,
-        DATASET_NODE_ID,
-        CurationNodeKind::Select(Selection::for_basis(
-            crate::activities::curation::document::SelectionBasis::EpisodeFacts,
-        )),
-    );
+    let long = child(&mut graph, DATASET_NODE_ID, CurationNodeKind::Select);
     assert!(matches!(
         CurationPath::to(&graph, &long).unwrap().statement(),
         Err(PathError(_))
     ));
 }
 
-/// The stretches the browser keeps for a progress Select are the ones its
+/// The stretches the browser keeps for Score progress are the ones its
 /// statement keeps. The frames are the ones Spiral's in-memory engine was
 /// given, in place of the unnested scores, and the stretches are what it
 /// answered for everything after the unnest of this path's statement.
 #[test]
 fn the_browser_keeps_the_stretches_the_statement_keeps() {
     let mut graph = graph();
-    let score = child(
+    let score = keeping(
         &mut graph,
-        DATASET_NODE_ID,
-        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
-    );
-    let moving = child(
-        &mut graph,
-        &score,
-        CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
+        (
+            DATASET_NODE_ID,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        ),
+        Selection::Progressing { minimum: 0.2 },
     );
     let (first, second) = (EpisodeId::fixture(1), EpisodeId::fixture(2));
     let sample = EpisodeSample::fixture(vec![
@@ -741,7 +739,7 @@ fn the_browser_keeps_the_stretches_the_statement_keeps() {
         ))),
     );
     let kept = PopulationReader::new(&graph, &sample, &reads)
-        .of(&moving)
+        .of(&score)
         .slices(&sample)
         .iter()
         .map(|slice| {

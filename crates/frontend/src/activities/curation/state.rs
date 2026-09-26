@@ -3,7 +3,9 @@
 //! saves. The controller is passed as a prop; every Curation view reads and
 //! edits through it. Shared contract: extend it, never change what is here.
 use super::annotate::SubtaskRow;
-use super::document::{CURATION_ENCODING_VERSION, CurationGraph, CurationNode, DATASET_NODE_ID};
+use super::document::{
+    CURATION_ENCODING_VERSION, CurationGraph, CurationNode, DATASET_NODE_ID, Selection,
+};
 use super::population::{EpisodeSample, Population, PopulationReader};
 use super::preview::{
     PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows, ReadInput,
@@ -36,8 +38,8 @@ pub(crate) type NodeActivity = BTreeMap<String, String>;
 pub(crate) enum RunState {
     Idle,
     Running,
-    /// Stop was pressed: nothing new starts, and what is in flight finishes
-    /// and is saved.
+    /// Stop was pressed and the run is ending: nothing new starts, and what
+    /// is in flight is dropped.
     Stopping,
 }
 
@@ -131,10 +133,6 @@ pub(super) struct RunHandle {
 }
 
 impl RunHandle {
-    /// The node the run measures for.
-    pub(super) fn node(&self) -> &str {
-        &self.node
-    }
     /// Whether the operator still wants the run; Stop clears it, and the run
     /// starts nothing new.
     pub(super) fn wanted(&self) -> bool {
@@ -319,6 +317,18 @@ impl CurationController {
             let reader = reader?;
             Some((reader.input(node), reader.of(node)))
         })
+    }
+    /// What `node`'s rule judges, and what it keeps of that, once the sample
+    /// is read.
+    pub(super) fn judged(&self, node: &str) -> Option<(Population, Population)> {
+        self.with_reading(|_, reader| {
+            let reader = reader?;
+            Some((reader.judged(node), reader.of(node)))
+        })
+    }
+    /// Replace `node`'s rule, when it still keeps by that measure.
+    pub(super) fn set_rule(self, node: &str, rule: Selection) -> Result<(), String> {
+        self.edit(|payload| payload.set_rule(node, rule))
     }
     /// Read the graph together with what it is interpreted over, once the
     /// sample is read.

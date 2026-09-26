@@ -32,7 +32,7 @@ is one of two kinds:
 | Select | Keeps the intervals whose property passes its rule | Episodes ≥ 10 s; category is *fold*; moving stretches |
 
 **Output.** Every leaf Select is an output. Its relation is published as it
-stands: one row per kept interval.
+stands: one row per kept interval. (Revised 2026-09-26: see D7.)
 
 **Two runs of the same SQL.**
 
@@ -113,7 +113,7 @@ Agreed:
 | D4 | Caching model results is Spiral's concern: an optimization, done later | Correctness first. Users shouldn't manage cost. | Studio-side caches |
 | D5 | A node's preview runs only its own step, over the rows its parent's preview holds, written into the statement as `VALUES`. Editing or re-running a node leaves every node below it out of date, and each re-runs from its parent's current rows. (Revised 2026-09-24; it was: preview recomputes the whole path.) | Each step is still written once and runs the same SQL in both readings, but a search or a grouping makes only its own text calls instead of running Break down again for every episode | Recomputing the whole path per episode, which repeats every model call above the node; a table-parameter endpoint, which does not exist |
 | D6 | Preview uses the first ≤100 episodes in recording order | This is the sample today, and it is fast enough to iterate on | A random sample |
-| D7 | Outputs are the leaf Selects | Current behaviour. No extra node kind. | An explicit Output node |
+| D7 | Outputs are the leaf Selects. Revised 2026-09-26: every Score progress, Find similar, Group similar, and Select node is an output, whatever follows it; Score progress and Find similar keep by thresholds of their own, a Select holds several conditions, and Publish chooses which outputs become views and names them | Break down's free text is not trainable until a search or grouping reads it; a threshold belongs with the measure it divides, and frames never flow on an edge | An explicit Output node; progress and similarity Selects |
 | D8 | An output is one row per kept interval | It is what the graph already carries, so publishing converts nothing. Rows stay flat, and each label stays on its own interval. | One row per episode with nested ranges (derivable with `GROUP BY`); one row per moment (rate is a training choice) |
 | D9 | Curation only chooses data. Sample rate, cameras, image size, normalization and augmentation belong to Training. | These are the policy's input contract, and rollout must replay it on live frames, so they travel with the checkpoint | Shape nodes in Curation; a separate Shape tab |
 | D10 | Publish is explicit and named. Save stays local. | Exploratory leaves must not create catalog resources, and readers need a stable name | Auto-publishing every leaf |

@@ -208,7 +208,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     // The preview runs this node's step, the one a published view chains,
     // over the intervals that reach it, one query per episode. The pass is
     // the curation's, not this view's: choosing another node leaves it
-    // reading. Stop starts no further episode; the ones in flight land.
+    // reading. Stop ends it at once; the episodes in flight stay unread.
     let run = controller.run_state(&node);
     let problem = use_signal(|| Option::<String>::None);
     let start = {
@@ -309,7 +309,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                         Button {
                             purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
                             disabled: run == RunState::Stopping,
-                            title: "Start no further episode; the one in flight still lands",
+                            title: "Stop breaking down; the episodes in flight stay unread",
                             onclick: {
                                 let node = node.clone();
                                 move |_| controller.stop_run(&node)

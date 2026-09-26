@@ -653,7 +653,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                             Button {
                                 purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
                                 disabled: run == RunState::Stopping,
-                                title: "Group no further episode; the one in flight still lands",
+                                title: "Stop grouping; the episodes in flight stay ungrouped",
                                 onclick: {
                                     let node = node.clone();
                                     move |_| controller.stop_run(&node)

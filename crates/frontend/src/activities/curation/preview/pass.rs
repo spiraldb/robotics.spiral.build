@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 
 /// How often a pass asks the backend how far its run has got.
 const POLL_INTERVAL_MS: u32 = 1_000;
+/// How soon, between polls, a pass notices Stop.
+const STOP_CHECK_MS: u32 = 100;
 /// What one batch of judgments may spend of the 64 KiB a read-only query is
 /// admitted at, leaving room for the step and its categories.
 const MAX_BATCH_BYTES: usize = 60 * 1024;
@@ -128,7 +130,7 @@ impl PreviewPlan {
             CurationNodeKind::BreakDownSubtasks(_) => "Breaking down",
             CurationNodeKind::FindSimilarSubtasks(_) => "Searching",
             CurationNodeKind::GroupSimilarSubtasks(_) => "Grouping",
-            CurationNodeKind::Dataset | CurationNodeKind::Select(_) => "Reading",
+            CurationNodeKind::Dataset | CurationNodeKind::Select => "Reading",
         };
         let unit = match (&self.reading, self.jobs.first().map(|job| &job.bound)) {
             (PreviewReading::Subtasks(_), Some(None)) => "subtasks",
@@ -284,9 +286,9 @@ impl Batch<'_> {
 
 /// One node's preview as the curation's run: its queries go to the backend
 /// as one run, which is polled every second, and each answer is fetched and
-/// held for the session as it lands. Spiral cannot cancel a running query, so
-/// Stop starts no further query and the ones in flight finish. A failed query
-/// never stops the rest.
+/// held for the session as it lands. Stop ends the run at once: the backend
+/// starts nothing more and drops the queries in flight, whose episodes stay
+/// unread for the next Run. A failed query never stops the rest.
 pub(in crate::activities::curation) struct PreviewPass {
     controller: CurationController,
     run: RunHandle,
@@ -342,10 +344,12 @@ impl PreviewPass {
             if status.is_settled() {
                 return;
             }
-            if !stopping && !self.run.wanted() {
-                stopping = held.stop().await.is_ok();
+            // Just stopped, the run is read again at once: it has settled.
+            let stopped_now = !stopping && !self.run.wanted() && held.stop().await.is_ok();
+            stopping |= stopped_now;
+            if !stopped_now {
+                self.pause(stopping).await;
             }
-            gloo_timers::future::TimeoutFuture::new(POLL_INTERVAL_MS).await;
             status = match held.status().await {
                 Ok(status) => status,
                 Err(error) => {
@@ -356,6 +360,17 @@ impl PreviewPass {
                     return self.fail(&unread, &error.to_string());
                 }
             };
+        }
+    }
+
+    /// Wait out one poll interval, or only until Stop is pressed while the
+    /// run has not been stopped yet.
+    async fn pause(&self, stopping: bool) {
+        for _ in 0..POLL_INTERVAL_MS / STOP_CHECK_MS {
+            if !stopping && !self.run.wanted() {
+                return;
+            }
+            gloo_timers::future::TimeoutFuture::new(STOP_CHECK_MS).await;
         }
     }
 

@@ -3,10 +3,13 @@
 //! answers.
 //!
 //! The browser starts a run with every query at once and polls it every
-//! second, fetching each answer as it lands. Stop starts nothing new and lets
-//! what is running land, and a run nobody polls stops the same way, since the
-//! page that wanted it has gone. Runs live in memory: a restarted backend
-//! holds none, as a reloaded page holds no preview.
+//! second, fetching each answer as it lands. Stop ends the run at once: it
+//! starts nothing new, and the queries in flight are dropped and read as never
+//! run, so the next Run asks them again. Spiral has no way to cancel a
+//! statement it is computing, so one in flight finishes the batch it is on
+//! and its answer is thrown away. A run nobody polls only starts nothing new,
+//! since the page that wanted it has gone. Runs live in memory: a restarted
+//! backend holds none, as a reloaded page holds no preview.
 use crate::OperationError;
 use crate::adapters::clock::SystemClock;
 use crate::clock::{Clock, StableIdSequence};
@@ -86,9 +89,13 @@ impl PreviewRuns {
         Ok(run.status(id))
     }
 
-    /// Start none of run `id`'s remaining queries.
+    /// End run `id` now: start none of its remaining queries, and drop the
+    /// ones in flight.
     pub(super) fn stop(&self, id: &str) -> Result<(), OperationError> {
-        self.run(id)?.stop();
+        let runs = self.runs.recover_lock();
+        let held = runs.get(id).ok_or_else(Self::not_held)?;
+        held.run.stop();
+        held.task.abort();
         Ok(())
     }
 
@@ -110,11 +117,11 @@ impl PreviewRuns {
             .recover_lock()
             .get(id)
             .map(|held| held.run.clone())
-            .ok_or_else(|| {
-                OperationError::NotFound(
-                    "This preview run is no longer held; run the node again.".into(),
-                )
-            })
+            .ok_or_else(Self::not_held)
+    }
+
+    fn not_held() -> OperationError {
+        OperationError::NotFound("This preview run is no longer held; run the node again.".into())
     }
 
     /// Drop the settled runs nobody has asked about since they settled.
@@ -175,7 +182,14 @@ impl PreviewRun {
     }
 
     async fn answer_one(&self, query: usize, storage: &StorageManager) {
-        self.progress.recover_lock().states[query] = PreviewQueryState::Running;
+        {
+            // A query the stream handed over as Stop landed never starts.
+            let mut progress = self.progress.recover_lock();
+            if progress.stopped {
+                return;
+            }
+            progress.states[query] = PreviewQueryState::Running;
+        }
         let answered = Self::ask(&self.queries[query], storage).await;
         let mut progress = self.progress.recover_lock();
         progress.states[query] = match answered {
@@ -223,8 +237,16 @@ impl PreviewRun {
         self.progress.recover_lock().polled = Instant::now();
     }
 
+    /// Start nothing more, and read every query in flight as never run: its
+    /// task is being dropped, so it will not land.
     fn stop(&self) {
-        self.progress.recover_lock().stopped = true;
+        let mut progress = self.progress.recover_lock();
+        progress.stopped = true;
+        for state in &mut progress.states {
+            if *state == PreviewQueryState::Running {
+                *state = PreviewQueryState::Queued;
+            }
+        }
     }
 
     fn answer(&self, query: usize) -> Result<PreviewAnswer, OperationError> {

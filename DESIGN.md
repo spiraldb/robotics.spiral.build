@@ -710,10 +710,12 @@ document bar, the `curation-graph-v1` layout scope opens as two tiles: a 23%
 Graph of 190px stage cards on the dotted bench (Dataset, then the
 measurements and Selects it feeds, joined by edges that carry populations),
 beside the node's Workspace. A card says what the node holds, or while it
-runs what it is doing; a leaf Select wears the Output flag (Published once
-it is a catalog view, Out of date in caution once the saved curation has moved
-past it), and a Select over moments says the recording it keeps ("keeps 1:53.9 of 2:26.9") because that
-is the training budget. Every count below the Dataset is over the first 100
+runs what it is doing; every output (Score progress, Find similar, Group
+similar, Select) wears the Output flag (Published once it is a catalog view,
+Out of date in caution once the saved curation has moved past it), and Score
+progress says the recording it keeps ("keeps 1:53.9 of 2:26.9") because that
+is the training budget. Publish ends the document bar and opens a panel of
+every output, each with a checkbox, its card's line, and its view's name. Every count below the Dataset is over the first 100
 episodes the curation reads.
 
 Every node's workspace has the same anatomy, top to bottom:
@@ -728,32 +730,35 @@ Every node's workspace has the same anatomy, top to bottom:
 ```
 
 - **Node bar:** the node's input or configuration on the left — Find
-  similar's query and Search, a Select's rule as one sentence with its
-  threshold read out, Break down's camera · model · sampling as the button
-  that opens its settings, what Moments, Group and the Dataset read ("Every
-  node reads these 100 episodes"). At the far end, in one group: a caution
+  similar's query and Search, a rule as one sentence with its thresholds read
+  out (a Select's conditions joined by "and whose", with Add condition;
+  Score progress's "Keep moments progressing at least 0.20× the expert
+  rate"), Break down's camera · model · sampling as the button that opens its
+  settings, what Group and the Dataset read ("Every node reads these 100
+  episodes"). At the far end, in one group: a caution
   note for what needs attention (a missing setting, failed episodes), a
   quiet line for how many episodes reach the node when fewer than all do,
   with a link to the measurement they wait on ("Score the rest"), and the
-  node's actions (Run N left, Retry failed, Stop, Regenerate) or a Select's
-  tally ("Keeps 1:53.9 of 2:26.9"), followed on an output by where it is
-  published and Publish, which asks for the view's name on the same line.
-- **Overview band:** Select's threshold strip — every judged value as a dot,
+  node's actions (Run N left, Retry failed, Stop, Regenerate) after a rule's
+  tally ("Keeps 1:53.9 of 2:26.9", "Keeps 2 of 42 subtasks").
+- **Overview band:** a rule's threshold strip, one per condition captioned
+  by its fact when a Select has several — every judged value as a dot,
   the threshold as a line running into the handle of a real slider under
   them (a 4px track filled in ink on the side the rule keeps, a 16px round
   handle, its value riding the axis beneath, a 1× tick on pace axes), dots
   and handle on one track inset by half the handle so they share pixels —
   over the episode map
   ("Kept in 6 of 6 episodes"); Find similar's asked-about still, the map of
-  matches and the match strip; Group's map and category chips (the open one
-  lime, each with its hue as a dot).
+  matches and the strip its cutoff slides on; Group's map and category chips
+  (the open one lime, each with its hue as a dot).
 - **Index:** one width for every node (`clamp(18rem, 36%, 28rem)`), so the
   divider holds still between nodes. Its 34px bar holds its filter, its
   Kept / Left out segments, or a caption naming its order ("6 episodes ·
   slowest first", "32 subtasks · closest first"). An index of a measurement
-  lists by that measurement: Moments slowest first (failures first of all),
-  Find similar closest first with a "Below 50%" divider, Group's members
-  most typical first; Break down, and a Select over moments, list by episode
+  lists by that measurement: Find similar closest first with a divider at
+  its cutoff ("Below 50% · left out"), Group's members most typical first;
+  Break down, and Score progress's kept and left-out stretches, list by
+  episode
   under sticky headings (the open one in the selected wash) that say what the
   episode holds ("10 subtasks", "leaves out 0:09.0 of 0:16.0"), the rows
   named by their spans. Kept / Left out count rows — stretches, not seconds —

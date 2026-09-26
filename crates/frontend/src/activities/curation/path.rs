@@ -6,9 +6,10 @@
 //! ([`PathFragment`]). What it asks a model about each whole episode is a
 //! column of that episode's row ([`EpisodeRow`]), beside the camera videos
 //! and the instruction the call reads. Its step then works over the interval
-//! rows that reach it: a Select filters them, a judgment adds a column, and
-//! the node that asked the episode unnests the answer and cuts it to the
-//! interval of the row it arrived on.
+//! rows that reach it: a judgment adds a column, and the node that asked the
+//! episode unnests the answer and cuts it to the interval of the row it
+//! arrived on. A node's rule, when it keeps by one, filters what its step
+//! wrote; a Select is a rule alone.
 //!
 //! Each step is written once and read two ways. The published view is one
 //! stream of rows over every episode of the dataset. Where the path leaves
@@ -21,7 +22,9 @@
 //! ([`StepInput`]): the node's own row for the episode bound as `$1` alone,
 //! joined to those rows, then the same step. No model call above the node is
 //! made again, and one that cannot answer fails the preview with its reason
-//! where the view answers NULL for that row.
+//! where the view answers NULL for that row. The preview leaves the node's
+//! rule out: the browser keeps by it over what the step read, so moving the
+//! rule's threshold asks nothing again.
 mod episode_row;
 
 pub(super) use episode_row::EpisodeRow;
@@ -285,13 +288,14 @@ impl<'a> CurationPath<'a> {
         Ok(Self::select(&compiled.entries, &compiled.relation))
     }
 
-    /// The last node alone, over `input`: the statement its preview runs on
-    /// the rows its parent's preview holds, with the node's own episode row
-    /// beside them.
+    /// The last node's step alone, over `input`, without its rule: the
+    /// statement its preview runs on the rows its parent's preview holds,
+    /// with the node's own episode row beside them.
     pub(super) fn preview(&self, input: StepInput) -> Result<String, PathError> {
         let depth = self.nodes.len() - 1;
         let dataset = self.dataset()?;
-        let fragment = Self::fragment(self.nodes[depth].kind(), dataset);
+        let fragment = Self::fragment(self.nodes[depth].kind(), dataset)
+            .ok_or_else(|| PathError::new("Only a measurement previews."))?;
         let mut row = EpisodeRow::new(dataset, PathSource::Preview);
         fragment.episode_columns(&mut row)?;
         let mut entries = input.entries;
@@ -335,14 +339,16 @@ impl<'a> CurationPath<'a> {
         )
     }
 
-    /// Every node's step from the dataset down, with the episode row built
-    /// once, before the first node below the dataset's own Selects: until
-    /// then every row is a whole episode.
+    /// Every node's step from the dataset down, each followed by its rule,
+    /// with the episode row built once, before the first node below the
+    /// dataset's own Select: until then every row is a whole episode.
     fn compile(&self) -> Result<StepSql, PathError> {
         let dataset = self.dataset()?;
         let mut row = EpisodeRow::new(dataset, PathSource::Published);
         for node in &self.nodes {
-            Self::fragment(node.kind(), dataset).episode_columns(&mut row)?;
+            if let Some(fragment) = Self::fragment(node.kind(), dataset) {
+                fragment.episode_columns(&mut row)?;
+            }
         }
         let mut row = Some(row);
         let mut entries = Vec::new();
@@ -358,30 +364,47 @@ impl<'a> CurationPath<'a> {
                 entries.extend(built.entries);
                 relation = Some(built.relation);
             }
-            let written = Self::fragment(node.kind(), dataset).interval_step(&PathStep {
-                name: self.step_name(depth),
-                input: relation.as_ref(),
-                source: PathSource::Published,
-            })?;
-            entries.extend(written.entries);
-            relation = Some(written.relation);
+            let name = self.step_name(depth);
+            // A measure's rule keeps from what its own step wrote, under a
+            // name of its own; a Select's rule is its whole step.
+            let mut rule_name = name.clone();
+            if let Some(fragment) = Self::fragment(node.kind(), dataset) {
+                let written = fragment.interval_step(&PathStep {
+                    name,
+                    input: relation.as_ref(),
+                    source: PathSource::Published,
+                })?;
+                entries.extend(written.entries);
+                relation = Some(written.relation);
+                rule_name.push_str("_kept");
+            }
+            if let Some(rule) = node.keeps() {
+                let kept = rule.interval_step(&PathStep {
+                    name: rule_name,
+                    input: relation.as_ref(),
+                    source: PathSource::Published,
+                })?;
+                entries.extend(kept.entries);
+                relation = Some(kept.relation);
+            }
         }
         let relation = relation.ok_or_else(|| PathError::new("The path compiled to nothing."))?;
         Ok(StepSql::new(entries, relation))
     }
 
-    /// The configuration that writes a node's part, by its kind.
+    /// The configuration that writes a node's own step, by its kind; a
+    /// Select asks nothing, and its rule is all it writes.
     fn fragment<'k>(
         kind: &'k CurationNodeKind,
         dataset: &'k DatasetSelection,
-    ) -> &'k dyn PathFragment {
+    ) -> Option<&'k dyn PathFragment> {
         match kind {
-            CurationNodeKind::Dataset => dataset,
-            CurationNodeKind::Select(selection) => selection,
-            CurationNodeKind::ScoreProgress(scoring) => scoring,
-            CurationNodeKind::BreakDownSubtasks(annotation) => annotation,
-            CurationNodeKind::FindSimilarSubtasks(search) => search,
-            CurationNodeKind::GroupSimilarSubtasks(grouping) => grouping,
+            CurationNodeKind::Dataset => Some(dataset),
+            CurationNodeKind::Select => None,
+            CurationNodeKind::ScoreProgress(scoring) => Some(scoring),
+            CurationNodeKind::BreakDownSubtasks(annotation) => Some(annotation),
+            CurationNodeKind::FindSimilarSubtasks(search) => Some(search),
+            CurationNodeKind::GroupSimilarSubtasks(grouping) => Some(grouping),
         }
     }
 }

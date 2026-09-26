@@ -25,6 +25,19 @@
   .curation-select-rule-hint {
     @apply text-ink-faint;
   }
+  /* Each condition reads on as the sentence does, "and whose …", and wraps
+     whole rather than splitting its fact from its value. */
+  .curation-select-condition {
+    @apply inline-flex items-center gap-x-1.5;
+  }
+  .curation-select-condition-remove .ui-icon {
+    @apply size-3;
+  }
+
+  /* Each condition's strip, captioned by its fact when there are several. */
+  .curation-select-overview-strip {
+    @apply flex flex-col gap-0.5;
+  }
 
   /* One toggle per category, in the hue the grouping gave it. */
   .curation-select-chips {
@@ -49,96 +62,7 @@
     color: var(--tone-ink-soft);
   }
 
-  /* How much recording the rule keeps, at the bar's far end. */
-  .curation-select-tally {
-    @apply m-0 font-mono text-[11.5px] text-ink tabular-nums;
-  }
-
-  /* An output publishes from the bar's far end, after its tally: the view it
-     is published as, then what can be done about it. Naming the view takes
-     the same line, so the bar never grows a second row. */
-  .curation-select-publish {
-    display: flex;
-    min-width: 0;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .curation-select-publish-status,
-  .curation-select-publish-note {
-    margin: 0;
-    color: var(--tone-ink-soft);
-    font-size: 11.5px;
-    white-space: nowrap;
-  }
-
-  .curation-select-publish-status code {
-    color: var(--tone-ink);
-    font-family: var(--font-mono);
-  }
-
-  .curation-select-publish-status.is-stale,
-  .curation-select-publish-status.is-stale code {
-    color: var(--tone-caution);
-  }
-
-  .curation-select-publish-problem {
-    margin: 0;
-    color: var(--tone-danger);
-    font-size: 11.5px;
-  }
-
-  /* Every judged value as a dot on one track, the threshold as a line down
-     it, and the slider's thumb at the foot of the line. The track is inset
-     by half the thumb at either end, as a range input insets its own, so a
-     dot and the thumb set to its value stand at the same pixel. */
-  .curation-select-strip {
-    @apply relative flex shrink-0 flex-col;
-    --thumb: 16px;
-  }
-  .curation-select-strip-track {
-    @apply relative h-6;
-    margin-inline: calc(var(--thumb) / 2);
-  }
-  .curation-select-strip-threshold {
-    @apply absolute -bottom-1 top-0 w-px;
-    background: var(--tone-ink);
-  }
-  .curation-select-strip-dot {
-    @apply absolute size-[7px] -ml-[3.5px] cursor-pointer rounded-full border-0 p-0;
-    top: calc(2px + var(--lift) * 3px);
-    background: var(--tone-ink);
-    transition: transform 100ms ease-out;
-  }
-  .curation-select-strip-dot[data-kept="false"] {
-    background: color-mix(in srgb, var(--tone-ink-faint) 45%, var(--tone-surface));
-  }
-  .curation-select-strip-dot:hover,
-  .curation-select-strip-dot[aria-current="true"] {
-    transform: scale(1.5);
-  }
-  .curation-select-strip-dot[aria-current="true"] {
-    box-shadow: 0 0 0 1.5px var(--tone-accent-strong);
-  }
-  .curation-select-strip-axis {
-    @apply pointer-events-none relative flex h-3.5 items-center justify-between font-mono text-[10.5px] leading-none tabular-nums;
-    color: var(--tone-ink-faint);
-  }
-  /* A label that rides the track at `--at`, 0–1, on the same inset as the
-     dots and the thumb. */
-  .curation-select-strip-value,
-  .curation-select-strip-reference {
-    @apply absolute top-0 px-1;
-    left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--at));
-    translate: -50% 0;
-    background: var(--tone-surface);
-  }
-  /* The threshold's value under its handle, in the rule's own digits. */
-  .curation-select-strip-value {
-    @apply z-[1] font-medium text-ink;
-  }
-
-  /* The strip over the episode map: where the threshold falls among the
+  /* The strips over the episode map: where each threshold falls among the
      values, then where the kept parts lie in their episodes. */
   .curation-select-overview {
     @apply flex shrink-0 flex-col gap-2 border-b border-line px-3 pb-2.5 pt-1.5;
@@ -157,97 +81,4 @@
   min-height: 22px;
   padding-inline: 9px;
   font-size: 11px;
-}
-
-/* Unlayered: a range input's parts are browser pseudo-elements. The level
-   a Select keeps by is slid on a real slider: a 4px track, filled in ink on
-   the side the rule keeps, and a round handle the threshold line runs into.
-   The fill stops at the handle's centre, on the same inset as the dots. */
-.curation-select-strip-slider {
-  --kept: var(--tone-ink-soft);
-  --dropped: var(--tone-line);
-  --stop: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--at));
-  width: 100%;
-  height: 22px;
-  margin: 0;
-  background: transparent;
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-}
-
-.curation-select-strip-slider[data-keeps="above"] {
-  --track: linear-gradient(to right, var(--dropped) var(--stop), var(--kept) var(--stop));
-}
-
-.curation-select-strip-slider[data-keeps="below"] {
-  --track: linear-gradient(to right, var(--kept) var(--stop), var(--dropped) var(--stop));
-}
-
-.curation-select-strip-slider::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--track);
-}
-
-.curation-select-strip-slider::-moz-range-track {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--track);
-}
-
-.curation-select-strip-slider::-webkit-slider-thumb {
-  width: 16px;
-  height: 16px;
-  margin-top: -6px;
-  border: 2px solid var(--tone-ink);
-  border-radius: 999px;
-  background: var(--tone-surface);
-  box-shadow: 0 1px 3px rgb(16 16 16 / 0.22);
-  cursor: grab;
-  transition: scale 100ms ease-out;
-  -webkit-appearance: none;
-}
-
-.curation-select-strip-slider::-moz-range-thumb {
-  box-sizing: border-box;
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--tone-ink);
-  border-radius: 999px;
-  background: var(--tone-surface);
-  box-shadow: 0 1px 3px rgb(16 16 16 / 0.22);
-  cursor: grab;
-}
-
-.curation-select-strip-slider:hover::-webkit-slider-thumb {
-  scale: 1.12;
-}
-
-.curation-select-strip-slider:active::-webkit-slider-thumb {
-  cursor: grabbing;
-}
-
-.curation-select-strip-slider:focus {
-  outline: none;
-}
-
-.curation-select-strip-slider:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 2px var(--tone-surface), 0 0 0 4px var(--tone-focus);
-}
-
-.curation-select-strip-slider:focus-visible::-moz-range-thumb {
-  box-shadow: 0 0 0 2px var(--tone-surface), 0 0 0 4px var(--tone-focus);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .curation-select-strip-slider::-webkit-slider-thumb {
-    transition: none;
-  }
-}
-
-/* The kit's input is unlayered, so its width for a view name is too. */
-.curation-select-publish .curation-select-publish-name {
-  width: 12rem;
-  font-family: var(--font-mono);
 }

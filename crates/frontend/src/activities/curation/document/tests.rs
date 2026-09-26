@@ -61,10 +61,113 @@ fn children_follow_the_menu_and_get_unique_ids() {
     assert_eq!(payload.parent_of(&search), Some(first.as_str()));
     assert_eq!(payload.subtask_source(&search), Some(first.as_str()));
     assert!(payload.add_child(DATASET_NODE_ID, group()).is_err());
-    assert!(payload.add_child(&search, group()).is_err());
+    // A search keeps by its own cutoff, so what follows reads what it kept;
+    // there is nothing left for a Select to keep by.
+    assert!(
+        payload
+            .add_child(&search, CurationNodeKind::Select)
+            .is_err()
+    );
+    assert!(payload.add_child(&search, group()).is_ok());
     assert!(payload.add_child("missing", group()).is_err());
     assert_eq!(payload.children_of(DATASET_NODE_ID).len(), 2);
     assert_eq!(payload.validate(), Ok(()));
+}
+
+#[test]
+fn each_node_keeps_by_the_rule_its_kind_and_place_allow() {
+    let mut payload = CurationGraph::new(None);
+    let rule = |id: &str, payload: &CurationGraph| {
+        payload
+            .node(id)
+            .and_then(CurationNode::keeps)
+            .map(Selection::basis)
+    };
+    let score = payload
+        .add_child(
+            DATASET_NODE_ID,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        )
+        .unwrap();
+    let episodes = payload
+        .add_child(DATASET_NODE_ID, CurationNodeKind::Select)
+        .unwrap();
+    let annotate = payload
+        .add_child(
+            &score,
+            CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
+        )
+        .unwrap();
+    let search = payload
+        .add_child(
+            &annotate,
+            CurationNodeKind::FindSimilarSubtasks(SubtaskSearch::default()),
+        )
+        .unwrap();
+    let group = payload
+        .add_child(
+            &annotate,
+            CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
+        )
+        .unwrap();
+    let categories = payload.add_child(&group, CurationNodeKind::Select).unwrap();
+    assert_eq!(rule(&score, &payload), Some(SelectionBasis::Progress));
+    assert_eq!(
+        rule(&episodes, &payload),
+        Some(SelectionBasis::EpisodeFacts)
+    );
+    assert_eq!(rule(&search, &payload), Some(SelectionBasis::Similarity));
+    assert_eq!(
+        rule(&categories, &payload),
+        Some(SelectionBasis::Categories)
+    );
+    assert_eq!(rule(&annotate, &payload), None);
+    assert_eq!(rule(&group, &payload), None);
+    // Every one of them is an output but Break down.
+    assert_eq!(
+        payload
+            .outputs()
+            .iter()
+            .map(|output| output.id())
+            .collect::<Vec<_>>(),
+        [
+            score.as_str(),
+            episodes.as_str(),
+            search.as_str(),
+            group.as_str(),
+            categories.as_str()
+        ]
+    );
+    // A rule of another basis is refused, and one the kind keeps by is taken.
+    assert!(
+        payload
+            .set_rule(&score, Selection::Similar { minimum: 0.5 })
+            .is_err()
+    );
+    assert!(
+        payload
+            .set_rule(&annotate, Selection::Similar { minimum: 0.5 })
+            .is_err()
+    );
+    payload
+        .set_rule(&score, Selection::Progressing { minimum: 0.4 })
+        .unwrap();
+    assert!(
+        payload
+            .set_rule(
+                &episodes,
+                Selection::Episodes {
+                    conditions: Vec::new()
+                }
+            )
+            .is_err(),
+        "a Select of episodes names at least one condition"
+    );
+    assert_eq!(payload.validate(), Ok(()));
+    assert_eq!(
+        CurationGraph::decode(CURATION_ENCODING_VERSION, &payload.encode().unwrap()).unwrap(),
+        payload
+    );
 }
 
 #[test]
@@ -216,10 +319,19 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
         json["nodes"][1]["kind"],
         serde_json::json!({"type": "score_progress"})
     );
+    assert_eq!(
+        json["nodes"][1]["keeps"],
+        serde_json::json!({"keep": "progressing", "minimum": 0.0})
+    );
     assert!(json.get("moments").is_none());
-    // What encoding 2 used to store for the nodes that did not compile yet is
-    // refused rather than carried: the preview reads it again.
+    // What earlier encodings stored is refused rather than carried: what the
+    // nodes read, which the preview reads again; a Select holding one fact of
+    // its own; and a rule a node's kind or place does not keep by.
     for stored in [
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"s","kind":{"type":"select","keep":"episodes","fact":"duration_seconds","comparison":"at_least","value":10.0}}],"edges":[{"from":"dataset","to":"s"}]}"#,
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"s","kind":{"type":"select"}}],"edges":[{"from":"dataset","to":"s"}]}"#,
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5},"keeps":{"keep":"similar","minimum":0.5}}],"edges":[{"from":"dataset","to":"a"}]}"#,
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress"},"keeps":{"keep":"similar","minimum":0.5}}],"edges":[{"from":"dataset","to":"m"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress","completed_episodes":[]}}],"edges":[{"from":"dataset","to":"m"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5,"completed_episodes":[]}}],"edges":[{"from":"dataset","to":"a"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"subtasks":[]}"#,
@@ -244,18 +356,21 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
 /// A graph with two outputs over whole episodes: longer and shorter ones.
 fn two_outputs() -> (CurationGraph, String, String) {
     let mut payload = CurationGraph::new(None);
-    let rule = |comparison| {
-        CurationNodeKind::Select(Selection::Episodes {
-            fact: EpisodeFact::DurationSeconds,
-            comparison,
-            value: 10.0,
-        })
-    };
+    let rule =
+        |comparison| Selection::episodes_where(EpisodeFact::DurationSeconds, comparison, 10.0);
     let long = payload
-        .add_child(DATASET_NODE_ID, rule(Comparison::AtLeast))
+        .add_keeping(
+            DATASET_NODE_ID,
+            CurationNodeKind::Select,
+            rule(Comparison::AtLeast),
+        )
         .unwrap();
     let short = payload
-        .add_child(DATASET_NODE_ID, rule(Comparison::AtMost))
+        .add_keeping(
+            DATASET_NODE_ID,
+            CurationNodeKind::Select,
+            rule(Comparison::AtMost),
+        )
         .unwrap();
     (payload, long, short)
 }
@@ -309,21 +424,22 @@ fn a_publication_names_one_output_by_one_view_name() {
 }
 
 #[test]
-fn a_published_output_stays_an_output_until_it_is_unpublished() {
+fn a_published_output_keeps_its_branch_until_it_is_unpublished() {
     let (mut payload, long, _) = two_outputs();
     payload
         .record_publication(&long, "long_episodes", 1)
         .unwrap();
-    // A step after it would make it no longer an output.
-    let longer = CurationNodeKind::Select(Selection::Episodes {
-        fact: EpisodeFact::DurationSeconds,
-        comparison: Comparison::AtLeast,
-        value: 20.0,
-    });
-    let mut attempt = payload.clone();
-    attempt.add_child(&long, longer).unwrap();
-    assert!(attempt.validate().unwrap_err().contains("unpublish it"));
-    // Nor does its branch go while the view is there.
+    // A step after it leaves it an output, published as it was.
+    let mut followed = payload.clone();
+    followed
+        .add_child(
+            &long,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        )
+        .unwrap();
+    assert_eq!(followed.validate(), Ok(()));
+    assert!(followed.publication(&long).is_some());
+    // Its branch does not go while the view is there.
     assert!(
         payload
             .remove_node(&long)

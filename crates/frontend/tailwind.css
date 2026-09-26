@@ -18,6 +18,8 @@
 @import "./styles/curation-similar.css";
 @import "./styles/curation-select.css";
 @import "./styles/curation-score-progress.css";
+@import "./styles/curation-threshold.css";
+@import "./styles/curation-publish.css";
 
 /*
   One palette, named by role rather than by hue. A colour is only ever spelled

@@ -1,12 +1,11 @@
-//! Where the threshold falls among the values a Select judges: every item as
+//! Where a rule's threshold falls among the values it judges: every item as
 //! one dot on one axis, kept in ink and left out faded, and the threshold as a
 //! line across it with its slider's thumb at the foot of the line. The gap
 //! between the values beside the line says how firm the choice is, which the
 //! count alone cannot, and dragging the line re-divides kept from left out.
-use super::SelectView;
-use crate::activities::curation::annotate::SubtaskRow;
-use crate::activities::curation::document::Selection;
-use crate::activities::curation::population::Population;
+//!
+//! A Select's episode conditions, Score progress's progress rate, and Find
+//! similar's similarity all slide on this one strip.
 use dioxus::prelude::*;
 
 /// The most dots one strip draws. Moments come one per frame, sixty thousand
@@ -17,45 +16,30 @@ const MAX_STRIP_DOTS: usize = 2_400;
 /// One item's value on the strip.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct StripDot {
-    /// The item's place in the Select's input.
+    /// The item's place in what the rule judges.
     item: usize,
     value: f64,
     kept: bool,
 }
 
 impl StripDot {
-    /// The values a numeric rule judges, one per item that has one: an
-    /// episode's recorded fact, a subtask's similarity, a moment's progress rate, every
-    /// nth of them past `MAX_STRIP_DOTS`. A rule of categories has no axis.
-    pub(super) fn for_view(view: &SelectView, kept: &[bool]) -> Option<Vec<Self>> {
-        let values: Vec<Option<f64>> = match (&view.selection, &view.input) {
-            (Selection::Episodes { fact, .. }, Population::Episodes(episodes)) => episodes
-                .iter()
-                .map(|id| view.sample.episode(id).and_then(|episode| fact.of(episode)))
-                .collect(),
-            (Selection::Similar { .. }, Population::Subtasks(rows)) => {
-                rows.iter().map(SubtaskRow::similarity).collect()
-            }
-            (Selection::Progressing { .. }, Population::Moments(rows)) => {
-                rows.iter().map(|row| row.progress_rate()).collect()
-            }
-            _ => return None,
-        };
+    /// One dot per item that has a value, in item order, every nth of them
+    /// past `MAX_STRIP_DOTS`; `kept` says, by item, which side of the rule
+    /// each is on.
+    pub(super) fn of(values: &[Option<f64>], kept: &[bool]) -> Vec<Self> {
         let every = values.len().div_ceil(MAX_STRIP_DOTS).max(1);
-        Some(
-            values
-                .into_iter()
-                .enumerate()
-                .step_by(every)
-                .filter_map(|(item, value)| {
-                    Some(Self {
-                        item,
-                        value: value.filter(|value| value.is_finite())?,
-                        kept: kept.get(item).copied().unwrap_or(false),
-                    })
+        values
+            .iter()
+            .enumerate()
+            .step_by(every)
+            .filter_map(|(item, value)| {
+                Some(Self {
+                    item,
+                    value: value.filter(|value| value.is_finite())?,
+                    kept: kept.get(item).copied().unwrap_or(false),
                 })
-                .collect(),
-        )
+            })
+            .collect()
     }
 }
 
@@ -70,8 +54,8 @@ pub(super) enum AxisUnit {
     Plain,
 }
 
-/// Where a numeric rule's threshold stands, the axis it slides along, and
-/// which side of it the rule keeps.
+/// Where a rule's threshold stands, the axis it slides along, and which side
+/// of it the rule keeps.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Threshold {
     value: f64,
@@ -82,10 +66,13 @@ pub(super) struct Threshold {
 }
 
 impl Threshold {
-    pub(super) fn new(value: f64, scale: ThresholdScale, keeps_above: bool) -> Self {
+    /// The threshold at `value` on an axis over the values `dots` judge, in
+    /// `unit`, keeping what is at least it or, when not `keeps_above`, at
+    /// most it.
+    pub(super) fn over(dots: &[StripDot], value: f64, unit: AxisUnit, keeps_above: bool) -> Self {
         Self {
             value,
-            scale,
+            scale: ThresholdScale::of(dots, value, unit),
             keeps_above,
         }
     }
@@ -95,12 +82,12 @@ impl Threshold {
     }
 }
 
-/// The axis a numeric rule's threshold moves along, shared by the strip and
+/// The axis a rule's threshold moves along, shared by the strip and
 /// the slider on it, so the two always agree: 0% to 100% for a probability,
 /// else the span of the judged values and the threshold, widened to whole
 /// steps.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ThresholdScale {
+struct ThresholdScale {
     low: f64,
     high: f64,
     step: SliderStep,
@@ -111,7 +98,7 @@ impl ThresholdScale {
     /// The scale for `threshold` over the values `dots` judge. With nothing
     /// judged yet the axis spans one unit either side of the threshold, so the
     /// slider still moves.
-    pub(super) fn of(dots: &[StripDot], threshold: f64, unit: AxisUnit) -> Self {
+    fn of(dots: &[StripDot], threshold: f64, unit: AxisUnit) -> Self {
         if unit == AxisUnit::Percent {
             return Self {
                 low: 0.0,
@@ -215,6 +202,9 @@ pub(super) fn ThresholdStrip(
     on_select: EventHandler<usize>,
     /// The threshold slid to a new value, on the nearest step.
     on_threshold: EventHandler<f64>,
+    /// What the slider sets, for a page with more than one.
+    #[props(default = "Threshold".to_owned())]
+    label: String,
 ) -> Element {
     let Threshold {
         value,
@@ -222,17 +212,17 @@ pub(super) fn ThresholdStrip(
         keeps_above,
     } = threshold;
     rsx! {
-        div { class: "curation-select-strip",
-            div { class: "curation-select-strip-track", "aria-hidden": "true",
+        div { class: "curation-threshold-strip",
+            div { class: "curation-threshold-strip-track", "aria-hidden": "true",
                 span {
-                    class: "curation-select-strip-threshold",
+                    class: "curation-threshold-strip-threshold",
                     style: "left: {scale.place(value):.2}%",
                 }
                 for dot in dots {
                     button {
                         key: "{dot.item}",
                         r#type: "button",
-                        class: "curation-select-strip-dot",
+                        class: "curation-threshold-strip-dot",
                         tabindex: "-1",
                         "data-kept": "{dot.kept}",
                         "aria-current": (chosen == Some(dot.item)).then_some("true"),
@@ -245,7 +235,7 @@ pub(super) fn ThresholdStrip(
             // The slider's track fills on the side the rule keeps, so the
             // bar reads as what is selected before its value is.
             input {
-                class: "curation-select-strip-slider",
+                class: "curation-threshold-strip-slider",
                 r#type: "range",
                 style: "--at: {scale.place(value) / 100.0:.4}",
                 "data-keeps": if keeps_above { "above" } else { "below" },
@@ -253,7 +243,7 @@ pub(super) fn ThresholdStrip(
                 max: "{scale.high}",
                 step: "{scale.step.0}",
                 value: "{value}",
-                "aria-label": "Threshold",
+                "aria-label": "{label}",
                 "aria-valuetext": "{scale.label(value)}",
                 oninput: move |event: FormEvent| {
                     if let Ok(slid) = event.value().parse::<f64>() {
@@ -263,17 +253,17 @@ pub(super) fn ThresholdStrip(
             }
             // The axis's ends, the threshold's value under its handle, and
             // on a progress-rate axis where the expert rate falls.
-            span { class: "curation-select-strip-axis", "aria-hidden": "true",
+            span { class: "curation-threshold-strip-axis", "aria-hidden": "true",
                 span { "{scale.label(scale.low)}" }
                 if let Some(reference) = scale.reference() {
                     span {
-                        class: "curation-select-strip-reference",
+                        class: "curation-threshold-strip-reference",
                         style: "--at: {scale.place(reference) / 100.0:.4}",
                         "1×"
                     }
                 }
                 span {
-                    class: "curation-select-strip-value",
+                    class: "curation-threshold-strip-value",
                     style: "--at: {scale.place(value) / 100.0:.4}",
                     "{scale.label(value)}"
                 }

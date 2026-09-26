@@ -1,0 +1,97 @@
+/* Curation › publish styles: the document bar's Publish and the panel it
+   opens. Prefix every class with `curation-publish-`. Use @layer components
+   like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
+   must be unlayered too. */
+
+@layer components {
+  /* Publish ends the bar, after Save, and its panel hangs from it. */
+  .curation-publish {
+    @apply relative flex shrink-0 items-center;
+  }
+  .curation-publish > .ui-button .ui-icon {
+    @apply size-3 shrink-0 text-ink-faint;
+    rotate: 90deg;
+    transition: rotate 160ms var(--ease-out-expo);
+  }
+  .curation-publish > .ui-button[aria-expanded="true"] .ui-icon {
+    rotate: -90deg;
+  }
+
+  .curation-publish-dialog {
+    @apply absolute right-0 top-full z-40 mt-1.5 flex w-[26rem] flex-col overflow-hidden bg-surface;
+    max-width: calc(100vw - 2rem);
+    max-height: min(32rem, calc(100vh - 8rem));
+    border-radius: 10px;
+    box-shadow: var(--shadow-popover);
+    animation: workflow-popover-enter 180ms var(--ease-out-expo) both;
+    transform-origin: top right;
+  }
+
+  .curation-publish-intro {
+    @apply m-0 border-b border-line px-3 py-2 text-[11.5px] text-ink-soft;
+  }
+
+  /* Why nothing publishes yet, said once over the list. */
+  .curation-publish-unsaved {
+    @apply flex items-center justify-between gap-2 border-b border-line bg-caution-soft px-3 py-1.5 text-[11.5px] text-caution;
+  }
+  .curation-publish-unsaved p {
+    @apply m-0;
+  }
+
+  .curation-publish-outputs {
+    @apply m-0 flex min-h-0 flex-col overflow-y-auto p-0;
+    list-style: none;
+  }
+
+  /* One output: whether to publish it and where its view stands, its card's
+     words, and the view's name. */
+  .curation-publish-output {
+    @apply flex flex-col gap-1 border-b border-line px-3 py-2;
+  }
+  .curation-publish-output:last-child {
+    @apply border-b-0;
+  }
+  .curation-publish-output[data-chosen="true"] {
+    background: color-mix(in srgb, var(--tone-ink) 4%, var(--tone-surface));
+  }
+  .curation-publish-output-head {
+    @apply flex min-w-0 items-center gap-2;
+  }
+  .curation-publish-output-head .ui-toggle {
+    @apply mr-auto text-[12px] font-medium text-ink;
+  }
+
+  .curation-publish-summary,
+  .curation-publish-note {
+    @apply m-0 truncate text-[11.5px] text-ink-soft;
+  }
+  .curation-publish-note {
+    @apply whitespace-normal text-ink-faint;
+  }
+
+  .curation-publish-status {
+    @apply m-0 shrink-0 whitespace-nowrap text-[11.5px] text-ink-soft;
+  }
+  .curation-publish-status code {
+    @apply font-mono text-ink;
+  }
+  .curation-publish-status.is-stale,
+  .curation-publish-status.is-stale code {
+    @apply text-caution;
+  }
+
+  .curation-publish-problem {
+    @apply m-0 text-[11.5px] text-danger;
+  }
+
+  .curation-publish-actions {
+    @apply flex items-center justify-end gap-1 border-t border-line px-2 py-1.5;
+  }
+}
+
+/* The kit's input is unlayered, so a view name's face is too. */
+.curation-publish-output .curation-publish-name {
+  width: 100%;
+  font-family: var(--font-mono);
+}

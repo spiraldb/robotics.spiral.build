@@ -345,67 +345,13 @@ struct SliceTitle {
 }
 
 /// The small drawing in a row's facts line: an episode's length against the
-/// longest listed, where a stretch sits in its episode, or a measurement's
-/// values across the episode.
+/// longest listed, or where a stretch sits in its episode.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SliceShape {
     /// A share of the longest episode listed, 0–1.
     Length(f64),
     /// Where a stretch starts and ends, as fractions of its episode.
     Within(f64, f64),
-    Trace(TraceLine),
-}
-
-/// A measurement's values across one episode, drawn small against the level
-/// they are read by: where a recording slowed, stalled or went backwards,
-/// before it is opened.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct TraceLine {
-    /// Each value at its place across the episode, 0–1; `None` where nothing
-    /// was read, which breaks the line.
-    points: Vec<(f64, Option<f64>)>,
-    /// The values the drawing's height spans; values beyond it are drawn at
-    /// its edge, so every row of an index shares one scale.
-    domain: (f64, f64),
-    reference: f64,
-}
-
-impl TraceLine {
-    const WIDTH: f64 = 100.0;
-    const HEIGHT: f64 = 20.0;
-
-    pub(super) fn new(points: Vec<(f64, Option<f64>)>, domain: (f64, f64), reference: f64) -> Self {
-        Self {
-            points,
-            domain,
-            reference,
-        }
-    }
-    fn y(&self, value: f64) -> f64 {
-        let (low, high) = self.domain;
-        let share = ((value - low) / (high - low).max(f64::EPSILON)).clamp(0.0, 1.0);
-        Self::HEIGHT - 1.0 - share * (Self::HEIGHT - 2.0)
-    }
-    fn path(&self) -> String {
-        use std::fmt::Write as _;
-        let mut path = String::new();
-        let mut connected = false;
-        for (place, value) in &self.points {
-            let Some(value) = value.filter(|value| value.is_finite()) else {
-                connected = false;
-                continue;
-            };
-            let command = if connected { 'L' } else { 'M' };
-            let _ = write!(
-                path,
-                "{command}{:.2},{:.2} ",
-                place.clamp(0.0, 1.0) * Self::WIDTH,
-                self.y(value)
-            );
-            connected = true;
-        }
-        path
-    }
 }
 
 /// The measure a row is ranked or kept by, and what that number is.
@@ -519,21 +465,6 @@ fn SliceDrawing(shape: SliceShape) -> Element {
                 }
             }
         }
-        SliceShape::Trace(trace) => rsx! {
-            svg {
-                class: "curation-entry-trace",
-                "aria-hidden": "true",
-                view_box: "0 0 {TraceLine::WIDTH} {TraceLine::HEIGHT}",
-                preserve_aspect_ratio: "none",
-                line {
-                    class: "curation-entry-trace-reference",
-                    x1: "0", x2: "{TraceLine::WIDTH}",
-                    y1: "{trace.y(trace.reference):.2}", y2: "{trace.y(trace.reference):.2}",
-                    vector_effect: "non-scaling-stroke",
-                }
-                path { d: "{trace.path()}", vector_effect: "non-scaling-stroke" }
-            }
-        },
     }
 }
 
@@ -865,7 +796,7 @@ impl NodeReach {
                 CurationNodeKind::BreakDownSubtasks(_) => Some("Break down the rest"),
                 CurationNodeKind::FindSimilarSubtasks(_) => Some("Search the rest"),
                 CurationNodeKind::GroupSimilarSubtasks(_) => Some("Group the rest"),
-                CurationNodeKind::Dataset | CurationNodeKind::Select(_) => None,
+                CurationNodeKind::Dataset | CurationNodeKind::Select => None,
             };
             let finished = controller
                 .progress(&id)

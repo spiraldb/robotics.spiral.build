@@ -99,7 +99,7 @@ impl CurationGraph {
         ViewName::try_from(view)?;
         if !self.outputs().iter().any(|output| output.id() == node) {
             return Err(format!(
-                "“{view}” is published from a Select that must stay an output; unpublish it before adding a step after it."
+                "“{view}” names a node that is not an output; only Score progress, Find similar, Group similar, and Select publish."
             ));
         }
         Ok(())

@@ -190,12 +190,13 @@ never becomes the motor-control runtime.
     tab.
   - **Curation** owns graphs rooted at one dataset whose edges carry episode
     intervals: measures (Break down subtasks, Find similar, Group similar,
-    Identify unproductive moments) add properties or cut intervals, and
-    Selects keep the intervals that pass a rule. A path compiles to one
-    read-only Spiral statement. Each measure previews its own step over the
-    rows its parent's preview holds, from the first 100 episodes, and a leaf
-    Select publishes as a named catalog view
-    with one row per kept interval. Every node compiles, the model
+    Score progress) add properties or cut intervals, Score progress and Find
+    similar keeping what passes their own threshold, and Selects keep the
+    intervals that pass their conditions. A path compiles to one read-only
+    Spiral statement. Each measure previews its own step over the rows its
+    parent's preview holds, from the first 100 episodes. Every node but the
+    dataset and Break down is an output, and Publish turns the ones chosen
+    into named catalog views with one row per kept interval. Every node compiles, the model
     judgments to `spql.ai` functions. Graphs persist in the Studio SQLite
     `curations` table with optimistic revisions and travel in project
     bundles. See `docs/curation.md`.

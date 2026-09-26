@@ -41,7 +41,7 @@ pub(in crate::activities::curation) fn NodeWorkspace(controller: CurationControl
                     CurationNodeKind::ScoreProgress(_) => rsx! {
                         score_progress::ScoringWorkspace { controller, node: node.clone() }
                     },
-                    CurationNodeKind::Select(_) => rsx! {
+                    CurationNodeKind::Select => rsx! {
                         select::SelectWorkspace { controller, node: node.clone() }
                     },
                 }

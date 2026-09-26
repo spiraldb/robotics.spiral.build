@@ -141,53 +141,6 @@
     }
   }
 
-  /* Every answer as a dot from 0 to 100%, best first to arrive. The tick at
-     the half is the line the episode count uses. */
-  .curation-match-strip {
-    @apply relative h-9;
-  }
-
-  .curation-match-strip::before {
-    @apply absolute inset-x-0 top-3.5 h-px bg-line content-[''];
-  }
-
-  .curation-match-threshold {
-    @apply absolute top-0.5 h-6 w-px;
-    background: var(--tone-ink-faint);
-    opacity: 0.5;
-  }
-
-  .curation-match-dot {
-    @apply absolute size-[7px] -ml-[3.5px] cursor-pointer rounded-full border-0 p-0;
-    top: calc(4px + var(--lift) * 3px);
-    background: color-mix(in srgb, var(--curation-map-match) var(--match), var(--curation-map-unasked));
-    transition: transform 100ms ease-out;
-    animation: curation-match-drop 420ms var(--delay, 0ms) backwards cubic-bezier(0.2, 0, 0, 1);
-  }
-
-  .curation-match-dot:hover {
-    transform: scale(1.5);
-  }
-
-  .curation-match-dot[aria-current="true"] {
-    @apply z-[1];
-    box-shadow:
-      0 0 0 1.5px var(--tone-surface),
-      0 0 0 2.5px var(--tone-ink);
-  }
-
-  @keyframes curation-match-drop {
-    from {
-      opacity: 0;
-      transform: translateY(-10px);
-    }
-  }
-
-  .curation-match-axis {
-    @apply pointer-events-none absolute inset-x-0 bottom-0 flex justify-between font-mono text-[10.5px] leading-none tabular-nums;
-    color: var(--tone-ink-faint);
-  }
-
   /* The row a search asks about, first in the band its answers fill: its
      thumbnail and where it came from. Its words are already in the query. */
   .curation-similar-asked {
@@ -528,7 +481,6 @@
     .curation-map-segment,
     .curation-map-lanes:is([data-reveal="ripple"], [data-reveal="pour"]) .curation-map-segment,
     .curation-map-lanes[data-reveal="reading"] .curation-map-segment[data-source="true"],
-    .curation-match-dot,
     .curation-similar-category,
     .curation-similar-chip,
     .curation-profile,

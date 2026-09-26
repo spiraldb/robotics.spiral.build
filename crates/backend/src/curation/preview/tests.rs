@@ -94,6 +94,37 @@ async fn a_stopped_run_starts_nothing_more() {
     assert!(matches!(runs.status(&id), Err(OperationError::NotFound(_))));
 }
 
+#[tokio::test]
+async fn stopping_a_run_drops_what_is_in_flight_at_once() {
+    let runs = runs();
+    let id = runs.start(queries()).unwrap().id().to_owned();
+    let run = runs.run(&id).unwrap();
+    // A query in flight when Stop lands reads as never run, and the run is
+    // settled without waiting for it.
+    run.progress.recover_lock().states[0] = PreviewQueryState::Running;
+    runs.stop(&id).unwrap();
+    let status = runs.status(&id).unwrap();
+    assert!(status.is_settled());
+    assert_eq!(status.queries(), vec![PreviewQueryState::Queued; 4]);
+    // Its task is gone, and a query handed over as Stop landed never starts.
+    let stopped = |runs: &PreviewRuns| {
+        runs.runs
+            .recover_lock()
+            .get(&id)
+            .is_some_and(|held| held.task.is_finished())
+    };
+    for _ in 0..100 {
+        if stopped(&runs) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(stopped(&runs));
+    let storage = runs.storage.clone();
+    run.answer_one(2, &storage).await;
+    assert_eq!(run.status(&id).queries()[2], PreviewQueryState::Queued);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_run_nobody_polls_stops_and_is_then_forgotten() {
     let runs = runs();

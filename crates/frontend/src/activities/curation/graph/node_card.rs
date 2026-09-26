@@ -4,7 +4,7 @@
 use spiral_robotics_common::datasets::DatasetSelection;
 
 use super::super::document::{
-    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PopulationKind, PublishedOutput,
+    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PublishedOutput, Selection,
 };
 use super::super::population::{EpisodeSample, Population, PopulationReader, Slice};
 use super::super::preview::PreviewProgress;
@@ -31,7 +31,7 @@ impl NodeFace {
             CurationNodeKind::FindSimilarSubtasks(_) => Self::Search,
             CurationNodeKind::GroupSimilarSubtasks(_) => Self::Grouping,
             CurationNodeKind::ScoreProgress(_) => Self::Scoring,
-            CurationNodeKind::Select(_) => Self::Select,
+            CurationNodeKind::Select => Self::Select,
         }
     }
     pub(super) const fn class_name(self) -> &'static str {
@@ -191,17 +191,31 @@ impl NodeCard {
                 ),
                 _ => "Subtasks of every episode".to_owned(),
             },
+            // The question, then how many of the subtasks it answered for
+            // are close enough to keep.
             CurationNodeKind::FindSimilarSubtasks(search) => {
                 let query = search.query().trim();
-                let line = if query.is_empty() {
+                let asked = if query.is_empty() {
                     "No query yet".to_owned()
                 } else {
                     format!("“{query}”")
                 };
-                reader.map_or_else(
-                    || line.clone(),
-                    |reader| Self::stale(line.clone(), node, reader),
-                )
+                match reader {
+                    Some(reader) => {
+                        let judged = reader.judged(node.id()).len();
+                        let line = if judged == 0 {
+                            asked
+                        } else {
+                            format!(
+                                "{asked} · {} of {}",
+                                reader.of(node.id()).len(),
+                                Counted::subtasks(judged)
+                            )
+                        };
+                        Self::stale(line, node, reader)
+                    }
+                    None => asked,
+                }
             }
             CurationNodeKind::GroupSimilarSubtasks(grouping) => {
                 let line = match grouping.categories().len() {
@@ -213,45 +227,34 @@ impl NodeCard {
                     |reader| Self::stale(line.clone(), node, reader),
                 )
             }
-            // A moment is one frame, so what the node holds is said as
-            // the recording it scored rather than a count of frames.
+            // A moment is one frame, so what the node keeps is said as the
+            // recording it adds up to, of the recording it scored: what
+            // training gets, rather than a count of frames.
             CurationNodeKind::ScoreProgress(_) => match (counts, reader) {
                 (Some((input, output)), Some(reader)) => Self::stale(
                     format!(
-                        "{} of {} · {} scored",
+                        "{} of {} · keeps {} of {}",
                         PreviewProgress::of(reader, node.id()).read().len(),
                         Counted::episodes(input.len()),
                         Self::recorded(&output, reader.sample()),
+                        Self::recorded(&reader.judged(node.id()), reader.sample()),
                     ),
                     node,
                     reader,
                 ),
-                _ => "Progress rate per frame of recording".to_owned(),
+                _ => "Stretches progressing fast enough".to_owned(),
             },
-            CurationNodeKind::Select(selection) => match (counts, sample) {
-                // A moment is a frame, so what a rule over moments keeps is
-                // said as the recording it adds up to: what training gets.
-                (Some((input, output)), Some(sample))
-                    if payload.population_kind(node.id()) == Some(PopulationKind::Moments) =>
-                {
-                    format!(
-                        "{} · keeps {} of {}",
-                        selection.sentence(),
-                        Self::recorded(&output, sample),
-                        Self::recorded(&input, sample)
-                    )
-                }
-                (Some((input, output)), _) => {
-                    let unit = payload.population_kind(node.id());
-                    format!(
-                        "{} · {} of {}",
-                        selection.sentence(),
+            CurationNodeKind::Select => {
+                let sentence = node.keeps().map(Selection::sentence).unwrap_or_default();
+                match counts {
+                    Some((input, output)) => format!(
+                        "{sentence} · {} of {}",
                         output.len(),
-                        Counted::of_kind(unit, input.len())
-                    )
+                        Counted::of_kind(payload.population_kind(node.id()), input.len())
+                    ),
+                    None => sentence,
                 }
-                (None, _) => selection.sentence(),
-            },
+            }
         }
     }
     /// How much recording a population adds up to, on the clock.
@@ -322,7 +325,8 @@ impl NodeCard {
 mod tests {
     use super::super::super::annotate::SubtaskRow;
     use super::super::super::document::{
-        Comparison, EpisodeFact, Selection, SubtaskAnnotation, SubtaskGrouping, SubtaskSearch,
+        Comparison, EpisodeCondition, EpisodeFact, SubtaskAnnotation, SubtaskGrouping,
+        SubtaskSearch,
     };
     use super::super::super::preview::{PreviewReads, PreviewRows, ReadInput};
     use super::*;
@@ -390,13 +394,18 @@ mod tests {
             )
             .unwrap();
         let long = payload
-            .add_child(
-                DATASET_NODE_ID,
-                CurationNodeKind::Select(Selection::Episodes {
-                    fact: EpisodeFact::DurationSeconds,
-                    comparison: Comparison::AtLeast,
-                    value: 20.0,
-                }),
+            .add_child(DATASET_NODE_ID, CurationNodeKind::Select)
+            .unwrap();
+        payload
+            .set_rule(
+                &long,
+                Selection::Episodes {
+                    conditions: vec![EpisodeCondition::new(
+                        EpisodeFact::DurationSeconds,
+                        Comparison::AtLeast,
+                        20.0,
+                    )],
+                },
             )
             .unwrap();
         let reader = PopulationReader::new(&payload, &sample, &reads);
@@ -416,6 +425,16 @@ mod tests {
             "Duration at least 20 s · 1 of 2 episodes"
         );
         assert_eq!(card(&cards, &long).output(), Some(&OutputFlag::Unpublished));
+        // A search and a grouping are outputs too; Break down's free text is
+        // not something to train on until one of them has read it.
+        assert_eq!(
+            card(&cards, &search).output(),
+            Some(&OutputFlag::Unpublished)
+        );
+        assert_eq!(
+            card(&cards, &group).output(),
+            Some(&OutputFlag::Unpublished)
+        );
         assert_eq!(card(&cards, &annotate).output(), None);
         assert_eq!(card(&cards, &long).face(), NodeFace::Select);
         assert_eq!(

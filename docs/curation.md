@@ -14,18 +14,35 @@ is Training's concern, not Curation's. See
 ## The graph
 
 Every node except the dataset has one parent, and each edge carries episode
-intervals with properties. Every node is one of two kinds:
+intervals with properties. A node is what it asks, and its **rule**: the knob
+it keeps part of the answer by, tuned in its workspace.
 
 - **Measures** add a property to each interval, or cut intervals into finer
   ones: Break down subtasks, Find similar subtasks, Group similar subtasks,
-  and Score progress.
-- **Selects** keep the intervals whose property passes their rule. What a
-  Select keeps by comes from the nearest node above it that is not a Select:
-  the dataset's episode facts, a search's similarity, a grouping's category,
-  or the moments' progress rate.
+  and Score progress. Score progress keeps the moments progressing at least
+  its threshold, joined into stretches, and Find similar the subtasks at
+  least its cutoff likely to be what it asks.
+- **Selects** measure nothing: their rule is all they are. A Select after the
+  dataset keeps the episodes that meet every one of its conditions on their
+  recorded facts; a Select after Group similar keeps the chosen categories.
+  One Select holds all its conditions, so none follows another.
 
-Every Select that nothing follows is an **output**. Its relation is what a
-published view holds.
+What may follow a node:
+
+| Node | Followed by |
+| --- | --- |
+| Dataset | Break down, Score progress, Select |
+| Select of episodes | Break down, Score progress |
+| Score progress | Break down, which reads the stretches it keeps |
+| Break down | Find similar, Group similar |
+| Find similar | Find similar, Group similar, over the subtasks it keeps |
+| Group similar | Select of categories |
+| Select of categories | Find similar, Group similar |
+
+Every Score progress, Find similar, Group similar, and Select node is an
+**output**, whatever follows it: its relation is what a published view holds.
+Break down is not one: its descriptions are free text that differs from
+episode to episode until a search or a grouping reads them.
 
 ## What an edge carries
 
@@ -58,16 +75,19 @@ rows that reach it.
 | Node | On the episode row | Step over the rows that reach it | Where |
 | --- | --- | --- | --- |
 | Dataset | | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
-| Select | | A `WHERE` from the same `Selection` the browser filters with. A progress-rate rule keeps moments with no progress rate too, then joins touching moments into stretches carrying their mean progress rate | `document/selection.rs` |
-| Score progress | `scores`: `spql.ai.score_progress` over the top camera's packet video | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on | `score_progress/scoring.rs` |
+| Select | | Its rule alone: a `WHERE` of every condition, or of the categories, from the same `Selection` the browser filters with | `document/selection.rs` |
+| Score progress | `scores`: `spql.ai.score_progress` over the top camera's packet video | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on; then its rule keeps the moments at least its threshold, and those with no progress rate, and joins touching ones into stretches carrying their mean progress rate | `score_progress/scoring.rs` |
 | Break down subtasks | `subtasks`: `spql.ai.breakdown_task` over the chosen camera's packet video, with the configured model and sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks unnested, moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
-| Find similar subtasks | | `spql.ai.similarity(subtask, query)` as `similarity` | `similar/judgment.rs` |
+| Find similar subtasks | | `spql.ai.similarity(subtask, query)` as `similarity`; then its rule keeps the subtasks at least its cutoff | `similar/judgment.rs` |
 | Group similar subtasks | | `spql.ai.classify(subtask, categories)` as `subtask_category`, the categories written into the statement as a literal list | `similar/judgment.rs` |
 
+A node's rule is its own entry after its step, named after it
+(`score_progress_1_kept`); a Select's rule is its whole step (`select_1`).
+
 A published view is one stream of episode rows (decided 2026-09-25). The
-dataset's listing and its Selects of episodes come first; a Select keeps by
-the nearest measure above it, so these are the only Selects that can come
-before the first measure, and they are the `WHERE` on the episode rows.
+dataset's listing and its Select of episodes come first; a Select keeps by
+the nearest measure above it, so this is the only Select that can come
+before the first measure, and it is the `WHERE` on the episode rows.
 Where the path leaves whole episodes, it builds each episode's row once:
 
 ```text
@@ -75,15 +95,14 @@ dataset_0, select_1       the listing with its facts, and the Selects of episode
 camera_video_1            each camera a model on the path watches, read once
 instruction_1             each episode's first instruction, when Break down reads one
 episodes                  one row per episode: origin_ns, scores, subtasks; no video
-identify_…, select_…      each step reads the entry above it once
+score_progress_…, …_kept each step, and each rule after it, reads the entry above it once
 break_down_…, find_…      unnesting the answer it asked for when it reaches it
 ```
 
 The row carries the episode's first message as `origin_ns` and one column per
 model answer. The answers ride on the interval rows until the step of the
-node that asked for them unnests them: on Dataset → Score progress →
-Select → Break down, `subtasks` rides on every moment and every
-stretch. Spiral joins and windows rows that carry these lists of structs as
+node that asked for them unnests them: on Dataset → Score progress → Break
+down, `subtasks` rides on every moment and every stretch. Spiral joins and windows rows that carry these lists of structs as
 readily as scalar ones.
 
 The scorer and Break down read each episode whole, so what they are asked
@@ -109,6 +128,8 @@ read, and joins it to them before the same step. And the preview passes
 `on_error => 'fail'` to every `spql.ai` call that takes it, so an episode the
 model cannot answer fails with its reason; the view keeps the functions'
 default, a NULL for that row, so one episode never ends a read of thousands.
+The preview leaves the node's rule out: the browser keeps by it over what the
+step read, so sliding a threshold asks nothing again.
 
 The next frame's time is `LEAD`, and the last frame lasts as long as the one
 before it (`LAG`); the frames and the window over them are separate entries.
@@ -149,12 +170,12 @@ pursued for now; the compiler keeps these rules instead.
   `len`, `sum`, and the aggregate `collect`), so work over one row's list is
   written as unnest, then compute over the rows.
 - **Only a Select of episodes spares an episode its model calls.** A model's
-  column is on the episode row, before any interval is cut, so a Select below
-  a measure keeps rows but never skips a call. On Score progress →
-  Select → Break down, the view asks `breakdown_task` of every
-  episode, including one where no frame passes the progress-rate rule. Its rows are
-  still the preview's, which asks only the episodes that reach Break down;
-  only the cost differs.
+  column is on the episode row, before any interval is cut, so a rule below
+  a measure keeps rows but never skips a call. On Score progress → Break
+  down, the view asks `breakdown_task` of every episode, including one where
+  no frame passes Score progress's threshold. Its rows are still the
+  preview's, which asks only the episodes that reach Break down; only the
+  cost differs.
 
 ## Preview
 
@@ -166,8 +187,9 @@ node is its parent's preview rows, written into the statement (`preview/`):
 - **Break down and Score progress** read one recording per
   query. Each is handed the intervals of its episode that reach the node,
   with the episode bound as `$1`, and answers as rows (subtasks) or as one
-  Arrow stream (moments). After a Select of moments these are the stretches
-  it keeps, as its step joins them.
+  Arrow stream (moments). Touching intervals are handed on joined, so below
+  Score progress Break down is handed the stretches its rule keeps, never a
+  row per frame.
 - **Find similar and Group similar** read no recording, so they judge the
   subtasks of many episodes in one statement: as many as fit
   in 60 KiB and 1,000 rows, which is one statement for a sample of short
@@ -184,9 +206,12 @@ eight at a time. The browser polls it every second
 (`…/answers/{query}`), so no request of the page waits on a model: a query can
 take a minute, and the browser opens only six connections to the backend.
 
-Stop (`…/stop`) starts no further query and lets the ones in flight finish,
-since Spiral cannot cancel a running query. A run nobody polls for 30 seconds
-stops the same way, since the page that wanted it has gone, and a settled
+Stop (`…/stop`) ends the run at once: it starts no further query, and the
+backend drops the ones in flight, whose episodes read as never run and wait
+for the next Run. Spiral cannot cancel a statement it is computing, so a
+dropped query finishes the batch it is on and its answer is thrown away; the
+model calls it made are still spent. A run nobody polls for 30 seconds only
+starts nothing more, since the page that wanted it has gone, and a settled
 run is dropped once it has gone unread that long. Runs live in the backend's
 memory, so a restarted backend holds none. A failed episode is listed with its reason and
 never stops the rest; a failed batch fails each episode in it, since
@@ -210,20 +235,23 @@ the subtasks that reach the node, and the operator may rename or merge them.
 Either way the node's statement names them, and changing them runs the
 classification again, never the proposal.
 
-A Select's slider filters the preview rows of the node above it in the
-browser, so it answers at once. The same `Selection` renders the `WHERE` the
-published view keeps by, and tests hold the two to the same rows for every
-kind of rule. Tests also hold each measure's preview to its published step
+A rule's slider filters preview rows in the browser, so it answers at once:
+a Select's the rows of the node above it, a measure's its own. The same
+`Selection` renders the `WHERE` the published view keeps by, and tests hold
+the two to the same rows for every kind of rule. Tests also hold each measure's preview to its published step
 over the parent's rows; run live with literal stand-ins for the model's
 answers, the two readings return the same rows for every measure.
 
 ## Publishing
 
-On an output's workspace, Publish asks for a view name: one plain identifier,
-at the catalog root. With unsaved edits it asks you to save first, because the
-view is compiled from the saved recipe. Studio then sends the compiled
-statement to `POST /api/curations/publish`, records `node → view name,
-revision` in the curation, and saves.
+Publish, at the end of the document bar, lists every output with the name of
+its view. Choose the outputs to publish and give each a view name: one plain
+identifier, at the catalog root. With unsaved edits it asks you to save
+first, because each view is compiled from the saved recipe. Studio then sends
+each compiled statement to `POST /api/curations/publish` in turn, records
+every `node → view name, revision` it created in one edit, and saves once: a
+publication is recorded against the saved revision, and the save that records
+it must come next.
 
 The backend checks the name, admits the statement as one read-only query,
 refuses a name that a table or a Dataset holds, and runs one `CREATE OR
@@ -232,22 +260,23 @@ REPLACE VIEW`, so a reader sees the old view or the new one. (Spiral refuses a
 conflict once the view exists.) Unpublish drops the view.
 
 A later save that changes the recipe moves the curation past the published
-revision, and the output's card then reads "Out of date" until it is
-published again. A published output stays an output: adding a step after it,
-or removing its branch, waits until it is unpublished.
+revision, and Publish then lists the output's view as out of date until it
+is published again. Removing a published output's branch waits until it is
+unpublished; a step may follow it, and it stays an output.
 
 ## Documents
 
 Curations live in the Studio SQLite table `curations` and are saved only on an
 explicit Save, with an optimistic revision check: the submitted revision must
 equal the stored one, and the saved copy carries the next. The payload is
-opaque to the backend and versioned by the frontend. Encoding 2 keeps only the
-recipe: nodes, edges, each node's configuration, and the published outputs.
-Break down keeps its camera, model, sample interval, and the topic it reads
-each episode's task from; Find similar its query; Group similar its
-categories. Nothing any node read is saved. A scratch document that still
-carries subtasks, groupings, rankings, or an annotation's episode lists is
-refused. Curations saved in encoding 1 were deleted, with the saved
+opaque to the backend and versioned by the frontend. Encoding 3 keeps only the
+recipe: nodes, edges, each node's configuration and rule, and the published
+outputs. Break down keeps its camera, model, sample interval, and the topic
+it reads each episode's task from; Find similar its query and cutoff; Group
+similar its categories; Score progress its threshold; a Select its
+conditions or categories. Nothing any node read is saved. A document in an
+earlier encoding is refused: encoding 2 kept the thresholds in Selects of
+their own, and curations saved in encoding 1 were deleted, with the saved
 workflows, by the migration that retired Workflow.
 
 ## Not yet

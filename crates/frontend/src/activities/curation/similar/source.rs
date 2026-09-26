@@ -23,16 +23,21 @@ pub(super) struct SubtaskSource {
     measured: Vec<EpisodeId>,
     /// The search a Find similar node asks; a grouping node has none.
     search: Option<SubtaskSearch>,
-    /// What the node's own preview judged of those subtasks.
+    /// What the node's own preview judged of those subtasks, before a
+    /// search's cutoff keeps the close ones.
     judged: Vec<SubtaskRow>,
     progress: PreviewProgress,
 }
 
 impl SubtaskSource {
     pub(super) fn of(controller: CurationController, node: &str) -> Self {
-        let (reaching, judged) = controller
+        let reaching = controller
             .populations(node)
-            .map(|(input, output)| (input.subtasks().to_vec(), output.subtasks().to_vec()))
+            .map(|(input, _)| input.subtasks().to_vec())
+            .unwrap_or_default();
+        let judged = controller
+            .judged(node)
+            .map(|(judged, _)| judged.subtasks().to_vec())
             .unwrap_or_default();
         let annotation = controller.with_payload(|payload| {
             payload

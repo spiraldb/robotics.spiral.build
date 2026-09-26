@@ -1,10 +1,12 @@
-//! What a Select node keeps of the population it receives.
+//! What a node keeps of what it measured, or a Select of what reaches it: the
+//! node's rule.
 //!
-//! A Select narrows; it never measures. What it can keep by is decided by the
-//! nearest node above it that is not itself a Select — its basis: the
-//! dataset's recorded episode facts, a search's probabilities, a grouping's
-//! categories, or a Score progress node's progress rate. The rule is stored in those terms,
-//! so a Select reads as one sentence about the node it follows.
+//! A rule narrows; it never measures. What it keeps by is its basis: a Score
+//! progress node's progress rate and a Find similar node's similarity are
+//! those nodes' own knobs, and a Select keeps by what the node above it
+//! measured — the dataset's recorded episode facts, as many conditions as it
+//! names, or a grouping's categories. The rule is stored in those terms, so
+//! it reads as one sentence about the node it belongs to.
 //!
 //! One rule has two readings that must agree: the browser keeps what the
 //! preview read as the threshold slides (`keeps_*`), and the path compiles it
@@ -107,7 +109,7 @@ impl EpisodeFact {
     }
 }
 
-/// Which side of the threshold a Select keeps.
+/// Which side of its value a condition keeps.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Comparison {
@@ -149,16 +151,80 @@ impl Comparison {
     }
 }
 
-/// One Select's rule, in the terms of its basis.
+/// One condition an episode meets: its recorded fact compared with a value.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EpisodeCondition {
+    fact: EpisodeFact,
+    comparison: Comparison,
+    value: f64,
+}
+
+impl EpisodeCondition {
+    pub(crate) const fn new(fact: EpisodeFact, comparison: Comparison, value: f64) -> Self {
+        Self {
+            fact,
+            comparison,
+            value,
+        }
+    }
+    pub(crate) const fn fact(&self) -> EpisodeFact {
+        self.fact
+    }
+    pub(crate) const fn comparison(&self) -> Comparison {
+        self.comparison
+    }
+    pub(crate) const fn value(&self) -> f64 {
+        self.value
+    }
+    /// The same condition on another fact, from where it keeps everything.
+    pub(crate) const fn on(self, fact: EpisodeFact) -> Self {
+        Self::new(fact, self.comparison, 0.0)
+    }
+    pub(crate) const fn comparing(self, comparison: Comparison) -> Self {
+        Self::new(self.fact, comparison, self.value)
+    }
+    pub(crate) const fn at(self, value: f64) -> Self {
+        Self::new(self.fact, self.comparison, value)
+    }
+    /// Whether an episode meets it, by its recorded facts. An episode Spiral
+    /// did not record the fact of does not.
+    pub(in crate::activities::curation) fn holds(&self, episode: &Episode) -> bool {
+        self.fact
+            .of(episode)
+            .is_some_and(|measured| self.comparison.holds(measured, self.value))
+    }
+    /// "duration at least 20 s".
+    fn sentence(&self) -> String {
+        let unit = self
+            .fact
+            .unit()
+            .map(|unit| format!(" {unit}"))
+            .unwrap_or_default();
+        format!(
+            "{} {} {}{unit}",
+            self.fact.label(),
+            self.comparison.label(),
+            self.value
+        )
+    }
+    fn predicate(&self) -> Result<String, PathError> {
+        let value = SqlLiteral::double(self.value)
+            .ok_or_else(|| PathError::new("A Select's threshold must be a number."))?;
+        Ok(format!(
+            "{} {} {value}",
+            self.fact.key(),
+            self.comparison.operator()
+        ))
+    }
+}
+
+/// One rule, in the terms of its basis.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "keep", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Selection {
-    /// Episodes whose recorded fact compares with `value` as asked.
-    Episodes {
-        fact: EpisodeFact,
-        comparison: Comparison,
-        value: f64,
-    },
+    /// Episodes that meet every condition.
+    Episodes { conditions: Vec<EpisodeCondition> },
     /// Subtasks at least this likely to be the operation a search asked about.
     Similar { minimum: f64 },
     /// Subtasks in any of these categories.
@@ -169,15 +235,17 @@ pub(crate) enum Selection {
 }
 
 impl Selection {
-    /// A new Select's rule. Thresholds start where they keep everything
-    /// measured, so adding a Select never silently drops data; categories
-    /// start empty, because a grouping has no category that means "all".
+    /// A new rule. Episode conditions start where they keep every episode, so
+    /// adding a Select never silently drops data; categories start empty,
+    /// because a grouping has no category that means "all".
     pub(crate) fn for_basis(basis: SelectionBasis) -> Self {
         match basis {
             SelectionBasis::EpisodeFacts => Self::Episodes {
-                fact: EpisodeFact::DurationSeconds,
-                comparison: Comparison::AtLeast,
-                value: 0.0,
+                conditions: vec![EpisodeCondition::new(
+                    EpisodeFact::DurationSeconds,
+                    Comparison::AtLeast,
+                    0.0,
+                )],
             },
             SelectionBasis::Similarity => Self::Similar { minimum: 0.5 },
             SelectionBasis::Categories => Self::Categories { names: Vec::new() },
@@ -192,16 +260,12 @@ impl Selection {
             Self::Progressing { .. } => SelectionBasis::Progress,
         }
     }
-    /// Whether an episode is kept, by its recorded facts.
+    /// Whether an episode is kept: it meets every condition.
     pub(in crate::activities::curation) fn keeps_episode(&self, episode: &Episode) -> bool {
         match self {
-            Self::Episodes {
-                fact,
-                comparison,
-                value,
-            } => fact
-                .of(episode)
-                .is_some_and(|measured| comparison.holds(measured, *value)),
+            Self::Episodes { conditions } => {
+                conditions.iter().all(|condition| condition.holds(episode))
+            }
             _ => false,
         }
     }
@@ -224,56 +288,36 @@ impl Selection {
             _ => false,
         }
     }
-    /// The value a numeric rule divides at; a rule of categories has none.
-    pub(crate) fn threshold(&self) -> Option<f64> {
+    /// The least a measure's rule keeps: the knob of a Score progress or a
+    /// Find similar node. Episode conditions each have their own value, and
+    /// categories none.
+    pub(crate) fn minimum(&self) -> Option<f64> {
         match self {
-            Self::Episodes { value, .. } => Some(*value),
             Self::Similar { minimum } | Self::Progressing { minimum } => Some(*minimum),
-            Self::Categories { .. } => None,
+            Self::Episodes { .. } | Self::Categories { .. } => None,
         }
     }
-    /// Whether the rule keeps what measures at least its threshold, rather
-    /// than at most it.
-    pub(crate) fn keeps_at_least(&self) -> bool {
-        !matches!(
-            self,
-            Self::Episodes {
-                comparison: Comparison::AtMost,
-                ..
-            }
-        )
-    }
-    /// The same rule dividing at `value`; a rule of categories has no
-    /// threshold and stays as it is.
-    pub(crate) fn with_threshold(self, value: f64) -> Self {
+    /// The same measure's rule keeping at least `value`; any other rule
+    /// stays as it is.
+    pub(crate) fn with_minimum(self, value: f64) -> Self {
         match self {
-            Self::Episodes {
-                fact, comparison, ..
-            } => Self::Episodes {
-                fact,
-                comparison,
-                value,
-            },
             Self::Similar { .. } => Self::Similar { minimum: value },
             Self::Progressing { .. } => Self::Progressing { minimum: value },
-            Self::Categories { names } => Self::Categories { names },
+            rule => rule,
         }
     }
     /// The rule as its node card says it.
     pub(crate) fn sentence(&self) -> String {
         match self {
-            Self::Episodes {
-                fact,
-                comparison,
-                value,
-            } => {
-                let unit = fact
-                    .unit()
-                    .map(|unit| format!(" {unit}"))
-                    .unwrap_or_default();
-                let fact = fact.label();
-                let mut sentence = format!("{fact} {} {value}{unit}", comparison.label());
-                sentence[..1].make_ascii_uppercase();
+            Self::Episodes { conditions } => {
+                let mut sentence = conditions
+                    .iter()
+                    .map(EpisodeCondition::sentence)
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                if let Some(first) = sentence.get_mut(..1) {
+                    first.make_ascii_uppercase();
+                }
                 sentence
             }
             Self::Similar { minimum } => format!("At least {:.0}% similar", minimum * 100.0),
@@ -287,25 +331,19 @@ impl Selection {
     /// here too; a subtask the model could not judge is not.
     fn predicate(&self, input: &Relation) -> Result<String, PathError> {
         let literal = |value: f64| {
-            SqlLiteral::double(value)
-                .ok_or_else(|| PathError::new("A Select's threshold must be a number."))
+            SqlLiteral::double(value).ok_or_else(|| PathError::new("A threshold must be a number."))
         };
         let measured = |measure: &str| {
             input.measured(measure).ok_or_else(|| {
-                PathError::new(format!("Nothing above this Select measures {measure}."))
+                PathError::new(format!("Nothing above this rule measures {measure}."))
             })
         };
         match self {
-            Self::Episodes {
-                fact,
-                comparison,
-                value,
-            } => Ok(format!(
-                "{} {} {}",
-                fact.key(),
-                comparison.operator(),
-                literal(*value)?
-            )),
+            Self::Episodes { conditions } => Ok(conditions
+                .iter()
+                .map(EpisodeCondition::predicate)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(" AND ")),
             Self::Progressing { minimum } => Ok(format!(
                 "({rate} IS NULL OR {rate} >= {})",
                 literal(*minimum)?,
@@ -335,7 +373,14 @@ impl Selection {
     }
     pub(super) fn validate(&self) -> Result<(), String> {
         match self {
-            Self::Episodes { value, .. } if !value.is_finite() => {
+            Self::Episodes { conditions } if conditions.is_empty() => {
+                Err("A Select of episodes names at least one condition.".into())
+            }
+            Self::Episodes { conditions }
+                if conditions
+                    .iter()
+                    .any(|condition| !condition.value.is_finite()) =>
+            {
                 Err("A Select's threshold must be a number.".into())
             }
             Self::Similar { minimum } if !(0.0..=1.0).contains(minimum) => {
@@ -358,9 +403,10 @@ impl Selection {
     }
 }
 
-/// A Select of episodes keeps the rows whose fact passes; a Select of
-/// moments keeps the moments that pass and joins the ones that touch into
-/// stretches, each carrying its mean progress rate.
+/// A rule of episodes keeps the rows that meet every condition, and a rule
+/// of subtasks the ones it passes; a rule of moments keeps the moments that
+/// pass and joins the ones that touch into stretches, each carrying its mean
+/// progress rate.
 impl PathFragment for Selection {
     fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let input = step.input()?;
@@ -372,9 +418,14 @@ impl PathFragment for Selection {
             input.name()
         );
         Ok(match self {
-            Self::Episodes { fact, .. } => {
-                StepSql::new(vec![kept], input.renamed(name).publishing(fact.key()))
-            }
+            Self::Episodes { conditions } => StepSql::new(
+                vec![kept],
+                conditions
+                    .iter()
+                    .fold(input.renamed(name), |relation, condition| {
+                        relation.publishing(condition.fact.key())
+                    }),
+            ),
             // Moments tile their episode, so kept moments with none left out
             // between them touch: numbering every moment and then the kept
             // ones, a stretch is where the two numbers keep one difference.
@@ -392,7 +443,7 @@ impl PathFragment for Selection {
                             input.name()
                         ),
                         format!(
-                            "{name}_kept AS (SELECT {columns}, \
+                            "{name}_passing AS (SELECT {columns}, \
                              position - ROW_NUMBER() OVER (PARTITION BY episode_id ORDER BY start_ns) AS stretch \
                              FROM {name}_numbered WHERE {predicate})"
                         ),
@@ -400,7 +451,7 @@ impl PathFragment for Selection {
                             "{name}_stretches AS (SELECT episode_id, MIN(start_ns) {stretch} AS start_ns, \
                              MAX(end_ns) {stretch} AS end_ns, AVG({rate}) {stretch} AS {rate}{}, \
                              ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place \
-                             FROM {name}_kept)",
+                             FROM {name}_passing)",
                             input.answers().following("")
                         ),
                         format!(
@@ -414,6 +465,16 @@ impl PathFragment for Selection {
                 StepSql::new(vec![kept], input.renamed(name))
             }
         })
+    }
+}
+
+#[cfg(test)]
+impl Selection {
+    /// Episodes whose one recorded fact compares with `value` as asked.
+    pub(crate) fn episodes_where(fact: EpisodeFact, comparison: Comparison, value: f64) -> Self {
+        Self::Episodes {
+            conditions: vec![EpisodeCondition::new(fact, comparison, value)],
+        }
     }
 }
 
@@ -512,26 +573,19 @@ mod tests {
         .zip(1..)
         .map(|(duration, ordinal)| Episode::fixture(&EpisodeId::fixture(ordinal), duration))
         .collect::<Vec<_>>();
-        for rule in [
-            Selection::Episodes {
-                fact: EpisodeFact::DurationSeconds,
-                comparison: Comparison::AtLeast,
-                value: 10.0,
-            },
-            Selection::Episodes {
-                fact: EpisodeFact::DurationSeconds,
-                comparison: Comparison::AtMost,
-                value: 10.000_000_001,
-            },
-            Selection::Episodes {
-                fact: EpisodeFact::Messages,
-                comparison: Comparison::AtLeast,
-                value: 0.0,
-            },
+        for condition in [
+            EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtLeast, 10.0),
+            EpisodeCondition::new(
+                EpisodeFact::DurationSeconds,
+                Comparison::AtMost,
+                10.000_000_001,
+            ),
+            EpisodeCondition::new(EpisodeFact::Messages, Comparison::AtLeast, 0.0),
         ] {
-            let Selection::Episodes { fact, .. } = &rule else {
-                unreachable!("an episode rule")
+            let rule = Selection::Episodes {
+                conditions: vec![condition],
             };
+            let fact = condition.fact();
             let rendered = RenderedPredicate(rule.predicate(&searched()).unwrap());
             for episode in &episodes {
                 assert_eq!(
@@ -613,6 +667,31 @@ mod tests {
     }
 
     #[test]
+    fn an_episode_is_kept_when_it_meets_every_condition() {
+        let rule = Selection::Episodes {
+            conditions: vec![
+                EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtLeast, 10.0),
+                EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtMost, 20.0),
+            ],
+        };
+        let lasting = |seconds: u64| {
+            rule.keeps_episode(&Episode::fixture(
+                &EpisodeId::fixture(1),
+                seconds * 1_000_000_000,
+            ))
+        };
+        assert!(!lasting(9) && lasting(10) && lasting(20) && !lasting(21));
+        assert_eq!(
+            rule.predicate(&searched()).unwrap(),
+            "duration_seconds >= CAST(10 AS DOUBLE) AND duration_seconds <= CAST(20 AS DOUBLE)"
+        );
+        assert_eq!(
+            rule.sentence(),
+            "Duration at least 10 s and duration at most 20 s"
+        );
+    }
+
+    #[test]
     fn a_rule_reads_the_nearest_measure_of_its_kind() {
         // A second search below the first writes its own column, and the
         // Select below it reads that one.
@@ -649,9 +728,11 @@ mod tests {
     #[test]
     fn each_rule_keeps_by_its_own_measure_and_nothing_unmeasured() {
         let longer = Selection::Episodes {
-            fact: EpisodeFact::DurationSeconds,
-            comparison: Comparison::AtLeast,
-            value: 20.0,
+            conditions: vec![EpisodeCondition::new(
+                EpisodeFact::DurationSeconds,
+                Comparison::AtLeast,
+                20.0,
+            )],
         };
         assert!(!longer.keeps_episode(&Episode::fixture(&EpisodeId::fixture(1), 19_000_000_000)));
         assert!(longer.keeps_episode(&Episode::fixture(&EpisodeId::fixture(1), 20_000_000_000)));
@@ -679,14 +760,23 @@ mod tests {
     #[test]
     fn a_rule_is_stored_in_its_own_words_and_checked() {
         let json = serde_json::to_value(Selection::Episodes {
-            fact: EpisodeFact::Messages,
-            comparison: Comparison::AtMost,
-            value: 5000.0,
+            conditions: vec![EpisodeCondition::new(
+                EpisodeFact::Messages,
+                Comparison::AtMost,
+                5000.0,
+            )],
         })
         .unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"keep": "episodes", "fact": "messages", "comparison": "at_most", "value": 5000.0})
+            serde_json::json!({"keep": "episodes", "conditions": [{"fact": "messages", "comparison": "at_most", "value": 5000.0}]})
+        );
+        assert!(
+            Selection::Episodes {
+                conditions: Vec::new()
+            }
+            .validate()
+            .is_err()
         );
         assert!(Selection::Similar { minimum: 1.2 }.validate().is_err());
         assert!(
@@ -698,9 +788,11 @@ mod tests {
         );
         assert!(
             Selection::Episodes {
-                fact: EpisodeFact::Channels,
-                comparison: Comparison::AtLeast,
-                value: f64::NAN,
+                conditions: vec![EpisodeCondition::new(
+                    EpisodeFact::Channels,
+                    Comparison::AtLeast,
+                    f64::NAN,
+                )],
             }
             .validate()
             .is_err()

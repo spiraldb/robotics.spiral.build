@@ -110,21 +110,16 @@ fn a_recording_is_handed_the_intervals_that_reach_it_in_the_recordings_clock() {
 }
 
 #[test]
-fn after_a_select_of_moments_a_recording_is_handed_the_stretches_it_keeps() {
+fn below_score_progress_a_recording_is_handed_the_stretches_it_keeps() {
     let mut graph = graph();
     let score = graph
-        .add_child(
+        .add_keeping(
             DATASET_NODE_ID,
             CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+            Selection::Progressing { minimum: 0.2 },
         )
         .unwrap();
-    let moving = graph
-        .add_child(
-            &score,
-            CurationNodeKind::Select(Selection::Progressing { minimum: 0.2 }),
-        )
-        .unwrap();
-    let annotate = graph.add_child(&moving, breakdown()).unwrap();
+    let annotate = graph.add_child(&score, breakdown()).unwrap();
     let episode = EpisodeId::fixture(1);
     let moments = [0.5, 0.4, 0.1, 0.3]
         .into_iter()
@@ -151,13 +146,27 @@ fn after_a_select_of_moments_a_recording_is_handed_the_stretches_it_keeps() {
         .unwrap()
         .rows(&reader.input(&annotate), &sample)
         .unwrap();
-    // Seconds 0–2 and 3–4 progress, as the Select's own step joins them.
+    // Seconds 0–2 and 3–4 progress, as the node's own rule joins them.
     assert_eq!(
         rows[&episode].rows(),
         [
             "($1, CAST(1000000000 AS BIGINT), CAST(3000000000 AS BIGINT))",
             "($1, CAST(4000000000 AS BIGINT), CAST(5000000000 AS BIGINT))"
         ]
+    );
+    // A rule every frame passes hands on the scored recording as one stretch,
+    // never a row per frame.
+    graph
+        .set_rule(&score, Selection::Progressing { minimum: -1.0 })
+        .unwrap();
+    let reader = PopulationReader::new(&graph, &sample, &reads);
+    let rows = PreviewInput::of(&graph, &annotate)
+        .unwrap()
+        .rows(&reader.input(&annotate), &sample)
+        .unwrap();
+    assert_eq!(
+        rows[&episode].rows(),
+        ["($1, CAST(1000000000 AS BIGINT), CAST(5000000000 AS BIGINT))"]
     );
 }
 

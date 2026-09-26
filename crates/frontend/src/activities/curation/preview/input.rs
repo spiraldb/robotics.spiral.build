@@ -2,7 +2,7 @@
 //! the rows its parent's preview holds, in the columns the published view
 //! would hand the node.
 use crate::activities::curation::annotate::SubtaskColumns;
-use crate::activities::curation::document::{CurationGraph, CurationNodeKind, Selection};
+use crate::activities::curation::document::{CurationGraph, CurationNodeKind};
 use crate::activities::curation::path::{CurationPath, PathError, Relation, StepInput};
 use crate::activities::curation::population::{EpisodeSample, Population, Slice};
 use spiral_robotics_common::datasets::EpisodeId;
@@ -44,9 +44,9 @@ impl EpisodeRows {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum PreviewInput {
     /// The intervals that reach a node that reads each episode's recording,
-    /// one episode bound as `$1` at a time. After a Select of moments these
-    /// are the stretches it joins the kept moments into, as its step does.
-    Intervals { stretches: bool },
+    /// one episode bound as `$1` at a time. Below Score progress these are
+    /// the stretches its rule joins the kept moments into, as its step does.
+    Intervals,
     /// Every column of the subtasks that reach a text judgment, many
     /// episodes at once.
     Subtasks {
@@ -66,12 +66,7 @@ impl PreviewInput {
             .ok_or_else(|| PathError::new("Only the dataset starts a path."))?;
         match kind {
             CurationNodeKind::ScoreProgress(_) | CurationNodeKind::BreakDownSubtasks(_) => {
-                Ok(Self::Intervals {
-                    stretches: matches!(
-                        graph.node(parent).map(|parent| parent.kind()),
-                        Some(CurationNodeKind::Select(Selection::Progressing { .. }))
-                    ),
-                })
+                Ok(Self::Intervals)
             }
             CurationNodeKind::FindSimilarSubtasks(_)
             | CurationNodeKind::GroupSimilarSubtasks(_) => {
@@ -79,7 +74,7 @@ impl PreviewInput {
                 let columns = SubtaskColumns::of(&relation).map_err(PathError::new)?;
                 Ok(Self::Subtasks { relation, columns })
             }
-            CurationNodeKind::Dataset | CurationNodeKind::Select(_) => {
+            CurationNodeKind::Dataset | CurationNodeKind::Select => {
                 Err(PathError::new("Only a measurement previews."))
             }
         }
@@ -98,13 +93,12 @@ impl PreviewInput {
         };
         let mut rows = BTreeMap::<EpisodeId, Vec<String>>::new();
         match self {
-            Self::Intervals { stretches } => {
-                let slices = if *stretches {
-                    input.slices(sample)
-                } else {
-                    input.items(sample)
-                };
-                for slice in slices.iter().filter(|slice| slice.seconds() > 0.0) {
+            Self::Intervals => {
+                for slice in input
+                    .slices(sample)
+                    .iter()
+                    .filter(|slice| slice.seconds() > 0.0)
+                {
                     let row = Self::interval(slice, origin(slice.episode())?);
                     rows.entry(slice.episode().clone()).or_default().push(row);
                 }
@@ -136,7 +130,7 @@ impl PreviewInput {
     pub(super) fn step_input<'a>(&self, rows: impl Iterator<Item = &'a String>) -> StepInput {
         let values = rows.map(String::as_str).collect::<Vec<_>>().join(", ");
         match self {
-            Self::Intervals { .. } => StepInput::new(
+            Self::Intervals => StepInput::new(
                 vec![format!(
                     "{INPUT}(episode_id, start_ns, end_ns) AS (VALUES {values})"
                 )],

@@ -7,7 +7,9 @@
 //! through, and `population` what flows along an edge. `graph` is the canvas
 //! and its workspace shell; `annotate` is the Break down subtasks
 //! measurement, `score_progress` the Score progress node, `similar` the Find
-//! similar and Group similar subtasks nodes, and `select` the Select node.
+//! similar and Group similar subtasks nodes, and `select` the Select node and
+//! the review of any node's rule. `publish` turns the outputs the operator
+//! chooses into catalog views.
 //!
 //! `path` compiles a path of the graph to one Spiral statement, each node
 //! kind writing its own step; `preview` runs those statements one episode at
@@ -15,7 +17,8 @@
 //!
 //! `review` is the proportion every output is read in — an index that
 //! scrolls beside a recording that holds still — and `thumbnail` the frame
-//! each of its rows leads with. `episode_tabs` opens the episodes an index's
+//! each of its rows leads with. `threshold` is the strip every rule's
+//! threshold slides on. `episode_tabs` opens the episodes an index's
 //! rows belong to as tabs beside it. `rerun` guards the handful of actions
 //! that spend money or replace work already measured.
 pub(crate) mod state;
@@ -34,4 +37,5 @@ mod review;
 mod score_progress;
 mod select;
 mod similar;
+mod threshold;
 mod thumbnail;

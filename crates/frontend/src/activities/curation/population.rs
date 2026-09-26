@@ -4,11 +4,12 @@
 //! episodes its dataset lists — so every node answers while the graph is
 //! still being built. The dataset hands on those episodes whole; a
 //! measurement hands on what its preview read over the episodes it received,
-//! already cut to what reached it; a Select hands on the part its rule keeps.
+//! already cut to what reached it; and a node's rule, a Select's or a
+//! measure's own, keeps part of that.
 //! Any population reads out as slices, one part of one episode each, which is
 //! what a published view holds one row per.
 use super::annotate::SubtaskRow;
-use super::document::{CurationGraph, CurationNodeKind, Selection};
+use super::document::{CurationGraph, CurationNode, CurationNodeKind, Selection};
 use super::preview::PreviewReads;
 use super::score_progress::Moment;
 use crate::activities::episode::Episode;
@@ -257,8 +258,18 @@ impl<'a> PopulationReader<'a> {
     pub(super) fn reads(&self) -> &PreviewReads {
         self.reads
     }
-    /// What `node` hands on. A node the graph does not hold hands on nothing.
+    /// What `node` hands on: what it judged, kept by its rule when it has
+    /// one. A node the graph does not hold hands on nothing.
     pub(super) fn of(&self, node: &str) -> Population {
+        let judged = self.judged(node);
+        match self.graph.node(node).and_then(CurationNode::keeps) {
+            Some(rule) => self.kept(judged, rule),
+            None => judged,
+        }
+    }
+    /// What `node`'s rule judges: what the node measured, or for a Select
+    /// what reaches it.
+    pub(super) fn judged(&self, node: &str) -> Population {
         let Some(measured) = self.graph.node(node) else {
             return Population::Episodes(Vec::new());
         };
@@ -293,7 +304,7 @@ impl<'a> PopulationReader<'a> {
                     .cloned()
                     .collect(),
             ),
-            CurationNodeKind::Select(selection) => self.select(node, selection),
+            CurationNodeKind::Select => self.input(node),
         }
     }
     /// What reaches `node`: what its parent hands on.
@@ -303,8 +314,9 @@ impl<'a> PopulationReader<'a> {
             None => Population::Episodes(Vec::new()),
         }
     }
-    fn select(&self, node: &str, selection: &Selection) -> Population {
-        match self.input(node) {
+    /// The part of `judged` `selection` keeps.
+    fn kept(&self, judged: Population, selection: &Selection) -> Population {
+        match judged {
             Population::Episodes(episodes) => Population::Episodes(
                 episodes
                     .into_iter()
@@ -334,8 +346,8 @@ impl<'a> PopulationReader<'a> {
 mod tests {
     use super::super::annotate::{CategoryPlacement, JudgmentValue};
     use super::super::document::{
-        Comparison, CurationNode, DATASET_NODE_ID, EpisodeFact, ProgressScoring, SubtaskAnnotation,
-        SubtaskCategory, SubtaskGrouping, SubtaskSearch,
+        Comparison, DATASET_NODE_ID, EpisodeCondition, EpisodeFact, ProgressScoring,
+        SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
     };
     use super::super::preview::{PreviewRows, ReadInput};
     use super::*;
@@ -394,59 +406,51 @@ mod tests {
 
     fn select(graph: &mut CurationGraph, parent: &str, selection: Selection) -> String {
         graph
-            .add_child(parent, CurationNodeKind::Select(selection))
+            .add_keeping(parent, CurationNodeKind::Select, selection)
             .expect("the grammar allows this Select")
     }
 
+    fn longer_than_20_seconds() -> Selection {
+        Selection::episodes_where(EpisodeFact::DurationSeconds, Comparison::AtLeast, 20.0)
+    }
+
     #[test]
-    fn chained_episode_selects_narrow_and_hand_on_whole_episodes() {
+    fn a_select_of_episodes_keeps_those_meeting_every_condition_whole() {
         let mut graph = CurationGraph::new(None);
-        let long = select(
+        let between = select(
             &mut graph,
             DATASET_NODE_ID,
             Selection::Episodes {
-                fact: EpisodeFact::DurationSeconds,
-                comparison: Comparison::AtLeast,
-                value: 20.0,
-            },
-        );
-        let shorter = select(
-            &mut graph,
-            &long,
-            Selection::Episodes {
-                fact: EpisodeFact::DurationSeconds,
-                comparison: Comparison::AtMost,
-                value: 28.0,
+                conditions: vec![
+                    EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtLeast, 20.0),
+                    EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtMost, 28.0),
+                ],
             },
         );
         let sample = sample();
         let reads = unread();
         let reader = PopulationReader::new(&graph, &sample, &reads);
         assert_eq!(reader.of(DATASET_NODE_ID).len(), 3);
-        assert_eq!(
-            reader.of(&long).episodes(),
-            [EpisodeId::fixture(1), EpisodeId::fixture(3)]
-        );
-        let kept = reader.of(&shorter);
+        assert_eq!(reader.judged(&between).len(), 3);
+        let kept = reader.of(&between);
         assert_eq!(kept.episodes(), [EpisodeId::fixture(3)]);
         let slices = kept.slices(&sample);
         assert_eq!((slices[0].start(), slices[0].end()), (0.0, 25.0));
         assert_eq!(graph.outputs().len(), 1);
-        assert_eq!(graph.outputs()[0].id(), shorter);
+        assert_eq!(graph.outputs()[0].id(), between);
+        // Its conditions are all in the one node, so no Select follows it.
+        assert!(
+            !graph
+                .child_kinds(&between)
+                .iter()
+                .any(|kind| matches!(kind, CurationNodeKind::Select))
+        );
     }
 
     #[test]
     fn a_breakdown_hands_on_what_it_read_of_the_episodes_that_reach_it() {
         let mut graph = CurationGraph::new(None);
-        let long = select(
-            &mut graph,
-            DATASET_NODE_ID,
-            Selection::Episodes {
-                fact: EpisodeFact::DurationSeconds,
-                comparison: Comparison::AtLeast,
-                value: 20.0,
-            },
-        );
+        let long = select(&mut graph, DATASET_NODE_ID, longer_than_20_seconds());
         let annotate = graph
             .add_child(
                 &long,
@@ -481,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn subtask_selects_keep_by_what_the_measure_above_judged() {
+    fn a_search_keeps_the_close_subtasks_and_a_select_the_chosen_categories() {
         let mut graph = CurationGraph::new(None);
         let annotate = graph
             .add_child(
@@ -506,14 +510,18 @@ mod tests {
                 names: vec!["Fold".into()],
             },
         );
-        // A search inside the chosen category reads only its rows.
+        // A search inside the chosen category reads only its rows, and keeps
+        // those at least as close as its own cutoff.
         let mut query = SubtaskSearch::default();
         query.set_query("fold the towel");
         let search = graph
-            .add_child(&folds, CurationNodeKind::FindSimilarSubtasks(query))
+            .add_keeping(
+                &folds,
+                CurationNodeKind::FindSimilarSubtasks(query),
+                Selection::Similar { minimum: 0.5 },
+            )
             .unwrap();
         assert_eq!(graph.subtask_source(&search), Some(annotate.as_str()));
-        let close = select(&mut graph, &search, Selection::Similar { minimum: 0.5 });
 
         let placed = |row: SubtaskRow, category: Option<&str>| {
             row.judged(
@@ -553,7 +561,10 @@ mod tests {
         read_subtasks(
             &mut reads,
             &node(&graph, &search),
-            &[similar(fold.clone(), Some(0.8))],
+            &[
+                similar(fold.clone(), Some(0.8)),
+                similar(fold.clone(), Some(0.3)),
+            ],
         );
 
         let sample = sample();
@@ -567,11 +578,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["fold in half"]
         );
+        assert_eq!(reader.judged(&search).len(), 2);
         assert_eq!(
             reader.of(&search).subtasks(),
             [similar(fold.clone(), Some(0.8))]
         );
-        assert_eq!(reader.of(&close).subtasks().len(), 1);
+
+        // Sliding the cutoff keeps more of what was read, and reads nothing.
+        graph
+            .set_rule(&search, Selection::Similar { minimum: 0.2 })
+            .unwrap();
+        let reader = PopulationReader::new(&graph, &sample, &reads);
+        assert_eq!(reader.of(&search).len(), 2);
 
         // A new question makes what the search read an answer to another one.
         if let Some(CurationNodeKind::FindSimilarSubtasks(config)) =
@@ -580,11 +598,11 @@ mod tests {
             config.set_query("smooth the cloth");
         }
         let reader = PopulationReader::new(&graph, &sample, &reads);
-        assert!(reader.of(&close).subtasks().is_empty());
+        assert!(reader.of(&search).subtasks().is_empty());
     }
 
     #[test]
-    fn a_progress_select_keeps_moving_and_unread_moments_and_joins_them() {
+    fn score_progress_keeps_moving_and_unread_moments_and_joins_them() {
         let mut graph = CurationGraph::new(None);
         let score = graph
             .add_child(
@@ -605,21 +623,24 @@ mod tests {
                 (3.0, Some(0.2)),
             ],
         );
-        let moving = select(&mut graph, &score, Selection::Progressing { minimum: 0.0 });
-        // A second Select of the same progress would only repeat this one;
-        // breaking down what is left is what follows.
+        // How fast is fast enough is the node's own; breaking down what it
+        // keeps is what follows.
+        assert_eq!(
+            graph.node(&score).and_then(CurationNode::keeps),
+            Some(&Selection::Progressing { minimum: 0.0 })
+        );
         assert_eq!(
             graph
-                .child_kinds(&moving)
+                .child_kinds(&score)
                 .iter()
                 .map(CurationNodeKind::label)
                 .collect::<Vec<_>>(),
             ["Break down subtasks"]
         );
         let sample = sample();
-        let slices = PopulationReader::new(&graph, &sample, &reads)
-            .of(&moving)
-            .slices(&sample);
+        let reader = PopulationReader::new(&graph, &sample, &reads);
+        assert_eq!(reader.judged(&score).len(), 4);
+        let slices = reader.of(&score).slices(&sample);
         assert_eq!(
             slices
                 .iter()
@@ -632,15 +653,7 @@ mod tests {
     #[test]
     fn moments_reach_only_the_episodes_that_reach_the_score_node() {
         let mut graph = CurationGraph::new(None);
-        let long = select(
-            &mut graph,
-            DATASET_NODE_ID,
-            Selection::Episodes {
-                fact: EpisodeFact::DurationSeconds,
-                comparison: Comparison::AtLeast,
-                value: 20.0,
-            },
-        );
+        let long = select(&mut graph, DATASET_NODE_ID, longer_than_20_seconds());
         let score = graph
             .add_child(
                 &long,

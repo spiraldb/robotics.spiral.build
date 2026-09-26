@@ -1,142 +1,182 @@
-//! The rule a Select keeps by, written as one sentence in the words of the
-//! node above it, with the sentence's variable words as its fields.
-use super::SelectView;
-use super::strip::Threshold;
+//! A node's rule, written as one sentence in the words of what it keeps by,
+//! with the sentence's variable words as its fields: a Select's episode
+//! conditions and categories, and Score progress's progress rate.
+use super::RuleView;
 use crate::activities::curation::document::{
-    Comparison, CurationNode, CurationNodeKind, EpisodeFact, Selection,
+    Comparison, CurationNodeKind, EpisodeCondition, EpisodeFact, Selection,
 };
 use crate::activities::curation::population::Population;
 use crate::activities::curation::similar::CategoryHues;
 use crate::activities::curation::state::CurationController;
+use crate::activities::curation::threshold::Threshold;
 use dioxus::prelude::*;
-use spiral_robotics_ui::Select;
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant, CloseIcon, Select};
 
-/// One Select node, edited through the controller.
+/// One node's rule, edited through the controller.
 #[derive(Clone, PartialEq)]
-pub(super) struct SelectNode {
-    id: String,
+pub(super) struct RuleEdit {
+    node: String,
     controller: CurationController,
 }
 
-impl SelectNode {
-    pub(super) fn new(id: String, controller: CurationController) -> Self {
-        Self { id, controller }
+impl RuleEdit {
+    pub(super) fn new(node: String, controller: CurationController) -> Self {
+        Self { node, controller }
     }
     /// Replace the node's rule. The document refuses a rule for another
-    /// basis, so a slip can never re-point a Select at something else.
+    /// basis, so a slip can never re-point a node at something else.
     pub(super) fn set(&self, rule: Selection) {
-        let id = self.id.clone();
-        let _ = self.controller.edit(move |payload| {
-            match payload.node_mut(&id).map(CurationNode::kind_mut) {
-                Some(CurationNodeKind::Select(selection)) if selection.basis() == rule.basis() => {
-                    *selection = rule;
-                    Ok(())
-                }
-                _ => Err("This node no longer selects by that measure.".to_owned()),
-            }
-        });
+        let _ = self.controller.set_rule(&self.node, rule);
     }
 }
 
-/// The rule as one sentence. Its threshold reads out where the sentence
-/// says it; the strip under the bar is where it is slid.
+/// The rule as one sentence. Its thresholds read out where the sentence says
+/// them, in the order the strips under the bar slide them.
 #[component]
-pub(super) fn SelectRule(
+pub(in crate::activities::curation) fn RuleSentence(
     controller: CurationController,
-    view: SelectView,
-    threshold: Option<Threshold>,
+    view: RuleView,
+    thresholds: Vec<Threshold>,
 ) -> Element {
-    let node = SelectNode::new(view.node.clone(), controller);
+    let edit = RuleEdit::new(view.node.clone(), controller);
     rsx! {
         div { class: "curation-select-rule",
-            match (view.selection.clone(), threshold) {
-                (Selection::Episodes { fact, comparison, value }, Some(threshold)) => rsx! {
-                    EpisodeRule { node, fact, comparison, threshold, value }
+            match view.selection.clone() {
+                Selection::Episodes { conditions } => rsx! {
+                    EpisodeRule { edit, conditions, thresholds }
                 },
-                (Selection::Similar { .. }, Some(threshold)) => {
-                    let query = match view.measure.kind() {
-                        CurationNodeKind::FindSimilarSubtasks(search) => search.query().trim().to_owned(),
-                        _ => String::new(),
-                    };
-                    rsx! { SimilarRule { threshold, query } }
-                }
-                (Selection::Progressing { .. }, Some(threshold)) => rsx! { ProgressRule { threshold } },
-                (Selection::Categories { names }, _) => {
+                Selection::Progressing { .. } => rsx! {
+                    ProgressRule { threshold: thresholds.first().copied() }
+                },
+                Selection::Categories { names } => {
                     let categories = CategoryChoice::of(&view);
-                    rsx! { CategoryRule { node, names, categories } }
+                    rsx! { CategoryRule { edit, names, categories } }
                 }
-                // A numeric rule's axis waits for the values it judges.
-                (_, None) => rsx! {},
+                // A search's closeness is Find similar's own, on its ranking.
+                Selection::Similar { .. } => rsx! {},
             }
         }
     }
 }
 
-/// "Keep episodes whose [duration] is [at least] 20 s".
+/// "Keep episodes whose [duration] is [at least] 20 s and whose …", with a
+/// way to add a condition and to take any but the last one away.
 #[component]
 fn EpisodeRule(
-    node: SelectNode,
-    fact: EpisodeFact,
-    comparison: Comparison,
-    threshold: Threshold,
-    value: f64,
+    edit: RuleEdit,
+    conditions: Vec<EpisodeCondition>,
+    thresholds: Vec<Threshold>,
 ) -> Element {
-    let with_fact = node.clone();
-    let with_comparison = node.clone();
+    let with = {
+        let conditions = conditions.clone();
+        move |index: usize, condition: EpisodeCondition| {
+            let mut conditions = conditions.clone();
+            conditions[index] = condition;
+            Selection::Episodes { conditions }
+        }
+    };
+    // A new condition asks about a fact the rule does not read yet, from
+    // where it keeps every episode.
+    let added = {
+        let mut conditions = conditions.clone();
+        let fact = EpisodeFact::ALL
+            .into_iter()
+            .find(|fact| conditions.iter().all(|condition| condition.fact() != *fact))
+            .unwrap_or(EpisodeFact::DurationSeconds);
+        conditions.push(EpisodeCondition::new(fact, Comparison::AtLeast, 0.0));
+        Selection::Episodes { conditions }
+    };
+    let removable = conditions.len() > 1;
     rsx! {
-        span { "Keep episodes whose" }
-        Select {
-            class: "curation-select-rule-choice",
-            value: fact.key().to_owned(),
-            "aria-label": "Recorded fact",
-            onchange: move |key: String| {
-                if let Some(fact) = EpisodeFact::from_key(&key) {
-                    with_fact.set(Selection::Episodes { fact, comparison, value });
+        span { "Keep episodes" }
+        for (index, condition) in conditions.iter().copied().enumerate() {
+            span { key: "{index}", class: "curation-select-condition",
+                span { if index == 0 { "whose" } else { "and whose" } }
+                Select {
+                    class: "curation-select-rule-choice",
+                    value: condition.fact().key().to_owned(),
+                    "aria-label": "Recorded fact",
+                    onchange: {
+                        let edit = edit.clone();
+                        let with = with.clone();
+                        move |key: String| {
+                            if let Some(fact) = EpisodeFact::from_key(&key) {
+                                edit.set(with(index, condition.on(fact)));
+                            }
+                        }
+                    },
+                    for option in EpisodeFact::ALL {
+                        option { key: "{option.key()}", value: "{option.key()}", selected: option == condition.fact(), "{option.label()}" }
+                    }
                 }
-            },
-            for option in EpisodeFact::ALL {
-                option { key: "{option.key()}", value: "{option.key()}", selected: option == fact, "{option.label()}" }
+                span { "is" }
+                Select {
+                    class: "curation-select-rule-choice",
+                    value: condition.comparison().key().to_owned(),
+                    "aria-label": "Comparison",
+                    onchange: {
+                        let edit = edit.clone();
+                        let with = with.clone();
+                        move |key: String| {
+                            if let Some(comparison) = Comparison::from_key(&key) {
+                                edit.set(with(index, condition.comparing(comparison)));
+                            }
+                        }
+                    },
+                    for option in Comparison::ALL {
+                        option { key: "{option.key()}", value: "{option.key()}", selected: option == condition.comparison(), "{option.label()}" }
+                    }
+                }
+                output { class: "curation-select-rule-readout",
+                    match thresholds.get(index) {
+                        Some(threshold) => threshold.label(),
+                        None => condition.value().to_string(),
+                    }
+                }
+                if let Some(unit) = condition.fact().unit() {
+                    span { "{unit}" }
+                }
+                if removable {
+                    Button {
+                        purpose: ActionPurpose::Remove,
+                        variant: ButtonVariant::Quiet,
+                        size: ButtonSize::Compact,
+                        class: "curation-select-condition-remove",
+                        title: "Remove this condition",
+                        "aria-label": "Remove the {condition.fact().label()} condition",
+                        onclick: {
+                            let edit = edit.clone();
+                            let conditions = conditions.clone();
+                            move |_| {
+                                let mut conditions = conditions.clone();
+                                conditions.remove(index);
+                                edit.set(Selection::Episodes { conditions });
+                            }
+                        },
+                        CloseIcon {}
+                    }
+                }
             }
         }
-        span { "is" }
-        Select {
-            class: "curation-select-rule-choice",
-            value: comparison.key().to_owned(),
-            "aria-label": "Comparison",
-            onchange: move |key: String| {
-                if let Some(comparison) = Comparison::from_key(&key) {
-                    with_comparison.set(Selection::Episodes { fact, comparison, value });
-                }
-            },
-            for option in Comparison::ALL {
-                option { key: "{option.key()}", value: "{option.key()}", selected: option == comparison, "{option.label()}" }
-            }
-        }
-        output { class: "curation-select-rule-readout", "{threshold.label()}" }
-        if let Some(unit) = fact.unit() {
-            span { "{unit}" }
-        }
-    }
-}
-
-/// "Keep subtasks at least 50% likely to be “fold the towel”".
-#[component]
-fn SimilarRule(threshold: Threshold, query: String) -> Element {
-    rsx! {
-        span { "Keep subtasks at least" }
-        output { class: "curation-select-rule-readout", "{threshold.label()}" }
-        span {
-            if query.is_empty() { "likely to be what the search above asks" } else { "likely to be “{query}”" }
+        Button {
+            purpose: ActionPurpose::Create,
+            variant: ButtonVariant::Link,
+            size: ButtonSize::Compact,
+            title: "Keep only episodes that also meet another condition",
+            onclick: move |_| edit.set(added.clone()),
+            "Add condition"
         }
     }
 }
 
 /// "Keep moments progressing at least 0.89× the expert rate".
 #[component]
-fn ProgressRule(threshold: Threshold) -> Element {
+fn ProgressRule(threshold: Option<Threshold>) -> Element {
     rsx! {
         span { "Keep moments progressing at least" }
-        output { class: "curation-select-rule-readout", "{threshold.label()}" }
+        if let Some(threshold) = threshold {
+            output { class: "curation-select-rule-readout", "{threshold.label()}" }
+        }
         span { "the expert rate" }
     }
 }
@@ -153,7 +193,7 @@ struct CategoryChoice {
 impl CategoryChoice {
     /// The categories of the grouping above, biggest first, as the grouping
     /// itself lists them.
-    fn of(view: &SelectView) -> Vec<Self> {
+    fn of(view: &RuleView) -> Vec<Self> {
         let (Population::Subtasks(rows), CurationNodeKind::GroupSimilarSubtasks(grouping)) =
             (&view.input, view.measure.kind())
         else {
@@ -179,7 +219,7 @@ impl CategoryChoice {
 
 /// "Keep subtasks in [Folding] [Pick and Place] …", one toggle per category.
 #[component]
-fn CategoryRule(node: SelectNode, names: Vec<String>, categories: Vec<CategoryChoice>) -> Element {
+fn CategoryRule(edit: RuleEdit, names: Vec<String>, categories: Vec<CategoryChoice>) -> Element {
     rsx! {
         span { "Keep subtasks in" }
         if categories.is_empty() {
@@ -198,7 +238,7 @@ fn CategoryRule(node: SelectNode, names: Vec<String>, categories: Vec<CategoryCh
                         }
                         names
                     };
-                    let node = node.clone();
+                    let edit = edit.clone();
                     rsx! {
                         button {
                             key: "{category.name}",
@@ -206,7 +246,7 @@ fn CategoryRule(node: SelectNode, names: Vec<String>, categories: Vec<CategoryCh
                             class: "curation-select-chip",
                             style: "{category.tint}",
                             "aria-pressed": "{chosen}",
-                            onclick: move |_| node.set(Selection::Categories { names: toggled.clone() }),
+                            onclick: move |_| edit.set(Selection::Categories { names: toggled.clone() }),
                             span { class: "curation-select-chip-name", "{category.name}" }
                             span { class: "curation-select-chip-count", "{category.members}" }
                         }

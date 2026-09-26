@@ -1,10 +1,10 @@
-//! One side of a Select's rule, one item at a time beside its recording:
-//! whole episodes, subtasks with their thumbnails, or stretches of moments.
+//! One side of a rule, one item at a time beside its recording: whole
+//! episodes, subtasks with their thumbnails, or stretches of moments.
 //!
-//! Every listing names its items by their place in the Select's input, the
-//! same number the map and the strip use, so choosing an item anywhere opens
+//! Every listing names its items by their place in what the rule judges, the
+//! same number the map and the strips use, so choosing an item anywhere opens
 //! its episode in a tab beside the list.
-use super::SelectView;
+use super::RuleView;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{CurationNodeKind, EpisodeFact, Selection};
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
@@ -55,7 +55,7 @@ impl ListedItems {
     }
     /// Where the first listed item plays, which opens by itself so the
     /// recording column is never an empty half beside the list.
-    fn first_place(&self, view: &SelectView) -> Option<(EpisodeId, Option<(f64, f64)>)> {
+    fn first_place(&self, view: &RuleView) -> Option<(EpisodeId, Option<(f64, f64)>)> {
         self.items.first().and_then(|item| view.place(*item))
     }
     /// Where the chosen item is in the listing, for the list's one tab stop.
@@ -92,18 +92,17 @@ fn SideReview(
     }
 }
 
-/// Which side of a Select's rule a listing shows: the Select, whether the
-/// rule keeps each item that reaches it, and whether the kept side is the
-/// one listed.
+/// Which side of a rule a listing shows: the rule, whether it keeps each item
+/// it judges, and whether the kept side is the one listed.
 #[derive(Clone, PartialEq)]
 pub(super) struct ListedSide {
-    view: SelectView,
+    view: RuleView,
     kept: Vec<bool>,
     listed_kept: bool,
 }
 
 impl ListedSide {
-    pub(super) fn new(view: SelectView, kept: Vec<bool>, listed_kept: bool) -> Self {
+    pub(super) fn new(view: RuleView, kept: Vec<bool>, listed_kept: bool) -> Self {
         Self {
             view,
             kept,
@@ -160,8 +159,9 @@ pub(super) fn EpisodeListing(
         tabs.open_first(first)
     }));
     let episodes = view.input.episodes();
+    // The first condition's fact is each row's measure.
     let fact = match &view.selection {
-        Selection::Episodes { fact, .. } => Some(*fact),
+        Selection::Episodes { conditions } => conditions.first().map(|condition| condition.fact()),
         _ => None,
     };
     let labels = EpisodeLabels::of(view.sample.episodes().iter().map(Episode::facts));
@@ -401,7 +401,7 @@ struct StretchGroup {
 }
 
 impl StretchGroup {
-    fn of(stretches: &[Stretch], view: &SelectView, listed_kept: bool) -> Vec<Self> {
+    fn of(stretches: &[Stretch], view: &RuleView, listed_kept: bool) -> Vec<Self> {
         let mut groups = Vec::<Self>::new();
         for (position, stretch) in stretches.iter().enumerate() {
             match groups.last_mut() {
@@ -482,7 +482,7 @@ pub(super) fn MomentListing(
     let thumbnails =
         Thumbnails::use_camera(controller, Some(ProgressScorer::WarpSimBottles.camera()));
     let front = tabs.front().map(|tab| tab.episode().clone());
-    let cutoff = view.selection.threshold();
+    let cutoff = view.selection.minimum();
     let evidence = view.clone();
     rsx! {
         SideReview {

@@ -35,39 +35,28 @@ impl MeasuredEpisodes {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum CoverageMeasure {
     /// Find similar scores every row, so an episode is as close to the query
-    /// as its closest row is.
-    BestMatch,
+    /// as its closest row is, and contains the searched subtask when that
+    /// row is at least as likely as the node's cutoff keeps.
+    BestMatch { at_least: f64 },
     /// Group similar assigns every row, so an episode is in a category when
     /// any of its rows joined it.
     Members,
 }
 
 impl CoverageMeasure {
-    /// An episode contains the searched subtask when jev's best row for it is
-    /// more likely than not to describe the same operation.
-    ///
-    /// The ranking itself has no cutoff, but a count must have one, so this is
-    /// the only threshold in the surface and the label says it out loud. It is
-    /// fixed at a half rather than taken from the ranking's median because
-    /// jev's Noul is a calibrated probability: a half already means "as likely
-    /// the same operation as not", and it stays put between queries. A median
-    /// would name about half the episodes whatever was asked, which measures
-    /// the query's spread rather than the dataset.
-    pub(super) const MATCHED: f64 = 0.5;
-
     fn found(self, best: f64) -> bool {
         match self {
-            Self::BestMatch => best >= Self::MATCHED,
+            Self::BestMatch { at_least } => best >= at_least,
             Self::Members => true,
         }
     }
     /// The count in words, including the rule it counted by.
     fn summary(self, found: usize, measured: usize) -> String {
         match self {
-            Self::BestMatch => format!(
+            Self::BestMatch { at_least } => format!(
                 "Found in {found} of {} (best match ≥ {:.0}%)",
                 Counted::episodes(measured),
-                Self::MATCHED * 100.0
+                at_least * 100.0
             ),
             Self::Members => format!("In {found} of {}", Counted::episodes(measured)),
         }
@@ -196,7 +185,7 @@ mod tests {
         let coverage = coverage(
             &[A, B, C],
             &[(A, 0.91), (B, 0.50), (A, 0.12), (C, 0.49)],
-            CoverageMeasure::BestMatch,
+            CoverageMeasure::BestMatch { at_least: 0.5 },
         );
         assert_eq!(
             coverage.summary(),

@@ -591,31 +591,6 @@
     background: var(--tone-ink);
   }
 
-  .curation-entry[aria-current="true"] .curation-entry-trace path {
-    stroke: var(--tone-ink);
-  }
-
-  .curation-entry-trace {
-    display: block;
-    width: min(9rem, 55%);
-    height: 18px;
-    flex-shrink: 0;
-    overflow: visible;
-  }
-
-  .curation-entry-trace path {
-    fill: none;
-    stroke: var(--tone-ink-soft);
-    stroke-width: 1.25;
-    stroke-linejoin: round;
-  }
-
-  .curation-entry-trace-reference {
-    stroke: var(--tone-line-strong);
-    stroke-width: 1;
-    stroke-dasharray: 2 2;
-  }
-
   /* Every measure holds the same column, so an index reads as a column of
      numbers rather than a ragged edge. */
   .curation-entry-score {
