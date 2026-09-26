@@ -3724,80 +3724,14 @@ button.studio-status-fact:hover {
     border-color: var(--tone-line-soft);
   }
 
-  .data-stream-track > .data-track {
-    inset-block: 7px;
-  }
-
   .data-stream-track {
     @apply h-6;
-  }
-
-  .data-track {
-    @apply absolute inset-x-0 inset-y-0;
-  }
-
-  .data-track-loading::after {
-    content: "";
-    @apply absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-sm bg-sunken;
-    animation: data-track-pulse 1.2s ease-in-out infinite;
   }
 
   @keyframes data-track-pulse {
     50% {
       opacity: 0.35;
     }
-  }
-
-  .data-track-failed {
-    @apply flex items-center px-2 text-[10px] text-caution;
-  }
-
-  .data-density {
-    @apply block h-full w-full;
-  }
-
-  /* Density is structure, so it draws in graphite, quiet until the stream
-     is shown: a camera on screen takes the camera hue, a plotted stream
-     firms to ink. A dropout inside a dense stream stays caution. */
-  .data-density path {
-    fill: var(--tone-ink);
-  }
-
-  .data-density-1 {
-    opacity: 0.08;
-  }
-
-  .data-density-2 {
-    opacity: 0.14;
-  }
-
-  .data-density-3 {
-    opacity: 0.2;
-  }
-
-  .data-stream[data-shown="true"] .data-density-1 {
-    opacity: 0.25;
-  }
-
-  .data-stream[data-shown="true"] .data-density-2 {
-    opacity: 0.45;
-  }
-
-  .data-stream[data-shown="true"] .data-density-3 {
-    opacity: 0.7;
-  }
-
-  .data-stream[data-kind="video"][data-shown="true"] .data-density path:not(.data-density-gap) {
-    fill: var(--tone-kind-camera);
-  }
-
-  .data-stream[data-kind="video"][data-shown="true"] .data-density-3 {
-    opacity: 0.42;
-  }
-
-  .data-density path.data-density-gap {
-    fill: var(--tone-caution);
-    opacity: 1;
   }
 
   .data-field-name {

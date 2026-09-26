@@ -2,7 +2,6 @@
 
 mod camera_video;
 mod catalog;
-mod coverage;
 mod episode_id;
 mod h264;
 mod messages;
@@ -12,10 +11,9 @@ pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
     EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
 };
-pub use coverage::{EpisodeCoverageRequest, StreamCoverage, TopicCoverage, TopicCoverageRequest};
 pub use episode_id::EpisodeId;
 pub use h264::H264AccessUnit;
-pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision};
+pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision, ValueSchemaRead};
 pub use robot::{DatasetRobot, DatasetRobotSave, JointBinding, JointSelector};
 
 use serde::{Deserialize, Serialize};

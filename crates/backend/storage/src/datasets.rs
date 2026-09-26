@@ -2,7 +2,6 @@
 mod cameras;
 #[cfg(test)]
 mod catalog_tests;
-mod coverage;
 mod sources;
 mod topics;
 pub(crate) use sources::{McapDatasetDefinition, McapFile, McapSourceBlob, McapSources};
@@ -11,8 +10,7 @@ use crate::{SpiralAccess, SpiralConnection, StorageManager};
 use serde::Deserialize;
 use serde_json::json;
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeId,
-    EpisodeTopicRequest, ProjectResource,
+    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeId, ProjectResource,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -325,10 +323,6 @@ pub(crate) struct EpisodeTopicQuery {
 }
 
 impl EpisodeTopicQuery {
-    fn for_sql(request: &EpisodeTopicRequest, sql: String) -> Result<Self, String> {
-        Self::for_episode(request.dataset(), request.episode_id(), sql)
-    }
-
     pub(crate) fn for_episode(
         dataset: &DatasetSelection,
         episode_id: &EpisodeId,
@@ -396,15 +390,13 @@ mod tests {
     fn episode_reads_bind_uuid_bytes_and_reject_invalid_ids() {
         let dataset = DatasetSelection::new(vec!["dataset_default".into()]).unwrap();
         let id = uuid::Uuid::parse_str("01900000-0000-7000-8000-000000000001").unwrap();
-        let request = EpisodeTopicRequest::new(
-            dataset.clone(),
-            "/camera' --".into(),
-            EpisodeId::try_from(id.simple().to_string()).unwrap(),
-        );
-        let statement =
-            EpisodeTopicQuery::for_sql(&request, "SELECT value FROM source WHERE id = $1".into())
-                .unwrap()
-                .statement;
+        let statement = EpisodeTopicQuery::for_episode(
+            &dataset,
+            &EpisodeId::try_from(id.simple().to_string()).unwrap(),
+            "SELECT value FROM source WHERE id = $1".into(),
+        )
+        .unwrap()
+        .statement;
         assert!(statement.as_str().contains("WHERE id = $1"));
         assert!(!statement.as_str().contains(&id.to_string()));
         let parameters = statement.parameters().unwrap();

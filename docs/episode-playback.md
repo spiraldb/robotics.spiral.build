@@ -7,11 +7,9 @@ chronological episodes; opening one fills the workspace: one camera panel per
 across the bottom. Every panel reads the same episode-owned clock and the same
 visible span; native tabs, splits, and resizing remain available.
 
-The Timeline lists every stream with messages in the episode, in topic order,
-with a density track of 240 buckets from `POST /api/datasets/topic-coverage`
-(loaded four streams at a time, progressively). Ticking a stream shows it:
-a camera opens its panel; a data stream draws all of its numeric fields
-(bounded to 16 per stream). Expanding a data stream reads its schema once and
+The Timeline lists every stream with messages in the episode, in topic order.
+Ticking a stream shows it: a camera opens its panel; a data stream draws all of
+its numeric fields (bounded to 16 per stream). Expanding a data stream reads its schema once and
 lists nested structs, lists, scalar types, and nullability (`?`) with
 per-field checkboxes. Clicking a stream name selects it for Messages. Kind is
 decided from recorded schema names only; topic and field names carry no
@@ -91,7 +89,7 @@ Data, Curation, and Live compose the same controlled component in
 `TimelineInteraction` binds a caller-owned clock projection to typed events;
 `TimelineContent` supplies rows, identity, toolbar additions, and notices.
 The component shares transport controls, ruler, keyboard/wheel handling,
-scrubbing, numeric tracks, density rendering, and playback timing. Each activity
+scrubbing, numeric and interval tracks, and playback timing. Each activity
 owns its effects: Data selects streams, Curation handles interval activation,
 and Live controls recording and permits robot motion only on committed seeks.
 Events carry the source identity; owners reject events from replaced sources.

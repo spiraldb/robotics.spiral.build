@@ -11,8 +11,8 @@ use axum::{
 };
 use spiral_robotics_common::datasets::{
     DatasetInspection, DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetSummary,
-    DatasetTopic, EpisodeCoverageRequest, EpisodeSelection, HuggingFaceDatasetImportSummary,
-    HuggingFaceDatasetInspection, HuggingFaceDatasetSource, ProjectResource, StreamCoverage,
+    DatasetTopic, EpisodeSelection, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
+    HuggingFaceDatasetSource, ProjectResource,
 };
 use spiral_robotics_common::relations::{
     EpisodeQueryRequest, QueryRequest, RelationCatalog, SpiralQuerySnapshot,
@@ -30,7 +30,6 @@ impl DatasetQueryEndpoints {
             .route("/datasets/robot", post(Self::dataset_robot))
             .route("/datasets/cameras", post(Self::dataset_cameras))
             .route("/datasets/episode-topics", post(Self::episode_topics))
-            .route("/datasets/episode-coverage", post(Self::episode_coverage))
             .route("/relations", get(Self::relation_catalog))
             .route("/queries", post(Self::run_spiral_query))
             .route("/queries/episode", post(Self::run_episode_query))
@@ -132,17 +131,6 @@ impl DatasetQueryEndpoints {
             .await
             .map_err(OperationError::External)?;
         Ok(Json(topics))
-    }
-    async fn episode_coverage(
-        Project(project): Project,
-        ApiJson(request): ApiJson<EpisodeCoverageRequest>,
-    ) -> Result<Json<Vec<StreamCoverage>>, OperationError> {
-        let coverage = project
-            .storage()
-            .episode_coverage(request)
-            .await
-            .map_err(OperationError::External)?;
-        Ok(Json(coverage))
     }
     async fn relation_catalog(
         Project(project): Project,

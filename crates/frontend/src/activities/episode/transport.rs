@@ -39,9 +39,6 @@ impl EpisodeTimeRange {
     pub(super) fn start_ns(self) -> u64 {
         self.start_ns
     }
-    pub(super) fn seconds_of(self, absolute_ns: u64) -> f64 {
-        (i128::from(absolute_ns) - i128::from(self.start_ns)) as f64 / 1e9
-    }
     pub(super) fn ns_at(self, seconds: f64) -> u64 {
         let offset = (seconds.max(0.0) * 1e9).round();
         self.start_ns.saturating_add(offset as u64)

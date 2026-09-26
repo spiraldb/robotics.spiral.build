@@ -152,11 +152,10 @@ fn InspectedEpisode(
     let mut catalog = use_resource(move || StreamCatalog::load(selection.clone()));
     let robot = RobotModel::use_dataset(episode.dataset());
     let choices = StreamChoices::use_choices();
-    let range = episode.range();
     use_effect(move || {
         if let Some(Ok(catalog)) = &*catalog.read() {
             let mut choices = choices;
-            choices.open(catalog, range);
+            choices.open(catalog);
         }
     });
     let mut keys = transport.clone();

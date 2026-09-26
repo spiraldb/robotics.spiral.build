@@ -8,7 +8,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use spiral_robotics_common::{
-    datasets::{MessageCursor, MessageRead},
+    datasets::{MessageCursor, MessageRead, ValueSchemaRead},
     relations::EpisodeQueryRequest,
 };
 use std::{collections::BTreeMap, io::Cursor, rc::Rc, sync::Arc};
@@ -37,6 +37,32 @@ impl MessageField {
             projection: vec![field.name().clone()],
             field: field.clone(),
         }
+    }
+    /// Each read's `value` root, in order, from one episode query.
+    pub(in crate::activities) async fn values_of(reads: &[MessageRead]) -> Result<Vec<Self>, String> {
+        let read = ValueSchemaRead::new(reads)?;
+        let response = DatasetClient::current()
+            .run_episode_arrow_query(&EpisodeQueryRequest::new(
+                read.episode().clone(),
+                read.sql(),
+                1,
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        let schema = arrow_ipc::reader::StreamReader::try_new(Cursor::new(response), None)
+            .map_err(|error| error.to_string())?
+            .schema();
+        (0..reads.len())
+            .map(|index| {
+                let value = schema
+                    .field_with_name(&ValueSchemaRead::column(index))
+                    .map_err(|error| error.to_string())?;
+                Ok(Self::root(
+                    &Field::new("value", value.data_type().clone(), value.is_nullable())
+                        .with_metadata(value.metadata().clone()),
+                ))
+            })
+            .collect()
     }
     pub(in crate::activities) fn children(&self) -> Vec<Self> {
         match self.field.data_type() {

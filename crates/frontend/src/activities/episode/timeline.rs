@@ -5,10 +5,10 @@
 //! subtasks — so they lead, and activating one of their intervals plays it.
 //! The streams follow as the hub the operator steers the rest from: ticking a
 //! camera shows its panel, ticking a stream plots its numeric fields. Under
-//! evidence they wait folded behind one row, since every camera's density is
-//! a full bar that says nothing about the measurement being checked.
+//! evidence they wait folded behind one row, since the streams say nothing
+//! about the measurement being checked.
 use super::{
-    choices::{CoverageState, PlotState, PlottableLeaves, StreamChoices, StreamSchema},
+    choices::{PlotState, PlottableLeaves, StreamChoices, StreamSchema},
     inspection::LoadedEpisode,
     messages::MessageField,
     streams::{RecordedStream, StreamKind},
@@ -17,11 +17,11 @@ use super::{
 use crate::components::{
     icons::{CameraStreamIcon, SignalStreamIcon},
     timeline::{
-        DensityTrack, IntervalTrack, IntervalTrackRow, NumericTrackRow, Timeline, TimelineContent,
+        IntervalTrack, IntervalTrackRow, NumericTrackRow, Timeline, TimelineContent,
         TimelineScrubber, TimelineTrack,
     },
 };
-use crate::format::{GroupedCountPresentation, PreciseClockPresentation};
+use crate::format::GroupedCountPresentation;
 use dioxus::prelude::*;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonVariant, ChevronIcon, TextInput, TextInputKind,
@@ -223,9 +223,7 @@ fn StreamRow(
                 span { class: "data-stream-count", title: "Messages in this episode", "{count}" }
             }
             div { class: "data-stream-track",
-                StreamDensity { coverage: choices.coverage(stream.key()), transport: transport.clone() }
                 TimelineScrubber { interaction: transport.interaction() }
-
             }
         }
         if expanded {
@@ -344,34 +342,6 @@ fn ShowCheck(
                     PlotState::None => rsx! {},
                 }
             }
-        }
-    }
-}
-
-#[component]
-fn StreamDensity(coverage: CoverageState, transport: EpisodeTransport) -> Element {
-    let range = transport.range();
-    match coverage {
-        CoverageState::Uncounted => rsx! { div { class: "data-track data-track-empty" } },
-        CoverageState::Loading => {
-            rsx! { div { class: "data-track data-track-loading", role: "status", "aria-label": "Counting messages" } }
-        }
-        CoverageState::Failed(error) => {
-            rsx! { div { class: "data-track data-track-failed", title: "{error}", span { "Density unavailable" } } }
-        }
-        CoverageState::Ready(coverage) => {
-            let moment = |nanos: Option<u64>| {
-                nanos
-                    .map(|nanos| range.seconds_of(nanos).precise_clock_label())
-                    .unwrap_or_else(|| "—".into())
-            };
-            let title = format!(
-                "{} messages · first {} · last {}",
-                coverage.messages().grouped_label(),
-                moment(coverage.first_ns()),
-                moment(coverage.last_ns())
-            );
-            rsx! { DensityTrack { buckets: coverage.buckets().to_vec(), state: transport.timeline_state(), title } }
         }
     }
 }

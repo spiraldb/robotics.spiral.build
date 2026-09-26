@@ -111,17 +111,6 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/episode-topics").json(&request))
     }
 
-    /// Message density for every stream of one episode, in request order.
-    pub(in crate::activities) fn episode_coverage(
-        &self,
-        request: spiral_robotics_common::datasets::EpisodeCoverageRequest,
-    ) -> impl Future<
-        Output = Result<Vec<spiral_robotics_common::datasets::StreamCoverage>, CommandError>,
-    > + use<> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/episode-coverage").json(&request))
-    }
-
     pub(in crate::activities) fn run_spiral_query(
         &self,
         statement: String,

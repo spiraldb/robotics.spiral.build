@@ -7137,76 +7137,13 @@ button.studio-status-fact:hover {
     border-bottom-width: 1px;
     border-color: var(--tone-line-soft);
   }
-  .data-stream-track > .data-track {
-    inset-block: 7px;
-  }
   .data-stream-track {
     height: calc(var(--spacing) * 6);
-  }
-  .data-track {
-    position: absolute;
-    inset-inline: 0px;
-    inset-block: 0px;
-  }
-  .data-track-loading::after {
-    content: "";
-    position: absolute;
-    inset-inline: 0px;
-    top: calc(1 / 2 * 100%);
-    height: calc(var(--spacing) * 1.5);
-    --tw-translate-y: calc(calc(1 / 2 * 100%) * -1);
-    translate: var(--tw-translate-x) var(--tw-translate-y);
-    border-radius: var(--radius-sm);
-    background-color: var(--tone-sunken);
-    animation: data-track-pulse 1.2s ease-in-out infinite;
   }
   @keyframes data-track-pulse {
     50% {
       opacity: 0.35;
     }
-  }
-  .data-track-failed {
-    display: flex;
-    align-items: center;
-    padding-inline: calc(var(--spacing) * 2);
-    font-size: 10px;
-    color: var(--tone-caution);
-  }
-  .data-density {
-    display: block;
-    height: 100%;
-    width: 100%;
-  }
-  .data-density path {
-    fill: var(--tone-ink);
-  }
-  .data-density-1 {
-    opacity: 0.08;
-  }
-  .data-density-2 {
-    opacity: 0.14;
-  }
-  .data-density-3 {
-    opacity: 0.2;
-  }
-  .data-stream[data-shown="true"] .data-density-1 {
-    opacity: 0.25;
-  }
-  .data-stream[data-shown="true"] .data-density-2 {
-    opacity: 0.45;
-  }
-  .data-stream[data-shown="true"] .data-density-3 {
-    opacity: 0.7;
-  }
-  .data-stream[data-kind="video"][data-shown="true"] .data-density path:not(.data-density-gap) {
-    fill: var(--tone-kind-camera);
-  }
-  .data-stream[data-kind="video"][data-shown="true"] .data-density-3 {
-    opacity: 0.42;
-  }
-  .data-density path.data-density-gap {
-    fill: var(--tone-caution);
-    opacity: 1;
   }
   .data-field-name {
     height: calc(var(--spacing) * 6);

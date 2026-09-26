@@ -87,6 +87,53 @@ impl MessageRead {
     }
 }
 
+/// The value schemas of several topic revisions of one episode, read by one
+/// episode query instead of one each. Every revision contributes an empty
+/// relation, so the statement returns no rows, only a `value_<index>` column
+/// per revision in the order given.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValueSchemaRead {
+    episode: EpisodeSelection,
+    sources: Vec<String>,
+}
+impl ValueSchemaRead {
+    /// At least one read, all of the same episode.
+    pub fn new(reads: &[MessageRead]) -> Result<Self, String> {
+        let episode = reads
+            .first()
+            .ok_or("A schema read needs at least one topic")?
+            .episode();
+        if reads.iter().any(|read| read.episode() != episode) {
+            return Err("A schema read covers exactly one episode".into());
+        }
+        Ok(Self {
+            episode,
+            sources: reads.iter().map(MessageRead::source_sql).collect(),
+        })
+    }
+    pub fn episode(&self) -> &EpisodeSelection {
+        &self.episode
+    }
+    /// The column holding the value of the read at `index`.
+    pub fn column(index: usize) -> String {
+        format!("value_{index}")
+    }
+    pub fn sql(&self) -> String {
+        let relations = self
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                format!(
+                    "(SELECT value AS {} FROM {source} WHERE id = $1 LIMIT 0) read_{index}",
+                    Self::column(index)
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("SELECT * FROM {}", relations.join(" CROSS JOIN "))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageCursor {
@@ -236,5 +283,33 @@ mod tests {
         ));
         assert!(invalid.sql().is_err());
         assert!(MessageWindow::new((10, 1), vec![]).bounds().is_err());
+    }
+
+    #[test]
+    fn one_schema_read_names_each_topic_value_by_its_position() {
+        let second = MessageRead::schema(
+            EpisodeTopicRequest::new(
+                read().topic().dataset().clone(),
+                "/other".into(),
+                read().topic().episode_id().clone(),
+            ),
+            TopicRevision::new("next".into()),
+        );
+        let sql = ValueSchemaRead::new(&[read(), second]).unwrap().sql();
+        assert_eq!(
+            sql,
+            "SELECT * FROM (SELECT value AS value_0 FROM spql.mcap.read_topic('dataset_test', '/sensor''s', 'variant') WHERE id = $1 LIMIT 0) read_0 \
+             CROSS JOIN (SELECT value AS value_1 FROM spql.mcap.read_topic('dataset_test', '/other', 'next') WHERE id = $1 LIMIT 0) read_1"
+        );
+        assert!(ValueSchemaRead::new(&[]).is_err());
+        let elsewhere = MessageRead::schema(
+            EpisodeTopicRequest::new(
+                read().topic().dataset().clone(),
+                "/sensor".into(),
+                EpisodeId::try_from("01a0989fc80b75e7a89de99ad2bd1d49").unwrap(),
+            ),
+            TopicRevision::new("variant".into()),
+        );
+        assert!(ValueSchemaRead::new(&[read(), elsewhere]).is_err());
     }
 }
