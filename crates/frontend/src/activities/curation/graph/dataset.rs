@@ -3,24 +3,25 @@
 //! over and watch one with the Data view's own player, so a curation starts
 //! from the recording rather than from a table.
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{DatasetSelection, DatasetSummary};
+use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone, Remount, TextInput,
-    TextInputKind,
+    ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone, RefreshIcon, Remount,
+    TextInput, TextInputKind,
 };
 
 use super::super::document::{CurationGraph, EpisodeFact};
 use super::super::episode_tabs::{EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes};
 use super::super::path::{PathError, PathFragment, PathStep, Relation, StepSql};
 use super::super::review::{
-    Counted, EvidenceHeading, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SliceShape,
-    SubtaskReview, TabStop,
+    Counted, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SubtaskReview, TabStop,
 };
 use super::super::state::CurationController;
 use super::super::thumbnail::Thumbnails;
-use crate::activities::data::{DatasetClient, DatasetOverview};
-use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels, FeaturedCamera};
-use crate::components::dataset_picker::DatasetPicker;
+use crate::activities::data::{DatasetClient, DatasetLedger, DatasetOverview};
+use crate::activities::episode::{
+    Episode, EpisodeHeading, EpisodeInspection, EpisodeRows, FeaturedCamera, HeadingSubject,
+};
+use crate::components::dataset_picker::DatasetCatalog;
 use crate::components::icons::SpinnerIcon;
 
 /// The name a graph carries until it has a dataset to take one from.
@@ -69,16 +70,13 @@ pub(super) fn DatasetWorkspace(controller: CurationController) -> Element {
 }
 
 /// A graph without a dataset measures nothing, so the empty workspace asks
-/// for one.
+/// for one — from the ledger Data's home offers them in, a row pressed to
+/// choose it, so the totals that tell datasets apart are there to choose by.
 #[component]
 fn DatasetChoice(controller: CurationController) -> Element {
-    let chosen = use_signal(|| None::<DatasetSummary>);
+    let catalog = DatasetCatalog::use_catalog();
     let mut problem = use_signal(|| None::<String>);
-    let use_chosen = move |_| {
-        let Some(source) = chosen() else {
-            return;
-        };
-        let selection = source.selection().clone();
+    let choose = move |selection: DatasetSelection| {
         let label = selection.display_name();
         problem.set(
             controller
@@ -96,26 +94,30 @@ fn DatasetChoice(controller: CurationController) -> Element {
             controller.set_name(label);
         }
     };
+    let datasets = catalog
+        .datasets()
+        .iter()
+        .map(|summary| summary.selection().clone())
+        .collect::<Vec<_>>();
     rsx! {
-        div { class: "curation-canvas-dataset-choice",
+        section { class: "data-glance curation-canvas-dataset-choice", "aria-label": "Choose a dataset",
+            header { class: "data-glance-head",
+                h2 { "Choose a dataset" }
+                p { "Every step of this curation reads one dataset's recordings." }
+            }
             if let Some(problem) = problem() {
                 Notice { tone: NoticeTone::Danger, class: "inline-error", "{problem}" }
             }
-            EmptyState { title: "Choose a dataset",
-                p { "Every measurement in this graph reads one dataset's recordings." }
-                div { class: "curation-canvas-dataset-field",
-                    DatasetPicker {
-                        id: "curation-canvas-dataset".to_owned(),
-                        chosen,
-                        label: "Dataset",
-                    }
-                    Button {
-                        purpose: ActionPurpose::Apply, variant: ButtonVariant::Outline,
-                        disabled: chosen().is_none(),
-                        onclick: use_chosen,
-                        "Use this dataset"
-                    }
-                }
+            if let Some(error) = catalog.problem() {
+                Notice { tone: NoticeTone::Danger, "Could not load datasets: {error}" }
+                Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
+                    onclick: move |_| catalog.reread(), "Retry" }
+            } else if datasets.is_empty() && catalog.reading() {
+                EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Loading datasets…" } }
+            } else if datasets.is_empty() {
+                p { class: "data-rail-note", "This project has no datasets yet. Import recordings in Data first." }
+            } else {
+                DatasetLedger { datasets, on_select: choose }
             }
         }
     }
@@ -146,10 +148,10 @@ fn DatasetEpisodes(
                     EmptyState { tone: NoticeTone::Danger, title: "The episodes could not be listed",
                         p { "{error}" }
                         Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
-                            onclick: move |_| controller.reload_sample(), "Try again" }
+                            onclick: move |_| controller.reload_sample(), "Retry" }
                     }
                 },
-                (None, None) => rsx! { EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Reading episodes…" } } },
+                (None, None) => rsx! { EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Loading episodes…" } } },
             }
         }
     }
@@ -174,28 +176,14 @@ fn DatasetEpisodeList(
             .await
             .map_err(|error| error.to_string())
     }));
-    let labels = EpisodeLabels::of(episodes.iter().map(Episode::facts));
-    // On a square-root scale, as Data's rail draws it, so one runaway take
-    // does not flatten every other bar into a dot.
-    let longest = episodes
-        .iter()
-        .filter_map(|episode| episode.facts().duration_seconds())
-        .fold(0.0_f64, f64::max);
+    let rows = EpisodeRows::of(&episodes);
+    // Matched the way Data's rail matches, on the id and the source path as
+    // well as the words the row shows, so an id pasted from anywhere finds
+    // its episode.
     let faces = episodes
         .iter()
-        .map(|episode| {
-            let share = episode
-                .facts()
-                .duration_seconds()
-                .filter(|_| longest > 0.0)
-                .map_or(0.0, |seconds| (seconds / longest).sqrt());
-            let label = labels.label(episode.facts());
-            (
-                episode.id().clone(),
-                SliceFace::episode(episode, label.head()).shaped(SliceShape::Length(share)),
-            )
-        })
-        .filter(|(_, face)| face.says(&wanted()))
+        .filter(|episode| episode.matches(&wanted()))
+        .map(|episode| (episode.id().clone(), SliceFace::episode(&rows, episode)))
         .collect::<Vec<_>>();
     let thumbnails = Thumbnails::use_camera(controller, None);
     let front = tabs.front().map(|tab| tab.episode().clone());
@@ -227,10 +215,17 @@ fn DatasetEpisodeList(
                         placeholder: "Filter episodes",
                         "aria-label": "Filter episodes",
                         oninput: move |text| wanted.set(text),
+                        onkeydown: move |event: KeyboardEvent| if event.key() == Key::Escape { wanted.set(String::new()) },
+                    }
+                    Button {
+                        purpose: ActionPurpose::Refresh, variant: ButtonVariant::Icon,
+                        aria_label: "Refresh episodes", title: "Refresh episodes",
+                        onclick: move |_| controller.reload_sample(),
+                        RefreshIcon {}
                     }
                 }
                 if faces.is_empty() {
-                    p { class: "curation-review-note", role: "status", "No episode says “{wanted}”." }
+                    p { class: "curation-review-note", role: "status", "No episodes match." }
                 }
                 ol { class: "curation-entries", "aria-label": "Episodes this curation reads",
                     for (position, (id, face)) in faces.into_iter().enumerate() {
@@ -258,7 +253,7 @@ fn DatasetEpisodeList(
                         };
                         let facts = EpisodeFact::DurationSeconds.reading(&episode).into_iter().collect::<Vec<_>>();
                         rsx! {
-                            EvidenceHeading { subject: episode.name(), episode: Some(episode.id().clone()), facts }
+                            EpisodeHeading { subject: HeadingSubject::episode(&episode).with_facts(facts) }
                             div { class: "curation-review-player",
                                 EpisodeInspection { episode, featured_camera: featured.clone() }
                             }

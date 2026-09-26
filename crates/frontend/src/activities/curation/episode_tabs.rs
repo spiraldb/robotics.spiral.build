@@ -83,30 +83,58 @@ impl OpenEpisode {
 pub(super) struct OpenEpisodes {
     open: Signal<Vec<OpenEpisode>>,
     front: Signal<Option<PanelId>>,
+    /// Whether the next open steps the tab in front on to another episode,
+    /// as J and K do, rather than opening a tab beside it.
+    stepping: Signal<bool>,
 }
 
 impl OpenEpisodes {
+    /// The workspace's open episodes, provided to its index too, so the
+    /// index's keys can step them.
     pub(super) fn use_open() -> Self {
-        Self {
+        let tabs = Self {
             open: use_signal(Vec::new),
             front: use_signal(|| None),
-        }
+            stepping: use_signal(|| false),
+        };
+        use_context_provider(|| tabs)
+    }
+    /// The open episodes of the workspace an index sits in, if any.
+    pub(super) fn use_around() -> Option<Self> {
+        use_hook(try_consume_context::<Self>)
+    }
+    /// Make the next open step the tab in front on, as Data's J and K do.
+    pub(super) fn step_next(mut self) {
+        self.stepping.set(true);
     }
     /// Open `episode` in a tab of its own, or bring its tab forward, and play
-    /// on from `interval`'s start when one is given.
+    /// on from `interval`'s start when one is given. After `step_next`, an
+    /// episode not yet open takes the place of the one in front instead.
     pub(super) fn open(mut self, episode: &EpisodeId, interval: Option<(f64, f64)>) {
+        let stepping = std::mem::take(&mut *self.stepping.write());
+        let front = self.front.peek().clone();
         {
             let mut open = self.open.write();
+            let in_front = front.and_then(|front| {
+                open.iter()
+                    .position(|tab| OpenEpisode::panel(&tab.episode) == front)
+            });
             match open.iter_mut().find(|tab| &tab.episode == episode) {
                 Some(tab) => {
                     tab.interval = interval;
                     tab.play = interval.map(|(start, _)| PlayRequest::after(tab.play, start));
                 }
-                None => open.push(OpenEpisode {
-                    episode: episode.clone(),
-                    interval,
-                    play: interval.map(|(start, _)| PlayRequest::new(start)),
-                }),
+                None => {
+                    let tab = OpenEpisode {
+                        episode: episode.clone(),
+                        interval,
+                        play: interval.map(|(start, _)| PlayRequest::new(start)),
+                    };
+                    match in_front.filter(|_| stepping) {
+                        Some(position) => open[position] = tab,
+                        None => open.push(tab),
+                    }
+                }
             }
         }
         self.front.set(Some(OpenEpisode::panel(episode)));

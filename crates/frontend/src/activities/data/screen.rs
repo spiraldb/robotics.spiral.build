@@ -10,7 +10,9 @@ use super::{
     catalog_rail::{CatalogRail, OpenedEpisode, RailActions, RailSelection},
     dataset_overview::{DatasetOverview, DatasetsAtAGlance},
 };
-use crate::activities::episode::{EpisodeFactsPresentation as _, EpisodeInspection};
+use crate::activities::episode::{
+    EpisodeFactsPresentation as _, EpisodeHeading, EpisodeInspection, HeadingSubject,
+};
 use crate::components::page_keys::PageKeys;
 use crate::format::WallClockPresentation as _;
 use crate::shell::{
@@ -339,13 +341,21 @@ fn DataPanels() -> Element {
 #[component]
 fn EpisodeSubject(opened: OpenedEpisode, on_dataset: EventHandler<()>) -> Element {
     let episode = opened.episode().clone();
-    let facts = episode.facts().clone();
+    let recorded = episode.facts();
+    let mut facts = vec![recorded.duration_label()];
+    if recorded
+        .message_start_time()
+        .is_some_and(|start| start.has_wall_clock())
+    {
+        facts.push(recorded.recorded_date_label());
+    }
     let dataset = episode.dataset().display_name();
     let name = episode.name();
     rsx! {
         section { class: "data-episode-subject", "aria-label": "{name}",
-            header { class: "data-subject-head",
-                nav { class: "data-subject-path", "aria-label": "Location",
+            EpisodeHeading {
+                subject: HeadingSubject::episode(&episode).with_facts(facts),
+                lead: rsx! {
                     Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Link, size: ButtonSize::Compact,
                         class: "data-subject-dataset",
                         title: "Back to {dataset} (Esc)", onclick: move |_| on_dataset.call(()),
@@ -353,19 +363,14 @@ fn EpisodeSubject(opened: OpenedEpisode, on_dataset: EventHandler<()>) -> Elemen
                         "{dataset}"
                     }
                     span { class: "data-subject-separator", "aria-hidden": "true", "/" }
-                    h2 { "{name}" }
-                }
-                p { class: "data-subject-facts", title: "{facts.facts_label()}\n{facts.source_uri().unwrap_or_default()}",
-                    span { "{facts.duration_label()}" }
-                    if facts.message_start_time().is_some_and(|start| start.has_wall_clock()) {
-                        span { "{facts.recorded_date_label()}" }
+                },
+                actions: rsx! {
+                    p { class: "data-subject-keys", "aria-hidden": "true",
+                        kbd { class: "ui-kbd", "J" }
+                        kbd { class: "ui-kbd", "K" }
+                        span { "step" }
                     }
-                }
-                p { class: "data-subject-keys", "aria-hidden": "true",
-                    kbd { class: "ui-kbd", "J" }
-                    kbd { class: "ui-kbd", "K" }
-                    span { "step" }
-                }
+                },
             }
             EpisodeInspection { episode }
         }

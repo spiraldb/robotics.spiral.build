@@ -42,8 +42,9 @@ const MAX_STAGGER_MS: f64 = 420.0;
 /// Points a flight's curve is drawn through; enough that the arc reads as a
 /// curve rather than two straight legs.
 const FLIGHT_SAMPLES: usize = 10;
-const EASE_OUT: &str = "cubic-bezier(0.2, 0, 0, 1)";
-const EASE_IN_OUT: &str = "cubic-bezier(0.45, 0, 0.2, 1)";
+/// The Studio's one easing, expo out: fast out of the gate, settled early.
+/// A slide and a flight are arrivals like any other entrance.
+const EASE_OUT: &str = "cubic-bezier(0.16, 1, 0.3, 1)";
 
 /// The questions every choreography asks of the page.
 pub struct Motion;
@@ -369,7 +370,7 @@ impl Timing {
     /// A token keeps its landing until it is removed, so it never flashes
     /// back to where it took off.
     fn flight(delay_ms: f64) -> Object {
-        Self::record(FLIGHT_MS, delay_ms, EASE_IN_OUT, "both")
+        Self::record(FLIGHT_MS, delay_ms, EASE_OUT, "both")
     }
     fn record(duration_ms: f64, delay_ms: f64, easing: &str, fill: &str) -> Object {
         Record::of(&[

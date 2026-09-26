@@ -20,6 +20,7 @@ use super::review::{Counted, NodeBar, NodeReach};
 use super::state::CurationController;
 use super::threshold::{AxisUnit, StripDot, Threshold, ThresholdStrip};
 use crate::format::ClockPresentation as _;
+use crate::components::icons::SpinnerIcon;
 use dioxus::prelude::*;
 use listing::{EpisodeListing, ListedSide, MomentListing, SubtaskListing};
 use rule::RuleEdit;
@@ -347,7 +348,7 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
                     Some(error) => rsx! {
                         Notice { tone: NoticeTone::Danger, "The episodes could not be read: {error}" }
                     },
-                    None => rsx! { EmptyState { p { "Reading episodes…" } } },
+                    None => rsx! { EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Loading episodes…" } } },
                 }
             }
         };

@@ -83,6 +83,11 @@ impl PreviewProgress {
     pub(in crate::activities::curation) fn is_stale(&self) -> bool {
         self.stale_above || !self.stale.is_empty()
     }
+    /// Whether the preview has not read, tried, or once held any episode that
+    /// reaches the node: a measurement that has nothing to show yet.
+    pub(in crate::activities::curation) fn is_unmeasured(&self) -> bool {
+        self.read.is_empty() && self.stale.is_empty() && self.failed.is_empty()
+    }
 }
 
 #[cfg(test)]

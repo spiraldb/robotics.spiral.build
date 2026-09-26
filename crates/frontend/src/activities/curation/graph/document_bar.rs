@@ -49,7 +49,7 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
                 document: OpenDocument::new(
                     DocumentEntry::new(controller.id(), controller.name()),
                     saved,
-                    DocumentState::of(controller.unsaved_changes()),
+                    DocumentState::of(controller.unsaved_changes(), controller.is_stored()),
                 ).saving(command == Some(DocumentCommand::Saving)),
                 gate: DocumentBarGate::new(waiting.clone(), waiting.clone(), command.is_some())
                     .renaming(waiting),
@@ -87,7 +87,7 @@ fn CurationDatasetCreation(controller: CurationController) -> Element {
                     disabled: chosen().is_none() || controller.command().is_some(),
                     onclick: move |_| {
                         if let Some(source) = chosen() {
-                            controller.create(source.selection().label(), Some(source.selection().clone()));
+                            controller.create(source.selection().display_name(), Some(source.selection().clone()));
                         }
                     },
                     "Create"

@@ -15,14 +15,16 @@ pub(super) use subtask::{MAX_SUBTASKS, SubtaskColumns, SubtaskRow};
 use super::document::{CurationNode, CurationNodeKind, SubtaskAnnotation};
 use super::episode_tabs::{EpisodeTabs, OpenEpisode};
 use super::preview::{PreviewPlan, PreviewProgress};
+use super::primer::{NodePrimer, Primer};
 use super::rerun::ConfirmedRerun;
 use super::review::{
-    EpisodeOrder, FailedEpisodes, NodeBar, NodeNotes, NodeReach, SubtaskContext, SubtaskReview,
+    Counted, EpisodeOrder, FailedEpisodes, NodeBar, NodeNotes, NodeReach, SubtaskContext,
+    SubtaskReview,
 };
 use super::state::{CurationController, RunState};
 use super::thumbnail::Thumbnails;
-use crate::activities::episode::Episode;
-use crate::components::icons::SettingsIcon;
+use crate::activities::episode::{Episode, StreamCatalog};
+use crate::components::icons::{SettingsIcon, SpinnerIcon};
 use dioxus::prelude::*;
 use episodes::{AnnotationEpisode, RecordedTopics};
 use output::{
@@ -234,10 +236,18 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                 "This node does not break down subtasks." }
         };
     };
-    let uncompiled = controller
-        .with_payload(|payload| PreviewPlan::check(payload, &node))
-        .err()
-        .map(|error| error.message().to_owned());
+    // Until the dataset's cameras are read, a new node has no camera yet
+    // and the effect above is about to choose one, so its missing camera is
+    // not yet something to fix.
+    let uncompiled = topics
+        .is_some()
+        .then(|| {
+            controller
+                .with_payload(|payload| PreviewPlan::check(payload, &node))
+                .err()
+                .map(|error| error.message().to_owned())
+        })
+        .flatten();
     let progress = controller.progress(&node).unwrap_or_default();
     let failures = progress
         .failed()
@@ -257,6 +267,16 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     let thumbnails = Thumbnails::use_camera(controller, context.camera());
     let evidence = (listed.clone(), groups.clone(), context.clone());
     let done = progress.read().len();
+    // Nothing read yet: the workspace says what the node is for, beside the
+    // run that starts it, rather than an empty index and an episode nobody
+    // asked to watch.
+    let unmeasured = progress.is_unmeasured();
+    let first_run = RunScope::Pending.episodes(&listed, &progress);
+    let running_line = controller
+        .activity()
+        .get(&node)
+        .cloned()
+        .unwrap_or_else(|| "Breaking down…".to_owned());
     let replaceable = RunScope::All.episodes(&listed, &progress).len();
     let retry = {
         let listed = listed.clone();
@@ -287,7 +307,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                             let start = start.clone();
                             let episodes = RunScope::All.episodes(&listed, &progress);
                             rsx! {
-                                if replaceable > 0 && !running && uncompiled.is_none() {
+                                if done > 0 && replaceable > 0 && !running && uncompiled.is_none() {
                                     ConfirmedRerun {
                                         id: "curation-annotate-replace".to_owned(),
                                         label: RunScope::All.label().to_owned(),
@@ -316,7 +336,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                             },
                             if run == RunState::Stopping { "Stopping…" } else { "Stop" }
                         }
-                    } else {
+                    } else if !unmeasured {
                         for scope in [RunScope::Failed, RunScope::Pending] {
                             {
                                 let episodes = scope.episodes(&listed, &progress);
@@ -348,9 +368,34 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                 div { class: "curation-annotate-failure", role: "alert",
                     p { "{error}" }
                     Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
-                        onclick: move |_| controller.reload_sample(), "Retry the episode list" }
+                        onclick: move |_| controller.reload_sample(), "Retry" }
                 }
             }
+            if unmeasured {
+                NodePrimer {
+                    primer: Primer::BreakDown,
+                    action: rsx! {
+                        if running {
+                            p { class: "curation-primer-status", role: "status",
+                                SpinnerIcon {}
+                                "{running_line}"
+                            }
+                        } else if !first_run.is_empty() {
+                            Button {
+                                purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
+                                disabled: uncompiled.is_some(),
+                                title: RunScope::Pending.explanation(first_run.len()),
+                                onclick: {
+                                    let start = start.clone();
+                                    let episodes = first_run.clone();
+                                    move |_| start(episodes.clone())
+                                },
+                                "Break down {Counted::episodes(first_run.len())}"
+                            }
+                        }
+                    },
+                }
+            } else {
             SubtaskReview {
                 index: rsx! {
                     SubtaskIndex {
@@ -394,17 +439,20 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                     }
                 },
             }
+            }
         }
     }
 }
 
 /// The settings dialog answers Escape and the backdrop, so it needs a name
-/// focus can reach it by.
+/// focus can reach it by, and the button that opens it one focus returns to.
 const SETTINGS_DIALOG_ID: &str = "curation-annotate-settings";
+const SETTINGS_BUTTON_ID: &str = "curation-annotate-settings-button";
 
-/// The camera, model, and sampling one pass runs with, said on the node's
-/// bar as the button that changes them, plus the run that replaces what they
-/// already produced.
+/// The camera and sampling one pass runs with, said on the node's bar as the
+/// button that changes them, plus the run that replaces what they already
+/// produced. The model is the backend's to choose, as every model is: an
+/// operator is never asked to name one.
 #[component]
 fn AnnotationSettings(
     annotation: AnnotationNode,
@@ -423,44 +471,49 @@ fn AnnotationSettings(
     });
     let camera = settings.camera().unwrap_or_default().to_owned();
     let known = cameras.contains(&camera);
+    let camera_title = StreamCatalog::camera_title_among(&camera, &cameras);
     let pick = annotation.clone();
-    let name = annotation.clone();
     let interval = annotation.clone();
     rsx! {
         span { class: "curation-annotate-settings-slot",
             Button {
+                id: SETTINGS_BUTTON_ID,
                 purpose: ActionPurpose::Navigate,
                 variant: ButtonVariant::Quiet,
                 class: "curation-node-bar-settings",
                 aria_haspopup: "dialog",
                 aria_expanded: open(),
-                title: "Change the camera, model, and sampling",
+                title: "Change the camera and how often it is sampled",
                 onclick: move |_| open.toggle(),
                 SettingsIcon {}
-                if camera.is_empty() {
+                // The bar names what the operator chose in their words; the
+                // topic, model, and sampling are the dialog's to show.
+                if camera.is_empty() && cameras.is_empty() {
+                    // The node chooses one itself once the cameras are read.
+                    span { "Loading cameras…" }
+                } else if camera.is_empty() {
                     span { class: "curation-node-bar-missing", "Choose a camera" }
                 } else {
-                    code { "{camera}" }
-                    code { "{settings.model()}" }
-                    code { "every {settings.sample_interval_seconds()} s" }
-                    if let Some(topic) = settings.task_topic() {
-                        code { title: "Each episode's task is the instruction it records here", "task from {topic}" }
-                    }
+                    span { class: "curation-node-bar-camera", "Watches the {camera_title} camera" }
                 }
                 ChevronIcon { open: open() }
             }
             if open() {
-                div { class: "popover-backdrop", onclick: move |_| open.set(false) }
+                div { class: "popover-backdrop", onclick: move |_| {
+                    open.set(false);
+                    BrowserFocus::after_render(SETTINGS_BUTTON_ID.to_owned());
+                } }
                 div {
                     id: SETTINGS_DIALOG_ID,
                     class: "curation-annotate-settings",
                     role: "dialog",
                     tabindex: "-1",
-                    "aria-label": "Annotation settings",
+                    "aria-label": "Break down settings",
                     onkeydown: move |event: KeyboardEvent| {
                         if event.key() == Key::Escape {
                             event.prevent_default();
                             open.set(false);
+                            BrowserFocus::after_render(SETTINGS_BUTTON_ID.to_owned());
                         }
                     },
                     Field { label: "Camera".to_owned(), layout: FieldLayout::Stacked,
@@ -477,17 +530,9 @@ fn AnnotationSettings(
                                 option { value: camera.clone(), selected: true, "{camera} (not in this dataset)" }
                             }
                             for topic in cameras.iter() {
-                                option { key: "{topic}", value: "{topic}", selected: *topic == camera, "{topic}" }
+                                option { key: "{topic}", value: "{topic}", selected: *topic == camera,
+                                    "{StreamCatalog::camera_title_among(topic, &cameras)}" }
                             }
-                        }
-                    }
-                    Field { label: "Model".to_owned(), layout: FieldLayout::Stacked,
-                        TextInput {
-                            value: settings.model().to_owned(), disabled,
-                            placeholder: "provider/model",
-                            oninput: move |value: String| {
-                                let _ = name.configure(|annotation| annotation.set_model(value.clone()));
-                            },
                         }
                     }
                     Field { label: "Sample every (s)".to_owned(), layout: FieldLayout::Stacked,
@@ -503,6 +548,10 @@ fn AnnotationSettings(
                                 }
                             },
                         }
+                    }
+                    if settings.task_topic().is_some() {
+                        p { class: "curation-annotate-settings-note",
+                            "Each episode's task is read from the instruction it recorded." }
                     }
                     span { class: "curation-annotate-replace-slot", {reannotate} }
                 }

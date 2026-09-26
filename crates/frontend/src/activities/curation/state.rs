@@ -176,6 +176,9 @@ impl StudioDocument for CurationDocument {
             self.set_revision(saved.revision());
         }
     }
+    fn is_stored(&self) -> bool {
+        self.revision() > 0
+    }
 }
 
 /// The graph travels inside the document as opaque text. Replacing that text
@@ -432,6 +435,19 @@ impl CurationController {
     }
     pub(crate) fn unsaved_changes(&self) -> bool {
         self.session.unsaved_changes()
+    }
+    /// Whether a reload would lose work: edits not saved, what the preview
+    /// has read this session — it is held in the tab, not in the saved
+    /// graph — or a run still reading. Read without subscribing, for the
+    /// moment the page is about to unload.
+    pub(crate) fn holds_unkept_work(&self) -> bool {
+        self.session.peek_unsaved_changes()
+            || !self.interpretation.reads.peek().is_empty()
+            || !self.runs.owned.peek().is_empty()
+    }
+    /// Whether this graph has ever been stored.
+    pub(crate) fn is_stored(&self) -> bool {
+        self.session.is_stored()
     }
 
     pub(crate) fn selected_node(&self) -> Option<String> {

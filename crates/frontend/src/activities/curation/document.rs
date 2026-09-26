@@ -225,14 +225,6 @@ impl SubtaskAnnotation {
     pub(crate) fn model(&self) -> &str {
         &self.model
     }
-    pub(crate) fn set_model(&mut self, model: impl Into<String>) -> Result<(), String> {
-        let model = model.into();
-        if model.trim().is_empty() {
-            return Err("The annotation model id is empty.".into());
-        }
-        self.model = model;
-        Ok(())
-    }
     pub(crate) fn sample_interval_seconds(&self) -> f64 {
         self.sample_interval_seconds
     }
@@ -619,6 +611,21 @@ impl CurationGraph {
         }
         Ok(node)
     }
+    /// `id` and every node below it, `id` first.
+    pub(crate) fn branch_of(&self, id: &str) -> Vec<String> {
+        let mut branch = vec![id.to_owned()];
+        let mut index = 0;
+        while index < branch.len() {
+            let current = branch[index].clone();
+            branch.extend(
+                self.children_of(&current)
+                    .into_iter()
+                    .map(|child| child.id.clone()),
+            );
+            index += 1;
+        }
+        branch
+    }
     /// Remove a node and its descendants. A branch
     /// holding a published output stays until the view is unpublished, so no
     /// view outlives the recipe it was compiled from.
@@ -627,17 +634,7 @@ impl CurationGraph {
             return Err("The dataset node cannot be removed.".into());
         }
         self.node(id).ok_or("Unknown node.")?;
-        let mut doomed = vec![id.to_owned()];
-        let mut index = 0;
-        while index < doomed.len() {
-            let current = doomed[index].clone();
-            doomed.extend(
-                self.children_of(&current)
-                    .into_iter()
-                    .map(|child| child.id.clone()),
-            );
-            index += 1;
-        }
+        let doomed = self.branch_of(id);
         if let Some(published) = self
             .published
             .iter()

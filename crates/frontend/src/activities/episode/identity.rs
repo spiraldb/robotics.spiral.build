@@ -217,14 +217,16 @@ impl Episode {
         let end = start.checked_add(self.facts.duration_ns()?)?;
         Some(EpisodeTimeRange::new(start, end))
     }
-    /// Whether a lowercase search term appears in its id or source path.
+    /// Whether a search term appears in its id or source path, whatever its
+    /// case — the one test every list of episodes filters by.
     pub(in crate::activities) fn matches(&self, needle: &str) -> bool {
+        let needle = needle.trim().to_lowercase();
         needle.is_empty()
-            || self.id().as_str().contains(needle)
+            || self.id().as_str().contains(&needle)
             || self
                 .facts
                 .source_uri()
-                .is_some_and(|uri| uri.to_lowercase().contains(needle))
+                .is_some_and(|uri| uri.to_lowercase().contains(&needle))
     }
 
     /// One episode of a fixed length, for tests that only need its identity

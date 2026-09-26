@@ -7,7 +7,7 @@ use dioxus_flow::{
     NodeViewCtx, Point, Side, WorldLayer, use_flow,
 };
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
+    ActionPurpose, BrowserFocus, Button, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
     ConfirmationResponse, DeleteIcon, InlineConfirmation, Menu, Notice, NoticeTone,
 };
 
@@ -95,11 +95,54 @@ impl GraphFlow {
     }
 }
 
+/// The nodes and edges the flow draws, derived from the controller.
+///
+/// The flow crate owns these as signals it may write — a pane click clears
+/// its own idea of the selection — so they are the controller's truth drawn
+/// again: after every change the canvas makes itself, in the same frame, and
+/// in an effect for every change that arrives from elsewhere.
+#[derive(Clone, Copy, PartialEq)]
+struct CanvasDrawing {
+    nodes: Signal<Vec<Node<NodeCard>>>,
+    edges: Signal<Vec<Edge>>,
+}
+
+impl CanvasDrawing {
+    fn use_drawing(controller: CurationController) -> Self {
+        let drawing = use_hook(|| {
+            let flow = Self::flow(controller);
+            Self {
+                nodes: Signal::new(flow.nodes),
+                edges: Signal::new(flow.edges),
+            }
+        });
+        use_effect(move || drawing.redraw(controller));
+        drawing
+    }
+    fn flow(controller: CurationController) -> GraphFlow {
+        controller.with_reading(|payload, reader| {
+            GraphFlow::new(
+                payload,
+                reader,
+                controller.selected_node().as_deref(),
+                &controller.activity(),
+            )
+        })
+    }
+    /// Draw the graph as the controller holds it now.
+    fn redraw(mut self, controller: CurationController) {
+        let flow = Self::flow(controller);
+        self.nodes.set(flow.nodes);
+        self.edges.set(flow.edges);
+    }
+}
+
 /// What a node card reaches for: the graph it edits, the one + menu that may
 /// be open, and where a refused edit is reported.
 #[derive(Clone, Copy, PartialEq)]
 struct CanvasHand {
     controller: CurationController,
+    drawing: CanvasDrawing,
     /// The one node whose + menu is open, and the one whose removal is being
     /// confirmed. Both are popovers, and a popover belongs to the canvas
     /// rather than to the card it hangs from — see `CanvasPopovers`.
@@ -109,9 +152,10 @@ struct CanvasHand {
 }
 
 impl CanvasHand {
-    fn use_hand(controller: CurationController) -> Self {
+    fn use_hand(controller: CurationController, drawing: CanvasDrawing) -> Self {
         Self {
             controller,
+            drawing,
             open_menu: use_signal(|| None),
             confirming: use_signal(|| None),
             problem: use_signal(|| None),
@@ -140,6 +184,12 @@ impl CanvasHand {
         self.open_menu.set(None);
         self.confirming.set(None);
     }
+    /// A press on the empty pane closes what is open, and draws the
+    /// selection again over the one the flow crate cleared.
+    fn press_pane(self) {
+        self.close_menu();
+        self.drawing.redraw(self.controller);
+    }
     fn confirm_removal(mut self, node: &str) {
         self.open_menu.set(None);
         self.confirming.set(Some(node.to_owned()));
@@ -148,20 +198,59 @@ impl CanvasHand {
         self.open_menu.set(None);
         self.confirming.set(None);
         self.controller.select_node(Some(node));
+        self.drawing.redraw(self.controller);
     }
-    /// Add the chosen child and select it, or say why the graph refused.
+    /// Add the chosen child, select it, and carry focus to its card, since
+    /// the menu that added it is gone; or say why the graph refused.
     fn choose(mut self, menu: &ChildMenu, index: usize) {
         self.open_menu.set(None);
-        self.problem.set(menu.choose(self.controller, index).err());
+        let outcome = menu.choose(self.controller, index);
+        if let Ok(added) = &outcome {
+            self.drawing.redraw(self.controller);
+            BrowserFocus::after_render(Self::card_id(added));
+        }
+        self.problem.set(outcome.err());
     }
+    /// Delete `node` and every step after it, and carry on from the step it
+    /// hung from: the selection moves to that parent when it was in the
+    /// deleted branch, and focus follows it, since the control that was
+    /// pressed is gone.
     fn remove(mut self, node: &str) {
         let node = node.to_owned();
+        let parent = self
+            .controller
+            .with_payload(|payload| payload.parent_of(&node).map(str::to_owned));
+        let selected = self.controller.selected_node();
         self.confirming.set(None);
-        self.problem.set(
-            self.controller
-                .edit(|payload| payload.remove_node(&node))
-                .err(),
-        );
+        let outcome = self.controller.edit(|payload| payload.remove_node(&node));
+        if outcome.is_ok() {
+            let selection_gone = selected.is_some_and(|selected| {
+                self.controller
+                    .with_payload(|payload| payload.node(&selected).is_none())
+            });
+            if let Some(parent) = parent.filter(|_| selection_gone) {
+                self.controller.select_node(Some(parent.clone()));
+                BrowserFocus::after_render(Self::card_id(&parent));
+            }
+            self.drawing.redraw(self.controller);
+        }
+        self.problem.set(outcome.err());
+    }
+    /// The id of the control a card is chosen and focused by.
+    fn card_id(node: &str) -> String {
+        format!("curation-canvas-card-{node}")
+    }
+    /// What deleting `node` asks: its name, and how many later steps go with
+    /// it, since those are on the page under the question.
+    fn removal_question(self, node: &str, label: &str) -> String {
+        let after = self
+            .controller
+            .with_payload(|payload| payload.branch_of(node).len().saturating_sub(1));
+        match after {
+            0 => format!("Delete {label}?"),
+            1 => format!("Delete {label} and the step after it?"),
+            steps => format!("Delete {label} and the {steps} steps after it?"),
+        }
     }
 }
 
@@ -171,33 +260,9 @@ impl CanvasHand {
 pub(in crate::activities::curation) fn CurationGraphCanvas(
     controller: CurationController,
 ) -> Element {
-    let hand = CanvasHand::use_hand(controller);
-    let initial = use_hook(|| {
-        controller.with_reading(|payload, reader| {
-            GraphFlow::new(
-                payload,
-                reader,
-                controller.selected_node().as_deref(),
-                &controller.activity(),
-            )
-        })
-    });
-    let mut nodes = use_signal(|| initial.nodes);
-    let mut edges = use_signal(|| initial.edges);
-    // The payload, the selection, and what is running are the truth; the
-    // canvas follows them.
-    use_effect(move || {
-        let flow = controller.with_reading(|payload, reader| {
-            GraphFlow::new(
-                payload,
-                reader,
-                controller.selected_node().as_deref(),
-                &controller.activity(),
-            )
-        });
-        nodes.set(flow.nodes);
-        edges.set(flow.edges);
-    });
+    let drawing = CanvasDrawing::use_drawing(controller);
+    let hand = CanvasHand::use_hand(controller, drawing);
+    let CanvasDrawing { nodes, edges } = drawing;
     let count = nodes.read().len();
     // Curation draws no minimap; the fit reports an overflowing graph all the
     // same, and parking at the first rank is the answer either way.
@@ -215,7 +280,7 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
                 // zoom.
                 pan_on_scroll: true, zoom_on_scroll: false,
                 is_valid_connection: move |_| false,
-                on_pane_click: move |_| hand.close_menu(),
+                on_pane_click: move |_| hand.press_pane(),
                 on_node_click: move |id: String| hand.select(id),
                 node_view: move |ctx: NodeViewCtx<NodeCard>| rsx! { NodeCardView { ctx, hand } },
                 Background { variant: BackgroundVariant::Dots, gap: 22.0, size: 0.7 }
@@ -301,24 +366,22 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
             class: "workflow-stage-card curation-canvas-node {card.face().class_name()}",
             class: if ctx.node.selected { "is-selected" },
             style: "--stage-order: {card.order()}",
+            onmounted: CardStop::take_over,
             // Selecting a node is the way into every workspace in Curation, and
             // the flow crate's own key handling reaches it only for a node it
             // is allowed to select — which this one is not, because the
-            // controller owns the selection. So the card is the button.
-            role: "button",
-            tabindex: "0",
-            "aria-current": ctx.node.selected.then_some("true"),
-            onmounted: CardStop::take_over,
-            onkeydown: move |event: KeyboardEvent| {
-                match event.key() {
-                    Key::Enter => {}
-                    Key::Character(key) if key == " " => {}
-                    _ => return,
-                }
-                event.prevent_default();
-                event.stop_propagation();
-                hand.select(activated.clone());
-            },
+            // controller owns the selection. The card cannot be that button
+            // itself: its + and trash would be buttons inside a button, which
+            // nobody reaches with a screen reader. So one button is laid over
+            // the whole card, and the card's two actions sit above it.
+            button {
+                r#type: "button",
+                id: "{CanvasHand::card_id(&id)}",
+                class: "curation-canvas-node-open",
+                "aria-label": "{card.label()}: {card.summary()}",
+                "aria-current": ctx.node.selected.then_some("true"),
+                onclick: move |_| hand.select(activated.clone()),
+            }
             // An output wears its flag on the card's edge rather than in the
             // heading, so the name keeps the heading's width and the flag
             // never sits under the card's remove control.
@@ -390,19 +453,24 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
             // After the +, because a keyboard user should reach what builds
             // the graph before what deletes a branch of it. The card places it
             // back in its top corner.
+            // The press stops here too: asking to delete a step is not
+            // opening it, so the workspace is not rebuilt for a node that is
+            // about to go.
             if card.removable() {
-                Button {
-                    id: "{CanvasHand::remove_action(&id)}",
-                    purpose: ActionPurpose::Remove,
-                    variant: ButtonVariant::Icon,
-                    class: "curation-canvas-node-remove",
-                    aria_label: "Remove {card.label()}",
-                    title: "Remove this step and everything after it",
-                    onclick: {
-                        let id = id.clone();
-                        move |_| hand.confirm_removal(&id)
-                    },
-                    DeleteIcon {}
+                span { class: "curation-canvas-node-remove-slot", onpointerdown: move |event| event.stop_propagation(),
+                    Button {
+                        id: "{CanvasHand::remove_action(&id)}",
+                        purpose: ActionPurpose::Remove,
+                        variant: ButtonVariant::Icon,
+                        class: "curation-canvas-node-remove",
+                        aria_label: "Delete {card.label()}",
+                        title: "Delete this step and every step after it",
+                        onclick: {
+                            let id = id.clone();
+                            move |_| hand.confirm_removal(&id)
+                        },
+                        DeleteIcon {}
+                    }
                 }
             }
         }
@@ -463,20 +531,22 @@ fn CanvasPopovers(nodes: Signal<Vec<Node<NodeCard>>>, hand: CanvasHand) -> Eleme
                     }
                 }
             }
+            // Over the card it deletes, in the card's own box: beside what it
+            // is about, and never over the steps it will delete with it.
             if let Some((card, at)) = placed(&confirming) {
                 div {
                     class: "curation-canvas-remove",
-                    style: "left:{at.x}px;top:{at.y + NODE_HEIGHT + MENU_DROP}px;{screen}",
+                    style: "left:{at.x}px;top:{at.y}px;width:{NODE_WIDTH}px;min-height:{NODE_HEIGHT}px",
                     onpointerdown: move |event| event.stop_propagation(),
                     InlineConfirmation {
                         id: "{CanvasHand::remove_action(card.id())}-confirmation",
                         copy: ConfirmationCopy::new(
-                            format!("Remove {} and everything after it?", card.label()),
-                            "Remove",
+                            hand.removal_question(card.id(), card.label()),
+                            "Delete",
                             "Keep",
                         ),
                         response: ConfirmationResponse::new(
-                            ActionPurpose::Remove,
+                            ActionPurpose::Delete,
                             {
                                 let id = card.id().to_owned();
                                 move |_| hand.remove(&id)

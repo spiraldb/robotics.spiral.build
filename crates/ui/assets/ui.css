@@ -819,6 +819,11 @@
   text-transform: uppercase;
 }
 
+/* A strip's labels are the Studio's label size; only fact tiles run at 10px. */
+.ui-facts--strip dt {
+  font-size: 10.5px;
+}
+
 :is(.ui-facts--tiles, .ui-facts--strip) dd {
   overflow: hidden;
   font-family: var(--ui-font-mono);
@@ -946,7 +951,10 @@
   place-items: center;
   border: 1.5px solid var(--ui-kind-hue, var(--ui-ink-faint));
   border-radius: 4px;
-  color: var(--ui-kind-hue, var(--ui-ink-faint));
+  /* The letter is read, so it is the hue pushed toward ink until it clears
+     4.5:1 on every surface it sits on, as category text is; the outline
+     keeps the hue. */
+  color: color-mix(in srgb, var(--ui-kind-hue, var(--ui-ink-faint)) 45%, var(--ui-ink));
   font-family: var(--ui-font-mono);
   font-size: 10px;
   font-weight: 600;

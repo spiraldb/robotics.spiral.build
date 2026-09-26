@@ -1,5 +1,6 @@
 //! Group similar subtasks: one LLM pass in the browser proposes the
-//! categories, which become the node's configuration, and the node's step puts
+//! categories as soon as the subtasks that reach the node have arrived, they
+//! become the node's configuration, and the node's step puts
 //! every subtask that reaches it in one of them with `spql.ai.classify`. Its
 //! preview runs that step over the subtasks Break down's preview holds, many
 //! episodes to a query, as the curation's own run.
@@ -87,6 +88,22 @@ impl GroupingNode {
                 _ => DEFAULT_ANNOTATION_MODEL.to_owned(),
             }
         })
+    }
+    /// Whether a node above is still running, so the subtasks that reach
+    /// this one are still arriving.
+    fn subtasks_arriving(&self) -> bool {
+        let parent = |node: &str| {
+            self.controller
+                .with_payload(|payload| payload.parent_of(node).map(str::to_owned))
+        };
+        let mut above = parent(&self.id);
+        while let Some(node) = above {
+            if self.controller.run_state(&node) != RunState::Idle {
+                return true;
+            }
+            above = parent(&node);
+        }
+        false
     }
     /// The LLM pass: 4 to 8 categories over the deduped descriptions of the
     /// subtasks that reach the node.
@@ -487,6 +504,24 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             }
         })
     };
+    // A grouping has nothing to show before it has categories, so it
+    // proposes them itself once the subtasks that reach it have all arrived:
+    // Break down has described some and no node above is still running. A
+    // proposal that failed waits for Try again.
+    let unproposed = grouping.clone();
+    use_effect(move || {
+        let arrived = controller
+            .populations(&unproposed.id)
+            .is_some_and(|(input, _)| !input.subtasks().is_empty());
+        if arrived
+            && unproposed.categories().is_empty()
+            && !unproposed.subtasks_arriving()
+            && problem.peek().is_none()
+            && !*proposing.peek()
+        {
+            group.call(None);
+        }
+    });
 
     let Some(annotation) = source.annotation().map(str::to_owned) else {
         return rsx! {
@@ -698,17 +733,24 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             if cards.is_empty() {
                 EmptyState { title: "No categories yet",
                     p {
-                        "One model pass reads the {reaching} descriptions and proposes four to eight categories, then every subtask is put in one of them."
-                    }
-                    Button {
-                        purpose: ActionPurpose::Start,
-                        variant: ButtonVariant::Solid,
-                        disabled: busy || reaching == 0,
-                        onclick: move |_| group.call(None),
-                        if busy { "Generating…" } else { "Generate categories" }
+                        if grouping.subtasks_arriving() {
+                            "{Counted::subtasks(reaching)} so far; the categories are proposed from all of them once the nodes above finish."
+                        } else if reaching == 0 {
+                            "Run Break down subtasks first; the categories are proposed from the subtasks it describes."
+                        } else {
+                            "One model pass reads the {reaching} descriptions and proposes four to eight categories, then every subtask is put in one of them."
+                        }
                     }
                     if let Some(status) = status.clone() {
                         p { class: "curation-similar-note", role: "status", "{status}" }
+                    }
+                    if problem().is_some() && !busy {
+                        Button {
+                            purpose: ActionPurpose::Start,
+                            variant: ButtonVariant::Solid,
+                            onclick: move |_| group.call(None),
+                            "Try again"
+                        }
                     }
                 }
             } else {

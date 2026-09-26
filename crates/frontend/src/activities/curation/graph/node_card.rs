@@ -179,6 +179,9 @@ impl NodeCard {
             // What the node holds, not what it runs with: the camera and model
             // are the workspace's status line.
             CurationNodeKind::BreakDownSubtasks(_) => match (counts, reader) {
+                (Some((input, _)), Some(reader)) if Self::unmeasured(node, reader) => {
+                    Self::unrun(input.episodes().len())
+                }
                 (Some((input, output)), Some(reader)) => Self::stale(
                     format!(
                         "{} of {} · {}",
@@ -231,6 +234,9 @@ impl NodeCard {
             // recording it adds up to, of the recording it scored: what
             // training gets, rather than a count of frames.
             CurationNodeKind::ScoreProgress(_) => match (counts, reader) {
+                (Some((input, _)), Some(reader)) if Self::unmeasured(node, reader) => {
+                    Self::unrun(input.len())
+                }
                 (Some((input, output)), Some(reader)) => Self::stale(
                     format!(
                         "{} of {} · keeps {} of {}",
@@ -265,6 +271,15 @@ impl NodeCard {
             .map(Slice::seconds)
             .sum::<f64>()
             .clock_label()
+    }
+    /// Whether a measurement has read nothing of what reaches it yet.
+    fn unmeasured(node: &CurationNode, reader: &PopulationReader<'_>) -> bool {
+        PreviewProgress::of(reader, node.id()).is_unmeasured()
+    }
+    /// A measurement's line before its first run: what is waiting for it,
+    /// rather than zeros that read as a result.
+    fn unrun(reaching: usize) -> String {
+        format!("Not run yet · {}", Counted::episodes(reaching))
     }
     /// A measurement's line, saying when what reaches it changed since its
     /// preview ran.
@@ -468,7 +483,7 @@ mod tests {
         let cards = NodeCard::all(&payload, Some(&reader));
         assert_eq!(
             card(&cards, &annotate).summary(),
-            "0 of 2 episodes · 0 subtasks"
+            "Not run yet · 2 episodes"
         );
     }
 }

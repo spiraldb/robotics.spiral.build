@@ -99,7 +99,7 @@
      lanes for a grouping — with a brief swell as it lands. Backwards fill
      only, so a finished reveal never pins the hover or chosen transforms. */
   .curation-map-lanes:is([data-reveal="ripple"], [data-reveal="pour"]) .curation-map-segment {
-    animation: curation-map-light 560ms var(--delay, 0ms) backwards cubic-bezier(0.2, 0, 0, 1);
+    animation: curation-map-light 560ms var(--delay, 0ms) backwards var(--ease-out-expo);
   }
 
   @keyframes curation-map-light {
@@ -147,7 +147,7 @@
     @apply flex items-center gap-2;
   }
 
-  .curation-similar-asked .curation-thumbnail {
+  .curation-similar-asked .episode-still {
     width: 48px;
     height: 27px;
   }
@@ -387,7 +387,7 @@
     background: var(--hue);
     opacity: 0.85;
     transition: transform 100ms ease-out;
-    animation: curation-profile-dot 360ms calc(var(--lift) * 40ms) backwards cubic-bezier(0.2, 0, 0, 1);
+    animation: curation-profile-dot 360ms calc(var(--lift) * 40ms) backwards var(--ease-out-expo);
   }
 
   .curation-profile-lane[data-side="members"] .curation-profile-dot:hover {

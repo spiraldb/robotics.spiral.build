@@ -4,6 +4,8 @@ pub(crate) mod canvas_controls;
 pub(crate) mod charts;
 pub(crate) mod document_bar;
 pub(crate) mod icons;
+/// Asks before a reload throws away work only this tab holds.
+pub(crate) mod leave_guard;
 pub(crate) mod page_keys;
 
 pub(crate) mod time_series;

@@ -110,7 +110,7 @@ fn ActivityGlyph(activity: Activity) -> Element {
 /// Every shortcut the Studio answers, grouped by where it works.
 #[component]
 fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
-    let groups: [(&str, Vec<(String, &str)>); 4] = [
+    let groups: [(&str, Vec<(String, &str)>); 5] = [
         (
             "Anywhere",
             vec![
@@ -128,6 +128,13 @@ fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
                 ("/".into(), "Filter datasets and episodes"),
                 ("J  K".into(), "Next and previous episode"),
                 ("Esc".into(), "Back to the dataset"),
+            ],
+        ),
+        (
+            "Curation",
+            vec![
+                ("/".into(), "Filter the node's index"),
+                ("J  K".into(), "Next and previous row"),
             ],
         ),
         (

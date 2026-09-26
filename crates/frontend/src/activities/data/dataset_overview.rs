@@ -8,6 +8,7 @@ use crate::format::{
 };
 use dioxus::prelude::*;
 use serde::Deserialize;
+use std::collections::HashMap;
 use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, DatasetTopic};
 use spiral_robotics_common::sql::SqlLiteral;
 use spiral_robotics_ui::{
@@ -134,6 +135,50 @@ impl LengthDistribution {
     }
 }
 
+/// What the overview last read for each dataset, kept for the project, by
+/// SQL name: a view that mounts again — the Dataset node after a step is
+/// deleted, Data after Curation — paints the last answer at once while it
+/// reads again, rather than a column of "Counting…".
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct DatasetOverviewMemory {
+    facts: Signal<HashMap<String, DatasetFacts>>,
+    lengths: Signal<HashMap<String, LengthDistribution>>,
+    inspections: Signal<HashMap<String, DatasetInspection>>,
+}
+
+impl DatasetOverviewMemory {
+    pub(crate) fn use_provider() -> Self {
+        use_context_provider(|| Self {
+            facts: Signal::new(HashMap::new()),
+            lengths: Signal::new(HashMap::new()),
+            inspections: Signal::new(HashMap::new()),
+        })
+    }
+    fn current() -> Self {
+        consume_context()
+    }
+    fn facts(self, dataset: &DatasetSelection) -> Option<DatasetFacts> {
+        self.facts.read().get(&dataset.sql_name()).cloned()
+    }
+    fn lengths(self, dataset: &DatasetSelection) -> Option<LengthDistribution> {
+        self.lengths.read().get(&dataset.sql_name()).cloned()
+    }
+    fn inspection(self, dataset: &DatasetSelection) -> Option<DatasetInspection> {
+        self.inspections.read().get(&dataset.sql_name()).cloned()
+    }
+    /// Keep `answer` as `dataset`'s, unless it already is.
+    fn remember<V: Clone + PartialEq + 'static>(
+        mut memory: Signal<HashMap<String, V>>,
+        dataset: &DatasetSelection,
+        answer: &V,
+    ) {
+        let key = dataset.sql_name();
+        if memory.peek().get(&key) != Some(answer) {
+            memory.write().insert(key, answer.clone());
+        }
+    }
+}
+
 #[component]
 pub(crate) fn DatasetOverview(
     dataset: DatasetSelection,
@@ -181,6 +226,36 @@ pub(crate) fn DatasetOverview(
             });
         Some(result)
     }));
+    // Each answer, once read, is the dataset's last answer; until one is
+    // read the last answer stands in for it.
+    let memory = DatasetOverviewMemory::current();
+    let remembered = dataset.clone();
+    use_effect(use_reactive((&inspection,), move |(inspection,)| {
+        if let Some(Ok(detail)) = inspection {
+            DatasetOverviewMemory::remember(memory.inspections, &remembered, &detail);
+        }
+    }));
+    let remembered = dataset.clone();
+    use_effect(move || {
+        if let Some(Ok(answer)) = &*facts.read() {
+            DatasetOverviewMemory::remember(memory.facts, &remembered, answer);
+        }
+    });
+    let remembered = dataset.clone();
+    use_effect(move || {
+        if let Some(Some(Ok(answer))) = &*distribution.read() {
+            DatasetOverviewMemory::remember(memory.lengths, &remembered, answer);
+        }
+    });
+    let facts = facts
+        .read()
+        .clone()
+        .or_else(|| memory.facts(&dataset).map(Ok));
+    let distribution = match &*distribution.read() {
+        Some(Some(answer)) => Some(answer.clone()),
+        _ => memory.lengths(&dataset).map(Ok),
+    };
+    let inspection = inspection.or_else(|| memory.inspection(&dataset).map(Ok));
     let name = dataset.display_name();
     let sql_name = dataset.sql_name();
     let topics = inspection
@@ -196,7 +271,7 @@ pub(crate) fn DatasetOverview(
                 KindMark { class: "data-overview-mark", letter: 'D', hue: "var(--tone-kind-dataset)", label: "Dataset" }
                 h2 { title: "{sql_name}", "{name}" }
             }
-            match &*facts.read() {
+            match &facts {
                 Some(Err(error)) => rsx! { p { class: "data-overview-alert", role: "alert", "{error}" } },
                 Some(Ok(facts)) => rsx! {
                     FactList { class: "data-overview-facts", layout: FactLayout::Strip,
@@ -216,10 +291,10 @@ pub(crate) fn DatasetOverview(
             }
             section { class: "data-overview-section", "aria-label": "Episode lengths",
                 h3 { "Episode lengths" }
-                match (&*facts.read(), &*distribution.read()) {
+                match (&facts, &distribution) {
                     (Some(Ok(facts)), _) if facts.length_range().is_none() => rsx! { p { class: "data-rail-note", "No episode records a length yet." } },
-                    (_, Some(Some(Ok(distribution)))) => rsx! { EpisodeLengthChart { distribution: distribution.clone() } },
-                    (_, Some(Some(Err(error)))) => rsx! { p { class: "data-rail-note", role: "alert", "{error}" } },
+                    (_, Some(Ok(distribution))) => rsx! { EpisodeLengthChart { distribution: distribution.clone() } },
+                    (_, Some(Err(error))) => rsx! { p { class: "data-rail-note", role: "alert", "{error}" } },
                     _ => rsx! { div { class: "data-lengths is-loading", role: "status", "aria-label": "Counting episode lengths" } },
                 }
             }
@@ -267,21 +342,34 @@ pub(super) fn DatasetsAtAGlance(
                 Button { purpose: ActionPurpose::Import, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
                     onclick: move |_| on_import.call(()), "Import MCAP recordings" }
             } else {
-                div { class: "data-ledger-card",
-                    table { class: "data-ledger data-glance-ledger", "aria-label": "Datasets",
-                        thead { tr {
-                            th { "Dataset" }
-                            th { class: "is-number", "Episodes" }
-                            th { class: "is-number", "Recorded" }
-                            th { class: "is-number", "Average" }
-                            th { class: "is-number", "Size" }
-                            th { "Span" }
-                        } }
-                        tbody {
-                            for (index, dataset) in datasets.into_iter().enumerate() {
-                                DatasetRow { key: "{dataset.sql_name()}", dataset, order: index, on_select }
-                            }
-                        }
+                DatasetLedger { datasets, on_select }
+            }
+        }
+    }
+}
+
+/// The project's datasets as one ledger, a row each with the totals that tell
+/// them apart, and a row pressed to choose it: how every surface that asks
+/// for a dataset offers them — Data's home, and a curation that has none yet.
+#[component]
+pub(crate) fn DatasetLedger(
+    datasets: Vec<DatasetSelection>,
+    on_select: EventHandler<DatasetSelection>,
+) -> Element {
+    rsx! {
+        div { class: "data-ledger-card",
+            table { class: "data-ledger data-glance-ledger", "aria-label": "Datasets",
+                thead { tr {
+                    th { "Dataset" }
+                    th { class: "is-number", "Episodes" }
+                    th { class: "is-number", "Recorded" }
+                    th { class: "is-number", "Average" }
+                    th { class: "is-number", "Size" }
+                    th { "Span" }
+                } }
+                tbody {
+                    for (index, dataset) in datasets.into_iter().enumerate() {
+                        DatasetRow { key: "{dataset.sql_name()}", dataset, order: index, on_select }
                     }
                 }
             }
@@ -305,7 +393,18 @@ fn DatasetRow(
             .next()?;
         serde_json::from_value::<DatasetFacts>(serde_json::Value::Object(row)).ok()
     }));
-    let facts = facts.read().clone().flatten();
+    let memory = DatasetOverviewMemory::current();
+    let remembered = dataset.clone();
+    use_effect(move || {
+        if let Some(Some(answer)) = &*facts.read() {
+            DatasetOverviewMemory::remember(memory.facts, &remembered, answer);
+        }
+    });
+    let facts = facts
+        .read()
+        .clone()
+        .flatten()
+        .or_else(|| memory.facts(&dataset));
     let cell =
         |read: fn(&DatasetFacts) -> String| facts.as_ref().map_or_else(|| "…".to_owned(), read);
     let chosen = dataset.clone();

@@ -5,25 +5,34 @@
 //! [`EpisodeInspection`] shows it whole — cameras, robot, plots and the
 //! timeline of its streams, docked on a clock of its own and arranged for the
 //! room a surface gives it, or as the operator last arranged the dataset's
-//! episodes.
+//! episodes. [`EpisodeRows`] is the row it gets in any list of recordings,
+//! and [`EpisodeStill`] the picture that row leads with, decoded once per
+//! project.
 
 mod arrangement;
 mod camera;
 mod choices;
 mod decoder;
+mod heading;
 mod identity;
 mod inspection;
+mod listing;
 mod messages;
 mod plots;
 mod remembered_layout;
 mod robot;
+mod still;
 mod streams;
 mod timeline;
 mod transport;
 
 pub(crate) use decoder::{DecodedGroup, EncodedCamera};
+pub(in crate::activities) use heading::{EpisodeHeading, HeadingSubject};
 pub(in crate::activities) use identity::{
-    Episode, EpisodeFactsPresentation, EpisodeLabels, SourceLabel,
+    Episode, EpisodeFactsPresentation, SourceLabel,
 };
 pub(in crate::activities) use inspection::{EpisodeInspection, FeaturedCamera, PlayRequest};
+pub(in crate::activities) use listing::{EpisodeRows, RowFace, RowFaceView};
+pub(crate) use still::EpisodeStills;
+pub(in crate::activities) use still::{EpisodeStill, StillMoment};
 pub(in crate::activities) use streams::StreamCatalog;

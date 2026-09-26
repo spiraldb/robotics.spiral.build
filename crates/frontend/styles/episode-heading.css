@@ -1,0 +1,107 @@
+/* Episode › heading styles: the one line over every episode inspection —
+   the way back, the subject, the facts that place it, and what can be done
+   from here — in Data's episode tabs and every Curation node. Prefix every
+   class with `episode-heading`. Use @layer components like tailwind.css.
+   A surface sets the height it needs; this is the line they share. */
+
+@layer components {
+  /* What the inspection below is showing, on one line: the subject gives
+     way first, then the facts, and the actions at the end never wrap. */
+  .episode-heading {
+    display: flex;
+    min-width: 0;
+    height: 34px;
+    overflow: hidden;
+    background: var(--tone-surface);
+    flex-shrink: 0;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--tone-line);
+  }
+
+  /* The way back and the subject share one path that gives way first. */
+  .episode-heading-path {
+    display: flex;
+    min-width: 0;
+    flex: 0 1 auto;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .episode-heading-subject {
+    min-width: 4rem;
+    flex: 0 1 auto;
+    overflow: hidden;
+    margin: 0;
+    color: var(--tone-ink);
+    font-size: 13px;
+    font-weight: 560;
+    letter-spacing: -0.01em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .episode-heading-actions {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 12px;
+    margin-left: auto;
+  }
+
+  .episode-heading-actions:empty {
+    display: none;
+  }
+
+  /* The facts are measurements and never cut; the subject gives way. */
+  .episode-heading-facts {
+    display: flex;
+    min-width: 0;
+    flex: 0 0 auto;
+    margin: 0;
+    overflow: hidden;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The episode's identifier, as text somebody can select and paste. It was a
+     `title` tooltip, which is none of those things. It is cut from the front,
+     so the tail every index heading names the episode by is what shows. */
+  .episode-heading-id {
+    overflow: hidden;
+    /* "…" and eight hex digits: the tail every index row names it by,
+       which the subject gives way to rather than it. */
+    max-width: 9.6ch;
+    flex-shrink: 0;
+    color: var(--tone-ink-soft);
+    font: inherit;
+    direction: rtl;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    user-select: text;
+  }
+
+  .episode-heading-id:hover,
+  .episode-heading-id:focus-within {
+    max-width: none;
+  }
+
+  /* A model's words begin as a sentence does, however the model wrote them. */
+  .episode-heading-subject::first-letter {
+    text-transform: uppercase;
+  }
+
+  /* Facts are read as a sentence of fields, separated as every fact line is. */
+  .episode-heading-facts > * + *::before {
+    content: "·";
+    margin-right: 8px;
+  }
+}

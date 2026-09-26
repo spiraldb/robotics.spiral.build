@@ -1,10 +1,12 @@
 //! Datasets and their episodes, the way an operator thinks about recordings:
 //! a dataset is a folder of MCAP files, and each file is one episode.
 use crate::activities::episode::{
-    Episode, EpisodeFactsPresentation as _, EpisodeLabels, SourceLabel,
+    Episode, EpisodeFactsPresentation as _, EpisodeRows, EpisodeStill, EpisodeStills,
+    RowFaceView, SourceLabel, StillMoment,
 };
+use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::components::page_keys::PageKeys;
-use crate::format::{GroupedCountPresentation as _, WallClockPresentation as _};
+use crate::format::GroupedCountPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
     DatasetInspection, DatasetSelection, EpisodeId, ProjectResource,
@@ -117,7 +119,7 @@ pub(super) fn CatalogRail(
             }
             div { class: "data-rail-scroll",
                 match &*result {
-                    None => rsx! { p { class: "data-rail-note", role: "status", "Reading SpiralDB catalog…" } },
+                    None => rsx! { p { class: "data-rail-note", role: "status", "Loading datasets…" } },
                     Some(Err(error)) => rsx! { p { class: "data-rail-note", role: "alert", "{error} Refresh to retry." } },
                     Some(Ok(entries)) => {
                         let needle = filter().to_lowercase();
@@ -177,13 +179,16 @@ fn DatasetBranch(
     let name = dataset.display_name();
     let sql_name = dataset.sql_name();
     // Every dataset says how many episodes it holds, open or not.
-    let counted = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
-        Episode::count(&dataset).await.ok()
-    }));
+    // Read again when the catalog is refreshed, as the episodes are.
+    let count_dataset = dataset.clone();
+    let counted = QueryPolicy::on_demand(QueryDomain::Catalog).use_resource(move || {
+        let dataset = count_dataset.clone();
+        async move { Episode::count(&dataset).await }
+    });
     let members = inspection
         .as_ref()
         .and_then(DatasetInspection::members)
-        .or_else(|| counted.read().flatten());
+        .or_else(|| counted.read().as_ref().and_then(|count| count.as_ref().ok().copied()));
     let select = dataset.clone();
     // A search opens every dataset so its matches show; the operator's own
     // expansion choice returns when the field clears.
@@ -223,7 +228,9 @@ fn DatasetEpisodes(
     let mut has_more = use_signal(|| false);
     let mut offset = use_signal(|| 0_usize);
     let query_dataset = dataset.clone();
-    let mut page = use_resource(move || {
+    // Refresh reads the page again along with the catalog, so the rail's
+    // Refresh refreshes what the rail shows, not only its datasets.
+    let mut page = QueryPolicy::on_demand(QueryDomain::Catalog).use_resource(move || {
         let dataset = query_dataset.clone();
         let offset = offset();
         async move {
@@ -258,13 +265,12 @@ fn DatasetEpisodes(
         filter.clone(),
         actions.on_step_episode,
     );
+    // Stills of the camera that shows the workspace best, as the Dataset
+    // node's are; every episode of a dataset records the same cameras.
+    let camera = EpisodeStills::use_overview_camera(loaded.read().first().map(Episode::selection));
     let pending = *page.state().read() == UseResourceState::Pending;
     let episodes = loaded.read();
-    let labels = EpisodeLabels::of(episodes.iter().map(Episode::facts));
-    let longest = episodes
-        .iter()
-        .filter_map(|episode| episode.facts().duration_seconds())
-        .fold(0.0_f64, f64::max);
+    let listing = EpisodeRows::of(episodes.iter());
     let rows = episodes
         .iter()
         .filter(|episode| episode.matches(&filter))
@@ -273,51 +279,23 @@ fn DatasetEpisodes(
     let unmatched = searching && rows.is_empty() && !episodes.is_empty();
     rsx! {
         Fragment {
+            // The row Curation's Dataset node lists it with, inside the tree
+            // item that makes it one of the rail's rows.
             for episode in rows {
-                {
-                    let label = labels.label(episode.facts());
-                    let selected = selected_episode_id.as_ref() == Some(episode.id());
-                    let facts = episode.facts().clone();
-                    // On a square-root scale, so one runaway take does not
-                    // flatten every other bar into a dot.
-                    let share = facts
-                        .duration_seconds()
-                        .filter(|_| longest > 0.0)
-                        .map_or(0.0, |seconds| (seconds / longest).sqrt() * 100.0);
-                    let opened = OpenedEpisode { episode: episode.clone(), label: label.clone() };
-                    rsx! {
-                        TreeItem { key: "{episode.id()}", class: "data-episode", selected,
-                            id: EpisodeStepper::row_id(episode.id()),
-                            "data-labelled": label.head().is_some(),
-                            title: "{facts.facts_label()}\n{facts.source_uri().unwrap_or_default()}",
-                            onselect: move |_| on_open.call(opened.clone()),
-                            // A label gets the whole first line; the id, date,
-                            // length, and duration share the second. A row
-                            // without a label is one line led by its id.
-                            label: rsx! {
-                                span { class: "data-episode-body",
-                                    match label.head() {
-                                        Some(head) => rsx! {
-                                            span { class: "data-episode-head", "{head}" }
-                                            span { class: "data-episode-sub",
-                                                span { class: "data-episode-id", title: "{episode.id()}", "{Episode::listed_name_of(episode.id())}" }
-                                                if facts.message_start_time().is_some_and(|start| start.has_wall_clock()) {
-                                                    span { "{facts.recorded_date_label()}" }
-                                                }
-                                            }
-                                        },
-                                        None => rsx! {
-                                            span { class: "data-episode-head data-episode-id", title: "{episode.id()}", "{Episode::listed_name_of(episode.id())}" }
-                                        },
-                                    }
-                                    span { class: "data-episode-length", "aria-hidden": "true",
-                                        i { style: "width: {share:.1}%" }
-                                    }
-                                    span { class: "data-episode-duration", "{facts.duration_label()}" }
-                                }
-                            },
+                TreeItem { key: "{episode.id()}", class: "data-episode",
+                    selected: selected_episode_id.as_ref() == Some(episode.id()),
+                    id: EpisodeStepper::row_id(episode.id()),
+                    title: "{episode.facts().facts_label()}\n{episode.facts().source_uri().unwrap_or_default()}",
+                    onselect: {
+                        let opened = OpenedEpisode { episode: episode.clone(), label: listing.label(&episode) };
+                        move |_| on_open.call(opened.clone())
+                    },
+                    label: rsx! {
+                        RowFaceView {
+                            face: listing.face(&episode),
+                            still: rsx! { EpisodeStill { moment: StillMoment::opening(&episode), camera: camera.clone() } },
                         }
-                    }
+                    },
                 }
             }
             if pending {
@@ -405,10 +383,9 @@ impl EpisodeStepper {
             else {
                 return true;
             };
-            let labels = EpisodeLabels::of(episodes.iter().map(Episode::facts));
             let opened = OpenedEpisode {
                 episode: (*next).clone(),
-                label: labels.label(next.facts()),
+                label: EpisodeRows::of(episodes.iter()).label(next),
             };
             Self::release_rail_focus();
             BrowserFocus::reveal_after_render(Self::row_id(next.id()));

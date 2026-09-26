@@ -52,6 +52,10 @@ struct NodeReads {
 pub(in crate::activities::curation) struct PreviewReads(BTreeMap<String, NodeReads>);
 
 impl PreviewReads {
+    /// Whether the preview holds anything a reload would lose.
+    pub(in crate::activities::curation) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
     /// Hold what `node`, configured as it is, answered for `episode` from
     /// `input`, replacing any earlier read of it. A read under another
     /// configuration replaces everything the node read before.

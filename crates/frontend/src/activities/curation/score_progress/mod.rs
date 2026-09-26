@@ -15,10 +15,14 @@ pub(super) use moment::Moment;
 pub(super) use scoring::{MAX_MOMENTS, ProgressScorer};
 
 use super::preview::{PreviewPlan, PreviewProgress};
-use super::review::{EvidenceHeading, FailedEpisodes, NodeBar, NodeNotes, NodeReach};
+use super::primer::{NodePrimer, Primer};
+use super::review::{Counted, FailedEpisodes, NodeBar, NodeNotes, NodeReach};
 use super::select::{RuleReview, RuleSentence, RuleStrip, RuleView};
 use super::state::{CurationController, RunState};
-use crate::activities::episode::{Episode, EpisodeInspection, PlayRequest, StreamCatalog};
+use crate::activities::episode::{
+    Episode, EpisodeHeading, EpisodeInspection, HeadingSubject, PlayRequest, StreamCatalog,
+};
+use crate::components::icons::SpinnerIcon;
 use crate::components::timeline::{
     NumericReading, NumericTrack, TimelineInterval, TimelineSample, TimelineTrack,
 };
@@ -118,7 +122,7 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
                     Some(error) => rsx! {
                         Notice { tone: NoticeTone::Danger, "The episodes could not be read: {error}" }
                     },
-                    None => rsx! { EmptyState { p { "Reading episodes…" } } },
+                    None => rsx! { EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Loading episodes…" } } },
                 }
             }
         };
@@ -131,6 +135,14 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
         .is_stale()
         .then(|| "Out of date: what reaches this node changed since it ran".to_owned());
     let blocked = unsupported.is_some() || uncompiled.is_some();
+    // Nothing scored yet: the workspace says what scoring is for, beside the
+    // run that starts it, rather than an empty strip, map, and index.
+    let unmeasured = input.preview.is_unmeasured();
+    let running_line = controller
+        .activity()
+        .get(&node)
+        .cloned()
+        .unwrap_or_else(|| "Scoring…".to_owned());
     let strips = view.strips();
     let thresholds = strips.iter().map(RuleStrip::threshold).collect::<Vec<_>>();
     rsx! {
@@ -138,15 +150,13 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
             NodeBar {
                 lead: rsx! {
                     RuleSentence { controller, view: view.clone(), thresholds }
-                    p { class: "curation-node-bar-reads",
-                        "against expert demonstrations, read from "
-                        code { "{camera}" }
-                    }
                 },
                 note: NodeNotes::join([unsupported.clone(), uncompiled.clone(), problem(), stale, FailedEpisodes::note(failed.len())]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
-                    p { class: "curation-threshold-tally", role: "status", "{view.tally()}" }
+                    if !unmeasured {
+                        p { class: "curation-threshold-tally", role: "status", "{view.tally()}" }
+                    }
                     if running {
                         Button {
                             purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
@@ -173,8 +183,9 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
                             }
                         }
                         // Scoring runs on this machine and costs nothing; what
-                        // it reads is held until the page reloads.
-                        if !pending.is_empty() {
+                        // it reads is held until the page reloads. Before the
+                        // first score the primer holds the run.
+                        if !pending.is_empty() && !unmeasured {
                             Button {
                                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
                                 disabled: blocked,
@@ -190,7 +201,33 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
                     }
                 },
             }
-            RuleReview { controller, view, strips }
+            if unmeasured {
+                NodePrimer {
+                    primer: Primer::ScoreProgress,
+                    action: rsx! {
+                        if running {
+                            p { class: "curation-primer-status", role: "status",
+                                SpinnerIcon {}
+                                "{running_line}"
+                            }
+                        } else if !pending.is_empty() {
+                            Button {
+                                purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
+                                disabled: blocked,
+                                title: "Score the {unscored} episodes not yet scored, on this machine",
+                                onclick: {
+                                    let start = start.clone();
+                                    let fresh = pending.clone();
+                                    move |_| start(fresh.clone())
+                                },
+                                "Score {Counted::episodes(unscored)}"
+                            }
+                        }
+                    },
+                }
+            } else {
+                RuleReview { controller, view, strips }
+            }
         }
     }
 }
@@ -297,7 +334,7 @@ pub(super) fn MomentEvidence(
             .with_reference(1.0, "1×", "1× is the expert rate"),
     );
     rsx! {
-        EvidenceHeading { subject: episode.name(), episode: Some(episode.id().clone()), facts }
+        EpisodeHeading { subject: HeadingSubject::episode(&episode).with_facts(facts) }
         div { class: "curation-review-player",
             EpisodeInspection {
                 episode,

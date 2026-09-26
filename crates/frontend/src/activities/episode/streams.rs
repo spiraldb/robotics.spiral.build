@@ -178,7 +178,15 @@ impl StreamCatalog {
     /// "left-wrist" and "top". A lone camera keeps its whole name.
     pub(in crate::activities) fn camera_title(&self, camera: &RecordedStream) -> String {
         let names = self.videos().map(RecordedStream::name).collect::<Vec<_>>();
-        let name = camera.name();
+        Self::camera_title_among(camera.name(), &names)
+    }
+    /// What to call camera topic `name` among the episode's `cameras`: the
+    /// part of its name the others do not share ("top", "left-wrist").
+    pub(in crate::activities) fn camera_title_among(name: &str, cameras: &[impl AsRef<str>]) -> String {
+        let mut names = cameras.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        if !names.contains(&name) {
+            names.push(name);
+        }
         let distinct = if names.len() > 1 {
             let prefix = names.shared_prefix_len();
             let suffix = names.shared_suffix_len();

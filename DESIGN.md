@@ -603,11 +603,13 @@ of MCAP files and each file is one episode. The canonical layout at
 - **Catalog rail** (21%, sidebar tone): a filter field with a `/` kbd chip,
   refresh, and an outlined Import; then the dataset tree. A dataset row is a
   D kind mark, the display name, and its episode count in mono. Expanded, it
-  lists chronological episode rows that lead with the task label (or the
-  distinguishing id when unlabelled), then a mono line of id, date, a 3px
-  length bar against the longest episode listed, and the duration. The rail
-  marks what is in front: the front episode tab's row, else the Overview's
-  dataset.
+  lists chronological episodes in the Episode Row every Curation index uses
+  (see Episode Rows): a 64×36 still on the dataset's overview camera, the
+  task label (or the distinguishing id when unlabelled) over a mono line of
+  length bar, id, date, and duration. Filter and Refresh reach the episodes
+  too: the filter matches id and source path, as Curation's does, and
+  Refresh reads the open pages and counts again. The rail marks what is in
+  front: the front episode tab's row, else the Overview's dataset.
 - **Subject tabs:** one Overview tab (D mark) plus one closable tab per
   opened episode (E mark), in the order opened. J and K step the front
   episode tab on through the dataset rather than opening another; Esc brings
@@ -621,10 +623,13 @@ of MCAP files and each file is one episode. The canonical layout at
   the "Episode lengths" distribution (104px of bars with a dashed average
   marker and a mono axis), the "Streams" ledger, and a sidebar-toned footer
   naming the source in mono (`spql.mcap.episodes('dataset_…')`).
-- **Episode subject:** a 40px head naming where it is on one line, whatever
-  the label's length: the D mark and dataset (the way back), "/", the
-  semibold "Episode …id", the mono facts, and the J K step hint at right.
-  Below it, the shared episode inspection.
+- **Episode subject:** the Episode Heading every inspection is headed by
+  (`activities/episode/heading.rs`), here at 40px and led by the way back:
+  the D mark and dataset, "/", the "Episode …id" subject at 13px/560, the
+  mono facts, and the J K step hint at right. Curation's evidence column
+  uses the same heading at 34px, where it meets the index bar's hairline,
+  with a part's words ("Grasp the bottle") and its episode's id when the
+  subject is a subtask or stretch. Below it, the shared episode inspection.
 
 The inspection arranges itself for the room its surface gives it
 (`activities/episode/arrangement.rs`), so it reads the same everywhere. Three
@@ -733,9 +738,11 @@ Every node's workspace has the same anatomy, top to bottom:
   similar's query and Search, a rule as one sentence with its thresholds read
   out (a Select's conditions joined by "and whose", with Add condition;
   Score progress's "Keep moments progressing at least 0.20× the expert
-  rate"), Break down's camera · model · sampling as the button that opens its
-  settings, what Group and the Dataset read ("Every node reads these 100
-  episodes"). At the far end, in one group: a caution
+  rate"), Break down's camera in words ("Watches the top camera") as the
+  button that opens its settings (camera and sampling; the model is the
+  backend's and never shown), what Group and the Dataset read ("Every node
+  reads these 100 episodes"). Topic paths, model ids, and sampling rates
+  stay off the bar. At the far end, in one group: a caution
   note for what needs attention (a missing setting, failed episodes), a
   quiet line for how many episodes reach the node when fewer than all do,
   with a link to the measurement they wait on ("Score the rest"), and the
@@ -769,6 +776,40 @@ Every node's workspace has the same anatomy, top to bottom:
   node has one (the Dataset's Overview, a category's Profile). Choosing a row
   plays from its start and keeps playing. The node's rows lead the timeline
   and the recorded streams fold behind one row.
+- **Primer:** a measurement that has read nothing yet (Break down, Score
+  progress) has no index to list and no recording worth opening, so below
+  its node bar it says what it is for instead (`curation/primer.rs`): a
+  480px drawing that plays its idea once, about 2.5 s on expo-out, and rests
+  on its last frame; two sentences, the problem in ink and the answer in
+  soft ink; and the run itself ("Break down 100 episodes", "Score 100
+  episodes"), which the node bar leaves out until then. Break down's drawing
+  splits one take into reach · grasp · fold · place, lines three takes up on
+  their fold, and picks every fold in lime; Score progress's draws the
+  progress-rate lane as the timeline does (1× reference, dashed cutoff) with
+  a regrasp dipping under the cutoff, which takes the graphite left-out wash
+  while the episode's other stretches are kept. Reduced motion shows the
+  last frame. The card says "Not run yet · 100 episodes" rather than zeros.
+- **Deleting a step:** the card's trash asks in the card's own box, laid
+  over it ("Delete Score progress and the step after it?", Keep / red
+  Delete), so the steps it deletes stay in view; pressing the trash does not
+  select the card. After Delete the step it hung from is selected and
+  focused; after adding a step, the new card is.
+- **Cards:** a card is not itself a button — its + and trash would be
+  buttons inside one. One transparent button covers the card and selects it
+  (named "Score progress: Not run yet · 100 episodes"); the + and trash sit
+  above it, and the card draws the focus ring while that button has focus.
+  The canvas draws an edit in the frame it happens.
+- **A graph without a dataset** asks for one as Data's home offers them:
+  "Choose a dataset", one sentence, and the datasets ledger
+  (`DatasetLedger`), a row pressed to choose it. The switcher's "From
+  dataset" keeps the compact field, since a popover has no room for a
+  ledger; both read the same catalog.
+- **Keys:** J and K step the episode tab in front through the node's index,
+  as they step Data's episodes, and `/` goes to the index's filter.
+- **Saving:** the chip says "Saved" only for a graph Studio has stored;
+  a new, untouched one is "Not saved yet". Previews live in the tab, so a
+  reload asks first ("Leave site?") while unsaved edits, preview reads, or a
+  run would go with it.
 
 ### Training, Rollout
 
@@ -1036,7 +1077,9 @@ one workspace.
 
 Icons are outline geometry at a 1.4 stroke with round caps and joins, 14–16px
 inside a 26–30px target. Kind marks are one mono letter in a 1.5px outline of
-their hue; stage marks put the stage glyph in the same outline. Tab and nav
+their hue, the letter itself mixed 55% toward ink so it clears 4.5:1 on
+every surface; a mark in a tab at the back is faint ink, as that tab's other
+icons are. Stage marks put the stage glyph in the same outline. Tab and nav
 indicators are 2px ink bars with 2px top corners.
 
 ## Components
@@ -1223,17 +1266,23 @@ parent.
 - **Graph canvas:** The pale bench with a dot grid; zoom in, zoom out, and fit
   share one hairline group at bottom left.
 
-### Curation Index Rows
+### Episode Rows
 
-**Every row leads with a still.** An index is scanned before it is read, so
-every row of every node — a subtask, a whole episode, a stretch of one — is
-one anatomy at one height: a 96×54 still on the camera mat, the name over a
-mono facts line, and the measure in a fixed right-hand column.
+**Every row leads with a still.** A list of recordings is scanned before it
+is read, so every row that lists one — Data's rail, and every Curation
+node's index: a subtask, a whole episode, a stretch of one — is one anatomy
+(`activities/episode/listing.rs`, `styles/episode-row.css`): a still on the
+camera mat, the name over a mono facts line, and the measure in a fixed
+right-hand column. A Curation index row is 96×54 at 62px; the rail's is
+64×36 inside its tree item. A row is read aloud as one name with commas
+between its parts ("…daa7587d, 0:14.4").
 
 - **Still:** a subtask's, an episode's, or a stretch's middle, cut on demand
-  on the camera its node read (else the configured camera, else the overview
-  camera), one query per episode, cached per camera, episode and instant for
-  the whole curation.
+  on the camera its node read (else the configured camera, else the dataset's
+  overview camera, which the rail uses too), one query per still, decoded
+  once per project and camera, episode and instant (`EpisodeStills`) and
+  shared by every row that shows it, so coming back to a node, deleting one,
+  or opening Data after Curation paints from what was already decoded.
   Waiting is a shimmer on the recess; failure says why on the mat.
 - **Name:** a subtask's words, clamped to two lines; a recording's label
   when its path gives one; otherwise its id tail ("…206c08ff") in mono.
@@ -1332,7 +1381,10 @@ ease-out. Entrances: popovers 180–220ms, dialogs 200–220ms,
 subject panels 260ms with a 4px rise, toast 320ms, stage cards 320ms. Lists
 deal in with short staggers (tree rows 12ms, dataset rows 40ms, tiles 12ms,
 stage cards 45ms) and the length histogram rises over 520ms, 9ms per bar.
-Only work in progress loops: the 900ms pulse on run and tool dots, the
+Rearrangements (FLIP slides) and Find similar's flight arrive on the same
+curve (`crates/ui/src/foundation/motion.rs`). A measurement's primer plays
+its drawing once, about 2.5s, and rests on its last frame. Only work in
+progress loops: the 900ms pulse on run and tool dots, the
 reconnecting dot's 1.2s pulse, the spinner, and the 1.4s loading shimmer.
 Under `prefers-reduced-motion`, dialogs keep a 120ms fade
 and every rise, stagger, bar growth, and loop is removed.

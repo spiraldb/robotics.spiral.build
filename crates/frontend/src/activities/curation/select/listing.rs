@@ -10,7 +10,7 @@ use crate::activities::curation::document::{CurationNodeKind, EpisodeFact, Selec
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::population::Population;
 use crate::activities::curation::review::{
-    EpisodeOrder, EvidenceHeading, IndexBar, RowStanding, SliceEntry, SliceFace, SubtaskContext,
+    EpisodeOrder, IndexBar, RowStanding, SliceEntry, SliceFace, SubtaskContext,
     SubtaskEntry, SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::score_progress::{
@@ -18,7 +18,9 @@ use crate::activities::curation::score_progress::{
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus};
 use crate::activities::curation::thumbnail::Thumbnails;
-use crate::activities::episode::{Episode, EpisodeInspection, EpisodeLabels};
+use crate::activities::episode::{
+    Episode, EpisodeHeading, EpisodeInspection, EpisodeRows, HeadingSubject,
+};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;
@@ -164,18 +166,18 @@ pub(super) fn EpisodeListing(
         Selection::Episodes { conditions } => conditions.first().map(|condition| condition.fact()),
         _ => None,
     };
-    let labels = EpisodeLabels::of(view.sample.episodes().iter().map(Episode::facts));
+    let rows = EpisodeRows::of(view.sample.episodes());
     let faces = listed
         .items
         .iter()
         .filter_map(|item| {
             let episode = view.sample.episode(episodes.get(*item)?)?;
-            let face = SliceFace::episode(episode, labels.label(episode.facts()).head());
+            let face = SliceFace::episode(&rows, episode);
             // The judged fact is the row's measure, so it is not said twice.
             let face = match fact {
                 Some(EpisodeFact::DurationSeconds) => face.saying(
-                    labels
-                        .label(episode.facts())
+                    rows
+                        .label(episode)
                         .head()
                         .map(|_| Episode::listed_name_of(episode.id()))
                         .into_iter()
@@ -221,10 +223,9 @@ pub(super) fn EpisodeListing(
                             return rsx! {};
                         };
                         rsx! {
-                            EvidenceHeading {
-                                subject: episode.name(),
-                                episode: Some(episode.id().clone()),
-                                facts: EpisodeFact::DurationSeconds.reading(&episode).into_iter().collect::<Vec<_>>(),
+                            EpisodeHeading {
+                                subject: HeadingSubject::episode(&episode)
+                                    .with_facts(EpisodeFact::DurationSeconds.reading(&episode).into_iter().collect()),
                             }
                             div { class: "curation-review-player",
                                 EpisodeInspection { episode, featured_camera: featured.clone() }

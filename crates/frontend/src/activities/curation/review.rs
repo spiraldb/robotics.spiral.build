@@ -9,10 +9,15 @@
 //! moves, and the row the operator chose is always beside its own footage.
 use super::annotate::SubtaskRow;
 use super::document::{CurationNodeKind, PopulationKind};
+use super::episode_tabs::OpenEpisodes;
 use super::state::CurationController;
 use super::thumbnail::{Thumbnail, ThumbnailMoment, Thumbnails};
-use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera, PlayRequest};
+use crate::activities::episode::{
+    Episode, EpisodeHeading, EpisodeInspection, EpisodeRows, FeaturedCamera, HeadingSubject,
+    PlayRequest, RowFace, RowFaceView,
+};
 use crate::components::icons::FindSimilarIcon;
+use crate::components::page_keys::PageKeys;
 use crate::components::timeline::{IntervalTrack, TimelineInterval};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
@@ -236,6 +241,113 @@ impl IndexFocus {
         }
     }
 
+    /// J and K open the next and previous row of the index on screen, as they
+    /// step Data's episodes, and `/` goes to its filter: the keys answer
+    /// wherever focus was left, while Curation is in front.
+    fn use_page_keys() {
+        let activity = crate::shell::activity::WorkspaceActivity::current();
+        let tabs = OpenEpisodes::use_around();
+        PageKeys::use_listener(move |event| {
+            if !activity.is_active() || !PageKeys::is_shortcut(event) {
+                return false;
+            }
+            let step = match event.key().as_str() {
+                "j" | "J" => 1,
+                "k" | "K" => -1,
+                "/" => return Self::focus_filter(),
+                _ => return false,
+            };
+            // The row steps the tab in front on rather than opening another.
+            if let Some(tabs) = tabs {
+                tabs.step_next();
+            }
+            Self::open_adjacent(step)
+        });
+    }
+
+    /// Open the row `step` rows on from the chosen one — the first row when
+    /// none is chosen — and bring it into view. At either end the key is
+    /// still spent, so it does not fall through to the page.
+    fn open_adjacent(step: isize) -> bool {
+        use wasm_bindgen::JsCast as _;
+
+        let Some(index) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.query_selector(Self::INDEX).ok().flatten())
+        else {
+            return false;
+        };
+        let Ok(found) = index.query_selector_all(Self::ROWS) else {
+            return false;
+        };
+        let rows = (0..found.length())
+            .filter_map(|position| found.item(position))
+            .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+            .collect::<Vec<_>>();
+        let chosen = rows
+            .iter()
+            .position(|row| row.get_attribute("aria-current").as_deref() == Some("true"));
+        let next = match chosen {
+            Some(here) => here.checked_add_signed(step).filter(|next| *next < rows.len()),
+            None => (!rows.is_empty()).then_some(0),
+        };
+        if let Some(row) = next.and_then(|next| rows.get(next)) {
+            row.click();
+            Self::reveal(&index, row);
+        }
+        true
+    }
+
+    /// Scroll the index, and only the index, until `row` is inside it. The
+    /// browser's own `scrollIntoView` also scrolls every ancestor that hides
+    /// its overflow, which slid the whole workspace out from under its bars.
+    fn reveal(index: &web_sys::Element, row: &web_sys::HtmlElement) {
+        let (frame, place) = (
+            index.get_bounding_client_rect(),
+            row.get_bounding_client_rect(),
+        );
+        // The bar over the index is sticky, so a row under it is hidden.
+        let covered = index
+            .query_selector(".curation-index-bar")
+            .ok()
+            .flatten()
+            .map_or(0.0, |bar| bar.get_bounding_client_rect().height());
+        let above = place.top() - (frame.top() + covered);
+        let below = place.bottom() - frame.bottom();
+        let scroll = f64::from(index.scroll_top());
+        if above < 0.0 {
+            index.set_scroll_top((scroll + above).round() as i32);
+        } else if below > 0.0 {
+            index.set_scroll_top((scroll + below).round() as i32);
+        }
+    }
+
+    /// Put the caret in the index's filter, with what it says selected.
+    fn focus_filter() -> bool {
+        use wasm_bindgen::JsCast as _;
+
+        let filter = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| {
+                document
+                    .query_selector(".curation-review-index .curation-index-bar input")
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|input| input.dyn_into::<web_sys::HtmlElement>().ok());
+        let Some(filter) = filter else {
+            return false;
+        };
+        let _ = filter.focus();
+        // `select` is the input's own; reached by name, it needs no binding.
+        if let Ok(select) = js_sys::Reflect::get(&filter, &"select".into())
+            .and_then(|select| select.dyn_into::<js_sys::Function>())
+        {
+            let _ = select.call0(&filter);
+        }
+        true
+    }
+
     /// What a row does with a key press: press itself, or hand focus on.
     fn handle(event: &KeyboardEvent, on_select: EventHandler<()>) {
         match event.key() {
@@ -291,18 +403,20 @@ pub(super) fn SubtaskEntry(
                 onclick: move |_| on_select.call(()),
                 onkeydown: move |event: KeyboardEvent| IndexFocus::handle(&event, on_select),
                 Thumbnail { moment: ThumbnailMoment::of_subtask(&row), thumbnails }
-                span { class: "curation-entry-words",
-                    span { class: "curation-entry-description", "{row.description()}" }
-                    span { class: "curation-entry-facts",
+                span { class: "episode-row-words",
+                    span { class: "episode-row-title", "{row.description()}" }
+                    span { class: "episode-row-facts",
                         if let Some(episode) = episode.clone() {
+                            span { class: "ui-sr-only", ", " }
                             span { "{episode}" }
                         }
+                        span { class: "ui-sr-only", ", " }
                         span { "{span}" }
                     }
                 }
                 if let Some(score) = standing.label() {
                     span {
-                        class: "curation-entry-score",
+                        class: "episode-row-measure",
                         "data-answered": "{standing.answered}",
                         title: if standing.answered { "How likely this is the same operation" }
                                else { "This row came back without an answer" },
@@ -325,7 +439,7 @@ pub(super) fn SubtaskEntry(
                         let thumbnail = item
                             .peek()
                             .as_ref()
-                            .and_then(|item| item.query_selector(".curation-thumbnail").ok().flatten())
+                            .and_then(|item| item.query_selector(".episode-still").ok().flatten())
                             .map(|thumbnail| Place::of(&thumbnail));
                         find.call(thumbnail);
                     },
@@ -336,135 +450,38 @@ pub(super) fn SubtaskEntry(
     }
 }
 
-/// What a row of whole episodes or stretches is called: a recording's own
-/// label, or its id, which is set as the measurement it is.
-#[derive(Clone, Debug, PartialEq)]
-struct SliceTitle {
-    words: String,
-    is_id: bool,
-}
-
-/// The small drawing in a row's facts line: an episode's length against the
-/// longest listed, or where a stretch sits in its episode.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum SliceShape {
-    /// A share of the longest episode listed, 0–1.
-    Length(f64),
-    /// Where a stretch starts and ends, as fractions of its episode.
-    Within(f64, f64),
-}
-
-/// The measure a row is ranked or kept by, and what that number is.
-#[derive(Clone, Debug, PartialEq)]
-struct RowMeasure {
-    reading: String,
-    meaning: String,
-}
-
-/// One row of an index of whole episodes or stretches, in the anatomy every
-/// index row shares: a thumbnail, a name over a line of facts, and the measure.
+/// One row of an index that is not a subtask — a whole episode, or a stretch
+/// of one — as every list of recordings words it, and the frame its thumbnail
+/// is.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SliceFace {
-    title: SliceTitle,
-    facts: Vec<String>,
+    face: RowFace,
     thumbnail: ThumbnailMoment,
-    shape: Option<SliceShape>,
-    measure: Option<RowMeasure>,
 }
 
 impl SliceFace {
-    /// A whole episode: its own label when its path gives one, with the id
-    /// beside its length, else its id alone.
-    pub(super) fn episode(episode: &Episode, label: Option<&str>) -> Self {
-        let id = Episode::listed_name_of(episode.id());
-        let seconds = episode.facts().duration_seconds();
-        let (title, mut facts) = match label {
-            Some(label) => (
-                SliceTitle {
-                    words: label.to_owned(),
-                    is_id: false,
-                },
-                vec![id],
-            ),
-            None => (
-                SliceTitle {
-                    words: id,
-                    is_id: true,
-                },
-                Vec::new(),
-            ),
-        };
-        facts.extend(seconds.map(|seconds| seconds.clock_label()));
+    /// A whole episode, as `rows` words it — the row Data's rail gives it.
+    pub(super) fn episode(rows: &EpisodeRows, episode: &Episode) -> Self {
         Self {
-            title,
-            facts,
+            face: rows.face(episode),
             thumbnail: ThumbnailMoment::opening(episode.id()),
-            shape: None,
-            measure: None,
         }
     }
-    /// A stretch of one episode, listed under its episode's heading: named
-    /// by its span, saying how long it runs — a stretch too short to train
-    /// on reads as one — and drawn where it sits in the episode's
-    /// `duration`.
-    pub(super) fn stretch(episode: &EpisodeId, (start, end): (f64, f64), duration: f64) -> Self {
-        let duration = duration.max(f64::EPSILON);
+    /// A stretch of one episode, listed under its episode's heading.
+    pub(super) fn stretch(episode: &EpisodeId, span: (f64, f64), duration: f64) -> Self {
         Self {
-            title: SliceTitle {
-                words: format!("{} – {}", start.clock_label(), end.clock_label()),
-                is_id: true,
-            },
-            facts: vec![format!("{:.1} s", (end - start).max(0.0))],
-            thumbnail: ThumbnailMoment::of_stretch(episode, (start, end)),
-            shape: Some(SliceShape::Within(start / duration, end / duration)),
-            measure: None,
+            face: RowFace::span(span, duration),
+            thumbnail: ThumbnailMoment::of_stretch(episode, span),
         }
-    }
-    pub(super) fn shaped(mut self, shape: SliceShape) -> Self {
-        self.shape = Some(shape);
-        self
     }
     /// Replace the facts line's words, keeping its drawing.
     pub(super) fn saying(mut self, facts: Vec<String>) -> Self {
-        self.facts = facts;
+        self.face = self.face.saying(facts);
         self
     }
     pub(super) fn measured(mut self, reading: String, meaning: impl Into<String>) -> Self {
-        self.measure = Some(RowMeasure {
-            reading,
-            meaning: meaning.into(),
-        });
+        self.face = self.face.measured(reading, meaning);
         self
-    }
-    /// Whether this row names its recording with the words `needle` says.
-    pub(super) fn says(&self, needle: &str) -> bool {
-        let needle = needle.trim().to_lowercase();
-        needle.is_empty()
-            || self.title.words.to_lowercase().contains(&needle)
-            || self
-                .facts
-                .iter()
-                .any(|fact| fact.to_lowercase().contains(&needle))
-    }
-}
-
-/// A row's facts-line drawing.
-#[component]
-fn SliceDrawing(shape: SliceShape) -> Element {
-    match shape {
-        SliceShape::Length(share) => rsx! {
-            span { class: "curation-entry-extent", "aria-hidden": "true",
-                i { style: "width: {share.clamp(0.0, 1.0) * 100.0:.1}%" }
-            }
-        },
-        SliceShape::Within(left, right) => {
-            let (left, right) = (left.clamp(0.0, 1.0), right.clamp(0.0, 1.0));
-            rsx! {
-                span { class: "curation-entry-extent", "aria-hidden": "true",
-                    i { style: "left: {left * 100.0:.2}%; width: {(right - left).max(0.0) * 100.0:.2}%" }
-                }
-            }
-        }
     }
 }
 
@@ -477,6 +494,7 @@ pub(super) fn SliceEntry(
     standing: RowStanding,
     on_select: EventHandler<()>,
 ) -> Element {
+    let SliceFace { face, thumbnail } = face;
     rsx! {
         li { class: "curation-entry-item",
             div {
@@ -486,25 +504,7 @@ pub(super) fn SliceEntry(
                 "aria-current": standing.chosen.then_some("true"),
                 onclick: move |_| on_select.call(()),
                 onkeydown: move |event: KeyboardEvent| IndexFocus::handle(&event, on_select),
-                Thumbnail { moment: face.thumbnail.clone(), thumbnails }
-                span { class: "curation-entry-words",
-                    span {
-                        class: "curation-entry-description",
-                        "data-id": face.title.is_id.then_some("true"),
-                        "{face.title.words}"
-                    }
-                    span { class: "curation-entry-facts",
-                        if let Some(shape) = face.shape.clone() {
-                            SliceDrawing { shape }
-                        }
-                        for fact in face.facts.iter() {
-                            span { "{fact}" }
-                        }
-                    }
-                }
-                if let Some(measure) = face.measure.clone() {
-                    span { class: "curation-entry-score", title: "{measure.meaning}", "{measure.reading}" }
-                }
+                RowFaceView { face, still: rsx! { Thumbnail { moment: thumbnail, thumbnails } } }
             }
         }
     }
@@ -514,6 +514,7 @@ pub(super) fn SliceEntry(
 /// only which one scrolls.
 #[component]
 pub(super) fn SubtaskReview(index: Element, evidence: Element) -> Element {
+    IndexFocus::use_page_keys();
     rsx! {
         div { class: "curation-review",
             div { class: "curation-review-index", {index} }
@@ -555,10 +556,9 @@ pub(super) fn SubtaskEvidence(
     let opened = use_resource(use_reactive(&selection, Episode::open));
     let span = (row.start_time(), row.end_time());
     rsx! {
-        EvidenceHeading {
-            subject: row.description().to_owned(),
-            episode: Some(row.episode().clone()),
-            facts: vec![format!("{} – {}", span.0.clock_label(), span.1.clock_label())],
+        EpisodeHeading {
+            subject: HeadingSubject::part(row.description(), row.episode())
+                .with_facts(vec![format!("{} – {}", span.0.clock_label(), span.1.clock_label())]),
             actions: rsx! {
                 Button {
                     purpose: ActionPurpose::Navigate,
@@ -597,48 +597,6 @@ pub(super) fn SubtaskEvidence(
             None => rsx! {
                 p { class: "curation-review-note", role: "status", "Opening the recording…" }
             },
-        }
-    }
-}
-
-/// What the evidence column is showing, named once, on one line: the
-/// subject, the facts that place it, and at the end the actions that take it
-/// elsewhere.
-///
-/// A subtask's episode is named by its id, cut from the front so the tail
-/// every index heading shows ("…f9e3e090") is the part that stays; it is text,
-/// so it can be selected and pasted. When the subject is the episode itself
-/// its name already says that tail, so the id is the name's tooltip instead.
-#[component]
-pub(super) fn EvidenceHeading(
-    subject: String,
-    /// The episode the subject belongs to, when the subject is not the
-    /// episode itself.
-    #[props(default)]
-    episode: Option<EpisodeId>,
-    #[props(default)] facts: Vec<String>,
-    #[props(default = VNode::empty())] actions: Element,
-) -> Element {
-    let names_itself = episode
-        .as_ref()
-        .is_some_and(|episode| Episode::name_of(episode) == subject);
-    let (subject_title, id) = match episode {
-        Some(episode) if names_itself => (episode.to_string(), None),
-        Some(episode) => (subject.clone(), Some(episode)),
-        None => (subject.clone(), None),
-    };
-    rsx! {
-        header { class: "curation-review-head",
-            p { class: "curation-review-subject", title: "{subject_title}", "{subject}" }
-            p { class: "curation-review-facts",
-                if let Some(episode) = id {
-                    code { class: "curation-review-id", title: "{episode}", "{episode}" }
-                }
-                for fact in facts {
-                    span { "{fact}" }
-                }
-            }
-            div { class: "curation-review-actions", {actions} }
         }
     }
 }

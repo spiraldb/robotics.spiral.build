@@ -19,7 +19,8 @@
 //! scrolls beside a recording that holds still — and `thumbnail` the frame
 //! each of its rows leads with. `threshold` is the strip every rule's
 //! threshold slides on. `episode_tabs` opens the episodes an index's
-//! rows belong to as tabs beside it. `rerun` guards the handful of actions
+//! rows belong to as tabs beside it. `primer` is what a measurement says it
+//! is for until it has measured something. `rerun` guards the handful of actions
 //! that spend money or replace work already measured.
 pub(crate) mod state;
 pub(crate) mod workspace;
@@ -32,6 +33,7 @@ mod graph;
 mod path;
 mod population;
 mod preview;
+mod primer;
 mod rerun;
 mod review;
 mod score_progress;

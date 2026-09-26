@@ -9,4 +9,4 @@ mod import_dataset;
 mod relations;
 mod robot_discovery;
 pub(crate) use client::DatasetClient;
-pub(crate) use dataset_overview::DatasetOverview;
+pub(crate) use dataset_overview::{DatasetLedger, DatasetOverview, DatasetOverviewMemory};

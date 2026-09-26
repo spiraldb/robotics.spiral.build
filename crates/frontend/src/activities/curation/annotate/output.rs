@@ -4,12 +4,14 @@ use super::episodes::AnnotationEpisode;
 use super::subtask::SubtaskRow;
 use crate::activities::curation::episode_tabs::{OpenEpisode, OpenEpisodes};
 use crate::activities::curation::review::{
-    Counted, EvidenceHeading, IndexBar, RowStanding, SubtaskContext, SubtaskEntry, SubtaskIntervals,
+    Counted, IndexBar, RowStanding, SubtaskContext, SubtaskEntry, SubtaskIntervals,
 };
 use crate::activities::curation::thumbnail::Thumbnails;
 #[cfg(all(test, target_arch = "wasm32"))]
 use crate::activities::episode::PlayRequest;
-use crate::activities::episode::{Episode, EpisodeInspection, FeaturedCamera};
+use crate::activities::episode::{
+    Episode, EpisodeHeading, EpisodeInspection, FeaturedCamera, HeadingSubject,
+};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::EpisodeId;
@@ -445,10 +447,9 @@ pub(super) fn AnnotatedEpisode(
     rsx! {
         match playing {
             Some(row) => rsx! {
-                EvidenceHeading {
-                    subject: row.description().to_owned(),
-                    episode: Some(subtasks.episode().clone()),
-                    facts: vec![format!("{} – {}", row.start_time().clock_label(), row.end_time().clock_label())],
+                EpisodeHeading {
+                    subject: HeadingSubject::part(row.description(), subtasks.episode())
+                        .with_facts(vec![format!("{} – {}", row.start_time().clock_label(), row.end_time().clock_label())]),
                     actions: {
                         let row = row.clone();
                         rsx! {
@@ -465,10 +466,9 @@ pub(super) fn AnnotatedEpisode(
                 }
             },
             None => rsx! {
-                EvidenceHeading {
-                    subject: episode.episode().name(),
-                    episode: Some(subtasks.episode().clone()),
-                    facts: vec![Counted::subtasks(subtasks.rows().len()).to_string()],
+                EpisodeHeading {
+                    subject: HeadingSubject::episode(episode.episode())
+                        .with_facts(vec![Counted::subtasks(subtasks.rows().len()).to_string()]),
                 }
             },
         }

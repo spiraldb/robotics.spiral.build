@@ -1,0 +1,314 @@
+/* Curation › primer styles: what a measurement is for, drawn before its first
+   run. Prefix every class with `curation-primer`. Use @layer components like
+   tailwind.css.
+
+   Each drawing plays its idea once when the workspace opens, about two and a
+   half seconds, and rests on its last frame: the rest state is the whole
+   argument, so it is also what reduced motion shows. Every element's own
+   style is where it ends; each animation runs from where it starts. */
+
+@layer components {
+  .curation-primer {
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 32px 24px 48px;
+    overflow: auto;
+    text-align: center;
+  }
+
+  .curation-primer-figure {
+    width: min(480px, 100%);
+    flex-shrink: 0;
+    margin: 0;
+  }
+
+  .curation-primer-figure svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+
+  .curation-primer-figure text {
+    fill: var(--tone-ink-soft);
+    font-family: var(--font-sans);
+    font-size: 11px;
+    text-anchor: middle;
+  }
+
+  .curation-primer-words {
+    display: grid;
+    max-width: 44ch;
+    gap: 6px;
+    color: var(--tone-ink-soft);
+    font-size: 13px;
+    line-height: 1.45;
+    text-wrap: balance;
+  }
+
+  .curation-primer-words p {
+    margin: 0;
+  }
+
+  .curation-primer-lead {
+    color: var(--tone-ink);
+  }
+
+  .curation-primer-action {
+    display: flex;
+    min-height: 30px;
+    align-items: center;
+    gap: 8px;
+    color: var(--tone-ink-soft);
+    font-size: 12px;
+  }
+
+  /* While the first episodes are read, the run says what it is doing where
+     its button was. */
+  .curation-primer-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Break down: one take recorded as one bar splits into its steps; two
+     more takes arrive, slide until their folds line up, and every fold is
+     picked out together — in lime, because picking them is what the rest
+     of Curation does with them. */
+  .curation-primer-track {
+    opacity: 0;
+    fill: var(--tone-sunken);
+    stroke: var(--tone-line);
+    transform-box: fill-box;
+    transform-origin: left center;
+    animation:
+      curation-primer-record 520ms var(--ease-out-expo) both,
+      curation-primer-fade-out 200ms 560ms ease-out backwards;
+  }
+
+  .curation-primer-step {
+    fill: rgb(16 16 16 / 0.05);
+    transform-box: fill-box;
+    transform-origin: left center;
+    animation: curation-primer-dim 420ms 1560ms ease-out both;
+  }
+
+  .curation-primer-step[data-picked="true"] {
+    fill: var(--tone-accent);
+    stroke: var(--tone-accent-strong);
+    animation: curation-primer-picked 420ms 1620ms ease-out both;
+  }
+
+  /* The first take is the one seen splitting. */
+  .curation-primer-take:first-child .curation-primer-step {
+    animation:
+      curation-primer-split 420ms calc(520ms + var(--step) * 60ms) var(--ease-out-expo) both,
+      curation-primer-dim 420ms 1560ms ease-out both;
+  }
+
+  .curation-primer-take:first-child .curation-primer-step[data-picked="true"] {
+    animation:
+      curation-primer-split 420ms calc(520ms + var(--step) * 60ms) var(--ease-out-expo) both,
+      curation-primer-picked 420ms 1620ms ease-out both;
+  }
+
+  .curation-primer-take:not(:first-child) .curation-primer-episode {
+    animation: curation-primer-arrive 460ms calc(900ms + var(--row) * 100ms) var(--ease-out-expo) both;
+  }
+
+  .curation-primer-take {
+    transform: translateX(var(--align));
+    animation: curation-primer-align 680ms 1560ms var(--ease-out-expo) both;
+  }
+
+  .curation-primer-names text {
+    animation: curation-primer-fade-in 320ms calc(680ms + var(--step) * 60ms) ease-out both;
+  }
+
+  .curation-primer-names text[data-picked="true"] {
+    fill: var(--tone-ink);
+    font-weight: 560;
+  }
+
+  .curation-primer-pick {
+    fill: none;
+    stroke: var(--tone-accent-strong);
+    stroke-width: 1.25;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: curation-primer-box 460ms 2080ms var(--ease-out-expo) both;
+  }
+
+  .curation-primer-pick-name {
+    animation: curation-primer-fade-in 360ms 2200ms ease-out both;
+  }
+
+  /* Score progress: the progress rate drawn as the timeline draws it
+     — ink line, 1× reference, dashed cutoff — dips under the cutoff; that
+     stretch takes the graphite wash a left-out stretch wears everywhere
+     else and leaves the episode, whose other stretches are kept. */
+  .curation-primer-reference {
+    stroke: var(--tone-line-strong);
+    stroke-width: 1;
+  }
+
+  .curation-primer-cutoff {
+    stroke: var(--tone-ink-soft);
+    stroke-width: 1;
+    stroke-dasharray: 4 3;
+  }
+
+  .curation-primer-figure .curation-primer-axis {
+    fill: var(--tone-ink-faint);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-anchor: end;
+  }
+
+  .curation-primer-figure .curation-primer-axis[data-cutoff="true"] {
+    fill: var(--tone-ink-soft);
+  }
+
+  .curation-primer-rate {
+    fill: none;
+    stroke: var(--tone-ink);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 1 1;
+    animation: curation-primer-draw 1100ms 120ms linear both;
+  }
+
+  .curation-primer-left-out {
+    fill: rgb(16 16 16 / 0.06);
+    animation: curation-primer-fade-in 320ms 1260ms ease-out both;
+  }
+
+  .curation-primer-stall {
+    animation: curation-primer-fade-in 320ms 1340ms ease-out both;
+  }
+
+  .curation-primer-kept {
+    fill: rgb(16 16 16 / 0.38);
+    animation: curation-primer-keep 420ms 1560ms ease-out both;
+  }
+
+  .curation-primer-cut {
+    fill: transparent;
+    stroke: var(--tone-ink-faint);
+    stroke-dasharray: 3 3;
+    animation: curation-primer-leave 420ms 1500ms ease-out both;
+  }
+
+  .curation-primer-figure .curation-primer-side {
+    animation: curation-primer-fade-in 320ms 1700ms ease-out both;
+  }
+
+  .curation-primer-figure .curation-primer-side[data-left-out="true"] {
+    fill: var(--tone-ink-faint);
+  }
+
+  @keyframes curation-primer-record {
+    from {
+      opacity: 1;
+      transform: scaleX(0);
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes curation-primer-fade-out {
+    from {
+      opacity: 1;
+    }
+  }
+
+  @keyframes curation-primer-fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  @keyframes curation-primer-split {
+    from {
+      opacity: 0;
+      transform: scaleX(0.4);
+    }
+  }
+
+  @keyframes curation-primer-arrive {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+  }
+
+  @keyframes curation-primer-align {
+    from {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes curation-primer-dim {
+    from {
+      fill: rgb(16 16 16 / 0.11);
+    }
+  }
+
+  @keyframes curation-primer-picked {
+    from {
+      fill: rgb(16 16 16 / 0.11);
+      stroke: transparent;
+    }
+  }
+
+  @keyframes curation-primer-box {
+    from {
+      opacity: 0;
+      transform: scale(0.96);
+    }
+  }
+
+  @keyframes curation-primer-draw {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  @keyframes curation-primer-keep {
+    from {
+      fill: rgb(16 16 16 / 0.1);
+    }
+  }
+
+  @keyframes curation-primer-leave {
+    from {
+      fill: rgb(16 16 16 / 0.1);
+      stroke: transparent;
+    }
+  }
+
+  /* Reduced motion keeps the fade and shows the last frame at once. Every
+     part of the drawing is animated by a rule more specific than this one,
+     so the override is important rather than a race of selectors. */
+  @media (prefers-reduced-motion: reduce) {
+    .curation-primer-figure * {
+      animation: none !important;
+    }
+
+    .curation-primer-figure svg {
+      animation: curation-primer-fade-in 200ms ease-out both;
+    }
+  }
+}

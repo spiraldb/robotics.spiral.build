@@ -1,6 +1,6 @@
 /* Curation › review styles: the proportion every measurement's output is read in,
    and the row it is read as. Prefix every class with `curation-review-`,
-   `curation-entries-`, `curation-entry-` or `curation-thumbnail`. Use @layer components
+   `curation-entries-` or `curation-entry-`. Use @layer components
    like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
    must be unlayered too. */
 
@@ -232,84 +232,6 @@
     background: var(--tone-surface);
   }
 
-  /* What the evidence column is showing, above the picture rather than in
-     it, on one line: the subject gives way first, then the facts, and the
-     actions at the end never wrap. */
-  .curation-review-head {
-    display: flex;
-    min-width: 0;
-    height: 34px;
-    flex-shrink: 0;
-    align-items: center;
-    gap: 10px;
-    padding: 0 12px;
-    border-bottom: 1px solid var(--tone-line);
-  }
-
-  .curation-review-subject {
-    min-width: 4rem;
-    flex: 0 1 auto;
-    overflow: hidden;
-    margin: 0;
-    color: var(--tone-ink);
-    font-size: 12px;
-    font-weight: 500;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .curation-review-actions {
-    display: flex;
-    flex-shrink: 0;
-    align-items: center;
-    gap: 12px;
-    margin-left: auto;
-  }
-
-  .curation-review-actions:empty {
-    display: none;
-  }
-
-  /* The facts are measurements and never cut; the subject gives way. */
-  .curation-review-facts {
-    display: flex;
-    min-width: 0;
-    flex: 0 0 auto;
-    margin: 0;
-    overflow: hidden;
-    flex-wrap: nowrap;
-    align-items: center;
-    gap: 8px;
-    white-space: nowrap;
-    color: var(--tone-ink-soft);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* The episode's identifier, as text somebody can select and paste. It was a
-     `title` tooltip, which is none of those things. It is cut from the front,
-     so the tail every index heading names the episode by is what shows. */
-  .curation-review-id {
-    overflow: hidden;
-    /* "…" and eight hex digits: the tail every index row names it by,
-       which the subject gives way to rather than it. */
-    max-width: 9.6ch;
-    flex-shrink: 0;
-    color: var(--tone-ink-soft);
-    font: inherit;
-    direction: rtl;
-    text-align: left;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    user-select: text;
-  }
-
-  .curation-review-id:hover,
-  .curation-review-id:focus-within {
-    max-width: none;
-  }
-
   /* The evidence column takes about a second to open a recording. A short
      fade on arrival says the wait ended; a hard cut said the pane broke. */
   /* A column shorter than the inspection needs scrolls it rather than
@@ -514,187 +436,15 @@
     background: var(--tone-selected);
   }
 
-  .curation-entry-words {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 1px;
-    user-select: text;
-  }
-
-  /* Two lines, because at 1024px four descriptions in five did not fit on
-     one — in the index whose entire job is reading and comparing them. */
-  .curation-entry-description {
-    display: -webkit-box;
-    overflow: hidden;
-    color: var(--tone-ink);
-    font-size: 12px;
-    line-height: 1.35;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-  }
-
-  .curation-entry-facts {
-    display: flex;
-    min-height: 18px;
-    flex-wrap: nowrap;
-    align-items: center;
-    gap: 8px;
-    overflow: hidden;
-    color: var(--tone-ink-soft);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-
-  /* A model's words begin as a sentence does, however the model wrote them;
-     what is stored is left as written. */
-  .curation-entry-description:not([data-id="true"])::first-letter,
-  .curation-review-subject::first-letter {
-    text-transform: uppercase;
-  }
-
-  /* A row named by its id sets it as the identifier it is. */
-  .curation-entry-description[data-id="true"] {
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* The facts line's drawing, before its words: an episode's length against
-     the longest listed, or where a stretch sits in its episode — Data's rail
-     draws the same bar — or a measurement's values across the episode. */
-  .curation-entry-extent {
-    position: relative;
-    display: block;
-    width: 56px;
-    height: 3px;
-    flex-shrink: 0;
-    align-self: center;
-    overflow: hidden;
-    border-radius: 999px;
-    background: var(--tone-line-soft);
-  }
-
-  .curation-entry-extent i {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    min-width: 2px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--tone-ink) 38%, transparent);
-  }
-
-  .curation-entry[aria-current="true"] .curation-entry-extent i {
+  /* The chosen row's bar in ink, as the chosen tree row's in Data. */
+  .curation-entry[aria-current="true"] .episode-row-extent i {
     background: var(--tone-ink);
-  }
-
-  /* Every measure holds the same column, so an index reads as a column of
-     numbers rather than a ragged edge. */
-  .curation-entry-score {
-    width: 3.25rem;
-    flex-shrink: 0;
-    color: var(--tone-ink);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-  }
-
-  .curation-entry-score[data-answered="false"] {
-    color: var(--tone-ink-faint);
-  }
-
-  /* The thumbnail. It holds its box from the first render so a list filling
-     with pictures never reflows. A row waiting for its frame rests on the
-     sunken surface — a screenful of black rectangles read as failure rather
-     than as a list still arriving — and the camera mat comes with the
-     picture. */
-  .curation-thumbnail {
-    position: relative;
-    width: 96px;
-    height: 54px;
-    flex-shrink: 0;
-    overflow: hidden;
-    border-radius: 4px;
-    background: var(--tone-sunken);
-  }
-
-  .curation-thumbnail:is([data-state="ready"], [data-state="failed"]) {
-    background: var(--tone-camera);
-  }
-
-  .curation-thumbnail img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .curation-thumbnail[data-state="ready"] img {
-    animation: curation-thumbnail-arrive 160ms ease-out;
-  }
-
-  @keyframes curation-thumbnail-arrive {
-    from {
-      opacity: 0;
-    }
-  }
-
-  .curation-thumbnail-empty {
-    position: absolute;
-    inset: 0;
-  }
-
-  /* A frame still being decoded says so, because a grey box that means "waiting"
-     and a grey box that means "this failed" are the same box otherwise. */
-  .curation-thumbnail[data-state="waiting"] .curation-thumbnail-empty {
-    background: linear-gradient(
-      100deg,
-      transparent 20%,
-      rgb(16 16 16 / 0.06) 40%,
-      transparent 60%
-    );
-    background-size: 300% 100%;
-    animation: curation-thumbnail-loading 1.4s linear infinite;
-  }
-
-  @keyframes curation-thumbnail-loading {
-    from {
-      background-position: 150% 0;
-    }
-    to {
-      background-position: -150% 0;
-    }
-  }
-
-  .curation-thumbnail[data-state="failed"] .curation-thumbnail-empty {
-    display: flex;
-    align-items: flex-end;
-    overflow: hidden;
-    padding: 3px 4px;
-    color: rgb(255 255 255 / 0.78);
-    font-size: 10px;
-    line-height: 1.2;
-    background: repeating-linear-gradient(
-      135deg,
-      transparent 0 5px,
-      rgb(255 255 255 / 0.08) 5px 10px
-    );
-  }
-
-  /* Facts are read as a sentence of fields, so they are separated the way
-     every other Curation fact line is rather than by a gap alone. */
-  .curation-review-facts > * + *::before {
-    content: "·";
-    margin-right: 8px;
   }
 
   /* A narrow index spends its width on the words. The picture and the score
      are the two things that read at any size, so they give first. */
   @container curation-index (max-width: 22rem) {
-    .curation-thumbnail {
+    .episode-still {
       width: 72px;
       height: 40px;
     }
@@ -705,29 +455,27 @@
       padding: 4px 8px;
     }
 
-    .curation-entry-score {
+    .episode-row-measure {
       width: 2.75rem;
     }
 
     /* The words give way last: the bar that places a row shortens first,
        and facts that still do not fit take a second line rather than
        losing the end of a time. */
-    .curation-entry-extent {
+    .episode-row-extent {
       width: 24px;
     }
 
-    .curation-entry-facts {
+    .episode-row-facts {
       flex-wrap: wrap;
       gap: 0 6px;
     }
   }
 
-  /* Under reduce, a picture and a pane still arrive — they just arrive rather
-     than fade in. The selection transitions stay: they are 100ms of colour,
+  /* Under reduce, a pane still arrives — it just arrives rather than
+     fades in. The selection transitions stay: they are 100ms of colour,
      which is feedback, not movement. */
   @media (prefers-reduced-motion: reduce) {
-    .curation-thumbnail[data-state="ready"] img,
-    .curation-thumbnail[data-state="waiting"] .curation-thumbnail-empty,
     .curation-review-player {
       animation: none;
     }

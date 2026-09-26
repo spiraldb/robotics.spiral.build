@@ -12,6 +12,8 @@
 
 /* Curation styles live in one file per owner. Each file adds only classes
    carrying the `curation-` prefix; nothing here is edited for Curation. */
+@import "./styles/episode-row.css";
+@import "./styles/episode-heading.css";
 @import "./styles/curation-canvas.css";
 @import "./styles/curation-annotate.css";
 @import "./styles/curation-review.css";
@@ -20,6 +22,7 @@
 @import "./styles/curation-score-progress.css";
 @import "./styles/curation-threshold.css";
 @import "./styles/curation-publish.css";
+@import "./styles/curation-primer.css";
 
 /*
   One palette, named by role rather than by hue. A colour is only ever spelled
@@ -226,8 +229,11 @@
   font-size: 8.5px;
 }
 
+/* A tab in the back wears its mark in faint ink, as its other icons do,
+   rather than a faded hue nobody can read. */
 .wb-workspace .wb-tab-item:not(.wb-tab-item-active) .wb-tab-icon .ui-kind-mark {
-  opacity: 0.7;
+  border-color: var(--tone-line-strong);
+  color: var(--tone-ink-faint);
 }
 
 /* Focus is blue everywhere; lime is where you are, not where the keyboard is. */
@@ -3123,24 +3129,18 @@ button.studio-status-fact:hover {
 .data-dataset-count { flex: 0 0 auto; color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
 .data-dataset[data-selected="true"] > .ui-tree-row .data-dataset-count { color: var(--tone-accent-ink); }
 
-.data-episode .ui-tree-label { gap: 10px; padding-block: 5px; }
-.data-episode-body { display: grid; min-width: 0; flex: 1 1 auto; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 10px; row-gap: 3px; }
-.data-episode-head { min-width: 0; overflow: hidden; color: var(--tone-ink-soft); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
-.data-episode[data-labelled="true"] .data-episode-head { grid-column: 1 / -1; color: var(--tone-ink); }
-.data-episode-id { color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
-.data-episode-head.data-episode-id { color: var(--tone-ink-soft); font-size: 12px; }
-.data-episode-sub { display: flex; min-width: 0; gap: 8px; color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 10.5px; white-space: nowrap; }
-.data-episode-length { position: relative; height: 3px; overflow: hidden; border-radius: 2px; background: var(--tone-line-soft); }
-.data-episode-length i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: color-mix(in srgb, var(--tone-ink) 30%, transparent); transition: background-color 120ms ease-out; }
-.data-episode > .ui-tree-row:hover .data-episode-length i { background: color-mix(in srgb, var(--tone-ink) 55%, transparent); }
-.data-episode-duration { color: var(--tone-ink-soft); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
-.data-episode[data-selected="true"] :is(.data-episode-id, .data-episode-sub, .data-episode-duration) { color: var(--tone-accent-ink); }
-.data-episode[data-selected="true"] .data-episode-head.data-episode-id { color: var(--tone-ink); }
-.data-episode[data-selected="true"] .data-episode-length { background: rgb(16 16 16 / 0.1); }
-.data-episode[data-selected="true"] .data-episode-length i { background: var(--tone-ink); }
+/* An episode row is the row Curation's index lists it with (styles/episode-row.css):
+   a still, its name over its facts. The rail is narrower, so its still is too. */
+.data-episode .ui-tree-label { gap: 8px; padding-block: 4px; }
+.data-episode .episode-still { width: 64px; height: 36px; }
+.data-episode .episode-row-extent { width: 32px; }
+.data-episode > .ui-tree-row:hover .episode-row-extent i { background: color-mix(in srgb, var(--tone-ink) 55%, transparent); }
+.data-episode[data-selected="true"] .episode-row-facts { color: var(--tone-accent-ink); }
+.data-episode[data-selected="true"] .episode-row-extent { background: rgb(16 16 16 / 0.1); }
+.data-episode[data-selected="true"] .episode-row-extent i { background: var(--tone-ink); }
 
-.data-subject-path .data-subject-dataset { gap: 6px; flex: 0 1 auto; min-width: 0; color: var(--tone-ink-soft); font-size: 13px; font-weight: 450; }
-.data-subject-path .data-subject-dataset .ui-kind-mark { width: 14px; height: 14px; flex-basis: 14px; border-width: 1.25px; font-size: 8.5px; }
+.episode-heading .data-subject-dataset { gap: 6px; flex: 0 1 auto; min-width: 0; color: var(--tone-ink-soft); font-size: 13px; font-weight: 450; }
+.episode-heading .data-subject-dataset .ui-kind-mark { width: 14px; height: 14px; flex-basis: 14px; border-width: 1.25px; font-size: 8.5px; }
 
 .data-overview-head .data-overview-mark { width: 30px; height: 30px; flex-basis: 30px; border-width: 1.75px; border-radius: 8px; font-size: 14px; }
 .data-overview .data-overview-facts { margin: 0 24px; padding: 12px 0; border-top: 1px solid var(--tone-line-soft); border-bottom: 1px solid var(--tone-line-soft); }
@@ -3156,7 +3156,8 @@ button.studio-status-fact:hover {
 .calibration-joint-check .ui-icon { width: 12px; height: 12px; }
 
 /* Streams ledger: mono measures on hairlines, cameras first. */
-.data-ledger-card { overflow: hidden; border: 1px solid var(--tone-line); border-radius: 8px; }
+/* A narrow pane scrolls a ledger sideways rather than cutting its last column. */
+.data-ledger-card { overflow-x: auto; border: 1px solid var(--tone-line); border-radius: 8px; }
 .data-ledger { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12.5px; }
 .data-ledger th { position: sticky; top: 0; z-index: 1; padding: 8px 12px; border-bottom: 1px solid var(--tone-line); background: var(--tone-sunken); color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.03em; text-align: left; text-transform: uppercase; white-space: nowrap; }
 .data-ledger td { padding: 7px 12px; border-bottom: 1px solid var(--tone-line-soft); vertical-align: middle; }
@@ -3445,36 +3446,20 @@ button.studio-status-fact:hover {
     flex: 1 0 auto;
   }
 
-  /* One line whatever the label's length, so the inspection's room — and
-     with it the arrangement — stays put from one episode to the next. */
-  .data-subject-head {
-    @apply flex h-10 shrink-0 items-center gap-4 overflow-hidden border-b border-line bg-surface pl-3 pr-3;
-  }
-
-  .data-subject-path {
-    @apply flex min-w-0 items-center gap-2;
-    flex: 0 1 auto;
-  }
-
-  .data-subject-path h2 {
-    @apply shrink-0 whitespace-nowrap text-[13px] font-semibold tracking-[-0.01em] text-ink;
+  /* Data's episode tab is headed as every inspection is
+     (styles/episode-heading.css), at the subject head's 40px, led by the
+     dataset it belongs to. One line whatever the label's length, so the
+     inspection's room stays put from one episode to the next. */
+  .data-episode-subject > .episode-heading {
+    @apply h-10 gap-4;
   }
 
   .data-subject-separator {
     @apply text-ink-faint;
   }
 
-  .data-subject-facts {
-    @apply flex shrink-0 items-center gap-x-2 whitespace-nowrap font-mono text-[11.5px] tabular-nums text-ink-faint;
-  }
-
-  .data-subject-facts > span + span::before {
-    @apply mr-2;
-    content: "·";
-  }
-
   .data-subject-keys {
-    @apply ml-auto flex shrink-0 items-center gap-1 text-[11px] text-ink-faint;
+    @apply flex shrink-0 items-center gap-1 text-[11px] text-ink-faint;
   }
 
   .data-subject-keys > span {

@@ -55,6 +55,9 @@ pub(crate) trait StudioDocument:
     /// flight: keep the local content and adopt the stored revision. A save
     /// that answers about a different document is ignored.
     fn acknowledge_save(&mut self, saved: &Self);
+
+    /// Whether Studio has stored this document at least once.
+    fn is_stored(&self) -> bool;
 }
 
 /// Whether what is on screen matches what Studio has stored.
@@ -62,22 +65,31 @@ pub(crate) trait StudioDocument:
 pub(crate) enum DocumentState {
     Saved,
     Draft,
+    /// Never stored and not yet changed: nothing is lost, and nothing is
+    /// saved either.
+    New,
 }
 
 impl DocumentState {
-    pub(crate) const fn of(unsaved: bool) -> Self {
-        if unsaved { Self::Draft } else { Self::Saved }
+    pub(crate) const fn of(unsaved: bool, stored: bool) -> Self {
+        match (unsaved, stored) {
+            (true, _) => Self::Draft,
+            (false, true) => Self::Saved,
+            (false, false) => Self::New,
+        }
     }
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Saved => "Saved",
             Self::Draft => "Unsaved changes",
+            Self::New => "Not saved yet",
         }
     }
     pub(crate) const fn class_name(self) -> &'static str {
         match self {
             Self::Saved => "is-saved",
             Self::Draft => "is-draft",
+            Self::New => "is-new",
         }
     }
 }
@@ -202,6 +214,14 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
 
     pub(crate) fn unsaved_changes(&self) -> bool {
         *self.draft.read() != *self.baseline.read()
+    }
+    /// `unsaved_changes` without subscribing to either document.
+    pub(crate) fn peek_unsaved_changes(&self) -> bool {
+        *self.draft.peek() != *self.baseline.peek()
+    }
+    /// Whether what Studio last stored or served was ever stored at all.
+    pub(crate) fn is_stored(&self) -> bool {
+        self.baseline.read().is_stored()
     }
 
     /// Run `task` on the scope that owns this session, so a command outlives the

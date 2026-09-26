@@ -229,7 +229,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                 .and_then(|list| list.closest(".curation-similar-search").ok().flatten())
                 .and_then(|workspace| {
                     workspace
-                        .query_selector(".curation-similar-asked .curation-thumbnail")
+                        .query_selector(".curation-similar-asked .episode-still")
                         .ok()
                         .flatten()
                 })
