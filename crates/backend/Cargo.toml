@@ -50,3 +50,4 @@ spiral-robotics-inference = { workspace = true, features = ["test-support"] }
 spiral-robotics-storage = { workspace = true, features = ["test-support"] }
 spiral-robotics-training = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+tokio = { version = "1", features = ["test-util"] }

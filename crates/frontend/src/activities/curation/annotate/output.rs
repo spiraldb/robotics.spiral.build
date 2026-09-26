@@ -290,53 +290,58 @@ pub(super) fn SubtaskIndex(
                 "No subtask says “{filter}”." }
         }
         ol { class: "curation-entries curation-entries-grouped", "aria-label": "Annotated subtasks by episode",
+            // The key sits on the loop's own item, so an episode that lands
+            // mid-run moves the groups after it rather than rebuilding them,
+            // and their rows keep the thumbnails they already have.
             for entry in entries {
-                match entry {
-                    IndexEntry::Measured(group) => rsx! {
-                        li { key: "{group.episode()}", class: "curation-entries-group",
-                            "aria-current": (chosen.episode().as_ref() == Some(group.episode())).then_some("true"),
-                            // The heading is a heading as well as a button, so a reader
-                            // moving by heading walks thirty-nine episodes instead of
-                            // finding one heading in the whole workspace.
-                            h3 { class: "curation-entries-heading-slot",
-                                button {
-                                    r#type: "button",
-                                    id: "{IndexHeading::id(group.episode())}",
-                                    class: "curation-entries-heading",
-                                    onclick: {
-                                        let episode = group.episode().clone();
-                                        move |_| chosen.show(&episode)
-                                    },
-                                    span { class: "curation-entries-heading-name", title: "{group.episode()}",
-                                        "{Episode::name_of(group.episode())}" }
-                                    span { class: "curation-entries-heading-count",
-                                        "{Counted::subtasks(group.rows().len())}" }
+                Fragment { key: "{entry.episode()}",
+                    match entry {
+                        IndexEntry::Measured(group) => rsx! {
+                            li { class: "curation-entries-group",
+                                "aria-current": (chosen.episode().as_ref() == Some(group.episode())).then_some("true"),
+                                // The heading is a heading as well as a button, so a reader
+                                // moving by heading walks thirty-nine episodes instead of
+                                // finding one heading in the whole workspace.
+                                h3 { class: "curation-entries-heading-slot",
+                                    button {
+                                        r#type: "button",
+                                        id: "{IndexHeading::id(group.episode())}",
+                                        class: "curation-entries-heading",
+                                        onclick: {
+                                            let episode = group.episode().clone();
+                                            move |_| chosen.show(&episode)
+                                        },
+                                        span { class: "curation-entries-heading-name", title: "{group.episode()}",
+                                            "{Episode::name_of(group.episode())}" }
+                                        span { class: "curation-entries-heading-count",
+                                            "{Counted::subtasks(group.rows().len())}" }
+                                    }
                                 }
-                            }
-                            ol { class: "curation-entries",
-                                for row in group.rows() {
-                                    SubtaskEntry {
-                                        key: "{row.start_time()}",
-                                        row: row.clone(),
-                                        standing: RowStanding::plain(chosen.holds(row))
-                                            .roving(chosen.holds(row) || resting_stop.as_ref() == Some(row)),
-                                        thumbnails,
-                                        on_select: {
-                                            let row = row.clone();
-                                            move |()| chosen.play_row(&row)
-                                        },
-                                        on_find_similar: {
-                                            let row = row.clone();
-                                            move |from| on_find_similar.call((row.clone(), from))
-                                        },
+                                ol { class: "curation-entries",
+                                    for row in group.rows() {
+                                        SubtaskEntry {
+                                            key: "{row.start_time()}",
+                                            row: row.clone(),
+                                            standing: RowStanding::plain(chosen.holds(row))
+                                                .roving(chosen.holds(row) || resting_stop.as_ref() == Some(row)),
+                                            thumbnails,
+                                            on_select: {
+                                                let row = row.clone();
+                                                move |()| chosen.play_row(&row)
+                                            },
+                                            on_find_similar: {
+                                                let row = row.clone();
+                                                move |from| on_find_similar.call((row.clone(), from))
+                                            },
+                                        }
                                     }
                                 }
                             }
-                        }
-                    },
-                    IndexEntry::Failed(failure) => rsx! {
-                        FailedEpisode { key: "{failure.episode()}", failure, on_retry }
-                    },
+                        },
+                        IndexEntry::Failed(failure) => rsx! {
+                            FailedEpisode { failure, on_retry }
+                        },
+                    }
                 }
             }
         }

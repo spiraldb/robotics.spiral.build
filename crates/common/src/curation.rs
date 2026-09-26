@@ -7,7 +7,12 @@
 //! stored document comes back one higher. A mismatch is a `conflict` failure.
 //!
 //! The frontend also compiles each output to one read-only statement; the
-//! backend publishes it under a plain name at the catalog root.
+//! backend publishes it under a plain name at the catalog root. A node's
+//! preview queries run on the backend as one polled run (`preview`).
+mod preview;
+
+pub use preview::{PreviewQuery, PreviewQueryState, PreviewRunStatus};
+
 use crate::sql::UnquotedSqlIdentifier;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};

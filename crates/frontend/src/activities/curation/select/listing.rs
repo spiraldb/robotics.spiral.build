@@ -271,6 +271,23 @@ pub(super) fn SubtaskListing(
     );
     let thumbnails = Thumbnails::use_camera(controller, context.camera());
     let stop = listed.chosen_position();
+    let entries = listed
+        .items
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(position, item)| {
+            let row = rows[item].clone();
+            let standing = match row.similarity() {
+                Some(probability) => {
+                    RowStanding::scored(probability, true, listed.chosen == Some(item))
+                }
+                None => RowStanding::plain(listed.chosen == Some(item)),
+            }
+            .roving(TabStop::at(position, stop));
+            (item, row, standing)
+        })
+        .collect::<Vec<_>>();
     let opening = view.clone();
     rsx! {
         SideReview {
@@ -278,25 +295,19 @@ pub(super) fn SubtaskListing(
             sides,
             rows: (!listed.items.is_empty()).then(|| rsx! {
                 ol { class: "curation-entries", "aria-label": "Subtasks on this side of the rule",
-                    for (position, item) in listed.items.iter().copied().enumerate() {
-                        {
-                            let row = rows[item].clone();
-                            let standing = match row.similarity() {
-                                Some(probability) => RowStanding::scored(probability, true, listed.chosen == Some(item)),
-                                None => RowStanding::plain(listed.chosen == Some(item)),
-                            }
-                            .roving(TabStop::at(position, stop));
-                            let opening = opening.clone();
-                            rsx! {
-                                SubtaskEntry {
-                                    key: "{row.episode()}-{row.start_time()}",
-                                    episode: Episode::listed_name_of(row.episode()),
-                                    row,
-                                    standing,
-                                    thumbnails,
-                                    on_select: move |()| opening.open(tabs, item),
-                                }
-                            }
+                    // Keyed on the loop's own item, so a rule that re-sorts
+                    // the rows moves them, thumbnails and all.
+                    for (item, row, standing) in entries {
+                        SubtaskEntry {
+                            key: "{row.episode()}-{row.start_time()}",
+                            episode: Episode::listed_name_of(row.episode()),
+                            row,
+                            standing,
+                            thumbnails,
+                            on_select: {
+                                let opening = opening.clone();
+                                move |()| opening.open(tabs, item)
+                            },
                         }
                     }
                 }
@@ -497,18 +508,16 @@ pub(super) fn MomentListing(
                             }
                             ol { class: "curation-entries",
                                 for position in group.positions {
-                                    {
-                                        let (episode, (start, end)) = (stretches[position].episode.clone(), stretches[position].span);
-                                        rsx! {
-                                            SliceEntry {
-                                                key: "{start}",
-                                                face: faces[position].clone(),
-                                                thumbnails,
-                                                standing: RowStanding::plain(shown == Some(position))
-                                                    .roving(TabStop::at(position, shown)),
-                                                on_select: move |()| tabs.open(&episode, Some((start, end))),
-                                            }
-                                        }
+                                    SliceEntry {
+                                        key: "{stretches[position].span.0}",
+                                        face: faces[position].clone(),
+                                        thumbnails,
+                                        standing: RowStanding::plain(shown == Some(position))
+                                            .roving(TabStop::at(position, shown)),
+                                        on_select: {
+                                            let (episode, span) = (stretches[position].episode.clone(), stretches[position].span);
+                                            move |()| tabs.open(&episode, Some(span))
+                                        },
                                     }
                                 }
                             }

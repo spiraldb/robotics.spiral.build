@@ -1,6 +1,7 @@
 //! One measurement's preview as a run: the queries it takes, built from the
-//! rows its parent's preview holds, and the pass that sends them and holds
-//! what comes back.
+//! rows its parent's preview holds, and the pass that hands them to the
+//! backend and holds what comes back.
+use super::held_run::HeldRun;
 use super::input::{EpisodeRows, PreviewInput};
 use super::reads::{PreviewRows, ReadInput};
 use crate::activities::curation::annotate::{MAX_SUBTASKS, SubtaskColumns};
@@ -9,16 +10,13 @@ use crate::activities::curation::path::{CurationPath, PathError};
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::score_progress::{MAX_MOMENTS, Moment};
 use crate::activities::curation::state::{CurationController, RunHandle};
-use crate::activities::data::DatasetClient;
-use futures_util::StreamExt as _;
+use spiral_robotics_common::curation::{PreviewQuery, PreviewQueryState};
 use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
-use spiral_robotics_common::relations::EpisodeQueryRequest;
+use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest};
 use std::collections::BTreeMap;
 
-/// How many of a preview's queries are in flight at once: enough to hide
-/// each one's latency, few enough that a hundred episodes do not all start
-/// at once.
-const PREVIEWS_IN_FLIGHT: usize = 8;
+/// How often a pass asks the backend how far its run has got.
+const POLL_INTERVAL_MS: u32 = 1_000;
 /// What one batch of judgments may spend of the 64 KiB a read-only query is
 /// admitted at, leaving room for the step and its categories.
 const MAX_BATCH_BYTES: usize = 60 * 1024;
@@ -139,9 +137,34 @@ impl PreviewPlan {
         (verb, unit)
     }
 
-    /// Send one query and read its answer, by episode.
-    async fn read(&self, job: &PreviewJob) -> Result<BTreeMap<EpisodeId, PreviewRows>, String> {
-        let datasets = DatasetClient::current();
+    /// `job` as the query a run hands the backend, asking for its answer in
+    /// the form this preview reads.
+    fn query(&self, job: &PreviewJob) -> Result<PreviewQuery, String> {
+        let statement = job.statement.clone();
+        match (&self.reading, &job.bound) {
+            (PreviewReading::Moments, Some(bound)) => Ok(PreviewQuery::EpisodeArrow(
+                EpisodeQueryRequest::new(bound.clone(), statement, MAX_MOMENTS),
+            )),
+            (PreviewReading::Subtasks(_), Some(bound)) => Ok(PreviewQuery::EpisodeRows(
+                EpisodeQueryRequest::new(bound.clone(), statement, MAX_SUBTASKS),
+            )),
+            (PreviewReading::Subtasks(_), None) => Ok(PreviewQuery::Rows(QueryRequest::new(
+                statement,
+                MAX_SUBTASKS,
+            ))),
+            (PreviewReading::Moments, None) => {
+                Err("Moments are scored one recording at a time.".into())
+            }
+        }
+    }
+
+    /// Fetch what query `query` of `run`, `job`'s, answered, and read it by
+    /// episode.
+    async fn read(
+        &self,
+        run: &HeldRun,
+        (query, job): (usize, &PreviewJob),
+    ) -> Result<BTreeMap<EpisodeId, PreviewRows>, String> {
         let fail = |error: crate::client::CommandError| error.to_string();
         match (&self.reading, &job.bound) {
             (PreviewReading::Moments, Some(bound)) => {
@@ -149,35 +172,15 @@ impl PreviewPlan {
                     .sample
                     .episode(bound.episode_id())
                     .ok_or("The sample no longer lists this episode.")?;
-                let stream = datasets
-                    .run_episode_arrow_query(&EpisodeQueryRequest::new(
-                        bound.clone(),
-                        job.statement.clone(),
-                        MAX_MOMENTS,
-                    ))
-                    .await
-                    .map_err(fail)?;
+                let stream = run.stream(query).await.map_err(fail)?;
                 let moments = Moment::read(&stream, episode)?;
                 Ok(BTreeMap::from([(
                     episode.id().clone(),
                     PreviewRows::Moments(moments),
                 )]))
             }
-            (PreviewReading::Subtasks(columns), bound) => {
-                let answer = match bound {
-                    Some(bound) => datasets
-                        .run_episode_query(&EpisodeQueryRequest::new(
-                            bound.clone(),
-                            job.statement.clone(),
-                            MAX_SUBTASKS,
-                        ))
-                        .await
-                        .map_err(fail)?,
-                    None => datasets
-                        .run_spiral_query(job.statement.clone(), MAX_SUBTASKS)
-                        .await
-                        .map_err(fail)?,
-                };
+            (PreviewReading::Subtasks(columns), _) => {
+                let answer = run.rows(query).await.map_err(fail)?;
                 let mut rows = BTreeMap::<EpisodeId, Vec<_>>::new();
                 for row in columns.read(&answer, &self.sample)? {
                     rows.entry(row.episode().clone()).or_default().push(row);
@@ -279,10 +282,11 @@ impl Batch<'_> {
     }
 }
 
-/// One node's preview as the curation's run: its queries go out up to eight
-/// at a time, and each answer is held for the session as it lands. Spiral
-/// cannot cancel a running query, so Stop starts no further query and the
-/// ones in flight finish. A failed query never stops the rest.
+/// One node's preview as the curation's run: its queries go to the backend
+/// as one run, which is polled every second, and each answer is fetched and
+/// held for the session as it lands. Spiral cannot cancel a running query, so
+/// Stop starts no further query and the ones in flight finish. A failed query
+/// never stops the rest.
 pub(in crate::activities::curation) struct PreviewPass {
     controller: CurationController,
     run: RunHandle,
@@ -306,16 +310,59 @@ impl PreviewPass {
         let plan = &self.plan;
         let (verb, unit) = plan.doing();
         let total = plan.jobs.iter().map(|job| job.units).sum::<usize>();
-        let mut done = 0;
         self.run.report(format!("{verb} 0 of {total} {unit}"));
-        let mut answers = futures_util::stream::iter(plan.jobs.iter())
-            .take_while(|_| std::future::ready(self.run.wanted()))
-            .map(|job| async move { (job, plan.read(job).await) })
-            .buffered(PREVIEWS_IN_FLIGHT);
-        while let Some((job, answer)) = answers.next().await {
-            self.hold(job, answer);
-            done += job.units;
-            self.run.report(format!("{verb} {done} of {total} {unit}"));
+        let queries = plan.jobs.iter().map(|job| plan.query(job));
+        let started = match queries.collect::<Result<Vec<_>, _>>() {
+            Ok(queries) => HeldRun::start(&queries)
+                .await
+                .map_err(|error| error.to_string()),
+            Err(reason) => Err(reason),
+        };
+        let (held, mut status) = match started {
+            Ok(started) => started,
+            Err(reason) => return self.fail(&plan.jobs, &reason),
+        };
+        let mut read = vec![false; plan.jobs.len()];
+        let mut done = 0;
+        let mut stopping = false;
+        loop {
+            for (query, state) in status.queries().iter().enumerate() {
+                let job = &plan.jobs[query];
+                let answer = match state {
+                    _ if read[query] => continue,
+                    PreviewQueryState::Queued | PreviewQueryState::Running => continue,
+                    PreviewQueryState::Answered => plan.read(&held, (query, job)).await,
+                    PreviewQueryState::Failed(reason) => Err(reason.clone()),
+                };
+                self.hold(job, answer);
+                read[query] = true;
+                done += job.units;
+                self.run.report(format!("{verb} {done} of {total} {unit}"));
+            }
+            if status.is_settled() {
+                return;
+            }
+            if !stopping && !self.run.wanted() {
+                stopping = held.stop().await.is_ok();
+            }
+            gloo_timers::future::TimeoutFuture::new(POLL_INTERVAL_MS).await;
+            status = match held.status().await {
+                Ok(status) => status,
+                Err(error) => {
+                    let unread = (plan.jobs.iter().zip(&read))
+                        .filter(|(_, read)| !**read)
+                        .map(|(job, _)| job.clone())
+                        .collect::<Vec<_>>();
+                    return self.fail(&unread, &error.to_string());
+                }
+            };
+        }
+    }
+
+    /// Hold `reason` for every episode of `jobs`: none of them will be read.
+    fn fail(&self, jobs: &[PreviewJob], reason: &str) {
+        for job in jobs {
+            self.hold(job, Err(reason.to_owned()));
         }
     }
 

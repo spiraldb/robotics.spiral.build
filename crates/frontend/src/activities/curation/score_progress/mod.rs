@@ -149,6 +149,23 @@ impl ScoringInput {
         scored.sort_by(|left, right| slowest(left).total_cmp(&slowest(right)));
         failed.into_iter().chain(scored).collect()
     }
+    /// How `listed` reads as a row: a scored episode with its progress rate
+    /// drawn and its mean beside it, or a failed one saying why.
+    fn face(&self, listed: &ListedEpisode, labels: &EpisodeLabels) -> SliceFace {
+        let episode = listed.episode();
+        let face = SliceFace::episode(episode, labels.label(episode.facts()).head());
+        match listed {
+            ListedEpisode::Scored { progress_rate, .. } => face
+                .shaped(SliceShape::Trace(self.trace(episode)))
+                .measured(
+                    progress_rate
+                        .map(ProgressRate::label)
+                        .unwrap_or_else(|| "—".to_owned()),
+                    ProgressRate::MEANING,
+                ),
+            ListedEpisode::Failed { reason, .. } => face.saying(vec![format!("Failed: {reason}")]),
+        }
+    }
     /// The episode's progress rate across its recording, drawn small in its
     /// row.
     fn trace(&self, episode: &Episode) -> TraceLine {
@@ -252,6 +269,10 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
         .iter()
         .position(|listed| shown.as_ref() == Some(listed.episode().id()));
     let labels = EpisodeLabels::of(input.episodes.iter().map(Episode::facts));
+    let faces = listed
+        .iter()
+        .map(|listed| (listed.episode().id().clone(), input.face(listed, &labels)))
+        .collect::<Vec<_>>();
     let evidence = input.clone();
     rsx! {
         section { class: "curation-score-progress-workspace", "aria-label": "Score progress",
@@ -316,28 +337,17 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
                         }
                     }
                     ol { class: "curation-entries", "aria-label": "Scored episodes, slowest first; each row ends with its mean progress rate",
-                        for (position, listed) in listed.iter().enumerate() {
-                            {
-                                let episode = listed.episode().clone();
-                                let id = episode.id().clone();
-                                let label = labels.label(episode.facts());
-                                let face = SliceFace::episode(&episode, label.head());
-                                let face = match listed {
-                                    ListedEpisode::Scored { progress_rate, .. } => face
-                                        .shaped(SliceShape::Trace(input.trace(&episode)))
-                                        .measured(progress_rate.map(ProgressRate::label).unwrap_or_else(|| "—".to_owned()), ProgressRate::MEANING),
-                                    ListedEpisode::Failed { reason, .. } => face.saying(vec![format!("Failed: {reason}")]),
-                                };
-                                rsx! {
-                                    SliceEntry {
-                                        key: "{id}",
-                                        face,
-                                        thumbnails,
-                                        standing: RowStanding::plain(chosen == Some(position))
-                                            .roving(TabStop::at(position, chosen)),
-                                        on_select: move |()| tabs.open(&id, None),
-                                    }
-                                }
+                        // The key sits on the loop's own item, so a newly scored
+                        // episode moves the rows below it rather than rebuilding
+                        // them, and each keeps the thumbnail it already has.
+                        for (position, (id, face)) in faces.into_iter().enumerate() {
+                            SliceEntry {
+                                key: "{id}",
+                                face,
+                                thumbnails,
+                                standing: RowStanding::plain(chosen == Some(position))
+                                    .roving(TabStop::at(position, chosen)),
+                                on_select: move |()| tabs.open(&id, None),
                             }
                         }
                     }

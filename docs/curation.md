@@ -164,13 +164,12 @@ say how far it has got ("Breaking down 3 of 5 episodes"). What reaches the
 node is its parent's preview rows, written into the statement (`preview/`):
 
 - **Break down and Score progress** read one recording per
-  query, eight queries in flight. Each is handed the intervals of its episode
-  that reach the node, with the episode bound as `$1`, through
-  `/api/queries/episode` (subtasks) or `/api/queries/episode/arrow` (moments).
-  After a Select of moments these are the stretches it keeps, as its step
-  joins them.
+  query. Each is handed the intervals of its episode that reach the node,
+  with the episode bound as `$1`, and answers as rows (subtasks) or as one
+  Arrow stream (moments). After a Select of moments these are the stretches
+  it keeps, as its step joins them.
 - **Find similar and Group similar** read no recording, so they judge the
-  subtasks of many episodes in one `/api/queries` statement: as many as fit
+  subtasks of many episodes in one statement: as many as fit
   in 60 KiB and 1,000 rows, which is one statement for a sample of short
   episodes. One call over many rows costs the same model time as many small
   ones and saves the round trips. The ids travel as text, because Spiral
@@ -178,8 +177,18 @@ node is its parent's preview rows, written into the statement (`preview/`):
   travels as its two fields, rebuilt with `STRUCT_PACK`, because `VALUES`
   takes literals only.
 
-Stop starts no further query and lets the ones in flight finish, since Spiral
-cannot cancel a running query. A failed episode is listed with its reason and
+A pass hands every query to the backend as one run
+(`POST /api/curation-previews`), which answers at once and works through them
+eight at a time. The browser polls it every second
+(`GET /api/curation-previews/{id}`) and fetches each answer as it lands
+(`…/answers/{query}`), so no request of the page waits on a model: a query can
+take a minute, and the browser opens only six connections to the backend.
+
+Stop (`…/stop`) starts no further query and lets the ones in flight finish,
+since Spiral cannot cancel a running query. A run nobody polls for 30 seconds
+stops the same way, since the page that wanted it has gone, and a settled
+run is dropped once it has gone unread that long. Runs live in the backend's
+memory, so a restarted backend holds none. A failed episode is listed with its reason and
 never stops the rest; a failed batch fails each episode in it, since
 `on_error => 'fail'` fails the statement. What the preview reads is held in
 the browser for the session and is gone after a reload.

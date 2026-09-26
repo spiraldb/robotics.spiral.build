@@ -265,6 +265,7 @@ impl OpenProject {
     }
 
     pub(crate) async fn shutdown(&self) {
+        self.curation().shutdown();
         self.rollout().shutdown().await;
     }
 }

@@ -21,23 +21,23 @@ impl QueryCommand {
         }
     }
 
-    pub(super) fn statement(&self) -> &str {
+    pub(crate) fn statement(&self) -> &str {
         &self.statement
     }
-    pub(super) fn max_rows(&self) -> usize {
+    pub(crate) fn max_rows(&self) -> usize {
         self.max_rows
     }
 }
 
 impl QueryCommand {
     /// A preview request, admitted: read-only, with a bounded row count.
-    pub(super) fn admitted(request: QueryRequest) -> Result<Self, OperationError> {
+    pub(crate) fn admitted(request: QueryRequest) -> Result<Self, OperationError> {
         let (statement, max_rows) = request.into_parts();
         Self::new(statement, max_rows).validated()
     }
 
     /// One exact dataset member's query, with its statement admitted the same way.
-    pub(super) fn admitted_for_episode(
+    pub(crate) fn admitted_for_episode(
         request: EpisodeQueryRequest,
     ) -> Result<EpisodeQueryRequest, OperationError> {
         let command = Self::new(request.statement(), request.max_rows()).validated()?;

@@ -6,6 +6,7 @@
 //! There is no in-process save lock: the conditional write in storage is the
 //! single authority on which revision a document currently holds, so two tabs
 //! racing to save produce exactly one winner and one conflict.
+use super::preview::PreviewRuns;
 use crate::OperationError;
 use spiral_robotics_common::curation::{
     CurationDocument, CurationSummary, PublishRequest, UnpublishRequest, ViewName,
@@ -19,11 +20,25 @@ const SAVED_ELSEWHERE: &str = "This curation was saved elsewhere. Reopen it befo
 
 pub(crate) struct CurationManager {
     storage: Arc<StorageManager>,
+    previews: PreviewRuns,
 }
 
 impl CurationManager {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
-        Self { storage }
+        Self {
+            previews: PreviewRuns::new(storage.clone()),
+            storage,
+        }
+    }
+
+    /// The preview runs this project's curations have started.
+    pub(super) fn previews(&self) -> &PreviewRuns {
+        &self.previews
+    }
+
+    /// Abandon every preview run; the project is closing.
+    pub(crate) fn shutdown(&self) {
+        self.previews.shutdown();
     }
 
     pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, OperationError> {
