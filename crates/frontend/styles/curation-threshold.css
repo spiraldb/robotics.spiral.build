@@ -31,8 +31,14 @@
     background: var(--tone-ink);
     transition: transform 100ms ease-out;
   }
-  .curation-threshold-strip-dot[data-kept="false"] {
+  .curation-threshold-strip-dot[data-side="left-out"] {
     background: color-mix(in srgb, var(--tone-ink-faint) 45%, var(--tone-surface));
+  }
+  /* Passing this condition but left out by another: a ring, so a strip
+     shows what the other conditions take away from what it keeps. */
+  .curation-threshold-strip-dot[data-side="elsewhere"] {
+    background: var(--tone-surface);
+    box-shadow: inset 0 0 0 1.5px var(--tone-ink-soft);
   }
   .curation-threshold-strip-dot:hover,
   .curation-threshold-strip-dot[aria-current="true"] {
@@ -57,11 +63,6 @@
   /* The threshold's value under its handle, in the rule's own digits. */
   .curation-threshold-strip-value {
     @apply z-[1] font-medium text-ink;
-  }
-
-  /* Which condition a strip slides, when a rule has several. */
-  .curation-threshold-caption {
-    @apply m-0 text-[11px] text-ink-soft;
   }
 }
 

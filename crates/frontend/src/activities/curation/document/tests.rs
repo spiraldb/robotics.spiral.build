@@ -110,19 +110,24 @@ fn each_node_keeps_by_the_rule_its_kind_and_place_allow() {
             CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
         )
         .unwrap();
-    let categories = payload.add_child(&group, CurationNodeKind::Select).unwrap();
     assert_eq!(rule(&score, &payload), Some(SelectionBasis::Progress));
     assert_eq!(
         rule(&episodes, &payload),
         Some(SelectionBasis::EpisodeFacts)
     );
     assert_eq!(rule(&search, &payload), Some(SelectionBasis::Similarity));
-    assert_eq!(
-        rule(&categories, &payload),
-        Some(SelectionBasis::Categories)
-    );
+    assert_eq!(rule(&group, &payload), Some(SelectionBasis::Categories));
     assert_eq!(rule(&annotate, &payload), None);
-    assert_eq!(rule(&group, &payload), None);
+    // A Select reads only what the dataset recorded, so it follows nothing a
+    // model answered; a grouping chooses its own categories.
+    for measure in [&score, &annotate, &search, &group] {
+        assert!(
+            payload
+                .add_child(measure, CurationNodeKind::Select)
+                .is_err(),
+            "{measure}"
+        );
+    }
     // Every one of them is an output but Break down.
     assert_eq!(
         payload
@@ -134,8 +139,7 @@ fn each_node_keeps_by_the_rule_its_kind_and_place_allow() {
             score.as_str(),
             episodes.as_str(),
             search.as_str(),
-            group.as_str(),
-            categories.as_str()
+            group.as_str()
         ]
     );
     // A rule of another basis is refused, and one the kind keeps by is taken.
@@ -170,21 +174,50 @@ fn each_node_keeps_by_the_rule_its_kind_and_place_allow() {
     );
 }
 
+/// A graph whose grouping has proposed `names`, and the grouping's id.
+fn grouped(names: &[&str]) -> (CurationGraph, String) {
+    let (mut payload, annotate) = annotated_graph();
+    let group = payload
+        .add_child(
+            &annotate,
+            CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
+        )
+        .unwrap();
+    payload
+        .node_mut(&group)
+        .unwrap()
+        .propose_categories(categories(names))
+        .unwrap();
+    (payload, group)
+}
+
+/// The names `node` keeps, in its rule's order.
+fn kept(payload: &CurationGraph, node: &str) -> Vec<String> {
+    match payload.node(node).and_then(CurationNode::keeps) {
+        Some(Selection::Categories { names }) => names.clone(),
+        other => panic!("a rule of categories, not {other:?}"),
+    }
+}
+
 #[test]
 fn a_grouping_holds_its_categories_and_refuses_a_list_the_classifier_would() {
-    let mut grouping = SubtaskGrouping::default();
+    let (mut payload, annotate) = annotated_graph();
+    let group = payload
+        .add_child(
+            &annotate,
+            CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
+        )
+        .unwrap();
     assert!(
-        grouping.categories().is_empty(),
+        kept(&payload, &group).is_empty(),
         "none before any are proposed"
     );
-    grouping
-        .set_categories(categories(&["fold", "grasp"]))
+    let node = payload.node_mut(&group).unwrap();
+    node.propose_categories(categories(&["fold", "grasp"]))
         .unwrap();
-    assert_eq!(grouping.categories()[1].name(), "grasp");
     // The same name twice would be two indistinguishable options.
     assert!(
-        grouping
-            .set_categories(categories(&["fold", "fold"]))
+        node.propose_categories(categories(&["fold", "fold"]))
             .unwrap_err()
             .contains("appears twice")
     );
@@ -192,15 +225,11 @@ fn a_grouping_holds_its_categories_and_refuses_a_list_the_classifier_would() {
         .map(|index| format!("c{index}"))
         .collect::<Vec<_>>();
     let too_many = too_many.iter().map(String::as_str).collect::<Vec<_>>();
-    assert!(grouping.set_categories(categories(&too_many)).is_err());
-    // A refused list leaves the categories as they were.
-    assert_eq!(grouping.categories().len(), 2);
+    assert!(node.propose_categories(categories(&too_many)).is_err());
+    // A refused list leaves the categories, and what is kept, as they were.
+    assert_eq!(kept(&payload, &group), ["fold", "grasp"]);
     assert!(SubtaskCategory::new("fold", " ").is_err());
 
-    let (mut payload, annotate) = annotated_graph();
-    let group = payload
-        .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks(grouping))
-        .unwrap();
     let json: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
     assert_eq!(
         json["nodes"][2]["kind"],
@@ -213,13 +242,83 @@ fn a_grouping_holds_its_categories_and_refuses_a_list_the_classifier_would() {
         })
     );
     assert_eq!(
+        json["nodes"][2]["keeps"],
+        serde_json::json!({"keep": "categories", "names": ["fold", "grasp"]})
+    );
+    assert_eq!(
         CurationGraph::decode(CURATION_ENCODING_VERSION, &payload.encode().unwrap()).unwrap(),
         payload
     );
-    // A document naming a category twice is refused on the way in too.
+    // A document naming a category twice is refused on the way in too, and
+    // so is one keeping a category its grouping does not name.
     let twice = payload.encode().unwrap().replace("\"grasp\"", "\"fold\"");
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, &twice).is_err());
-    assert!(payload.node(&group).is_some());
+    let stray = payload
+        .encode()
+        .unwrap()
+        .replace("\"names\":[\"fold\",", "\"names\":[\"flatten\",");
+    assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, &stray).is_err());
+}
+
+#[test]
+fn a_grouping_keeps_what_it_chose_through_every_edit_of_its_categories() {
+    let (mut payload, group) = grouped(&["fold", "grasp", "smooth"]);
+    assert_eq!(kept(&payload, &group), ["fold", "grasp", "smooth"]);
+    // Leaving a category out is a rule of the grouping's own names.
+    let only = |names: &[&str]| Selection::Categories {
+        names: names.iter().map(|name| (*name).to_owned()).collect(),
+    };
+    payload.set_rule(&group, only(&["fold", "smooth"])).unwrap();
+    assert!(
+        payload.set_rule(&group, only(&["flatten"])).is_err(),
+        "a category the grouping does not name"
+    );
+    let node = payload.node_mut(&group).unwrap();
+    // A renamed category keeps its standing under its new name, and a name
+    // another category holds is refused.
+    node.edit_category(
+        "fold",
+        SubtaskCategory::new("fold in half", "Folding the cloth over itself.").unwrap(),
+    )
+    .unwrap();
+    node.edit_category(
+        "grasp",
+        SubtaskCategory::new("reach", "Moving toward the cloth.").unwrap(),
+    )
+    .unwrap();
+    assert!(
+        node.edit_category("reach", SubtaskCategory::new("smooth", "Flat.").unwrap())
+            .is_err()
+    );
+    assert_eq!(kept(&payload, &group), ["fold in half", "smooth"]);
+    // Merging drops the merged category, and the one it joins keeps both
+    // definitions and its own standing.
+    let node = payload.node_mut(&group).unwrap();
+    node.merge_category("smooth", "reach").unwrap();
+    assert_eq!(kept(&payload, &group), ["fold in half"]);
+    let CurationNodeKind::GroupSimilarSubtasks(grouping) = payload.node(&group).unwrap().kind()
+    else {
+        panic!("a grouping");
+    };
+    assert_eq!(
+        grouping
+            .categories()
+            .iter()
+            .map(|category| (category.name(), category.definition()))
+            .collect::<Vec<_>>(),
+        [
+            ("fold in half", "Folding the cloth over itself."),
+            ("reach", "Moving toward the cloth. Everything that smooths.")
+        ]
+    );
+    let node = payload.node_mut(&group).unwrap();
+    assert!(node.merge_category("reach", "reach").is_err());
+    assert!(node.merge_category("gone", "reach").is_err());
+    // A list proposed afresh is kept whole.
+    node.propose_categories(categories(&["lift", "place"]))
+        .unwrap();
+    assert_eq!(kept(&payload, &group), ["lift", "place"]);
+    assert_eq!(payload.validate(), Ok(()));
 }
 
 #[test]
@@ -343,10 +442,29 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
             "{stored}"
         );
     }
-    // A grouping saved before categories were its configuration decodes as
-    // one with none yet.
-    let unconfigured = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}},{"id":"g","kind":{"type":"group_similar_subtasks"}}],"edges":[{"from":"dataset","to":"a"},{"from":"a","to":"g"}]}"#;
-    let decoded = CurationGraph::decode(CURATION_ENCODING_VERSION, unconfigured).unwrap();
+    // A grouping keeps by its own categories, so one saved without that
+    // rule, or with a Select choosing them after it, is refused.
+    let grouping = r#"{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}},{"id":"g","kind":{"type":"group_similar_subtasks","categories":[{"name":"fold","definition":"Folding."}]}"#;
+    let edges = r#"{"from":"dataset","to":"a"},{"from":"a","to":"g"}"#;
+    for stored in [
+        format!(r#"{{"nodes":[{grouping}}}],"edges":[{edges}]}}"#),
+        format!(
+            r#"{{"nodes":[{grouping},"keeps":{{"keep":"categories","names":["fold"]}}}},{{"id":"s","kind":{{"type":"select"}},"keeps":{{"keep":"categories","names":["fold"]}}}}],"edges":[{edges},{{"from":"g","to":"s"}}]}}"#
+        ),
+    ] {
+        assert!(
+            CurationGraph::decode(CURATION_ENCODING_VERSION, &stored).is_err(),
+            "{stored}"
+        );
+    }
+    let unproposed = format!(
+        r#"{{"nodes":[{},"keeps":{{"keep":"categories","names":[]}}}}],"edges":[{edges}]}}"#,
+        grouping.replace(
+            r#","categories":[{"name":"fold","definition":"Folding."}]"#,
+            ""
+        )
+    );
+    let decoded = CurationGraph::decode(CURATION_ENCODING_VERSION, &unproposed).unwrap();
     assert_eq!(
         decoded.node("g").unwrap().kind(),
         &CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default())
@@ -403,6 +521,24 @@ fn a_view_is_current_until_a_later_save_changes_the_recipe() {
     payload.remove_publication(&short, 6).unwrap();
     assert!(payload.publication(&short).is_none());
     assert!(payload.remove_publication(&short, 7).is_err());
+}
+
+#[test]
+fn the_views_a_stored_payload_publishes_are_read_without_decoding_it() {
+    let (mut payload, long, _) = two_outputs();
+    payload
+        .record_publication(&long, "long_episodes", 3)
+        .unwrap();
+    assert_eq!(
+        PublishedOutput::views_in(&payload.encode().unwrap()),
+        ["long_episodes"]
+    );
+    // A payload of an encoding this Studio no longer reads still names its
+    // views; one naming none, or not a payload at all, publishes nothing.
+    let older = r#"{"nodes":[{"id":"g","kind":{"type":"group_similar_subtasks"}}],"edges":[],"published":[{"node":"s","view":"folds","revision":3}]}"#;
+    assert_eq!(PublishedOutput::views_in(older), ["folds"]);
+    assert!(PublishedOutput::views_in(r#"{"nodes":[]}"#).is_empty());
+    assert!(PublishedOutput::views_in("not a payload").is_empty());
 }
 
 #[test]

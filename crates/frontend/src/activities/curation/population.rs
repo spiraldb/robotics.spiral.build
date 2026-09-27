@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn a_search_keeps_the_close_subtasks_and_a_select_the_chosen_categories() {
+    fn a_grouping_keeps_its_chosen_categories_and_a_search_the_close_subtasks() {
         let mut graph = CurationGraph::new(None);
         let annotate = graph
             .add_child(
@@ -493,30 +493,26 @@ mod tests {
                 CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
             )
             .unwrap();
-        let mut grouping = SubtaskGrouping::default();
-        grouping
-            .set_categories(vec![
-                SubtaskCategory::new("Grasp", "Take hold").unwrap(),
-                SubtaskCategory::new("Fold", "Bring over").unwrap(),
-            ])
-            .unwrap();
+        let grouping = SubtaskGrouping::of(vec![
+            SubtaskCategory::new("Grasp", "Take hold").unwrap(),
+            SubtaskCategory::new("Fold", "Bring over").unwrap(),
+        ]);
         let group = graph
-            .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks(grouping))
+            .add_keeping(
+                &annotate,
+                CurationNodeKind::GroupSimilarSubtasks(grouping),
+                Selection::Categories {
+                    names: vec!["Fold".into()],
+                },
+            )
             .unwrap();
-        let folds = select(
-            &mut graph,
-            &group,
-            Selection::Categories {
-                names: vec!["Fold".into()],
-            },
-        );
         // A search inside the chosen category reads only its rows, and keeps
         // those at least as close as its own cutoff.
         let mut query = SubtaskSearch::default();
         query.set_query("fold the towel");
         let search = graph
             .add_keeping(
-                &folds,
+                &group,
                 CurationNodeKind::FindSimilarSubtasks(query),
                 Selection::Similar { minimum: 0.5 },
             )
@@ -569,9 +565,10 @@ mod tests {
 
         let sample = sample();
         let reader = PopulationReader::new(&graph, &sample, &reads);
+        assert_eq!(reader.judged(&group).len(), 3);
         assert_eq!(
             reader
-                .of(&folds)
+                .of(&group)
                 .subtasks()
                 .iter()
                 .map(SubtaskRow::description)

@@ -24,7 +24,8 @@ const COPY: DocumentBarCopy = DocumentBarCopy::new(
     "New blank curation",
     "Save the graph",
     "Return to the saved graph",
-);
+)
+.deleting("Its graph and every view it publishes are gone for good.");
 
 #[component]
 pub(in crate::activities::curation) fn CurationDocumentBar(
@@ -50,14 +51,16 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
                     DocumentEntry::new(controller.id(), controller.name()),
                     saved,
                     DocumentState::of(controller.unsaved_changes(), controller.is_stored()),
-                ).saving(command == Some(DocumentCommand::Saving)),
+                )
+                .saving(command == Some(DocumentCommand::Saving)),
                 gate: DocumentBarGate::new(waiting.clone(), waiting.clone(), command.is_some())
                     .renaming(waiting),
                 creation: rsx! { CurationDatasetCreation { controller } },
                 on_command: move |command| match command {
                     DocumentBarCommand::Open(Some(id)) => controller.open(id),
                     DocumentBarCommand::Open(None) => controller.create(UNTITLED, None),
-                    DocumentBarCommand::Rename(name) => controller.set_name(name),
+                    DocumentBarCommand::Rename(name) => controller.rename(name, studio),
+                    DocumentBarCommand::Delete(id) => controller.delete(id, studio),
                     DocumentBarCommand::Discard => controller.discard(),
                     DocumentBarCommand::Save => controller.save(studio),
                 },

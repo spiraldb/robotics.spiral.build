@@ -228,6 +228,29 @@ impl ViewPublisher {
     }
 }
 
+/// The views one stored curation publishes, as its payload names them.
+pub(in crate::activities::curation) struct PublishedViews(Vec<String>);
+
+impl PublishedViews {
+    pub(in crate::activities::curation) fn of(payload: &str) -> Self {
+        Self(PublishedOutput::views_in(payload))
+    }
+    /// Drop every one of them, stopping at the first the catalog refuses.
+    /// Dropping a view already gone succeeds, so a delete that stopped
+    /// part-way can simply be asked again.
+    pub(in crate::activities::curation) async fn drop_all(self) -> Result<(), String> {
+        for view in self.0 {
+            let request = HttpRequest::new("POST", "/api/curations/unpublish")
+                .json(&UnpublishRequest::new(view));
+            ProjectClient::current()
+                .mutate::<()>(&[QueryDomain::Catalog], request)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
 /// Publish, at the end of the document bar, and the panel it opens: every
 /// output with the name of its view, the ones to publish chosen.
 #[component]

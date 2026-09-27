@@ -1643,8 +1643,9 @@ button.studio-status-fact:hover {
 @layer components {
 
   /* Document bar: identity on the left,
-     the activity's actions on the right, one 36px line. Switching, creating,
-     and renaming open behind the title so the bar never grows a second row. */
+     the activity's actions on the right, one 36px line. The name is edited
+     where it stands; switching, creating, and deleting open behind the
+     chevron after it, so the bar never grows a second row. */
   /* The bar sits above the workbench so its popover clears the panels'
      own layers (the graph's node and edge tiles are z-indexed). */
   .document-bar {
@@ -1659,31 +1660,44 @@ button.studio-status-fact:hover {
     @apply inline-flex size-6 shrink-0 items-center justify-center text-ink-faint;
   }
 
-  .document-title {
-    @apply min-w-0 max-w-[40rem] gap-1.5 px-2 text-[13px] font-semibold tracking-[-0.015em] text-ink;
+  /* The name reads as the bar's title and is an input all along: a hairline
+     box on hover says it can be typed into, and focus draws the field. */
+  .document-name-field {
+    @apply min-w-0 max-w-[40rem] rounded-md border border-transparent bg-transparent px-2 py-1 text-[13px] font-semibold tracking-[-0.015em] text-ink;
+    field-sizing: content;
+    min-inline-size: 6ch;
+    text-overflow: ellipsis;
+    transition: border-color 100ms ease-out, background-color 100ms ease-out;
+  }
+
+  .document-name-field:hover:not(:focus):not([readonly]) {
+    border-color: var(--tone-line);
+  }
+
+  .document-name-field:focus {
+    @apply outline-none;
+    border-color: var(--tone-focus);
+    background: var(--tone-surface);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-focus) 18%, transparent);
+  }
+
+  .document-name-field[readonly] {
+    @apply cursor-default;
   }
 
   /* The chevron points where the switcher will open, and turns when it has. */
-  .document-title .ui-icon {
+  .document-switch {
+    @apply size-6 shrink-0 justify-center p-0;
+  }
+
+  .document-switch .ui-icon {
     @apply size-3 shrink-0 text-ink-faint;
     rotate: 90deg;
     transition: rotate 160ms var(--ease-out-expo);
   }
 
-  .document-title[aria-expanded="true"] .ui-icon {
+  .document-switch[aria-expanded="true"] .ui-icon {
     rotate: -90deg;
-  }
-
-  .document-name {
-    @apply truncate;
-  }
-
-  .document-rename {
-    @apply flex min-w-0 items-center gap-1;
-  }
-
-  .document-name-input {
-    @apply w-72 max-w-full font-semibold;
   }
 
   .document-state {
@@ -1756,8 +1770,34 @@ button.studio-status-fact:hover {
     @apply max-h-72 overflow-y-auto p-1;
   }
 
+  /* Each saved document is a row that opens it, with its delete at the end:
+     faint until the row is pointed at or reached by keyboard, so the list
+     reads as names first. */
+  .document-switcher-row {
+    @apply relative flex items-center;
+  }
+
   .document-switcher-option {
-    @apply w-full gap-2 pr-2 text-[12px];
+    @apply w-full gap-2 pr-9 text-[12px];
+  }
+
+  .document-switcher-delete {
+    @apply absolute right-1 top-1/2 -translate-y-1/2 text-ink-faint opacity-0;
+    transition: opacity 100ms ease-out, color 100ms ease-out;
+  }
+
+  .document-switcher-row:hover .document-switcher-delete,
+  .document-switcher-delete:focus-visible {
+    @apply opacity-100;
+  }
+
+  .document-switcher-delete:hover {
+    color: var(--tone-danger);
+  }
+
+  /* Asking in place: the row becomes the question and its two answers. */
+  .document-switcher-confirmation {
+    @apply m-0.5 w-full;
   }
 
   .document-switcher-option .ui-icon {
@@ -1795,9 +1835,6 @@ button.studio-status-fact:hover {
     @apply min-w-0 flex-1;
   }
 
-  .document-switcher-rename {
-    @apply justify-self-start;
-  }
 
   /* Shared empty and pending states inside any graph tile. */
   .inline-error {
@@ -1928,7 +1965,7 @@ button.studio-status-fact:hover {
     }
 
     .workflow-stage-card,
-    .document-title .ui-icon {
+    .document-switch .ui-icon {
       transition: none;
     }
 

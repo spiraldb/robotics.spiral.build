@@ -10,7 +10,7 @@ use crate::activities::curation::document::{CurationNodeKind, EpisodeFact, Selec
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::population::Population;
 use crate::activities::curation::review::{
-    EpisodeOrder, IndexBar, RowStanding, SliceEntry, SliceFace, SubtaskContext,
+    EpisodeOrder, IndexBar, RowKeys, RowStanding, SliceEntry, SliceFace, SubtaskContext,
     SubtaskEntry, SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::score_progress::{
@@ -161,35 +161,17 @@ pub(super) fn EpisodeListing(
         tabs.open_first(first)
     }));
     let episodes = view.input.episodes();
-    // The first condition's fact is each row's measure.
-    let fact = match &view.selection {
-        Selection::Episodes { conditions } => conditions.first().map(|condition| condition.fact()),
-        _ => None,
-    };
     let rows = EpisodeRows::of(view.sample.episodes());
     let faces = listed
         .items
         .iter()
         .filter_map(|item| {
             let episode = view.sample.episode(episodes.get(*item)?)?;
-            let face = SliceFace::episode(&rows, episode);
-            // The judged fact is the row's measure, so it is not said twice.
-            let face = match fact {
-                Some(EpisodeFact::DurationSeconds) => face.saying(
-                    rows
-                        .label(episode)
-                        .head()
-                        .map(|_| Episode::listed_name_of(episode.id()))
-                        .into_iter()
-                        .collect(),
-                ),
-                _ => face,
-            };
-            let face = match fact.and_then(|fact| Some((fact, fact.reading(episode)?))) {
-                Some((fact, reading)) => face.measured(reading, fact.label()),
-                None => face,
-            };
-            Some((*item, episode.id().clone(), face))
+            Some((
+                *item,
+                episode.id().clone(),
+                view.episode_face(&rows, episode),
+            ))
         })
         .collect::<Vec<_>>();
     let thumbnails = Thumbnails::use_camera(controller, None);
@@ -247,6 +229,7 @@ pub(super) fn SubtaskListing(
 ) -> Element {
     let view = side.view.clone();
     let rows = view.input.subtasks().to_vec();
+    let keys = RowKeys::of(&rows);
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
     let listed = side.listed(chosen);
     let first = side.opening();
@@ -300,7 +283,7 @@ pub(super) fn SubtaskListing(
                     // the rows moves them, thumbnails and all.
                     for (item, row, standing) in entries {
                         SubtaskEntry {
-                            key: "{row.episode()}-{row.start_time()}",
+                            key: "{keys[item]}",
                             episode: Episode::listed_name_of(row.episode()),
                             row,
                             standing,
@@ -347,6 +330,45 @@ pub(super) fn SubtaskListing(
                 }
             },
         }
+    }
+}
+
+impl RuleView {
+    /// An episode's row under a Select: its measures are the facts the
+    /// conditions read, each once, and a fact the episode fails a condition
+    /// on is marked, so the Left out side says why each row is there. A fact
+    /// that is a measure is not said again in the facts line.
+    fn episode_face(&self, rows: &EpisodeRows, episode: &Episode) -> SliceFace {
+        let conditions = match &self.selection {
+            Selection::Episodes { conditions } => conditions.as_slice(),
+            _ => &[],
+        };
+        let mut facts = Vec::<EpisodeFact>::new();
+        for condition in conditions {
+            if !facts.contains(&condition.fact()) {
+                facts.push(condition.fact());
+            }
+        }
+        let mut face = SliceFace::episode(rows, episode);
+        if facts.contains(&EpisodeFact::DurationSeconds) {
+            face = face.saying(
+                rows.label(episode)
+                    .head()
+                    .map(|_| Episode::listed_name_of(episode.id()))
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        for fact in facts {
+            let Some(reading) = fact.reading(episode) else {
+                continue;
+            };
+            let failing = conditions
+                .iter()
+                .any(|condition| condition.fact() == fact && !condition.holds(episode));
+            face = face.judged(reading, fact.name(), failing);
+        }
+        face
     }
 }
 

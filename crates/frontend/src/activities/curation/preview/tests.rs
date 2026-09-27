@@ -240,12 +240,9 @@ fn a_node_below_a_changed_one_is_stale_and_reads_again_only_what_changed() {
 fn a_judgment_asks_about_as_many_episodes_as_one_query_carries() {
     let mut graph = graph();
     let annotate = graph.add_child(DATASET_NODE_ID, breakdown()).unwrap();
-    let mut grouping = SubtaskGrouping::default();
-    grouping
-        .set_categories(vec![
-            SubtaskCategory::new("fold", "Folding cloth.").unwrap(),
-        ])
-        .unwrap();
+    let grouping = SubtaskGrouping::of(vec![
+        SubtaskCategory::new("fold", "Folding cloth.").unwrap(),
+    ]);
     let group = graph
         .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks(grouping))
         .unwrap();

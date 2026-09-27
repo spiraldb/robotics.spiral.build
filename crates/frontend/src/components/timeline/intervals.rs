@@ -69,7 +69,9 @@ pub(crate) fn IntervalTrackRow(track: IntervalTrack, interaction: TimelineIntera
     let visible = track
         .spans
         .iter()
-        .filter(|span| span.span().1 > view.start() && span.span().0 < view.end());
+        // Keyed by place in the track: spans that overlap may share a start.
+        .enumerate()
+        .filter(|(_, span)| span.span().1 > view.start() && span.span().0 < view.end());
     rsx! {
         div { class: "data-stream data-interval-track", "aria-label": track.label.clone(),
             div { class: "data-stream-name data-interval-name",
@@ -78,8 +80,8 @@ pub(crate) fn IntervalTrackRow(track: IntervalTrack, interaction: TimelineIntera
             }
             div { class: "data-stream-track data-interval-lane",
                 TimelineScrubber { interaction: interaction.clone() }
-                for span in visible {
-                    button { key: "{span.span().0}", r#type: "button",
+                for (place, span) in visible {
+                    button { key: "{place}", r#type: "button",
                         class: "data-interval",
                         "data-chosen": (track.chosen == Some(span.span().0)).then_some("true"),
                         "data-current": (current == Some(span.span().0)).then_some("true"),

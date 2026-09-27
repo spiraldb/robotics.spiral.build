@@ -80,6 +80,29 @@ impl Noun {
     const MOMENT: Self = Self("moment", "moments");
 }
 
+/// The keys a list of subtask rows is keyed by: episode and start, which
+/// usually tell rows apart, with a count after any repeat. Overlapping
+/// subtasks, and subtasks cut to the start of the stretch that reached them,
+/// can share both, and two siblings sharing a key stop the page.
+pub(super) struct RowKeys;
+
+impl RowKeys {
+    pub(super) fn of<'a>(rows: impl IntoIterator<Item = &'a SubtaskRow>) -> Vec<String> {
+        let mut seen = std::collections::HashMap::<String, usize>::new();
+        rows.into_iter()
+            .map(|row| {
+                let key = format!("{}-{}", row.episode(), row.start_time());
+                let repeats = seen.entry(key.clone()).or_default();
+                *repeats += 1;
+                match *repeats {
+                    1 => key,
+                    repeat => format!("{key}~{repeat}"),
+                }
+            })
+            .collect()
+    }
+}
+
 /// The order an index lists episodes in: the order they were measured, each
 /// at its first sight so the rows of one episode stay together.
 ///
@@ -288,7 +311,9 @@ impl IndexFocus {
             .iter()
             .position(|row| row.get_attribute("aria-current").as_deref() == Some("true"));
         let next = match chosen {
-            Some(here) => here.checked_add_signed(step).filter(|next| *next < rows.len()),
+            Some(here) => here
+                .checked_add_signed(step)
+                .filter(|next| *next < rows.len()),
             None => (!rows.is_empty()).then_some(0),
         };
         if let Some(row) = next.and_then(|next| rows.get(next)) {
@@ -415,12 +440,14 @@ pub(super) fn SubtaskEntry(
                     }
                 }
                 if let Some(score) = standing.label() {
-                    span {
-                        class: "episode-row-measure",
-                        "data-answered": "{standing.answered}",
-                        title: if standing.answered { "How likely this is the same operation" }
-                               else { "This row came back without an answer" },
-                        "{score}"
+                    span { class: "episode-row-measures",
+                        span {
+                            class: "episode-row-measure",
+                            "data-answered": "{standing.answered}",
+                            title: if standing.answered { "How likely this is the same operation" }
+                                   else { "This row came back without an answer" },
+                            "{score}"
+                        }
                     }
                 }
             }
@@ -481,6 +508,11 @@ impl SliceFace {
     }
     pub(super) fn measured(mut self, reading: String, meaning: impl Into<String>) -> Self {
         self.face = self.face.measured(reading, meaning);
+        self
+    }
+    /// One more measure, `failing` when it is what leaves the row out.
+    pub(super) fn judged(mut self, reading: String, meaning: &str, failing: bool) -> Self {
+        self.face = self.face.judged(reading, meaning, failing);
         self
     }
 }
@@ -822,6 +854,17 @@ mod tests {
         assert_eq!(order.place(&first), 0);
         assert_eq!(order.place(&second), 1);
         assert_eq!(order.place(&unseen), 2);
+    }
+
+    #[test]
+    fn rows_sharing_an_episode_and_a_start_get_keys_of_their_own() {
+        let row = |start: f64, end: f64| {
+            SubtaskRow::new(EpisodeId::fixture(1), (start, end), "fold").unwrap()
+        };
+        let keys = RowKeys::of(&[row(0.0, 2.0), row(0.0, 3.0), row(1.0, 2.0), row(0.0, 4.0)]);
+        let unique = keys.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), 4, "{keys:?}");
+        assert_eq!(keys[2], format!("{}-1", EpisodeId::fixture(1)));
     }
 
     #[test]

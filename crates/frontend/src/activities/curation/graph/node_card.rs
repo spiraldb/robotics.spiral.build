@@ -220,15 +220,33 @@ impl NodeCard {
                     None => asked,
                 }
             }
+            // How many of its categories it keeps, then how many of the
+            // subtasks it grouped are in them.
             CurationNodeKind::GroupSimilarSubtasks(grouping) => {
+                let kept = match node.keeps() {
+                    Some(Selection::Categories { names }) => names.len(),
+                    _ => 0,
+                };
                 let line = match grouping.categories().len() {
                     0 => "No categories yet".to_owned(),
-                    categories => Counted::categories(categories).to_string(),
+                    categories => format!("{kept} of {}", Counted::categories(categories)),
                 };
-                reader.map_or_else(
-                    || line.clone(),
-                    |reader| Self::stale(line.clone(), node, reader),
-                )
+                match reader {
+                    Some(reader) => {
+                        let judged = reader.judged(node.id()).len();
+                        let line = if judged == 0 {
+                            line
+                        } else {
+                            format!(
+                                "{line} · {} of {}",
+                                reader.of(node.id()).len(),
+                                Counted::subtasks(judged)
+                            )
+                        };
+                        Self::stale(line, node, reader)
+                    }
+                    None => line,
+                }
             }
             // A moment is one frame, so what the node keeps is said as the
             // recording it adds up to, of the recording it scored: what
@@ -340,8 +358,8 @@ impl NodeCard {
 mod tests {
     use super::super::super::annotate::SubtaskRow;
     use super::super::super::document::{
-        Comparison, EpisodeCondition, EpisodeFact, SubtaskAnnotation, SubtaskGrouping,
-        SubtaskSearch,
+        Comparison, EpisodeCondition, EpisodeFact, SubtaskAnnotation, SubtaskCategory,
+        SubtaskGrouping, SubtaskSearch,
     };
     use super::super::super::preview::{PreviewReads, PreviewRows, ReadInput};
     use super::*;
@@ -456,9 +474,11 @@ mod tests {
             card(&cards, &annotate).menu().expect("menu").labels(),
             ["Find similar subtasks", "Group similar subtasks"]
         );
+        // A grouping keeps its own categories, so what follows it reads the
+        // subtasks it kept.
         assert_eq!(
             card(&cards, &group).menu().expect("menu").labels(),
-            ["Select"]
+            ["Find similar subtasks", "Group similar subtasks"]
         );
         assert!(card(&cards, &annotate).removable());
 
@@ -472,7 +492,24 @@ mod tests {
         {
             config.set_query("make the first fold");
         }
+        payload
+            .node_mut(&group)
+            .unwrap()
+            .propose_categories(vec![
+                SubtaskCategory::new("Grasp", "Take hold.").unwrap(),
+                SubtaskCategory::new("Fold", "Bring over.").unwrap(),
+            ])
+            .unwrap();
+        payload
+            .set_rule(
+                &group,
+                Selection::Categories {
+                    names: vec!["Fold".into()],
+                },
+            )
+            .unwrap();
         let cards = NodeCard::all(&payload, None);
+        assert_eq!(card(&cards, &group).summary(), "1 of 2 categories");
         assert_eq!(
             card(&cards, &annotate).summary(),
             "Subtasks of every episode"

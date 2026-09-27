@@ -191,8 +191,9 @@ never becomes the motor-control runtime.
   - **Curation** owns graphs rooted at one dataset whose edges carry episode
     intervals: measures (Break down subtasks, Find similar, Group similar,
     Score progress) add properties or cut intervals, Score progress and Find
-    similar keeping what passes their own threshold, and Selects keep the
-    intervals that pass their conditions. A path compiles to one read-only
+    similar keeping what passes their own threshold and Group similar the
+    categories it keeps, and Selects keep the episodes whose recorded facts
+    pass their conditions. A path compiles to one read-only
     Spiral statement. Each measure previews its own step over the rows its
     parent's preview holds, from the first 100 episodes. Every node but the
     dataset and Break down is an output, and Publish turns the ones chosen

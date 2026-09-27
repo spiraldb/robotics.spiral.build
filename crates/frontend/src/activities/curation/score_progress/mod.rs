@@ -17,7 +17,7 @@ pub(super) use scoring::{MAX_MOMENTS, ProgressScorer};
 use super::preview::{PreviewPlan, PreviewProgress};
 use super::primer::{NodePrimer, Primer};
 use super::review::{Counted, FailedEpisodes, NodeBar, NodeNotes, NodeReach};
-use super::select::{RuleReview, RuleSentence, RuleStrip, RuleView};
+use super::select::{ProgressRule, RuleReview, RuleStrip, RuleView};
 use super::state::{CurationController, RunState};
 use crate::activities::episode::{
     Episode, EpisodeHeading, EpisodeInspection, HeadingSubject, PlayRequest, StreamCatalog,
@@ -144,13 +144,11 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
         .cloned()
         .unwrap_or_else(|| "Scoring…".to_owned());
     let strips = view.strips();
-    let thresholds = strips.iter().map(RuleStrip::threshold).collect::<Vec<_>>();
+    let threshold = strips.first().map(RuleStrip::threshold);
     rsx! {
         section { class: "curation-score-progress-workspace", "aria-label": "Score progress",
             NodeBar {
-                lead: rsx! {
-                    RuleSentence { controller, view: view.clone(), thresholds }
-                },
+                lead: rsx! { ProgressRule { threshold } },
                 note: NodeNotes::join([unsupported.clone(), uncompiled.clone(), problem(), stale, FailedEpisodes::note(failed.len())]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
@@ -226,7 +224,7 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
                     },
                 }
             } else {
-                RuleReview { controller, view, strips }
+                RuleReview { view, strips }
             }
         }
     }

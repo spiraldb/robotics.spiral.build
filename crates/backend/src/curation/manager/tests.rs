@@ -71,6 +71,39 @@ async fn each_save_returns_the_next_revision_and_a_stale_one_conflicts() {
 }
 
 #[tokio::test]
+async fn a_delete_removes_only_the_revision_it_names() {
+    let fixture = CurationFixture::new();
+    let saved = fixture
+        .manager
+        .save(CurationFixture::document())
+        .await
+        .unwrap();
+    let next = fixture.manager.save(saved.clone()).await.unwrap();
+    // The revision the caller loaded is gone: the stored copy stays.
+    assert_eq!(
+        fixture
+            .manager
+            .delete(CurationDeletion::new("folding", saved.revision()))
+            .await,
+        Err(OperationError::Conflict(DELETE_SAVED_ELSEWHERE.into()))
+    );
+    assert_eq!(fixture.manager.load("folding").await.unwrap(), next);
+    fixture
+        .manager
+        .delete(CurationDeletion::new("folding", next.revision()))
+        .await
+        .unwrap();
+    assert!(fixture.manager.list().await.unwrap().is_empty());
+    assert!(matches!(
+        fixture
+            .manager
+            .delete(CurationDeletion::new("folding", next.revision()))
+            .await,
+        Err(OperationError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
 async fn a_publish_is_refused_before_the_catalog_when_its_name_is_not_an_identifier() {
     let fixture = CurationFixture::new();
     for name in ["", "2folds", "folds; DROP TABLE robots", "my folds"] {

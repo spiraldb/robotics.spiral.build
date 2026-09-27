@@ -1,5 +1,6 @@
-//! Select: keep part of what reaches the node by what the node above it
-//! measured, and show exactly what is kept and what is left out.
+//! Select: keep the episodes whose recorded facts — duration, message count,
+//! channel count, file size — meet every one of its conditions, and show
+//! exactly what is kept and what is left out, and by which condition.
 //!
 //! The review is any rule's, not only a Select's: Score progress keeps its
 //! moments by a rule of its own and reads them here too. It reads top to
@@ -10,20 +11,20 @@
 mod listing;
 mod rule;
 
-pub(super) use rule::RuleSentence;
+pub(super) use rule::ProgressRule;
 
-use super::document::{Comparison, CurationNode, CurationNodeKind, Selection};
+use super::document::{Comparison, CurationNode, CurationNodeKind, EpisodeCondition, Selection};
 use super::episode_map::{EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, SegmentPaint};
 use super::episode_tabs::{OpenEpisode, OpenEpisodes};
 use super::population::{EpisodeSample, Population, Slice};
 use super::review::{Counted, NodeBar, NodeReach};
 use super::state::CurationController;
-use super::threshold::{AxisUnit, StripDot, Threshold, ThresholdStrip};
-use crate::format::ClockPresentation as _;
+use super::threshold::{AxisUnit, DotSide, StripDot, Threshold, ThresholdStrip};
 use crate::components::icons::SpinnerIcon;
+use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use listing::{EpisodeListing, ListedSide, MomentListing, SubtaskListing};
-use rule::RuleEdit;
+use rule::EpisodeConditions;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{ActionPurpose, EmptyState, ModeButton, ModeGroup, Notice, NoticeTone};
 
@@ -39,6 +40,7 @@ enum Showing {
 #[derive(Clone, PartialEq)]
 pub(in crate::activities::curation) struct RuleView {
     node: String,
+    controller: CurationController,
     selection: Selection,
     /// The node the rule is stated in terms of: the measure above a Select,
     /// or the node that keeps by a rule of its own.
@@ -88,6 +90,7 @@ impl RuleView {
             };
             Some(Self {
                 node: node.to_owned(),
+                controller,
                 selection: current.keeps()?.clone(),
                 measure: measure.clone(),
                 input,
@@ -95,6 +98,11 @@ impl RuleView {
                 sample,
             })
         })
+    }
+    /// Replace the rule. The document refuses a rule of another basis, so a
+    /// slip can never re-point a node at something else.
+    fn set(&self, rule: Selection) {
+        let _ = self.controller.set_rule(&self.node, rule);
     }
     /// Whether the rule keeps each item that reaches it, in input order.
     fn kept(&self) -> Vec<bool> {
@@ -156,14 +164,19 @@ impl RuleView {
     }
     /// Every threshold the rule slides, each with the values it divides: one
     /// per condition of a Select of episodes, whose dots are faded where that
-    /// condition alone leaves the episode out, or Score progress's least
-    /// progress rate. A rule of categories has no axis.
+    /// condition leaves the episode out and rings where only another one
+    /// does, or Score progress's least progress rate. Find similar slides its
+    /// cutoff over its own ranking.
     pub(in crate::activities::curation) fn strips(&self) -> Vec<RuleStrip> {
         match (&self.selection, &self.input) {
             (Selection::Episodes { conditions }, Population::Episodes(episodes)) => {
                 let episodes = episodes
                     .iter()
                     .filter_map(|id| self.sample.episode(id))
+                    .collect::<Vec<_>>();
+                let kept = episodes
+                    .iter()
+                    .map(|episode| self.selection.keeps_episode(episode))
                     .collect::<Vec<_>>();
                 conditions
                     .iter()
@@ -173,11 +186,16 @@ impl RuleView {
                             .iter()
                             .map(|episode| condition.fact().of(episode))
                             .collect::<Vec<_>>();
-                        let passes = episodes
+                        let sides = episodes
                             .iter()
-                            .map(|episode| condition.holds(episode))
+                            .zip(&kept)
+                            .map(|(episode, kept)| match (condition.holds(episode), kept) {
+                                (false, _) => DotSide::LeftOut,
+                                (true, false) => DotSide::LeftOutElsewhere,
+                                (true, true) => DotSide::Kept,
+                            })
                             .collect::<Vec<_>>();
-                        let dots = StripDot::of(&values, &passes);
+                        let dots = StripDot::on_sides(&values, &sides);
                         let threshold = Threshold::over(
                             &dots,
                             condition.value(),
@@ -206,21 +224,18 @@ impl RuleView {
                     dots,
                 }]
             }
-            // Find similar slides its cutoff over its own ranking.
             _ => Vec::new(),
         }
     }
-    /// The rule with `knob` slid to `value`.
-    fn slid(&self, knob: RuleKnob, value: f64) -> Selection {
-        match (knob, self.selection.clone()) {
-            (RuleKnob::Condition(index), Selection::Episodes { mut conditions }) => {
-                if let Some(condition) = conditions.get_mut(index) {
-                    *condition = condition.at(value);
-                }
-                Selection::Episodes { conditions }
-            }
-            (_, rule) => rule.with_minimum(value),
-        }
+    /// How many of the episodes reaching a Select `condition` leaves out,
+    /// whatever the others say.
+    fn leaves_out(&self, condition: &EpisodeCondition) -> usize {
+        self.input
+            .episodes()
+            .iter()
+            .filter_map(|id| self.sample.episode(id))
+            .filter(|episode| !condition.holds(episode))
+            .count()
     }
     /// Where one item of the input plays: its episode, and its stretch unless
     /// the item is the episode whole.
@@ -266,31 +281,16 @@ impl RuleView {
     }
     /// What an empty side of the rule says in place of its list.
     fn empty_side(&self, listed_kept: bool) -> &'static str {
-        match (&self.selection, listed_kept) {
+        match listed_kept {
             _ if self.input.len() == 0 => match self.measure.kind() {
                 CurationNodeKind::ScoreProgress(_) => {
                     "No episode is scored yet. Run scores them on this machine."
                 }
-                CurationNodeKind::GroupSimilarSubtasks(_) => "Group the subtasks above first.",
                 _ => "Nothing reaches this rule yet.",
             },
-            (Selection::Categories { names }, true) if names.is_empty() => {
-                "Choose the categories to keep above."
-            }
-            (_, true) => "Nothing passes this rule. Loosen it above to keep something.",
-            (_, false) => "Nothing is left out: everything that reaches this rule passes it.",
+            true => "Nothing passes this rule. Loosen it above to keep something.",
+            false => "Nothing is left out: everything that reaches this rule passes it.",
         }
-    }
-    /// Why nothing can be judged yet, when the grouping above has not read
-    /// any episode.
-    fn unmeasured(&self) -> Option<String> {
-        (matches!(
-            self.measure.kind(),
-            CurationNodeKind::GroupSimilarSubtasks(_)
-        ) && self.input.len() == 0)
-            .then(|| {
-                "Group the subtasks above first, then choose the categories to keep.".to_owned()
-            })
     }
 }
 
@@ -337,8 +337,8 @@ impl MapSegments {
     }
 }
 
-/// The workspace shown for a selected Select node: its rule on the node's
-/// bar, what it keeps, and the review of both sides.
+/// The workspace shown for a selected Select node: what it keeps by on the
+/// node's bar, its conditions, and the review of both sides.
 #[component]
 pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> Element {
     let Some(view) = RuleView::of(controller, &node) else {
@@ -354,19 +354,21 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
         };
     };
     let strips = view.strips();
-    let thresholds = strips.iter().map(RuleStrip::threshold).collect::<Vec<_>>();
     rsx! {
         section { class: "curation-select-workspace", "aria-label": "Select",
             NodeBar {
-                lead: rsx! { RuleSentence { controller, view: view.clone(), thresholds } },
-                note: view.unmeasured(),
+                lead: rsx! {
+                    p { class: "curation-node-bar-reads",
+                        "Keeps the episodes whose recorded facts meet every condition"
+                    }
+                },
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 // The bar ends with what the rule gives training.
                 actions: rsx! {
                     p { class: "curation-threshold-tally", role: "status", "{view.tally()}" }
                 },
             }
-            RuleReview { controller, view, strips }
+            RuleReview { view, strips }
         }
     }
 }
@@ -377,10 +379,10 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
 /// the strips, and either side of the index agree on it.
 #[component]
 pub(in crate::activities::curation) fn RuleReview(
-    controller: CurationController,
     view: RuleView,
     strips: Vec<RuleStrip>,
 ) -> Element {
+    let controller = view.controller;
     let mut showing = use_signal(|| Showing::Kept);
     let tabs = OpenEpisodes::use_open();
     let spans = EpisodeSpans::of(&view.sample);
@@ -399,10 +401,7 @@ pub(in crate::activities::curation) fn RuleReview(
             });
         }
     };
-    let edit = RuleEdit::new(view.node.clone(), controller);
     let segments = MapSegments::of(&view, &kept);
-    // Several conditions each slide their own strip, so each says which.
-    let captioned = strips.len() > 1;
     // Switching sides plays that side's first row, so the recording beside
     // the list is always one of the rows it lists.
     let kept_side = ListedSide::new(view.clone(), kept.clone(), true);
@@ -440,53 +439,58 @@ pub(in crate::activities::curation) fn RuleReview(
     };
     let side = ListedSide::new(view.clone(), kept.clone(), listed_kept);
     rsx! {
-        if !strips.is_empty() || !matches!(view.input, Population::Episodes(_)) {
+        // A Select's conditions each slide their strip in their own row. A
+        // rule over whole episodes keeps each one end to end or not at all,
+        // so it draws no map: a column of full bars would say what the
+        // counts already say.
+        if matches!(view.selection, Selection::Episodes { .. }) {
+            EpisodeConditions {
+                view: view.clone(),
+                strips,
+                chosen,
+                on_select: {
+                    let mut open = open.clone();
+                    move |item| open(item)
+                },
+            }
+        } else {
             div { class: "curation-select-overview",
                 for strip in strips {
-                    div { key: "{strip.label}-{strip.knob:?}", class: "curation-select-overview-strip",
-                        if captioned {
-                            p { class: "curation-threshold-caption", "{strip.label}" }
-                        }
-                        ThresholdStrip {
-                            dots: strip.dots.clone(),
-                            threshold: strip.threshold,
-                            chosen,
-                            label: format!("{} threshold", strip.label),
-                            on_select: {
-                                let mut open = open.clone();
-                                move |item| open(item)
-                            },
-                            on_threshold: {
-                                let (edit, view) = (edit.clone(), view.clone());
-                                move |value| edit.set(view.slid(strip.knob, value))
-                            },
-                        }
-                    }
-                }
-                // Where the kept parts lie inside their episodes. A rule over
-                // whole episodes keeps each one end to end or not at all, so
-                // its map would be a column of full bars saying what the
-                // counts already say.
-                if !matches!(view.input, Population::Episodes(_)) {
-                    EpisodeMap {
-                        lanes: EpisodeLanes::of(&view.input.episodes(), &segments.slices, &spans),
-                        // Kept in ink, left out faded; the Kept and Left out
-                        // segments over the index say the same in words.
-                        paint: MapPaint::new(
-                            segments.kept.iter().map(|kept| SegmentPaint::Kept(*kept)).collect(),
-                            chosen.map(|item| segments.segment_of(item)),
-                        ),
-                        summary: view.kept_in(),
+                    ThresholdStrip {
+                        key: "{strip.label}-{strip.knob:?}",
+                        dots: strip.dots.clone(),
+                        threshold: strip.threshold,
+                        chosen,
+                        label: format!("{} threshold", strip.label),
                         on_select: {
                             let mut open = open.clone();
-                            let firsts = segments.first_items.clone();
-                            move |segment: usize| {
-                                if let Some(item) = firsts.get(segment) {
-                                    open(*item);
-                                }
-                            }
+                            move |item| open(item)
+                        },
+                        on_threshold: {
+                            let view = view.clone();
+                            move |value| view.set(view.selection.clone().with_minimum(value))
                         },
                     }
+                }
+                // Where the kept parts lie inside their episodes.
+                EpisodeMap {
+                    lanes: EpisodeLanes::of(&view.input.episodes(), &segments.slices, &spans),
+                    // Kept in ink, left out faded; the Kept and Left out
+                    // segments over the index say the same in words.
+                    paint: MapPaint::new(
+                        segments.kept.iter().map(|kept| SegmentPaint::Kept(*kept)).collect(),
+                        chosen.map(|item| segments.segment_of(item)),
+                    ),
+                    summary: view.kept_in(),
+                    on_select: {
+                        let mut open = open.clone();
+                        let firsts = segments.first_items.clone();
+                        move |segment: usize| {
+                            if let Some(item) = firsts.get(segment) {
+                                open(*item);
+                            }
+                        }
+                    },
                 }
             }
         }

@@ -727,7 +727,7 @@ Every node's workspace has the same anatomy, top to bottom:
 
 ```text
 ┌ node bar (40px) ─ what the node reads, runs with or asks · note ── actions ┐
-├ overview band (when the node has one) ─ strip / episode map / categories   ┤
+├ overview band (when the node has one) ─ conditions / strip / map / categories ┤
 ├ index bar (34px) ──────────────┬ tab strip (34px, 2+ tabs) / evidence head ┤
 │ rows: still · name / facts ·   │ episode inspection: cameras, Scene, and    │
 │       drawing · measure        │ the timeline led by the node's own tracks  │
@@ -735,10 +735,10 @@ Every node's workspace has the same anatomy, top to bottom:
 ```
 
 - **Node bar:** the node's input or configuration on the left — Find
-  similar's query and Search, a rule as one sentence with its thresholds read
-  out (a Select's conditions joined by "and whose", with Add condition;
-  Score progress's "Keep moments progressing at least 0.20× the expert
-  rate"), Break down's camera in words ("Watches the top camera") as the
+  similar's query and Search, a rule as one sentence with its threshold read
+  out (Score progress's "Keep moments progressing at least 0.20× the expert
+  rate"; a Select's "Keeps the episodes whose recorded facts meet every
+  condition", its conditions in the band below), Break down's camera in words ("Watches the top camera") as the
   button that opens its settings (camera and sampling; the model is the
   backend's and never shown), what Group and the Dataset read ("Every node
   reads these 100 episodes"). Topic paths, model ids, and sampling rates
@@ -748,22 +748,36 @@ Every node's workspace has the same anatomy, top to bottom:
   with a link to the measurement they wait on ("Score the rest"), and the
   node's actions (Run N left, Retry failed, Stop, Regenerate) after a rule's
   tally ("Keeps 1:53.9 of 2:26.9", "Keeps 2 of 42 subtasks").
-- **Overview band:** a rule's threshold strip, one per condition captioned
-  by its fact when a Select has several — every judged value as a dot,
+- **Overview band:** a rule's threshold strip — every judged value as a dot,
   the threshold as a line running into the handle of a real slider under
   them (a 4px track filled in ink on the side the rule keeps, a 16px round
   handle, its value riding the axis beneath, a 1× tick on pace axes), dots
   and handle on one track inset by half the handle so they share pixels —
   over the episode map
   ("Kept in 6 of 6 episodes"); Find similar's asked-about still, the map of
-  matches and the strip its cutoff slides on; Group's map and category chips
-  (the open one lime, each with its hue as a dot).
+  matches and the strip its cutoff slides on; Group's map and category cards,
+  chips once one is open (the open one lime, each with its hue as a dot).
+  A Select's band is its conditions, one row each in shared columns: the
+  fact and the comparison as selects, the value in mono, that condition's
+  strip, "leaves out 4", and × while another remains; Add condition under
+  the last. Its dots fade where that condition leaves an episode out and
+  are rings where it passes one another condition leaves out. It draws no
+  map: a whole episode is kept end to end or not at all.
+- **Keeping categories:** Group similar is an output of the categories it
+  keeps. A checkbox before each category's name, on its card and on its
+  chip, keeps it or leaves it out without asking the model again; a new
+  proposal keeps every category, a renamed one keeps its standing, a merged
+  one joins the other's. A left-out card sits on the sunken wash with its
+  words and share at half strength and its checkbox at full, and with no
+  category open the map fades the left-out categories' rows.
 - **Index:** one width for every node (`clamp(18rem, 36%, 28rem)`), so the
   divider holds still between nodes. Its 34px bar holds its filter, its
   Kept / Left out segments, or a caption naming its order ("6 episodes ·
   slowest first", "32 subtasks · closest first"). An index of a measurement
   lists by that measurement: Find similar closest first with a divider at
-  its cutoff ("Below 50% · left out"), Group's members most typical first;
+  its cutoff ("Below 50% · left out"), Group's members most typical first,
+  a Select's episodes with a measure per fact its conditions read, stacked,
+  the reading that fails a condition struck through in danger;
   Break down, and Score progress's kept and left-out stretches, list by
   episode
   under sticky headings (the open one in the selected wash) that say what the
@@ -1254,8 +1268,14 @@ parent.
 
 ### Graph and Document Bar
 
-- **Document bar:** The glyph, the name as a quiet button with a turning
-  chevron that opens the 320px switcher popover, then at right the state chip
+- **Document bar:** The glyph, the name as an input that reads as the title
+  (a hairline box on hover, the focus field when clicked; Enter or leaving it
+  renames and saves the new name at once, Escape puts it back), a turning
+  chevron after it that opens the 320px switcher popover (saved documents,
+  each row ending in a trash that shows on hover or focus and asks Keep /
+  Delete in the row itself, saying the graph and every view it publishes go
+  with it, then New and From dataset),
+  then at right the state chip
   (Saved · good dot, Unsaved changes · caution, Changed in another session ·
   danger), Discard while dirty, and outlined Save. A longer state grows
   leftwards without moving Save.

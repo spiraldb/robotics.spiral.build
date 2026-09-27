@@ -1,4 +1,5 @@
-//! Saved curations: list, load by identity, and one revision-guarded save;
+//! Saved curations: list, load by identity, and a revision-guarded save and
+//! delete;
 //! publishing an output as a catalog view, or dropping it; and the preview
 //! runs a node's Run starts, polls, stops, and reads answers from.
 use super::preview::PreviewAnswer;
@@ -12,8 +13,8 @@ use axum::{
     routing::{get, post},
 };
 use spiral_robotics_common::curation::{
-    CurationDocument, CurationSummary, MAX_CURATION_PAYLOAD_BYTES, PreviewQuery, PreviewRunStatus,
-    PublishRequest, UnpublishRequest,
+    CurationDeletion, CurationDocument, CurationSummary, MAX_CURATION_PAYLOAD_BYTES, PreviewQuery,
+    PreviewRunStatus, PublishRequest, UnpublishRequest,
 };
 
 /// The body carries the payload as a JSON string, so escaping and the
@@ -41,6 +42,7 @@ impl CurationEndpoints {
                 "/curations/save",
                 post(Self::save).layer(DefaultBodyLimit::max(MAX_SAVE_BODY_BYTES)),
             )
+            .route("/curations/delete", post(Self::delete))
             .route("/curations/publish", post(Self::publish))
             .route("/curations/unpublish", post(Self::unpublish))
             .route("/curation-previews", post(Self::start_preview))
@@ -60,6 +62,13 @@ impl CurationEndpoints {
         ApiJson(document): ApiJson<CurationDocument>,
     ) -> Result<Json<CurationDocument>, OperationError> {
         Ok(Json(project.curation().save(document).await?))
+    }
+    async fn delete(
+        Project(project): Project,
+        ApiJson(request): ApiJson<CurationDeletion>,
+    ) -> Result<Json<()>, OperationError> {
+        project.curation().delete(request).await?;
+        Ok(Json(()))
     }
     async fn publish(
         Project(project): Project,

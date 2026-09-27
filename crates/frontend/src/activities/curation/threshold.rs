@@ -1,11 +1,14 @@
 //! Where a rule's threshold falls among the values it judges: every item as
-//! one dot on one axis, kept in ink and left out faded, and the threshold as a
-//! line across it with its slider's thumb at the foot of the line. The gap
+//! one dot on one axis, kept in ink, left out faded, and — on one of several
+//! conditions — passing this one but left out by another as a ring, and the
+//! threshold as a line across it with its slider's thumb at the foot of the
+//! line. The gap
 //! between the values beside the line says how firm the choice is, which the
 //! count alone cannot, and dragging the line re-divides kept from left out.
 //!
 //! A Select's episode conditions, Score progress's progress rate, and Find
 //! similar's similarity all slide on this one strip.
+use crate::format::GroupedCountPresentation as _;
 use dioxus::prelude::*;
 
 /// The most dots one strip draws. Moments come one per frame, sixty thousand
@@ -13,13 +16,34 @@ use dioxus::prelude::*;
 /// value, and the page stays responsive.
 const MAX_STRIP_DOTS: usize = 2_400;
 
+/// Which side of a rule one item falls on, as its dot shows it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DotSide {
+    Kept,
+    /// Left out by the threshold this strip slides.
+    LeftOut,
+    /// Passing this strip's threshold, but left out by another condition of
+    /// the same rule.
+    LeftOutElsewhere,
+}
+
+impl DotSide {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::LeftOut => "left-out",
+            Self::LeftOutElsewhere => "elsewhere",
+        }
+    }
+}
+
 /// One item's value on the strip.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct StripDot {
     /// The item's place in what the rule judges.
     item: usize,
     value: f64,
-    kept: bool,
+    side: DotSide,
 }
 
 impl StripDot {
@@ -27,6 +51,20 @@ impl StripDot {
     /// past `MAX_STRIP_DOTS`; `kept` says, by item, which side of the rule
     /// each is on.
     pub(super) fn of(values: &[Option<f64>], kept: &[bool]) -> Vec<Self> {
+        let sides = kept
+            .iter()
+            .map(|kept| {
+                if *kept {
+                    DotSide::Kept
+                } else {
+                    DotSide::LeftOut
+                }
+            })
+            .collect::<Vec<_>>();
+        Self::on_sides(values, &sides)
+    }
+    /// The same, with each item's side said in full.
+    pub(super) fn on_sides(values: &[Option<f64>], sides: &[DotSide]) -> Vec<Self> {
         let every = values.len().div_ceil(MAX_STRIP_DOTS).max(1);
         values
             .iter()
@@ -36,7 +74,7 @@ impl StripDot {
                 Some(Self {
                     item,
                     value: value.filter(|value| value.is_finite())?,
-                    kept: kept.get(item).copied().unwrap_or(false),
+                    side: sides.get(item).copied().unwrap_or(DotSide::LeftOut),
                 })
             })
             .collect()
@@ -133,11 +171,15 @@ impl ThresholdScale {
         self.step.snap(value)
     }
     /// A value as the rule and the strip print it: a whole percentage for a
-    /// probability, otherwise with the step's own decimals.
+    /// probability, otherwise with the step's own decimals, and a whole count
+    /// in thousands: "150,000" messages.
     fn label(self, value: f64) -> String {
         match self.unit {
             AxisUnit::Percent => format!("{:.0}%", value * 100.0),
             AxisUnit::ProgressRate => format!("{value:.*}×", self.step.decimals().max(2)),
+            AxisUnit::Plain if self.step.decimals() == 0 && value >= 0.0 => {
+                (value.round() as u64).grouped_label()
+            }
             AxisUnit::Plain => format!("{value:.*}", self.step.decimals()),
         }
     }
@@ -224,7 +266,7 @@ pub(super) fn ThresholdStrip(
                         r#type: "button",
                         class: "curation-threshold-strip-dot",
                         tabindex: "-1",
-                        "data-kept": "{dot.kept}",
+                        "data-side": dot.side.key(),
                         "aria-current": (chosen == Some(dot.item)).then_some("true"),
                         style: "left: {scale.place(dot.value):.2}%; --lift: {(dot.item * 7) % 5}",
                         title: "{scale.label(dot.value)}",
@@ -275,7 +317,7 @@ pub(super) fn ThresholdStrip(
 
 #[cfg(test)]
 mod tests {
-    use super::{AxisUnit, SliderStep, ThresholdScale};
+    use super::{AxisUnit, SliderStep, StripDot, ThresholdScale};
 
     #[test]
     fn a_slid_threshold_snaps_to_its_step_and_keeps_its_decimals() {
@@ -296,6 +338,9 @@ mod tests {
         // hundredths, and a recorded fact carries no unit of its own.
         let seconds = ThresholdScale::of(&[], 20.0, AxisUnit::Plain);
         assert_eq!(seconds.label(20.0), "20.00");
+        let counts = StripDot::of(&[Some(2_000.0), Some(531_000.0)], &[true, true]);
+        let messages = ThresholdScale::of(&counts, 150_000.0, AxisUnit::Plain);
+        assert_eq!(messages.label(150_000.0), "150,000");
         let similarity = ThresholdScale::of(&[], 0.5, AxisUnit::Percent);
         assert_eq!(
             (similarity.low, similarity.high, similarity.step.0),

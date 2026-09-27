@@ -47,7 +47,11 @@ impl EpisodeRows {
         {
             listed.push(facts.recorded_date_label());
         }
-        listed.extend(facts.duration_seconds().map(|seconds| seconds.clock_label()));
+        listed.extend(
+            facts
+                .duration_seconds()
+                .map(|seconds| seconds.clock_label()),
+        );
         let share = facts
             .duration_seconds()
             .filter(|_| self.longest > 0.0)
@@ -56,7 +60,7 @@ impl EpisodeRows {
             title,
             facts: listed,
             drawing: Some(RowDrawing::Length(share)),
-            measure: None,
+            measures: Vec::new(),
         }
     }
 }
@@ -94,21 +98,23 @@ enum RowDrawing {
     Within(f64, f64),
 }
 
-/// The measure a row is ranked or kept by, and what that number is.
+/// A number a row is ranked or kept by, what that number is, and whether it
+/// is what leaves the row out.
 #[derive(Clone, Debug, PartialEq)]
 struct RowMeasure {
     reading: String,
     meaning: String,
+    failing: bool,
 }
 
 /// One row of a list of recordings, in the anatomy every such row shares: a
-/// still, a name over a line of facts, and the measure.
+/// still, a name over a line of facts, and its measures, one over another.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::activities) struct RowFace {
     title: RowTitle,
     facts: Vec<String>,
     drawing: Option<RowDrawing>,
-    measure: Option<RowMeasure>,
+    measures: Vec<RowMeasure>,
 }
 
 impl RowFace {
@@ -121,7 +127,7 @@ impl RowFace {
             title: RowTitle::id(format!("{} – {}", start.clock_label(), end.clock_label())),
             facts: vec![format!("{:.1} s", (end - start).max(0.0))],
             drawing: Some(RowDrawing::Within(start / duration, end / duration)),
-            measure: None,
+            measures: Vec::new(),
         }
     }
     /// Replace the facts line's words, keeping its drawing.
@@ -129,14 +135,26 @@ impl RowFace {
         self.facts = facts;
         self
     }
+    /// One more measure, under the ones before it.
     pub(in crate::activities) fn measured(
-        mut self,
+        self,
         reading: String,
         meaning: impl Into<String>,
     ) -> Self {
-        self.measure = Some(RowMeasure {
+        self.judged(reading, meaning, false)
+    }
+    /// One more measure, `failing` when it is what leaves the row out of a
+    /// rule.
+    pub(in crate::activities) fn judged(
+        mut self,
+        reading: String,
+        meaning: impl Into<String>,
+        failing: bool,
+    ) -> Self {
+        self.measures.push(RowMeasure {
             reading,
             meaning: meaning.into(),
+            failing,
         });
         self
     }
@@ -184,8 +202,17 @@ pub(in crate::activities) fn RowFaceView(face: RowFace, still: Element) -> Eleme
                 }
             }
         }
-        if let Some(measure) = face.measure.clone() {
-            span { class: "episode-row-measure", title: "{measure.meaning}", "{measure.reading}" }
+        if !face.measures.is_empty() {
+            span { class: "episode-row-measures",
+                for measure in face.measures.iter() {
+                    span {
+                        class: "episode-row-measure",
+                        "data-failing": measure.failing.then_some("true"),
+                        title: "{measure.meaning}",
+                        "{measure.reading}"
+                    }
+                }
+            }
         }
     }
 }

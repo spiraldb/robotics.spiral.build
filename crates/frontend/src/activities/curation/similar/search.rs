@@ -17,8 +17,8 @@ use crate::activities::curation::episode_map::{
 use crate::activities::curation::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use crate::activities::curation::population::Slice;
 use crate::activities::curation::review::{
-    Counted, FailedEpisodes, IndexBar, NodeBar, NodeNotes, NodeReach, RowStanding, SubtaskEntry,
-    SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
+    Counted, FailedEpisodes, IndexBar, NodeBar, NodeNotes, NodeReach, RowKeys, RowStanding,
+    SubtaskEntry, SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus, RunState};
 use crate::activities::curation::threshold::{AxisUnit, StripDot, Threshold, ThresholdStrip};
@@ -268,6 +268,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
         };
     };
     let rows = table.rows.clone();
+    let keys = RowKeys::of(&rows);
     let context = source.context();
     let measured = source.measured();
     let thumbnails = Thumbnails::use_camera(controller, context.camera());
@@ -520,7 +521,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                                 // Where the ranking crosses the line the
                                 // episode count above is drawn at: likely
                                 // matches above it, the rest below.
-                                Fragment { key: "{rows[row].episode()}-{rows[row].start_time()}",
+                                Fragment { key: "{keys[row]}",
                                 if Some(position) == cut {
                                     li { class: "curation-entries-divider", role: "separator",
                                         "Below {threshold.label()} · left out"

@@ -155,15 +155,31 @@
 
 
   /* Every measure holds the same column, so an index reads as a column of
-     numbers rather than a ragged edge. */
-  .episode-row-measure {
-    width: 3.25rem;
+     numbers rather than a ragged edge; a row kept by several stacks them. */
+  .episode-row-measures {
+    display: flex;
+    min-width: 3.25rem;
     flex-shrink: 0;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+  }
+
+  .episode-row-measure {
     color: var(--tone-ink);
     font-family: var(--font-mono);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
     text-align: right;
+    white-space: nowrap;
+  }
+
+  /* The reading that leaves a row out of its rule, so the Left out side
+     says why each row is there. */
+  .episode-row-measure[data-failing="true"] {
+    color: var(--tone-danger);
+    text-decoration: line-through;
+    text-decoration-color: color-mix(in srgb, var(--tone-danger) 55%, transparent);
   }
 
   .episode-row-measure[data-answered="false"] {

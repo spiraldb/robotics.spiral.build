@@ -193,9 +193,26 @@
       border-color 100ms ease-out;
   }
 
-  .curation-similar-category[data-selected="true"] {
-    border-color: var(--hue);
-    background: color-mix(in srgb, var(--hue) 8%, var(--tone-surface));
+  /* A category the grouping leaves out steps back: its words and its share
+     fade, and only its checkbox keeps full strength, to bring it back. */
+  .curation-similar-category[data-kept="false"] {
+    background: var(--tone-sunken);
+  }
+
+  .curation-similar-category[data-kept="false"] > :not(.curation-similar-category-head),
+  .curation-similar-category[data-kept="false"] .curation-similar-category-open {
+    opacity: 0.5;
+  }
+
+  .curation-similar-category-head {
+    @apply flex min-w-0 items-center gap-1.5;
+  }
+
+  /* Whether a category's subtasks are handed on: a checkbox before its
+     name, in ink, on the card and on the chip alike. */
+  .curation-similar-keep {
+    @apply m-0 size-3.5 shrink-0 cursor-pointer;
+    accent-color: var(--tone-ink);
   }
 
   /* One row of chips while a category is open: the same six categories, the
@@ -205,17 +222,22 @@
   }
 
   /* The name is what a chip is for, so it keeps its width and the row wraps
-     rather than cutting six names to three words each. */
+     rather than cutting six names to three words each. The checkbox keeps
+     the category; the rest of the chip opens it. */
   .curation-similar-chip {
-    @apply flex min-h-6 max-w-full cursor-pointer items-center gap-1.5 rounded border border-line bg-surface px-1.5 py-0.5 text-left;
+    @apply flex min-h-6 max-w-full items-center gap-1.5 rounded border border-line bg-surface pl-1.5 text-left;
     transition:
       background-color 100ms ease-out,
       border-color 100ms ease-out;
   }
 
+  .curation-similar-chip-open {
+    @apply flex min-h-6 min-w-0 cursor-pointer items-center gap-1.5 border-0 bg-transparent py-0.5 pl-0 pr-1.5 text-left;
+  }
+
   /* The category's hue is its identity, a dot before its name; the chip
      itself takes the selection's lime when it is the open one. */
-  .curation-similar-chip::before {
+  .curation-similar-chip-open::before {
     @apply size-2 shrink-0 rounded-full content-[''];
     background: var(--hue, var(--tone-line-strong));
   }
@@ -223,6 +245,10 @@
   .curation-similar-chip[data-selected="true"] {
     border-color: var(--tone-accent-line);
     background: var(--tone-accent-wash);
+  }
+
+  .curation-similar-chip[data-kept="false"] .curation-similar-chip-open {
+    opacity: 0.5;
   }
 
   .curation-similar-chip-name {
@@ -236,7 +262,7 @@
   }
 
   .curation-similar-category-open {
-    @apply flex min-h-6 w-full cursor-pointer items-baseline justify-between gap-2 border-0 bg-transparent p-0 text-left;
+    @apply flex min-h-6 min-w-0 flex-1 cursor-pointer items-baseline justify-between gap-2 border-0 bg-transparent p-0 text-left;
   }
 
   .curation-similar-category-name {

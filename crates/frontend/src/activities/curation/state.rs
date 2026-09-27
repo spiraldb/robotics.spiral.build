@@ -6,6 +6,7 @@ use super::annotate::SubtaskRow;
 use super::document::{
     CURATION_ENCODING_VERSION, CurationGraph, CurationNode, DATASET_NODE_ID, Selection,
 };
+use super::graph::PublishedViews;
 use super::population::{EpisodeSample, Population, PopulationReader};
 use super::preview::{
     PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows, ReadInput,
@@ -165,8 +166,14 @@ impl StudioDocument for CurationDocument {
     fn id(&self) -> &str {
         self.id()
     }
+    fn name(&self) -> &str {
+        self.name()
+    }
     fn set_name(&mut self, name: String) {
         self.set_name(name);
+    }
+    fn revision(&self) -> u64 {
+        self.revision()
     }
     fn fresh(id: String) -> Self {
         Self::new(id, UNTITLED, CURATION_ENCODING_VERSION, "{}").carrying(&CurationGraph::new(None))
@@ -175,9 +182,6 @@ impl StudioDocument for CurationDocument {
         if self.id() == saved.id() {
             self.set_revision(saved.revision());
         }
-    }
-    fn is_stored(&self) -> bool {
-        self.revision() > 0
     }
 }
 
@@ -373,8 +377,25 @@ impl CurationController {
         self.session
             .with_draft(|document| document.name().to_owned())
     }
+    /// Name the draft as part of the edit that names it, such as choosing
+    /// its dataset; it is saved with that edit.
     pub(crate) fn set_name(self, name: String) {
         self.session.set_name(name);
+    }
+    /// Rename the curation; a stored one is saved under the new name at once.
+    pub(crate) fn rename(self, name: String, studio: StudioProjectState) {
+        self.session.rename(name, studio);
+    }
+    /// Delete the saved curation `id`, open or not, and the views its stored
+    /// copy publishes first, so no view outlives the recipe it was compiled
+    /// from. The open one gives way to a blank graph.
+    pub(crate) fn delete(self, id: String, studio: StudioProjectState) {
+        self.session.delete(
+            id,
+            studio,
+            |stored| PublishedViews::of(stored.payload()).drop_all(),
+            move |opened| self.adopt(opened),
+        );
     }
     /// What every running node is doing, which is all the top bar wants
     /// from a curation.

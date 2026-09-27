@@ -4,7 +4,7 @@ use super::episodes::AnnotationEpisode;
 use super::subtask::SubtaskRow;
 use crate::activities::curation::episode_tabs::{OpenEpisode, OpenEpisodes};
 use crate::activities::curation::review::{
-    Counted, IndexBar, RowStanding, SubtaskContext, SubtaskEntry, SubtaskIntervals,
+    Counted, IndexBar, RowKeys, RowStanding, SubtaskContext, SubtaskEntry, SubtaskIntervals,
 };
 use crate::activities::curation::thumbnail::Thumbnails;
 #[cfg(all(test, target_arch = "wasm32"))]
@@ -320,9 +320,9 @@ pub(super) fn SubtaskIndex(
                                     }
                                 }
                                 ol { class: "curation-entries",
-                                    for row in group.rows() {
+                                    for (row, key) in group.rows().iter().zip(RowKeys::of(group.rows())) {
                                         SubtaskEntry {
-                                            key: "{row.start_time()}",
+                                            key: "{key}",
                                             row: row.clone(),
                                             standing: RowStanding::plain(chosen.holds(row))
                                                 .roving(chosen.holds(row) || resting_stop.as_ref() == Some(row)),

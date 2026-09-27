@@ -4,7 +4,8 @@
 //! The frontend owns the payload schema and its encoding version; the backend
 //! stores, lists, and loads documents by identity without reading the payload.
 //! A save carries the revision it was loaded at (0 for a new document) and the
-//! stored document comes back one higher. A mismatch is a `conflict` failure.
+//! stored document comes back one higher; a delete carries it too. A mismatch
+//! is a `conflict` failure.
 //!
 //! The frontend also compiles each output to one read-only statement; the
 //! backend publishes it under a plain name at the catalog root. A node's
@@ -172,6 +173,29 @@ impl PublishRequest {
     }
     pub fn statement(&self) -> &str {
         &self.statement
+    }
+}
+
+/// Delete one saved curation at the revision it was loaded at, so a delete
+/// never removes a version its caller has not seen.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurationDeletion {
+    id: String,
+    revision: u64,
+}
+impl CurationDeletion {
+    pub fn new(id: impl Into<String>, revision: u64) -> Self {
+        Self {
+            id: id.into(),
+            revision,
+        }
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 }
 

@@ -1,5 +1,5 @@
-//! The category proposal: what the LLM is asked, what it must answer with,
-//! and how the operator's edits change the list.
+//! The category proposal: what the LLM is asked and what it must answer
+//! with, and the category the operator is editing.
 //!
 //! The categories come from the descriptions themselves, so the list is
 //! complete by construction: `spql.ai.classify` puts every subtask in its
@@ -168,79 +168,10 @@ impl CategoryEdit {
     }
 }
 
-/// Changes to a grouping's category list. Each returns a new list to group
-/// rows by: an edited category only reruns the classification, never the
-/// proposal, because the categories themselves are the operator's now.
-pub(super) struct CategoryEdits<'a> {
-    categories: &'a [SubtaskCategory],
-}
-impl<'a> CategoryEdits<'a> {
-    pub(super) fn new(categories: &'a [SubtaskCategory]) -> Self {
-        Self { categories }
-    }
-    pub(super) fn renamed(&self, edit: &CategoryEdit) -> Result<Vec<SubtaskCategory>, String> {
-        let renamed = SubtaskCategory::new(edit.name(), edit.definition())?;
-        if self
-            .categories
-            .iter()
-            .any(|category| category.name() != edit.original() && category.name() == renamed.name())
-        {
-            return Err(format!(
-                "A category is already called “{}”.",
-                renamed.name()
-            ));
-        }
-        let mut categories = self.categories.to_vec();
-        let position = categories
-            .iter()
-            .position(|category| category.name() == edit.original())
-            .ok_or("That category is no longer part of this grouping.")?;
-        categories[position] = renamed;
-        Ok(categories)
-    }
-    /// `from` disappears into `into`, which keeps its name and gains the
-    /// other definition: the union of two groups is not described by either
-    /// sentence alone, and the operator can trim it afterwards.
-    pub(super) fn merged(&self, into: &str, from: &str) -> Result<Vec<SubtaskCategory>, String> {
-        if into == from {
-            return Err("Merge a category into a different one.".into());
-        }
-        let absorbed = self
-            .categories
-            .iter()
-            .find(|category| category.name() == from)
-            .ok_or("That category is no longer part of this grouping.")?;
-        let mut categories = Vec::with_capacity(self.categories.len() - 1);
-        for category in self.categories {
-            if category.name() == from {
-                continue;
-            }
-            if category.name() == into {
-                categories.push(SubtaskCategory::new(
-                    category.name(),
-                    format!("{} {}", category.definition(), absorbed.definition()),
-                )?);
-            } else {
-                categories.push(category.clone());
-            }
-        }
-        if categories.len() != self.categories.len() - 1 {
-            return Err("That category is no longer part of this grouping.".into());
-        }
-        Ok(categories)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn categories(names: &[&str]) -> Vec<SubtaskCategory> {
-        names
-            .iter()
-            .map(|name| SubtaskCategory::new(*name, format!("Everything that {name}s.")).unwrap())
-            .collect()
-    }
     fn reply(categories: usize) -> String {
         let entries = (0..categories)
             .map(|index| format!(r#"{{"name":"c{index}","definition":"Defines c{index}."}}"#))
@@ -317,51 +248,6 @@ mod tests {
                    {"name":"c","definition":"C."},{"name":"d","definition":"D."}]}"#
             )
             .is_err()
-        );
-    }
-
-    #[test]
-    fn renaming_keeps_the_list_and_refuses_a_name_another_category_holds() {
-        let categories = categories(&["fold", "grasp"]);
-        let mut edit = CategoryEdit::of(&categories[0]);
-        edit.set_name("fold in half".into());
-        edit.set_definition("Folding the cloth over itself.".into());
-        let renamed = CategoryEdits::new(&categories).renamed(&edit).unwrap();
-        assert_eq!(renamed[0].name(), "fold in half");
-        assert_eq!(renamed[0].definition(), "Folding the cloth over itself.");
-        assert_eq!(renamed[1], categories[1]);
-
-        let mut clash = CategoryEdit::of(&categories[0]);
-        clash.set_name("grasp".into());
-        assert!(CategoryEdits::new(&categories).renamed(&clash).is_err());
-        let mut blank = CategoryEdit::of(&categories[0]);
-        blank.set_definition("  ".into());
-        assert!(CategoryEdits::new(&categories).renamed(&blank).is_err());
-    }
-
-    #[test]
-    fn merging_drops_one_category_and_keeps_both_definitions() {
-        let categories = categories(&["fold", "grasp", "smooth"]);
-        let merged = CategoryEdits::new(&categories)
-            .merged("fold", "grasp")
-            .unwrap();
-        assert_eq!(
-            merged.iter().map(SubtaskCategory::name).collect::<Vec<_>>(),
-            ["fold", "smooth"]
-        );
-        assert_eq!(
-            merged[0].definition(),
-            "Everything that folds. Everything that grasps."
-        );
-        assert!(
-            CategoryEdits::new(&categories)
-                .merged("fold", "fold")
-                .is_err()
-        );
-        assert!(
-            CategoryEdits::new(&categories)
-                .merged("fold", "gone")
-                .is_err()
         );
     }
 }

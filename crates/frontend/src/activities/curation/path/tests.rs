@@ -1,8 +1,8 @@
 use super::*;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{
-    Comparison, CurationNode, DATASET_NODE_ID, EpisodeFact, ProgressScoring, Selection,
-    SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
+    Comparison, DATASET_NODE_ID, EpisodeFact, ProgressScoring, Selection, SubtaskAnnotation,
+    SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::preview::{PreviewReads, PreviewRows, ReadInput};
@@ -89,19 +89,16 @@ fn searching(query: &str) -> CurationNodeKind {
     CurationNodeKind::FindSimilarSubtasks(search)
 }
 
+/// A grouping by `names`, which a new node keeps every one of.
 fn grouping(names: &[&str]) -> CurationNodeKind {
-    let mut grouping = SubtaskGrouping::default();
-    grouping
-        .set_categories(
-            names
-                .iter()
-                .map(|name| {
-                    SubtaskCategory::new(*name, format!("The robot {name}s the cloth.")).unwrap()
-                })
-                .collect(),
-        )
-        .unwrap();
-    CurationNodeKind::GroupSimilarSubtasks(grouping)
+    CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::of(
+        names
+            .iter()
+            .map(|name| {
+                SubtaskCategory::new(*name, format!("The robot {name}s the cloth.")).unwrap()
+            })
+            .collect(),
+    ))
 }
 
 /// Both readings pass the read-only gate Publish and the preview admit by.
@@ -286,18 +283,19 @@ fn both_models_answer_on_the_episode_row_and_the_subtasks_ride_to_their_step() {
 
 /// The example the plan names: fold subtasks, grouped from Break down.
 #[test]
-fn a_grouping_publishes_each_subtask_with_its_category_and_a_select_keeps_the_chosen() {
+fn a_grouping_publishes_the_subtasks_of_the_categories_it_keeps() {
     let mut graph = graph();
     let annotate = child(&mut graph, DATASET_NODE_ID, breakdown());
     let group = child(&mut graph, &annotate, grouping(&["fold", "flatten"]));
-    let folds = keeping(
-        &mut graph,
-        (&group, CurationNodeKind::Select),
-        Selection::Categories {
-            names: vec!["fold".into()],
-        },
-    );
-    let published = published(&graph, &folds);
+    graph
+        .set_rule(
+            &group,
+            Selection::Categories {
+                names: vec!["fold".into()],
+            },
+        )
+        .unwrap();
+    let published = published(&graph, &group);
     assert!(
         published.contains(
             "group_similar_subtasks_2 AS (SELECT episode_id, start_ns, end_ns, subtask, spql.ai.classify(subtask, [STRUCT_PACK(name := 'fold', definition := 'The robot folds the cloth.'), STRUCT_PACK(name := 'flatten', definition := 'The robot flattens the cloth.')], model => 'typesafe/jev-1.13') AS subtask_category FROM break_down_subtasks_1)"
@@ -305,10 +303,10 @@ fn a_grouping_publishes_each_subtask_with_its_category_and_a_select_keeps_the_ch
         "{published}"
     );
     assert!(published.contains(
-        "select_3 AS (SELECT episode_id, start_ns, end_ns, subtask, subtask_category FROM group_similar_subtasks_2 WHERE group_similar_subtasks_2.subtask_category.category IN ('fold'))"
+        "group_similar_subtasks_2_kept AS (SELECT episode_id, start_ns, end_ns, subtask, subtask_category FROM group_similar_subtasks_2 WHERE group_similar_subtasks_2.subtask_category.category IN ('fold'))"
     ));
     assert!(published.ends_with(
-        "\nSELECT episode_id, start_ns, end_ns, subtask, subtask_category FROM select_3"
+        "\nSELECT episode_id, start_ns, end_ns, subtask, subtask_category FROM group_similar_subtasks_2_kept"
     ));
     // The preview judges the rows Break down's preview holds, and nothing
     // above it is asked again.
@@ -407,16 +405,19 @@ fn a_node_missing_what_its_step_needs_says_so() {
         "Generate the categories, or write them, before grouping."
     );
     assert_eq!(reason(&graph, &search), "Type the subtask to search for.");
-    // A Select below a grouping starts with no category chosen.
-    let nothing = child(&mut graph, &group, CurationNodeKind::Select);
-    if let CurationNodeKind::GroupSimilarSubtasks(grouping) =
-        graph.node_mut(&group).unwrap().kind_mut()
-    {
-        grouping
-            .set_categories(vec![SubtaskCategory::new("fold", "Folding.").unwrap()])
-            .unwrap();
-    }
-    assert_eq!(reason(&graph, &nothing), "Choose the categories to keep.");
+    // A grouping that keeps no category has nothing to publish.
+    graph
+        .node_mut(&group)
+        .unwrap()
+        .propose_categories(vec![SubtaskCategory::new("fold", "Folding.").unwrap()])
+        .unwrap();
+    graph
+        .set_rule(&group, Selection::Categories { names: Vec::new() })
+        .unwrap();
+    assert_eq!(
+        reason(&graph, &group),
+        "Keep at least one category: this grouping keeps none."
+    );
 }
 
 #[test]
@@ -616,16 +617,6 @@ fn every_path(
     }
     for kind in graph.child_kinds(node).into_iter().flat_map(configured) {
         let added = child(graph, node, kind);
-        // A Select of categories compiles once it keeps one.
-        if let Some(Selection::Categories { names }) =
-            graph.node(&added).and_then(CurationNode::keeps)
-            && names.is_empty()
-        {
-            let fold = Selection::Categories {
-                names: vec!["fold".into()],
-            };
-            graph.set_rule(&added, fold).unwrap();
-        }
         check(graph, &added);
         every_path(graph, (&added, below - 1), check);
         graph.remove_node(&added).unwrap();

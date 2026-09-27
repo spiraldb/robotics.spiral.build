@@ -20,12 +20,14 @@ it keeps part of the answer by, tuned in its workspace.
 - **Measures** add a property to each interval, or cut intervals into finer
   ones: Break down subtasks, Find similar subtasks, Group similar subtasks,
   and Score progress. Score progress keeps the moments progressing at least
-  its threshold, joined into stretches, and Find similar the subtasks at
-  least its cutoff likely to be what it asks.
-- **Selects** measure nothing: their rule is all they are. A Select after the
-  dataset keeps the episodes that meet every one of its conditions on their
-  recorded facts; a Select after Group similar keeps the chosen categories.
-  One Select holds all its conditions, so none follows another.
+  its threshold, joined into stretches; Find similar the subtasks at least
+  its cutoff likely to be what it asks; and Group similar the subtasks of
+  the categories it keeps, every one until some are unchecked.
+- **Selects** measure nothing: their rule is all they are. A Select follows
+  the dataset and keeps the episodes that meet every one of its conditions
+  on their recorded facts: duration, message count, channel count, and file
+  size. It never reads what a model answered; each measure keeps by its own
+  rule. One Select holds all its conditions, so none follows another.
 
 What may follow a node:
 
@@ -36,8 +38,7 @@ What may follow a node:
 | Score progress | Break down, which reads the stretches it keeps |
 | Break down | Find similar, Group similar |
 | Find similar | Find similar, Group similar, over the subtasks it keeps |
-| Group similar | Select of categories |
-| Select of categories | Find similar, Group similar |
+| Group similar | Find similar, Group similar, over the subtasks it keeps |
 
 Every Score progress, Find similar, Group similar, and Select node is an
 **output**, whatever follows it: its relation is what a published view holds.
@@ -51,8 +52,8 @@ and then one column per property. Times are MCAP log time in nanoseconds, so a
 reader can join the recording's streams without converting them. Properties
 are named by what measured them: `progress_rate`, `subtask`, `similarity`, and
 `subtask_category`, which holds the category and its probability. A measure
-repeated on one path writes `similarity_2`, `similarity_3`, and so on, and a
-Select reads the column of the nearest measure of its kind. An episode-level
+repeated on one path writes `similarity_2`, `similarity_3`, and so on, and
+its rule reads its own column. An episode-level
 output shows the facts its Selects read, such as `duration_seconds`; Break
 down and Score progress start their own properties, and the
 text judgments add theirs to what reaches them.
@@ -75,19 +76,19 @@ rows that reach it.
 | Node | On the episode row | Step over the rows that reach it | Where |
 | --- | --- | --- | --- |
 | Dataset | | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
-| Select | | Its rule alone: a `WHERE` of every condition, or of the categories, from the same `Selection` the browser filters with | `document/selection.rs` |
+| Select | | Its rule alone: a `WHERE` of every condition, from the same `Selection` the browser filters with | `document/selection.rs` |
 | Score progress | `scores`: `spql.ai.score_progress` over the top camera's packet video | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on; then its rule keeps the moments at least its threshold, and those with no progress rate, and joins touching ones into stretches carrying their mean progress rate | `score_progress/scoring.rs` |
 | Break down subtasks | `subtasks`: `spql.ai.breakdown_task` over the chosen camera's packet video, with the configured model and sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks unnested, moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
 | Find similar subtasks | | `spql.ai.similarity(subtask, query)` as `similarity`; then its rule keeps the subtasks at least its cutoff | `similar/judgment.rs` |
-| Group similar subtasks | | `spql.ai.classify(subtask, categories)` as `subtask_category`, the categories written into the statement as a literal list | `similar/judgment.rs` |
+| Group similar subtasks | | `spql.ai.classify(subtask, categories)` as `subtask_category`, the categories written into the statement as a literal list; then its rule keeps the subtasks of the categories it keeps | `similar/judgment.rs` |
 
 A node's rule is its own entry after its step, named after it
 (`score_progress_1_kept`); a Select's rule is its whole step (`select_1`).
 
 A published view is one stream of episode rows (decided 2026-09-25). The
-dataset's listing and its Select of episodes come first; a Select keeps by
-the nearest measure above it, so this is the only Select that can come
-before the first measure, and it is the `WHERE` on the episode rows.
+dataset's listing and its Select of episodes come first; a Select only
+follows the dataset, so it always comes before the first measure, and it is
+the `WHERE` on the episode rows.
 Where the path leaves whole episodes, it builds each episode's row once:
 
 ```text
@@ -233,10 +234,15 @@ Group similar's categories are configuration. One model call in the browser,
 through the Studio provider, proposes four to eight from the descriptions of
 the subtasks that reach the node, and the operator may rename or merge them.
 Either way the node's statement names them, and changing them runs the
-classification again, never the proposal.
+classification again, never the proposal. Which of them the node keeps is its
+rule, and the document keeps the two together: a proposal keeps every
+category, a renamed category keeps its standing under its new name, a merged
+one leaves the rule with the category it joined, and a rule naming a
+category the grouping does not have is refused.
 
-A rule's slider filters preview rows in the browser, so it answers at once:
-a Select's the rows of the node above it, a measure's its own. The same
+A rule's slider or checkbox filters preview rows in the browser, so it
+answers at once: a Select's the dataset's episodes, a measure's its own
+rows. The same
 `Selection` renders the `WHERE` the published view keeps by, and tests hold
 the two to the same rows for every kind of rule. Tests also hold each measure's preview to its published step
 over the parent's rows; run live with literal stand-ins for the model's
@@ -268,16 +274,24 @@ unpublished; a step may follow it, and it stays an output.
 
 Curations live in the Studio SQLite table `curations` and are saved only on an
 explicit Save, with an optimistic revision check: the submitted revision must
-equal the stored one, and the saved copy carries the next. The payload is
-opaque to the backend and versioned by the frontend. Encoding 3 keeps only the
+equal the stored one, and the saved copy carries the next. A rename saves at
+once, from the stored copy, so only the name moves and unsaved graph edits
+stay unsaved. Any saved curation can be deleted from its row in the switcher, open or not:
+Studio reads its stored copy, drops every view that copy publishes (read from
+the payload without decoding the graph, so a curation in an older encoding,
+which cannot be opened to unpublish, still takes its views with it), and then
+deletes it at the revision just read. A view the catalog refuses to drop stops
+the delete. Deleting the open one opens a blank graph. The payload is
+opaque to the backend and versioned by the frontend. Encoding 4 keeps only the
 recipe: nodes, edges, each node's configuration and rule, and the published
 outputs. Break down keeps its camera, model, sample interval, and the topic
 it reads each episode's task from; Find similar its query and cutoff; Group
-similar its categories; Score progress its threshold; a Select its
-conditions or categories. Nothing any node read is saved. A document in an
-earlier encoding is refused: encoding 2 kept the thresholds in Selects of
-their own, and curations saved in encoding 1 were deleted, with the saved
-workflows, by the migration that retired Workflow.
+similar its categories and the ones it keeps; Score progress its threshold;
+a Select its conditions. Nothing any node read is saved. A document in an
+earlier encoding is refused: encoding 3 chose a grouping's categories in a
+Select after it, encoding 2 kept the thresholds in Selects of their own, and
+curations saved in encoding 1 were deleted, with the saved workflows, by the
+migration that retired Workflow.
 
 ## Not yet
 

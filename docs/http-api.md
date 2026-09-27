@@ -216,7 +216,11 @@ its schema and `encoding` version, and the backend stores, lists, and loads it
 by identity without reading it (`GET /curations`, `GET /curations/{id}`). Save
 (`POST /curations/save`) carries the revision the document was loaded at, 0
 for one never saved, and returns the stored copy one revision higher; a
-mismatch fails with `conflict`. A payload over 32 MiB fails with
+mismatch fails with `conflict`. Delete (`POST /curations/delete`) takes
+`{id, revision}` and removes the curation only at that revision: a later save
+fails it with `conflict`, a curation already gone with `not_found`; it answers
+`null`. The browser drops the views a curation publishes before deleting it,
+since only the payload names them. A payload over 32 MiB fails with
 `invalid_input`. This is the only JSON route with a raised request-body bound,
 twice the payload limit so a document's JSON framing always fits.
 

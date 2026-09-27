@@ -11,55 +11,43 @@
     background: var(--tone-surface);
   }
 
-  /* The rule is one sentence on the node's bar; its variable words are its
-     fields, and its threshold reads out in the rule's own digits. */
+  /* A measure's rule is one sentence on the node's bar; its threshold reads
+     out in the rule's own digits. */
   .curation-select-rule {
     @apply flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-ink;
-  }
-  .curation-select-rule-choice {
-    @apply w-auto max-w-[10rem];
   }
   .curation-select-rule-readout {
     @apply min-w-[3.5ch] font-mono text-[12px] font-medium tabular-nums text-ink;
   }
-  .curation-select-rule-hint {
-    @apply text-ink-faint;
+
+  /* A Select's conditions, one row each: what it reads and which side it
+     keeps, the value, the strip the value slides on, and how many episodes
+     it leaves out. The columns line up across rows, so several conditions
+     read as one table of the rule. */
+  .curation-select-conditions {
+    @apply flex shrink-0 flex-col border-b border-line px-3 pb-1.5;
   }
-  /* Each condition reads on as the sentence does, "and whose …", and wraps
-     whole rather than splitting its fact from its value. */
   .curation-select-condition {
-    @apply inline-flex items-center gap-x-1.5;
+    @apply grid items-center gap-x-2 border-b py-1.5;
+    border-bottom-color: var(--tone-line-soft);
+    grid-template-columns: 9rem 6rem 5.5rem minmax(10rem, 1fr) 6.5rem 1.5rem;
+  }
+  .curation-select-condition-fact,
+  .curation-select-condition-comparison {
+    @apply w-full;
+  }
+  .curation-select-condition-value {
+    @apply text-right font-mono text-[12px] font-medium tabular-nums text-ink;
+  }
+  .curation-select-condition-count {
+    @apply m-0 whitespace-nowrap font-mono text-[11px] tabular-nums;
+    color: var(--tone-ink-soft);
   }
   .curation-select-condition-remove .ui-icon {
     @apply size-3;
   }
-
-  /* Each condition's strip, captioned by its fact when there are several. */
-  .curation-select-overview-strip {
-    @apply flex flex-col gap-0.5;
-  }
-
-  /* One toggle per category, in the hue the grouping gave it. */
-  .curation-select-chips {
-    @apply flex basis-full flex-wrap items-center gap-1;
-  }
-  .curation-select-chip {
-    @apply flex min-h-6 max-w-full cursor-pointer items-baseline gap-1.5 rounded border border-line bg-surface px-1.5 py-0.5 text-left;
-    transition:
-      background-color 100ms ease-out,
-      border-color 100ms ease-out;
-  }
-  .curation-select-chip[aria-pressed="true"] {
-    border-color: var(--hue, var(--tone-ink));
-    background: color-mix(in srgb, var(--hue, var(--tone-ink)) 12%, var(--tone-surface));
-  }
-  .curation-select-chip-name {
-    @apply truncate text-[11px] font-medium text-ink;
-    flex: 0 1 auto;
-  }
-  .curation-select-chip-count {
-    @apply shrink-0 font-mono text-[10px] tabular-nums;
-    color: var(--tone-ink-soft);
+  .curation-select-condition-add {
+    @apply flex pt-1;
   }
 
   /* The strips over the episode map: where each threshold falls among the

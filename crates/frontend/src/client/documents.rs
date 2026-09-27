@@ -1,8 +1,8 @@
 //! One client for every Studio document endpoint.
 //!
-//! Documents are stored three ways — list the saved ones, load one by id,
-//! store one back — so this owns those three requests once. An activity's own
-//! client keeps only the calls that are its alone.
+//! Documents are stored four ways — list the saved ones, load one by id,
+//! store one back, delete one — so this owns those requests once. An
+//! activity's own client keeps only the calls that are its alone.
 
 use std::marker::PhantomData;
 
@@ -38,8 +38,9 @@ impl DocumentSummary {
 }
 
 /// The documents Studio serves under one collection: `/api/{collection}` lists
-/// them as [`DocumentSummary`], `/api/{collection}/{id}` loads one as `Doc`, and
-/// `/api/{collection}/save` stores one and answers with what was stored.
+/// them as [`DocumentSummary`], `/api/{collection}/{id}` loads one as `Doc`,
+/// `/api/{collection}/save` stores one and answers with what was stored, and
+/// `/api/{collection}/delete` deletes one at the revision it was loaded at.
 ///
 /// Build one inside the task that awaits it, as every other Studio client is
 /// built, so the request names the mounting scope's project.
@@ -92,6 +93,18 @@ impl<Doc: Serialize + DeserializeOwned + 'static> DocumentClient<Doc> {
         self.project
             .request(
                 HttpRequest::new("POST", format!("/api/{}/save", self.collection)).json(document),
+            )
+            .await
+    }
+
+    /// Deletes `id` as stored at `revision`, or fails with `conflict` when a
+    /// later save moved it on.
+    pub(crate) async fn delete(&self, id: &str, revision: u64) -> Result<(), CommandError> {
+        use spiral_robotics_common::curation::CurationDeletion;
+        self.project
+            .request(
+                HttpRequest::new("POST", format!("/api/{}/delete", self.collection))
+                    .json(&CurationDeletion::new(id, revision)),
             )
             .await
     }

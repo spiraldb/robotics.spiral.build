@@ -23,6 +23,30 @@ pub(crate) struct PublishedOutput {
 }
 
 impl PublishedOutput {
+    /// The views a stored payload publishes, read without decoding its
+    /// graph, so a curation saved in an encoding this Studio no longer opens
+    /// is still checked before it is deleted. A payload naming none, or not
+    /// JSON at all, publishes nothing.
+    pub(crate) fn views_in(payload: &str) -> Vec<String> {
+        #[derive(Deserialize)]
+        struct Publications {
+            #[serde(default)]
+            published: Vec<Named>,
+        }
+        #[derive(Deserialize)]
+        struct Named {
+            view: String,
+        }
+        serde_json::from_str::<Publications>(payload)
+            .map(|publications| {
+                publications
+                    .published
+                    .into_iter()
+                    .map(|named| named.view)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
     pub(crate) fn node(&self) -> &str {
         &self.node
     }

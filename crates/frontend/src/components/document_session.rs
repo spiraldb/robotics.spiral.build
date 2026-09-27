@@ -1,6 +1,6 @@
 //! One owner for a Studio document's life: what is open, what the operator has
 //! changed, what Studio has stored, and the commands that move between them —
-//! open, save, discard.
+//! open, save, rename, delete, discard.
 //!
 //! Curation opens one saved document at a time, edits it in the browser, and
 //! saves it back. That lifecycle is this module; the activity's controller
@@ -44,6 +44,7 @@ pub(crate) trait StudioDocument:
     const REPORTS_AS: MessageSource;
 
     fn id(&self) -> &str;
+    fn name(&self) -> &str;
     fn set_name(&mut self, name: String);
 
     /// A never-saved document under `id`, named however this activity names an
@@ -56,8 +57,14 @@ pub(crate) trait StudioDocument:
     /// that answers about a different document is ignored.
     fn acknowledge_save(&mut self, saved: &Self);
 
+    /// The stored revision this copy was loaded or saved at; 0 for one never
+    /// stored.
+    fn revision(&self) -> u64;
+
     /// Whether Studio has stored this document at least once.
-    fn is_stored(&self) -> bool;
+    fn is_stored(&self) -> bool {
+        self.revision() > 0
+    }
 }
 
 /// Whether what is on screen matches what Studio has stored.
@@ -101,6 +108,7 @@ pub(crate) enum DocumentCommand {
     /// Reading the saved list, or one saved document.
     Opening,
     Saving,
+    Deleting,
 }
 
 impl DocumentCommand {
@@ -111,6 +119,7 @@ impl DocumentCommand {
         match self {
             Self::Opening => format!("Opening a saved {noun}…"),
             Self::Saving => format!("Saving this {noun}…"),
+            Self::Deleting => format!("Deleting this {noun}…"),
         }
     }
 }
@@ -314,6 +323,93 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
                     }
                 }
                 Err(error) => studio.report_from(Doc::REPORTS_AS, error.to_string()),
+            }
+            self.command.set(None);
+        });
+    }
+
+    /// Rename the document where Studio stores it too, as a rename is
+    /// everywhere else: a stored document is saved under the new name at
+    /// once, from what Studio stored, so edits not yet saved stay unsaved
+    /// and only the name moves. A document never stored takes the name for
+    /// its first save. A refused rename puts the old name back and is
+    /// reported like any other command failure.
+    pub(crate) fn rename(mut self, name: String, studio: StudioProjectState) {
+        if self.command().is_some() {
+            return;
+        }
+        let previous = self.draft.peek().name().to_owned();
+        self.set_name(name.clone());
+        let mut stored = self.baseline.peek().clone();
+        if !stored.is_stored() {
+            return;
+        }
+        stored.set_name(name);
+        self.command.set(Some(DocumentCommand::Saving));
+        self.spawn(async move {
+            let client = DocumentClient::<Doc>::current(Doc::COLLECTION);
+            match client.save(&stored).await {
+                Ok(saved) => {
+                    if self.draft.peek().id() == saved.id() {
+                        self.draft.write().acknowledge_save(&saved);
+                        self.baseline.set(saved);
+                    }
+                    if let Ok(summaries) = client.list().await {
+                        self.summaries.set(summaries);
+                    }
+                }
+                Err(error) => {
+                    if self.draft.peek().id() == stored.id() {
+                        self.set_name(previous);
+                    }
+                    studio.report_from(Doc::REPORTS_AS, error.to_string());
+                }
+            }
+            self.command.set(None);
+        });
+    }
+
+    /// Delete the saved document `id`, open or not. Its stored copy is read
+    /// first and handed to `prepare` — Curation drops the views it publishes
+    /// — whose failure stops the delete and is reported like any command
+    /// failure. Then it is deleted at the revision just read, so a save
+    /// landing in between is refused rather than lost; if it is the open
+    /// document, a fresh one opens in its place.
+    pub(crate) fn delete<Prepared>(
+        mut self,
+        id: String,
+        studio: StudioProjectState,
+        prepare: impl FnOnce(&Doc) -> Prepared + 'static,
+        on_install: impl FnOnce(&Doc) -> Result<(), String> + 'static,
+    ) where
+        Prepared: std::future::Future<Output = Result<(), String>> + 'static,
+    {
+        if self.command().is_some() {
+            return;
+        }
+        self.command.set(Some(DocumentCommand::Deleting));
+        self.spawn(async move {
+            let client = DocumentClient::<Doc>::current(Doc::COLLECTION);
+            let deleted = match client.load(&id).await {
+                Ok(stored) => match prepare(&stored).await {
+                    Ok(()) => client
+                        .delete(stored.id(), stored.revision())
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(reason) => Err(reason),
+                },
+                Err(error) => Err(error.to_string()),
+            };
+            match deleted {
+                Ok(()) => {
+                    if self.draft.peek().id() == id {
+                        self.install(Self::fresh(), on_install);
+                    }
+                    if let Ok(summaries) = client.list().await {
+                        self.summaries.set(summaries);
+                    }
+                }
+                Err(reason) => studio.report_from(Doc::REPORTS_AS, reason),
             }
             self.command.set(None);
         });

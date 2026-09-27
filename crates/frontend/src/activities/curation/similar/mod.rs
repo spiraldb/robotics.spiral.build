@@ -18,7 +18,4 @@ mod profile;
 mod search;
 mod source;
 
-pub(super) use {
-    grouping::{CategoryHues, GroupingWorkspace},
-    search::SearchWorkspace,
-};
+pub(super) use {grouping::GroupingWorkspace, search::SearchWorkspace};

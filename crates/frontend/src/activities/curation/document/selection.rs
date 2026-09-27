@@ -2,11 +2,11 @@
 //! node's rule.
 //!
 //! A rule narrows; it never measures. What it keeps by is its basis: a Score
-//! progress node's progress rate and a Find similar node's similarity are
-//! those nodes' own knobs, and a Select keeps by what the node above it
-//! measured — the dataset's recorded episode facts, as many conditions as it
-//! names, or a grouping's categories. The rule is stored in those terms, so
-//! it reads as one sentence about the node it belongs to.
+//! progress node's progress rate, a Find similar node's similarity, and a
+//! Group similar node's categories are those nodes' own knobs, and a Select
+//! keeps by the dataset's recorded facts of each episode, as many conditions
+//! as it names — never by what a model answered. The rule is stored in those
+//! terms, so it reads as one sentence about the node it belongs to.
 //!
 //! One rule has two readings that must agree: the browser keeps what the
 //! preview read as the threshold slides (`keeps_*`), and the path compiles it
@@ -19,10 +19,10 @@ use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::sql::SqlLiteral;
 
-/// What a Select's input was measured by, and so what its rule can name.
+/// What a rule keeps by, and so what it can name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SelectionBasis {
-    /// The dataset's own statistics of each episode.
+    /// The dataset's own statistics of each episode: a Select's.
     EpisodeFacts,
     /// A Find similar node's probability for each subtask.
     Similarity,
@@ -59,6 +59,15 @@ impl EpisodeFact {
     }
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|fact| fact.key() == key)
+    }
+    /// The fact as a condition's row starts with it.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::DurationSeconds => "Duration",
+            Self::Messages => "Message count",
+            Self::Channels => "Channel count",
+            Self::SizeMegabytes => "File size",
+        }
     }
     /// The fact as the noun of "Keep episodes whose … is at least".
     pub(crate) const fn label(self) -> &'static str {
@@ -227,7 +236,7 @@ pub(crate) enum Selection {
     Episodes { conditions: Vec<EpisodeCondition> },
     /// Subtasks at least this likely to be the operation a search asked about.
     Similar { minimum: f64 },
-    /// Subtasks in any of these categories.
+    /// Subtasks in any of these categories, which the grouping names.
     Categories { names: Vec<String> },
     /// Moments progressing at least this fast. A moment the scorer could not
     /// read is kept: an unread moment is not a slow one.
@@ -237,7 +246,8 @@ pub(crate) enum Selection {
 impl Selection {
     /// A new rule. Episode conditions start where they keep every episode, so
     /// adding a Select never silently drops data; categories start empty,
-    /// because a grouping has no category that means "all".
+    /// because a grouping has none until they are proposed, and then keeps
+    /// them all.
     pub(crate) fn for_basis(basis: SelectionBasis) -> Self {
         match basis {
             SelectionBasis::EpisodeFacts => Self::Episodes {
@@ -306,7 +316,8 @@ impl Selection {
             rule => rule,
         }
     }
-    /// The rule as its node card says it.
+    /// A Select's conditions as its node card says them: "Duration at
+    /// least 20 s and message count at most 5000".
     pub(crate) fn sentence(&self) -> String {
         match self {
             Self::Episodes { conditions } => {
@@ -321,7 +332,6 @@ impl Selection {
                 sentence
             }
             Self::Similar { minimum } => format!("At least {:.0}% similar", minimum * 100.0),
-            Self::Categories { names } if names.is_empty() => "No category chosen".to_owned(),
             Self::Categories { names } => names.join(", "),
             Self::Progressing { minimum } => format!("Progress rate at least {minimum:.2}×"),
         }
@@ -354,9 +364,9 @@ impl Selection {
                 measured(SubtaskRow::SIMILARITY)?,
                 literal(*minimum)?
             )),
-            Self::Categories { names } if names.is_empty() => {
-                Err(PathError::new("Choose the categories to keep."))
-            }
+            Self::Categories { names } if names.is_empty() => Err(PathError::new(
+                "Keep at least one category: this grouping keeps none.",
+            )),
             // The column is qualified by its relation, so the field is read
             // from the column rather than the column from a table.
             Self::Categories { names } => Ok(format!(
@@ -393,7 +403,7 @@ impl Selection {
                 let mut seen = std::collections::BTreeSet::new();
                 for name in names {
                     if name.trim().is_empty() || !seen.insert(name.as_str()) {
-                        return Err("A Select names each category once.".into());
+                        return Err("A grouping keeps each category once.".into());
                     }
                 }
                 Ok(())
@@ -712,8 +722,8 @@ mod tests {
         assert_eq!(episodes.sentence(), "Duration at least 0 s");
         assert!(Selection::for_basis(SelectionBasis::Progress).keeps_moment(Some(0.0)));
         assert_eq!(
-            Selection::for_basis(SelectionBasis::Categories).sentence(),
-            "No category chosen"
+            Selection::for_basis(SelectionBasis::Categories),
+            Selection::Categories { names: Vec::new() }
         );
         for basis in [
             SelectionBasis::EpisodeFacts,

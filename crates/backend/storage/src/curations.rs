@@ -1,5 +1,6 @@
 //! One row per curation. The list reads identity and revision; the payload
-//! is loaded by identity and replaced only on an explicit Save.
+//! is loaded by identity, replaced only on an explicit Save, and deleted only
+//! at the revision it was loaded at.
 //!
 //! Storage never parses the payload. Its only rules are the ones
 //! [`CurationDocument::validate`] states plus the revision guard below, so a
@@ -122,6 +123,23 @@ impl<'a> CurationPersistence<'a> {
                 .map_err(|error| error.to_string())?;
             Ok(result.rows_affected == 1)
         }
+    }
+
+    /// Delete the curation stored at exactly `revision`. `false` means it is
+    /// gone, or another save moved it on, and nothing was deleted.
+    pub async fn delete(&self, id: &str, revision: u64) -> Result<bool, String> {
+        use crate::studio::curations as table;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let revision = i64::try_from(revision)
+            .map_err(|_| "Curation revision exceeds SQLite integer range")?;
+        let result = table::Entity::delete_many()
+            .filter(table::Column::Project.eq(self.project_store.key()))
+            .filter(table::Column::Id.eq(id))
+            .filter(table::Column::Revision.eq(revision))
+            .exec(self.project_store.connection().await?)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(result.rows_affected == 1)
     }
 }
 

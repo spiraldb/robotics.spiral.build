@@ -11,13 +11,18 @@
 //! category, with no "other" option and no confidence gate. Renaming or
 //! merging a category runs only the classification again — the LLM pass runs
 //! again only when the operator asks for new categories.
-use super::categories::{CategoryEdit, CategoryEdits, DescriptionCounts, ProposedCategories};
+//!
+//! The node is an output, and what it hands on is the subtasks of the
+//! categories it keeps: all of them once proposed, and each category's card
+//! says whether it is kept and leaves it out when unchecked, which asks
+//! nothing again.
+use super::categories::{CategoryEdit, DescriptionCounts, ProposedCategories};
 use super::coverage::{CoverageMeasure, EpisodeCoverage, SubtaskList};
 use super::profile::{CategoryProfile, ProfilePanel};
 use super::source::SubtaskSource;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{
-    CurationNode, CurationNodeKind, DEFAULT_ANNOTATION_MODEL, SubtaskCategory,
+    CurationNode, CurationNodeKind, DEFAULT_ANNOTATION_MODEL, Selection, SubtaskCategory,
 };
 use crate::activities::curation::episode_map::{
     EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
@@ -28,7 +33,7 @@ use crate::activities::curation::episode_tabs::{
 use crate::activities::curation::population::Slice;
 use crate::activities::curation::rerun::ConfirmedRerun;
 use crate::activities::curation::review::{
-    Counted, FailedEpisodes, NodeBar, NodeNotes, NodeReach, RowStanding, SubtaskEntry,
+    Counted, FailedEpisodes, NodeBar, NodeNotes, NodeReach, RowKeys, RowStanding, SubtaskEntry,
     SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus, RunState};
@@ -130,16 +135,47 @@ impl GroupingNode {
             .ok_or("The model answered the category prompt without any text.")?;
         Ok(ProposedCategories::parse(text)?.into_categories())
     }
-    /// Group by `categories`, then run the node's step on every episode that
-    /// reaches it: a new list has classified nothing yet.
-    fn group_by(&self, categories: Vec<SubtaskCategory>) -> Result<(), String> {
+    /// The names of the categories the node keeps, in its list's order.
+    fn kept(&self) -> Vec<String> {
+        self.controller.with_payload(|payload| {
+            match payload.node(&self.id).and_then(CurationNode::keeps) {
+                Some(Selection::Categories { names }) => names.clone(),
+                _ => Vec::new(),
+            }
+        })
+    }
+    /// Keep the category called `name`, or leave it out. The rows are
+    /// grouped already, so nothing is asked again.
+    fn keep(&self, name: &str, keep: bool) -> Result<(), String> {
+        let kept = self.kept();
+        let names = self
+            .categories()
+            .iter()
+            .map(SubtaskCategory::name)
+            .filter(|category| {
+                if *category == name {
+                    keep
+                } else {
+                    kept.iter().any(|kept| kept == category)
+                }
+            })
+            .map(str::to_owned)
+            .collect();
+        self.controller
+            .set_rule(&self.id, Selection::Categories { names })
+    }
+    /// Change the categories, then run the node's step on every episode that
+    /// reaches it: a changed list has classified nothing by it yet.
+    fn regroup(&self, change: Regroup) -> Result<(), String> {
         let id = self.id.clone();
         self.controller.edit(|payload| {
-            match payload.node_mut(&id).map(CurationNode::kind_mut) {
-                Some(CurationNodeKind::GroupSimilarSubtasks(grouping)) => {
-                    grouping.set_categories(categories)
-                }
-                _ => Err("This node no longer groups subtasks.".into()),
+            let node = payload
+                .node_mut(&id)
+                .ok_or("This node is no longer in the graph.")?;
+            match change {
+                Regroup::Proposed(categories) => node.propose_categories(categories),
+                Regroup::Edited { original, edited } => node.edit_category(&original, edited),
+                Regroup::Merged { merged, into } => node.merge_category(&merged, &into),
             }
         })?;
         self.run()
@@ -159,19 +195,32 @@ impl GroupingNode {
     }
 }
 
+/// A change to a grouping's categories, each of which groups every subtask
+/// again. What the grouping keeps follows the change: a proposed list is
+/// kept whole, an edited category keeps its standing under its new name, and
+/// a merged one joins the other's.
+#[derive(Clone, Debug, PartialEq)]
+enum Regroup {
+    Proposed(Vec<SubtaskCategory>),
+    Edited {
+        original: String,
+        edited: SubtaskCategory,
+    },
+    Merged {
+        merged: String,
+        into: String,
+    },
+}
+
 /// Which colour, and which place in the band, each category gets: biggest
 /// first, the order an operator reads a taxonomy in, so the hue a category
 /// wears means its size rather than the order the model happened to name it.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(in crate::activities::curation) struct CategoryHues(Vec<String>);
+pub(super) struct CategoryHues(Vec<String>);
 
 impl CategoryHues {
-    /// The hues of `categories`, ranked by how many of `rows` joined each, so
-    /// a Select after the grouping wears the grouping's colours.
-    pub(in crate::activities::curation) fn of_rows(
-        categories: &[SubtaskCategory],
-        rows: &[SubtaskRow],
-    ) -> Self {
+    /// The hues of `categories`, ranked by how many of `rows` joined each.
+    pub(super) fn of_rows(categories: &[SubtaskCategory], rows: &[SubtaskRow]) -> Self {
         let mut sized = categories
             .iter()
             .map(|category| {
@@ -198,7 +247,7 @@ impl CategoryHues {
     }
     /// The inline style that lends a category's hue to whatever wears it;
     /// nothing for no category, which falls back to the neutral line colour.
-    pub(in crate::activities::curation) fn tint_of(&self, category: Option<&str>) -> String {
+    pub(super) fn tint_of(&self, category: Option<&str>) -> String {
         category
             .and_then(|category| self.hue(category))
             .map(|hue| format!("--hue: var(--tone-category-{})", hue + 1))
@@ -267,12 +316,16 @@ struct CategorySummary {
     /// annotation measured.
     coverage: EpisodeCoverage,
     representatives: Vec<String>,
+    /// Whether the grouping hands its members on.
+    kept: bool,
 }
 
 impl CategorySummary {
-    /// Every category's card, biggest first, over the rows the node judged.
+    /// Every category's card, biggest first, over the rows the node judged,
+    /// each saying whether it is among the `kept`.
     fn all(
         categories: &[SubtaskCategory],
+        kept: &[String],
         rows: &[SubtaskRow],
         source: &SubtaskSource,
     ) -> Vec<Self> {
@@ -310,6 +363,7 @@ impl CategorySummary {
                         .map(|(row, _)| rows[*row].description().to_owned())
                         .collect(),
                     members,
+                    kept: kept.iter().any(|kept| kept == category.name()),
                 }
             })
             .collect::<Vec<_>>();
@@ -364,6 +418,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     // one playing in the tab in front.
     let tabs = OpenEpisodes::use_open();
     let rows = source.judged().to_vec();
+    let keys = RowKeys::of(&rows);
     let open_row = {
         let rows = rows.clone();
         move |row: usize| {
@@ -375,7 +430,8 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     let mut reveal = use_signal(|| MapReveal::Still);
     let mut generation = use_signal(|| 0_u32);
     let mut workspace = use_signal(|| None::<web_sys::Element>);
-    let cards = CategorySummary::all(&categories, &rows, &source);
+    let kept = grouping.kept();
+    let cards = CategorySummary::all(&categories, &kept, &rows, &source);
     let hues = CategoryHues::of_rows(&categories, &rows);
 
     // A grouping with nothing open is a band of cards over an empty half-pane,
@@ -461,47 +517,42 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         }
     });
 
-    // Propose categories from the subtasks that reach the node, or take the
-    // edited ones, then classify every episode by them.
-    let group = {
+    // Propose categories from the subtasks that reach the node, then classify
+    // every episode by them.
+    let propose = {
         let grouping = grouping.clone();
         let source = source.clone();
-        use_callback(move |edited: Option<Vec<SubtaskCategory>>| {
+        use_callback(move |()| {
             if *proposing.peek() || controller.run_state(&grouping.id) != RunState::Idle {
                 return;
             }
             problem.set(None);
-            let grouping = grouping.clone();
-            match edited {
-                Some(categories) => problem.set(grouping.group_by(categories).err()),
-                None => {
-                    let descriptions = source
-                        .reaching()
-                        .iter()
-                        .map(|row| row.description().to_owned())
-                        .collect::<Vec<_>>();
-                    if descriptions.is_empty() {
-                        problem.set(Some(
-                            "Run Break down subtasks first; grouping reads the subtasks its preview read."
-                                .to_owned(),
-                        ));
-                        return;
-                    }
-                    let model = grouping.proposal_model(&source);
-                    proposing.set(true);
-                    reveal.set(MapReveal::Reading);
-                    spawn(async move {
-                        let proposed = GroupingNode::propose(model, descriptions).await;
-                        proposing.set(false);
-                        reveal.set(MapReveal::Still);
-                        problem.set(
-                            proposed
-                                .and_then(|categories| grouping.group_by(categories))
-                                .err(),
-                        );
-                    });
-                }
+            let descriptions = source
+                .reaching()
+                .iter()
+                .map(|row| row.description().to_owned())
+                .collect::<Vec<_>>();
+            if descriptions.is_empty() {
+                problem.set(Some(
+                    "Run Break down subtasks first; grouping reads the subtasks its preview read."
+                        .to_owned(),
+                ));
+                return;
             }
+            let model = grouping.proposal_model(&source);
+            let grouping = grouping.clone();
+            proposing.set(true);
+            reveal.set(MapReveal::Reading);
+            spawn(async move {
+                let proposed = GroupingNode::propose(model, descriptions).await;
+                proposing.set(false);
+                reveal.set(MapReveal::Still);
+                problem.set(
+                    proposed
+                        .and_then(|categories| grouping.regroup(Regroup::Proposed(categories)))
+                        .err(),
+                );
+            });
         })
     };
     // A grouping has nothing to show before it has categories, so it
@@ -519,7 +570,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             && problem.peek().is_none()
             && !*proposing.peek()
         {
-            group.call(None);
+            propose.call(());
         }
     });
 
@@ -571,12 +622,17 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         .as_ref()
         .map(|spans| EpisodeLanes::of(measured.episodes(), &slices, spans))
         .unwrap_or_default();
+    // An open category stands out from the rest; otherwise the categories
+    // the node leaves out step back.
     let paint = MapPaint::new(
         rows.iter()
             .map(|row| match row.category() {
                 Some(category) => SegmentPaint::Category {
                     hue: hues.hue(category).unwrap_or_default(),
-                    faded: open_name.as_deref().is_some_and(|open| open != category),
+                    faded: match open_name.as_deref() {
+                        Some(open) => open != category,
+                        None => !kept.iter().any(|kept| kept == category),
+                    },
                 },
                 None => SegmentPaint::Unasked,
             })
@@ -654,6 +710,12 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         .as_ref()
         .map(CategorySummary::colour)
         .unwrap_or_default();
+    // What the node hands on: the rows of the categories it keeps.
+    let kept_rows = cards
+        .iter()
+        .filter(|card| card.kept)
+        .map(|card| card.members.len())
+        .sum::<usize>();
     rsx! {
         section {
             class: "curation-similar-workspace curation-similar-grouping",
@@ -684,6 +746,11 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                     note: NodeNotes::join([stale, FailedEpisodes::note(failed)]),
                     reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                     actions: rsx! {
+                        if !rows.is_empty() {
+                            p { class: "curation-threshold-tally", role: "status",
+                                "Keeps {kept_rows} of {Counted::subtasks(rows.len())}"
+                            }
+                        }
                         if running {
                             Button {
                                 purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
@@ -704,7 +771,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                     "Propose categories again? This replaces the {} categories and groups every subtask again.",
                                     cards.len(),
                                 ),
-                                on_confirm: move |()| group.call(None),
+                                on_confirm: move |()| propose.call(()),
                             }
                             if pending + failed > 0 {
                                 Button {
@@ -748,7 +815,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                         Button {
                             purpose: ActionPurpose::Start,
                             variant: ButtonVariant::Solid,
-                            onclick: move |_| group.call(None),
+                            onclick: move |_| propose.call(()),
                             "Try again"
                         }
                     }
@@ -760,8 +827,20 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                         CategoryCard {
                             key: "{summary.category.name()}",
                             summary: summary.clone(),
-                            opened: open.as_ref().map(CategoryEdit::original) == Some(summary.category.name()),
-                            collapsed,
+                            face: if collapsed {
+                                CategoryFace::Chip {
+                                    open: open.as_ref().map(CategoryEdit::original) == Some(summary.category.name()),
+                                }
+                            } else {
+                                CategoryFace::Card
+                            },
+                            on_keep: {
+                                let grouping = grouping.clone();
+                                let name = summary.category.name().to_owned();
+                                EventHandler::new(move |keep: bool| {
+                                    problem.set(grouping.keep(&name, keep).err());
+                                })
+                            },
                             on_open: {
                                 let open_row = open_row.clone();
                                 EventHandler::new(move |()| {
@@ -798,11 +877,9 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                 Disclosure { summary: rsx! { "Rename or merge" },
                                     CategoryDetail {
                                         edit: edit.clone(),
+                                        grouping: grouping.clone(),
                                         categories: categories.clone(),
                                         busy,
-                                        on_apply: EventHandler::new(move |edited: Vec<SubtaskCategory>| {
-                                            group.call(Some(edited));
-                                        }),
                                     }
                                 }
                             }
@@ -812,7 +889,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                 "aria-label": "Members of this category, most typical first; each row ends with how sure it is that the row belongs here",
                                 for (position , (row , probability)) in members.into_iter().enumerate() {
                                     SubtaskEntry {
-                                        key: "{rows[row].episode()}-{rows[row].start_time()}",
+                                        key: "{keys[row]}",
                                         row: rows[row].clone(),
                                         standing: RowStanding::scored(probability, true, chosen == Some(row))
                                             .roving(TabStop::at(position, chosen_place)),
@@ -894,74 +971,111 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     }
 }
 
-/// One category: what it is, how many rows joined it, which episodes they came
-/// from, and the rows that joined it most typically.
+/// How a category is drawn: a card in the band while no category is open, or
+/// a chip in one row once one is, because the open category owns the height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CategoryFace {
+    Card,
+    Chip { open: bool },
+}
+
+/// One category: whether the grouping keeps it, what it is, how many rows
+/// joined it, which episodes they came from, and the rows that joined it
+/// most typically.
 ///
 /// While a category is open the band has no height to spare for six of these,
 /// so every card steps back to its name and its counts alone.
 #[component]
 fn CategoryCard(
     summary: CategorySummary,
-    opened: bool,
-    /// One row of chips rather than a band of cards, because an open category
-    /// owns the height.
-    collapsed: bool,
+    face: CategoryFace,
     on_open: EventHandler<()>,
+    /// The category kept (`true`) or left out of what the node hands on.
+    on_keep: EventHandler<bool>,
 ) -> Element {
     let share = format!("{:.0}%", summary.share * 100.0);
     let counted = summary.counted();
-    if collapsed {
-        // The chip carries the name and the size; the open category below it
-        // is already saying which episodes it reached, and six names plus six
-        // pairs of counts would cost the rows this band just gave back.
-        let members = Counted::subtasks(summary.members.len());
+    let keep = rsx! {
+        KeepCheck { name: summary.category.name().to_owned(), kept: summary.kept, on_keep }
+    };
+    let CategoryFace::Chip { open } = face else {
         return rsx! {
-            button {
-                r#type: "button",
-                class: "curation-similar-chip",
+            // The examples are a list, and a list may not live inside a
+            // button, so the button is the card's heading and the card is the
+            // article.
+            article {
+                class: "curation-similar-category",
                 style: "{summary.tint()}",
-                title: "{members}",
-                "aria-label": "{summary.category.name()}, {members}",
-                "aria-expanded": "{opened}",
-                "data-selected": "{opened}",
+                "data-kept": "{summary.kept}",
                 "data-bin": "{summary.rank}",
                 "data-motion-key": "{summary.category.name()}",
+                div { class: "curation-similar-category-head",
+                    {keep}
+                    button {
+                        r#type: "button",
+                        class: "curation-similar-category-open",
+                        "aria-expanded": "false",
+                        onclick: move |_| on_open.call(()),
+                        span { class: "curation-similar-category-name", "{summary.category.name()}" }
+                    }
+                }
+                div {
+                    class: "curation-similar-category-share",
+                    "aria-hidden": "true",
+                    span { style: "width:{summary.share * 100.0}%" }
+                }
+                // The share the bar draws, the rows it counted, and the
+                // episodes they came from — the bar is never the only place
+                // the number is.
+                p { class: "curation-similar-category-count", "{share} · {counted}" }
+                p { class: "curation-similar-category-definition", "{summary.category.definition()}" }
+                ul { class: "curation-similar-category-examples",
+                    for (place, representative) in summary.representatives.iter().enumerate() {
+                        li { key: "{place}", "{representative}" }
+                    }
+                }
+            }
+        };
+    };
+    // The chip carries the name and the size; the open category below it is
+    // already saying which episodes it reached, and six names plus six pairs
+    // of counts would cost the rows this band just gave back.
+    let members = Counted::subtasks(summary.members.len());
+    rsx! {
+        div {
+            class: "curation-similar-chip",
+            style: "{summary.tint()}",
+            "data-selected": "{open}",
+            "data-kept": "{summary.kept}",
+            "data-bin": "{summary.rank}",
+            "data-motion-key": "{summary.category.name()}",
+            {keep}
+            button {
+                r#type: "button",
+                class: "curation-similar-chip-open",
+                title: "{members}",
+                "aria-label": "{summary.category.name()}, {members}",
+                "aria-expanded": "{open}",
                 onclick: move |_| on_open.call(()),
                 span { class: "curation-similar-chip-name", "{summary.category.name()}" }
                 span { class: "curation-similar-chip-count", "{summary.members.len()}" }
             }
-        };
+        }
     }
+}
+
+/// Whether a category's subtasks are part of what the grouping hands on: a
+/// checkbox before its name, on its card and on its chip alike.
+#[component]
+fn KeepCheck(name: String, kept: bool, on_keep: EventHandler<bool>) -> Element {
     rsx! {
-        // The examples are a list, and a list may not live inside a button, so
-        // the button is the card's heading and the card is the article.
-        article {
-            class: "curation-similar-category",
-            style: "{summary.tint()}",
-            "data-selected": "{opened}",
-            "data-bin": "{summary.rank}",
-            "data-motion-key": "{summary.category.name()}",
-            button {
-                r#type: "button",
-                class: "curation-similar-category-open",
-                "aria-expanded": "{opened}",
-                onclick: move |_| on_open.call(()),
-                span { class: "curation-similar-category-name", "{summary.category.name()}" }
-            }
-            div {
-                class: "curation-similar-category-share",
-                "aria-hidden": "true",
-                span { style: "width:{summary.share * 100.0}%" }
-            }
-            // The share the bar draws, the rows it counted, and the episodes
-            // they came from — the bar is never the only place the number is.
-            p { class: "curation-similar-category-count", "{share} · {counted}" }
-            p { class: "curation-similar-category-definition", "{summary.category.definition()}" }
-            ul { class: "curation-similar-category-examples",
-                for representative in summary.representatives.iter() {
-                    li { key: "{representative}", "{representative}" }
-                }
-            }
+        input {
+            r#type: "checkbox",
+            class: "curation-similar-keep",
+            checked: kept,
+            title: if kept { "Kept in this output; uncheck to leave it out" } else { "Left out of this output; check to keep it" },
+            "aria-label": "Keep {name}",
+            onchange: move |event| on_keep.call(event.checked()),
         }
     }
 }
@@ -971,9 +1085,9 @@ fn CategoryCard(
 #[component]
 fn CategoryDetail(
     edit: CategoryEdit,
+    grouping: GroupingNode,
     categories: Vec<SubtaskCategory>,
     busy: bool,
-    on_apply: EventHandler<Vec<SubtaskCategory>>,
 ) -> Element {
     let mut draft = use_signal(|| edit.clone());
     let mut problem = use_signal(|| Option::<String>::None);
@@ -983,22 +1097,14 @@ fn CategoryDetail(
         problem.set(None);
         target.set(String::new());
     }));
-    let apply = use_callback(
-        move |edited: Result<Vec<SubtaskCategory>, String>| match edited {
-            Ok(categories) => {
-                problem.set(None);
-                on_apply.call(categories);
-            }
-            Err(reason) => problem.set(Some(reason)),
-        },
-    );
+    let apply = use_callback(move |change: Result<Regroup, String>| {
+        problem.set(change.and_then(|change| grouping.regroup(change)).err());
+    });
     let others = categories
         .iter()
         .filter(|category| category.name() != edit.original())
         .map(|category| category.name().to_owned())
         .collect::<Vec<_>>();
-    let renaming = categories.clone();
-    let merging = categories;
     let chosen = target();
     rsx! {
         div { class: "curation-similar-editor",
@@ -1018,7 +1124,17 @@ fn CategoryDetail(
                 purpose: ActionPurpose::Apply,
                 variant: ButtonVariant::Outline,
                 disabled: busy,
-                onclick: move |_| apply.call(CategoryEdits::new(&renaming).renamed(&draft.read())),
+                onclick: move |_| {
+                    let draft = draft.read();
+                    apply.call(
+                        SubtaskCategory::new(draft.name(), draft.definition()).map(|edited| {
+                            Regroup::Edited {
+                                original: draft.original().to_owned(),
+                                edited,
+                            }
+                        }),
+                    );
+                },
                 "Apply and regroup"
             }
             if !others.is_empty() {
@@ -1041,9 +1157,10 @@ fn CategoryDetail(
                         edit.original(),
                     ),
                     on_confirm: move |()| {
-                        apply.call(
-                            CategoryEdits::new(&merging).merged(&chosen, draft.peek().original()),
-                        );
+                        apply.call(Ok(Regroup::Merged {
+                            merged: draft.peek().original().to_owned(),
+                            into: chosen.clone(),
+                        }));
                     },
                 }
             }

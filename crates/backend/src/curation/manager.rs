@@ -9,7 +9,7 @@
 use super::preview::PreviewRuns;
 use crate::OperationError;
 use spiral_robotics_common::curation::{
-    CurationDocument, CurationSummary, PublishRequest, UnpublishRequest, ViewName,
+    CurationDeletion, CurationDocument, CurationSummary, PublishRequest, UnpublishRequest, ViewName,
 };
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 use spiral_robotics_storage::StorageManager;
@@ -17,6 +17,9 @@ use std::sync::Arc;
 
 /// The one message a losing save shows; reopening reloads the stored revision.
 const SAVED_ELSEWHERE: &str = "This curation was saved elsewhere. Reopen it before saving.";
+/// The same for a delete: the version on screen is no longer the stored one.
+const DELETE_SAVED_ELSEWHERE: &str =
+    "This curation was saved elsewhere. Reopen it before deleting.";
 
 pub(crate) struct CurationManager {
     storage: Arc<StorageManager>,
@@ -80,6 +83,32 @@ impl CurationManager {
             return Err(OperationError::Conflict(SAVED_ELSEWHERE.into()));
         }
         Ok(document.with_revision(stored))
+    }
+
+    /// Delete one saved curation at the revision it was loaded at. One saved
+    /// elsewhere since is refused, so a delete never removes a version the
+    /// operator has not seen, and one already gone is not found. The views
+    /// its outputs publish are the browser's to drop first: only the payload
+    /// names them.
+    pub(super) async fn delete(&self, request: CurationDeletion) -> Result<(), OperationError> {
+        let curations = self.storage.curations();
+        if curations
+            .delete(request.id(), request.revision())
+            .await
+            .map_err(OperationError::External)?
+        {
+            return Ok(());
+        }
+        match curations
+            .load(request.id())
+            .await
+            .map_err(OperationError::External)?
+        {
+            Some(_) => Err(OperationError::Conflict(DELETE_SAVED_ELSEWHERE.into())),
+            None => Err(OperationError::NotFound(
+                "That curation no longer exists.".into(),
+            )),
+        }
     }
 
     /// Publish one output under `name`, replacing the view it names. The

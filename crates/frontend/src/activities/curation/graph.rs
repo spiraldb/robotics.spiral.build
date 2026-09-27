@@ -18,3 +18,4 @@ pub(super) use canvas::{CurationGraphCanvas, NodeGlyph};
 pub(super) use document_bar::CurationDocumentBar;
 pub(super) use node_card::NodeFace;
 pub(super) use node_workspace::NodeWorkspace;
+pub(super) use publish::PublishedViews;
