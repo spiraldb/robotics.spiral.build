@@ -419,7 +419,7 @@ fn CuratedRows(
         None => rsx! {
             p { class: "data-curated-status", role: "status",
                 SpinnerIcon {}
-                "Reading {view.view()}: its models are asked about {episodes} episodes again, which can take minutes."
+                "Curation in progress. This can take a few minutes."
             }
         },
         Some(Err(error)) => rsx! {
