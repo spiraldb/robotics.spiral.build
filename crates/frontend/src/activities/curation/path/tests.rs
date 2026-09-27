@@ -124,7 +124,7 @@ fn a_select_on_duration_keeps_whole_episodes_and_publishes_the_fact_it_read() {
     assert_eq!(
         published(&graph, &long),
         "WITH
-  dataset_0 AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, CAST(duration_ns AS DOUBLE) / 1e9 AS duration_seconds, message_count AS messages, channel_count AS channels, CAST(source_bytes AS DOUBLE) / 1e6 AS size_megabytes FROM (SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, message_start_time, duration_ns, channel_count FROM spql.mcap.episodes('abc130k')) listed),
+  dataset_0 AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, CAST(duration_ns AS DOUBLE) / 1e9 AS duration_seconds, message_count AS messages, channel_count AS channels, CAST(source_bytes AS DOUBLE) / 1e6 AS size_megabytes FROM (SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, message_start_time, duration_ns, channel_count FROM spql.mcap.episodes('abc130k') ORDER BY message_start_time, source_uri, id LIMIT 20) listed),
   select_1 AS (SELECT episode_id, start_ns, end_ns, duration_seconds, messages, channels, size_megabytes FROM dataset_0 WHERE duration_seconds >= CAST(10 AS DOUBLE))
 SELECT episode_id, start_ns, end_ns, duration_seconds FROM select_1"
     );

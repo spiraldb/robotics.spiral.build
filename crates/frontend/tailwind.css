@@ -23,6 +23,7 @@
 @import "./styles/curation-threshold.css";
 @import "./styles/curation-publish.css";
 @import "./styles/curation-primer.css";
+@import "./styles/data-curated.css";
 
 /*
   One palette, named by role rather than by hue. A colour is only ever spelled
@@ -100,6 +101,9 @@
   --tone-kind-episode: #5971fd;
   --tone-kind-stream: #7a5ad6;
   --tone-kind-camera: #e0752f;
+  /* A curated view is what a curation's output publishes, so it wears the
+     output stage's hue. */
+  --tone-kind-curated: var(--tone-stage-output);
 
   /* Stage identity: what a graph node does to the data. Identity, not
      health — a mark or a 14% wash is all it ever paints. */
@@ -274,7 +278,7 @@
 }
 
 /* Top bar ------------------------------------------------------------------
-   One 44px bar: the brand and the activities lead, the open workspace's
+   One 40px bar: the brand and the activities lead, the open workspace's
    status line fills the middle, messages and settings trail. Unlayered,
    because the nav items are shared buttons whose kit rules are unlayered. */
 .studio-topbar-lead,
@@ -283,7 +287,7 @@
   grid-row: 1;
   display: flex;
   min-width: 0;
-  height: 44px;
+  height: 40px;
   align-items: center;
   border-bottom: 1px solid var(--tone-line);
   background: var(--tone-surface);
@@ -404,7 +408,7 @@
 .studio-status-connection,
 .studio-status-fact {
   display: inline-flex;
-  height: 43px;
+  height: 39px;
   flex: 0 0 auto;
   align-items: center;
   gap: 7px;
@@ -1642,28 +1646,29 @@ button.studio-status-fact:hover {
 
 @layer components {
 
-  /* Document bar: identity on the left,
-     the activity's actions on the right, one 36px line. The name is edited
-     where it stands; switching, creating, and deleting open behind the
-     chevron after it, so the bar never grows a second row. */
-  /* The bar sits above the workbench so its popover clears the panels'
-     own layers (the graph's node and edge tiles are z-indexed). */
+  /* Document bar: the head of the pane holding the document, as Data's
+     rail head is — identity on the left, the activity's actions on the
+     right, one line. The name is edited where it stands; switching,
+     creating, and deleting open behind the chevron after it. Only a pane
+     too narrow to keep 9rem for the name sends the actions to a second
+     row, rather than squeezing the name to nothing. */
+  /* The bar sits above the pane's content so its popovers clear the graph's
+     own layers (node and edge tiles are z-indexed). The popovers hang from
+     the bar itself rather than the control that opens them, so they stay
+     inside a narrow pane. */
   .document-bar {
-    @apply relative z-30 flex min-h-10 shrink-0 items-center gap-2 border-b border-line bg-surface pl-3 pr-2;
+    @apply relative z-30 flex shrink-0 flex-wrap items-center gap-x-1 gap-y-1.5 border-b bg-surface py-2 pl-2 pr-2;
+    border-color: var(--tone-line-soft);
   }
 
   .document-identity {
-    @apply relative flex min-w-0 flex-1 items-center gap-1;
-  }
-
-  .document-glyph {
-    @apply inline-flex size-6 shrink-0 items-center justify-center text-ink-faint;
+    @apply flex min-w-36 flex-1 items-center gap-0.5;
   }
 
   /* The name reads as the bar's title and is an input all along: a hairline
      box on hover says it can be typed into, and focus draws the field. */
   .document-name-field {
-    @apply min-w-0 max-w-[40rem] rounded-md border border-transparent bg-transparent px-2 py-1 text-[13px] font-semibold tracking-[-0.015em] text-ink;
+    @apply min-w-0 max-w-[40rem] rounded-md border border-transparent bg-transparent px-2 py-0.5 text-[13px] font-semibold tracking-[-0.015em] text-ink;
     field-sizing: content;
     min-inline-size: 6ch;
     text-overflow: ellipsis;
@@ -1700,49 +1705,19 @@ button.studio-status-fact:hover {
     rotate: -90deg;
   }
 
+  /* Green is saved; red is anything Studio does not hold yet. */
   .document-state {
-    @apply inline-flex min-h-6 shrink-0 items-center px-1.5 font-mono text-[11px] text-ink-faint;
+    @apply mx-1.5 size-2 shrink-0 rounded-full;
+    background: var(--tone-danger);
+    transition: background-color 160ms ease-out;
   }
 
-  /* What the chip says, remounted on every change of state so the settle
-     plays once; the status region around it stays put. */
-  .document-state-settle {
-    @apply inline-flex items-center gap-1.5;
-    animation: workflow-settle 220ms var(--ease-out-expo) both;
-  }
-
-  .document-state-dot {
-    @apply size-1.5 rounded-full;
-    background: var(--tone-ink-faint);
-  }
-
-  .document-state.is-saved .document-state-dot {
+  .document-state.is-saved {
     background: var(--tone-good-dot);
-  }
-
-  .document-state.is-draft {
-    @apply text-caution;
-  }
-
-  .document-state.is-draft .document-state-dot {
-    background: var(--tone-caution);
-  }
-
-  @keyframes workflow-settle {
-    from {
-      opacity: 0;
-      translate: 0 2px;
-    }
   }
 
   .document-actions {
     @apply ml-auto flex shrink-0 items-center gap-1;
-  }
-
-  /* The state chip leads the action group: "Saved" reads beside Save, and
-     a longer state grows leftwards so Save and Run never move. */
-  .document-actions .document-state {
-    @apply mr-1;
   }
 
   /* The switcher floats from the title. A transparent backdrop closes it. */
@@ -1751,8 +1726,8 @@ button.studio-status-fact:hover {
   }
 
   .document-switcher {
-    @apply absolute left-0 top-full z-40 mt-1.5 flex w-80 flex-col overflow-hidden bg-surface;
-    max-width: calc(100vw - 6rem);
+    @apply absolute left-2 top-full z-40 mt-1 flex w-80 flex-col overflow-hidden bg-surface;
+    max-width: calc(100% - 1rem);
     border-radius: 10px;
     box-shadow: var(--shadow-popover);
     animation: workflow-popover-enter 180ms var(--ease-out-expo) both;
@@ -1958,13 +1933,13 @@ button.studio-status-fact:hover {
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .document-state-settle,
     .document-switcher,
     .workflow-stage-card {
       animation: none;
     }
 
     .workflow-stage-card,
+    .document-state,
     .document-switch .ui-icon {
       transition: none;
     }
@@ -2986,7 +2961,7 @@ button.studio-status-fact:hover {
 .studio-route-layout {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-rows: 44px minmax(0, 1fr);
+  grid-template-rows: 40px minmax(0, 1fr);
 }
 .studio-route-layout::before {
   content: "";

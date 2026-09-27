@@ -4,6 +4,7 @@ pub(crate) mod screen;
 
 mod catalog_rail;
 mod client;
+mod curated_view;
 mod dataset_overview;
 mod import_dataset;
 mod relations;

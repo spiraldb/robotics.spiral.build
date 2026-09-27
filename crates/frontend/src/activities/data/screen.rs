@@ -4,12 +4,15 @@
 //! The rail is the hierarchy: a dataset holds episodes. The Overview tab shows
 //! the dataset last chosen; every episode opened gets a tab of its own, so a
 //! few recordings can be compared by switching tabs, and each names the
-//! dataset it belongs to as the way back to its overview.
+//! dataset it belongs to as the way back to its overview. A view a curation
+//! published opens as a tab too, and its intervals open their episodes.
 use super::{
     DatasetClient,
     catalog_rail::{CatalogRail, OpenedEpisode, RailActions, RailSelection},
+    curated_view::CuratedViewSubject,
     dataset_overview::{DatasetOverview, DatasetsAtAGlance},
 };
+use crate::activities::curation::CuratedView;
 use crate::activities::episode::{
     EpisodeFactsPresentation as _, EpisodeHeading, EpisodeInspection, HeadingSubject,
 };
@@ -37,12 +40,13 @@ pub(crate) fn DataWorkspace(is_active: ReadSignal<bool>) -> Element {
 }
 
 /// What the operator has open: the dataset the Overview shows, and the
-/// episodes open as tabs, in the order they were opened. Owned by the
-/// workspace; the rail and the tabs read it and report back.
+/// episodes and curated views open as tabs, in the order they were opened.
+/// Owned by the workspace; the rail and the tabs read it and report back.
 #[derive(Clone, Copy, PartialEq)]
 struct DataSelection {
     dataset: Signal<Option<DatasetSelection>>,
     episodes: Signal<Vec<OpenedEpisode>>,
+    views: Signal<Vec<CuratedView>>,
     importing: Signal<bool>,
     active_panel: Signal<Option<PanelId>>,
 }
@@ -52,12 +56,38 @@ impl DataSelection {
         Self {
             dataset: use_signal(|| None),
             episodes: use_signal(Vec::new),
+            views: use_signal(Vec::new),
             importing: use_signal(|| false),
             active_panel: use_signal(|| None),
         }
     }
     fn episode_panel(id: &EpisodeId) -> PanelId {
         PanelId::new(format!("episode-{id}"))
+    }
+    fn view_panel(view: &str) -> PanelId {
+        PanelId::new(format!("view-{view}"))
+    }
+    /// The curated view whose tab is in front, if a view's tab is.
+    fn active_view(&self) -> Option<String> {
+        let active = self.active_panel.read().clone()?;
+        self.views
+            .read()
+            .iter()
+            .find(|view| Self::view_panel(view.view()) == active)
+            .map(|view| view.view().to_owned())
+    }
+    /// A curated view opens in a tab of its own, or brings its tab forward.
+    fn open_view(mut self, view: CuratedView) {
+        let panel = Self::view_panel(view.view());
+        if !self
+            .views
+            .peek()
+            .iter()
+            .any(|open| open.view() == view.view())
+        {
+            self.views.write().push(view);
+        }
+        self.activate(panel);
     }
     fn activate(mut self, panel: PanelId) {
         self.active_panel.set(Some(panel));
@@ -76,17 +106,19 @@ impl DataSelection {
         self.dataset.set(Some(dataset));
         self.activate(PanelId::new(OVERVIEW_PANEL));
     }
-    /// An episode opens in a tab of its own, or brings its tab forward.
+    /// An episode opens in a tab of its own, or brings its tab forward with
+    /// whatever a curated view asks of it.
     fn open_episode(mut self, opened: OpenedEpisode) {
         let panel = Self::episode_panel(opened.episode().id());
         self.dataset.set(Some(opened.episode().dataset().clone()));
-        if !self
+        let open = self
             .episodes
             .peek()
             .iter()
-            .any(|open| open.episode().id() == opened.episode().id())
-        {
-            self.episodes.write().push(opened);
+            .position(|open| open.episode().id() == opened.episode().id());
+        match open {
+            Some(open) => self.episodes.write()[open].reopen(opened),
+            None => self.episodes.write().push(opened),
         }
         self.activate(panel);
     }
@@ -128,6 +160,9 @@ impl DataSelection {
         self.episodes
             .write()
             .retain(|open| &Self::episode_panel(open.episode().id()) != panel);
+        self.views
+            .write()
+            .retain(|view| &Self::view_panel(view.view()) != panel);
         // Closing the tab in front brings the newest remaining episode
         // forward, or the Overview when none is left.
         if self.active_panel.peek().as_ref() == Some(panel) {
@@ -170,6 +205,12 @@ fn DataPanels() -> Element {
         },
     );
     let resources = catalog.value();
+    // Which of the catalog's views curations published, and from what; read
+    // again with the catalog, and once a publication is saved.
+    let curated = crate::client::queries::QueryPolicy::on_demand(
+        crate::client::queries::QueryDomain::Catalog,
+    )
+    .use_when(move || *available.read(), CuratedView::all);
     let selection = DataSelection::use_selection();
     let inspection = use_resource(move || {
         let dataset = selection.dataset.read().clone();
@@ -237,7 +278,8 @@ fn DataPanels() -> Element {
         EventHandler::new(move |opened| selection.open_episode(opened)),
         EventHandler::new(move |opened| selection.step_episode(opened)),
     )
-    .with_import(EventHandler::new(move |()| selection.start_import()));
+    .with_import(EventHandler::new(move |()| selection.start_import()))
+    .with_curated(EventHandler::new(move |view| selection.open_view(view)));
     // The rail marks what is in front: the episode tab's row, or the
     // Overview's dataset while the Overview is — nothing behind an import.
     let overview_in_front = selection
@@ -254,7 +296,8 @@ fn DataPanels() -> Element {
             .as_ref()
             .map(|opened| opened.episode().id().clone()),
         dataset_inspection.clone().and_then(|result| result.ok()),
-    );
+    )
+    .with_view(selection.active_view());
 
     let overview = match dataset {
         Some(dataset) => rsx! { DatasetOverview { dataset, inspection: dataset_inspection } },
@@ -284,7 +327,7 @@ fn DataPanels() -> Element {
             "Datasets",
             CATALOG_PANEL,
             rsx! {
-                CatalogRail { resources, selection: rail_selection, actions: rail_actions }
+                CatalogRail { resources, curated: curated.value(), selection: rail_selection, actions: rail_actions }
             },
         )
         .with_class("data-catalog-panel"),
@@ -310,6 +353,26 @@ fn DataPanels() -> Element {
             .with_closable(true)
             .with_class("data-subject-panel")
             .with_tab_icon(rsx! { KindMark { letter: 'E', hue: "var(--tone-kind-episode)", label: "Episode" } }),
+        );
+    }
+    for view in selection.views.read().iter().cloned() {
+        let dataset = view.dataset().clone();
+        let panel = DataSelection::view_panel(view.view());
+        panels.push(
+            Panel::new(
+                panel.clone(),
+                view.view().to_owned(),
+                SUBJECT_TILE,
+                rsx! {
+                    CuratedViewSubject { key: "{view.view()}", view,
+                        on_dataset: move |_| selection.select_dataset(dataset.clone()),
+                        on_open: move |opened| selection.open_episode(opened),
+                        on_unpublished: move |_| selection.close(&panel) }
+                },
+            )
+            .with_closable(true)
+            .with_class("data-subject-panel")
+            .with_tab_icon(rsx! { KindMark { letter: 'C', hue: "var(--tone-kind-curated)", label: "Curated view" } }),
         );
     }
     if (selection.importing)() {
@@ -351,6 +414,11 @@ fn EpisodeSubject(opened: OpenedEpisode, on_dataset: EventHandler<()>) -> Elemen
     }
     let dataset = episode.dataset().display_name();
     let name = episode.name();
+    // Opened from a curated view, the view's intervals ride on the timeline.
+    let tracks = opened
+        .spans()
+        .map(|spans| vec![spans.track().into()])
+        .unwrap_or_default();
     rsx! {
         section { class: "data-episode-subject", "aria-label": "{name}",
             EpisodeHeading {
@@ -372,7 +440,7 @@ fn EpisodeSubject(opened: OpenedEpisode, on_dataset: EventHandler<()>) -> Elemen
                     }
                 },
             }
-            EpisodeInspection { episode }
+            EpisodeInspection { episode, tracks, focus: opened.play() }
         }
     }
 }

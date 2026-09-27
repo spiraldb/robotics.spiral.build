@@ -139,13 +139,9 @@
   }
 
 
-  /* The document bar over the panels, as every document activity stacks. */
-  .curation-activity {
-    @apply flex h-full min-h-0 min-w-0 flex-col;
-  }
-
-  .curation-panels {
-    @apply min-h-0 min-w-0 flex-1;
+  /* The graph is the document, so the document bar heads its pane. */
+  .curation-graph-pane {
+    @apply flex min-h-0 min-w-0 flex-1 flex-col;
   }
 
   /* Both panes fill their tile; the workspace scrolls, the canvas clips. */

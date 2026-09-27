@@ -1,6 +1,6 @@
 //! Publishing from the document bar: the outputs the operator chooses, each
-//! compiled over the whole dataset and created as a catalog view under the
-//! name they give it, then recorded in the curation, which saves. A view
+//! compiled over the dataset's first episodes and created as a catalog view
+//! under the name they give it, then recorded in the curation, which saves. A view
 //! cannot be turned back into a graph, so the recipe stays in the curation
 //! and the view is what it produces.
 //!
@@ -11,9 +11,10 @@
 use super::node_card::NodeCard;
 use crate::activities::curation::document::PublishedOutput;
 use crate::activities::curation::path::CurationPath;
+use crate::activities::curation::population::PUBLISHED_EPISODES;
 use crate::activities::curation::state::CurationController;
 use crate::client::project::ProjectClient;
-use crate::client::queries::QueryDomain;
+use crate::client::queries::{QueryDomain, QueryRefresh};
 use crate::client::transport::HttpRequest;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
@@ -183,6 +184,9 @@ impl ViewPublisher {
                 match recorded {
                     Ok(()) => {
                         controller.save_when_idle(studio).await;
+                        // Data lists a view by the curation recording it, so
+                        // the catalog is read again once the record is saved.
+                        QueryRefresh::current().invalidate(&[QueryDomain::Catalog]);
                         let views = created
                             .iter()
                             .map(|(_, view)| view.as_str())
@@ -211,12 +215,8 @@ impl ViewPublisher {
         busy.set(true);
         spawn(async move {
             controller.report_activity(&node, Some(format!("Unpublishing {view}")));
-            let request = HttpRequest::new("POST", "/api/curations/unpublish")
-                .json(&UnpublishRequest::new(view));
-            let forgotten = ProjectClient::current()
-                .mutate::<()>(&[QueryDomain::Catalog], request)
+            let forgotten = PublishedViews::drop_view(view)
                 .await
-                .map_err(|error| error.to_string())
                 .and_then(|()| controller.edit(|payload| payload.remove_publication(&node, saved)));
             controller.report_activity(&node, None);
             match forgotten {
@@ -240,14 +240,18 @@ impl PublishedViews {
     /// part-way can simply be asked again.
     pub(in crate::activities::curation) async fn drop_all(self) -> Result<(), String> {
         for view in self.0 {
-            let request = HttpRequest::new("POST", "/api/curations/unpublish")
-                .json(&UnpublishRequest::new(view));
-            ProjectClient::current()
-                .mutate::<()>(&[QueryDomain::Catalog], request)
-                .await
-                .map_err(|error| error.to_string())?;
+            Self::drop_view(view).await?;
         }
         Ok(())
+    }
+    /// Drop the catalog view `view`; one already gone is dropped too.
+    pub(in crate::activities::curation) async fn drop_view(view: String) -> Result<(), String> {
+        let request =
+            HttpRequest::new("POST", "/api/curations/unpublish").json(&UnpublishRequest::new(view));
+        ProjectClient::current()
+            .mutate::<()>(&[QueryDomain::Catalog], request)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -321,7 +325,7 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                         }
                     },
                     p { class: "curation-publish-intro",
-                        "Each output you choose becomes a catalog view of what it keeps, over the whole dataset."
+                        "Each output you choose becomes a catalog view of what it keeps in the dataset's first {PUBLISHED_EPISODES} episodes. Every read of a view asks its models again."
                     }
                     if unsaved {
                         div { class: "curation-publish-unsaved", role: "status",

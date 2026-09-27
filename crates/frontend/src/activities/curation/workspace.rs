@@ -1,6 +1,6 @@
-//! The Curation activity: one document bar over the graph in a narrow left
-//! pane and the selected node's workspace in the larger right pane. Video and
-//! tables live in the workspace so the graph's nodes stay small.
+//! The Curation activity: the graph in a narrow left pane, headed by the
+//! document bar, and the selected node's workspace in the larger right pane.
+//! Video and tables live in the workspace so the graph's nodes stay small.
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelLayout, PanelWorkspace, SplitAxis};
 
@@ -11,7 +11,7 @@ use crate::components::icons::GraphIcon;
 
 const GRAPH_PANEL_ID: &str = "curation-graph";
 const WORKSPACE_PANEL_ID: &str = "curation-workspace";
-const CURATION_LAYOUT_SCOPE: &str = "curation-graph-v1";
+const CURATION_LAYOUT_SCOPE: &str = "curation-graph-v2";
 
 #[component]
 fn CurationPanels(controller: CurationController) -> Element {
@@ -24,7 +24,12 @@ fn CurationPanels(controller: CurationController) -> Element {
             GRAPH_PANEL_ID,
             "Graph",
             "curation-graph",
-            rsx! { CurationGraphCanvas { controller } },
+            rsx! {
+                div { class: "curation-graph-pane",
+                    CurationDocumentBar { controller }
+                    CurationGraphCanvas { controller }
+                }
+            },
         )
         .with_class("curation-canvas-graph-editor")
         .with_tab_icon(rsx! { GraphIcon {} }),
@@ -51,15 +56,16 @@ fn CurationPanels(controller: CurationController) -> Element {
 struct CurationWorkspaceLayout;
 
 impl CurationWorkspaceLayout {
-    /// The graph is a column of 224px cards, so a fifth of a 1440px window
-    /// already fits two branches side by side with room to pan, and the
-    /// workspace under study — episodes, tables, video — keeps the rest. Both
-    /// tiles stay dockable and resizable, so a wider graph is a drag away.
+    /// The graph pane is headed by the document bar, whose name, Discard,
+    /// Save, and Publish want about 390px, so the graph takes just over a
+    /// quarter of a 1440px window, and the workspace under study — episodes,
+    /// tables, video — keeps the rest. Both tiles stay dockable and
+    /// resizable, so a wider graph is a drag away.
     fn initial() -> PanelLayout {
         PanelLayout::new(LayoutNode::split(
             "curation-columns",
             SplitAxis::Horizontal,
-            0.23,
+            0.27,
             LayoutNode::tile("curation-graph", [GRAPH_PANEL_ID]),
             LayoutNode::tile("curation-workspace", [WORKSPACE_PANEL_ID]),
         ))
@@ -81,10 +87,7 @@ pub(crate) fn CurationWorkspace(is_active: ReadSignal<bool>) -> Element {
         crate::shell::frame::WorkspaceFrame {
             workspace,
             status: crate::shell::frame::WorkspaceStatus::Curation(status),
-            div { class: "curation-activity",
-                CurationDocumentBar { controller }
-                div { class: "curation-panels", CurationPanels { controller } }
-            }
+            CurationPanels { controller }
         }
     }
 }

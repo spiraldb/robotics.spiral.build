@@ -4,9 +4,10 @@
    must be unlayered too. */
 
 @layer components {
-  /* Publish ends the bar, after Save, and its panel hangs from it. */
+  /* Publish ends the bar, after Save. Its panel hangs from the bar's end,
+     and a pane narrower than the panel gets the pane's width. */
   .curation-publish {
-    @apply relative flex shrink-0 items-center;
+    @apply flex shrink-0 items-center;
   }
   .curation-publish > .ui-button .ui-icon {
     @apply size-3 shrink-0 text-ink-faint;
@@ -18,8 +19,8 @@
   }
 
   .curation-publish-dialog {
-    @apply absolute right-0 top-full z-40 mt-1.5 flex w-[26rem] flex-col overflow-hidden bg-surface;
-    max-width: calc(100vw - 2rem);
+    @apply absolute right-2 top-full z-40 mt-1 flex w-[26rem] flex-col overflow-hidden bg-surface;
+    max-width: calc(100% - 1rem);
     max-height: min(32rem, calc(100vh - 8rem));
     border-radius: 10px;
     box-shadow: var(--shadow-popover);

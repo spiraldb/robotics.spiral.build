@@ -524,6 +524,46 @@ fn a_view_is_current_until_a_later_save_changes_the_recipe() {
 }
 
 #[test]
+fn a_view_reads_the_first_episodes_and_one_published_before_the_bound_reads_all() {
+    let (mut payload, long, _) = two_outputs();
+    payload
+        .record_publication(&long, "long_episodes", 3)
+        .unwrap();
+    let recorded =
+        CurationGraph::decode(CURATION_ENCODING_VERSION, &payload.encode().unwrap()).unwrap();
+    let (published, node) = recorded.publications().next().unwrap();
+    assert_eq!(node.id(), long);
+    assert_eq!(
+        published.episodes(),
+        Some(crate::activities::curation::population::PUBLISHED_EPISODES)
+    );
+    let older: PublishedOutput =
+        serde_json::from_str(r#"{"node":"s","view":"folds","revision":3}"#).unwrap();
+    assert_eq!(older.episodes(), None);
+}
+
+#[test]
+fn a_copy_unpublished_elsewhere_differs_by_its_publications_alone() {
+    let (mut open, long, short) = two_outputs();
+    open.record_publication(&long, "long_episodes", 3).unwrap();
+    open.record_publication(&short, "short_episodes", 4)
+        .unwrap();
+    let shortest = Selection::episodes_where(EpisodeFact::DurationSeconds, Comparison::AtMost, 5.0);
+    // Data unpublished one view and stored the curation.
+    let mut stored = open.clone();
+    stored.remove_publication(&long, 5).unwrap();
+    assert!(open.same_recipe(&stored));
+    open.take_publications(&stored);
+    assert_eq!(open, stored);
+    // A recipe edited elsewhere is another writer's change.
+    let mut edited = stored.clone();
+    edited
+        .add_keeping(DATASET_NODE_ID, CurationNodeKind::Select, shortest)
+        .unwrap();
+    assert!(!open.same_recipe(&edited));
+}
+
+#[test]
 fn the_views_a_stored_payload_publishes_are_read_without_decoding_it() {
     let (mut payload, long, _) = two_outputs();
     payload

@@ -1,7 +1,8 @@
 //! The document bar: which curation is open, whether it is saved, and what
-//! may be done to it. What is Curation's own is starting a graph from a
-//! dataset and publishing its outputs; there is no Run, because each node
-//! runs from its own workspace.
+//! may be done to it. It heads the graph pane, because the graph is the
+//! document. What is Curation's own is starting a graph from a dataset and
+//! publishing its outputs; there is no Run, because each node runs from its
+//! own workspace.
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::DatasetSummary;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
@@ -14,7 +15,6 @@ use crate::components::document_bar::{
     DocumentState, OpenDocument,
 };
 use crate::components::document_session::DocumentCommand;
-use crate::components::icons::CurationIcon;
 use crate::shell::state::StudioProjectState;
 
 const UNTITLED: &str = "Untitled curation";
@@ -44,7 +44,6 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
     use_future(move || async move { controller.refresh_documents() });
     rsx! {
         header { class: "document-bar",
-            span { class: "document-glyph", "aria-hidden": "true", CurationIcon {} }
             DocumentBar {
                 copy: COPY,
                 document: OpenDocument::new(
@@ -56,6 +55,7 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
                 gate: DocumentBarGate::new(waiting.clone(), waiting.clone(), command.is_some())
                     .renaming(waiting),
                 creation: rsx! { CurationDatasetCreation { controller } },
+                actions: rsx! { CurationPublish { controller } },
                 on_command: move |command| match command {
                     DocumentBarCommand::Open(Some(id)) => controller.open(id),
                     DocumentBarCommand::Open(None) => controller.create(UNTITLED, None),
@@ -65,7 +65,6 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
                     DocumentBarCommand::Save => controller.save(studio),
                 },
             }
-            CurationPublish { controller }
         }
     }
 }

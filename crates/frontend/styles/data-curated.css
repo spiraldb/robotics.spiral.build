@@ -1,0 +1,239 @@
+/* Data › curated view styles: the rail's Curated section, and a curated
+   view's tab — where it comes from, what one read kept, and its intervals
+   under the episodes they belong to. Prefix every class with
+   `data-curated-`. Use @layer components like tailwind.css. */
+
+@layer components {
+  /* Rail ---------------------------------------------------------------- */
+  .data-curated-heading {
+    margin: 16px 0 4px;
+    padding: 0 16px;
+    color: var(--tone-ink-faint);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .data-curated-item > .ui-tree-row .ui-tree-label {
+    gap: 8px;
+    padding-block: 3px;
+  }
+
+  .data-curated-item-words {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+  }
+
+  .data-curated-item-name,
+  .data-curated-item-origin {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .data-curated-item-name {
+    color: var(--tone-ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .data-curated-item-origin {
+    color: var(--tone-ink-faint);
+    font-size: 11px;
+  }
+
+  .data-curated-item[data-selected="true"] .data-curated-item-origin {
+    color: var(--tone-accent-ink);
+  }
+
+  .data-curated-item-stale {
+    flex: 0 0 auto;
+    color: var(--tone-caution);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  /* Tab ----------------------------------------------------------------- */
+  .data-curated {
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    overflow-y: auto;
+    padding-bottom: 32px;
+    animation: data-subject-enter 260ms var(--ease-out-expo) both;
+  }
+
+  .data-curated-title {
+    min-width: 0;
+  }
+
+  /* The name the catalog reads it by, at the Title step, set as the
+     identifier it is. */
+  .data-curated-title h2 {
+    font-family: var(--font-mono);
+  }
+
+  .data-curated-origin {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin-top: 2px;
+    color: var(--tone-ink-faint);
+    font-size: 12.5px;
+  }
+
+  .data-curated-origin .data-curated-dataset {
+    gap: 6px;
+    color: var(--tone-ink-soft);
+    font-size: 12.5px;
+    font-weight: 450;
+  }
+
+  .data-curated-dataset .ui-kind-mark {
+    width: 14px;
+    height: 14px;
+    flex-basis: 14px;
+    border-width: 1.25px;
+    font-size: 8.5px;
+  }
+
+  /* Unpublish ends the head, the tab's one destructive action, at rest as
+     quiet as a link; confirming asks on its own row under the head. */
+  .data-curated-unpublish {
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+
+  .data-curated-confirmation {
+    width: auto;
+    margin: 0 24px 12px;
+    padding-inline: 12px;
+  }
+
+  .data-curated-notice {
+    margin: 0 24px 12px;
+  }
+
+  .data-curated-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 24px;
+    color: var(--tone-ink-soft);
+    font-size: 12.5px;
+  }
+
+  .data-curated-status[role="alert"] {
+    flex-direction: column;
+    align-items: flex-start;
+    color: var(--tone-danger);
+  }
+
+  .data-curated .data-overview-facts {
+    margin: 0 24px;
+    padding: 12px 0;
+    border-top: 1px solid var(--tone-line-soft);
+    border-bottom: 1px solid var(--tone-line-soft);
+    grid-auto-columns: minmax(max-content, 1fr);
+  }
+
+  .data-curated-index,
+  .data-curated-rows {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .data-curated-index {
+    margin-top: 16px;
+  }
+
+  /* An episode heading stays put while its intervals scroll under it, so
+     the row on screen always has its episode named above it. */
+  .data-curated-episode,
+  .data-curated-row {
+    display: grid;
+    width: 100%;
+    align-items: center;
+    gap: 10px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 100ms ease-out;
+  }
+
+  .data-curated-episode {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 6px 24px;
+    border-top: 1px solid var(--tone-line);
+    border-bottom: 1px solid var(--tone-line-soft);
+    background: var(--tone-sidebar);
+  }
+
+  .data-curated-episode:hover {
+    background: var(--tone-sunken);
+  }
+
+  .data-curated-episode .episode-still {
+    width: 64px;
+    height: 36px;
+  }
+
+  .data-curated-count {
+    color: var(--tone-ink-faint);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .data-curated-row {
+    min-height: 56px;
+    padding: 4px 24px 4px 48px;
+    border-bottom: 1px solid var(--tone-line-soft);
+    background: none;
+  }
+
+  .data-curated-row:hover {
+    background: var(--tone-hover);
+  }
+
+  .data-curated-episode:focus-visible,
+  .data-curated-row:focus-visible {
+    outline: 2px solid var(--tone-focus);
+    outline-offset: -2px;
+  }
+
+  .data-curated-row .episode-still {
+    width: 80px;
+    height: 45px;
+  }
+
+  /* A published value can be words, such as a category with its
+     probability, so the measure column holds them without pushing the row. */
+  .data-curated-row .episode-row-measures {
+    max-width: 16rem;
+  }
+
+  .data-curated-row .episode-row-measure {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .data-curated {
+      animation: none;
+    }
+  }
+}

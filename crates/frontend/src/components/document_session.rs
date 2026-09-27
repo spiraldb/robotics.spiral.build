@@ -232,6 +232,20 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
     pub(crate) fn is_stored(&self) -> bool {
         self.baseline.read().is_stored()
     }
+    /// Read what Studio last stored or served, without subscribing to it.
+    pub(crate) fn peek_baseline<R>(&self, read: impl FnOnce(&Doc) -> R) -> R {
+        read(&self.baseline.peek())
+    }
+
+    /// Take `stored`, the open document as Studio now stores it, as what
+    /// Studio last stored: the draft keeps its content and takes the stored
+    /// revision, as after a save. Another document is ignored.
+    pub(crate) fn adopt_stored(mut self, stored: Doc) {
+        if self.draft.peek().id() == stored.id() {
+            self.draft.write().acknowledge_save(&stored);
+            self.baseline.set(stored);
+        }
+    }
 
     /// Run `task` on the scope that owns this session, so a command outlives the
     /// view that started it but is cancelled with the workspace.
@@ -314,10 +328,7 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
             let client = DocumentClient::<Doc>::current(Doc::COLLECTION);
             match client.save(&submitted).await {
                 Ok(saved) => {
-                    if self.draft.peek().id() == saved.id() {
-                        self.draft.write().acknowledge_save(&saved);
-                        self.baseline.set(saved);
-                    }
+                    self.adopt_stored(saved);
                     if let Ok(summaries) = client.list().await {
                         self.summaries.set(summaries);
                     }
@@ -350,10 +361,7 @@ impl<Doc: StudioDocument> DocumentSession<Doc> {
             let client = DocumentClient::<Doc>::current(Doc::COLLECTION);
             match client.save(&stored).await {
                 Ok(saved) => {
-                    if self.draft.peek().id() == saved.id() {
-                        self.draft.write().acknowledge_save(&saved);
-                        self.baseline.set(saved);
-                    }
+                    self.adopt_stored(saved);
                     if let Ok(summaries) = client.list().await {
                         self.summaries.set(summaries);
                     }

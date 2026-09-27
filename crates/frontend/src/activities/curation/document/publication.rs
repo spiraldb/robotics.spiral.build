@@ -7,7 +7,8 @@
 //! it, which is how a node says its view is out of date. Recording a
 //! publication is itself a save that edits no recipe, so every view current
 //! before it stays current after it.
-use super::CurationGraph;
+use super::{CurationGraph, CurationNode};
+use crate::activities::curation::population::PUBLISHED_EPISODES;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::curation::ViewName;
 use std::collections::BTreeSet;
@@ -20,6 +21,10 @@ pub(crate) struct PublishedOutput {
     view: String,
     /// The saved revision whose recipe the view was compiled from.
     revision: u64,
+    /// How many of the dataset's first episodes the view reads; none for a
+    /// view published before views were bounded, which reads them all.
+    #[serde(default)]
+    episodes: Option<usize>,
 }
 
 impl PublishedOutput {
@@ -53,6 +58,9 @@ impl PublishedOutput {
     pub(crate) fn view(&self) -> &str {
         &self.view
     }
+    pub(crate) fn episodes(&self) -> Option<usize> {
+        self.episodes
+    }
     /// Whether the view is still what the recipe saved at `saved` compiles to.
     pub(crate) fn is_current(&self, saved: u64) -> bool {
         self.revision >= saved
@@ -67,9 +75,17 @@ impl CurationGraph {
             .find(|published| published.node == node)
     }
 
+    /// Every output published as a view, beside its node.
+    pub(crate) fn publications(&self) -> impl Iterator<Item = (&PublishedOutput, &CurationNode)> {
+        self.published
+            .iter()
+            .filter_map(|published| Some((published, self.node(&published.node)?)))
+    }
+
     /// Record that `node` is published as `view`, compiled from the recipe
-    /// saved at `saved`. The save that records it comes next, at `saved + 1`.
-    /// A refused record changes nothing.
+    /// saved at `saved` over the dataset's first [`PUBLISHED_EPISODES`]. The
+    /// save that records it comes next, at `saved + 1`. A refused record
+    /// changes nothing.
     pub(crate) fn record_publication(
         &mut self,
         node: &str,
@@ -93,8 +109,20 @@ impl CurationGraph {
             node: node.to_owned(),
             view: view.to_owned(),
             revision: saved + 1,
+            episodes: Some(PUBLISHED_EPISODES),
         });
         Ok(())
+    }
+
+    /// Whether `other` differs from this graph by what it publishes alone.
+    pub(crate) fn same_recipe(&self, other: &Self) -> bool {
+        self.dataset == other.dataset && self.nodes == other.nodes && self.edges == other.edges
+    }
+
+    /// Publish what `other`, a copy of this curation stored elsewhere,
+    /// publishes.
+    pub(crate) fn take_publications(&mut self, other: &Self) {
+        self.published = other.published.clone();
     }
 
     /// Forget that `node` is published, once its view is dropped.

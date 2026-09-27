@@ -1,7 +1,10 @@
 //! Datasets and their episodes, the way an operator thinks about recordings:
-//! a dataset is a folder of MCAP files, and each file is one episode.
+//! a dataset is a folder of MCAP files, and each file is one episode. Above
+//! them, the views curations published of those episodes.
+use super::curated_view::ViewSpans;
+use crate::activities::curation::CuratedView;
 use crate::activities::episode::{
-    Episode, EpisodeFactsPresentation as _, EpisodeRows, EpisodeStill, EpisodeStills,
+    Episode, EpisodeFactsPresentation as _, EpisodeRows, EpisodeStill, EpisodeStills, PlayRequest,
     RowFaceView, SourceLabel, StillMoment,
 };
 use crate::client::queries::{QueryDomain, QueryPolicy};
@@ -17,33 +20,76 @@ use spiral_robotics_ui::{
 };
 
 type ResourceCatalog = ReadSignal<Option<Result<Vec<ProjectResource>, String>>>;
+pub(super) type CuratedCatalog = ReadSignal<Option<Result<Vec<CuratedView>, String>>>;
 const EPISODE_PAGE_SIZE: usize = 50;
 const FILTER_ID: &str = "data-rail-filter";
 
-/// The episode the workspace is inspecting, with the label the rail showed.
-#[derive(Clone, Debug, PartialEq)]
+/// The episode the workspace is inspecting, with the label the rail showed,
+/// and, opened from a curated view, that view's intervals and the ask to play
+/// the one chosen.
+#[derive(Clone, PartialEq)]
 pub(super) struct OpenedEpisode {
     episode: Episode,
     label: SourceLabel,
+    spans: Option<ViewSpans>,
+    play: Option<PlayRequest>,
 }
 
 impl OpenedEpisode {
+    fn new(episode: Episode, label: SourceLabel) -> Self {
+        Self {
+            episode,
+            label,
+            spans: None,
+            play: None,
+        }
+    }
+    /// `episode` opened from a curated view: its intervals on the timeline,
+    /// playing from the one chosen.
+    pub(super) fn from_view(episode: Episode, label: SourceLabel, spans: ViewSpans) -> Self {
+        Self {
+            play: spans.chosen().map(PlayRequest::new),
+            spans: Some(spans),
+            ..Self::new(episode, label)
+        }
+    }
     pub(super) fn episode(&self) -> &Episode {
         &self.episode
     }
     pub(super) fn label(&self) -> &SourceLabel {
         &self.label
     }
+    pub(super) fn spans(&self) -> Option<&ViewSpans> {
+        self.spans.as_ref()
+    }
+    pub(super) fn play(&self) -> Option<PlayRequest> {
+        self.play
+    }
+    /// Take what opening this episode again asks of its tab. A view's
+    /// intervals replace the ones shown and play the chosen one, asked anew
+    /// even when it is the one already playing; opened again from the rail,
+    /// the tab stays as it is.
+    pub(super) fn reopen(&mut self, again: Self) {
+        let Some(spans) = again.spans else {
+            return;
+        };
+        if let Some(start) = spans.chosen() {
+            self.play = Some(PlayRequest::after(self.play, start));
+        }
+        self.spans = Some(spans);
+    }
 }
 
 /// What the rail reports back to the workspace: a dataset chosen, an episode
-/// opened from its row, or the next or previous episode stepped to by key.
+/// opened from its row, the next or previous episode stepped to by key, or a
+/// curated view chosen.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct RailActions {
     on_select_dataset: EventHandler<DatasetSelection>,
     on_open_episode: EventHandler<OpenedEpisode>,
     on_step_episode: EventHandler<OpenedEpisode>,
     on_import: EventHandler<()>,
+    on_open_view: EventHandler<CuratedView>,
 }
 
 impl RailActions {
@@ -57,10 +103,15 @@ impl RailActions {
             on_open_episode,
             on_step_episode,
             on_import: EventHandler::new(|_| {}),
+            on_open_view: EventHandler::new(|_| {}),
         }
     }
     pub(super) fn with_import(mut self, on_import: EventHandler<()>) -> Self {
         self.on_import = on_import;
+        self
+    }
+    pub(super) fn with_curated(mut self, on_open_view: EventHandler<CuratedView>) -> Self {
+        self.on_open_view = on_open_view;
         self
     }
 }
@@ -71,6 +122,7 @@ pub(super) struct RailSelection {
     dataset: Option<DatasetSelection>,
     episode_id: Option<EpisodeId>,
     inspection: Option<DatasetInspection>,
+    view: Option<String>,
 }
 
 impl RailSelection {
@@ -83,13 +135,20 @@ impl RailSelection {
             dataset,
             episode_id,
             inspection,
+            view: None,
         }
+    }
+    /// The curated view whose tab is in front.
+    pub(super) fn with_view(mut self, view: Option<String>) -> Self {
+        self.view = view;
+        self
     }
 }
 
 #[component]
 pub(super) fn CatalogRail(
     resources: ResourceCatalog,
+    curated: CuratedCatalog,
     selection: RailSelection,
     actions: RailActions,
 ) -> Element {
@@ -127,7 +186,26 @@ pub(super) fn CatalogRail(
                         // searches its own episodes, so a match in a collapsed dataset
                         // is found and the operator's expansion choices survive.
                         let datasets = entries.iter().filter(|resource| resource.kind() == "dataset").cloned().collect::<Vec<_>>();
+                        // Curated views lead, so an open dataset's episodes
+                        // never push them out of sight.
+                        let curated = match &*curated.read() {
+                            Some(Ok(views)) => Ok(ListedViews::of(views, entries, &needle)),
+                            Some(Err(error)) => Err(error.clone()),
+                            None => Ok(Vec::new()),
+                        };
+                        let headed = !matches!(&curated, Ok(views) if views.is_empty());
                         rsx! {
+                            match curated {
+                                Ok(views) => rsx! {
+                                    CuratedViewList { views, selected: selection.view.clone(), on_open: actions.on_open_view }
+                                },
+                                Err(error) => rsx! {
+                                    p { class: "data-rail-note", role: "alert", "Curated views could not be read: {error}" }
+                                },
+                            }
+                            if headed {
+                                h3 { class: "data-curated-heading", "Datasets" }
+                            }
                             if datasets.is_empty() {
                                 div { class: "data-rail-note",
                                     strong { "No datasets yet" }
@@ -287,7 +365,7 @@ fn DatasetEpisodes(
                     id: EpisodeStepper::row_id(episode.id()),
                     title: "{episode.facts().facts_label()}\n{episode.facts().source_uri().unwrap_or_default()}",
                     onselect: {
-                        let opened = OpenedEpisode { episode: episode.clone(), label: listing.label(&episode) };
+                        let opened = OpenedEpisode::new(episode.clone(), listing.label(&episode));
                         move |_| on_open.call(opened.clone())
                     },
                     label: rsx! {
@@ -313,6 +391,65 @@ fn DatasetEpisodes(
                 li { class: "data-rail-more",
                     Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Link, size: ButtonSize::Compact,
                         onclick: move |_| offset.set(offset() + EPISODE_PAGE_SIZE), "Load {EPISODE_PAGE_SIZE} more" }
+                }
+            }
+        }
+    }
+}
+
+/// The curated views the rail lists: those a saved curation records that the
+/// catalog still holds, and whose name the filter matches.
+struct ListedViews;
+
+impl ListedViews {
+    fn of(views: &[CuratedView], catalog: &[ProjectResource], needle: &str) -> Vec<CuratedView> {
+        views
+            .iter()
+            .filter(|view| {
+                catalog.iter().any(|resource| {
+                    resource.kind() == "view"
+                        && matches!(resource.selection().path(), [name] if name.eq_ignore_ascii_case(view.view()))
+                })
+            })
+            .filter(|view| view.view().to_lowercase().contains(needle))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The views curations published, above the datasets their episodes belong
+/// to: each named as the catalog reads it, over the dataset and the output it
+/// comes from.
+#[component]
+fn CuratedViewList(
+    views: Vec<CuratedView>,
+    selected: Option<String>,
+    on_open: EventHandler<CuratedView>,
+) -> Element {
+    if views.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        h3 { class: "data-curated-heading", "Curated" }
+        Tree { label: "Curated views", class: "data-curated-list",
+            for view in views {
+                TreeItem { key: "{view.view()}", class: "data-curated-item",
+                    selected: selected.as_deref() == Some(view.view()),
+                    title: "{view.output()} of the curation “{view.curation()}”",
+                    onselect: {
+                        let view = view.clone();
+                        move |_| on_open.call(view.clone())
+                    },
+                    label: rsx! {
+                        KindMark { letter: 'C', hue: "var(--tone-kind-curated)", label: "Curated view" }
+                        span { class: "data-curated-item-words",
+                            span { class: "data-curated-item-name", "{view.view()}" }
+                            span { class: "data-curated-item-origin", "{view.dataset().display_name()} · {view.output()}" }
+                        }
+                    },
+                    trailing: (!view.is_current()).then(|| rsx! {
+                        span { class: "data-curated-item-stale", title: "Its curation has changed since it was published", "Changed" }
+                    }),
                 }
             }
         }
@@ -383,10 +520,10 @@ impl EpisodeStepper {
             else {
                 return true;
             };
-            let opened = OpenedEpisode {
-                episode: (*next).clone(),
-                label: EpisodeRows::of(episodes.iter()).label(next),
-            };
+            let opened = OpenedEpisode::new(
+                (*next).clone(),
+                EpisodeRows::of(episodes.iter()).label(next),
+            );
             Self::release_rail_focus();
             BrowserFocus::reveal_after_render(Self::row_id(next.id()));
             on_step.call(opened);

@@ -1,41 +1,37 @@
-//! One document bar for an activity that opens documents: the name, which is
-//! edited where it stands, the chevron that opens the switcher — saved
-//! documents, each with its own delete, and the ways to make one — the saved
-//! state, Discard and Save.
+//! One document bar for an activity that opens documents: the saved state as
+//! a dot, the name, which is edited where it stands, the chevron that opens
+//! the switcher — saved documents, each with its own delete, and the ways to
+//! make one — then Discard and Save.
 //!
 //! What is the activity's own is a value the caller supplies: the words for
 //! this kind of document ([`DocumentBarCopy`]), why an action is refused right
-//! now ([`DocumentBarGate`]), and the extra creation control inside the
-//! switcher. Everything the operator presses arrives back as one
-//! [`DocumentBarCommand`], because opening and discarding reinstall whatever
-//! the activity keeps beside the document.
+//! now ([`DocumentBarGate`]), the extra creation control inside the
+//! switcher, and the extra actions after Save. Everything the operator
+//! presses arrives back as one [`DocumentBarCommand`], because opening and
+//! discarding reinstall whatever the activity keeps beside the document.
 
 use crate::components::icons::CheckIcon;
 use dioxus::prelude::*;
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonSize, ButtonVariant, ChevronIcon, ConfirmationCopy,
-    ConfirmationDismissal, ConfirmationResponse, DeleteIcon, InlineConfirmation, Remount,
+    ConfirmationDismissal, ConfirmationResponse, DeleteIcon, InlineConfirmation,
 };
 use wasm_bindgen::JsCast as _;
 
-/// The saved state the chip below reports now lives with the session that owns
+/// The saved state the dot below reports now lives with the session that owns
 /// it; the bars that import it from here keep working.
 pub(crate) use crate::components::document_session::DocumentState;
 
-/// A change of state remounts what the chip says, which replays its settle
-/// motion once. The status region itself stays mounted: a live region
-/// inserted afresh is not reliably announced, while new words inside a
-/// standing one are.
+/// Whether the document is saved, as one dot before its name: green when
+/// Studio holds what is on screen, red when it does not. The words are for
+/// the hover and screen readers. The status region stays mounted, because a
+/// live region inserted afresh is not reliably announced, while new words
+/// inside a standing one are.
 #[component]
-fn DocumentStateChip(state: DocumentState) -> Element {
+fn DocumentStateDot(state: DocumentState) -> Element {
     rsx! {
-        span { class: "document-state {state.class_name()}", role: "status",
-            Remount { identity: state.class_name().to_owned(),
-                span { class: "document-state-settle",
-                    span { class: "document-state-dot", "aria-hidden": "true" }
-                    "{state.label()}"
-                }
-            }
+        span { class: "document-state {state.class_name()}", role: "status", title: "{state.label()}",
+            span { class: "sr-only", "{state.label()}" }
         }
     }
 }
@@ -288,10 +284,12 @@ pub(crate) struct DocumentBarProps {
     on_command: EventHandler<DocumentBarCommand>,
     /// Extra creation controls inside the switcher, such as "From dataset".
     creation: Element,
+    /// Extra actions after Save, such as Publish.
+    actions: Element,
 }
 
-/// The identity half and the action half of one document bar. The glyph and
-/// the surrounding `header` stay with the activity.
+/// The identity half and the action half of one document bar. The
+/// surrounding `header` stays with the activity.
 #[component]
 pub(crate) fn DocumentBar(props: DocumentBarProps) -> Element {
     // The switcher remembers which document it was opened over, so anything
@@ -307,6 +305,7 @@ pub(crate) fn DocumentBar(props: DocumentBarProps) -> Element {
     let switching = opened_over.read().as_deref() == Some(current_id.as_str());
     rsx! {
         div { class: "document-identity",
+            DocumentStateDot { state: document.state }
             DocumentName {
                 id: format!("{}-document-name", copy.noun),
                 label: copy.name_label(),
@@ -323,8 +322,7 @@ pub(crate) fn DocumentBar(props: DocumentBarProps) -> Element {
                     opened_over.set(opened);
                 },
             }
-            // The switcher hangs from the name it belongs to, wherever that
-            // name sits in the bar.
+            // The switcher hangs from the activity's header, under the name.
             if switching {
                 DocumentSwitcher {
                     id: format!("{}-switcher", copy.noun),
@@ -343,7 +341,6 @@ pub(crate) fn DocumentBar(props: DocumentBarProps) -> Element {
             }
         }
         div { class: "document-actions",
-            DocumentStateChip { state: document.state }
             if document.state == DocumentState::Draft {
                 Button { purpose: ActionPurpose::Discard, variant: ButtonVariant::Link,
                     class: "document-discard-action",
@@ -358,6 +355,7 @@ pub(crate) fn DocumentBar(props: DocumentBarProps) -> Element {
                 onclick: move |_| on_command.call(DocumentBarCommand::Save),
                 if document.saving { "Saving…" } else { "Save" }
             }
+            {props.actions}
         }
     }
 }

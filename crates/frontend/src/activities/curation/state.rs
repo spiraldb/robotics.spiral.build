@@ -11,6 +11,8 @@ use super::population::{EpisodeSample, Population, PopulationReader};
 use super::preview::{
     PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows, ReadInput,
 };
+use crate::client::documents::DocumentClient;
+use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::components::document_session::{
     DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
 };
@@ -188,7 +190,7 @@ impl StudioDocument for CurationDocument {
 /// The graph travels inside the document as opaque text. Replacing that text
 /// keeps the document's identity, name, and revision, so one encoded payload
 /// is all that separates a draft from what Studio stored.
-trait CurationDraft {
+pub(super) trait CurationDraft {
     fn carrying(&self, payload: &CurationGraph) -> Self;
 }
 
@@ -275,7 +277,7 @@ impl CurationController {
                 None => Ok(None),
             }
         });
-        use_hook(|| Self {
+        let controller = use_hook(|| Self {
             session,
             payload,
             selected_node: Signal::new(Some(DATASET_NODE_ID.to_owned())),
@@ -286,7 +288,63 @@ impl CurationController {
                 sample,
                 reads: Signal::new(PreviewReads::default()),
             },
-        })
+        });
+        controller.use_stored_publications();
+        controller
+    }
+
+    /// Keep the open curation's publications with what Studio stores, which
+    /// another surface records too — Data unpublishing a view. The stored
+    /// copy is read again whenever the catalog changes.
+    fn use_stored_publications(self) {
+        let open = use_memo(move || {
+            self.session
+                .with_draft(|document| document.is_stored().then(|| document.id().to_owned()))
+        });
+        let stored = QueryPolicy::on_demand(QueryDomain::Catalog).use_resource(move || {
+            let open = open();
+            async move {
+                match open {
+                    Some(id) => {
+                        DocumentClient::<CurationDocument>::current(CurationDocument::COLLECTION)
+                            .load(&id)
+                            .await
+                            .map(Some)
+                    }
+                    None => Ok(None),
+                }
+            }
+        });
+        use_effect(move || {
+            if let Some(Ok(Some(stored))) = &*stored.read() {
+                self.take_publications(stored);
+            }
+        });
+    }
+
+    /// Take `stored`'s publications when it is the open curation stored
+    /// since, differing from what this copy last stored by its publications
+    /// alone: the graph's edits and what the preview read stay. Any other
+    /// change is another writer's, which the next save refuses as before.
+    fn take_publications(self, stored: &CurationDocument) {
+        let Ok(stored_graph) = Self::graph_of(stored) else {
+            return;
+        };
+        let publications_alone = self.session.peek_baseline(|baseline| {
+            baseline.id() == stored.id()
+                && stored.revision() > baseline.revision()
+                && Self::graph_of(baseline).is_ok_and(|graph| graph.same_recipe(&stored_graph))
+        });
+        if publications_alone
+            && self
+                .edit(|payload| {
+                    payload.take_publications(&stored_graph);
+                    Ok(())
+                })
+                .is_ok()
+        {
+            self.session.adopt_stored(stored.clone());
+        }
     }
 
     /// The episodes this curation is interpreted over: `None` while they are

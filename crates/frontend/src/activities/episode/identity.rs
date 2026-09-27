@@ -166,14 +166,19 @@ impl Episode {
         )
     }
 
+    /// The first `count` episodes of `dataset`, in recording order: the ones
+    /// every page and sample starts from.
+    pub(in crate::activities) fn first_sql(dataset: &DatasetSelection, count: usize) -> String {
+        format!(
+            "{} ORDER BY message_start_time, source_uri, id LIMIT {count}",
+            Self::listing_sql(dataset)
+        )
+    }
+
     /// In recording order, with one more row than the page holds, which says
     /// whether another follows.
     fn page_sql(dataset: &DatasetSelection, offset: usize, limit: usize) -> String {
-        format!(
-            "{} ORDER BY message_start_time, source_uri, id LIMIT {} OFFSET {offset}",
-            Self::listing_sql(dataset),
-            limit + 1
-        )
+        format!("{} OFFSET {offset}", Self::first_sql(dataset, limit + 1))
     }
 
     fn from_row(

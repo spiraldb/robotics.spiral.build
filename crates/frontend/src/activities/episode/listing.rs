@@ -130,6 +130,18 @@ impl RowFace {
             measures: Vec::new(),
         }
     }
+    /// A stretch named by its own words, such as the subtask it is, with its
+    /// span beside how long it runs.
+    pub(in crate::activities) fn described(span: (f64, f64), duration: f64, words: &str) -> Self {
+        let stretch = Self::span(span, duration);
+        let mut facts = vec![stretch.title.words];
+        facts.extend(stretch.facts);
+        Self {
+            title: RowTitle::words(words),
+            facts,
+            ..stretch
+        }
+    }
     /// Replace the facts line's words, keeping its drawing.
     pub(in crate::activities) fn saying(mut self, facts: Vec<String>) -> Self {
         self.facts = facts;

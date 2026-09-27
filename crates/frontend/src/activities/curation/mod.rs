@@ -9,7 +9,8 @@
 //! measurement, `score_progress` the Score progress node, `similar` the Find
 //! similar and Group similar subtasks nodes, and `select` the Select node and
 //! the review of any node's rule. `publish` turns the outputs the operator
-//! chooses into catalog views.
+//! chooses into catalog views, and `curated_view` lists those views for
+//! Data to inspect.
 //!
 //! `path` compiles a path of the graph to one Spiral statement, each node
 //! kind writing its own step; `preview` runs those statements one episode at
@@ -25,7 +26,10 @@
 pub(crate) mod state;
 pub(crate) mod workspace;
 
+pub(crate) use curated_view::CuratedView;
+
 mod annotate;
+mod curated_view;
 mod document;
 mod episode_map;
 mod episode_tabs;
