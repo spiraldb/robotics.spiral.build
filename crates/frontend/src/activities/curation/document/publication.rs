@@ -21,8 +21,9 @@ pub(crate) struct PublishedOutput {
     view: String,
     /// The saved revision whose recipe the view was compiled from.
     revision: u64,
-    /// How many of the dataset's first episodes the view reads; none for a
-    /// view published before views were bounded, which reads them all.
+    /// The most whole episodes the view reads, the first its dataset's
+    /// Selects keep; none for a view published before views were bounded,
+    /// which reads them all.
     #[serde(default)]
     episodes: Option<usize>,
 }
@@ -83,7 +84,7 @@ impl CurationGraph {
     }
 
     /// Record that `node` is published as `view`, compiled from the recipe
-    /// saved at `saved` over the dataset's first [`PUBLISHED_EPISODES`]. The
+    /// saved at `saved` and bounded to [`PUBLISHED_EPISODES`] episodes. The
     /// save that records it comes next, at `saved + 1`. A refused record
     /// changes nothing.
     pub(crate) fn record_publication(

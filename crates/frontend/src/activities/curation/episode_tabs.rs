@@ -86,6 +86,9 @@ pub(super) struct OpenEpisodes {
     /// Whether the next open steps the tab in front on to another episode,
     /// as J and K do, rather than opening a tab beside it.
     stepping: Signal<bool>,
+    /// Whether the tab in front was opened for the operator, showing the
+    /// list's first row, rather than chosen by them.
+    following: Signal<bool>,
 }
 
 impl OpenEpisodes {
@@ -96,6 +99,7 @@ impl OpenEpisodes {
             open: use_signal(Vec::new),
             front: use_signal(|| None),
             stepping: use_signal(|| false),
+            following: use_signal(|| false),
         };
         use_context_provider(|| tabs)
     }
@@ -138,14 +142,26 @@ impl OpenEpisodes {
             }
         }
         self.front.set(Some(OpenEpisode::panel(episode)));
+        self.following.set(false);
     }
-    /// Open the first of `choices` when nothing is open yet, so the recording
-    /// column is never an empty half beside a full index.
-    pub(super) fn open_first(self, choice: Option<(EpisodeId, Option<(f64, f64)>)>) {
-        if self.open.peek().is_empty()
-            && let Some((episode, interval)) = choice
-        {
+    /// Open the list's first row, `first`, until the operator chooses one:
+    /// when nothing is open yet, so the recording column is never an empty
+    /// half beside a full index, and again whenever the first row changes
+    /// while the tab in front is still the one opened for them, so it
+    /// settles on the list's first row rather than on whichever row arrived
+    /// first.
+    pub(super) fn open_first(self, first: Option<(EpisodeId, Option<(f64, f64)>)>) {
+        if self.open.peek().is_empty() || *self.following.peek() {
+            self.show_first(first);
+        }
+    }
+    /// Show the list's first row, `first`, in the tab in front, in place of
+    /// what it shows, as a tab opened for the operator.
+    pub(super) fn show_first(mut self, first: Option<(EpisodeId, Option<(f64, f64)>)>) {
+        if let Some((episode, interval)) = first {
+            self.stepping.set(!self.open.peek().is_empty());
             self.open(&episode, interval);
+            self.following.set(true);
         }
     }
     /// The episode tab in front, if an episode tab is.
@@ -164,9 +180,11 @@ impl OpenEpisodes {
     }
     fn activated(mut self, panel: PanelId) {
         self.front.set(Some(panel));
+        self.following.set(false);
     }
     /// Closing the tab in front brings the newest remaining one forward.
     fn close(mut self, panel: &PanelId) {
+        self.following.set(false);
         self.open
             .write()
             .retain(|tab| &OpenEpisode::panel(&tab.episode) != panel);

@@ -4,8 +4,10 @@ Curation chooses the data to train on: which stretches of which episodes, and
 what to call them. A curation is a graph rooted at one dataset. You build it
 against a preview of the dataset's first 100 episodes, and you publish what it
 selects as a named view in the Spiral catalog. The view is a read-only query
-Spiral runs over the whole dataset whenever it is read, with one row per kept
-interval of an episode.
+Spiral runs whenever it is read, with one row per kept interval of an episode.
+Nothing caches a model's answers, so a view reads at most the first 20
+episodes, in recording order, that pass the Selects under the dataset, and
+every model below them is asked about those alone.
 
 How a model sees that data (sample rate, cameras, image size, normalization)
 is Training's concern, not Curation's. See
@@ -58,10 +60,12 @@ output shows the facts its Selects read, such as `duration_seconds`; Break
 down and Score progress start their own properties, and the
 text judgments add theirs to what reaches them.
 
-Intervals of one episode may overlap: Break down can return subtasks that
-happen at the same time, such as each arm doing something different, and
-keeps them in order of start. A reader that samples moments, such as
-Training's resampler, decides what an instant inside two intervals means.
+Break down's subtasks cover each episode end to end: each starts where the
+previous one ends, with no gaps and no overlaps, so reaching, pausing,
+handing over, and retracting are subtasks too, and two arms acting at once
+share one subtask. Cut to the intervals that reached the node, they still
+never overlap, so a reader that samples moments, such as Training's
+resampler, finds at most one subtask at any instant.
 The view holds no stream data; cameras and joint states stay in the
 recording.
 
@@ -88,11 +92,15 @@ A node's rule is its own entry after its step, named after it
 A published view is one stream of episode rows (decided 2026-09-25). The
 dataset's listing and its Select of episodes come first; a Select only
 follows the dataset, so it always comes before the first measure, and it is
-the `WHERE` on the episode rows.
+the `WHERE` on the episode rows. The listing numbers every episode in
+recording order (`recorded_place`), and after the last Select the view keeps
+the first 20 of what passed (`select_1_first`, or `dataset_0_first` without
+a Select), so every camera read and model call below reads those alone.
 Where the path leaves whole episodes, it builds each episode's row once:
 
 ```text
 dataset_0, select_1       the listing with its facts, and the Selects of episodes
+select_1_first            the first 20 episodes they keep, in recording order
 camera_video_1            each camera a model on the path watches, read once
 instruction_1             each episode's first instruction, when Break down reads one
 episodes                  one row per episode: origin_ns, scores, subtasks; no video
@@ -252,8 +260,8 @@ answers, the two readings return the same rows for every measure.
 
 Publish, at the end of the document bar, lists every output with the name of
 its view. Choose the outputs to publish and give each a view name: one plain
-identifier, at the catalog root. With unsaved edits it asks you to save
-first, because each view is compiled from the saved recipe. Studio then sends
+identifier, at the catalog root. Publish saves the curation first, because
+each view is compiled from the saved recipe. Studio then sends
 each compiled statement to `POST /api/curations/publish` in turn, records
 every `node → view name, revision` it created in one edit, and saves once: a
 publication is recorded against the saved revision, and the save that records

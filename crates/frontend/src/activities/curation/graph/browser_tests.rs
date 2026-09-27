@@ -2,13 +2,14 @@
 //! grow the graph the way the + on a node does.
 use super::*;
 use crate::client::{project::ProjectClient, queries::QueryRefresh};
+use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use serde_json::Value;
 use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
-use super::super::document::DATASET_NODE_ID;
+use super::super::document::{CurationNodeKind, DATASET_NODE_ID};
 use super::super::state::CurationController;
 use super::node_card::NodeCard;
 
@@ -61,19 +62,29 @@ impl Drop for CurationFetch {
 }
 
 #[derive(Clone, Default)]
-struct CanvasHarness(Rc<RefCell<Option<CurationController>>>);
+struct CanvasHarness(Rc<RefCell<Option<(CurationController, StudioProjectState)>>>);
 
 impl CanvasHarness {
     fn render(self) -> Element {
         let refresh = QueryRefresh::use_provider();
+        let studio = StudioProjectState::use_provider();
         let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
         use_context_provider(|| ProjectClient::new(project, refresh));
         let controller = CurationController::use_controller();
-        *self.0.borrow_mut() = Some(controller);
+        *self.0.borrow_mut() = Some((controller, studio));
         rsx! { CurationGraphCanvas { controller } }
     }
     fn controller(&self) -> CurationController {
-        self.0.borrow().expect("the canvas mounted its controller")
+        self.0
+            .borrow()
+            .expect("the canvas mounted its controller")
+            .0
+    }
+    fn studio(&self) -> StudioProjectState {
+        self.0
+            .borrow()
+            .expect("the canvas mounted its studio state")
+            .1
     }
     async fn settle(&self, dom: &mut VirtualDom) {
         for _ in 0..200 {
@@ -152,4 +163,48 @@ async fn the_canvas_lists_saved_curations_and_grows_the_graph_from_a_nodes_menu(
     );
     controller.with_payload(|payload| assert_eq!(payload.nodes().len(), 2));
     assert_eq!(fetch.requests().len(), 1, "growing the graph saves nothing");
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn publishing_saves_what_is_drawn_before_it_records_a_view() {
+    let fetch = CurationFetch::install();
+    let harness = CanvasHarness::default();
+    let mut dom = VirtualDom::new_with_props(CanvasHarness::render, harness.clone());
+    dom.rebuild_in_place();
+    let controller = harness.controller();
+    dom.in_scope(ScopeId::ROOT, || controller.refresh_documents());
+    harness.settle(&mut dom).await;
+    dom.in_scope(ScopeId::ROOT, || {
+        controller.edit(|payload| {
+            payload.add_child(DATASET_NODE_ID, CurationNodeKind::Select)?;
+            Ok(())
+        })
+    })
+    .expect("the dataset accepts a Select");
+    assert!(controller.unsaved_changes());
+
+    let saved = Rc::new(RefCell::new(None::<bool>));
+    let answer = saved.clone();
+    let studio = harness.studio();
+    dom.in_scope(ScopeId::ROOT, || {
+        spawn(async move {
+            *answer.borrow_mut() = Some(controller.saved(studio).await);
+        });
+    });
+    for _ in 0..400 {
+        dom.render_immediate_to_vec();
+        if saved.borrow().is_some() {
+            break;
+        }
+        gloo_timers::future::TimeoutFuture::new(5).await;
+    }
+    assert_eq!(*saved.borrow(), Some(true));
+    assert!(!controller.unsaved_changes());
+    assert!(
+        fetch
+            .requests()
+            .iter()
+            .any(|request| request["path"] == "/api/curations/save"),
+        "the draft is saved before a view is recorded against it"
+    );
 }

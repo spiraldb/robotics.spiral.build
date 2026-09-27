@@ -38,6 +38,24 @@ pub(in crate::activities) enum EvidenceTrack {
     Intervals(IntervalTrack),
 }
 
+impl EvidenceTrack {
+    /// A value row as a curation draws it, tall enough to read a shape in
+    /// (`curation-review.css`).
+    const VALUES_ROW: f64 = 168.0;
+    /// A row of spans: one line of their names.
+    const INTERVALS_ROW: f64 = 44.0;
+
+    /// How tall its row is on the timeline; a row of spans with none in it
+    /// is not drawn.
+    pub(super) fn row_height(&self) -> f64 {
+        match self {
+            Self::Values(_) => Self::VALUES_ROW,
+            Self::Intervals(track) if track.is_empty() => 0.0,
+            Self::Intervals(_) => Self::INTERVALS_ROW,
+        }
+    }
+}
+
 impl From<TimelineTrack> for EvidenceTrack {
     fn from(track: TimelineTrack) -> Self {
         Self::Values(track)

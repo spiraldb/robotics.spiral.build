@@ -18,9 +18,10 @@ use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 /// How many of a dataset's episodes interpretive execution reads.
 pub(super) const INTERPRETED_EPISODES: usize = 100;
 
-/// How many of a dataset's episodes a published view reads: the sample's
-/// first, in the same order. Nothing caches a model's answers, so every read
-/// of a view asks its models again, and this bounds what one read costs.
+/// How many whole episodes a published view reads: the first, in recording
+/// order, of those the dataset's Selects keep, as the graph shows them kept.
+/// Nothing caches a model's answers, so every read of a view asks its models
+/// again, and this bounds what one read costs.
 pub(super) const PUBLISHED_EPISODES: usize = 20;
 
 /// Two moments this close are one stretch of recording. A moment ends where

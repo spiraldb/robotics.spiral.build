@@ -88,7 +88,8 @@ pub(super) enum AxisUnit {
     Percent,
     /// Progress rate against expert demonstrations, as "0.90×".
     ProgressRate,
-    /// A recorded fact, whose unit the rule's sentence says after it.
+    /// A recorded fact, whose unit the rule's sentence says after it: a
+    /// duration, count, or size, all measured from zero.
     Plain,
 }
 
@@ -118,6 +119,10 @@ impl Threshold {
     pub(super) fn label(self) -> String {
         self.scale.label(self.value)
     }
+    /// The low and high ends of the axis it slides along.
+    pub(super) fn ends(self) -> (f64, f64) {
+        (self.scale.low, self.scale.high)
+    }
 }
 
 /// The axis a rule's threshold moves along, shared by the strip and
@@ -133,9 +138,11 @@ struct ThresholdScale {
 }
 
 impl ThresholdScale {
-    /// The scale for `threshold` over the values `dots` judge. With nothing
-    /// judged yet the axis spans one unit either side of the threshold, so the
-    /// slider still moves.
+    /// The scale for `threshold` over the values `dots` judge. A recorded
+    /// fact's axis starts at zero, where a new condition keeps everything, so
+    /// the first drag away from it never rescales the axis under the pointer.
+    /// With nothing judged yet the axis spans one unit either side of the
+    /// threshold, so the slider still moves.
     fn of(dots: &[StripDot], threshold: f64, unit: AxisUnit) -> Self {
         if unit == AxisUnit::Percent {
             return Self {
@@ -145,10 +152,12 @@ impl ThresholdScale {
                 unit,
             };
         }
+        let origin = (unit == AxisUnit::Plain).then_some(0.0);
         let (low, high) = dots
             .iter()
             .map(|dot| dot.value)
             .chain(std::iter::once(threshold))
+            .chain(origin)
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| {
                 (low.min(value), high.max(value))
             });
@@ -335,9 +344,10 @@ mod tests {
         let progress = ThresholdScale::of(&[], 0.89, AxisUnit::ProgressRate);
         assert_eq!(progress.label(0.8912), "0.89×");
         // With nothing judged the axis spans one unit either side, in
-        // hundredths, and a recorded fact carries no unit of its own.
+        // hundredths; a recorded fact's reaches down to zero, in tenths, and
+        // carries no unit of its own.
         let seconds = ThresholdScale::of(&[], 20.0, AxisUnit::Plain);
-        assert_eq!(seconds.label(20.0), "20.00");
+        assert_eq!(seconds.label(20.0), "20.0");
         let counts = StripDot::of(&[Some(2_000.0), Some(531_000.0)], &[true, true]);
         let messages = ThresholdScale::of(&counts, 150_000.0, AxisUnit::Plain);
         assert_eq!(messages.label(150_000.0), "150,000");
@@ -347,5 +357,14 @@ mod tests {
             (0.0, 1.0, 0.01)
         );
         assert_eq!(similarity.label(0.734), "73%");
+    }
+
+    #[test]
+    fn a_recorded_fact_slides_on_one_axis_from_zero() {
+        let durations = StripDot::of(&[Some(13.57), Some(60.53)], &[true, true]);
+        let fresh = ThresholdScale::of(&durations, 0.0, AxisUnit::Plain);
+        let slid = ThresholdScale::of(&durations, 45.0, AxisUnit::Plain);
+        assert_eq!((fresh.low, fresh.high), (0.0, 60.6));
+        assert_eq!((slid.low, slid.high), (fresh.low, fresh.high));
     }
 }

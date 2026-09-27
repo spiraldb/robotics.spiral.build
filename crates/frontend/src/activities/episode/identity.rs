@@ -157,6 +157,19 @@ impl Episode {
         Self::from_row(&dataset, row)
     }
 
+    /// The order of `listing_sql`'s columns every list of episodes follows.
+    pub(in crate::activities) const RECORDING_ORDER: &'static str =
+        "message_start_time, source_uri, id";
+    /// The facts `listing_sql` lists beside each episode's id.
+    const LISTED_FACTS: [&'static str; 6] = [
+        "source_uri",
+        "source_bytes",
+        "message_count",
+        "message_start_time",
+        "duration_ns",
+        "channel_count",
+    ];
+
     /// Every episode of `dataset` with the facts every surface shows.
     pub(in crate::activities) fn listing_sql(dataset: &DatasetSelection) -> String {
         format!(
@@ -170,8 +183,61 @@ impl Episode {
     /// every page and sample starts from.
     pub(in crate::activities) fn first_sql(dataset: &DatasetSelection, count: usize) -> String {
         format!(
-            "{} ORDER BY message_start_time, source_uri, id LIMIT {count}",
+            "{} ORDER BY {} LIMIT {count}",
+            Self::listing_sql(dataset),
+            Self::RECORDING_ORDER
+        )
+    }
+
+    /// Every row of `rows`, a statement whose rows each name an episode of
+    /// `dataset` in `episode_id`, with that episode's listed facts beside it,
+    /// each named after `prefix`: one read answers both what the rows hold
+    /// and which episodes they belong to, however far into the dataset.
+    pub(in crate::activities) fn beside_sql(
+        dataset: &DatasetSelection,
+        rows: &str,
+        prefix: &str,
+    ) -> String {
+        let facts = Self::LISTED_FACTS
+            .map(|fact| format!("listed.{fact} AS {prefix}{fact}"))
+            .join(", ");
+        format!(
+            "SELECT named.*, {facts} FROM ({rows}) named JOIN ({}) listed ON listed.id = named.episode_id",
             Self::listing_sql(dataset)
+        )
+    }
+
+    /// The episode a row read by `beside_sql` names, from the facts under
+    /// `prefix`.
+    pub(in crate::activities) fn beside(
+        dataset: &DatasetSelection,
+        row: &serde_json::Map<String, serde_json::Value>,
+        prefix: &str,
+    ) -> Result<Self, String> {
+        let id = row
+            .get("episode_id")
+            .cloned()
+            .ok_or("A row names no episode.")?;
+        let facts = Self::LISTED_FACTS
+            .iter()
+            .filter_map(|fact| {
+                Some((
+                    (*fact).to_owned(),
+                    row.get(&format!("{prefix}{fact}"))?.clone(),
+                ))
+            })
+            .chain(std::iter::once(("id".to_owned(), id)))
+            .collect();
+        Self::from_row(dataset, facts)
+    }
+
+    /// Where the episode falls in recording order, as every list orders
+    /// episodes.
+    pub(in crate::activities) fn recording_place(&self) -> (Option<u64>, Option<&str>, &EpisodeId) {
+        (
+            self.facts.message_start_time(),
+            self.facts.source_uri(),
+            self.facts.id(),
         )
     }
 

@@ -1,13 +1,15 @@
 //! The views saved curations publish, as another activity lists and
 //! unpublishes them: each one's catalog name, the curation and output it
-//! comes from, the dataset its rows belong to, and how many of that dataset's
-//! episodes it reads.
+//! comes from, the dataset its rows belong to, and whether it is bounded to
+//! the episodes its Selects keep first.
 //!
 //! The catalog holds a view as a bare statement, which names neither its
 //! curation nor the dataset its episodes are in; the curation that published
 //! it records both.
+use super::annotate::SubtaskRow;
 use super::document::CurationGraph;
 use super::graph::PublishedViews;
+use super::score_progress::{Moment, ProgressRate};
 use super::state::CurationDraft as _;
 use crate::client::documents::DocumentClient;
 use crate::client::queries::{QueryDomain, QueryRefresh};
@@ -24,7 +26,7 @@ pub(crate) struct CuratedView {
     curation: String,
     output: &'static str,
     dataset: DatasetSelection,
-    episodes: Option<usize>,
+    bounded: bool,
     current: bool,
 }
 
@@ -89,7 +91,7 @@ impl CuratedView {
                 curation: document.name().to_owned(),
                 output: node.kind().label(),
                 dataset: dataset.clone(),
-                episodes: published.episodes(),
+                bounded: published.episodes().is_some(),
                 current: published.is_current(document.revision()),
             })
             .collect()
@@ -111,13 +113,25 @@ impl CuratedView {
     pub(crate) fn dataset(&self) -> &DatasetSelection {
         &self.dataset
     }
-    /// How many of the dataset's first episodes it reads; `None` for a view
-    /// published before views were bounded, which reads every one.
-    pub(crate) fn episodes(&self) -> Option<usize> {
-        self.episodes
+    /// Whether it reads only the first episodes its Selects keep; one
+    /// published before views were bounded reads every one.
+    pub(crate) fn is_bounded(&self) -> bool {
+        self.bounded
     }
     /// Whether it is still what its curation's saved recipe compiles to.
     pub(crate) fn is_current(&self) -> bool {
         self.current
+    }
+    /// A number one of its columns holds, printed the way Curation prints
+    /// it, when a node publishes the column: a progress rate reads "0.69×",
+    /// a similarity "69%".
+    pub(crate) fn reading(column: &str, value: f64) -> Option<String> {
+        match column {
+            Moment::PROGRESS_RATE => Some(ProgressRate::label(value)),
+            column if SubtaskRow::is_similarity(column) => {
+                Some(SubtaskRow::similarity_label(value))
+            }
+            _ => None,
+        }
     }
 }

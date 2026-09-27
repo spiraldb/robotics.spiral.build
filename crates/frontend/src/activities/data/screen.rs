@@ -440,7 +440,7 @@ fn EpisodeSubject(opened: OpenedEpisode, on_dataset: EventHandler<()>) -> Elemen
                     }
                 },
             }
-            EpisodeInspection { episode, tracks, focus: opened.play() }
+            EpisodeInspection { episode, tracks, tracks_lead: false, focus: opened.play() }
         }
     }
 }

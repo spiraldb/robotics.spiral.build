@@ -121,12 +121,52 @@ fn a_select_on_duration_keeps_whole_episodes_and_publishes_the_fact_it_read() {
         (DATASET_NODE_ID, CurationNodeKind::Select),
         lasting(Comparison::AtLeast, 10.0),
     );
+    // The view reads the first episodes the Select keeps, in recording
+    // order, not the dataset's first episodes.
     assert_eq!(
         published(&graph, &long),
         "WITH
-  dataset_0 AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, CAST(duration_ns AS DOUBLE) / 1e9 AS duration_seconds, message_count AS messages, channel_count AS channels, CAST(source_bytes AS DOUBLE) / 1e6 AS size_megabytes FROM (SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, message_start_time, duration_ns, channel_count FROM spql.mcap.episodes('abc130k') ORDER BY message_start_time, source_uri, id LIMIT 20) listed),
-  select_1 AS (SELECT episode_id, start_ns, end_ns, duration_seconds, messages, channels, size_megabytes FROM dataset_0 WHERE duration_seconds >= CAST(10 AS DOUBLE))
-SELECT episode_id, start_ns, end_ns, duration_seconds FROM select_1"
+  dataset_0 AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, CAST(duration_ns AS DOUBLE) / 1e9 AS duration_seconds, message_count AS messages, channel_count AS channels, CAST(source_bytes AS DOUBLE) / 1e6 AS size_megabytes, ROW_NUMBER() OVER (ORDER BY message_start_time, source_uri, id) AS recorded_place FROM (SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, message_start_time, duration_ns, channel_count FROM spql.mcap.episodes('abc130k')) listed),
+  select_1 AS (SELECT episode_id, start_ns, end_ns, duration_seconds, messages, channels, size_megabytes, recorded_place FROM dataset_0 WHERE duration_seconds >= CAST(10 AS DOUBLE)),
+  select_1_first AS (SELECT episode_id, start_ns, end_ns, duration_seconds, messages, channels, size_megabytes, recorded_place FROM select_1 ORDER BY recorded_place LIMIT 20)
+SELECT episode_id, start_ns, end_ns, duration_seconds FROM select_1_first"
+    );
+}
+
+#[test]
+fn a_view_asks_its_models_about_the_first_episodes_its_selects_keep() {
+    let mut graph = graph();
+    let long = keeping(
+        &mut graph,
+        (DATASET_NODE_ID, CurationNodeKind::Select),
+        lasting(Comparison::AtLeast, 10.0),
+    );
+    let score = child(
+        &mut graph,
+        &long,
+        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+    );
+    let published = published(&graph, &score);
+    // Bounded once, after the Select: its condition runs first, and the
+    // camera is read and scored for the bounded episodes alone.
+    assert_eq!(published.matches(" LIMIT 20)").count(), 1);
+    for step in [
+        "select_1_first AS (SELECT episode_id, start_ns, end_ns, duration_seconds, messages, channels, size_megabytes, recorded_place FROM select_1 ORDER BY recorded_place LIMIT 20)",
+        "WHERE r.id IN (SELECT episode_id FROM select_1_first))",
+        "AS scores FROM select_1_first i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
+    ] {
+        assert!(published.contains(step), "{step}\n{published}");
+    }
+    // Without a Select, the view reads the dataset's first episodes.
+    let mut graph = self::graph();
+    let score = child(
+        &mut graph,
+        DATASET_NODE_ID,
+        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+    );
+    assert!(
+        self::published(&graph, &score)
+            .contains("dataset_0_first AS (SELECT episode_id, start_ns, end_ns, duration_seconds, messages, channels, size_megabytes, recorded_place FROM dataset_0 ORDER BY recorded_place LIMIT 20)")
     );
 }
 
@@ -144,10 +184,10 @@ fn score_progress_scores_every_frame_and_joins_the_moments_its_rule_keeps() {
     let published = published(&graph, &score);
     for step in [
         "FROM spql.mcap.read_topic('abc130k', '/cameras/top_camera-images-rgb') r",
-        "WHERE r.id IN (SELECT episode_id FROM dataset_0))",
+        "WHERE r.id IN (SELECT episode_id FROM dataset_0_first))",
         // Each episode's scores are a column of its row, whose start is its
         // first message.
-        "episodes AS (SELECT i.episode_id, i.start_ns, i.end_ns, i.duration_seconds, i.messages, i.channels, i.size_megabytes, i.start_ns AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores FROM dataset_0 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
+        "episodes AS (SELECT i.episode_id, i.start_ns, i.end_ns, i.duration_seconds, i.messages, i.channels, i.size_megabytes, i.recorded_place, i.start_ns AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores FROM dataset_0_first i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
         "r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns, p.frame_index AS frame_index, CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS progress_rate FROM episodes r CROSS JOIN LATERAL UNNEST(r.scores) p)",
         "COALESCE(LEAD(start_ns) OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index), start_ns + (start_ns - LAG(start_ns) OVER (PARTITION BY episode_id, reached_start_ns, reached_end_ns ORDER BY frame_index))) AS end_ns",
         "score_progress_1 AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, LEAST(end_ns, reached_end_ns) AS end_ns, progress_rate FROM score_progress_1_moments WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns AND end_ns > start_ns)",
@@ -196,11 +236,11 @@ fn a_breakdown_reads_each_episode_whole_and_cuts_its_subtasks_to_what_reached_it
     let published = published(&graph, &annotate);
     for step in [
         // The chosen camera's packets of the episodes that reach the node.
-        "FROM spql.mcap.read_topic('abc130k', '/top-camera') r JOIN spql.mcap.episodes('abc130k') e ON e.id = r.id WHERE r.id IN (SELECT episode_id FROM select_1))",
+        "FROM spql.mcap.read_topic('abc130k', '/top-camera') r JOIN spql.mcap.episodes('abc130k') e ON e.id = r.id WHERE r.id IN (SELECT episode_id FROM select_1_first))",
         // Each episode's first instruction is its task.
-        "instruction_1 AS (SELECT id, task FROM (SELECT r.id, r.value.data AS task, ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.log_time) AS position FROM spql.mcap.read_topic('abc130k', '/instruction') r WHERE r.id IN (SELECT episode_id FROM select_1)) instructions WHERE position = 1)",
+        "instruction_1 AS (SELECT id, task FROM (SELECT r.id, r.value.data AS task, ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY r.log_time) AS position FROM spql.mcap.read_topic('abc130k', '/instruction') r WHERE r.id IN (SELECT episode_id FROM select_1_first)) instructions WHERE position = 1)",
         // The subtasks are a column of the episode's row, kept by the Select.
-        "spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash', task => instruction_1.task) AS subtasks FROM select_1 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id LEFT JOIN instruction_1 ON instruction_1.id = i.episode_id)",
+        "spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash', task => instruction_1.task) AS subtasks FROM select_1_first i JOIN camera_video_1 ON camera_video_1.id = i.episode_id LEFT JOIN instruction_1 ON instruction_1.id = i.episode_id)",
         // Unnested from the row, and moved to log time: presentation time
         // counts from the episode's first message.
         "r.origin_ns + CAST(s.start_ns AS BIGINT) AS start_ns, r.origin_ns + CAST(s.end_ns AS BIGINT) AS end_ns, s.description AS subtask FROM episodes r CROSS JOIN LATERAL UNNEST(r.subtasks) AS s)",
@@ -234,7 +274,7 @@ fn a_breakdown_reads_each_episode_whole_and_cuts_its_subtasks_to_what_reached_it
     let published = self::published(&graph, &annotate);
     assert!(!published.contains("instruction_"));
     assert!(published.contains(
-        "model => 'google/gemini-3.8-flash') AS subtasks FROM select_1 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)"
+        "model => 'google/gemini-3.8-flash') AS subtasks FROM select_1_first i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)"
     ));
 }
 
@@ -262,7 +302,7 @@ fn both_models_answer_on_the_episode_row_and_the_subtasks_ride_to_their_step() {
     let published = published(&graph, &annotate);
     assert_eq!(published.matches("spql.mcap.read_topic(").count(), 1);
     for step in [
-        "i.start_ns AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores, spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash') AS subtasks FROM dataset_0 i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
+        "i.start_ns AS origin_ns, spql.ai.score_progress(camera_video_1.source, model => 'uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f') AS scores, spql.ai.breakdown_task(camera_video_1.source, sample_interval => 0.5, model => 'google/gemini-3.8-flash') AS subtasks FROM dataset_0_first i JOIN camera_video_1 ON camera_video_1.id = i.episode_id)",
         "score_progress_1_frames AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns, r.origin_ns, r.subtasks, r.origin_ns + CAST(p.timestamp_ns AS BIGINT) AS start_ns,",
         "LEAST(end_ns, reached_end_ns) AS end_ns, progress_rate, origin_ns, subtasks FROM score_progress_1_moments",
         "AVG(progress_rate) OVER (PARTITION BY episode_id, stretch) AS progress_rate, origin_ns, subtasks, ROW_NUMBER()",

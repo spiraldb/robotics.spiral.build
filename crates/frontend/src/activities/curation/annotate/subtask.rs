@@ -84,6 +84,20 @@ impl SubtaskRow {
     /// The measure Group similar writes: the category and its probability.
     pub(in crate::activities::curation) const CATEGORY: &'static str = "subtask_category";
 
+    /// Whether `column` is one a Find similar writes: its own, or a repeat's
+    /// below it on the same path (`similarity_2`).
+    pub(in crate::activities::curation) fn is_similarity(column: &str) -> bool {
+        column == Self::SIMILARITY
+            || column
+                .strip_prefix(Self::SIMILARITY)
+                .and_then(|suffix| suffix.strip_prefix('_'))
+                .is_some_and(|repeat| repeat.parse::<u32>().is_ok())
+    }
+    /// A similarity as every index prints it: a whole percentage.
+    pub(in crate::activities::curation) fn similarity_label(similarity: f64) -> String {
+        format!("{:.0}%", similarity * 100.0)
+    }
+
     pub(in crate::activities::curation) fn new(
         episode: EpisodeId,
         (start_time, end_time): (f64, f64),

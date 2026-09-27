@@ -92,6 +92,11 @@ pub(in crate::activities) fn EpisodeInspection(
     /// Rows drawn above the recorded streams on the timeline.
     #[props(default)]
     tracks: Vec<EvidenceTrack>,
+    /// Whether `tracks` are what the surface is about, so the timeline takes
+    /// near half the room; otherwise the recording leads, and the timeline
+    /// takes what its rows need.
+    #[props(default = true)]
+    tracks_lead: bool,
     /// Where to play from, such as the start of the row the operator chose.
     /// Each new ask plays from there on; `None` leaves the playhead where the
     /// operator put it.
@@ -105,7 +110,28 @@ pub(in crate::activities) fn EpisodeInspection(
     // it mounts afresh rather than rewiring the previous one's.
     rsx! {
         Remount { identity: format!("{}/{}", episode.dataset().label(), episode.id()),
-            InspectedEpisode { episode, tracks, focus, featured_camera }
+            InspectedEpisode { episode, evidence: Evidence { tracks, lead: tracks_lead }, focus, featured_camera }
+        }
+    }
+}
+
+/// The rows a surface draws above the recorded streams, and whether they
+/// lead the recording.
+#[derive(Clone, PartialEq)]
+struct Evidence {
+    tracks: Vec<EvidenceTrack>,
+    lead: bool,
+}
+
+impl Evidence {
+    /// `arrangement` with the timeline room these rows claim.
+    fn arranging(&self, arrangement: EpisodeArrangement) -> EpisodeArrangement {
+        match (self.tracks.is_empty(), self.lead) {
+            (true, _) => arrangement,
+            (false, true) => arrangement.led_by_evidence(),
+            (false, false) => {
+                arrangement.beside_rows(self.tracks.iter().map(EvidenceTrack::row_height).sum())
+            }
         }
     }
 }
@@ -136,7 +162,7 @@ impl LoadedEpisode {
 #[component]
 fn InspectedEpisode(
     episode: Episode,
-    tracks: Vec<EvidenceTrack>,
+    evidence: Evidence,
     focus: Option<PlayRequest>,
     featured_camera: FeaturedCamera,
 ) -> Element {
@@ -184,7 +210,7 @@ fn InspectedEpisode(
                 Ok(Some(loaded)) => rsx! {
                     InspectionDock {
                         loaded,
-                        evidence: tracks,
+                        evidence,
                         featured_camera,
                         remembered: RememberedLayout::of(episode.dataset()),
                     }
@@ -208,7 +234,7 @@ fn InspectedEpisode(
 #[component]
 fn InspectionDock(
     loaded: LoadedEpisode,
-    evidence: Vec<EvidenceTrack>,
+    evidence: Evidence,
     featured_camera: FeaturedCamera,
     remembered: RememberedLayout,
 ) -> Element {
@@ -257,9 +283,10 @@ fn InspectionDock(
                 .with_class("episode-stage-dock"),
         );
     }
-    let arrangement =
-        EpisodeArrangement::new(panels.iter().map(|panel| panel.id.clone()).collect())
-            .led_by_evidence(!evidence.is_empty());
+    let arrangement = evidence.arranging(EpisodeArrangement::new(
+        panels.iter().map(|panel| panel.id.clone()).collect(),
+    ));
+    let evidence = evidence.tracks;
     panels.push(
         Panel::new(
             EpisodeArrangement::PLOTS,

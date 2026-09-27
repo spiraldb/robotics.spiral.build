@@ -157,9 +157,19 @@ pub(super) fn EpisodeListing(
     let chosen = tabs.front().and_then(|tab| view.item_in(&tab));
     let listed = side.listed(chosen);
     let first = side.opening();
-    use_effect(use_reactive((&first,), move |(first,)| {
-        tabs.open_first(first)
-    }));
+    // A condition slid past the episode in front leaves it off this side, so
+    // the tab moves on to the side's first episode.
+    let unlisted = listed.chosen.is_none();
+    use_effect(use_reactive(
+        (&first, &unlisted),
+        move |(first, unlisted)| {
+            if unlisted {
+                tabs.show_first(first);
+            } else {
+                tabs.open_first(first);
+            }
+        },
+    ));
     let episodes = view.input.episodes();
     let rows = EpisodeRows::of(view.sample.episodes());
     let faces = listed

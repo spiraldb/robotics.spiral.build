@@ -18,7 +18,7 @@ use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use serde_json::{Map, Value};
-use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
@@ -32,6 +32,9 @@ const VIEW_ROWS: usize = 1_000;
 
 /// The interval every curated view's rows lead with.
 const INTERVAL_COLUMNS: [&str; 3] = ["episode_id", "start_ns", "end_ns"];
+
+/// What each episode fact read beside a row of the view is named after.
+const LISTED: &str = "listed_";
 
 /// One value a view publishes beside an interval, as a list shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +58,18 @@ impl From<&Value> for ViewCell {
             Value::Array(items) => Self::Parts(items.iter().map(Self::from).collect()),
             Value::Object(fields) => Self::Parts(fields.values().map(Self::from).collect()),
         }
+    }
+}
+
+impl ViewCell {
+    /// The cell as a row shows it under `column`: a number the way the
+    /// curation that published the column prints it, else as it reads.
+    fn reading(&self, column: &str) -> String {
+        match self {
+            Self::Number(value) => CuratedView::reading(column, *value),
+            _ => None,
+        }
+        .unwrap_or_else(|| self.to_string())
     }
 }
 
@@ -108,7 +123,7 @@ impl ViewRow {
             .find(|read| read.id() == &episode)
             .and_then(|read| read.facts().message_start_time())
             .and_then(|start| i64::try_from(start).ok())
-            .ok_or("A row of the view belongs to an episode it does not read.")?;
+            .ok_or("An episode of the view lists no first message.")?;
         let seconds = |column: &str| {
             row.get(column)
                 .and_then(Value::as_i64)
@@ -129,9 +144,9 @@ impl ViewRow {
     }
 }
 
-/// What one read of a view answered: the episodes it reads, in recording
-/// order, the columns after the interval, and its rows, each episode's by
-/// start.
+/// What one read of a view answered: the episodes it keeps part of, in
+/// recording order, the columns after the interval, and its rows, each
+/// episode's by start.
 #[derive(Clone, Debug, PartialEq)]
 struct ViewReading {
     episodes: Vec<Episode>,
@@ -141,25 +156,38 @@ struct ViewReading {
 }
 
 impl ViewReading {
-    /// Read `view` over the first `episodes` of its dataset.
-    async fn read(view: CuratedView, episodes: usize) -> Result<Self, String> {
-        let episodes = Episode::page(view.dataset(), 0, episodes)
-            .await?
-            .into_episodes();
+    /// Read `view` once, with the listed facts of the episode each row
+    /// belongs to beside it: the view keeps the first episodes its Selects
+    /// keep, wherever they fall in the dataset.
+    async fn read(view: CuratedView) -> Result<Self, String> {
+        let rows = format!("SELECT * FROM {}", view.view());
         let answer = DatasetClient::current()
-            .run_spiral_query(format!("SELECT * FROM {}", view.view()), VIEW_ROWS)
+            .run_spiral_query(
+                Episode::beside_sql(view.dataset(), &rows, LISTED),
+                VIEW_ROWS,
+            )
             .await
             .map_err(|error| error.to_string())?;
-        Self::of(episodes, &answer)
+        Self::of(view.dataset(), &answer)
     }
 
-    fn of(episodes: Vec<Episode>, answer: &SpiralQuerySnapshot) -> Result<Self, String> {
+    fn of(dataset: &DatasetSelection, answer: &SpiralQuerySnapshot) -> Result<Self, String> {
         let columns = answer
             .columns()
             .iter()
             .map(|column| column.name().to_owned())
-            .filter(|column| !INTERVAL_COLUMNS.contains(&column.as_str()))
+            .filter(|column| {
+                !INTERVAL_COLUMNS.contains(&column.as_str()) && !column.starts_with(LISTED)
+            })
             .collect::<Vec<_>>();
+        let mut episodes = Vec::<Episode>::new();
+        for row in answer.rows() {
+            let episode = Episode::beside(dataset, row, LISTED)?;
+            if !episodes.iter().any(|read| read.id() == episode.id()) {
+                episodes.push(episode);
+            }
+        }
+        episodes.sort_by(|left, right| left.recording_place().cmp(&right.recording_place()));
         let mut rows = answer
             .rows()
             .iter()
@@ -179,7 +207,7 @@ impl ViewReading {
         })
     }
 
-    /// Each episode with a row, in recording order, beside its rows.
+    /// Each episode, in recording order, beside its rows.
     fn by_episode(&self) -> Vec<(&Episode, Vec<&ViewRow>)> {
         self.episodes
             .iter()
@@ -191,12 +219,12 @@ impl ViewReading {
                     .collect::<Vec<_>>();
                 (episode, rows)
             })
-            .filter(|(_, rows)| !rows.is_empty())
             .collect()
     }
     fn kept_seconds(&self) -> f64 {
         self.rows.iter().map(ViewRow::seconds).sum()
     }
+    /// How long the episodes it keeps part of are, whole.
     fn read_seconds(&self) -> f64 {
         self.episodes
             .iter()
@@ -224,7 +252,8 @@ impl ViewReading {
         };
         for (column, cell) in row.cells.iter().enumerate() {
             if Some(column) != naming {
-                face = face.measured(cell.to_string(), Self::column_label(&self.columns[column]));
+                let name = &self.columns[column];
+                face = face.measured(cell.reading(name), Self::column_label(name));
             }
         }
         face
@@ -337,13 +366,12 @@ pub(super) fn CuratedViewSubject(
                     "Its curation has changed since it was published. Publish it again from Curation to bring the view up to date."
                 }
             }
-            match view.episodes() {
-                Some(episodes) => rsx! { CuratedRows { view, episodes, on_open } },
-                None => rsx! {
-                    Notice { class: "data-curated-notice", tone: NoticeTone::Caution,
-                        "Published before views were bounded, so reading it would ask its models about every episode of the dataset. Publish it again from Curation to inspect it here."
-                    }
-                },
+            if view.is_bounded() {
+                CuratedRows { view, on_open }
+            } else {
+                Notice { class: "data-curated-notice", tone: NoticeTone::Caution,
+                    "Published before views were bounded, so reading it would ask its models about every episode of the dataset. Publish it again from Curation to inspect it here."
+                }
             }
         }
     }
@@ -399,16 +427,12 @@ fn UnpublishConfirmation(
     }
 }
 
-/// The view read once over its first `episodes`: its totals, then every
-/// episode it kept part of, each interval under it.
+/// The view read once: its totals, then every episode it kept part of, each
+/// interval under it.
 #[component]
-fn CuratedRows(
-    view: CuratedView,
-    episodes: usize,
-    on_open: EventHandler<OpenedEpisode>,
-) -> Element {
+fn CuratedRows(view: CuratedView, on_open: EventHandler<OpenedEpisode>) -> Element {
     let read = view.clone();
-    let mut view_read = use_resource(move || ViewReading::read(read.clone(), episodes));
+    let mut view_read = use_resource(move || ViewReading::read(read.clone()));
     let answer = view_read.read();
     let first = match &*answer {
         Some(Ok(reading)) => reading.episodes.first().map(Episode::selection),
@@ -438,13 +462,13 @@ fn CuratedRows(
                     Fact { label: "Intervals",
                         if reading.truncated { "first {intervals}" } else { "{intervals}" }
                     }
-                    Fact { label: "Episodes", "{groups.len()} of {reading.episodes.len()}" }
+                    Fact { label: "Episodes", "{groups.len()}" }
                     Fact { label: "Kept time",
                         "{reading.kept_seconds().long_duration_label()} of {reading.read_seconds().long_duration_label()}"
                     }
                 }
                 if groups.is_empty() {
-                    p { class: "data-rail-note", "It keeps nothing of the {reading.episodes.len()} episodes it reads." }
+                    p { class: "data-rail-note", "It keeps nothing of the episodes it reads." }
                 }
                 ol { class: "data-curated-index",
                     for (episode, rows) in groups {
@@ -492,19 +516,25 @@ fn CuratedRows(
 mod tests {
     use super::*;
     use serde_json::json;
-    use spiral_robotics_common::datasets::DatasetSelection;
     use spiral_robotics_common::relations::QueryColumn;
 
-    fn episode(id: u32, start: u64) -> Episode {
-        let facts = json!({
-            "id": EpisodeId::fixture(id).to_string(),
-            "message_start_time": start,
-            "duration_ns": 10_000_000_000_u64,
+    fn dataset() -> DatasetSelection {
+        DatasetSelection::new(vec!["dataset_bottles".into()]).unwrap()
+    }
+
+    /// A row of the view on episode `id`, recorded from `start`, with the
+    /// episode's listed facts beside it as one read answers them.
+    fn row(id: u32, start: u64, published: Value) -> Value {
+        let mut row = json!({
+            "episode_id": EpisodeId::fixture(id).to_string(),
+            "listed_source_uri": format!("s3://recordings/{id}.mcap"),
+            "listed_message_start_time": start,
+            "listed_duration_ns": 10_000_000_000_u64,
         });
-        Episode::new(
-            DatasetSelection::new(vec!["dataset_bottles".into()]).unwrap(),
-            serde_json::from_value(facts).unwrap(),
-        )
+        row.as_object_mut()
+            .unwrap()
+            .extend(published.as_object().unwrap().clone());
+        row
     }
 
     fn answer(rows: Vec<Value>) -> SpiralQuerySnapshot {
@@ -514,6 +544,9 @@ mod tests {
             "end_ns",
             "subtask",
             "subtask_category",
+            "listed_source_uri",
+            "listed_message_start_time",
+            "listed_duration_ns",
         ]
         .map(|name| QueryColumn::new(name, "Utf8", true))
         .to_vec();
@@ -526,23 +559,23 @@ mod tests {
 
     #[test]
     fn a_view_reads_as_intervals_by_episode_in_recording_order() {
-        let (first, second) = (episode(1, 5_000_000_000), episode(2, 90_000_000_000));
         let reading = ViewReading::of(
-            vec![first.clone(), second.clone()],
+            &dataset(),
             &answer(vec![
-                json!({"episode_id": EpisodeId::fixture(2).to_string(), "start_ns": 91_000_000_000_i64, "end_ns": 93_500_000_000_i64,
-                       "subtask": "drop the bottle", "subtask_category": {"category": "Pick-and-Place", "probability": 0.8}}),
-                json!({"episode_id": EpisodeId::fixture(1).to_string(), "start_ns": 9_000_000_000_i64, "end_ns": 10_000_000_000_i64,
-                       "subtask": "grasp", "subtask_category": null}),
-                json!({"episode_id": EpisodeId::fixture(1).to_string(), "start_ns": 6_000_000_000_i64, "end_ns": 7_000_000_000_i64,
-                       "subtask": "reach", "subtask_category": {"category": "Reaching", "probability": 0.5}}),
+                row(2, 90_000_000_000, json!({"start_ns": 91_000_000_000_i64, "end_ns": 93_500_000_000_i64,
+                       "subtask": "drop the bottle", "subtask_category": {"category": "Pick-and-Place", "probability": 0.8}})),
+                row(1, 5_000_000_000, json!({"start_ns": 9_000_000_000_i64, "end_ns": 10_000_000_000_i64,
+                       "subtask": "grasp", "subtask_category": null})),
+                row(1, 5_000_000_000, json!({"start_ns": 6_000_000_000_i64, "end_ns": 7_000_000_000_i64,
+                       "subtask": "reach", "subtask_category": {"category": "Reaching", "probability": 0.5}})),
             ]),
         )
         .unwrap();
         assert_eq!(reading.columns, ["subtask", "subtask_category"]);
         let groups = reading.by_episode();
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0.id(), first.id());
+        assert_eq!(groups[0].0.id(), &EpisodeId::fixture(1));
+        let second = groups[1].0.clone();
         assert_eq!(
             groups[0].1.iter().map(|row| row.span).collect::<Vec<_>>(),
             [(1.0, 2.0), (4.0, 5.0)]
@@ -562,11 +595,23 @@ mod tests {
     }
 
     #[test]
-    fn a_row_outside_the_episodes_read_is_an_error() {
-        let stray = answer(vec![
-            json!({"episode_id": EpisodeId::fixture(3).to_string(), "start_ns": 0, "end_ns": 1,
-                                       "subtask": "x", "subtask_category": null}),
-        ]);
-        assert!(ViewReading::of(vec![episode(1, 0)], &stray).is_err());
+    fn a_published_measure_reads_as_curation_prints_it() {
+        let rate = ViewCell::Number(0.6912);
+        assert_eq!(rate.reading("progress_rate"), "0.69×");
+        assert_eq!(rate.reading("similarity"), "69%");
+        assert_eq!(rate.reading("similarity_2"), "69%");
+        assert_eq!(rate.reading("similarity_of"), "0.69");
+        assert_eq!(rate.reading("duration_seconds"), "0.69");
+        assert_eq!(ViewCell::Missing.reading("progress_rate"), "—");
+    }
+
+    #[test]
+    fn a_row_whose_episode_lists_no_first_message_is_an_error() {
+        let mut unlisted = row(3, 0, json!({"start_ns": 0, "end_ns": 1, "subtask": "x"}));
+        unlisted
+            .as_object_mut()
+            .unwrap()
+            .remove("listed_message_start_time");
+        assert!(ViewReading::of(&dataset(), &answer(vec![unlisted])).is_err());
     }
 }

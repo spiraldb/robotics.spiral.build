@@ -12,7 +12,8 @@
 //! wrote; a Select is a rule alone.
 //!
 //! Each step is written once and read two ways. The published view is one
-//! stream of rows over every episode of the dataset. Where the path leaves
+//! stream of rows over the first episodes the dataset's Selects keep
+//! ([`PublishedEpisodes`]). Where the path leaves
 //! whole episodes, each episode's row is built once with every answer the
 //! nodes below ask for, and the answers ride on the interval rows until the
 //! step that unnests them. Every step reads the one before it exactly once,
@@ -30,6 +31,7 @@ mod episode_row;
 pub(super) use episode_row::EpisodeRow;
 
 use super::document::{CurationGraph, CurationNode, CurationNodeKind, PopulationKind};
+use super::population::PUBLISHED_EPISODES;
 use episode_row::RowAnswers;
 use spiral_robotics_common::datasets::DatasetSelection;
 
@@ -39,7 +41,7 @@ pub(super) enum PathSource {
     /// Over the rows a parent's preview holds; the node's own episode row
     /// reads the episode bound as `$1`.
     Preview,
-    /// Chained into the view over every episode of the dataset.
+    /// Chained into the view over the episodes it is bounded to.
     Published,
 }
 
@@ -240,6 +242,32 @@ pub(super) trait PathFragment {
     fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError>;
 }
 
+/// The whole episodes a published view reads: the first
+/// [`PUBLISHED_EPISODES`] that the dataset and its Selects hand on, in
+/// recording order. Nothing caches a model's answers, so every read of the
+/// view asks each model below about these again, and no more.
+pub(super) struct PublishedEpisodes;
+
+impl PublishedEpisodes {
+    /// The column carrying each episode's place in the dataset's recording
+    /// order, from the dataset's listing down to the bound.
+    pub(super) const PLACE: &'static str = "recorded_place";
+}
+
+impl PathFragment for PublishedEpisodes {
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+        let input = step.input()?;
+        let name = step.name();
+        let first = format!(
+            "{name} AS (SELECT {} FROM {} ORDER BY {} LIMIT {PUBLISHED_EPISODES})",
+            input.columns(),
+            input.name(),
+            Self::PLACE
+        );
+        Ok(StepSql::new(vec![first], input.renamed(name)))
+    }
+}
+
 /// Why a path has no statement, in the words a workspace shows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PathError(String);
@@ -341,7 +369,9 @@ impl<'a> CurationPath<'a> {
 
     /// Every node's step from the dataset down, each followed by its rule,
     /// with the episode row built once, before the first node below the
-    /// dataset's own Select: until then every row is a whole episode.
+    /// dataset's own Select: until then every row is a whole episode. Where
+    /// the dataset's Selects end, the view is bounded to the first episodes
+    /// they keep, so every model below is asked about those alone.
     fn compile(&self) -> Result<StepSql, PathError> {
         let dataset = self.dataset()?;
         let mut row = EpisodeRow::new(dataset, PathSource::Published);
@@ -353,6 +383,17 @@ impl<'a> CurationPath<'a> {
         let mut row = Some(row);
         let mut entries = Vec::new();
         let mut relation = None::<Relation>;
+        let bounded_at = self
+            .nodes
+            .iter()
+            .take_while(|node| {
+                matches!(
+                    node.kind(),
+                    CurationNodeKind::Dataset | CurationNodeKind::Select
+                )
+            })
+            .count()
+            .saturating_sub(1);
         for (depth, node) in self.nodes.iter().enumerate() {
             let whole_episodes =
                 self.graph.population_kind(node.id()) == Some(PopulationKind::Episodes);
@@ -386,6 +427,15 @@ impl<'a> CurationPath<'a> {
                 })?;
                 entries.extend(kept.entries);
                 relation = Some(kept.relation);
+            }
+            if depth == bounded_at {
+                let first = PublishedEpisodes.interval_step(&PathStep {
+                    name: format!("{}_first", self.step_name(depth)),
+                    input: relation.as_ref(),
+                    source: PathSource::Published,
+                })?;
+                entries.extend(first.entries);
+                relation = Some(first.relation);
             }
         }
         let relation = relation.ok_or_else(|| PathError::new("The path compiled to nothing."))?;

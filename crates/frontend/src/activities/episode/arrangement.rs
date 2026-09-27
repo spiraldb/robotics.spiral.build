@@ -25,8 +25,12 @@ use std::iter;
 const LEAST_TIMELINE_SHARE: f64 = 0.3;
 /// The least it keeps when the surface brings rows of its own — a node's
 /// progress, its subtasks — because those rows are what the surface is
-/// about, and the pictures give way first.
+/// about, and the pictures give way first. Rows brought beside the recording
+/// instead take what they need, up to this.
 const LEAST_EVIDENCE_TIMELINE_SHARE: f64 = 0.46;
+/// The timeline around rows brought beside the recording: its transport, its
+/// ruler, and the one row the recorded streams fold into under them.
+const TIMELINE_CHROME: f64 = 40.0 + 36.0 + 24.0;
 /// The least width the column beside the cameras is worth: the Scene's view
 /// controls and a plot's time axis still read.
 const LEAST_SIDE_WIDTH: f64 = 280.0;
@@ -83,13 +87,24 @@ impl ViewTile {
     }
 }
 
+/// What the timeline holds, and so how much of the room it claims.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TimelineClaim {
+    /// The recorded streams, a handful of rows at least.
+    Streams,
+    /// Rows the surface is about, above the streams folded behind one row.
+    Evidence,
+    /// Rows this tall brought beside the recording, above the streams
+    /// folded behind one row.
+    Rows(f64),
+}
+
 /// The panels of one inspected episode and where they go.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct EpisodeArrangement {
     /// Cameras, the leading one first, then the robot's Scene if it has one.
     views: Vec<PanelId>,
-    /// The least share of the room the timeline keeps.
-    least_timeline: f64,
+    timeline: TimelineClaim,
 }
 
 impl EpisodeArrangement {
@@ -101,15 +116,32 @@ impl EpisodeArrangement {
     pub(super) fn new(views: Vec<PanelId>) -> Self {
         Self {
             views,
-            least_timeline: LEAST_TIMELINE_SHARE,
+            timeline: TimelineClaim::Streams,
         }
     }
-    /// The arrangement for a surface that brings timeline rows of its own.
-    pub(super) fn led_by_evidence(mut self, evidence: bool) -> Self {
-        if evidence {
-            self.least_timeline = LEAST_EVIDENCE_TIMELINE_SHARE;
-        }
+    /// The arrangement for a surface whose own timeline rows are what it is
+    /// about.
+    pub(super) fn led_by_evidence(mut self) -> Self {
+        self.timeline = TimelineClaim::Evidence;
         self
+    }
+    /// The arrangement for timeline rows `height` tall brought beside the
+    /// recording, which leads: the timeline takes what they need and the
+    /// pictures the rest.
+    pub(super) fn beside_rows(mut self, height: f64) -> Self {
+        self.timeline = TimelineClaim::Rows(height);
+        self
+    }
+    /// The share of `room`'s height the timeline takes, on a step.
+    fn timeline_share(&self, room: Size) -> f64 {
+        match self.timeline {
+            TimelineClaim::Streams => LEAST_TIMELINE_SHARE,
+            TimelineClaim::Evidence => LEAST_EVIDENCE_TIMELINE_SHARE,
+            TimelineClaim::Rows(height) => {
+                let needed = (TIMELINE_CHROME + height) / room.height.max(1.0);
+                ((needed / SHARE_STEP).ceil() * SHARE_STEP).min(LEAST_EVIDENCE_TIMELINE_SHARE)
+            }
+        }
     }
     /// The panel one recorded camera opens in.
     pub(super) fn camera(key: &str) -> PanelId {
@@ -123,7 +155,7 @@ impl EpisodeArrangement {
     /// The designed arrangement for `room`.
     pub(super) fn layout(&self, room: Size) -> PanelLayout {
         let timeline = LayoutNode::tile("episode-timeline", [Self::TIMELINE]);
-        let band_share = Self::step(1.0 - self.least_timeline);
+        let band_share = Self::step(1.0 - self.timeline_share(room));
         let (cameras, side): (Vec<PanelId>, Vec<PanelId>) = self
             .views
             .iter()
@@ -498,7 +530,7 @@ mod tests {
         // width the grid leaves.
         let cameras = views(3);
         let layout = EpisodeArrangement::new(with_scene(cameras.clone()))
-            .led_by_evidence(true)
+            .led_by_evidence()
             .layout(Size::new(708.0, 752.0));
         let LayoutNode::Split { first, .. } = &layout.root else {
             panic!("the recording over the timeline")
@@ -527,9 +559,13 @@ mod tests {
             (Size::new(1137.0, 782.0), false),
         ] {
             let cameras = views(3);
-            let layout = EpisodeArrangement::new(with_scene(cameras.clone()))
-                .led_by_evidence(led)
-                .layout(room);
+            let arrangement = EpisodeArrangement::new(with_scene(cameras.clone()));
+            let arrangement = if led {
+                arrangement.led_by_evidence()
+            } else {
+                arrangement
+            };
+            let layout = arrangement.layout(room);
             assert_eq!(tiles_of(&layout, &cameras).len(), 3, "{room:?}");
             let splits = layout.split_ids();
             assert!(
@@ -560,12 +596,43 @@ mod tests {
         let room = Size::new(600.0, 900.0);
         let plain = EpisodeArrangement::new(cameras.clone()).layout(room);
         let led = EpisodeArrangement::new(cameras)
-            .led_by_evidence(true)
+            .led_by_evidence()
             .layout(room);
         assert!(
             share(led) < share(plain),
             "the pictures give way to the evidence"
         );
+    }
+
+    #[test]
+    fn rows_beside_the_recording_take_what_they_need_and_the_cameras_fill_the_rest() {
+        // A curated view's intervals on an episode in Data at a 1440 × 900
+        // window: one row of spans over the folded streams.
+        let cameras = views(3);
+        let room = Size::new(1137.0, 786.0);
+        let layout = EpisodeArrangement::new(with_scene(cameras.clone()))
+            .beside_rows(44.0)
+            .layout(room);
+        let LayoutNode::Split { ratio, .. } = &layout.root else {
+            panic!("the recording over the timeline")
+        };
+        assert!((ratio - 0.8).abs() < 1e-9, "the recording takes {ratio}");
+        assert!(
+            (1.0 - ratio) * room.height >= TIMELINE_CHROME + 44.0,
+            "the timeline shows its row whole"
+        );
+        // Two rows of pictures that fill the band's height: nothing is drawn
+        // letterboxed in a band taller than its pictures.
+        let band = Size::new(room.width - LEAST_SIDE_WIDTH, room.height * ratio);
+        let plan = ViewPlan::for_room(3, band, TieBreak::LeastWidth);
+        assert_eq!(plan.grid, ViewGrid::Rows { columns: 2 });
+        assert!((plan.height - band.height).abs() < 1e-9);
+        assert_eq!(tiles_of(&layout, &cameras).len(), 3);
+        // Many rows never take more than a surface led by its rows gives.
+        let tall = EpisodeArrangement::new(with_scene(cameras))
+            .beside_rows(900.0)
+            .timeline_share(room);
+        assert!((tall - LEAST_EVIDENCE_TIMELINE_SHARE).abs() < 1e-9);
     }
 
     #[test]

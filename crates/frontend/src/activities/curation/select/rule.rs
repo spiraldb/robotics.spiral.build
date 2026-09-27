@@ -146,8 +146,22 @@ fn ConditionLine(view: RuleView, row: ConditionRow, removable: bool, pick: Strip
                 onchange: {
                     let with = with.clone();
                     move |key: String| {
-                        if let Some(comparison) = Comparison::from_key(&key) {
-                            with(condition.comparing(comparison));
+                        let Some(comparison) = Comparison::from_key(&key) else {
+                            return;
+                        };
+                        // A condition that leaves nothing out still leaves
+                        // nothing out once turned around, from the other end
+                        // of its strip, rather than suddenly leaving out
+                        // every episode.
+                        let flipped = condition.comparing(comparison);
+                        if leaves_out > 0 {
+                            with(flipped);
+                        } else {
+                            let (low, high) = threshold.ends();
+                            with(flipped.at(match comparison {
+                                Comparison::AtLeast => low,
+                                Comparison::AtMost => high,
+                            }));
                         }
                     }
                 },

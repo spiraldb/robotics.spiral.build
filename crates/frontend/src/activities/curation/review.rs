@@ -80,10 +80,10 @@ impl Noun {
     const MOMENT: Self = Self("moment", "moments");
 }
 
-/// The keys a list of subtask rows is keyed by: episode and start, which
-/// usually tell rows apart, with a count after any repeat. Overlapping
-/// subtasks, and subtasks cut to the start of the stretch that reached them,
-/// can share both, and two siblings sharing a key stop the page.
+/// The keys a list of subtask rows is keyed by: episode and start, which tell
+/// one node's rows apart, since Break down's subtasks never overlap and stay
+/// apart when cut to the stretches that reached them. A repeat still gets a
+/// count after it, because two siblings sharing a key stop the page.
 pub(super) struct RowKeys;
 
 impl RowKeys {

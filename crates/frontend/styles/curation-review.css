@@ -441,6 +441,14 @@
     background: var(--tone-ink);
   }
 
+  /* Facts that do not fit beside the score take a second line rather than
+     losing the end of a time: an index across episodes names the episode
+     before the span, and at 1440px the two outgrew one line. */
+  .curation-entry .episode-row-facts {
+    flex-wrap: wrap;
+    gap: 0 8px;
+  }
+
   /* A narrow index spends its width on the words. The picture and the score
      are the two things that read at any size, so they give first. */
   @container curation-index (max-width: 22rem) {
@@ -459,15 +467,12 @@
       width: 2.75rem;
     }
 
-    /* The words give way last: the bar that places a row shortens first,
-       and facts that still do not fit take a second line rather than
-       losing the end of a time. */
+    /* The words give way last: the bar that places a row shortens first. */
     .episode-row-extent {
       width: 24px;
     }
 
-    .episode-row-facts {
-      flex-wrap: wrap;
+    .curation-entry .episode-row-facts {
       gap: 0 6px;
     }
   }
@@ -487,6 +492,53 @@
    so they are drawn tall enough to read a shape in. */
 .curation-review-evidence .data-stream-track.data-numeric-plot {
   height: 168px;
+}
+
+/* Unlayered, over the timeline's own layout: a node's timeline tile is sized
+   for its rows to lead (`arrangement.rs`), and a row of subtasks is shorter
+   than that. The row takes the height the tile has left rather than leaving
+   it empty, so its spans read top-down like a schedule, in full. Streams
+   opened under it still scroll. */
+.curation-review-player .data-timeline-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.curation-review-player .data-timeline-rows {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+
+.curation-review-player .data-interval-track {
+  flex: 1 0 auto;
+}
+
+.curation-review-player .data-interval-track .data-interval-name {
+  justify-content: flex-start;
+}
+
+.curation-review-player .data-interval {
+  align-items: flex-start;
+  padding-top: 4px;
+}
+
+.curation-review-player .data-interval-label,
+.curation-review-player .data-interval-now {
+  -webkit-line-clamp: 8;
+}
+
+/* A span too narrow for its words across runs them down its height, as a
+   book's spine does, since the row is tall here. */
+@container (max-width: 46px) {
+  .curation-review-player .data-interval-label {
+    display: block;
+    max-height: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    writing-mode: vertical-rl;
+  }
 }
 
 /* Unlayered, over Data's own strip: in a tab beside an index, Data's

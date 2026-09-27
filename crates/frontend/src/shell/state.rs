@@ -92,7 +92,7 @@ impl StudioProjectState {
     }
 }
 impl StudioProjectState {
-    pub(super) fn use_provider() -> Self {
+    pub(crate) fn use_provider() -> Self {
         let state = Self {
             clock_ms: use_signal(|| 0.0),
             notifications: use_signal(NotificationCenterState::default),

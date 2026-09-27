@@ -3962,11 +3962,12 @@ button.studio-status-fact:hover {
 .data-interval[data-chosen="true"] { border-color: var(--tone-accent-strong); background: var(--tone-selected); color: var(--tone-accent-ink); }
 .data-interval[data-chosen="true"][data-current="true"] { border-color: var(--tone-ink); }
 .data-interval:focus-visible { z-index: 1; outline: 2px solid var(--tone-focus); outline-offset: 1px; }
-.data-interval-label { display: -webkit-box; overflow: hidden; font-size: 10.5px; line-height: 1.2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.data-interval-label { display: -webkit-box; overflow: hidden; overflow-wrap: break-word; -webkit-hyphens: auto; hyphens: auto; font-size: 10.5px; line-height: 1.2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .data-interval-now::first-letter, .data-interval-label::first-letter { text-transform: uppercase; }
-/* A span too narrow for a word says nothing rather than half of one; the
-   readout beside the lane names it in full. */
-@container (max-width: 46px) { .data-interval-label { display: none; } }
+/* A narrow span still says what it can: a word that does not fit breaks at a
+   hyphen, and only a span too narrow for two letters says nothing. The
+   readout beside the lane names every span in full. */
+@container (max-width: 18px) { .data-interval-label { display: none; } }
 .data-numeric-name output { font-size: 12px; font-variant-numeric: tabular-nums; }
 .data-numeric-name span { font-size: 10px; color: var(--tone-ink-soft); }
 .data-stream-track.data-numeric-plot { height: 104px; overflow: hidden; }

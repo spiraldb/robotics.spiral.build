@@ -69,7 +69,7 @@ pub(crate) fn IntervalTrackRow(track: IntervalTrack, interaction: TimelineIntera
     let visible = track
         .spans
         .iter()
-        // Keyed by place in the track: spans that overlap may share a start.
+        // Keyed by place in the track, unique even when two spans share a start.
         .enumerate()
         .filter(|(_, span)| span.span().1 > view.start() && span.span().0 < view.end());
     rsx! {

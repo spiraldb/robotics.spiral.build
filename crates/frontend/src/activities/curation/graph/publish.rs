@@ -1,13 +1,13 @@
 //! Publishing from the document bar: the outputs the operator chooses, each
-//! compiled over the dataset's first episodes and created as a catalog view
-//! under the name they give it, then recorded in the curation, which saves. A view
-//! cannot be turned back into a graph, so the recipe stays in the curation
-//! and the view is what it produces.
+//! compiled over the first episodes the dataset's Selects keep and created as
+//! a catalog view under the name they give it, then recorded in the curation,
+//! which saves. A view cannot be turned back into a graph, so the recipe
+//! stays in the curation and the view is what it produces.
 //!
 //! A publication is recorded against the saved recipe, and the save that
-//! records it must come next. So one press creates every chosen view, records
-//! them all in one edit, and saves once; and nothing else publishes or
-//! unpublishes until that is done.
+//! records it must come next. So one press saves what is drawn, creates every
+//! chosen view, records them all in one edit, and saves again; and nothing
+//! else publishes or unpublishes until that is done.
 use super::node_card::NodeCard;
 use crate::activities::curation::document::PublishedOutput;
 use crate::activities::curation::path::CurationPath;
@@ -150,17 +150,22 @@ struct ViewPublisher {
 }
 
 impl ViewPublisher {
-    /// Create each `(node, view, statement)` in turn, then record every view
-    /// that was created in one edit of the recipe saved now, and save.
+    /// Save what is drawn, since a view is recorded against the saved recipe;
+    /// then create each `(node, view, statement)` in turn, record every view
+    /// that was created in one edit, and save again.
     fn publish(self, views: Vec<(String, String, String)>) {
         let Self {
             controller,
             studio,
             mut busy,
         } = self;
-        let saved = controller.saved_revision();
         busy.set(true);
         spawn(async move {
+            if !controller.saved(studio).await {
+                busy.set(false);
+                return;
+            }
+            let saved = controller.saved_revision();
             let mut created = Vec::new();
             for (node, view, statement) in views {
                 controller.report_activity(&node, Some(format!("Publishing as {view}")));
@@ -275,7 +280,6 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
     });
     let outputs = PublishableOutput::all(controller);
     let none = outputs.is_empty();
-    let unsaved = controller.unsaved_changes();
     let waiting = busy() || controller.command().is_some();
     let views = choice.read().views(&outputs);
     let count = choice.read().chosen.len();
@@ -325,18 +329,7 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                         }
                     },
                     p { class: "curation-publish-intro",
-                        "Each output you choose becomes a catalog view of what it keeps in the dataset's first {PUBLISHED_EPISODES} episodes. Every read of a view asks its models again."
-                    }
-                    if unsaved {
-                        div { class: "curation-publish-unsaved", role: "status",
-                            p { "Save the curation first: each view is recorded in it." }
-                            Button {
-                                purpose: ActionPurpose::Apply, variant: ButtonVariant::Outline,
-                                disabled: controller.command().is_some(),
-                                onclick: move |_| controller.save(studio),
-                                "Save"
-                            }
-                        }
+                        "Each output you choose becomes a catalog view of what it keeps in the first {PUBLISHED_EPISODES} episodes that pass the dataset's Selects. Every read of a view asks its models again."
                     }
                     ul { class: "curation-publish-outputs",
                         for output in outputs.clone() {
@@ -382,13 +375,11 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                         }
                         Button {
                             purpose: ActionPurpose::Export, variant: ButtonVariant::Solid,
-                            disabled: views.is_none() || unsaved || waiting,
-                            title: if unsaved {
-                                "Save the curation first"
-                            } else if count == 0 {
+                            disabled: views.is_none() || waiting,
+                            title: if count == 0 {
                                 "Choose the outputs to publish"
                             } else {
-                                "Create or replace each chosen view under its name"
+                                "Save the curation, then create or replace each chosen view under its name"
                             },
                             onclick: move |_| {
                                 if let Some(views) = views.clone() {

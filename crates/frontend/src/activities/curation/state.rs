@@ -678,13 +678,27 @@ impl CurationController {
     /// Save once the document has no other command in flight, so what a
     /// publish just recorded reaches Studio even while a save is running.
     pub(super) async fn save_when_idle(self, studio: StudioProjectState) {
+        self.idle().await;
+        self.save(studio);
+    }
+    /// Save what is drawn, if anything is unsaved, and say once Studio has
+    /// answered whether it is now all saved. A refused save is reported like
+    /// any other.
+    pub(super) async fn saved(self, studio: StudioProjectState) -> bool {
+        if self.unsaved_changes() {
+            self.save_when_idle(studio).await;
+            self.idle().await;
+        }
+        !self.unsaved_changes()
+    }
+    /// Wait, ten seconds at most, for the document command in flight.
+    async fn idle(self) {
         for _ in 0..SAVE_WAIT_ROUNDS {
             if self.command().is_none() {
                 break;
             }
             gloo_timers::future::TimeoutFuture::new(SAVE_WAIT_MS).await;
         }
-        self.save(studio);
     }
     /// Drop local edits and return to the last saved or loaded state. The
     /// selection only moves when the node it named is no longer there.

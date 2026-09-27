@@ -11,8 +11,7 @@ use spiral_robotics_ui::{
 
 use super::super::document::{CurationGraph, EpisodeFact};
 use super::super::episode_tabs::{EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes};
-use super::super::path::{PathError, PathFragment, PathStep, Relation, StepSql};
-use super::super::population::PUBLISHED_EPISODES;
+use super::super::path::{PathError, PathFragment, PathStep, PublishedEpisodes, Relation, StepSql};
 use super::super::review::{
     Counted, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SubtaskReview, TabStop,
 };
@@ -28,11 +27,12 @@ use crate::components::icons::SpinnerIcon;
 /// The name a graph carries until it has a dataset to take one from.
 const UNTITLED: &str = "Untitled curation";
 
-/// The dataset's first episodes, each as one whole interval from its first
-/// message to its last, with the facts Spiral records for it. Only the
-/// published view reads the dataset this way, and only its first
-/// [`PUBLISHED_EPISODES`], so no model below is asked about more; a preview
-/// is given the episodes the sample already listed.
+/// Every episode of the dataset, each as one whole interval from its first
+/// message to its last, with the facts Spiral records for it and its place in
+/// recording order, by which the published view later reads only the first
+/// of them its Selects keep ([`PublishedEpisodes`]). Only the published view reads the
+/// dataset this way; a preview is given the episodes the sample already
+/// listed.
 impl PathFragment for DatasetSelection {
     fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let facts = EpisodeFact::ALL
@@ -42,12 +42,18 @@ impl PathFragment for DatasetSelection {
             .join(", ");
         let entry = format!(
             "{} AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, \
-             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts} \
-             FROM ({}) listed)",
+             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts}, \
+             ROW_NUMBER() OVER (ORDER BY {}) AS {} FROM ({}) listed)",
             step.name(),
-            Episode::first_sql(self, PUBLISHED_EPISODES),
+            Episode::RECORDING_ORDER,
+            PublishedEpisodes::PLACE,
+            Episode::listing_sql(self),
         );
-        let properties = EpisodeFact::ALL.iter().map(|fact| fact.key()).collect();
+        let properties = EpisodeFact::ALL
+            .iter()
+            .map(|fact| fact.key())
+            .chain([PublishedEpisodes::PLACE])
+            .collect();
         Ok(StepSql::new(
             vec![entry],
             Relation::new(step.name(), properties),
