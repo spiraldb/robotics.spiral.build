@@ -2,9 +2,9 @@
 //!
 //! Every value here belongs to one of two categories: (A) a concept consumed
 //! by at least three workspace crates, or (B) a frontend/backend wire contract
-//! used by a server function (including values embedded
-//! in those contracts). Storage identities, database schemas, hardware-only
-//! state, and native backend types belong to their owning crates.
+//! of the HTTP API (including values embedded in those contracts). Storage
+//! identities, database schemas, hardware-only state, and native backend types
+//! belong to their owning crates.
 
 pub mod account;
 pub mod command_failure;

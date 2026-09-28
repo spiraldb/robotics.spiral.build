@@ -1,4 +1,4 @@
-//! Serial discovery and identification from an unplugged motor bus.
+//! Serial ports offered as candidate motor buses.
 
 use crate::OperationError;
 use crate::projects::context::ProjectContext;
@@ -6,20 +6,10 @@ use spiral_robotics_common::robots::SerialPortSummary;
 use spiral_robotics_hardware::SerialPortCatalog;
 
 trait SerialPortPresentation {
-    fn kind(&self) -> &'static str;
     fn description(&self) -> Option<String>;
 }
 
 impl SerialPortPresentation for serialport::SerialPortType {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::UsbPort(_) => "usb",
-            Self::BluetoothPort => "bluetooth",
-            Self::PciPort => "pci",
-            Self::Unknown => "unknown",
-        }
-    }
-
     fn description(&self) -> Option<String> {
         match self {
             Self::UsbPort(info) => {
@@ -80,12 +70,8 @@ impl SerialPortDiscovery {
             .into_ports()
             .into_iter()
             .map(|port| {
-                SerialPortSummary::new(
-                    port.port_name.clone(),
-                    port.port_type.kind(),
-                    port.port_type.description(),
-                )
-                .with_owner(in_use.get(&port.port_name).cloned())
+                SerialPortSummary::new(port.port_name.clone(), port.port_type.description())
+                    .with_owner(in_use.get(&port.port_name).cloned())
             })
             .collect())
     }

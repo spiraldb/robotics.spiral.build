@@ -175,7 +175,6 @@
     background: var(--tone-surface);
   }
 
-  .curation-index-bar > .ui-field-input,
   .curation-index-bar > input {
     min-width: 0;
     flex: 1;
@@ -208,14 +207,6 @@
     height: 1px;
     flex: 1;
     background: var(--tone-line);
-  }
-
-  /* What an index counts but does not list, after its last row. */
-  .curation-index-footer {
-    margin: 0;
-    padding: 10px 12px;
-    color: var(--tone-ink-soft);
-    font-size: 11.5px;
   }
 
   .curation-entries-jump {

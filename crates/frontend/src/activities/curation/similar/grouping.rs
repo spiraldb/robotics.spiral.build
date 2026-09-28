@@ -79,21 +79,6 @@ impl GroupingNode {
             }
         })
     }
-    /// The model the annotation above used; proposing asks the same one.
-    fn proposal_model(&self, source: &SubtaskSource) -> String {
-        self.controller.with_payload(|payload| {
-            match source
-                .annotation()
-                .and_then(|annotation| payload.node(annotation))
-                .map(CurationNode::kind)
-            {
-                Some(CurationNodeKind::BreakDownSubtasks(annotation)) => {
-                    annotation.model().to_owned()
-                }
-                _ => DEFAULT_ANNOTATION_MODEL.to_owned(),
-            }
-        })
-    }
     /// Whether a node above is still running, so the subtasks that reach
     /// this one are still arriving.
     fn subtasks_arriving(&self) -> bool {
@@ -111,11 +96,8 @@ impl GroupingNode {
         false
     }
     /// The LLM pass: 4 to 8 categories over the deduped descriptions of the
-    /// subtasks that reach the node.
-    async fn propose(
-        model: String,
-        descriptions: Vec<String>,
-    ) -> Result<Vec<SubtaskCategory>, String> {
+    /// subtasks that reach the node, asked of the model that described them.
+    async fn propose(descriptions: Vec<String>) -> Result<Vec<SubtaskCategory>, String> {
         let borrowed = descriptions.iter().map(String::as_str).collect::<Vec<_>>();
         let counts = DescriptionCounts::of(&borrowed);
         if counts.is_empty() {
@@ -127,9 +109,9 @@ impl GroupingNode {
                 ProviderMessage::text("user", counts.prompt()),
             ],
             Vec::new(),
-        )
-        .with_model(model);
-        let reply = ModelClient::complete(request, |_| {}).await?;
+            DEFAULT_ANNOTATION_MODEL,
+        );
+        let reply = ModelClient::complete(request).await?;
         let text = reply
             .content()
             .ok_or("The model answered the category prompt without any text.")?;
@@ -539,12 +521,11 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                 ));
                 return;
             }
-            let model = grouping.proposal_model(&source);
             let grouping = grouping.clone();
             proposing.set(true);
             reveal.set(MapReveal::Reading);
             spawn(async move {
-                let proposed = GroupingNode::propose(model, descriptions).await;
+                let proposed = GroupingNode::propose(descriptions).await;
                 proposing.set(false);
                 reveal.set(MapReveal::Still);
                 problem.set(
@@ -1008,7 +989,6 @@ fn CategoryCard(
                 style: "{summary.tint()}",
                 "data-kept": "{summary.kept}",
                 "data-bin": "{summary.rank}",
-                "data-motion-key": "{summary.category.name()}",
                 div { class: "curation-similar-category-head",
                     {keep}
                     button {
@@ -1048,7 +1028,6 @@ fn CategoryCard(
             "data-selected": "{open}",
             "data-kept": "{summary.kept}",
             "data-bin": "{summary.rank}",
-            "data-motion-key": "{summary.category.name()}",
             {keep}
             button {
                 r#type: "button",

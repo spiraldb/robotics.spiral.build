@@ -21,10 +21,7 @@ async fn command_status(fixture: &ProjectFixture, uri: &str, body: String) -> St
         .body(Body::from(body))
         .unwrap();
     CurationEndpoints::commands()
-        .with_state(StudioContext::new(
-            fixture.projects.clone(),
-            crate::account::SpiralAccount::offline(),
-        ))
+        .with_state(fixture.context())
         .oneshot(request)
         .await
         .unwrap()

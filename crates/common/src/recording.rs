@@ -10,139 +10,49 @@ use serde::{Deserialize, Serialize};
 /// calibration. Published dataset members use datasets::EpisodeSelection.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInfo {
-    #[serde(flatten)]
-    identity: EpisodeIdentity,
-    #[serde(flatten)]
-    timeline: EpisodeTimeline,
-    #[serde(flatten)]
-    assessment: EpisodeAssessment,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct EpisodeIdentity {
     /// Stable identifier for the episode and all of its related rows.
     id: String,
     /// Explicit destination for publishing this take as an MCAP source.
     dataset_id: String,
     /// Arms sampled in this take, in the order their joints appear in a frame.
     arms: Vec<EpisodeArm>,
-    source: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct EpisodeTimeline {
     frames: u64,
-    duration_seconds: f64,
-    /// Wall-clock intervals deliberately omitted from the episode timeline.
-    ///
-    /// Samples and recorded video use the active timeline, so pausing does not
-    /// create a motionless training-data plateau. Each entry preserves where
-    /// the omission happened and how much real time passed there.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    recording_gaps: Vec<RecordingGap>,
-    /// Rate the take was captured at, so review and export honour its timing.
-    sample_hz: f64,
-    /// When the take started, as milliseconds since the Unix epoch.
-    ///
-    /// Carried as a number rather than a formatted string so the client can
-    /// render it in the operator's own locale and timezone.
-    started_ms: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct EpisodeAssessment {
-    /// Largest gap between a measured and a commanded joint angle during the
-    /// take, in degrees — the same quantity the inspector shows live as
-    /// `Follow Δ`, kept for the whole take instead of for one instant.
-    max_follow_error_degrees: Option<f64>,
-    /// True once the operator has judged this take unusable.
-    ///
-    /// A discarded take remains in SpiralDB and is excluded from training,
-    /// because the judgement is the operator's and deleting on their behalf is not.
-    discarded: bool,
-    /// Why this committed take cannot currently be reviewed or trained.
-    problem: Option<String>,
 }
 
 impl EpisodeInfo {
     pub fn new(id: impl Into<String>, dataset_id: impl Into<String>) -> Self {
         Self {
-            identity: EpisodeIdentity {
-                id: id.into(),
-                dataset_id: dataset_id.into(),
-                arms: Vec::new(),
-                source: String::new(),
-            },
-            timeline: EpisodeTimeline {
-                frames: 0,
-                duration_seconds: 0.0,
-                recording_gaps: Vec::new(),
-                sample_hz: 0.0,
-                started_ms: 0,
-            },
-            assessment: EpisodeAssessment {
-                max_follow_error_degrees: None,
-                discarded: false,
-                problem: None,
-            },
+            id: id.into(),
+            dataset_id: dataset_id.into(),
+            arms: Vec::new(),
+            frames: 0,
         }
     }
 
     pub fn with_arms(mut self, arms: Vec<EpisodeArm>) -> Self {
-        self.identity.arms = arms;
+        self.arms = arms;
         self
     }
 
-    pub fn with_source(mut self, source: impl Into<String>) -> Self {
-        self.identity.source = source.into();
-        self
-    }
-
-    pub const fn with_timeline(mut self, frames: u64, duration_seconds: f64) -> Self {
-        self.timeline.frames = frames;
-        self.timeline.duration_seconds = duration_seconds;
-        self
-    }
-
-    pub const fn with_sample_hz(mut self, sample_hz: f64) -> Self {
-        self.timeline.sample_hz = sample_hz;
-        self
-    }
-
-    pub fn with_recording_gaps(mut self, recording_gaps: Vec<RecordingGap>) -> Self {
-        self.timeline.recording_gaps = recording_gaps;
-        self
-    }
-
-    pub const fn with_started_ms(mut self, started_ms: i64) -> Self {
-        self.timeline.started_ms = started_ms;
-        self
-    }
-
-    pub const fn with_assessment(
-        mut self,
-        discarded: bool,
-        max_follow_error_degrees: Option<f64>,
-    ) -> Self {
-        self.assessment.discarded = discarded;
-        self.assessment.max_follow_error_degrees = max_follow_error_degrees;
+    pub const fn with_frames(mut self, frames: u64) -> Self {
+        self.frames = frames;
         self
     }
 
     pub fn id(&self) -> &str {
-        &self.identity.id
+        &self.id
     }
 
     pub fn arms(&self) -> &[EpisodeArm] {
-        &self.identity.arms
+        &self.arms
     }
 
     pub const fn frames(&self) -> u64 {
-        self.timeline.frames
+        self.frames
     }
 
     pub fn dataset_id(&self) -> &str {
-        &self.identity.dataset_id
+        &self.dataset_id
     }
 }
 
@@ -151,7 +61,6 @@ impl EpisodeInfo {
 pub struct EpisodeInspectionSnapshot {
     episode: EpisodeInfo,
     sample_times_seconds: Vec<f64>,
-    follow_error_degrees: Vec<Option<f64>>,
     arms: Vec<EpisodeInspectionArm>,
 }
 
@@ -159,19 +68,13 @@ impl EpisodeInspectionSnapshot {
     pub fn new(
         episode: EpisodeInfo,
         sample_times_seconds: Vec<f64>,
-        follow_error_degrees: Vec<Option<f64>>,
+        arms: Vec<EpisodeInspectionArm>,
     ) -> Self {
         Self {
             episode,
             sample_times_seconds,
-            follow_error_degrees,
-            arms: Vec::new(),
+            arms,
         }
-    }
-
-    pub fn with_arms(mut self, arms: Vec<EpisodeInspectionArm>) -> Self {
-        self.arms = arms;
-        self
     }
 
     pub const fn episode(&self) -> &EpisodeInfo {
@@ -180,80 +83,27 @@ impl EpisodeInspectionSnapshot {
     pub fn sample_times_seconds(&self) -> &[f64] {
         &self.sample_times_seconds
     }
-    pub fn follow_error_degrees(&self) -> &[Option<f64>] {
-        &self.follow_error_degrees
-    }
     pub fn arms(&self) -> &[EpisodeInspectionArm] {
         &self.arms
     }
 }
 
-/// All recorded scalar channels for one arm, sharing one frame and joint
-/// ordering. A matrix value for frame `f`, joint `j` is stored at
-/// `f * joints.len() + j`.
+/// One arm's normalized positions, sharing one frame and joint ordering. The
+/// value for frame `f`, joint `j` is stored at `f * joints.len() + j`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionArm {
     arm: String,
     joints: Vec<String>,
-    #[serde(flatten)]
-    samples: EpisodeArmScalarSamples,
-    velocity: EpisodeOptionalFrameMatrix,
-    effort: EpisodeOptionalFrameMatrix,
-    action: EpisodeOptionalFrameMatrix,
-}
-
-/// Dense scalar matrices that are present for every recorded arm frame.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeArmScalarSamples {
     normalized: Vec<Option<f64>>,
-    raw: Vec<i64>,
-    #[serde(default)]
-    degrees: Vec<Option<f64>>,
-}
-
-impl EpisodeArmScalarSamples {
-    pub const fn new(normalized: Vec<Option<f64>>, raw: Vec<i64>) -> Self {
-        Self {
-            normalized,
-            raw,
-            degrees: Vec::new(),
-        }
-    }
-    pub fn with_degrees(mut self, degrees: Vec<Option<f64>>) -> Self {
-        self.degrees = degrees;
-        self
-    }
 }
 
 impl EpisodeInspectionArm {
-    pub fn new(
-        arm: impl Into<String>,
-        joints: Vec<String>,
-        samples: EpisodeArmScalarSamples,
-    ) -> Self {
+    pub fn new(arm: impl Into<String>, joints: Vec<String>, normalized: Vec<Option<f64>>) -> Self {
         Self {
             arm: arm.into(),
             joints,
-            samples,
-            velocity: EpisodeOptionalFrameMatrix::default(),
-            effort: EpisodeOptionalFrameMatrix::default(),
-            action: EpisodeOptionalFrameMatrix::default(),
+            normalized,
         }
-    }
-
-    pub fn with_velocity(mut self, velocity: EpisodeOptionalFrameMatrix) -> Self {
-        self.velocity = velocity;
-        self
-    }
-
-    pub fn with_effort(mut self, effort: EpisodeOptionalFrameMatrix) -> Self {
-        self.effort = effort;
-        self
-    }
-
-    pub fn with_action(mut self, action: EpisodeOptionalFrameMatrix) -> Self {
-        self.action = action;
-        self
     }
 
     pub fn arm(&self) -> &str {
@@ -263,44 +113,7 @@ impl EpisodeInspectionArm {
         &self.joints
     }
     pub fn normalized(&self) -> &[Option<f64>] {
-        &self.samples.normalized
-    }
-    pub fn raw(&self) -> &[i64] {
-        &self.samples.raw
-    }
-    pub fn degrees(&self) -> &[Option<f64>] {
-        &self.samples.degrees
-    }
-    pub const fn velocity(&self) -> &EpisodeOptionalFrameMatrix {
-        &self.velocity
-    }
-    pub const fn effort(&self) -> &EpisodeOptionalFrameMatrix {
-        &self.effort
-    }
-    pub const fn action(&self) -> &EpisodeOptionalFrameMatrix {
-        &self.action
-    }
-}
-
-/// A channel that may be absent for an entire arm at an individual frame.
-/// `present` has one entry per frame; `values` remains frame-major and uses
-/// nulls for unavailable joints without repeating arm or joint names.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct EpisodeOptionalFrameMatrix {
-    present: Vec<bool>,
-    values: Vec<Option<f64>>,
-}
-
-impl EpisodeOptionalFrameMatrix {
-    pub const fn new(present: Vec<bool>, values: Vec<Option<f64>>) -> Self {
-        Self { present, values }
-    }
-
-    pub fn present(&self) -> &[bool] {
-        &self.present
-    }
-    pub fn values(&self) -> &[Option<f64>] {
-        &self.values
+        &self.normalized
     }
 }
 
@@ -354,25 +167,14 @@ pub struct RecordingIdentity {
     /// Identifier the finished take will have.
     episode: String,
     /// Logical dataset row this take will reference when it completes.
-    #[serde(default = "RecordingIdentity::default_dataset_id")]
     dataset_id: String,
-    arms: Vec<String>,
 }
 
 impl RecordingIdentity {
-    fn default_dataset_id() -> String {
-        "default".to_owned()
-    }
-
-    pub fn new(
-        episode: impl Into<String>,
-        dataset_id: impl Into<String>,
-        arms: Vec<String>,
-    ) -> Self {
+    pub fn new(episode: impl Into<String>, dataset_id: impl Into<String>) -> Self {
         Self {
             episode: episode.into(),
             dataset_id: dataset_id.into(),
-            arms,
         }
     }
 }
@@ -380,49 +182,31 @@ impl RecordingIdentity {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RecordingClock {
     frames: u64,
+    /// Active time on the episode timeline, excluding deliberate pauses.
     elapsed_seconds: f64,
-    /// Real time since Record was pressed, including deliberate pauses.
-    #[serde(default)]
-    wall_elapsed_seconds: f64,
-    /// Real time omitted from the active episode timeline so far.
-    #[serde(default)]
-    paused_seconds: f64,
 }
 
 impl RecordingClock {
-    pub const fn new(frames: u64, elapsed_seconds: f64, wall_elapsed_seconds: f64) -> Self {
+    pub const fn new(frames: u64, elapsed_seconds: f64) -> Self {
         Self {
             frames,
             elapsed_seconds,
-            wall_elapsed_seconds,
-            paused_seconds: 0.0,
         }
-    }
-    pub const fn with_paused_seconds(mut self, paused_seconds: f64) -> Self {
-        self.paused_seconds = paused_seconds;
-        self
     }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RecordingState {
     /// Whether samples and camera frames are currently being omitted.
-    #[serde(default)]
     paused: bool,
-    /// Largest `Follow Δ` seen so far in this take, in degrees.
-    max_follow_error_degrees: Option<f64>,
     /// Set when the capture stopped itself — a full disk, or an arm that went
     /// away mid-take.
     error: Option<String>,
 }
 
 impl RecordingState {
-    pub fn new(paused: bool, max_follow_error_degrees: Option<f64>, error: Option<String>) -> Self {
-        Self {
-            paused,
-            max_follow_error_degrees,
-            error,
-        }
+    pub fn new(paused: bool, error: Option<String>) -> Self {
+        Self { paused, error }
     }
 }
 

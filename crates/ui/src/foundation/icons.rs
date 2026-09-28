@@ -57,18 +57,6 @@ pub fn UnassignIcon() -> Element {
     }
 }
 
-/// Six dots: the handle a row is picked up by.
-#[component]
-pub fn GripIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon ui-icon--grip", view_box: "0 0 16 16", "aria-hidden": "true",
-            for (x, y) in [(5, 3), (11, 3), (5, 8), (11, 8), (5, 13), (11, 13)] {
-                circle { cx: "{x}", cy: "{y}", r: "1.2" }
-            }
-        }
-    }
-}
-
 /// Work in progress. The ring spins through `ui-icon--spin`.
 #[component]
 pub fn SpinnerIcon() -> Element {
@@ -105,16 +93,6 @@ pub fn PauseIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M5 3.5v9M11 3.5v9" }
-        }
-    }
-}
-
-/// Transport: end the current turn or run.
-#[component]
-pub fn StopIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            rect { x: "4", y: "4", width: "8", height: "8", rx: "1" }
         }
     }
 }

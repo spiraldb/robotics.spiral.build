@@ -17,7 +17,6 @@ use super::session::LiveSession;
 use super::timeline::TimelineSubject;
 use crate::components::timeline::{KeyboardFocus, SeekPhase};
 use crate::panels::recorded_source::RecordedSource;
-use crate::shell::notifications::MessageSource;
 
 /// Durable Timeline state for as long as the Live workspace is mounted.
 #[derive(Clone, Copy, PartialEq)]
@@ -240,13 +239,9 @@ impl LivePreview {
 }
 
 /// One press on a Timeline control, resolved against the subject the panel was
-/// rendered for.
-///
-/// This replaces the parallel action vocabulary Live used to send across the
-/// panel boundary as data and re-validate arm by arm: the subject travels with
-/// the verbs, so each verb states its own consequence and the only check left
-/// is the one that is real — that the recording has not moved on since the
-/// render that drew the control.
+/// rendered for. The subject travels with the verbs, so each verb states its
+/// own consequence and the only check left is that the recording has not moved
+/// on since the render that drew the control.
 #[derive(Clone, PartialEq)]
 pub(super) struct LiveTransport {
     preview: LivePreview,
@@ -432,10 +427,9 @@ impl LiveTransport {
                 if modifiers.shift() {
                     self.finish_capture(false);
                 } else {
-                    self.session().project().report_info_from(
-                        MessageSource::Live,
-                        "Press Shift+X to discard this take.",
-                    );
+                    self.session()
+                        .project()
+                        .report_live_info("Press Shift+X to discard this take.");
                 }
             }
             _ => {}

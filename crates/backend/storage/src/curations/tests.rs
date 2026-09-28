@@ -78,8 +78,8 @@ async fn the_list_is_newest_first_and_scoped_to_one_project() {
     assert_eq!(
         documents.list().await.unwrap(),
         vec![
-            CurationSummary::new("b-second", "Second", 1),
-            CurationSummary::new("a-first", "First", 1),
+            CurationSummary::new("b-second", "Second"),
+            CurationSummary::new("a-first", "First"),
         ]
     );
 

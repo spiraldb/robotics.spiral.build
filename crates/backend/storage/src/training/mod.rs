@@ -4,6 +4,6 @@ mod checkpoints;
 mod training_runs;
 
 pub(crate) use checkpoints::TrainingCheckpointPersistence;
-pub use checkpoints::{CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore};
+pub use checkpoints::{CheckpointArtifact, CheckpointKey};
 pub(crate) use training_runs::TrainingRunPersistence;
 pub use training_runs::TrainingRunRecord;

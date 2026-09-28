@@ -13,7 +13,8 @@ use dioxus_workbench::{Panel, PanelWorkspace};
 
 #[component]
 pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
-    let (workspace, project) = WorkspaceActivity::mount(Activity::Live, is_active);
+    let workspace = WorkspaceActivity::provide(Activity::Live, is_active);
+    let project = crate::shell::state::StudioProjectState::current();
     let telemetry = HardwareViewState::use_state(project, is_active);
     let selection = RobotSelection::use_selection(telemetry.snapshot());
     let session = LiveSession::use_session(project, telemetry, selection);

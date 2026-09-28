@@ -134,8 +134,6 @@ impl RolloutAdmission {
         }
         Ok(
             RolloutSnapshot::new(Some(self.session), Some(config.run_id().to_owned()))
-                .with_robot(Some(config.robot().to_owned()))
-                .with_checkpoint(Some(config.checkpoint_step()))
                 .with_duration(Some(config.duration_seconds()))
                 .with_lifecycle(RolloutPhase::Loading, Some(self.started_ms))
                 .with_completion(None, Some("Loading checkpoint…".to_owned())),

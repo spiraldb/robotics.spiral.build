@@ -13,15 +13,13 @@ The service uses Hugging Face LeRobot's Apache-2.0 ACT implementation directly
 through PyTorch. There is no LibTorch or model implementation in the Rust
 workspace.
 
-## Current recording support
+## Parked: training
 
-MCAP camera training is unavailable until Spiral supports native MCAP video
-packet decoding for training images. Studio disables starting these jobs and
-the worker rejects the dataset request explicitly. The legacy registry/MP4
-loader and its pinned Spiral Python driver have been removed. Checkpoints
-already in Spiral remain listed and loadable. The Arrow-based model inference
-service remains available for checkpoints matching the current schema; rollout
-still rejects older schema versions.
+Training is parked until Spiral decodes MCAP video into training images:
+Studio disables starting a run, and `McapTrainingDataset` rejects every job.
+The job loop, ACT session, and checkpoint writer stay in place for that day.
+Policy inference for rollout works for checkpoints matching the current
+schema.
 
 ## Lambda Cloud: clone and run
 
@@ -101,9 +99,8 @@ Control plane:
 
 The immutable job request carries the job ID, the SpiralDB destination, the
 selected Spiral schema version, and Studio's run configuration unchanged under
-`config`. Dataset-backed job execution is currently unavailable pending native
-MCAP training support. `POST /v1/jobs` is idempotent only when the job ID and
-complete specification match; conflicting reuse returns HTTP 409.
+`config`. `POST /v1/jobs` is idempotent only when the job ID and complete
+specification match; conflicting reuse returns HTTP 409.
 
 The worker owns each job's history. `GET /v1/jobs` lists every retained job's
 state for Studio's run list; `GET /v1/jobs/{id}` adds the job's metrics and log
@@ -124,7 +121,3 @@ zero-copy NumPy views. State children are `Float32`; image children are packed
 HWC RGB `UInt8`. The runtime transfers image bytes to the selected device,
 then permutes to CHW, converts to `Float32`, divides by 255, and applies
 ImageNet normalization.
-
-There is no public optimizer-session or training-batch upload API. Training is
-only a worker-owned job, and job checkpoints are committed directly to
-SpiralDB before their metadata appears in a snapshot.

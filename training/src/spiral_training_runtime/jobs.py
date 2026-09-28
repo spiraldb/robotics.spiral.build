@@ -123,13 +123,13 @@ class TrainingJob:
         config = request["config"]
         dataset = None
         try:
-            dataset = McapTrainingDataset(request)
+            dataset = McapTrainingDataset()
             model = TrainingConfig.from_request(_session_request(config, dataset))
             session = TrainingSession(model)
             with self.lock:
                 self.phase = "running"
                 self.message = (
-                    f"Vision ACT is running on {session.info['device']}: {dataset.summary}; "
+                    f"Vision ACT is running on {session.device_name}: {dataset.summary}; "
                     f"{session.parameter_count / 1_000_000.0:.1f}M parameters."
                 )
                 self.logs.append(
@@ -145,22 +145,19 @@ class TrainingJob:
                     break
                 arrays, loader_ms = dataset.fetch(False)
                 step_started = time.perf_counter()
-                session.buffer_batch(arrays, "training", step)
-                response = session.train_buffered(step)
+                response = session.train_step(arrays, step)
                 validation_loss = None
                 if dataset.has_validation and step % validation_every == 0:
                     validation, validation_loader_ms = dataset.fetch(True)
                     loader_ms += validation_loader_ms
-                    session.buffer_batch(validation, "validation", step)
-                    validation_response = session.validate_buffered(step)
-                    validation_loss = float(validation_response["loss"]["total"])
+                    validation_loss = session.validate(validation)["loss"]
                     last_validation = validation_loss
                 elapsed = time.perf_counter() - started
                 step_seconds = max(time.perf_counter() - step_started, 1.0e-9)
                 telemetry = response["telemetry"]
                 metric = {
                     "step": step,
-                    "train_loss": float(response["loss"]["total"]),
+                    "train_loss": response["loss"],
                     "validation_loss": validation_loss,
                     "learning_rate": float(response["learning_rate"]),
                     "elapsed_seconds": elapsed,
@@ -253,7 +250,6 @@ def _session_request(config: dict[str, Any], dataset: McapTrainingDataset) -> di
             "decoder_layers": act["decoder_layers"],
             "kl_weight": act["kl_weight"],
             "learning_rate": config["learning_rate"],
-            "total_steps": config["steps"],
             "seed": config["seed"],
         },
         "device": config["device"],
@@ -329,7 +325,7 @@ def _checkpoint_manifest(
                 "api_revision": backend["api_revision"],
                 "id": backend["id"],
                 "runtime": backend["runtime"],
-                "device": session.info["device"],
+                "device": session.device_name,
             },
             "transport": "direct SpiralDB ADBC / Arrow",
             "language": "python",

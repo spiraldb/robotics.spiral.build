@@ -61,10 +61,6 @@ impl DatabaseContract {
             DatabaseErrorKind::InvalidState
         );
         assert_eq!(
-            connection.relations().await.err().unwrap().kind(),
-            DatabaseErrorKind::InvalidState
-        );
-        assert_eq!(
             connection
                 .ingest(Self::input(
                     "must_not_run",
@@ -138,32 +134,15 @@ impl DatabaseContract {
 
     async fn verify_persistence(&self, table: &str, pending: &str) -> DatabaseResult<()> {
         let mut connection = self.database.connect().await?;
-        for mode in [IngestMode::Append, IngestMode::ReplaceExisting] {
-            let error = connection
-                .ingest(Self::input(table, mode, &[1])?)
-                .await
-                .unwrap_err();
-            assert_eq!(error.kind(), DatabaseErrorKind::NotFound);
-        }
         connection
             .ingest(Self::input(table, IngestMode::CreateOrAppend, &[1, 2])?)
             .await?;
         connection
-            .ingest(Self::input(table, IngestMode::Append, &[3])?)
-            .await?;
-        connection
-            .ingest(Self::input(table, IngestMode::CreateOrAppend, &[4])?)
+            .ingest(Self::input(table, IngestMode::CreateOrAppend, &[3])?)
             .await?;
         assert_eq!(
             Self::row_count(connection.as_mut(), &format!("SELECT * FROM {table}")).await?,
-            4
-        );
-        connection
-            .ingest(Self::input(table, IngestMode::ReplaceExisting, &[5])?)
-            .await?;
-        assert_eq!(
-            Self::row_count(connection.as_mut(), &format!("SELECT * FROM {table}")).await?,
-            1
+            3
         );
         connection
             .ingest(Self::input(table, IngestMode::ReplaceOrCreate, &[6, 7])?)
@@ -177,18 +156,11 @@ impl DatabaseContract {
             .await?
             .unwrap();
         assert_eq!(schema.field(0).data_type(), &DataType::Int64);
-        assert!(
-            connection
-                .relations()
-                .await?
-                .into_iter()
-                .any(|relation| relation.into_parts().0.as_str() == table)
-        );
 
         let mut observer = self.database.connect().await?;
         let mut transaction = connection.begin().await?;
         transaction
-            .ingest(Self::input(table, IngestMode::Append, &[8])?)
+            .ingest(Self::input(table, IngestMode::CreateOrAppend, &[8])?)
             .await?;
         transaction
             .ingest(Self::input(pending, IngestMode::ReplaceOrCreate, &[9])?)

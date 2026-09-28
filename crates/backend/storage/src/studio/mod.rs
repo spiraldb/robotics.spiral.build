@@ -22,8 +22,10 @@ mod dataset_joint_roles;
 mod dataset_robots;
 mod robot_configs;
 
-use sea_orm::sea_query::OnConflict;
-use sea_orm::{ConnectOptions, Database, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, EntityTrait,
+    Statement, TransactionTrait,
+};
 use sea_orm_migration::MigratorTrait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,9 +134,14 @@ impl StudioStore {
                 // SQLite migrations and their journal are committed together. SeaORM
                 // otherwise only automatically wraps PostgreSQL migrations.
                 let transaction = database.begin().await.map_err(|error| error.to_string())?;
+                // A database from an older schema chain is refused here, naming
+                // the migrations this build no longer has.
                 migrations::Migrator::up(&transaction, None)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| {
+                        let path = self.path().unwrap_or(Path::new(":memory:"));
+                        format!("Studio database {}: {error}", path.display())
+                    })?;
                 transaction
                     .commit()
                     .await
@@ -165,22 +172,24 @@ impl StudioStore {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) async fn save_backend_settings(
+    /// Merge `patch` into the backend settings document (RFC 7396): the
+    /// fields it names are replaced, a `null` removes one, and every other
+    /// field stays as saved.
+    pub(crate) async fn patch_backend_settings(
         &self,
-        document: serde_json::Value,
+        patch: serde_json::Value,
     ) -> Result<(), String> {
-        backend_settings::Entity::insert(backend_settings::ActiveModel {
-            id: Set(1),
-            document: Set(document),
-        })
-        .on_conflict(
-            OnConflict::column(backend_settings::Column::Id)
-                .update_column(backend_settings::Column::Document)
-                .to_owned(),
-        )
-        .exec(self.connection().await?)
-        .await
-        .map_err(|error| error.to_string())?;
+        let patch = patch.to_string();
+        self.connection()
+            .await?
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "INSERT INTO backend_settings (id, document) VALUES (1, json_patch('{}', ?)) \
+                 ON CONFLICT (id) DO UPDATE SET document = json_patch(document, ?)",
+                [patch.clone().into(), patch.into()],
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 }
@@ -198,32 +207,6 @@ impl StudioProject {
     }
     pub(crate) async fn connection(&self) -> Result<&DatabaseConnection, String> {
         self.store.connection().await
-    }
-}
-
-/// Versioned storage-owned JSON; UI contract renames cannot silently change it.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct StoredDocument<T> {
-    version: u32,
-    value: T,
-}
-impl StoredDocument<()> {
-    pub(crate) fn encode<T: serde::Serialize>(value: &T) -> Result<serde_json::Value, String> {
-        serde_json::to_value(StoredDocument { version: 1, value })
-            .map_err(|error| error.to_string())
-    }
-    pub(crate) fn decode<T: serde::de::DeserializeOwned>(
-        value: serde_json::Value,
-    ) -> Result<T, String> {
-        let document: StoredDocument<T> =
-            serde_json::from_value(value).map_err(|error| error.to_string())?;
-        if document.version != 1 {
-            return Err(format!(
-                "Unsupported Studio document version {}",
-                document.version
-            ));
-        }
-        Ok(document.value)
     }
 }
 

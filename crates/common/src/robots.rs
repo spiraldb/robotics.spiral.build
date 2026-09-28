@@ -303,22 +303,15 @@ impl CameraStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SerialPortSummary {
     path: String,
-    /// `usb`, `bluetooth`, `pci`, or `unknown`.
-    kind: String,
     description: Option<String>,
     /// ID of the robot currently holding this port open, if any.
     used_by: Option<String>,
 }
 
 impl SerialPortSummary {
-    pub fn new(
-        path: impl Into<String>,
-        kind: impl Into<String>,
-        description: Option<String>,
-    ) -> Self {
+    pub fn new(path: impl Into<String>, description: Option<String>) -> Self {
         Self {
             path: path.into(),
-            kind: kind.into(),
             description,
             used_by: None,
         }
@@ -351,18 +344,6 @@ pub enum ModeSelection {
     Teleoperate { leader: String, follower: String },
     /// A backend-owned remote policy session commands one calibrated arm.
     Policy { robot: String, session: String },
-}
-
-impl ModeSelection {
-    /// Human-readable name for status text.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::Manual { .. } => "Manual",
-            Self::Teleoperate { .. } => "Teleoperation",
-            Self::Policy { .. } => "Policy",
-        }
-    }
 }
 
 /// The selected mode plus whatever went wrong entering or running it.
@@ -459,7 +440,6 @@ pub struct RobotTelemetry {
     id: String,
     torque: bool,
     /// Hardware-owned verdict for excessive measured-versus-commanded error.
-    #[serde(default)]
     tracking_lagging: bool,
     joints: Vec<JointTelemetry>,
     error: Option<String>,
@@ -528,7 +508,6 @@ pub struct JointTelemetry {
     #[serde(flatten)]
     diagnostics: JointDiagnostics,
     /// Hardware-owned assessment against this motor's reported limits.
-    #[serde(default)]
     condition: MotorCondition,
 }
 
@@ -552,8 +531,6 @@ pub struct JointKinematics {
     raw: i64,
     degrees: Option<f64>,
     normalized: Option<f64>,
-    goal_raw: Option<i64>,
-    target_raw: Option<i64>,
     target_degrees: Option<f64>,
     range: Option<config::MotorRange>,
 }
@@ -564,20 +541,9 @@ impl JointKinematics {
             raw,
             degrees,
             normalized,
-            goal_raw: None,
-            target_raw: None,
             target_degrees: None,
             range: None,
         }
-    }
-    pub const fn with_raw_targets(
-        mut self,
-        goal_raw: Option<i64>,
-        target_raw: Option<i64>,
-    ) -> Self {
-        self.goal_raw = goal_raw;
-        self.target_raw = target_raw;
-        self
     }
     pub const fn with_calibrated_target(
         mut self,
@@ -592,11 +558,8 @@ impl JointKinematics {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct MotorElectricalReadings {
-    #[serde(default)]
     temperature_celsius: Option<f64>,
-    #[serde(default)]
     voltage_volts: Option<f64>,
-    #[serde(default)]
     current_amps: Option<f64>,
 }
 
@@ -618,11 +581,8 @@ impl MotorElectricalReadings {
 pub struct JointDiagnostics {
     #[serde(flatten)]
     electrical: MotorElectricalReadings,
-    #[serde(default)]
     load: Option<f64>,
-    #[serde(default)]
     speed_degrees_per_second: Option<f64>,
-    #[serde(default)]
     temperature_rise_per_minute: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     faults: Vec<MotorFault>,
@@ -741,14 +701,6 @@ impl JointTelemetry {
     pub const fn normalized(&self) -> Option<f64> {
         self.kinematics.normalized
     }
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn goal_raw(&self) -> Option<i64> {
-        self.kinematics.goal_raw
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn target_raw(&self) -> Option<i64> {
-        self.kinematics.target_raw
-    }
     pub const fn target_degrees(&self) -> Option<f64> {
         self.kinematics.target_degrees
     }
@@ -853,9 +805,7 @@ pub struct CalibrationJointProgress {
     min: i64,
     position: i64,
     max: i64,
-    #[serde(default)]
     encoder_counts_per_turn: i64,
-    #[serde(default)]
     ready: bool,
 }
 

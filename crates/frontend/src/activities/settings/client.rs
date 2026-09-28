@@ -4,6 +4,7 @@ use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
 use dioxus::html::FileData;
 use spiral_robotics_common::datasets::ProjectImportSummary;
+use spiral_robotics_common::providers::{ProviderKeysStatus, ProviderKeysUpdate};
 use spiral_robotics_common::settings::{ConnectionTest, DataSettings, SettingsUpdate};
 use std::future::Future;
 
@@ -15,23 +16,6 @@ impl SettingsClient {
         Self {
             project: ProjectClient::current(),
         }
-    }
-    pub(super) fn connection_settings(
-        &self,
-    ) -> impl Future<Output = Result<spiral_robotics_common::settings::SpiralSettings, CommandError>>
-    + use<> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/settings/connection"))
-    }
-    pub(super) fn update_connection(
-        &self,
-        change: spiral_robotics_common::settings::SpiralConnectionUpdate,
-    ) -> impl Future<Output = Result<spiral_robotics_common::settings::SpiralSettings, CommandError>>
-    + use<> {
-        self.project.mutate(
-            &[Project, Settings, RobotSetup],
-            HttpRequest::new("PUT", "/api/settings/connection").json(&change),
-        )
     }
     pub(super) fn data_settings(
         &self,
@@ -45,8 +29,25 @@ impl SettingsClient {
         update: SettingsUpdate,
     ) -> impl Future<Output = Result<DataSettings, CommandError>> + use<> {
         self.project.mutate(
-            &[Project, Settings, RobotSetup, Training, Catalog, Data],
+            &[Project, Settings, RobotSetup, Training, Catalog],
             HttpRequest::new("PUT", "/api/settings").json(&update),
+        )
+    }
+
+    /// Which provider keys the backend holds; the keys never reach the browser.
+    pub(super) fn provider_keys(
+        &self,
+    ) -> impl Future<Output = Result<ProviderKeysStatus, CommandError>> + use<> {
+        self.project.request(HttpRequest::new("GET", "/api/keys"))
+    }
+
+    pub(super) fn update_provider_keys(
+        &self,
+        update: ProviderKeysUpdate,
+    ) -> impl Future<Output = Result<ProviderKeysStatus, CommandError>> + use<> {
+        self.project.mutate(
+            &[Settings],
+            HttpRequest::new("PUT", "/api/keys").json(&update),
         )
     }
 
@@ -54,7 +55,7 @@ impl SettingsClient {
         &self,
     ) -> impl Future<Output = Result<ConnectionTest, CommandError>> + use<> {
         self.project.mutate(
-            &[Project, Settings, RobotSetup, Catalog, Data],
+            &[Project, Settings, RobotSetup, Catalog],
             HttpRequest::new("POST", "/api/settings/spiral/test"),
         )
     }
@@ -73,7 +74,7 @@ impl SettingsClient {
         document: FileData,
     ) -> impl Future<Output = Result<ProjectImportSummary, CommandError>> + use<> {
         self.project.mutate(
-            &[Project, Settings, Catalog, Data, Training],
+            &[Project, Settings, Catalog, Training],
             HttpRequest::new("POST", "/api/project/import").upload(document),
         )
     }

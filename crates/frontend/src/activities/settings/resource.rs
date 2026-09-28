@@ -5,19 +5,12 @@ use dioxus::prelude::*;
 use spiral_robotics_common::settings::DataSettings;
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct SettingsResource {
-    connection: Resource<
-        Result<spiral_robotics_common::settings::SpiralSettings, crate::client::CommandError>,
-    >,
     settings: Resource<Result<DataSettings, String>>,
     loaded_settings: Signal<Option<DataSettings>>,
 }
 
 impl SettingsResource {
     pub(super) fn use_resource(active: ReadSignal<bool>) -> Self {
-        let connection = QueryPolicy::on_demand(QueryDomain::Settings).use_when(
-            move || *active.read(),
-            || SettingsClient::current().connection_settings(),
-        );
         let settings = QueryPolicy::new(QueryDomain::Settings, 10_000).use_when(
             move || *active.read(),
             || async {
@@ -37,25 +30,14 @@ impl SettingsResource {
             }
         });
         Self {
-            connection,
             settings,
             loaded_settings,
         }
     }
 
+    /// The settings last read; `None` until the first read lands.
     pub(super) fn loaded(self) -> Option<DataSettings> {
-        self.loaded_settings.read().clone().or_else(|| {
-            self.connection
-                .read()
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .map(|connection| {
-                    DataSettings::new(connection.clone(), Default::default(), Default::default())
-                })
-        })
-    }
-    pub(super) fn preferences_loaded(self) -> bool {
-        self.loaded_settings.read().is_some()
+        self.loaded_settings.read().clone()
     }
     pub(super) fn error(self) -> Option<String> {
         self.settings

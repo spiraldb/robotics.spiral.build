@@ -36,11 +36,7 @@ pub use control::{
     PolicyGoals, RecordingCompletion, RecordingWriter, RobotSpec, Sample,
 };
 pub use serial_ports::SerialPortCatalog;
-pub use spiral_robotics_common::recording::{EpisodeArm, RecordingGap, RecordingProgress};
-pub use spiral_robotics_common::robots::{
-    CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointTelemetry, ModeSelection,
-    MotorCondition, MotorFault, MotorLimits, PortSettings, RobotTelemetry,
-};
+pub use spiral_robotics_common::robots::{ModeSelection, MotorLimits, RobotTelemetry};
 pub use state::CompletedRecording;
 
 /// A malformed value was rejected before it could enter the hardware actor.

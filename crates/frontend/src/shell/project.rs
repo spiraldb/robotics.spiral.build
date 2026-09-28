@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn media_links_name_the_mounted_project_and_preserve_existing_query_parameters() {
+    fn media_links_name_the_mounted_project() {
         let harness = SelectionHarness::default();
         let mut dom = VirtualDom::new_with_props(SelectionHarness::render, harness.clone());
         dom.rebuild_in_place();
@@ -260,10 +260,6 @@ mod tests {
         assert_eq!(
             client.scoped_url("/api/project/export"),
             "/api/project/export?endpoint=https%3A%2F%2Fapi.spiraldb.dev&project_id=project_one"
-        );
-        assert_eq!(
-            client.scoped_url("/api/project/export?format=bundle"),
-            "/api/project/export?format=bundle&endpoint=https%3A%2F%2Fapi.spiraldb.dev&project_id=project_one"
         );
     }
 }

@@ -10,8 +10,8 @@ episodes, in recording order, that pass the Selects under the dataset, and
 every model below them is asked about those alone.
 
 How a model sees that data (sample rate, cameras, image size, normalization)
-is Training's concern, not Curation's. See
-[the merge plan](curation-merge-plan.md) for the decisions behind this model.
+is Training's concern, not Curation's. [Why](#why) records the decisions
+behind this model.
 
 ## The graph
 
@@ -82,7 +82,7 @@ rows that reach it.
 | Dataset | | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
 | Select | | Its rule alone: a `WHERE` of every condition, from the same `Selection` the browser filters with | `document/selection.rs` |
 | Score progress | `scores`: `spql.ai.score_progress` over the top camera's packet video | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on; then its rule keeps the moments at least its threshold, and those with no progress rate, and joins touching ones into stretches carrying their mean progress rate | `score_progress/scoring.rs` |
-| Break down subtasks | `subtasks`: `spql.ai.breakdown_task` over the chosen camera's packet video, with the configured model and sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks unnested, moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
+| Break down subtasks | `subtasks`: `spql.ai.breakdown_task` over the chosen camera's packet video, with Studio's annotation model and the configured sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks unnested, moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
 | Find similar subtasks | | `spql.ai.similarity(subtask, query)` as `similarity`; then its rule keeps the subtasks at least its cutoff | `similar/judgment.rs` |
 | Group similar subtasks | | `spql.ai.classify(subtask, categories)` as `subtask_category`, the categories written into the statement as a literal list; then its rule keeps the subtasks of the categories it keeps | `similar/judgment.rs` |
 
@@ -119,7 +119,7 @@ never depends on anything above the node. Studio's packets carry presentation
 times counted from the episode's first message, so a subtask's log time is
 that message's time plus its own. The text judgments are asked of
 `typesafe/jev-1.13`, named in the statement so every answer names the model
-that gave it. Every model function is paid for with Studio's `LLM_API_KEY`,
+that gave it. Every model function is paid for with Studio's OpenRouter key,
 which the backend passes to the driver as `spiral.openrouter_api_key` (see
 [the database boundary](database-boundary.md)). Literals go through
 `SqlLiteral`; a function parameter that must be a constant, such as
@@ -285,24 +285,63 @@ explicit Save, with an optimistic revision check: the submitted revision must
 equal the stored one, and the saved copy carries the next. A rename saves at
 once, from the stored copy, so only the name moves and unsaved graph edits
 stay unsaved. Any saved curation can be deleted from its row in the switcher, open or not:
-Studio reads its stored copy, drops every view that copy publishes (read from
-the payload without decoding the graph, so a curation in an older encoding,
-which cannot be opened to unpublish, still takes its views with it), and then
+Studio reads its stored copy, drops every view that copy publishes, and then
 deletes it at the revision just read. A view the catalog refuses to drop stops
 the delete. Deleting the open one opens a blank graph. The payload is
 opaque to the backend and versioned by the frontend. Encoding 4 keeps only the
 recipe: nodes, edges, each node's configuration and rule, and the published
-outputs. Break down keeps its camera, model, sample interval, and the topic
-it reads each episode's task from; Find similar its query and cutoff; Group
+outputs. Break down keeps its camera, sample interval, and the topic it
+reads each episode's task from; Find similar its query and cutoff; Group
 similar its categories and the ones it keeps; Score progress its threshold;
 a Select its conditions. Nothing any node read is saved. A document in an
-earlier encoding is refused: encoding 3 chose a grouping's categories in a
-Select after it, encoding 2 kept the thresholds in Selects of their own, and
-curations saved in encoding 1 were deleted, with the saved workflows, by the
-migration that retired Workflow.
+earlier encoding is refused.
+
+## Why
+
+| Decision | Why | Rejected |
+| --- | --- | --- |
+| No SQL node, joins, or free-form query shapes | Curation always ends in training input; analytics is not the product | A SQL escape-hatch node |
+| Every node compiles to Spiral SQL, and a published view is the whole curation | One executable form: every reader sees exactly what was curated | Studio materializing results |
+| Per-row model work is a `spql.ai` function; an authoring suggestion, such as proposed categories, stays in the browser and becomes a literal | Spiral alone must be able to evaluate the view | Browser-orchestrated calls per episode |
+| Caching model answers is Spiral's, later | Correctness first; users shouldn't manage cost | Studio-side caches |
+| A preview runs only its node's step, over its parent's preview rows | Each step is written once, and a search or grouping makes only its own text calls | Recomputing the whole path per episode |
+| Preview reads the first 100 episodes in recording order | Fast enough to iterate on | A random sample |
+| Every Score progress, Find similar, Group similar, and Select node is an output; a measure keeps by its own rule; Publish chooses and names the views | Break down's free text is not trainable until a search or grouping reads it; a threshold belongs with the measure it divides | An explicit Output node; progress and similarity Selects |
+| One row per kept interval | It is what the graph carries, so publishing converts nothing | One row per episode with nested ranges; one row per moment |
+| Curation only chooses data | Sample rate, cameras, image size, and normalization are the policy's input contract, which rollout replays | Shape nodes in Curation |
+| Publish is explicit and named; Save stays local | Exploratory leaves must not create catalog resources, and readers need a stable name | Auto-publishing every leaf |
+| The frontend compiles; the backend only admits a read-only statement and creates the view | The backend stays thin and the browser never sends DDL | The backend compiles the graph |
 
 ## Not yet
 
-- Every read of a published view repeats its model calls; caching them is
-  Spiral's to add.
-- Training does not read published views yet.
+- Every read of a published view repeats its model calls; caching them, per
+  call so that preview, published views, and curations over one dataset
+  share the work, is Spiral's to add. So is cancelling a running query.
+- Training does not read published views yet. When it does, it resamples:
+  a recording keeps every stream at its own rate and a view only names
+  intervals, so Training picks a sample rate and makes one moment per tick
+  inside each interval. Rollout must run at that rate, since a policy learns
+  the time between the actions of a chunk; LeRobot, ACT, and π0 all train
+  and control at one rate.
+- The checkpoint carries how the model sees data, and rollout replays it:
+  sample rate, observation and action streams, image size, normalization,
+  and how each stream fills a tick (nearest frame, latest value, or
+  interpolation). It already carries `sample_hz`, camera streams, image
+  normalization, and frame alignment. Each image adjustment has one home: a
+  recording's missing colour space is a dataset fact set in Data; exposure
+  normalization is Training's input contract; colour jitter is training
+  augmentation, never replayed; a few badly exposed episodes are a Curation
+  measure.
+- Picking that up means: a training config of a published view, observation
+  streams, an action stream, a sample rate, and a fill rule per stream, in
+  place of `dataset_id`, `sql`, `state_column`, and `action_column`; a picker
+  listing catalog relations with `episode_id`, `start_ns`, and `end_ns`; a
+  training choice of whether action chunks read past an interval's edges; a
+  run record of the view definition it read; and `McapTrainingDataset` as the
+  resampler. Spiral would need every frame of a camera within an interval
+  decoded sequentially, reliable per-frame presentation times, state and
+  command fields as numeric columns keyed by log time, and an exposure
+  adjustment in `spql.image`.
+- Open: should published views take a prefix such as `curated_` rather than
+  plain root names (the catalog infers no ownership from names)? And since a
+  view is live, should a training run pin the data it read?

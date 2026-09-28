@@ -1,12 +1,11 @@
 //! Exercise the actual router with ordinary HTTP requests.
 use super::StudioApi;
-use crate::projects::context::StudioContext;
 use crate::projects::tests::{ENDPOINT, ProjectFixture};
 use crate::robotics::cameras::Frame;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header},
     routing::{get, post},
 };
 use bytes::Bytes;
@@ -41,10 +40,7 @@ struct HttpFixture {
 impl HttpFixture {
     fn new() -> Self {
         let project = ProjectFixture::new();
-        let router = StudioApi::router(StudioContext::new(
-            project.projects.clone(),
-            crate::account::SpiralAccount::offline(),
-        ));
+        let router = StudioApi::router(project.context());
         Self { project, router }
     }
     /// Name the fixture's project the way the browser does.
@@ -131,6 +127,45 @@ async fn snapshots_are_plain_gets_of_the_project_a_request_names() {
         assert!(value.is_object() || value.is_array());
     }
     assert_eq!(fixture.project.projects.opened().len(), 1);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn saved_keys_reach_the_providers_and_only_their_presence_reaches_the_browser() {
+    let fixture = HttpFixture::new();
+    let get = |path: &str| Request::builder().uri(path).body(Body::empty()).unwrap();
+    let (status, providers) = fixture.send(get("/providers")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(providers["llm"].is_null());
+    let save = |body: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri("/keys")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    };
+    let (status, saved) = fixture
+        .send(save(
+            r#"{"llm_api_key":"sk-or-private","huggingface_token":"hf_private"}"#,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved,
+        serde_json::json!({"llm_api_key_configured": true, "huggingface_token_configured": true})
+    );
+    let (_, providers) = fixture.send(get("/providers")).await;
+    assert!(providers["llm"]["base_url"].is_string());
+    assert!(!providers.to_string().contains("sk-or-private"));
+    // An omitted key stays saved; an empty one is removed.
+    let (_, saved) = fixture.send(save(r#"{"huggingface_token":""}"#)).await;
+    assert_eq!(
+        saved,
+        serde_json::json!({"llm_api_key_configured": true, "huggingface_token_configured": false})
+    );
+    let (_, status) = fixture.send(get("/keys")).await;
+    assert_eq!(status, saved);
     fixture.shutdown().await;
 }
 

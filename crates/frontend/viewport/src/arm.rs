@@ -53,20 +53,6 @@ impl Joint {
     }
 }
 
-impl std::fmt::Display for Joint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-impl<'a> TryFrom<&'a str> for Joint {
-    type Error = &'a str;
-
-    fn try_from(name: &'a str) -> Result<Self, Self::Error> {
-        Self::named(name).ok_or(name)
-    }
-}
-
 /// The joints of a stock SO-ARM101 in the Studio's canonical display order.
 pub const SO101_JOINTS: [Joint; 6] = [
     Joint::ShoulderPan,

@@ -9,19 +9,20 @@ use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingGap};
+use spiral_robotics_common::robots::MotorLimits;
 
 use super::EpisodeId;
+pub use spiral_robotics_hardware::Sample;
 use spiral_robotics_hardware::{
-    ArmConditionSummary as HardwareArmConditionSummary, CompletedRecording,
-    MotorLimits as HardwareMotorLimits, RecordingCompletion, RecordingWriter,
+    ArmConditionSummary as HardwareArmConditionSummary, CaptureClock, CompletedRecording,
+    EpisodeCheckpoint, RecordingCompletion, RecordingWriter,
 };
-pub use spiral_robotics_hardware::{EpisodeCheckpoint, Sample};
 
-use super::episode_schema::SpiralEpisodeEncoder;
+use super::episode_schema::EpisodeSample as _;
 
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
 /// Hard storage limit for a single recorded episode.
-pub const MAX_EPISODE_FRAMES: u64 = 1_000_000;
+const MAX_EPISODE_FRAMES: u64 = 1_000_000;
 const NO_SAMPLE_TIMESTAMP_BITS: u64 = u64::MAX;
 
 #[derive(Debug)]
@@ -52,71 +53,6 @@ impl fmt::Display for EpisodeError {
 
 impl std::error::Error for EpisodeError {}
 
-/// The limits one motor reports for itself, captured with the take.
-///
-/// Storage owns this shape because it is persisted: the equivalent wire type
-/// exposes only its temperature ceiling, so a stored row could never be read
-/// back through it.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct JointMotorLimits {
-    max_temperature_celsius: Option<f64>,
-    min_voltage_volts: Option<f64>,
-    max_voltage_volts: Option<f64>,
-    /// Configured torque ceiling as a fraction of the motor's rated torque.
-    max_load: Option<f64>,
-}
-
-impl JointMotorLimits {
-    const fn new(
-        max_temperature_celsius: Option<f64>,
-        voltage: JointVoltageRange,
-        max_load: Option<f64>,
-    ) -> Self {
-        Self {
-            max_temperature_celsius,
-            min_voltage_volts: voltage.minimum,
-            max_voltage_volts: voltage.maximum,
-            max_load,
-        }
-    }
-
-    pub(super) const fn max_temperature_celsius(self) -> Option<f64> {
-        self.max_temperature_celsius
-    }
-    pub(super) const fn min_voltage_volts(self) -> Option<f64> {
-        self.min_voltage_volts
-    }
-    pub(super) const fn max_voltage_volts(self) -> Option<f64> {
-        self.max_voltage_volts
-    }
-    pub(super) const fn max_load(self) -> Option<f64> {
-        self.max_load
-    }
-}
-
-/// The lower and upper supply voltages one motor accepts.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct JointVoltageRange {
-    minimum: Option<f64>,
-    maximum: Option<f64>,
-}
-
-impl JointVoltageRange {
-    const fn new(minimum: Option<f64>, maximum: Option<f64>) -> Self {
-        Self { minimum, maximum }
-    }
-}
-
-impl From<&HardwareMotorLimits> for JointMotorLimits {
-    fn from(limits: &HardwareMotorLimits) -> Self {
-        Self::new(
-            limits.max_temperature_celsius(),
-            JointVoltageRange::new(limits.min_voltage_volts(), limits.max_voltage_volts()),
-            limits.max_load(),
-        )
-    }
-}
-
 /// What one arm's motors were like as a take opened.
 ///
 /// Every vector is parallel to the arm's declared joint order, so a value at
@@ -126,7 +62,7 @@ pub struct ArmCondition {
     arm: String,
     temperature_celsius: Vec<Option<f64>>,
     voltage_volts: Vec<Option<f64>>,
-    limits: Vec<JointMotorLimits>,
+    limits: Vec<MotorLimits>,
 }
 
 impl ArmCondition {
@@ -149,7 +85,7 @@ impl ArmCondition {
         self
     }
 
-    pub fn with_limits(mut self, limits: Vec<JointMotorLimits>) -> Self {
+    pub fn with_limits(mut self, limits: Vec<MotorLimits>) -> Self {
         self.limits = limits;
         self
     }
@@ -163,12 +99,12 @@ impl ArmCondition {
     pub(super) fn voltage_volts(&self) -> &[Option<f64>] {
         &self.voltage_volts
     }
-    pub(super) fn limits(&self) -> &[JointMotorLimits] {
+    pub(super) fn limits(&self) -> &[MotorLimits] {
         &self.limits
     }
 
-    /// True when nothing was actually measured, so storage writes null columns
-    /// instead of inventing an all-empty observation.
+    /// True when nothing was actually measured, so the recording leaves these
+    /// fields absent instead of inventing an all-empty observation.
     pub(super) fn is_empty(&self) -> bool {
         self.temperature_celsius.is_empty()
             && self.voltage_volts.is_empty()
@@ -195,7 +131,6 @@ struct EpisodeRecordingMetadata {
     started_ms: i64,
     sample_hz: f64,
     source: String,
-    note: Option<String>,
 }
 
 impl EpisodeStart {
@@ -206,7 +141,6 @@ impl EpisodeStart {
                 started_ms: 0,
                 sample_hz: 0.0,
                 source: String::new(),
-                note: None,
             },
             arms: Vec::new(),
             condition: Vec::new(),
@@ -227,9 +161,8 @@ impl EpisodeStart {
         self.with_timing(started_ms, sample_hz)
     }
 
-    pub(super) fn with_source(mut self, source: String, note: Option<String>) -> Self {
+    pub(super) fn with_source(mut self, source: String) -> Self {
         self.recording.source = source;
-        self.recording.note = note;
         self
     }
 
@@ -253,9 +186,6 @@ impl EpisodeStart {
     }
     pub(super) fn source(&self) -> &str {
         &self.recording.source
-    }
-    pub(super) fn note(&self) -> Option<&str> {
-        self.recording.note.as_deref()
     }
     pub fn arms(&self) -> &[EpisodeArm] {
         &self.arms
@@ -317,28 +247,6 @@ pub(super) struct ArmConditionSummary {
 }
 
 impl ArmConditionSummary {
-    fn new(arm: String) -> Self {
-        Self {
-            arm,
-            peak_temperature_celsius: Vec::new(),
-            min_voltage_volts: Vec::new(),
-            peak_load: Vec::new(),
-            peak_current_amps: Vec::new(),
-        }
-    }
-
-    fn with_extremes(
-        mut self,
-        temperature: ArmConditionThermalExtremes,
-        effort: ArmConditionEffortExtremes,
-    ) -> Self {
-        self.peak_temperature_celsius = temperature.peak_temperature_celsius;
-        self.min_voltage_volts = temperature.min_voltage_volts;
-        self.peak_load = effort.peak_load;
-        self.peak_current_amps = effort.peak_current_amps;
-        self
-    }
-
     pub(super) fn arm(&self) -> &str {
         &self.arm
     }
@@ -364,51 +272,31 @@ impl ArmConditionSummary {
     }
 }
 
-/// Per-joint thermal and supply extremes for one arm.
-pub(super) struct ArmConditionThermalExtremes {
-    peak_temperature_celsius: Vec<Option<f64>>,
-    min_voltage_volts: Vec<Option<f64>>,
-}
-
-impl ArmConditionThermalExtremes {
-    const fn new(
-        peak_temperature_celsius: Vec<Option<f64>>,
-        min_voltage_volts: Vec<Option<f64>>,
-    ) -> Self {
-        Self {
-            peak_temperature_celsius,
-            min_voltage_volts,
-        }
-    }
-}
-
-/// Per-joint mechanical extremes for one arm.
-pub(super) struct ArmConditionEffortExtremes {
-    peak_load: Vec<Option<f64>>,
-    peak_current_amps: Vec<Option<f64>>,
-}
-
-impl ArmConditionEffortExtremes {
-    const fn new(peak_load: Vec<Option<f64>>, peak_current_amps: Vec<Option<f64>>) -> Self {
-        Self {
-            peak_load,
-            peak_current_amps,
-        }
-    }
-}
-
 impl From<&HardwareArmConditionSummary> for ArmConditionSummary {
     fn from(summary: &HardwareArmConditionSummary) -> Self {
-        Self::new(summary.arm().to_owned()).with_extremes(
-            ArmConditionThermalExtremes::new(
-                summary.peak_temperature_celsius().to_vec(),
-                summary.min_voltage_volts().to_vec(),
-            ),
-            ArmConditionEffortExtremes::new(
-                summary.peak_load().to_vec(),
-                summary.peak_current_amps().to_vec(),
-            ),
+        Self {
+            arm: summary.arm().to_owned(),
+            peak_temperature_celsius: summary.peak_temperature_celsius().to_vec(),
+            min_voltage_volts: summary.min_voltage_volts().to_vec(),
+            peak_load: summary.peak_load().to_vec(),
+            peak_current_amps: summary.peak_current_amps().to_vec(),
+        }
+    }
+}
+
+impl From<&RecordingCompletion> for EpisodeCompletion {
+    fn from(completion: &RecordingCompletion) -> Self {
+        Self::new(
+            completion.duration_seconds(),
+            completion.recording_gaps().to_vec(),
+            completion
+                .condition()
+                .iter()
+                .map(ArmConditionSummary::from)
+                .collect(),
         )
+        .with_max_follow_error_degrees(completion.max_follow_error_degrees())
+        .with_discarded(completion.discarded())
     }
 }
 
@@ -427,7 +315,7 @@ impl EpisodeCompletion {
         }
     }
 
-    pub(super) const fn with_max_follow_error_degrees(
+    const fn with_max_follow_error_degrees(
         mut self,
         max_follow_error_degrees: Option<f64>,
     ) -> Self {
@@ -491,8 +379,9 @@ impl FullEpisode {
     }
 
     pub fn summary(&self) -> EpisodeInfo {
-        self.start
-            .summary(&self.completion, self.samples.len() as u64)
+        EpisodeInfo::new(self.start.id(), self.start.dataset_id())
+            .with_arms(self.start.arms().to_vec())
+            .with_frames(self.samples.len() as u64)
     }
 
     pub(super) const fn completion(&self) -> &EpisodeCompletion {
@@ -526,10 +415,6 @@ impl RecordingBuffer {
         }
     }
 
-    pub fn get(&self, id: &str) -> Result<EpisodeInfo, EpisodeError> {
-        Ok(self.completed_episode(id)?.summary())
-    }
-
     pub fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
         let episode = self.completed_episode(id)?;
         let summary = episode.summary();
@@ -544,9 +429,8 @@ impl RecordingBuffer {
         }
         let start = EpisodeStart::new(uuid::Uuid::new_v4().to_string(), request.dataset_id)
             .with_current_timing(request.sample_hz)
-            .with_source(request.source, None)
+            .with_source(request.source)
             .with_arms(request.arms, request.condition);
-        SpiralEpisodeEncoder::new(start.clone())?;
         EpisodeWriter::start(start, Arc::clone(&self.completed))
     }
 
@@ -559,16 +443,6 @@ impl RecordingBuffer {
             .filter(|episode| episode.start.id() == id)
             .cloned()
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
-    }
-
-    pub fn forget_completed(&self, id: &str) {
-        let mut completed = self.completed.lock_unpoisoned();
-        if completed
-            .as_ref()
-            .is_some_and(|episode| episode.start.id() == id)
-        {
-            *completed = None;
-        }
     }
 }
 
@@ -584,28 +458,19 @@ enum WriterMessage {
     },
 }
 
-trait EpisodeWriteSession: Send {
-    fn start(&self) -> &EpisodeStart;
-    fn push(&self, sample: Sample) -> bool;
-    fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String>;
-    fn failure(&self) -> Option<String>;
-    fn finish(self: Box<Self>, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError>;
-}
-
 pub struct EpisodeWriter {
-    clock: spiral_robotics_hardware::CaptureClock,
-    session: Box<dyn EpisodeWriteSession>,
+    start: EpisodeStart,
+    clock: CaptureClock,
+    sender: Option<mpsc::SyncSender<WriterMessage>>,
+    thread: Option<JoinHandle<Result<Vec<Sample>, String>>>,
+    completed: Arc<Mutex<Option<FullEpisode>>>,
+    shared: Arc<WriterShared>,
+    last_queued_seconds: AtomicU64,
 }
 
 impl EpisodeWriter {
-    pub fn clock(&self) -> spiral_robotics_hardware::CaptureClock {
+    pub fn clock(&self) -> CaptureClock {
         self.clock.clone()
-    }
-    fn from_session(session: impl EpisodeWriteSession + 'static) -> Self {
-        Self {
-            session: Box::new(session),
-            clock: Default::default(),
-        }
     }
     fn start(
         start: EpisodeStart,
@@ -632,35 +497,45 @@ impl EpisodeWriter {
             .map_err(|source| {
                 EpisodeError::Invalid(format!("could not start the episode encoder: {source}"))
             })?;
-        Ok(Self::from_session(SpiralEpisodeWriter {
+        Ok(Self {
             start,
+            clock: CaptureClock::default(),
             sender: Some(sender),
             thread: Some(thread),
             completed,
             shared,
             last_queued_seconds: AtomicU64::new(NO_SAMPLE_TIMESTAMP_BITS),
-        }))
+        })
     }
     pub fn id(&self) -> &str {
-        self.session.start().id()
+        self.start.id()
     }
-    fn dataset_id(&self) -> &str {
-        self.session.start().dataset_id()
+    fn fail(&self, message: &str) -> bool {
+        let mut failure = self.shared.failure.lock_unpoisoned();
+        if failure.is_none() {
+            *failure = Some(message.to_owned());
+        }
+        false
     }
-    pub fn started_ms(&self) -> i64 {
-        self.session.start().started_ms()
-    }
-    fn push(&self, sample: Sample) -> bool {
-        self.session.push(sample)
-    }
-    fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String> {
-        self.session.checkpoint(completion)
-    }
-    fn failure(&self) -> Option<String> {
-        self.session.failure()
-    }
-    fn finish(self, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError> {
-        self.session.finish(completion)
+    fn finish(mut self, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError> {
+        self.sender.take();
+        let samples = self
+            .thread
+            .take()
+            .expect("episode worker exists")
+            .join()
+            .map_err(|_| EpisodeError::Invalid("episode encoder worker panicked".to_owned()))?
+            .map_err(EpisodeError::Invalid)?;
+        if let Some(error) = self.failure() {
+            return Err(EpisodeError::Invalid(error));
+        }
+        let full_episode = FullEpisode {
+            start: self.start.clone(),
+            samples,
+            completion,
+        };
+        *self.completed.lock_unpoisoned() = Some(full_episode.clone());
+        Ok(full_episode.summary())
     }
 }
 
@@ -669,72 +544,10 @@ impl RecordingWriter for EpisodeWriter {
         self.clock.update(now, elapsed);
     }
     fn id(&self) -> &str {
-        EpisodeWriter::id(self)
+        self.start.id()
     }
-
     fn dataset_id(&self) -> &str {
-        EpisodeWriter::dataset_id(self)
-    }
-
-    fn push(&self, sample: Sample) -> bool {
-        EpisodeWriter::push(self, sample)
-    }
-
-    fn checkpoint(&self, completion: RecordingCompletion) -> Result<EpisodeCheckpoint, String> {
-        EpisodeWriter::checkpoint(
-            self,
-            EpisodeCompletion::new(
-                completion.duration_seconds(),
-                completion.recording_gaps().to_vec(),
-                completion
-                    .condition()
-                    .iter()
-                    .map(ArmConditionSummary::from)
-                    .collect(),
-            )
-            .with_max_follow_error_degrees(completion.max_follow_error_degrees()),
-        )
-    }
-
-    fn failure(&self) -> Option<String> {
-        EpisodeWriter::failure(self)
-    }
-
-    fn finish(
-        self: Box<Self>,
-        completion: RecordingCompletion,
-    ) -> Result<CompletedRecording, String> {
-        EpisodeWriter::finish(
-            *self,
-            EpisodeCompletion::new(
-                completion.duration_seconds(),
-                completion.recording_gaps().to_vec(),
-                completion
-                    .condition()
-                    .iter()
-                    .map(ArmConditionSummary::from)
-                    .collect(),
-            )
-            .with_max_follow_error_degrees(completion.max_follow_error_degrees())
-            .with_discarded(completion.discarded()),
-        )
-        .map(|summary| CompletedRecording::new(summary.id(), summary.frames()))
-        .map_err(|error| error.to_string())
-    }
-}
-
-struct SpiralEpisodeWriter {
-    start: EpisodeStart,
-    sender: Option<mpsc::SyncSender<WriterMessage>>,
-    thread: Option<JoinHandle<Result<Vec<Sample>, String>>>,
-    completed: Arc<Mutex<Option<FullEpisode>>>,
-    shared: Arc<WriterShared>,
-    last_queued_seconds: AtomicU64,
-}
-
-impl EpisodeWriteSession for SpiralEpisodeWriter {
-    fn start(&self) -> &EpisodeStart {
-        &self.start
+        self.start.dataset_id()
     }
     fn push(&self, sample: Sample) -> bool {
         if !sample.seconds().is_finite() || sample.seconds() < 0.0 {
@@ -766,13 +579,13 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
             )),
         }
     }
-    fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String> {
+    fn checkpoint(&self, completion: RecordingCompletion) -> Result<EpisodeCheckpoint, String> {
         let (complete, receiver) = tokio::sync::oneshot::channel();
         self.sender
             .as_ref()
             .ok_or_else(|| "episode encoder is closed".to_owned())?
             .try_send(WriterMessage::Checkpoint {
-                completion,
+                completion: EpisodeCompletion::from(&completion),
                 complete,
             })
             .map_err(|error| error.to_string())?;
@@ -782,43 +595,16 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
         self.shared.failure.lock_unpoisoned().clone()
     }
     fn finish(
-        mut self: Box<Self>,
-        completion: EpisodeCompletion,
-    ) -> Result<EpisodeInfo, EpisodeError> {
-        self.sender.take();
-        let samples = self
-            .thread
-            .take()
-            .expect("episode worker exists")
-            .join()
-            .map_err(|_| EpisodeError::Invalid("episode encoder worker panicked".to_owned()))?
-            .map_err(EpisodeError::Invalid)?;
-        if let Some(error) = self.failure() {
-            return Err(EpisodeError::Invalid(error));
-        }
-        let full_episode = FullEpisode {
-            start: self.start.clone(),
-            samples,
-            completion,
-        };
-        *self.completed.lock_unpoisoned() = Some(full_episode.clone());
-        Ok(full_episode
-            .start
-            .summary(&full_episode.completion, full_episode.samples.len() as u64))
+        self: Box<Self>,
+        completion: RecordingCompletion,
+    ) -> Result<CompletedRecording, String> {
+        EpisodeWriter::finish(*self, EpisodeCompletion::from(&completion))
+            .map(|summary| CompletedRecording::new(summary.id(), summary.frames()))
+            .map_err(|error| error.to_string())
     }
 }
 
-impl SpiralEpisodeWriter {
-    fn fail(&self, message: &str) -> bool {
-        let mut failure = self.shared.failure.lock_unpoisoned();
-        if failure.is_none() {
-            *failure = Some(message.to_owned());
-        }
-        false
-    }
-}
-
-impl Drop for SpiralEpisodeWriter {
+impl Drop for EpisodeWriter {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(thread) = self.thread.take() {
@@ -835,8 +621,6 @@ struct EpisodeDrain<'a> {
 
 impl EpisodeDrain<'_> {
     fn run(self, receiver: mpsc::Receiver<WriterMessage>) -> Result<Vec<Sample>, String> {
-        let mut encoder =
-            SpiralEpisodeEncoder::new(self.start.clone()).map_err(|error| error.to_string())?;
         let mut samples = Vec::new();
         for message in receiver {
             match message {
@@ -848,7 +632,7 @@ impl EpisodeDrain<'_> {
                         *self.shared.failure.lock_unpoisoned() = Some(error.clone());
                         return Err(error);
                     }
-                    encoder.encode(&sample).map_err(|error| {
+                    sample.validate_for(self.start).map_err(|error| {
                         let error = error.to_string();
                         *self.shared.failure.lock_unpoisoned() = Some(error.clone());
                         error
@@ -871,23 +655,6 @@ impl EpisodeDrain<'_> {
             }
         }
         Ok(samples)
-    }
-}
-
-impl EpisodeStart {
-    fn summary(&self, completion: &EpisodeCompletion, frames: u64) -> EpisodeInfo {
-        let start = self;
-        EpisodeInfo::new(start.id(), start.dataset_id())
-            .with_arms(start.arms().to_vec())
-            .with_source(start.source())
-            .with_timeline(frames, completion.duration_seconds())
-            .with_sample_hz(start.sample_hz())
-            .with_recording_gaps(completion.recording_gaps().to_vec())
-            .with_started_ms(start.started_ms())
-            .with_assessment(
-                completion.discarded(),
-                completion.max_follow_error_degrees(),
-            )
     }
 }
 
@@ -932,7 +699,7 @@ mod recording_buffer_tests {
     fn review_is_scoped_to_current_session_without_storage_fallback() {
         let buffer = RecordingBuffer::new();
         assert!(matches!(
-            buffer.get("unknown-take"),
+            buffer.completed_episode("unknown-take"),
             Err(EpisodeError::NotFound(_))
         ));
         let arms = vec![EpisodeArm::new("arm", None, vec!["joint".into()])];
@@ -946,7 +713,7 @@ mod recording_buffer_tests {
             writer
                 .finish(EpisodeCompletion::new(0.1, vec![], vec![]))
                 .unwrap();
-            assert_eq!(buffer.get(id).unwrap().id(), id);
+            assert_eq!(buffer.completed_episode(id).unwrap().start.id(), id);
             assert_eq!(
                 buffer
                     .inspection(id)
@@ -959,19 +726,157 @@ mod recording_buffer_tests {
             );
         }
         assert!(matches!(
-            buffer.get("first"),
+            buffer.completed_episode("first"),
             Err(EpisodeError::NotFound(_))
         ));
-        buffer.forget_completed("first");
-        assert!(buffer.get("second").is_ok());
-        buffer.forget_completed("second");
+        assert!(buffer.completed_episode("second").is_ok());
         assert!(matches!(
-            buffer.get("second"),
+            RecordingBuffer::new().completed_episode("second"),
             Err(EpisodeError::NotFound(_))
         ));
-        assert!(matches!(
-            RecordingBuffer::new().get("second"),
-            Err(EpisodeError::NotFound(_))
-        ));
+    }
+}
+
+#[cfg(test)]
+mod recording_golden_tests {
+    use super::*;
+    use sha2::Digest as _;
+
+    /// One deterministic take touching every recorded field and presence case.
+    fn episode() -> FullEpisode {
+        let arms = vec![
+            EpisodeArm::new(
+                "leader",
+                Some("so101_leader".to_owned()),
+                vec!["shoulder".to_owned(), "elbow".to_owned()],
+            ),
+            EpisodeArm::new(
+                "follower",
+                None,
+                vec!["shoulder".to_owned(), "elbow".to_owned()],
+            ),
+        ];
+        let limits = MotorLimits::default()
+            .with_max_temperature_celsius(Some(70.0))
+            .with_voltage_range(Some(4.5), Some(14.0))
+            .with_max_load(Some(0.9));
+        let condition = vec![
+            ArmCondition::new("follower".to_owned())
+                .with_measurements(vec![Some(31.5), None], vec![Some(12.1), Some(12.0)])
+                .with_limits(vec![limits, MotorLimits::default()]),
+        ];
+        let start = EpisodeStart::new("episode_000042".to_owned(), "default".to_owned())
+            .with_timing(1_700_000_000_000, 60.0)
+            .with_source("teleoperation".to_owned())
+            .with_arms(arms, condition);
+        let samples = vec![
+            Sample::new(
+                0.0,
+                vec![vec![Some(0.1), None], vec![Some(0.2), Some(0.3)]],
+                vec![vec![10, 20], vec![30, -40]],
+            )
+            .with_follow_error_degrees(Some(1.25))
+            .with_velocity(Some(vec![
+                vec![Some(2.0), None],
+                vec![Some(4.0), Some(5.0)],
+            ]))
+            .with_action(vec![None, Some(vec![Some(0.25), None])]),
+            Sample::new(
+                0.5,
+                vec![vec![Some(0.4), Some(0.5)], vec![Some(0.6), Some(0.7)]],
+                vec![vec![11, 21], vec![31, 41]],
+            )
+            .with_action(vec![
+                Some(vec![Some(0.1), Some(0.2)]),
+                Some(vec![Some(0.3), Some(0.4)]),
+            ]),
+            Sample::new(
+                1.25,
+                vec![vec![None, None], vec![Some(0.8), Some(0.9)]],
+                vec![vec![12, 22], vec![32, 42]],
+            ),
+        ];
+        let peaks = ArmConditionSummary {
+            arm: "leader".to_owned(),
+            peak_temperature_celsius: vec![Some(40.0), None],
+            min_voltage_volts: vec![Some(11.9), None],
+            peak_load: vec![Some(0.5), None],
+            peak_current_amps: vec![None, Some(1.2)],
+        };
+        let completion = EpisodeCompletion::new(
+            2.5,
+            vec![RecordingGap::new(0.75, 0.25), RecordingGap::new(1.0, 0.125)],
+            vec![peaks],
+        )
+        .with_max_follow_error_degrees(Some(2.0))
+        .with_discarded(true);
+        FullEpisode::from_recording(start, samples, completion)
+    }
+
+    fn camera(stream: &str, camera_id: &str) -> crate::episodes::CameraRecording {
+        let key: &[u8] = &[
+            0, 0, 0, 1, 9, 0xf0, 0, 0, 0, 1, 0x67, 0x64, 0, 0x1e, 0, 0, 1, 0x68, 0x88, 0, 0, 1,
+            0x65, 0x88,
+        ];
+        let delta: &[u8] = &[0, 0, 0, 1, 9, 0xf0, 0, 0, 1, 0x41, 0x88];
+        crate::episodes::CameraRecording::from_annex_b(
+            stream.to_owned(),
+            (640, 480, 30),
+            ([key, delta].concat(), vec![0, 33_333_333]),
+        )
+        .unwrap()
+        .with_camera_id(camera_id.to_owned())
+    }
+
+    /// Every message with its channel, schema, and exact payload bytes. The
+    /// file bytes themselves are not stable: the MCAP summary lists schemas in
+    /// hash-map order.
+    fn messages(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let mut rendering = String::new();
+        for message in mcap::MessageStream::new(bytes).unwrap() {
+            let message = message.unwrap();
+            let channel = &message.channel;
+            let schema = channel.schema.as_ref().unwrap();
+            writeln!(
+                rendering,
+                "{} {:?} {} {} {} {} {} {} {}",
+                channel.topic,
+                channel.metadata,
+                channel.message_encoding,
+                schema.name,
+                hex(&sha2::Sha256::digest(&schema.data)),
+                message.sequence,
+                message.log_time,
+                message.publish_time,
+                hex(&message.data),
+            )
+            .unwrap();
+        }
+        rendering
+    }
+
+    #[test]
+    fn recording_messages_match_the_golden_take() {
+        let cameras = [
+            camera("follower.camera.wrist", "camera-1"),
+            camera("leader.camera.top", "camera-2"),
+        ];
+        let bytes = crate::episodes::McapRecording::encode(&episode(), &cameras).unwrap();
+        let rendering = messages(&bytes);
+        let digest = sha2::Sha256::digest(rendering.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest,
+            "af8f79ce60bbf5e62a10c8a3c1aed9a927faea1d1a224d096b2b4cdf8792c778"
+        );
     }
 }

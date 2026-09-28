@@ -778,9 +778,9 @@ mod tests {
             Some(30.0),
         );
         let checkpoints = [
-            TrainingCheckpoint::new("active-run", 10_000, 0).with_policy(policy.clone()),
-            TrainingCheckpoint::new("active-run", 20_000, 0).with_policy(policy),
-            TrainingCheckpoint::new("deleted-run", 30_000, 0),
+            TrainingCheckpoint::new("active-run", 10_000).with_policy(policy.clone()),
+            TrainingCheckpoint::new("active-run", 20_000).with_policy(policy),
+            TrainingCheckpoint::new("deleted-run", 30_000),
         ];
 
         let choices = CheckpointChoice::listed(&[run], &checkpoints);

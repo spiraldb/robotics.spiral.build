@@ -389,7 +389,6 @@ fn encoding_round_trips_and_rejects_other_versions_and_broken_graphs() {
     let encoded = payload.encode().unwrap();
     let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(json["nodes"][1]["kind"]["type"], "break_down_subtasks");
-    assert_eq!(json["nodes"][1]["kind"]["model"], DEFAULT_ANNOTATION_MODEL);
     assert_eq!(json["nodes"][1]["kind"]["task_topic"], "/instruction");
     assert_eq!(json["nodes"][2]["kind"]["query"], "make the first fold");
     assert_eq!(
@@ -398,7 +397,7 @@ fn encoding_round_trips_and_rejects_other_versions_and_broken_graphs() {
     );
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION + 1, &encoded).is_err());
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, r#"{"nodes":[]}"#).is_err());
-    let two_parents = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}},{"id":"b","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}}],"edges":[{"from":"dataset","to":"a"},{"from":"dataset","to":"b"},{"from":"a","to":"b"}]}"#;
+    let two_parents = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5}},{"id":"b","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5}}],"edges":[{"from":"dataset","to":"a"},{"from":"dataset","to":"b"},{"from":"a","to":"b"}]}"#;
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, two_parents).is_err());
     let unknown_field = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"colour":"blue"}"#;
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, unknown_field).is_err());
@@ -429,10 +428,10 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
     for stored in [
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"s","kind":{"type":"select","keep":"episodes","fact":"duration_seconds","comparison":"at_least","value":10.0}}],"edges":[{"from":"dataset","to":"s"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"s","kind":{"type":"select"}}],"edges":[{"from":"dataset","to":"s"}]}"#,
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5},"keeps":{"keep":"similar","minimum":0.5}}],"edges":[{"from":"dataset","to":"a"}]}"#,
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5},"keeps":{"keep":"similar","minimum":0.5}}],"edges":[{"from":"dataset","to":"a"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress"},"keeps":{"keep":"similar","minimum":0.5}}],"edges":[{"from":"dataset","to":"m"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress","completed_episodes":[]}}],"edges":[{"from":"dataset","to":"m"}]}"#,
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5,"completed_episodes":[]}}],"edges":[{"from":"dataset","to":"a"}]}"#,
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5,"completed_episodes":[]}}],"edges":[{"from":"dataset","to":"a"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"subtasks":[]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"groupings":[]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"rankings":[]}"#,
@@ -444,7 +443,7 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
     }
     // A grouping keeps by its own categories, so one saved without that
     // rule, or with a Select choosing them after it, is refused.
-    let grouping = r#"{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","model":"m","sample_interval_seconds":0.5}},{"id":"g","kind":{"type":"group_similar_subtasks","categories":[{"name":"fold","definition":"Folding."}]}"#;
+    let grouping = r#"{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5}},{"id":"g","kind":{"type":"group_similar_subtasks","categories":[{"name":"fold","definition":"Folding."}]}"#;
     let edges = r#"{"from":"dataset","to":"a"},{"from":"a","to":"g"}"#;
     for stored in [
         format!(r#"{{"nodes":[{grouping}}}],"edges":[{edges}]}}"#),
@@ -524,7 +523,7 @@ fn a_view_is_current_until_a_later_save_changes_the_recipe() {
 }
 
 #[test]
-fn a_view_reads_the_first_episodes_and_one_published_before_the_bound_reads_all() {
+fn a_view_reads_the_first_episodes() {
     let (mut payload, long, _) = two_outputs();
     payload
         .record_publication(&long, "long_episodes", 3)
@@ -535,11 +534,8 @@ fn a_view_reads_the_first_episodes_and_one_published_before_the_bound_reads_all(
     assert_eq!(node.id(), long);
     assert_eq!(
         published.episodes(),
-        Some(crate::activities::curation::population::PUBLISHED_EPISODES)
+        crate::activities::curation::population::PUBLISHED_EPISODES
     );
-    let older: PublishedOutput =
-        serde_json::from_str(r#"{"node":"s","view":"folds","revision":3}"#).unwrap();
-    assert_eq!(older.episodes(), None);
 }
 
 #[test]
@@ -573,10 +569,7 @@ fn the_views_a_stored_payload_publishes_are_read_without_decoding_it() {
         PublishedOutput::views_in(&payload.encode().unwrap()),
         ["long_episodes"]
     );
-    // A payload of an encoding this Studio no longer reads still names its
-    // views; one naming none, or not a payload at all, publishes nothing.
-    let older = r#"{"nodes":[{"id":"g","kind":{"type":"group_similar_subtasks"}}],"edges":[],"published":[{"node":"s","view":"folds","revision":3}]}"#;
-    assert_eq!(PublishedOutput::views_in(older), ["folds"]);
+    // A payload naming none, or not a payload at all, publishes nothing.
     assert!(PublishedOutput::views_in(r#"{"nodes":[]}"#).is_empty());
     assert!(PublishedOutput::views_in("not a payload").is_empty());
 }

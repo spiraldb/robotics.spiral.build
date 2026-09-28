@@ -10,20 +10,29 @@ use crate::rollout::manager::RolloutManager;
 use crate::training::manager::TrainingManager;
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_hardware::HardwareHandle;
-use spiral_robotics_storage::{StorageManager, episodes::RecordingBuffer};
+use spiral_robotics_storage::{ProviderKeyring, StorageManager, episodes::RecordingBuffer};
 use std::sync::Arc;
 
 /// Services shared by every request: the open projects, the hardware they
-/// share, and the Spiral account they reach Spiral as.
+/// share, the Spiral account they reach Spiral as, and the provider keys.
 #[derive(Clone)]
 pub(crate) struct StudioContext {
     projects: Arc<ProjectRegistry>,
     account: Arc<SpiralAccount>,
+    keys: Arc<ProviderKeyring>,
 }
 
 impl StudioContext {
-    pub(crate) fn new(projects: Arc<ProjectRegistry>, account: Arc<SpiralAccount>) -> Self {
-        Self { projects, account }
+    pub(crate) fn new(
+        projects: Arc<ProjectRegistry>,
+        account: Arc<SpiralAccount>,
+        keys: Arc<ProviderKeyring>,
+    ) -> Self {
+        Self {
+            projects,
+            account,
+            keys,
+        }
     }
 
     pub(crate) fn open(&self, key: &ProjectKey) -> Result<ProjectContext, crate::OperationError> {
@@ -50,6 +59,9 @@ impl StudioContext {
     }
     pub(crate) fn account(&self) -> &Arc<SpiralAccount> {
         &self.account
+    }
+    pub(crate) fn keys(&self) -> &ProviderKeyring {
+        &self.keys
     }
     pub(crate) fn cameras(&self) -> &Arc<CameraManager> {
         self.projects.cameras()

@@ -24,15 +24,11 @@ pub use robot::{DatasetRobot, DatasetRobotSave, JointBinding, JointSelector};
 
 use serde::{Deserialize, Serialize};
 
-/// Data-plane relation counts and warnings from restoring a project bundle.
+/// Data-plane relation counts from restoring a project bundle.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectImportSummary {
     relations: u64,
     rows: u64,
-    /// Non-transactional derived resources that still need repair after the
-    /// durable relational replacement committed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    warnings: Vec<String>,
 }
 
 impl ProjectImportSummary {
@@ -42,15 +38,9 @@ impl ProjectImportSummary {
     pub const fn rows(&self) -> u64 {
         self.rows
     }
-    pub fn warnings(&self) -> &[String] {
-        &self.warnings
-    }
     pub const fn record_relation(&mut self, rows: u64) {
         self.relations = self.relations.saturating_add(1);
         self.rows = self.rows.saturating_add(rows);
-    }
-    pub fn push_warning(&mut self, warning: impl Into<String>) {
-        self.warnings.push(warning.into());
     }
 }
 
@@ -60,7 +50,6 @@ impl ProjectImportSummary {
 pub struct HuggingFaceDatasetSource {
     dataset_id: String,
     repository: String,
-    #[serde(default = "HuggingFaceDatasetSource::default_revision")]
     revision: String,
 }
 
@@ -95,7 +84,6 @@ impl HuggingFaceDatasetSource {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceDatasetFile {
     path: String,
-    #[serde(default)]
     bytes: u64,
 }
 
@@ -129,7 +117,6 @@ pub struct HuggingFaceDatasetInspection {
 pub struct HuggingFaceInspectionSource {
     dataset_id: String,
     repository: String,
-    requested_revision: String,
     resolved_revision: String,
 }
 
@@ -143,27 +130,10 @@ pub struct HuggingFaceInspectionContents {
 /// Durable result of materializing one inspected Hugging Face snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HuggingFaceDatasetImportSummary {
-    #[serde(flatten)]
-    source: HuggingFaceResolvedSource,
-    #[serde(flatten)]
-    outcome: HuggingFaceImportOutcome,
+    files: u64,
+    relations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HuggingFaceResolvedSource {
-    dataset_id: String,
-    repository: String,
-    resolved_revision: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HuggingFaceImportOutcome {
-    files: u64,
-    total_bytes: u64,
-    relations: Vec<String>,
-    suggested_sql: String,
 }
 
 impl HuggingFaceInspectionSource {
@@ -171,16 +141,10 @@ impl HuggingFaceInspectionSource {
         Self {
             dataset_id: dataset_id.into(),
             repository: repository.into(),
-            requested_revision: String::new(),
             resolved_revision: String::new(),
         }
     }
-    pub fn with_revisions(
-        mut self,
-        requested_revision: impl Into<String>,
-        resolved_revision: impl Into<String>,
-    ) -> Self {
-        self.requested_revision = requested_revision.into();
+    pub fn with_resolved_revision(mut self, resolved_revision: impl Into<String>) -> Self {
         self.resolved_revision = resolved_revision.into();
         self
     }
@@ -238,40 +202,11 @@ impl HuggingFaceDatasetInspection {
     }
 }
 
-impl HuggingFaceResolvedSource {
-    pub fn new(dataset_id: impl Into<String>, repository: impl Into<String>) -> Self {
-        Self {
-            dataset_id: dataset_id.into(),
-            repository: repository.into(),
-            resolved_revision: String::new(),
-        }
-    }
-    pub fn with_resolved_revision(mut self, resolved_revision: impl Into<String>) -> Self {
-        self.resolved_revision = resolved_revision.into();
-        self
-    }
-}
-
-impl HuggingFaceImportOutcome {
-    pub fn new(files: u64, total_bytes: u64, relations: Vec<String>) -> Self {
+impl HuggingFaceDatasetImportSummary {
+    pub fn new(files: u64, relations: Vec<String>) -> Self {
         Self {
             files,
-            total_bytes,
             relations,
-            suggested_sql: String::new(),
-        }
-    }
-    pub fn with_suggested_sql(mut self, suggested_sql: impl Into<String>) -> Self {
-        self.suggested_sql = suggested_sql.into();
-        self
-    }
-}
-
-impl HuggingFaceDatasetImportSummary {
-    pub fn new(source: HuggingFaceResolvedSource, outcome: HuggingFaceImportOutcome) -> Self {
-        Self {
-            source,
-            outcome,
             warnings: Vec::new(),
         }
     }
@@ -283,9 +218,9 @@ impl HuggingFaceDatasetImportSummary {
         &self.warnings
     }
     pub const fn files(&self) -> u64 {
-        self.outcome.files
+        self.files
     }
     pub fn relations(&self) -> &[String] {
-        &self.outcome.relations
+        &self.relations
     }
 }

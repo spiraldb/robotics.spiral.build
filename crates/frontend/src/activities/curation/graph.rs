@@ -1,12 +1,14 @@
 //! The Curation canvas: a Dioxus Flow graph of the dataset and every node it
 //! feeds, beside the selected node's workspace, plus the document bar.
 //!
-//! Ranking the cards and parking the viewport are `components::flow_canvas`;
-//! what is Curation's own is which card a node draws and what its + offers,
-//! and the bar's Publish, which turns chosen outputs into catalog views.
+//! `flow_canvas` ranks the cards and parks the viewport; `node_card` is
+//! which card a node draws and what its + offers, and the bar's Publish
+//! turns chosen outputs into catalog views.
 mod canvas;
+mod canvas_controls;
 mod dataset;
 mod document_bar;
+mod flow_canvas;
 mod node_card;
 mod node_workspace;
 mod publish;

@@ -27,8 +27,7 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use crate::bus::SimulatedBus;
 use crate::bus::{
-    MotorBus, MotorFault as BusMotorFault, MotorFaults as BusMotorFaults,
-    MotorLimits as BusMotorLimits, MotorSample,
+    MotorBus, MotorFault as BusMotorFault, MotorFaults as BusMotorFaults, MotorSample,
 };
 use crate::feetech::FeetechBus;
 
@@ -260,7 +259,7 @@ impl RecordingCompletion {
 /// Persistence stays in the storage crate; the control runtime only owns the
 /// sampling contract, which keeps edits on either side independently cached.
 pub trait RecordingWriter: Send {
-    fn update_clock(&self, _now: Instant, _elapsed: Option<Duration>) {}
+    fn update_clock(&self, now: Instant, elapsed: Option<Duration>);
     fn id(&self) -> &str;
     fn dataset_id(&self) -> &str;
     fn push(&self, sample: Sample) -> bool;
@@ -320,7 +319,7 @@ impl TryFrom<RobotConfig> for RobotSpec {
 }
 
 impl RobotSpec {
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         self.config.id()
     }
 
@@ -459,12 +458,6 @@ impl JointGoals {
 
     fn values(&self) -> &BTreeMap<String, f64> {
         &self.0
-    }
-}
-
-impl AsRef<BTreeMap<String, f64>> for JointGoals {
-    fn as_ref(&self) -> &BTreeMap<String, f64> {
-        self.values()
     }
 }
 
@@ -655,14 +648,6 @@ impl RecordingClock {
             .saturating_sub(current_pause)
     }
 
-    /// All wall time deliberately omitted so far, including an active pause.
-    fn paused_elapsed(&self, now: Instant) -> Duration {
-        self.paused_duration
-            + self
-                .paused_at
-                .map_or(Duration::ZERO, |paused_at| now.duration_since(paused_at))
-    }
-
     /// Close an active pause and retain its active-time boundary and duration.
     fn close_pause(&mut self, now: Instant) {
         let Some(paused_at) = self.paused_at.take() else {
@@ -685,10 +670,6 @@ impl RecordingClock {
 
     fn is_paused(&self) -> bool {
         self.paused_at.is_some()
-    }
-
-    fn wall_elapsed(&self, now: Instant) -> Duration {
-        now.duration_since(self.started)
     }
 }
 
@@ -714,10 +695,6 @@ impl RecordingTrackingSummary {
 impl Recording {
     fn active_elapsed(&self, now: Instant) -> Duration {
         self.clock.active_elapsed(now)
-    }
-
-    fn paused_elapsed(&self, now: Instant) -> Duration {
-        self.clock.paused_elapsed(now)
     }
 
     fn close_pause(&mut self, now: Instant) {
@@ -970,7 +947,6 @@ impl HardwareHandle {
     }
 }
 
-/// One arm the control thread currently holds open.
 /// Weight a new sample carries when smoothing a continuously varying reading.
 ///
 /// The same trick the loop-rate measurement uses above, and for the same
@@ -1092,6 +1068,7 @@ impl MotorTrack {
     }
 }
 
+/// One arm the control thread currently holds open.
 struct ConnectedRobot {
     spec: RobotSpec,
     bus: Box<dyn MotorBus>,
@@ -1102,16 +1079,6 @@ struct ConnectedRobot {
     limits: BTreeMap<String, MotorLimits>,
     health: BusHealth,
     sweep: Option<MotorRangeTracker>,
-}
-
-/// Restate a bus-level limit on the published wire boundary.
-impl From<BusMotorLimits> for MotorLimits {
-    fn from(limits: BusMotorLimits) -> Self {
-        Self::default()
-            .with_max_temperature_celsius(limits.max_temperature_celsius())
-            .with_voltage_range(limits.min_voltage_volts(), limits.max_voltage_volts())
-            .with_max_load(limits.max_load())
-    }
 }
 
 impl From<BusMotorFaults> for Vec<MotorFault> {
@@ -1317,18 +1284,11 @@ impl ConnectedRobot {
                     .is_engaged()
                     .then(|| self.motion.target.get(name).copied())
                     .flatten();
-                let goal_raw = self
-                    .motion
-                    .torque
-                    .is_engaged()
-                    .then(|| self.motion.commanded.get(name).copied())
-                    .flatten();
                 let kinematics = JointKinematics::new(
                     raw,
                     motor.map(|motor| motor.degrees_from_center(raw)),
                     motor.map(|motor| motor.normalize_raw(raw)),
                 )
-                .with_raw_targets(goal_raw, target_raw)
                 .with_calibrated_target(
                     target_raw
                         .zip(motor)
@@ -1894,18 +1854,11 @@ impl Controller {
         let open = |spec: &RobotSpec| -> Result<Box<dyn MotorBus>, String> {
             #[cfg(test)]
             if self.use_test_bus {
-                Ok(Box::new(SimulatedBus::new(spec.motors(), true)))
-            } else {
-                FeetechBus::connect(spec.port().path(), spec.port().baud_rate(), spec.motors())
-                    .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
-                    .map_err(|error| error.to_string())
+                return Ok(Box::new(SimulatedBus::new(spec.motors(), true)));
             }
-            #[cfg(not(test))]
-            {
-                FeetechBus::connect(spec.port().path(), spec.port().baud_rate(), spec.motors())
-                    .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
-                    .map_err(|error| error.to_string())
-            }
+            FeetechBus::connect(spec.port().path(), spec.port().baud_rate(), spec.motors())
+                .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
+                .map_err(|error| error.to_string())
         };
 
         let mut bus = open(&spec).inspect_err(|error| {
@@ -1955,11 +1908,7 @@ impl Controller {
         // Off the control loop's path, and allowed to come back empty: an arm
         // that drives without known thresholds is far more useful than one
         // that refuses to open because a limit register would not answer.
-        let limits = bus
-            .read_limits()
-            .into_iter()
-            .map(|(name, limits)| (name, limits.into()))
-            .collect();
+        let limits = bus.read_limits();
 
         let id = spec.id().to_owned();
         self.robots.insert(
@@ -2162,38 +2111,25 @@ impl Controller {
 
     fn execute_control_decision(&mut self, decision: ControlDecision) -> Result<(), String> {
         for effect in decision.into_effects() {
-            match effect {
-                ControlEffect::ResetAllTargets => {
-                    for robot in self.robots.values_mut() {
-                        robot.follow_measured_positions();
-                    }
+            let ControlEffect::SetTorque {
+                robot,
+                engaged,
+                on_failure,
+            } = effect
+            else {
+                self.apply_state_effect(effect);
+                continue;
+            };
+            if let Err(error) = self.set_torque(&robot, engaged) {
+                let (recovery_effects, recovery_error) =
+                    on_failure.failure_decision(error).into_parts();
+                // Recovery is deliberately limited to state-only effects, so a
+                // second driver fault cannot prevent the policy from
+                // surrendering ownership to Idle.
+                for recovery_effect in recovery_effects {
+                    self.apply_state_effect(recovery_effect);
                 }
-                ControlEffect::SetTorque {
-                    robot,
-                    engaged,
-                    on_failure,
-                } => {
-                    if let Err(error) = self.set_torque(&robot, engaged) {
-                        let (recovery_effects, recovery_error) =
-                            on_failure.failure_decision(error).into_parts();
-                        // Recovery is deliberately limited to state-only
-                        // effects, so a second driver fault cannot prevent the
-                        // policy from surrendering ownership to Idle.
-                        for recovery_effect in recovery_effects {
-                            self.apply_state_effect(recovery_effect);
-                        }
-                        return Err(recovery_error);
-                    }
-                }
-                ControlEffect::CommitMode(mode) => {
-                    self.commit_control_mode(mode);
-                }
-                ControlEffect::CommitModeWithError { mode, error } => {
-                    self.commit_control_mode_with_error(mode, error);
-                }
-                ControlEffect::SetActivity { active, error } => {
-                    self.published.mode.update_activity(active, error);
-                }
+                return Err(recovery_error);
             }
         }
         Ok(())
@@ -2206,9 +2142,9 @@ impl Controller {
                     robot.follow_measured_positions();
                 }
             }
-            ControlEffect::CommitMode(mode) => self.commit_control_mode(mode),
+            ControlEffect::CommitMode(mode) => self.commit_control_mode(mode, None),
             ControlEffect::CommitModeWithError { mode, error } => {
-                self.commit_control_mode_with_error(mode, error);
+                self.commit_control_mode(mode, Some(error));
             }
             ControlEffect::SetActivity { active, error } => {
                 self.published.mode.update_activity(active, error);
@@ -2219,22 +2155,10 @@ impl Controller {
         }
     }
 
-    fn commit_control_mode(&mut self, mode: ControlMode) {
+    fn commit_control_mode(&mut self, mode: ControlMode, error: Option<String>) {
         let selection = ModeSelection::from(mode);
-        self.published.mode = ModeStatus::new(
-            selection.clone(),
-            !matches!(selection, ModeSelection::Idle),
-            None,
-        );
-    }
-
-    fn commit_control_mode_with_error(&mut self, mode: ControlMode, error: String) {
-        let selection = ModeSelection::from(mode);
-        self.published.mode = ModeStatus::new(
-            selection.clone(),
-            !matches!(selection, ModeSelection::Idle),
-            Some(error),
-        );
+        let active = !matches!(selection, ModeSelection::Idle);
+        self.published.mode = ModeStatus::new(selection, active, error);
     }
 
     fn start_calibration(&mut self, id: &str) -> Result<(), String> {
@@ -2539,23 +2463,13 @@ impl Controller {
             let identity = RecordingIdentity::new(
                 recording.writer.id().to_owned(),
                 recording.writer.dataset_id().to_owned(),
-                recording
-                    .arms
-                    .iter()
-                    .map(|arm| arm.id().to_owned())
-                    .collect(),
             );
             let clock = RecordingProgressClock::new(
                 recording.frames,
                 recording.active_elapsed(now).as_secs_f64(),
-                recording.clock.wall_elapsed(now).as_secs_f64(),
-            )
-            .with_paused_seconds(recording.paused_elapsed(now).as_secs_f64());
-            let state = RecordingState::new(
-                recording.clock.is_paused(),
-                recording.follow_error(),
-                recording.writer.failure(),
             );
+            let state =
+                RecordingState::new(recording.clock.is_paused(), recording.writer.failure());
             RecordingProgress::new(identity, clock, state)
         });
         let state = HardwareState {
@@ -2693,7 +2607,7 @@ mod tests {
                 .collect())
         }
 
-        fn read_limits(&mut self) -> BTreeMap<String, BusMotorLimits> {
+        fn read_limits(&mut self) -> BTreeMap<String, MotorLimits> {
             BTreeMap::new()
         }
 
@@ -3379,12 +3293,6 @@ mod tests {
             Some(MotorRange::new(1024, 2048, 3072).unwrap())
         );
         assert!(raw.joints().iter().all(|joint| joint.degrees().is_none()));
-        assert!(raw.joints().iter().all(|joint| joint.goal_raw().is_none()));
-        assert!(
-            raw.joints()
-                .iter()
-                .all(|joint| joint.target_raw().is_none())
-        );
         assert!(
             raw.joints()
                 .iter()

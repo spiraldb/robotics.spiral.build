@@ -9,7 +9,6 @@ pub const DEFAULT_SPIRAL_SPFS_ENDPOINT: &str = "https://spfs.spiraldb.dev";
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DataSettings {
     spiral: SpiralSettings,
-    #[serde(default)]
     training: TrainingRuntimeSettings,
     video: VideoSettings,
 }
@@ -84,12 +83,8 @@ pub struct SpiralSettings {
     /// Spiral control-plane API endpoint.
     endpoint: String,
     /// Spiral File System endpoint used for relation and binary payloads.
-    #[serde(default = "SpiralSettings::default_spfs_endpoint")]
     spfs_endpoint: String,
     project_id: String,
-    #[serde(default)]
-    huggingface_token_configured: bool,
-    table_prefix: String,
 }
 
 impl Default for SpiralSettings {
@@ -98,8 +93,6 @@ impl Default for SpiralSettings {
             endpoint: Self::default_endpoint(),
             spfs_endpoint: Self::default_spfs_endpoint(),
             project_id: String::new(),
-            huggingface_token_configured: false,
-            table_prefix: "studio".to_owned(),
         }
     }
 }
@@ -122,21 +115,7 @@ impl SpiralSettings {
             endpoint: endpoint.into(),
             spfs_endpoint: spfs_endpoint.into(),
             project_id: project_id.into(),
-            ..Self::default()
         }
-    }
-    pub const fn with_huggingface_token_configured(mut self, configured: bool) -> Self {
-        self.huggingface_token_configured = configured;
-        self
-    }
-
-    pub const fn huggingface_token_configured(&self) -> bool {
-        self.huggingface_token_configured
-    }
-
-    pub fn with_table_prefix(mut self, table_prefix: impl Into<String>) -> Self {
-        self.table_prefix = table_prefix.into();
-        self
     }
     pub fn endpoint(&self) -> &str {
         &self.endpoint
@@ -153,10 +132,6 @@ impl SpiralSettings {
     /// The project these settings save, as the browser names it on requests.
     pub fn project(&self) -> crate::project::ProjectKey {
         crate::project::ProjectKey::new(&self.endpoint, &self.project_id)
-    }
-
-    pub fn table_prefix(&self) -> &str {
-        &self.table_prefix
     }
 
     pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {
@@ -194,18 +169,12 @@ impl VideoSettings {
     }
 }
 
-/// Spiral connection and write-only Hugging Face token changes from the settings screen.
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+/// Spiral connection changes from the settings screen.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpiralConnectionUpdate {
-    #[serde(default = "SpiralSettings::default_endpoint")]
     spiral_endpoint: String,
-    #[serde(default = "SpiralSettings::default_spfs_endpoint")]
     spiral_spfs_endpoint: String,
-    #[serde(default)]
     project_id: String,
-    /// Omitted preserves the saved token; an empty string removes it.
-    #[serde(default)]
-    huggingface_token: Option<String>,
 }
 
 impl SpiralConnectionUpdate {
@@ -218,36 +187,15 @@ impl SpiralConnectionUpdate {
             spiral_endpoint: spiral_endpoint.into(),
             spiral_spfs_endpoint: spiral_spfs_endpoint.into(),
             project_id: project_id.into(),
-            huggingface_token: None,
         }
     }
 
-    pub fn with_huggingface_token(mut self, token: Option<String>) -> Self {
-        self.huggingface_token = token;
-        self
-    }
-
-    pub fn into_parts(self) -> (String, String, String, Option<String>) {
+    pub fn into_parts(self) -> (String, String, String) {
         (
             self.spiral_endpoint,
             self.spiral_spfs_endpoint,
             self.project_id,
-            self.huggingface_token,
         )
-    }
-}
-
-impl std::fmt::Debug for SpiralConnectionUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpiralConnectionUpdate")
-            .field("spiral_endpoint", &self.spiral_endpoint)
-            .field("spiral_spfs_endpoint", &self.spiral_spfs_endpoint)
-            .field("project_id", &self.project_id)
-            .field(
-                "huggingface_token",
-                &self.huggingface_token.as_ref().map(|_| "<redacted>"),
-            )
-            .finish()
     }
 }
 
@@ -263,25 +211,3 @@ impl Default for SpiralConnectionUpdate {
 
 mod requests;
 pub use requests::{ConnectionTest, SettingsUpdate};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn huggingface_settings_expose_presence_and_redact_update_debug() {
-        let update =
-            SpiralConnectionUpdate::default().with_huggingface_token(Some("hf_private".into()));
-        let debug = format!("{update:?}");
-        assert!(!debug.contains("hf_private"));
-        let settings = SpiralSettings::default().with_huggingface_token_configured(true);
-        let json = serde_json::to_value(settings).unwrap();
-        assert_eq!(json["huggingface_token_configured"], true);
-        assert!(json.get("huggingface_token").is_none());
-        let legacy: SpiralSettings = serde_json::from_value(serde_json::json!({
-            "endpoint": DEFAULT_SPIRAL_ENDPOINT, "project_id": "project", "table_prefix": "studio"
-        }))
-        .unwrap();
-        assert!(!legacy.huggingface_token_configured());
-    }
-}

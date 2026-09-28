@@ -172,7 +172,7 @@ fn LocalDraftProbe(activity: Activity, is_active: ReadSignal<bool>) -> Element {
             .unwrap()
             .drops += 1
     });
-    QueryPolicy::new(QueryDomain::Data, 1000).use_when(
+    QueryPolicy::new(QueryDomain::Catalog, 1000).use_when(
         move || *is_active.read(),
         move || {
             requests.set(requests.get() + 1);

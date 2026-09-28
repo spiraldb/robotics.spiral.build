@@ -57,34 +57,21 @@ pub enum TextInputKind {
     Password,
     /// The browser's numeric control, with `min`, `max`, and `step` forwarded.
     Number,
-    /// Free text with a decimal keypad, for thresholds the browser must not
-    /// reformat while they are typed.
-    Decimal,
-    /// Free text with a digit keypad, for sizes and counts.
-    Integer,
 }
 
 impl TextInputKind {
     fn input_type(self) -> &'static str {
         match self {
-            Self::Text | Self::Decimal | Self::Integer => "text",
+            Self::Text => "text",
             Self::Search => "search",
             Self::Password => "password",
             Self::Number => "number",
         }
     }
 
-    fn input_mode(self) -> Option<&'static str> {
-        match self {
-            Self::Decimal => Some("decimal"),
-            Self::Integer => Some("numeric"),
-            Self::Text | Self::Search | Self::Password | Self::Number => None,
-        }
-    }
-
     fn class_name(self) -> &'static str {
         match self {
-            Self::Number | Self::Decimal | Self::Integer => "ui-input ui-input--numeric",
+            Self::Number => "ui-input ui-input--numeric",
             Self::Text | Self::Search | Self::Password => "ui-input",
         }
     }
@@ -123,7 +110,6 @@ pub fn TextInput(props: TextInputProps) -> Element {
         input {
             class,
             r#type: props.kind.input_type(),
-            inputmode: props.kind.input_mode(),
             value: props.value,
             disabled: props.disabled,
             autofocus: props.autofocus,
@@ -161,24 +147,5 @@ pub fn Select(props: SelectProps) -> Element {
             ..attributes,
             {props.children}
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::TextInputKind;
-
-    #[test]
-    fn numeric_kinds_keep_free_text_but_ask_for_a_number_keypad() {
-        assert_eq!(TextInputKind::Decimal.input_type(), "text");
-        assert_eq!(TextInputKind::Decimal.input_mode(), Some("decimal"));
-        assert_eq!(TextInputKind::Integer.input_mode(), Some("numeric"));
-        assert_eq!(TextInputKind::Number.input_type(), "number");
-        assert_eq!(TextInputKind::Number.input_mode(), None);
-        assert_eq!(TextInputKind::Text.class_name(), "ui-input");
-        assert_eq!(
-            TextInputKind::Number.class_name(),
-            "ui-input ui-input--numeric"
-        );
     }
 }

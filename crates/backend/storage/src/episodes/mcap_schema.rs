@@ -1,101 +1,123 @@
 //! Self-describing, presence-preserving Protobuf messages inside MCAP.
-use arrow_array::{Array, RecordBatch};
-use arrow_schema::DataType;
 use prost::Message as _;
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value};
+use prost_reflect::{
+    DescriptorPool, DynamicMessage, FieldDescriptor, Kind, ReflectMessage as _, Value,
+};
 
-pub(super) struct McapSchema {
-    descriptor: MessageDescriptor,
-    schema: Vec<u8>,
+/// The recording's Protobuf message types, written into every MCAP file.
+pub(super) struct RecordingSchema {
+    pool: DescriptorPool,
 }
-impl McapSchema {
-    pub(super) fn recording(name: &str) -> Result<Self, String> {
-        let schema = include_bytes!("schemas/recording.bin").to_vec();
-        let pool = DescriptorPool::decode(schema.as_slice()).map_err(|error| error.to_string())?;
-        let descriptor = pool
+
+impl RecordingSchema {
+    pub(super) const BYTES: &[u8] = include_bytes!("schemas/recording.bin");
+
+    pub(super) fn load() -> Result<Self, String> {
+        DescriptorPool::decode(Self::BYTES)
+            .map(|pool| Self { pool })
+            .map_err(|error| error.to_string())
+    }
+
+    /// An empty `name` message on `topic`, placed at the recording's start.
+    pub(super) fn message(&self, name: &str, topic: String) -> McapMessage {
+        let descriptor = self
+            .pool
             .get_message_by_name(&format!("studio.recording.{name}"))
-            .ok_or("MCAP recording schema is missing")?;
-        Ok(Self { descriptor, schema })
-    }
-    pub(super) fn name(&self) -> &str {
-        self.descriptor.full_name()
-    }
-    pub(super) fn bytes(&self) -> &[u8] {
-        &self.schema
-    }
-    pub(super) fn encode(&self, batch: &RecordBatch, row: usize) -> Result<Vec<u8>, String> {
-        let mut message = DynamicMessage::new(self.descriptor.clone());
-        for (field, array) in batch.schema().fields().iter().zip(batch.columns()) {
-            let descriptor = self
-                .descriptor
-                .get_field_by_name(field.name())
-                .ok_or("Unknown MCAP field")?;
-            if !array.is_null(row) {
-                message.set_field(
-                    &descriptor,
-                    Self::value(array.as_ref(), row, descriptor.kind())?,
-                );
-            }
+            .unwrap_or_else(|| panic!("the recording schema defines {name}"));
+        McapMessage {
+            topic,
+            elapsed_ns: 0,
+            sequence: 0,
+            message: DynamicMessage::new(descriptor),
         }
-        Ok(message.encode_to_vec())
     }
-    fn value(array: &dyn Array, row: usize, kind: prost_reflect::Kind) -> Result<Value, String> {
-        macro_rules! scalar {
-            ($ty:ty, $variant:ident) => {
-                Value::$variant(
-                    array
-                        .as_any()
-                        .downcast_ref::<$ty>()
-                        .ok_or("MCAP array type mismatch")?
-                        .value(row)
-                        .into(),
-                )
-            };
+}
+
+/// One recording message and its place in the file. A field that is never set
+/// stays absent from the encoding, so readers can tell a missing value from a
+/// zero.
+pub(super) struct McapMessage {
+    topic: String,
+    elapsed_ns: u64,
+    sequence: u32,
+    message: DynamicMessage,
+}
+
+impl McapMessage {
+    pub(super) fn at(mut self, elapsed_ns: u64, sequence: u32) -> Self {
+        self.elapsed_ns = elapsed_ns;
+        self.sequence = sequence;
+        self
+    }
+
+    pub(super) fn topic(&self) -> &str {
+        &self.topic
+    }
+    pub(super) const fn elapsed_ns(&self) -> u64 {
+        self.elapsed_ns
+    }
+    pub(super) const fn sequence(&self) -> u32 {
+        self.sequence
+    }
+    pub(super) fn schema_name(&self) -> String {
+        self.message.descriptor().full_name().to_owned()
+    }
+    pub(super) fn encode(&self) -> Vec<u8> {
+        self.message.encode_to_vec()
+    }
+
+    pub(super) fn set(&mut self, name: &str, value: Value) -> &mut Self {
+        let field = self.field(name);
+        self.message.set_field(&field, value);
+        self
+    }
+
+    pub(super) fn set_optional(&mut self, name: &str, value: Option<Value>) -> &mut Self {
+        if let Some(value) = value {
+            self.set(name, value);
         }
-        Ok(match array.data_type() {
-            DataType::Boolean => scalar!(arrow_array::BooleanArray, Bool),
-            DataType::Float64 => scalar!(arrow_array::Float64Array, F64),
-            DataType::Float32 => scalar!(arrow_array::Float32Array, F32),
-            DataType::UInt64 => scalar!(arrow_array::UInt64Array, U64),
-            DataType::UInt32 => scalar!(arrow_array::UInt32Array, U32),
-            DataType::Int64 => scalar!(arrow_array::Int64Array, I64),
-            DataType::Int32 => scalar!(arrow_array::Int32Array, I32),
-            DataType::Utf8 => scalar!(arrow_array::StringArray, String),
-            DataType::Utf8View => scalar!(arrow_array::StringViewArray, String),
-            DataType::List(_) => {
-                let prost_reflect::Kind::Message(wrapper) = kind else {
-                    return Err("MCAP list descriptor mismatch".into());
-                };
-                let field = wrapper
-                    .get_field_by_name("values")
-                    .ok_or("MCAP list has no values")?;
-                let prost_reflect::Kind::Message(item) = field.kind() else {
-                    return Err("MCAP list item mismatch".into());
-                };
-                let value_field = item
-                    .get_field_by_name("value")
-                    .ok_or("MCAP list item has no value")?;
-                let array = array
-                    .as_any()
-                    .downcast_ref::<arrow_array::ListArray>()
-                    .ok_or("MCAP list array mismatch")?
-                    .value(row);
-                let mut values = Vec::with_capacity(array.len());
-                for index in 0..array.len() {
-                    let mut value = DynamicMessage::new(item.clone());
-                    if !array.is_null(index) {
-                        value.set_field(
-                            &value_field,
-                            Self::value(array.as_ref(), index, value_field.kind())?,
-                        );
-                    }
-                    values.push(Value::Message(value));
+        self
+    }
+
+    pub(super) fn set_floats(&mut self, name: &str, values: &[Option<f64>]) -> &mut Self {
+        self.set_list(name, values.iter().map(|value| value.map(Value::F64)))
+    }
+
+    /// Set a list field. The schema wraps each list in a message of `values`
+    /// items, and an item whose value is `None` holds no `value`.
+    pub(super) fn set_list(
+        &mut self,
+        name: &str,
+        values: impl IntoIterator<Item = Option<Value>>,
+    ) -> &mut Self {
+        let field = self.field(name);
+        let Kind::Message(list) = field.kind() else {
+            panic!("recording field {name} is not a list");
+        };
+        let items = list.get_field_by_name("values").expect("a list has values");
+        let Kind::Message(item) = items.kind() else {
+            panic!("recording list {name} has no item message");
+        };
+        let values = values
+            .into_iter()
+            .map(|value| {
+                let mut entry = DynamicMessage::new(item.clone());
+                if let Some(value) = value {
+                    entry.set_field_by_name("value", value);
                 }
-                let mut message = DynamicMessage::new(wrapper);
-                message.set_field(&field, Value::List(values));
-                Value::Message(message)
-            }
-            other => return Err(format!("Unsupported MCAP value type: {other}")),
-        })
+                Value::Message(entry)
+            })
+            .collect();
+        let mut wrapper = DynamicMessage::new(list);
+        wrapper.set_field(&items, Value::List(values));
+        self.message.set_field(&field, Value::Message(wrapper));
+        self
+    }
+
+    fn field(&self, name: &str) -> FieldDescriptor {
+        self.message
+            .descriptor()
+            .get_field_by_name(name)
+            .unwrap_or_else(|| panic!("the recording schema has no field {name}"))
     }
 }

@@ -22,5 +22,4 @@ Compatibility rules:
 
 Before changing the protocol, implement parsing and compatibility behavior,
 update `version.json`, add the matching `## Training API M.N` entry to
-[`CHANGELOG.md`](CHANGELOG.md), add cross-process tests, and then update
-`./spec`.
+[`CHANGELOG.md`](CHANGELOG.md), and add cross-process tests.

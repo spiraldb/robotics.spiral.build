@@ -1,38 +1,26 @@
-//! What a node canvas in Studio does with a graph of cards: rank it and park
-//! the viewport where it can be read.
-//!
-//! Curation's graph draws its cards on a `dioxus_flow` canvas; how the canvas
-//! behaves is here: [`CardGraph`] places the cards and hands back their
-//! reading order, and [`FlowFit`] decides what the pane shows.
-//!
-//! [`CanvasControls`] — the zoom and fit group at the bottom left — is
-//! re-exported here so a canvas reaches for one module, not two.
+//! What the curation canvas does with its graph of cards: rank it and park
+//! the viewport where it can be read. [`CardGraph`] places the cards and
+//! hands back their reading order, and [`FlowFit`] decides what the pane
+//! shows.
 
 use dioxus::prelude::*;
 use dioxus_flow::{
-    Edge, LayoutDirection, LayoutNode, LayoutOptions, Node, Point, Rect, Viewport, compute_layout,
+    Edge, LayoutDirection, LayoutNode, LayoutOptions, Node, Rect, Viewport, compute_layout,
     use_flow,
 };
 
-pub(crate) use super::canvas_controls::CanvasControls;
-
-/// How a graph of cards is arranged: which way its ranks run, and how much air
-/// sits between the cards within a rank and between the ranks themselves.
+/// How the graph of cards is arranged: ranks running top to bottom, the root
+/// above and what it feeds below, and how much air sits between the cards
+/// within a rank and between the ranks themselves.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CardGraph {
-    direction: LayoutDirection,
+pub(super) struct CardGraph {
     node_gap: f64,
     rank_gap: f64,
 }
 
 impl CardGraph {
-    /// Ranks running top to bottom: the root above, what it feeds below.
-    pub(crate) const fn top_to_bottom(node_gap: f64, rank_gap: f64) -> Self {
-        Self {
-            direction: LayoutDirection::TopToBottom,
-            node_gap,
-            rank_gap,
-        }
+    pub(super) const fn top_to_bottom(node_gap: f64, rank_gap: f64) -> Self {
+        Self { node_gap, rank_gap }
     }
 
     /// Position `nodes` along the ranks `edges` imply, and answer with each
@@ -41,7 +29,7 @@ impl CardGraph {
     /// so the graph arrives the way the data flows.
     ///
     /// The nodes must already carry their sizes; only their positions change.
-    pub(crate) fn rank_layout<T>(self, nodes: &mut [Node<T>], edges: &[Edge]) -> Vec<usize> {
+    pub(super) fn rank_layout<T>(self, nodes: &mut [Node<T>], edges: &[Edge]) -> Vec<usize> {
         let geometry = nodes
             .iter()
             .map(|node| LayoutNode {
@@ -57,7 +45,7 @@ impl CardGraph {
             &geometry,
             &connections,
             &LayoutOptions::default()
-                .direction(self.direction)
+                .direction(LayoutDirection::TopToBottom)
                 .gaps(self.node_gap, self.rank_gap),
         );
         for node in nodes.iter_mut() {
@@ -65,15 +53,16 @@ impl CardGraph {
                 node.position = *position;
             }
         }
-        self.reading_order(nodes)
+        Self::reading_order(nodes)
     }
 
-    fn reading_order<T>(self, nodes: &[Node<T>]) -> Vec<usize> {
+    /// Reading advances along the ranks first and across them second: top to
+    /// bottom, then left to right.
+    fn reading_order<T>(nodes: &[Node<T>]) -> Vec<usize> {
         let mut placed = (0..nodes.len()).collect::<Vec<_>>();
         placed.sort_by(|left, right| {
-            let left = self.reading_key(nodes[*left].position);
-            let right = self.reading_key(nodes[*right].position);
-            left.0.total_cmp(&right.0).then(left.1.total_cmp(&right.1))
+            let (left, right) = (nodes[*left].position, nodes[*right].position);
+            left.y.total_cmp(&right.y).then(left.x.total_cmp(&right.x))
         });
         let mut order = vec![0; nodes.len()];
         for (rank, node) in placed.into_iter().enumerate() {
@@ -81,28 +70,19 @@ impl CardGraph {
         }
         order
     }
-
-    /// Reading advances along the ranks first and across them second, so a
-    /// horizontal graph reads left to right and a vertical one top to bottom.
-    const fn reading_key(self, at: Point) -> (f64, f64) {
-        match self.direction {
-            LayoutDirection::LeftToRight | LayoutDirection::RightToLeft => (at.x, at.y),
-            LayoutDirection::TopToBottom | LayoutDirection::BottomToTop => (at.y, at.x),
-        }
-    }
 }
 
 /// The room a canvas keeps clear of its own furniture: the hairline at its
 /// edges, and the strip at the bottom where the zoom controls sit.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct FlowMargins {
+pub(super) struct FlowMargins {
     sides: f64,
     top: f64,
     bottom: f64,
 }
 
 impl FlowMargins {
-    pub(crate) const fn new(sides: f64, top: f64, bottom: f64) -> Self {
+    pub(super) const fn new(sides: f64, top: f64, bottom: f64) -> Self {
         Self { sides, top, bottom }
     }
 
@@ -121,42 +101,18 @@ impl FlowMargins {
 ///
 /// The whole graph, when it stays readable — a card shrunk past `min_zoom` is a
 /// card nobody can read, and a graph wider than the pane is going to be panned
-/// anyway. Past that point the canvas keeps its cards at the largest size the
-/// pane's height allows and starts at the first rank, so the operator begins
-/// where the data does.
+/// anyway. Past that point the canvas keeps its cards at the smallest readable
+/// zoom, which shows as many of a tree's side-by-side branches as it can, and
+/// starts at the first rank, so the operator begins where the data does.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ReadableViewport {
+pub(super) struct ReadableViewport {
     margins: FlowMargins,
     min_zoom: f64,
-    overflow: OverflowZoom,
-}
-
-/// The zoom a graph too big to show whole parks at.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum OverflowZoom {
-    /// As large as the pane's height allows: a pipeline running off to the
-    /// right is read one stage at a time anyway.
-    FitHeight,
-    /// As small as a card stays readable: a graph branching sideways shows
-    /// as many of its branches as it can.
-    Smallest,
 }
 
 impl ReadableViewport {
-    pub(crate) const fn new(margins: FlowMargins, min_zoom: f64) -> Self {
-        Self {
-            margins,
-            min_zoom,
-            overflow: OverflowZoom::FitHeight,
-        }
-    }
-
-    /// Park an overflowing graph at the smallest readable zoom rather than the
-    /// largest its height allows — the right answer for a tree read downwards,
-    /// whose overflow is its branches side by side.
-    pub(crate) const fn showing_most(mut self) -> Self {
-        self.overflow = OverflowZoom::Smallest;
-        self
+    pub(super) const fn new(margins: FlowMargins, min_zoom: f64) -> Self {
+        Self { margins, min_zoom }
     }
 
     /// Where to park for a graph of `bounds` inside `container`, and whether the
@@ -168,10 +124,7 @@ impl ReadableViewport {
         if whole >= self.min_zoom {
             return (Viewport::fit(Some(bounds), safe, self.min_zoom, 1.0), false);
         }
-        let zoom = match self.overflow {
-            OverflowZoom::FitHeight => (safe.height / bounds.height).clamp(self.min_zoom, 1.0),
-            OverflowZoom::Smallest => self.min_zoom,
-        };
+        let zoom = self.min_zoom;
         let parked = Viewport::new(
             safe.x - bounds.x * zoom,
             safe.y + (safe.height - bounds.height * zoom) / 2.0 - bounds.y * zoom,
@@ -230,7 +183,7 @@ impl CardReveal {
 /// operator pans or zooms: from then on their view is kept through a resize,
 /// and the canvas moves only to reveal a card they selected somewhere else.
 #[component]
-pub(crate) fn FlowFit(
+pub(super) fn FlowFit(
     fit: ReadableViewport,
     /// Set while the graph cannot be shown whole and readable. A canvas answers
     /// that by drawing its minimap.
@@ -306,6 +259,7 @@ pub(crate) fn FlowFit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dioxus_flow::Point;
 
     fn card(id: &str) -> Node<()> {
         Node::new(id, id, Point::ZERO).size((224.0, 92.0))
@@ -323,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn a_graph_too_wide_to_read_whole_keeps_its_cards_and_starts_at_the_first_rank() {
+    fn a_graph_too_wide_to_read_whole_keeps_its_cards_readable_from_the_first_rank() {
         let fit = ReadableViewport::new(FlowMargins::new(24.0, 20.0, 48.0), 0.7);
         let pane = Rect::new(0.0, 0.0, 800.0, 600.0);
 
@@ -331,16 +285,9 @@ mod tests {
         assert!(!cut_off);
         assert!(whole.zoom >= 0.7);
 
+        // A tree read downwards shows as many branches as stay readable, and
+        // the first rank sits at the safe area's left edge, not off-screen.
         let (parked, cut_off) = fit.park(Rect::new(0.0, 0.0, 4_000.0, 300.0), pane);
-        assert!(cut_off);
-        assert_eq!(parked.zoom, 1.0);
-        // The first rank sits at the safe area's left edge, not off-screen.
-        assert_eq!(parked.x, 24.0);
-
-        // A tree read downwards shows as many branches as stay readable.
-        let (parked, cut_off) = fit
-            .showing_most()
-            .park(Rect::new(0.0, 0.0, 4_000.0, 300.0), pane);
         assert!(cut_off);
         assert_eq!(parked.zoom, 0.7);
         assert_eq!(parked.x, 24.0);

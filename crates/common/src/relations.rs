@@ -1,12 +1,10 @@
-//! Spiral query and user-visible relation contracts.
+//! Spiral query contracts.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QueryColumn {
     name: String,
-    data_type: String,
-    nullable: bool,
     /// Arrow extension name when the column carries a semantic value such as
     /// a decoded image, tensor, media reference, or Blob.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -14,11 +12,9 @@ pub struct QueryColumn {
 }
 
 impl QueryColumn {
-    pub fn new(name: impl Into<String>, data_type: impl Into<String>, nullable: bool) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            data_type: data_type.into(),
-            nullable,
             semantic_type: None,
         }
     }
@@ -28,12 +24,6 @@ impl QueryColumn {
     }
     pub fn name(&self) -> &str {
         &self.name
-    }
-    pub fn data_type(&self) -> &str {
-        &self.data_type
-    }
-    pub const fn nullable(&self) -> bool {
-        self.nullable
     }
     /// Encoded previews produced by the shared native query result adapter.
     pub fn image_data_url<'a>(&self, value: Option<&'a serde_json::Value>) -> Option<&'a str> {
@@ -52,81 +42,11 @@ impl QueryColumn {
     }
 }
 
-/// Schema-only catalog used by relation consumers such as Data and Workflow.
-/// Scope is attached by the activity manager so an asynchronous catalog read
-/// cannot be reconciled into a different Spiral project.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RelationCatalog {
-    #[serde(default)]
-    scope_id: String,
-    relations: Vec<CatalogRelation>,
-    complete: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    limitation: Option<String>,
-}
-
-impl RelationCatalog {
-    pub fn new(relations: Vec<CatalogRelation>, complete: bool) -> Self {
-        Self {
-            scope_id: String::new(),
-            relations,
-            complete,
-            limitation: None,
-        }
-    }
-
-    pub fn with_limitation(mut self, limitation: Option<String>) -> Self {
-        self.limitation = limitation;
-        self
-    }
-
-    pub fn relations(&self) -> &[CatalogRelation] {
-        &self.relations
-    }
-
-    pub const fn complete(&self) -> bool {
-        self.complete
-    }
-
-    pub fn limitation(&self) -> Option<&str> {
-        self.limitation.as_deref()
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CatalogRelation {
-    name: String,
-    relation_type: String,
-    columns: Vec<QueryColumn>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    row_count: Option<u64>,
-}
-
-impl CatalogRelation {
-    pub fn new(
-        name: impl Into<String>,
-        relation_type: impl Into<String>,
-        columns: Vec<QueryColumn>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            relation_type: relation_type.into(),
-            columns,
-            row_count: None,
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-}
-
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SpiralQuerySnapshot {
     columns: Vec<QueryColumn>,
     rows: Vec<serde_json::Map<String, serde_json::Value>>,
     truncated: bool,
-    elapsed_ms: u64,
 }
 
 impl SpiralQuerySnapshot {
@@ -139,12 +59,7 @@ impl SpiralQuerySnapshot {
             columns,
             rows,
             truncated,
-            elapsed_ms: 0,
         }
-    }
-    pub const fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
-        self.elapsed_ms = elapsed_ms;
-        self
     }
     pub fn columns(&self) -> &[QueryColumn] {
         &self.columns
@@ -157,9 +72,6 @@ impl SpiralQuerySnapshot {
     }
     pub const fn truncated(&self) -> bool {
         self.truncated
-    }
-    pub const fn elapsed_ms(&self) -> u64 {
-        self.elapsed_ms
     }
 }
 

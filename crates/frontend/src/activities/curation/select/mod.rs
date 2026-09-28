@@ -23,7 +23,7 @@ use super::threshold::{AxisUnit, DotSide, StripDot, Threshold, ThresholdStrip};
 use crate::components::icons::SpinnerIcon;
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
-use listing::{EpisodeListing, ListedSide, MomentListing, SubtaskListing};
+use listing::{EpisodeListing, ListedSide, MomentListing};
 use rule::EpisodeConditions;
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{ActionPurpose, EmptyState, ModeButton, ModeGroup, Notice, NoticeTone};
@@ -109,9 +109,6 @@ impl RuleView {
         match (&self.input, &self.output) {
             (Population::Episodes(input), Population::Episodes(output)) => {
                 input.iter().map(|id| output.contains(id)).collect()
-            }
-            (Population::Subtasks(input), Population::Subtasks(output)) => {
-                input.iter().map(|row| output.contains(row)).collect()
             }
             // Moments come one per frame, too many to look each up in what
             // the rule kept; the rule itself says.
@@ -242,12 +239,8 @@ impl RuleView {
     fn place(&self, item: usize) -> Option<(EpisodeId, Option<(f64, f64)>)> {
         match &self.input {
             Population::Episodes(episodes) => episodes.get(item).map(|id| (id.clone(), None)),
-            Population::Subtasks(rows) => rows.get(item).map(|row| {
-                (
-                    row.episode().clone(),
-                    Some((row.start_time(), row.end_time())),
-                )
-            }),
+            // A Select follows only the dataset, so no rule judges subtasks.
+            Population::Subtasks(_) => None,
             Population::Moments(rows) => rows.get(item).map(|row| {
                 (
                     row.episode().clone(),
@@ -265,9 +258,7 @@ impl RuleView {
                 .is_none()
                 .then(|| episodes.iter().position(|id| id == tab.episode()))
                 .flatten(),
-            Population::Subtasks(rows) => rows
-                .iter()
-                .position(|row| tab.holds(row.episode(), row.start_time())),
+            Population::Subtasks(_) => None,
             Population::Moments(rows) => rows
                 .iter()
                 .position(|row| tab.holds(row.episode(), row.start_time())),
@@ -494,16 +485,10 @@ pub(in crate::activities::curation) fn RuleReview(
                 }
             }
         }
-        match &view.input {
-            Population::Episodes(_) => rsx! {
-                EpisodeListing { controller, side, tabs, sides }
-            },
-            Population::Subtasks(_) => rsx! {
-                SubtaskListing { controller, side, tabs, sides }
-            },
-            Population::Moments(_) => rsx! {
-                MomentListing { controller, side, tabs, sides }
-            },
+        if matches!(view.input, Population::Moments(_)) {
+            MomentListing { controller, side, tabs, sides }
+        } else {
+            EpisodeListing { controller, side, tabs, sides }
         }
     }
 }

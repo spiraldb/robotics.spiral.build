@@ -25,7 +25,6 @@ impl RobotEndpoints {
             .route("/hardware/status", get(Self::fetch_hardware_status))
             .route("/robots/telemetry", get(Self::fetch_telemetry))
             .route("/robots", get(Self::list_robots))
-            .route("/robots/{id}", get(Self::get_robot))
     }
     pub(crate) fn commands() -> Router<StudioContext> {
         Router::new()
@@ -86,12 +85,6 @@ impl RobotEndpoints {
         ApiJson(request): ApiJson<RobotConfigSave>,
     ) -> Result<Json<RobotSummary>, OperationError> {
         Ok(Json(RobotOperations::new(&project).save(request).await?))
-    }
-    async fn get_robot(
-        Project(project): Project,
-        ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<RobotSummary>, OperationError> {
-        Ok(Json(RobotOperations::new(&project).summary(&id).await?))
     }
     async fn delete_robot(
         Project(project): Project,

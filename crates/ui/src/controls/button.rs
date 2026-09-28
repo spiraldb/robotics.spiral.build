@@ -140,8 +140,6 @@ pub struct ButtonProps {
 
 #[derive(Clone, Default, PartialEq)]
 pub struct ButtonAuxiliaryHandlers {
-    onkeydown: Option<EventHandler<KeyboardEvent>>,
-    ondragstart: Option<EventHandler<DragEvent>>,
     onfocus: Option<EventHandler<FocusEvent>>,
     onblur: Option<EventHandler<FocusEvent>>,
 }
@@ -172,8 +170,6 @@ pub fn Button(props: ButtonProps) -> Element {
             class: class,
             "data-action": props.purpose.as_str(),
             onclick: move |event| if let Some(handler) = onclick { handler.call(event) },
-            onkeydown: move |event| if let Some(handler) = handlers.onkeydown { handler.call(event) },
-            ondragstart: move |event| if let Some(handler) = handlers.ondragstart { handler.call(event) },
             onfocus: move |event| if let Some(handler) = handlers.onfocus { handler.call(event) },
             onblur: move |event| if let Some(handler) = handlers.onblur { handler.call(event) },
             ..attributes,
@@ -351,8 +347,6 @@ pub struct ToggleProps {
     title: Option<String>,
     #[props(default)]
     class: Option<String>,
-    #[props(default = ActionPurpose::Toggle)]
-    purpose: ActionPurpose,
 }
 
 /// A binary option whose label and hit target are always part of the control.
@@ -363,7 +357,7 @@ pub fn Toggle(props: ToggleProps) -> Element {
         label {
             class,
             title: props.title,
-            "data-action": props.purpose.as_str(),
+            "data-action": ActionPurpose::Toggle.as_str(),
             "aria-disabled": props.disabled,
             input {
                 r#type: "checkbox",

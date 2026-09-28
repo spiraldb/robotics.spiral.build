@@ -1,21 +1,21 @@
-//! Version 3 ZIP: a project-scoped SQLite snapshot and a Spiral data archive.
+//! Format 4 project ZIP: a manifest, a project-scoped SQLite snapshot, and
+//! one Arrow IPC stream per Spiral data relation.
 use crate::datasets::McapSources;
-use crate::db::{self as spiral, ProjectConnection, StorageClock, Table};
+use crate::db::{self as spiral, ProjectConnection, Table};
 use crate::studio::StudioSnapshot;
 use arrow_array::RecordBatch;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::ProjectImportSummary;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::{self, Cursor, Read, Write};
 
-const PROJECT_MAGIC: &[u8; 8] = b"SPRDATA3";
 const PROJECT_FORMAT: &str = "spiral-robotics-project";
-const FORMAT_VERSION: u32 = 3;
-const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
-const MAX_ENTRY_NAME_BYTES: usize = 256;
-const MAX_ARROW_MESSAGE_METADATA_BYTES: usize = MAX_MANIFEST_BYTES;
+const FORMAT_VERSION: u32 = 4;
+const MANIFEST_ENTRY: &str = "manifest.json";
+const STUDIO_ENTRY: &str = "studio.sqlite3";
+const MAX_ARROW_MESSAGE_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_ARROW_DECODED_BYTES: usize = ProjectBundle::MAX_BYTES;
 const MAX_ARROW_RECORD_BATCH_ROWS: usize = 1_000_000;
 const MAX_ARROW_DECODED_ROWS: usize = 1_000_000;
@@ -27,38 +27,23 @@ impl ProjectBundle {
 }
 
 pub(super) struct ProjectBundleExport<'a> {
-    table_prefix: &'a str,
     studio: &'a crate::StudioProject,
     datasets: Vec<String>,
 }
 impl<'a> ProjectBundleExport<'a> {
-    pub(super) fn new(
-        table_prefix: &'a str,
-        studio: &'a crate::StudioProject,
-        datasets: Vec<String>,
-    ) -> Self {
-        Self {
-            table_prefix,
-            studio,
-            datasets,
-        }
+    pub(super) fn new(studio: &'a crate::StudioProject, datasets: Vec<String>) -> Self {
+        Self { studio, datasets }
     }
 }
 
 pub(super) struct ProjectBundleImport<'a> {
-    table_prefix: &'a str,
     studio: &'a crate::StudioProject,
     archive: DecodedBundle,
     current_datasets: Vec<String>,
 }
 impl<'a> ProjectBundleImport<'a> {
-    pub(super) fn new(
-        table_prefix: &'a str,
-        studio: &'a crate::StudioProject,
-        bytes: &[u8],
-    ) -> Result<Self, String> {
+    pub(super) fn new(studio: &'a crate::StudioProject, bytes: &[u8]) -> Result<Self, String> {
         Ok(Self {
-            table_prefix,
             studio,
             archive: ProjectBundle::decode(bytes)?,
             current_datasets: Vec::new(),
@@ -79,20 +64,49 @@ struct DecodedBundle {
     datasets: Vec<String>,
 }
 
-struct ParsedBundle {
-    entries: Vec<(String, Vec<u8>)>,
-    datasets: Vec<String>,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     format: String,
     format_version: u32,
     schema_version: u32,
-    exported_ms: i64,
-    relations: Vec<String>,
     mcap_datasets: Vec<String>,
+}
+
+impl Manifest {
+    fn current(mcap_datasets: Vec<String>) -> Self {
+        Self {
+            format: PROJECT_FORMAT.to_owned(),
+            format_version: FORMAT_VERSION,
+            schema_version: spiral::SCHEMA_VERSION,
+            mcap_datasets,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.format != PROJECT_FORMAT || self.format_version != FORMAT_VERSION {
+            return Err(format!(
+                "Project bundle format {} is not supported; this Studio imports format {FORMAT_VERSION} only",
+                self.format_version
+            ));
+        }
+        if self.schema_version != spiral::SCHEMA_VERSION {
+            return Err(format!(
+                "project schema {} cannot be imported by schema {}",
+                self.schema_version,
+                spiral::SCHEMA_VERSION
+            ));
+        }
+        let datasets = self.mcap_datasets.iter().collect::<BTreeSet<_>>();
+        if datasets.len() != self.mcap_datasets.len()
+            || datasets
+                .iter()
+                .any(|name| !spiral::StorageSchema::is_dataset_id(name) || name.contains('.'))
+        {
+            return Err("Project manifest contains invalid or duplicate MCAP datasets".into());
+        }
+        Ok(())
+    }
 }
 
 impl ProjectBundle {
@@ -102,15 +116,11 @@ impl ProjectBundle {
         source: ProjectBundleExport<'_>,
     ) -> Result<Vec<u8>, String> {
         let snapshot = StudioSnapshot::capture(source.studio).await?;
-        let studio = snapshot.bytes()?;
-        let mut entries = Vec::new();
+        let mut bundle =
+            BundleWriter::new(&Manifest::current(source.datasets), &snapshot.bytes()?)?;
         for table in Table::ALL {
-            let relation = table.qualified_name(source.table_prefix);
-            let mut payload = LimitedPayload::new(
-                Self::MAX_BYTES
-                    .saturating_sub(studio.len())
-                    .saturating_sub(Self::encoded_entries_size(&entries) + MAX_MANIFEST_BYTES),
-            );
+            let relation = table.qualified_name();
+            bundle.start(&Self::relation_entry(table))?;
             if connection.table_exists(&relation).await? {
                 let query = match table {
                     Table::DatasetSources => format!(
@@ -120,7 +130,7 @@ impl ProjectBundle {
                 };
                 let mut records = connection.execute_query(query).await?;
                 table.validate(records.schema().as_ref(), "project export")?;
-                let mut writer = StreamWriter::try_new(&mut payload, records.schema().as_ref())
+                let mut writer = StreamWriter::try_new(&mut bundle, records.schema().as_ref())
                     .map_err(|error| error.to_string())?;
                 while let Some(batch) = records.next().await {
                     writer
@@ -129,89 +139,41 @@ impl ProjectBundle {
                 }
                 writer.finish().map_err(|error| error.to_string())?;
             } else {
-                let mut writer = StreamWriter::try_new(&mut payload, &table.schema())
+                StreamWriter::try_new(&mut bundle, &table.schema())
+                    .and_then(|mut writer| writer.finish())
                     .map_err(|error| error.to_string())?;
-                writer.finish().map_err(|error| error.to_string())?;
             }
-            entries.push((table.name().to_owned(), payload.into_inner()));
         }
-        let data = self.build(entries, source.datasets)?;
-        Self::zip(&studio, &data)
+        bundle.finish()
     }
 
-    fn zip(studio: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
-        if studio.len().saturating_add(data.len()) > Self::MAX_BYTES {
-            return Err("Project exceeds the uncompressed bundle size limit".into());
-        }
-        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated)
-            .unix_permissions(0o600);
-        for (name, bytes) in [("studio.sqlite3", studio), ("spiral.data", data)] {
-            zip.start_file(name, options)
-                .map_err(|error| error.to_string())?;
-            zip.write_all(bytes).map_err(|error| error.to_string())?;
-        }
-        let bytes = zip
-            .finish()
-            .map_err(|error| error.to_string())?
-            .into_inner();
-        if bytes.len() > Self::MAX_BYTES {
-            return Err("Project exceeds the bundle size limit".into());
-        }
-        Ok(bytes)
+    fn relation_entry(table: Table) -> String {
+        format!("{}.arrows", table.name())
     }
 
     fn decode(bytes: &[u8]) -> Result<DecodedBundle, String> {
-        if bytes.len() > Self::MAX_BYTES {
-            return Err("Project exceeds the bundle size limit".into());
+        let mut bundle = BundleReader::new(bytes)?;
+        let manifest: Manifest = serde_json::from_slice(&bundle.entry(MANIFEST_ENTRY)?)
+            .map_err(|error| format!("project manifest is invalid: {error}"))?;
+        manifest.validate()?;
+        if bundle.zip.len() != 2 + Table::ALL.len() {
+            return Err(format!(
+                "Project ZIP must contain exactly {MANIFEST_ENTRY}, {STUDIO_ENTRY}, and one Arrow stream per relation"
+            ));
         }
-        let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
-            .map_err(|_| "Not a version 3 project ZIP; older bundles are unsupported")?;
-        if zip.len() != 2 {
-            return Err("Project ZIP must contain exactly studio.sqlite3 and spiral.data".into());
-        }
-        let mut files = BTreeMap::new();
-        let mut remaining = Self::MAX_BYTES;
-        for index in 0..zip.len() {
-            let file = zip.by_index(index).map_err(|error| error.to_string())?;
-            let name = file.name().to_owned();
-            if !matches!(name.as_str(), "studio.sqlite3" | "spiral.data")
-                || files.contains_key(&name)
-            {
-                return Err("Project ZIP contains an unexpected or duplicate file".into());
-            }
-            if file.size() > remaining as u64 {
-                return Err("Project exceeds the uncompressed bundle size limit".into());
-            }
-            let mut payload = Vec::new();
-            file.take(remaining as u64 + 1)
-                .read_to_end(&mut payload)
-                .map_err(|error| error.to_string())?;
-            remaining = remaining
-                .checked_sub(payload.len())
-                .ok_or("Project exceeds the uncompressed bundle size limit")?;
-            files.insert(name, payload);
-        }
-        let data = files
-            .remove("spiral.data")
-            .ok_or("Project ZIP is missing spiral.data")?;
-        let parsed = Self.parse(&data)?;
+        let studio = bundle.entry(STUDIO_ENTRY)?;
         let mut budget = ArrowDecodeBudget::default();
         let mut tables = Vec::new();
-        for (name, payload) in parsed.entries {
-            let table =
-                Table::named(&name).ok_or_else(|| format!("Unknown data relation {name}"))?;
-            let batches = budget.decode(ArrowPayload::new(&name, payload))?;
+        for table in Table::ALL {
+            let payload = bundle.entry(&Self::relation_entry(table))?;
+            let batches = budget.decode(ArrowPayload::new(table.name(), payload))?;
             table.validate(batches[0].schema().as_ref(), "project import")?;
             tables.push((table, batches));
         }
         Ok(DecodedBundle {
-            studio: files
-                .remove("studio.sqlite3")
-                .ok_or("Project ZIP is missing studio.sqlite3")?,
+            studio,
             tables,
-            datasets: parsed.datasets,
+            datasets: manifest.mcap_datasets,
         })
     }
 
@@ -221,105 +183,147 @@ impl ProjectBundle {
         source: ProjectBundleImport<'_>,
     ) -> Result<ProjectImportSummary, String> {
         let ProjectBundleImport {
-            table_prefix,
             studio,
             archive,
             current_datasets,
         } = source;
         let snapshot = StudioSnapshot::open(&archive.studio, studio).await?;
         let local_transaction = snapshot.stage(studio).await?;
-        connection
-            .begin_bundle_transaction("project import")
-            .await?;
-        let outcome = async {
-            McapSources::retire(connection, &current_datasets).await?;
-            let mut summary = ProjectImportSummary::default();
-            for (table, batches) in archive.tables {
-                summary.record_relation(
-                    batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64
-                );
-                let batches = if table == Table::DatasetSources {
-                    batches
-                        .into_iter()
-                        .map(McapSources::restore)
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_iter()
-                        .flatten()
-                        .collect()
-                } else {
-                    batches
-                };
-                connection
-                    .replace_or_create_batches(&table.qualified_name(table_prefix), batches)
-                    .await?;
-            }
-            McapSources::refresh(connection, &archive.datasets).await?;
-            Ok(summary)
-        }
-        .await;
-        let (mut summary, reconnect_warning) = connection
-            .finish_bundle_transaction(outcome, "project import")
+        let summary = connection
+            .transaction("project import", async move |connection| {
+                McapSources::retire(connection, &current_datasets).await?;
+                let mut summary = ProjectImportSummary::default();
+                for (table, batches) in archive.tables {
+                    summary.record_relation(
+                        batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
+                    );
+                    let batches = if table == Table::DatasetSources {
+                        batches
+                            .into_iter()
+                            .map(McapSources::restore)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_iter()
+                            .flatten()
+                            .collect()
+                    } else {
+                        batches
+                    };
+                    connection
+                        .replace_or_create_batches(&table.qualified_name(), batches)
+                        .await?;
+                }
+                McapSources::refresh(connection, &archive.datasets).await?;
+                Ok(summary)
+            })
             .await?;
         local_transaction.commit().await.map_err(|error| format!("Spiral data was restored, but committing Studio records failed: {error}. Retry the same project import before continuing."))?;
-        if let Some(warning) = reconnect_warning {
-            summary.push_warning(warning);
-        }
         Ok(summary)
     }
 }
 
-impl ProjectBundle {
-    fn encoded_entries_size(entries: &[(String, Vec<u8>)]) -> usize {
-        entries
-            .iter()
-            .map(|(name, payload)| 2 + name.len() + 8 + payload.len())
-            .sum()
+/// Writes project ZIP entries, refusing contents past the bundle size limit.
+struct BundleWriter {
+    zip: zip::ZipWriter<Cursor<Vec<u8>>>,
+    remaining: usize,
+}
+
+impl BundleWriter {
+    fn new(manifest: &Manifest, studio: &[u8]) -> Result<Self, String> {
+        let mut bundle = Self {
+            zip: zip::ZipWriter::new(Cursor::new(Vec::new())),
+            remaining: ProjectBundle::MAX_BYTES,
+        };
+        let manifest = serde_json::to_vec(manifest)
+            .map_err(|error| format!("encoding project manifest: {error}"))?;
+        for (name, bytes) in [
+            (MANIFEST_ENTRY, manifest.as_slice()),
+            (STUDIO_ENTRY, studio),
+        ] {
+            bundle.start(name)?;
+            bundle.write_all(bytes).map_err(|error| error.to_string())?;
+        }
+        Ok(bundle)
+    }
+
+    fn start(&mut self, name: &str) -> Result<(), String> {
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o600);
+        self.zip
+            .start_file(name, options)
+            .map_err(|error| error.to_string())
+    }
+
+    fn finish(self) -> Result<Vec<u8>, String> {
+        let bytes = self
+            .zip
+            .finish()
+            .map_err(|error| error.to_string())?
+            .into_inner();
+        if bytes.len() > ProjectBundle::MAX_BYTES {
+            return Err("Project exceeds the bundle size limit".into());
+        }
+        Ok(bytes)
     }
 }
 
-impl ProjectBundle {
-    fn build(
-        &self,
-        entries: Vec<(String, Vec<u8>)>,
-        datasets: Vec<String>,
-    ) -> Result<Vec<u8>, String> {
-        if let Some((name, _)) = entries
-            .iter()
-            .find(|(name, _)| name.len() > MAX_ENTRY_NAME_BYTES)
-        {
-            return Err(format!("project relation name {name:?} is too long"));
-        }
-        let manifest = Manifest {
-            format: PROJECT_FORMAT.to_owned(),
-            format_version: FORMAT_VERSION,
-            schema_version: spiral::SCHEMA_VERSION,
-            exported_ms: StorageClock::unix_millis(),
-            relations: entries.iter().map(|(name, _)| name.clone()).collect(),
-            mcap_datasets: datasets,
-        };
-        let manifest = serde_json::to_vec(&manifest)
-            .map_err(|error| format!("encoding project manifest: {error}"))?;
-        if manifest.len() > MAX_MANIFEST_BYTES {
-            return Err("Project manifest exceeds its size limit".into());
-        }
-        let mut bundle = Vec::new();
-        bundle.extend_from_slice(PROJECT_MAGIC);
-        BundleCodec::write_u32(&mut bundle, manifest.len())?;
-        bundle.extend_from_slice(&manifest);
-        for (name, payload) in entries {
-            BundleCodec::write_u16(&mut bundle, name.len())?;
-            bundle.extend_from_slice(name.as_bytes());
-            BundleCodec::write_u64(&mut bundle, payload.len())?;
-            bundle.extend_from_slice(&payload);
-        }
-        bundle.extend_from_slice(&0_u16.to_le_bytes());
-        if bundle.len() > Self::MAX_BYTES {
-            return Err(format!(
+impl io::Write for BundleWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.remaining = self.remaining.checked_sub(bytes.len()).ok_or_else(|| {
+            io::Error::other(format!(
                 "project export exceeds the {} MiB portable-file limit",
-                Self::MAX_BYTES / (1024 * 1024),
+                ProjectBundle::MAX_BYTES / (1024 * 1024),
+            ))
+        })?;
+        self.zip.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.zip.flush()
+    }
+}
+
+/// Reads project ZIP entries by name within the uncompressed size limit.
+struct BundleReader<'a> {
+    zip: zip::ZipArchive<Cursor<&'a [u8]>>,
+    remaining: usize,
+}
+
+impl<'a> BundleReader<'a> {
+    fn new(bytes: &'a [u8]) -> Result<Self, String> {
+        if bytes.len() > ProjectBundle::MAX_BYTES {
+            return Err("Project exceeds the bundle size limit".into());
+        }
+        let zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| "Not a project ZIP")?;
+        if zip.index_for_name(MANIFEST_ENTRY).is_none() {
+            return Err(format!(
+                "Not a format {FORMAT_VERSION} project; project files from older Studio versions cannot be imported"
             ));
         }
-        Ok(bundle)
+        Ok(Self {
+            zip,
+            remaining: ProjectBundle::MAX_BYTES,
+        })
+    }
+
+    fn entry(&mut self, name: &str) -> Result<Vec<u8>, String> {
+        let file = self
+            .zip
+            .by_name(name)
+            .map_err(|_| format!("Project ZIP is missing {name}"))?;
+        if file.size() > self.remaining as u64 {
+            return Err("Project exceeds the uncompressed bundle size limit".into());
+        }
+        let mut payload = Vec::new();
+        file.take(self.remaining as u64 + 1)
+            .read_to_end(&mut payload)
+            .map_err(|error| error.to_string())?;
+        self.remaining = self
+            .remaining
+            .checked_sub(payload.len())
+            .ok_or("Project exceeds the uncompressed bundle size limit")?;
+        Ok(payload)
     }
 }
 
@@ -436,9 +440,9 @@ impl ArrowDecodeBudget {
         let mut position = 0_usize;
         let mut counters = ArrowPreflightCounters::default();
         while position < payload.len() {
-            let first = BundleCodec::read_arrow_u32(payload, &mut position, relation)?;
+            let first = Self::read_u32(payload, &mut position, relation)?;
             let metadata_len = if first == u32::MAX {
-                BundleCodec::read_arrow_u32(payload, &mut position, relation)?
+                Self::read_u32(payload, &mut position, relation)?
             } else {
                 first
             };
@@ -550,12 +554,7 @@ impl ArrowDecodeBudget {
             })?;
         Ok(())
     }
-}
-
-struct BundleCodec;
-
-impl BundleCodec {
-    fn read_arrow_u32(payload: &[u8], position: &mut usize, relation: &str) -> Result<u32, String> {
+    fn read_u32(payload: &[u8], position: &mut usize, relation: &str) -> Result<u32, String> {
         let end = position
             .checked_add(4)
             .filter(|end| *end <= payload.len())
@@ -675,236 +674,6 @@ impl ArrowPreflight<'_> {
             debug_assert!(end <= body.len());
         }
         Ok(())
-    }
-}
-
-impl ProjectConnection {
-    async fn begin_bundle_transaction(&mut self, operation: &str) -> Result<(), String> {
-        if let Err(error) = self.begin_transaction().await {
-            self.discard();
-            return Err(format!(
-                "starting {operation} transaction failed and its connection was discarded: {error}"
-            ));
-        }
-        Ok(())
-    }
-
-    async fn finish_bundle_transaction<T>(
-        &mut self,
-        outcome: Result<T, String>,
-        operation: &str,
-    ) -> Result<(T, Option<String>), String> {
-        let value = match outcome {
-            Ok(value) => value,
-            Err(primary) => match self.rollback().await {
-                Ok(()) => return Err(primary),
-                Err(rollback) => {
-                    self.discard();
-                    return Err(format!(
-                        "{primary}; rolling back {operation} also failed: {rollback}; connection discarded"
-                    ));
-                }
-            },
-        };
-
-        if let Err(commit) = self.commit().await {
-            self.discard();
-            return Err(format!(
-                "committing {operation} failed with an uncertain outcome; connection discarded: {commit}"
-            ));
-        }
-        match self.reconnect().await {
-            Ok(()) => Ok((value, None)),
-            Err(error) => {
-                self.discard();
-                Ok((
-                    value,
-                    Some(format!(
-                        "{operation} committed, but its post-commit Spiral connection could not be opened and was discarded: {error}"
-                    )),
-                ))
-            }
-        }
-    }
-}
-
-impl ProjectBundle {
-    fn parse(&self, bundle: &[u8]) -> Result<ParsedBundle, String> {
-        if bundle.len() > Self::MAX_BYTES {
-            return Err(format!(
-                "project file exceeds the {} MiB import limit",
-                Self::MAX_BYTES / (1024 * 1024),
-            ));
-        }
-        let mut source = Cursor::new(bundle);
-        let mut magic = [0_u8; 8];
-        source
-            .read_exact(&mut magic)
-            .map_err(|_| "project file is truncated".to_owned())?;
-        if &magic != PROJECT_MAGIC {
-            return Err(
-                "Unsupported Spiral data format; only version 3 bundles are accepted".to_owned(),
-            );
-        }
-        let manifest_len = BundleCodec::read_u32(&mut source)? as usize;
-        if manifest_len == 0 || manifest_len > MAX_MANIFEST_BYTES {
-            return Err("project manifest has an invalid size".to_owned());
-        }
-        let mut manifest = vec![0_u8; manifest_len];
-        source
-            .read_exact(&mut manifest)
-            .map_err(|_| "project manifest is truncated".to_owned())?;
-        let manifest: Manifest = serde_json::from_slice(&manifest)
-            .map_err(|error| format!("project manifest is invalid: {error}"))?;
-        if manifest.format != PROJECT_FORMAT || manifest.format_version != FORMAT_VERSION {
-            return Err("project file uses an unsupported format version".to_owned());
-        }
-        if manifest.schema_version != spiral::SCHEMA_VERSION {
-            return Err(format!(
-                "project schema {} cannot be imported by schema {}",
-                manifest.schema_version,
-                spiral::SCHEMA_VERSION
-            ));
-        }
-
-        let dataset_names = manifest.mcap_datasets.iter().collect::<BTreeSet<_>>();
-        if dataset_names.len() != manifest.mcap_datasets.len()
-            || dataset_names
-                .iter()
-                .any(|name| !spiral::StorageSchema::is_dataset_id(name) || name.contains('.'))
-        {
-            return Err("Project manifest contains invalid or duplicate MCAP datasets".into());
-        }
-        let allowed = Table::ALL
-            .map(|table| table.name().to_owned())
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        if manifest.relations.iter().cloned().collect::<BTreeSet<_>>() != allowed {
-            return Err("Project must contain exactly the current data-plane relations".into());
-        }
-        let relation_count = manifest.relations.len();
-        let mut expected = manifest.relations.into_iter().collect::<BTreeSet<_>>();
-        if expected.len() != relation_count {
-            return Err("project manifest contains duplicate relations".to_owned());
-        }
-        let mut seen = BTreeSet::new();
-        let mut entries = BTreeMap::new();
-        loop {
-            let name_len = BundleCodec::read_u16(&mut source)? as usize;
-            if name_len == 0 {
-                break;
-            }
-            if name_len > MAX_ENTRY_NAME_BYTES {
-                return Err("project relation name is too long".to_owned());
-            }
-            let mut name = vec![0_u8; name_len];
-            source
-                .read_exact(&mut name)
-                .map_err(|_| "project relation name is truncated".to_owned())?;
-            let name = String::from_utf8(name)
-                .map_err(|_| "project relation name is not UTF-8".to_owned())?;
-            if !expected.remove(&name) || !seen.insert(name.clone()) {
-                return Err(format!(
-                    "project contains unexpected or duplicate relation {name:?}"
-                ));
-            }
-            let payload_len = BundleCodec::read_u64(&mut source)?;
-            let payload_len = usize::try_from(payload_len)
-                .map_err(|_| format!("project relation {name:?} is too large for this machine"))?;
-            let remaining = bundle.len().saturating_sub(source.position() as usize);
-            if payload_len > remaining {
-                return Err(format!("project relation {name:?} is truncated"));
-            }
-            let mut payload = vec![0_u8; payload_len];
-            source
-                .read_exact(&mut payload)
-                .map_err(|_| format!("project relation {name:?} is truncated"))?;
-            entries.insert(name, payload);
-        }
-        if !expected.is_empty() {
-            return Err(format!(
-                "project is missing relations: {}",
-                expected.into_iter().collect::<Vec<_>>().join(", ")
-            ));
-        }
-        if source.position() != bundle.len() as u64 {
-            return Err("project file has trailing bytes".to_owned());
-        }
-        Ok(ParsedBundle {
-            entries: entries.into_iter().collect(),
-            datasets: manifest.mcap_datasets,
-        })
-    }
-}
-struct LimitedPayload {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-
-impl LimitedPayload {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            limit,
-        }
-    }
-    fn into_inner(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
-impl io::Write for LimitedPayload {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
-            return Err(io::Error::other(format!(
-                "project export exceeds the {} MiB portable-file limit",
-                self.limit / (1024 * 1024),
-            )));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-impl BundleCodec {
-    fn write_u16(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
-        let value =
-            u16::try_from(value).map_err(|_| "project entry name is too long".to_owned())?;
-        target.extend_from_slice(&value.to_le_bytes());
-        Ok(())
-    }
-    fn write_u32(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
-        let value = u32::try_from(value).map_err(|_| "project manifest is too large".to_owned())?;
-        target.extend_from_slice(&value.to_le_bytes());
-        Ok(())
-    }
-    fn write_u64(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
-        target.extend_from_slice(&(value as u64).to_le_bytes());
-        Ok(())
-    }
-    fn read_u16(source: &mut Cursor<&[u8]>) -> Result<u16, String> {
-        let mut bytes = [0; 2];
-        source
-            .read_exact(&mut bytes)
-            .map_err(|_| "project file is truncated".to_owned())?;
-        Ok(u16::from_le_bytes(bytes))
-    }
-    fn read_u32(source: &mut Cursor<&[u8]>) -> Result<u32, String> {
-        let mut bytes = [0; 4];
-        source
-            .read_exact(&mut bytes)
-            .map_err(|_| "project file is truncated".to_owned())?;
-        Ok(u32::from_le_bytes(bytes))
-    }
-    fn read_u64(source: &mut Cursor<&[u8]>) -> Result<u64, String> {
-        let mut bytes = [0; 8];
-        source
-            .read_exact(&mut bytes)
-            .map_err(|_| "project file is truncated".to_owned())?;
-        Ok(u64::from_le_bytes(bytes))
     }
 }
 

@@ -10,20 +10,20 @@ use std::sync::{Arc, Mutex};
 
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::settings::{
-    DataSettings, SpiralConnectionUpdate, SpiralSettings, TrainingRuntimeSettings, VideoSettings,
+    DataSettings, SettingsUpdate, SpiralConnectionUpdate, SpiralSettings, TrainingRuntimeSettings,
+    VideoSettings,
 };
 use spiral_robotics_hardware::{
     HardwareHandle, HardwareState, ModeSelection as HardwareModeSelection,
 };
 use spiral_robotics_storage::episodes::RecordingBuffer;
 use spiral_robotics_storage::{
-    BackendStateStore, ProjectStore, SpiralAccess, SpiralConnection, SpiralConnectionSettings,
-    StorageManager, StoredStudioPreferences,
+    BackendStateStore, ProjectStore, ProviderKeys, SpiralAccess, SpiralConnection,
+    SpiralConnectionSettings, StorageManager, StoredStudioPreferences,
 };
 
 use crate::OperationError;
 use crate::curation::manager::CurationManager;
-use crate::data::settings::{DataSettingsUpdate, UpdateDataSettingsCommand};
 use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
@@ -71,24 +71,24 @@ impl ProjectHardware {
     }
 }
 
-/// How every project reaches its data: Studio's local store, the prefix of
-/// Studio's relations in Spiral, and the signed-in user's Spiral access.
+/// How every project reaches its data: Studio's local store, the signed-in
+/// user's Spiral access, and the provider keys the driver works with.
 pub(crate) struct ProjectDataAccess {
-    table_prefix: String,
     studio: spiral_robotics_storage::StudioStore,
     spiral: SpiralAccess,
+    keys: tokio::sync::watch::Receiver<ProviderKeys>,
 }
 
 impl ProjectDataAccess {
     pub(crate) fn new(
-        table_prefix: String,
         studio: spiral_robotics_storage::StudioStore,
         spiral: SpiralAccess,
+        keys: tokio::sync::watch::Receiver<ProviderKeys>,
     ) -> Self {
         Self {
-            table_prefix,
             studio,
             spiral,
+            keys,
         }
     }
 }
@@ -110,12 +110,10 @@ impl ProjectFactory {
         let connection = SpiralConnection::new(settings, self.data.spiral.clone());
         let database = Arc::new(
             spiral_robotics_storage::AdbcDatabase::new(connection.clone())
-                .with_model_credentials(Arc::new(crate::transport::DriverCredentials)),
+                .with_provider_keys(self.data.keys.clone()),
         );
-        let store = Arc::new(
-            ProjectStore::new(connection, self.data.table_prefix.clone(), database)
-                .map_err(OperationError::External)?,
-        );
+        let store =
+            Arc::new(ProjectStore::new(connection, database).map_err(OperationError::External)?);
         Ok(self.create_from_store(store))
     }
 
@@ -153,30 +151,20 @@ impl ProjectFactory {
 impl OpenProject {
     fn resolve_connection_update(
         update: SpiralConnectionUpdate,
-        previous: &SpiralConnectionSettings,
     ) -> Result<SpiralConnectionSettings, OperationError> {
-        let (endpoint, spfs, project, huggingface_token) = update.into_parts();
-        let huggingface_token =
-            huggingface_token.or_else(|| previous.huggingface_token().map(str::to_owned));
-        let endpoint =
-            crate::data::settings::HttpEndpoint::parse(&endpoint, "Spiral endpoint")?.into_string();
-        let spfs =
-            crate::data::settings::HttpEndpoint::parse(&spfs, "SpFS endpoint")?.into_string();
+        let (endpoint, spfs, project) = update.into_parts();
         SpiralConnectionSettings::new(endpoint, spfs)
-            .and_then(|settings| settings.with_project(project.trim()))
-            .map(|settings| settings.with_huggingface_token(huggingface_token))
+            .and_then(|settings| settings.with_project(&project))
             .map_err(OperationError::InvalidInput)
     }
 
     /// Present a connection to the browser without its secrets.
-    fn present(connection: &SpiralConnectionSettings, table_prefix: &str) -> SpiralSettings {
+    fn present(connection: &SpiralConnectionSettings) -> SpiralSettings {
         SpiralSettings::new(
             connection.endpoint(),
             connection.spfs_endpoint(),
             connection.project_id().unwrap_or_default(),
         )
-        .with_huggingface_token_configured(connection.huggingface_token().is_some())
-        .with_table_prefix(table_prefix)
     }
 
     fn connection(&self) -> SpiralConnectionSettings {
@@ -212,10 +200,7 @@ impl OpenProject {
             .await
             .map_err(OperationError::External)?;
         Ok(DataSettings::new(
-            Self::present(
-                &self.connection(),
-                self.storage().project_store().table_prefix(),
-            ),
+            Self::present(&self.connection()),
             TrainingRuntimeSettings::new(preferences.training().endpoint()),
             VideoSettings::new(preferences.video().enabled()),
         ))
@@ -317,7 +302,7 @@ impl ProjectRegistry {
     }
 
     pub(crate) fn saved_settings(&self) -> SpiralSettings {
-        OpenProject::present(&self.saved_connection(), &self.factory.data.table_prefix)
+        OpenProject::present(&self.saved_connection())
     }
 
     /// The project `key` names, reached with the saved credentials. A key for
@@ -354,44 +339,28 @@ impl ProjectRegistry {
         self.opened.recover_lock().projects.clone()
     }
 
-    pub(crate) async fn update_connection(
-        &self,
-        origin: &OpenProject,
-        update: SpiralConnectionUpdate,
-    ) -> Result<Arc<OpenProject>, OperationError> {
-        let connection = OpenProject::resolve_connection_update(update, &origin.connection())?;
-        let candidate = self.factory.create(connection)?;
-        candidate.validate().await?;
-        self.switch(origin, candidate).await
-    }
-
     /// Preferences for the same connection apply in place. A new connection is
-    /// validated and saved first; the preferences then belong to its project.
+    /// validated and saved first; the preferences then belong to its project,
+    /// which comes back beside the saved settings.
     pub(crate) async fn update_settings(
         &self,
         origin: &OpenProject,
-        command: UpdateDataSettingsCommand,
-    ) -> Result<DataSettingsUpdate, OperationError> {
-        let command = command.validated()?;
-        let connection =
-            OpenProject::resolve_connection_update((&command).into(), &origin.connection())?;
-        let preferences = StoredStudioPreferences::from_settings(
-            command.training_endpoint(),
-            command.video_enabled(),
-        )
-        .map_err(OperationError::InvalidInput)?;
+        update: SettingsUpdate,
+    ) -> Result<(DataSettings, Option<Arc<OpenProject>>), OperationError> {
+        let (connection, training, video) = update.into_parts();
+        let connection = OpenProject::resolve_connection_update(connection)?;
+        let preferences =
+            StoredStudioPreferences::from_settings(training.endpoint(), video.enabled())
+                .map_err(OperationError::InvalidInput)?;
         if connection == origin.connection() {
             origin.apply_preferences(preferences).await?;
-            return Ok(DataSettingsUpdate::new(origin.settings().await?, None));
+            return Ok((origin.settings().await?, None));
         }
         let candidate = self.factory.create(connection)?;
         candidate.validate().await?;
         let target = self.switch(origin, candidate).await?;
         target.apply_preferences(preferences).await?;
-        Ok(DataSettingsUpdate::new(
-            target.settings().await?,
-            Some(target),
-        ))
+        Ok((target.settings().await?, Some(target)))
     }
 
     /// Import into a freshly opened project, so no cache of the replaced data survives,
@@ -638,6 +607,7 @@ pub(crate) mod tests {
 
     pub(crate) struct ProjectFixture {
         pub(crate) projects: Arc<ProjectRegistry>,
+        /// Holds the backend database's directory for the fixture's lifetime.
         _directory: tempfile::TempDir,
     }
 
@@ -652,14 +622,13 @@ pub(crate) mod tests {
             let factory = ProjectFactory::new(
                 hardware,
                 ProjectDataAccess::new(
-                    "project_lifetime_test".to_owned(),
                     spiral_robotics_storage::StudioStore::in_memory(),
                     spiral_robotics_storage::SpiralAccessPublisher::new().1,
+                    tokio::sync::watch::channel(ProviderKeys::default()).1,
                 ),
             );
             let backend_state = Arc::new(BackendStateStore::new(
                 spiral_robotics_storage::StudioStore::at(directory.path().join("studio.sqlite3")),
-                directory.path().join("backend.json"),
             ));
             let connection = SpiralConnectionSettings::new(
                 ENDPOINT.to_owned(),
@@ -676,6 +645,22 @@ pub(crate) mod tests {
             self.projects
                 .open(&ProjectKey::new(ENDPOINT, project_id))
                 .unwrap()
+        }
+
+        /// What a request reaches: these projects, signed out, with keys
+        /// saved in memory.
+        pub(crate) fn context(&self) -> crate::projects::context::StudioContext {
+            let keys = spiral_robotics_storage::ProviderKeyring::new(
+                Arc::new(BackendStateStore::new(
+                    spiral_robotics_storage::StudioStore::in_memory(),
+                )),
+                ProviderKeys::default(),
+            );
+            crate::projects::context::StudioContext::new(
+                self.projects.clone(),
+                crate::account::SpiralAccount::offline(),
+                Arc::new(keys),
+            )
         }
     }
 
@@ -719,36 +704,8 @@ pub(crate) mod tests {
         fixture.projects.hardware().shutdown().await.unwrap();
     }
 
-    #[test]
-    fn huggingface_settings_preserve_replace_and_remove_the_private_token() {
-        let previous = SpiralConnectionSettings::new(
-            "https://api.spiraldb.dev".into(),
-            "https://spfs.spiraldb.dev".into(),
-        )
-        .unwrap()
-        .with_project("project")
-        .unwrap()
-        .with_huggingface_token(Some("hf_saved".into()));
-        for (change, expected) in [
-            (None, Some("hf_saved")),
-            (Some(" hf_replacement ".to_owned()), Some("hf_replacement")),
-            (Some(String::new()), None),
-        ] {
-            let update = SpiralConnectionUpdate::new(
-                previous.endpoint(),
-                previous.spfs_endpoint(),
-                "project",
-            )
-            .with_huggingface_token(change);
-            let decoded: SpiralConnectionUpdate =
-                serde_json::from_str(&serde_json::to_string(&update).unwrap()).unwrap();
-            let resolved = OpenProject::resolve_connection_update(decoded, &previous).unwrap();
-            assert_eq!(resolved.huggingface_token(), expected);
-        }
-    }
-
     #[tokio::test]
-    async fn settings_present_the_project_connection_and_preferences_without_secrets() {
+    async fn settings_present_the_project_connection_and_preferences() {
         let fixture = ProjectFixture::new();
         let connection = SpiralConnectionSettings::new(
             ENDPOINT.to_owned(),
@@ -756,8 +713,7 @@ pub(crate) mod tests {
         )
         .unwrap()
         .with_project("configured_project")
-        .unwrap()
-        .with_huggingface_token(Some("hf_private".to_owned()));
+        .unwrap();
         let project = fixture.projects.factory.create(connection).unwrap();
         let preferences =
             StoredStudioPreferences::from_settings("http://127.0.0.1:5050", false).unwrap();
@@ -774,15 +730,8 @@ pub(crate) mod tests {
             settings.spiral().spfs_endpoint(),
             "https://spfs.spiraldb.dev"
         );
-        assert_eq!(settings.spiral().table_prefix(), "project_lifetime_test");
-        assert!(settings.spiral().huggingface_token_configured());
         assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");
         assert!(!settings.video().enabled());
-        assert!(
-            !serde_json::to_string(&settings)
-                .unwrap()
-                .contains("hf_private")
-        );
         fixture.projects.hardware().shutdown().await.unwrap();
     }
 

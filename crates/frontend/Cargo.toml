@@ -15,9 +15,7 @@ arrow-ipc = { version = "58.4.0", default-features = false }
 arrow-cast = { version = "58.4.0", default-features = false }
 arrow-json = "58.4.0"
 base64.workspace = true
-bytes = "1"
 console_error_panic_hook = "0.1.7"
-eventsource-stream = "0.2.3"
 wasm-bindgen-futures = "0.4"
 wasm-streams = "0.4.2"
 charming = { version = "0.6.0", default-features = false, features = ["wasm"] }
@@ -59,7 +57,6 @@ web-sys = { version = "0.3", features = [
     "AbortController",
     "AbortSignal",
     "HtmlCanvasElement",
-    "HtmlImageElement",
     "CanvasRenderingContext2d",
     "CssStyleDeclaration",
     "ImageData",
@@ -68,19 +65,11 @@ web-sys = { version = "0.3", features = [
     "Node",
     "NodeList",
     "PointerEvent",
-    "MediaQueryList",
-    "Navigator",
     "ResizeObserver",
     "Storage",
     "Window",
 ] }
-pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
-ammonia = "4"
 
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.76"
 spiral-robotics-common = { workspace = true, features = ["test-support"] }
-spiral-robotics-viewport = { workspace = true, features = ["test-support"] }
-
-[build-dependencies]
-serde_json.workspace = true

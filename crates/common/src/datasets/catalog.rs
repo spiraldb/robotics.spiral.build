@@ -121,7 +121,6 @@ pub struct DatasetTopic {
     schemas: Vec<String>,
     members: u64,
     samples: Option<u64>,
-    #[serde(default)]
     revision: Option<super::TopicRevision>,
 }
 impl DatasetTopic {

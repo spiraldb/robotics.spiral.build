@@ -40,13 +40,9 @@ impl<'a> CurationPersistence<'a> {
     pub async fn list(&self) -> Result<Vec<CurationSummary>, String> {
         use crate::studio::curations as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
-        let rows: Vec<(String, String, i64)> = table::Entity::find()
+        let rows: Vec<(String, String)> = table::Entity::find()
             .select_only()
-            .columns([
-                table::Column::Id,
-                table::Column::Name,
-                table::Column::Revision,
-            ])
+            .columns([table::Column::Id, table::Column::Name])
             .filter(table::Column::Project.eq(self.project_store.key()))
             .order_by_desc(table::Column::UpdatedMs)
             .order_by_asc(table::Column::Id)
@@ -54,13 +50,10 @@ impl<'a> CurationPersistence<'a> {
             .all(self.project_store.connection().await?)
             .await
             .map_err(|error| error.to_string())?;
-        rows.into_iter()
-            .map(|(id, name, revision)| {
-                let revision =
-                    u64::try_from(revision).map_err(|_| "Curation revision is negative")?;
-                Ok(CurationSummary::new(id, name, revision))
-            })
-            .collect()
+        Ok(rows
+            .into_iter()
+            .map(|(id, name)| CurationSummary::new(id, name))
+            .collect())
     }
 
     pub async fn load(&self, id: &str) -> Result<Option<CurationDocument>, String> {

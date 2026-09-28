@@ -9,9 +9,6 @@ use crate::foundation::{AttributeClass, ChevronIcon};
 pub struct DisclosureProps {
     summary: Element,
     children: Element,
-    /// `Some` forces the state; `None` leaves it to the operator.
-    #[props(default)]
-    open: Option<bool>,
     #[props(extends = GlobalAttributes, extends = details)]
     attributes: Vec<Attribute>,
 }
@@ -20,7 +17,7 @@ pub struct DisclosureProps {
 pub fn Disclosure(props: DisclosureProps) -> Element {
     let (class, attributes) = props.attributes.with_base_class("ui-disclosure");
     rsx! {
-        details { class, open: props.open, ..attributes,
+        details { class, ..attributes,
             summary { class: "ui-disclosure-summary",
                 ChevronIcon { open: false }
                 span { class: "ui-disclosure-title", {props.summary} }

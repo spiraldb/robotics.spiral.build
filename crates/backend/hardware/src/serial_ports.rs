@@ -12,7 +12,7 @@ impl SerialPortCatalog {
     /// Discover the serial ports that could carry a motor bus.
     ///
     /// On macOS the paired `/dev/cu.*` and `/dev/tty.*` names for one device are
-    /// collapsed to the `/dev/tty.*` form that LeRobot and the calibration CLI use.
+    /// collapsed to the `/dev/tty.*` form that LeRobot uses.
     pub fn discover() -> Result<Self, serialport::Error> {
         let mut ports = serialport::available_ports()?;
 
@@ -27,11 +27,6 @@ impl SerialPortCatalog {
         ports.sort_by(|left, right| left.port_name.cmp(&right.port_name));
         ports.dedup_by(|left, right| left.port_name == right.port_name);
         Ok(Self(ports))
-    }
-
-    /// Borrow the discovered ports in their stable display order.
-    fn ports(&self) -> &[SerialPortInfo] {
-        &self.0
     }
 
     /// Consume the catalog and return the underlying serial-port records.
@@ -65,21 +60,6 @@ impl SerialPortCatalog {
         let mut collapsed = by_device.into_values().collect::<Vec<_>>();
         collapsed.sort();
         collapsed
-    }
-}
-
-impl AsRef<[SerialPortInfo]> for SerialPortCatalog {
-    fn as_ref(&self) -> &[SerialPortInfo] {
-        self.ports()
-    }
-}
-
-impl IntoIterator for SerialPortCatalog {
-    type Item = SerialPortInfo;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
     }
 }
 

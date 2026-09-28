@@ -408,9 +408,9 @@ mod tests {
     fn capture_pause_and_resume_change_media_source_without_changing_transport_identity() {
         let recording = |paused| {
             TimelineSubject::Recording(RecordingProgress::new(
-                RecordingIdentity::new("take-1", "default", vec!["follower".to_owned()]),
-                RecordingClock::new(60, 1.0, 2.0),
-                RecordingState::new(paused, None, None),
+                RecordingIdentity::new("take-1", "default"),
+                RecordingClock::new(60, 1.0),
+                RecordingState::new(paused, None),
             ))
         };
         let active = recording(false);

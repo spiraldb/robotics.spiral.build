@@ -23,7 +23,6 @@ class TrainingConfig:
     decoder_layers: int
     kl_weight: float
     learning_rate: float
-    total_steps: int
     seed: int
     requested_device: str
     pretrained_backbone: bool
@@ -57,7 +56,6 @@ class TrainingConfig:
             decoder_layers=_positive_int(model, "decoder_layers"),
             kl_weight=_finite_float(model, "kl_weight"),
             learning_rate=_finite_float(model, "learning_rate"),
-            total_steps=_positive_int(model, "total_steps"),
             seed=_nonnegative_int(model, "seed"),
             requested_device=_nonempty_string(request.get("device"), "device"),
             pretrained_backbone=initialization == "pretrained_backbone",
@@ -82,18 +80,6 @@ class TrainingConfig:
             raise RuntimeRequestError("ACT KL weight cannot be negative", 422)
         if self.learning_rate <= 0:
             raise RuntimeRequestError("ACT learning rate must be positive", 422)
-
-    @property
-    def state_width(self) -> int:
-        return self.state_dimensions
-
-    @property
-    def image_width_per_row(self) -> int:
-        return len(self.camera_streams) * 3 * self.image_height * self.image_width
-
-    @property
-    def action_width(self) -> int:
-        return self.chunk_size * self.action_dimensions
 
 
 @dataclass(frozen=True)

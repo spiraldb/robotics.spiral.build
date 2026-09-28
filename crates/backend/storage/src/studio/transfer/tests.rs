@@ -35,7 +35,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
     let target = Fixture::project(&store, "target");
     let other = Fixture::project(&store, "other");
     store
-        .save_backend_settings(serde_json::json!({"secret":"excluded-backend-secret-456789"}))
+        .patch_backend_settings(serde_json::json!({"secret":"excluded-backend-secret-456789"}))
         .await
         .unwrap();
     for (project, id) in [(&source, "arm"), (&other, "excluded-other-robot-456789")] {
@@ -133,8 +133,8 @@ async fn imported_sqlite_rejects_extra_schema_secrets_and_invalid_documents() {
     for corruption in [
         "CREATE TRIGGER injected AFTER INSERT ON robots BEGIN SELECT 1; END",
         "INSERT INTO backend_settings VALUES (1, '{}')",
-        "INSERT INTO robots VALUES ('', 'arm', '{}', 1, 1)",
-        "INSERT INTO robots VALUES ('other', 'arm', '{}', 1, 1)",
+        "INSERT INTO robots VALUES ('', 'arm', '{}', 1)",
+        "INSERT INTO robots VALUES ('other', 'arm', '{}', 1)",
         "INSERT INTO curations VALUES ('', 'folding', '   ', 1, 1, '{}', 0)",
     ] {
         let snapshot = StudioSnapshot::capture(&project).await.unwrap();

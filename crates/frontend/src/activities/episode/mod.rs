@@ -26,11 +26,9 @@ mod streams;
 mod timeline;
 mod transport;
 
-pub(crate) use decoder::{DecodedGroup, EncodedCamera};
+pub(crate) use decoder::{CameraPlayback, EncodedCamera};
 pub(in crate::activities) use heading::{EpisodeHeading, HeadingSubject};
-pub(in crate::activities) use identity::{
-    Episode, EpisodeFactsPresentation, SourceLabel,
-};
+pub(in crate::activities) use identity::{Episode, EpisodeFactsPresentation, SourceLabel};
 pub(in crate::activities) use inspection::{EpisodeInspection, FeaturedCamera, PlayRequest};
 pub(in crate::activities) use listing::{EpisodeRows, RowFace, RowFaceView};
 pub(crate) use still::EpisodeStills;

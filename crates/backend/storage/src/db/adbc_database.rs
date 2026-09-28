@@ -11,36 +11,28 @@ use adbc_core::options::OptionConnection;
 use adbc_core::{Connection as _, Optionable as _, Statement as _};
 use arrow_schema::Schema;
 use futures::FutureExt as _;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, watch};
 
 use super::database::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseFuture, DatabaseResult,
-    DatabaseSession, DatabaseTransaction, ExecutionSummary, RecordBatchStream, RelationMetadata,
-    RelationName, SqlStatement,
+    DatabaseSession, DatabaseTransaction, ExecutionSummary, RecordBatchStream, RelationName,
+    SqlStatement,
 };
-use crate::SpiralConnection;
+use crate::{ProviderKeys, SpiralConnection};
 use driver::{DriverConfiguration, LoadedDatabase};
 use worker::ConnectionWorker;
 
-/// Where a database reads the OpenRouter key Spiral's model functions call
-/// with. The driver takes the key only when a database is created, so the
-/// database asks again for every new connection and reopens itself when the
-/// answer has changed.
-pub trait ModelCredentials: Send + Sync {
-    fn openrouter_api_key(&self) -> Option<String>;
-}
-
-/// The driver database a new connection opens on, and the key it was
-/// created with.
+/// The driver database a new connection opens on, and the provider keys it
+/// was created with.
 struct OpenedDatabase {
-    openrouter_api_key: Option<String>,
+    keys: ProviderKeys,
     database: Arc<LoadedDatabase>,
 }
 
 /// Lazily loads a standalone Spiral ADBC library. No driver work runs in `new`.
 pub struct AdbcDatabase {
     configuration: DriverConfiguration,
-    credentials: Option<Arc<dyn ModelCredentials>>,
+    keys: Option<watch::Receiver<ProviderKeys>>,
     opened: Mutex<Option<OpenedDatabase>>,
 }
 
@@ -52,42 +44,38 @@ impl AdbcDatabase {
     fn of(configuration: DriverConfiguration) -> Self {
         Self {
             configuration,
-            credentials: None,
+            keys: None,
             opened: Mutex::new(None),
         }
     }
 
-    /// The same database, handing Spiral's model functions the key
-    /// `credentials` holds.
-    pub fn with_model_credentials(mut self, credentials: Arc<dyn ModelCredentials>) -> Self {
-        self.credentials = Some(credentials);
+    /// The same database, handing the driver the provider keys `keys` holds.
+    /// The driver takes them only when a database is created, so every new
+    /// connection reads the current keys.
+    pub fn with_provider_keys(mut self, keys: watch::Receiver<ProviderKeys>) -> Self {
+        self.keys = Some(keys);
         self
     }
 
-    /// The driver database for a new connection: the open one while the key
-    /// is the one it was created with, else a new one. Connections already
+    /// The driver database for a new connection: the open one while the keys
+    /// are the ones it was created with, else a new one. Connections already
     /// open keep the database they opened on until they close.
     async fn current(&self) -> DatabaseResult<Arc<LoadedDatabase>> {
-        let key = self
-            .credentials
+        let keys = self
+            .keys
             .as_ref()
-            .and_then(|credentials| credentials.openrouter_api_key());
+            .map(|keys| keys.borrow().clone())
+            .unwrap_or_default();
         let mut opened = self.opened.lock().await;
-        if let Some(open) = opened
-            .as_ref()
-            .filter(|open| open.openrouter_api_key == key)
-        {
+        if let Some(open) = opened.as_ref().filter(|open| open.keys == keys) {
             return Ok(open.database.clone());
         }
-        let configuration = self
-            .configuration
-            .clone()
-            .with_openrouter_api_key(key.clone());
+        let configuration = self.configuration.clone().with_provider_keys(&keys);
         let database = tokio::task::spawn_blocking(move || configuration.load())
             .await
             .map_err(DatabaseError::from_worker)??;
         *opened = Some(OpenedDatabase {
-            openrouter_api_key: key,
+            keys,
             database: database.clone(),
         });
         Ok(database)
@@ -138,25 +126,6 @@ impl DatabaseSession for AdbcConnection {
         .boxed()
     }
 
-    fn query_schema(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, Arc<Schema>> {
-        async move {
-            let permit = self.reserve_operation()?;
-            self.worker
-                .run(move |state| {
-                    let _permit = permit;
-                    let mut statement = state.connection().new_statement()?;
-                    statement.set_sql_query(sql.as_str())?;
-                    if let Some(parameters) = sql.parameters() {
-                        statement.prepare()?;
-                        statement.bind(parameters.clone())?;
-                    }
-                    Ok(Arc::new(statement.execute_schema()?))
-                })
-                .await
-        }
-        .boxed()
-    }
-
     fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary> {
         async move {
             let permit = self.reserve_operation()?;
@@ -192,19 +161,6 @@ impl DatabaseSession for AdbcConnection {
                 .run(move |state| {
                     let _permit = permit;
                     state.table_schema(&relation)
-                })
-                .await
-        }
-        .boxed()
-    }
-
-    fn relations(&mut self) -> DatabaseFuture<'_, Vec<RelationMetadata>> {
-        async move {
-            let permit = self.reserve_operation()?;
-            self.worker
-                .run(move |state| {
-                    let _permit = permit;
-                    state.relations()
                 })
                 .await
         }

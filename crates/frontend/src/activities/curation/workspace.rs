@@ -81,7 +81,7 @@ pub(crate) fn CurationWorkspace(is_active: ReadSignal<bool>) -> Element {
     let controller = CurationController::use_controller();
     // Previews live in this tab only, so a reload asks first while they, a
     // run, or unsaved edits would go with it.
-    crate::components::leave_guard::LeaveGuard::use_while(move || controller.holds_unkept_work());
+    super::leave_guard::LeaveGuard::use_while(move || controller.holds_unkept_work());
     let status = use_memo(move || controller.runs());
     rsx! {
         crate::shell::frame::WorkspaceFrame {

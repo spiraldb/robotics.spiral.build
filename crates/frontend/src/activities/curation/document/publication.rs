@@ -22,10 +22,8 @@ pub(crate) struct PublishedOutput {
     /// The saved revision whose recipe the view was compiled from.
     revision: u64,
     /// The most whole episodes the view reads, the first its dataset's
-    /// Selects keep; none for a view published before views were bounded,
-    /// which reads them all.
-    #[serde(default)]
-    episodes: Option<usize>,
+    /// Selects keep.
+    episodes: usize,
 }
 
 impl PublishedOutput {
@@ -37,18 +35,14 @@ impl PublishedOutput {
         #[derive(Deserialize)]
         struct Publications {
             #[serde(default)]
-            published: Vec<Named>,
-        }
-        #[derive(Deserialize)]
-        struct Named {
-            view: String,
+            published: Vec<PublishedOutput>,
         }
         serde_json::from_str::<Publications>(payload)
             .map(|publications| {
                 publications
                     .published
                     .into_iter()
-                    .map(|named| named.view)
+                    .map(|published| published.view)
                     .collect()
             })
             .unwrap_or_default()
@@ -59,7 +53,8 @@ impl PublishedOutput {
     pub(crate) fn view(&self) -> &str {
         &self.view
     }
-    pub(crate) fn episodes(&self) -> Option<usize> {
+    #[cfg(test)]
+    pub(crate) fn episodes(&self) -> usize {
         self.episodes
     }
     /// Whether the view is still what the recipe saved at `saved` compiles to.
@@ -110,7 +105,7 @@ impl CurationGraph {
             node: node.to_owned(),
             view: view.to_owned(),
             revision: saved + 1,
-            episodes: Some(PUBLISHED_EPISODES),
+            episodes: PUBLISHED_EPISODES,
         });
         Ok(())
     }

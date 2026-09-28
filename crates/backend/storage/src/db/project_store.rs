@@ -10,8 +10,8 @@ use futures::{FutureExt as _, StreamExt as _};
 
 use super::database::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
-    DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, RecordBatchStream,
-    RelationName, SqlStatement,
+    DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,
+    RecordBatchStream, RelationName, SqlStatement,
 };
 use crate::settings::SpiralConnectionSettings;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
@@ -34,7 +34,7 @@ impl StorageClock {
 }
 
 /// One async, project-scoped logical connection.
-pub struct ProjectConnection {
+pub(crate) struct ProjectConnection {
     database: Arc<dyn Database>,
     state: ProjectConnectionState,
     operation: Arc<ProjectOperationLease>,
@@ -64,21 +64,11 @@ impl ProjectConnection {
         })
     }
 
-    pub(crate) fn discard(&mut self) {
-        self.state = ProjectConnectionState::Closed;
-    }
-
-    pub async fn execute_query(
+    pub(crate) async fn execute_query(
         &mut self,
         sql: impl AsRef<str>,
     ) -> Result<RecordBatchStream, String> {
         self.query(sql.as_ref().into())
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    pub(crate) async fn plan_query(&mut self, sql: impl AsRef<str>) -> Result<Arc<Schema>, String> {
-        self.query_schema(sql.as_ref().into())
             .await
             .map_err(|error| error.to_string())
     }
@@ -91,38 +81,34 @@ impl ProjectConnection {
             .map_err(|error| error.to_string())
     }
 
-    /// Read schemas concurrently on independent connections while retaining this
-    /// operation's project lock. Never escape an explicit transaction's snapshot.
-    pub(super) async fn relation_schemas(
+    /// Run `mutation` in one Spiral transaction that commits only when it
+    /// succeeds. The connection is closed afterwards either way.
+    pub(crate) async fn transaction<T>(
         &mut self,
-        names: Vec<RelationName>,
-    ) -> DatabaseResult<Vec<(RelationName, DatabaseResult<Option<Arc<Schema>>>)>> {
-        if !matches!(self.state, ProjectConnectionState::Autocommit(_)) {
-            return Err(DatabaseError::invalid_state(
-                "parallel schema reads require an autocommit connection",
-            ));
+        operation: &str,
+        mutation: impl AsyncFnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.begin_transaction()
+            .await
+            .map_err(|error| format!("starting {operation} failed: {error}"))?;
+        match mutation(&mut *self).await {
+            Ok(value) => self
+                .complete_transaction(true)
+                .await
+                .map(|()| value)
+                .map_err(|error| {
+                    format!("committing {operation} failed with an uncertain outcome: {error}")
+                }),
+            Err(error) => match self.complete_transaction(false).await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(format!(
+                    "{error}; rolling back {operation} also failed: {rollback}"
+                )),
+            },
         }
-        let database = self.database.clone();
-        let operation = self.operation.clone();
-        Ok(futures::stream::iter(names.into_iter().map(move |name| {
-            let database = database.clone();
-            let operation = operation.clone();
-            async move {
-                let _operation = operation;
-                let schema = async {
-                    let mut connection = database.connect().await?;
-                    connection.table_schema(name.clone()).await
-                }
-                .await;
-                (name, schema)
-            }
-        }))
-        .buffered(8)
-        .collect()
-        .await)
     }
 
-    pub async fn begin_transaction(&mut self) -> Result<(), String> {
+    async fn begin_transaction(&mut self) -> Result<(), String> {
         let state = std::mem::replace(&mut self.state, ProjectConnectionState::Closed);
         let connection = match state {
             ProjectConnectionState::Autocommit(connection) => connection,
@@ -140,27 +126,6 @@ impl ProjectConnection {
                 .await
                 .map_err(|error| error.to_string())?,
         );
-        Ok(())
-    }
-
-    pub async fn commit(&mut self) -> Result<(), String> {
-        self.complete_transaction(true).await
-    }
-
-    pub(crate) async fn rollback(&mut self) -> Result<(), String> {
-        self.complete_transaction(false).await
-    }
-
-    pub(crate) async fn reconnect(&mut self) -> Result<(), String> {
-        if !matches!(self.state, ProjectConnectionState::Closed) {
-            return Err("database connection is already open".to_owned());
-        }
-        let connection = self
-            .database
-            .connect()
-            .await
-            .map_err(|error| error.to_string())?;
-        self.state = ProjectConnectionState::Autocommit(connection);
         Ok(())
     }
 
@@ -199,45 +164,12 @@ impl ProjectConnection {
         Ok(batches)
     }
 
-    pub(crate) async fn finish_transaction(
-        &mut self,
-        mutation: Result<(), String>,
-        label: &str,
-    ) -> Result<(), String> {
-        match mutation {
-            Ok(()) => self.commit().await,
-            Err(error) => match self.rollback().await {
-                Ok(()) => Err(error),
-                Err(rollback) => {
-                    self.discard();
-                    Err(format!(
-                        "{error}; rolling back {label} also failed: {rollback}; connection discarded"
-                    ))
-                }
-            },
-        }
-    }
-
-    async fn ingest_batch(&mut self, target: &str, batch: RecordBatch) -> Result<(), String> {
-        self.ingest_batches(target, vec![batch]).await
-    }
-
-    async fn ingest_batches(
-        &mut self,
-        target: &str,
-        batches: Vec<RecordBatch>,
-    ) -> Result<(), String> {
-        BatchWrite::new(target, batches, BatchWriteMode::Append)
-            .save(self)
-            .await
-    }
-
     pub(crate) async fn create_or_append_batches(
         &mut self,
         target: &str,
         batches: Vec<RecordBatch>,
     ) -> Result<(), String> {
-        BatchWrite::new(target, batches, BatchWriteMode::CreateOrAppend)
+        BatchWrite::new(target, batches, IngestMode::CreateOrAppend)
             .save(self)
             .await
     }
@@ -248,7 +180,7 @@ impl ProjectConnection {
         target: &str,
         batches: Vec<RecordBatch>,
     ) -> Result<(), String> {
-        BatchWrite::new(target, batches, BatchWriteMode::ReplaceOrCreate)
+        BatchWrite::new(target, batches, IngestMode::ReplaceOrCreate)
             .save(self)
             .await
     }
@@ -260,7 +192,7 @@ impl ProjectConnection {
             .map_err(|error| format!("checking Spiral table {target}: {error}"))
     }
 
-    pub async fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
+    pub(crate) async fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
         self.execute_update(sql.into())
             .await
             .map(|_| ())
@@ -268,21 +200,14 @@ impl ProjectConnection {
     }
 }
 
-#[derive(Clone, Copy)]
-enum BatchWriteMode {
-    Append,
-    CreateOrAppend,
-    ReplaceOrCreate,
-}
-
 struct BatchWrite<'a> {
     target: &'a str,
     batches: Vec<RecordBatch>,
-    mode: BatchWriteMode,
+    mode: IngestMode,
 }
 
 impl<'a> BatchWrite<'a> {
-    fn new(target: &'a str, batches: Vec<RecordBatch>, mode: BatchWriteMode) -> Self {
+    fn new(target: &'a str, batches: Vec<RecordBatch>, mode: IngestMode) -> Self {
         Self {
             target,
             batches,
@@ -296,25 +221,15 @@ impl<'a> BatchWrite<'a> {
         };
         let relation = RelationName::parse(self.target)
             .map_err(|error| format!("configuring native ingest for {}: {error}", self.target))?;
-        let mode = match self.mode {
-            BatchWriteMode::Append => crate::IngestMode::Append,
-            BatchWriteMode::CreateOrAppend => crate::IngestMode::CreateOrAppend,
-            BatchWriteMode::ReplaceOrCreate => crate::IngestMode::ReplaceOrCreate,
-        };
         let batches = futures::stream::iter(self.batches.into_iter().map(Ok)).boxed();
-        let ingestion = crate::BatchIngestion::new(
-            relation,
-            mode,
-            crate::RecordBatchStream::new(schema, batches),
-        );
+        let ingestion =
+            BatchIngestion::new(relation, self.mode, RecordBatchStream::new(schema, batches));
         connection.ingest(ingestion).await.map_err(|error| {
-            if matches!(self.mode, BatchWriteMode::ReplaceOrCreate) {
-                format!("replacing Spiral table {}: {error}", self.target)
-            } else if matches!(self.mode, BatchWriteMode::CreateOrAppend) {
-                format!("creating Spiral table {}: {error}", self.target)
-            } else {
-                format!("ingesting Spiral table {}: {error}", self.target)
-            }
+            let action = match self.mode {
+                IngestMode::CreateOrAppend => "creating",
+                IngestMode::ReplaceOrCreate => "replacing",
+            };
+            format!("{action} Spiral table {}: {error}", self.target)
         })?;
         Ok(())
     }
@@ -345,10 +260,6 @@ impl DatabaseSession for ProjectConnection {
         .boxed()
     }
 
-    fn query_schema(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, Arc<Schema>> {
-        async move { self.state.session()?.query_schema(sql).await }.boxed()
-    }
-
     fn execute_update(&mut self, sql: SqlStatement) -> DatabaseFuture<'_, ExecutionSummary> {
         async move { self.state.session()?.execute_update(sql).await }.boxed()
     }
@@ -360,17 +271,12 @@ impl DatabaseSession for ProjectConnection {
     fn table_schema(&mut self, relation: RelationName) -> DatabaseFuture<'_, Option<Arc<Schema>>> {
         async move { self.state.session()?.table_schema(relation).await }.boxed()
     }
-
-    fn relations(&mut self) -> DatabaseFuture<'_, Vec<crate::RelationMetadata>> {
-        async move { self.state.session()?.relations().await }.boxed()
-    }
 }
 
 /// Storage for one immutable destination. Another project gets another store.
 pub struct ProjectStore {
     connection_settings: SpiralConnectionSettings,
     catalog: crate::datasets::DatasetCatalogClient,
-    table_prefix: String,
     database: Arc<dyn Database>,
     async_operation_gate: Arc<tokio::sync::RwLock<()>>,
 }
@@ -388,16 +294,11 @@ impl ProjectStore {
 
     pub fn new(
         connection: crate::SpiralConnection,
-        table_prefix: String,
         database: Arc<dyn Database>,
     ) -> Result<Self, String> {
-        if !super::schema::StorageSchema::is_identifier(&table_prefix) {
-            return Err("Studio table prefix is not a safe SQL identifier".to_owned());
-        }
         Ok(Self {
             catalog: crate::datasets::DatasetCatalogClient::new(&connection)?,
             connection_settings: connection.settings().clone(),
-            table_prefix,
             database,
             async_operation_gate: Arc::new(tokio::sync::RwLock::new(())),
         })
@@ -416,10 +317,9 @@ impl ProjectStore {
         .expect("a fixed test project");
         Self::new(
             crate::SpiralConnection::new(settings, crate::SpiralAccessPublisher::new().1),
-            "contract".into(),
             Arc::new(crate::AdbcDatabase::memory()),
         )
-        .expect("a fixed test prefix")
+        .expect("a fixed test catalog client")
     }
 
     pub(crate) fn dataset_catalog(&self) -> &crate::datasets::DatasetCatalogClient {
@@ -445,30 +345,7 @@ impl ProjectStore {
         self.connection_settings.spfs_endpoint().to_owned()
     }
 
-    pub(crate) fn is_studio_control_relation(&self, path: &[String]) -> bool {
-        let [name] = path else {
-            return false;
-        };
-        // Retired source tables can remain as a migration backup in Spiral.
-        [
-            "robots",
-            "settings",
-            "training_runs",
-            "training_run_metrics",
-            "training_run_checkpoints",
-            "rollout_runs",
-            "workflows",
-            "feature_registry",
-        ]
-        .iter()
-        .any(|suffix| *name == format!("{}_{suffix}", self.table_prefix))
-    }
-
-    pub fn table_prefix(&self) -> &str {
-        &self.table_prefix
-    }
-
-    pub async fn connect(&self) -> Result<ProjectConnection, String> {
+    pub(crate) async fn connect(&self) -> Result<ProjectConnection, String> {
         let operation = self.async_operation_gate.clone().read_owned().await;
         self.open_connection(ProjectOperationLease::Shared { _lease: operation })
             .await
@@ -499,6 +376,48 @@ impl ProjectStore {
     }
 }
 
+/// Connection configuration and managed-relation provisioning.
+pub struct ProjectDatabasePersistence<'a> {
+    project_store: &'a ProjectStore,
+}
+
+impl<'a> ProjectDatabasePersistence<'a> {
+    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
+        Self { project_store }
+    }
+
+    pub async fn test(&self) -> (bool, String) {
+        let endpoint = self.project_store.endpoint();
+        let project = self.project_store.project_id();
+        if project.is_empty() {
+            return (
+                false,
+                "Choose a Spiral project in Settings before testing the connection.".to_owned(),
+            );
+        }
+        let provisioning = async {
+            let mut connection = self.project_store.connect_exclusive().await?;
+            let relation = Table::TrainingCheckpoints.qualified_name();
+            if let Some(schema) = connection.relation_schema(&relation).await? {
+                Table::TrainingCheckpoints.validate(&schema, "SpiralDB destination")
+                    .map_err(|error| format!("{error}; existing artifact table {relation} was not modified. Remove that table, then run Settings → SpiralDB → Test connection."))?;
+                Ok::<_, String>("model artifact table ready")
+            } else {
+                connection.create_or_append_batches(&relation, vec![RecordBatch::new_empty(Arc::new(Table::TrainingCheckpoints.schema()))]).await?;
+                Ok("created model artifact table")
+            }
+        }
+        .await;
+        match provisioning {
+            Ok(detail) => (
+                true,
+                format!("Connected to {endpoint} · project {project} · {detail}"),
+            ),
+            Err(error) => (false, error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,7 +434,7 @@ mod tests {
             let connection =
                 crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
             let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
-            ProjectStore::new(connection, "spiral_robotics".to_owned(), database)
+            ProjectStore::new(connection, database)
         }
         .unwrap();
         let second = {
@@ -523,7 +442,7 @@ mod tests {
             let connection =
                 crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
             let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
-            ProjectStore::new(connection, "spiral_robotics".to_owned(), database)
+            ProjectStore::new(connection, database)
         }
         .unwrap();
         assert_eq!(first.project_id(), "project_a");
@@ -538,7 +457,7 @@ mod tests {
             let connection =
                 crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
             let database = Arc::new(crate::AdbcDatabase::new(connection.clone()));
-            ProjectStore::new(connection, "spiral_robotics".to_owned(), database)
+            ProjectStore::new(connection, database)
         }
         .unwrap();
         assert!(
@@ -573,48 +492,3 @@ mod tests {
         );
     }
 }
-
-/// Connection configuration and managed-relation provisioning.
-pub struct ProjectDatabasePersistence<'a> {
-    project_store: &'a ProjectStore,
-}
-
-impl<'a> ProjectDatabasePersistence<'a> {
-    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
-        Self { project_store }
-    }
-
-    pub async fn test(&self) -> (bool, String) {
-        let endpoint = self.project_store.endpoint();
-        let project = self.project_store.project_id();
-        if project.is_empty() {
-            return (
-                false,
-                "Choose a Spiral project in Settings before testing the connection.".to_owned(),
-            );
-        }
-        let provisioning = async {
-            let mut connection = self.project_store.connect_exclusive().await?;
-            let relation = Table::TrainingCheckpoints.qualified_name(self.project_store.table_prefix());
-            if let Some(schema) = connection.relation_schema(&relation).await? {
-                Table::TrainingCheckpoints.validate(&schema, "SpiralDB destination")
-                    .map_err(|error| format!("{error}; existing artifact table {relation} was not modified. Choose a fresh table prefix or remove that table, then run Settings → SpiralDB → Test connection."))?;
-                Ok::<_, String>("model artifact table ready")
-            } else {
-                connection.ingest_batch(&relation, RecordBatch::new_empty(Arc::new(Table::TrainingCheckpoints.schema()))).await?;
-                Ok("created model artifact table")
-            }
-        }
-        .await;
-        match provisioning {
-            Ok(detail) => (
-                true,
-                format!("Connected to {endpoint} · project {project} · {detail}"),
-            ),
-            Err(error) => (false, error),
-        }
-    }
-}
-
-#[cfg(test)]
-mod schema_tests;

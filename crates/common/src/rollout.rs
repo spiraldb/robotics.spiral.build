@@ -12,15 +12,10 @@ pub struct RolloutConfig {
     checkpoint_step: u64,
     robot: String,
     /// Time spent actively applying policy actions, excluding load and warm-up.
-    #[serde(default = "RolloutConfig::default_duration_seconds")]
     duration_seconds: u32,
 }
 
 impl RolloutConfig {
-    const fn default_duration_seconds() -> u32 {
-        DEFAULT_ROLLOUT_DURATION_SECONDS
-    }
-
     pub fn new(run_id: impl Into<String>, checkpoint_step: u64, robot: impl Into<String>) -> Self {
         Self {
             run_id: run_id.into(),
@@ -148,9 +143,6 @@ pub struct RolloutSnapshot {
 struct RolloutIdentity {
     session_id: Option<String>,
     run_id: Option<String>,
-    checkpoint_step: Option<u64>,
-    robot: Option<String>,
-    #[serde(default)]
     duration_seconds: Option<u32>,
 }
 
@@ -160,7 +152,6 @@ struct RolloutLifecycle {
     started_ms: Option<i64>,
     finished_ms: Option<i64>,
     message: Option<String>,
-    #[serde(default)]
     warning: Option<String>,
 }
 
@@ -170,23 +161,11 @@ impl RolloutSnapshot {
             identity: RolloutIdentity {
                 session_id,
                 run_id,
-                checkpoint_step: None,
-                robot: None,
                 duration_seconds: None,
             },
             lifecycle: RolloutLifecycle::default(),
             metrics: RolloutMetrics::default(),
         }
-    }
-
-    pub fn with_robot(mut self, robot: Option<String>) -> Self {
-        self.identity.robot = robot;
-        self
-    }
-
-    pub const fn with_checkpoint(mut self, checkpoint_step: Option<u64>) -> Self {
-        self.identity.checkpoint_step = checkpoint_step;
-        self
     }
 
     pub const fn with_duration(mut self, duration_seconds: Option<u32>) -> Self {
@@ -242,22 +221,5 @@ impl RolloutSnapshot {
     }
     pub const fn metrics(&self) -> &RolloutMetrics {
         &self.metrics
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn older_rollout_configs_receive_the_safe_default_duration() {
-        let config: RolloutConfig = serde_json::from_value(serde_json::json!({
-            "run_id": "run-1",
-            "checkpoint_step": 20_000,
-            "robot": "follower"
-        }))
-        .expect("duration defaults for an older client");
-
-        assert_eq!(config.duration_seconds(), DEFAULT_ROLLOUT_DURATION_SECONDS);
     }
 }

@@ -1,18 +1,13 @@
-//! Load-once recorded episode inspection and browser-local frame selection.
-//!
-//! A snapshot contains the complete visual joint timeline in a compact
-//! columnar form. Data attaches the immutable loaded object to its catalog
-//! entry and resolves playback and scrubbing from that object in memory.
-//! Physical motion continues through backend-owned validation and control.
+//! The paused take's recorded preview for Live: the episode's joint timeline,
+//! loaded once in a compact columnar form, and the frame nearest the playhead
+//! picked from it in the browser.
 
 use super::RecordingClient;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use spiral_robotics_common::recording::{
-    EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
-};
+use spiral_robotics_common::recording::{EpisodeInspectionArm, EpisodeInspectionSnapshot};
 use spiral_robotics_viewport::SO101_JOINTS;
 
 use crate::activities::live::signals::SignalNamePresentation;
@@ -27,58 +22,19 @@ const EPISODE_RENDER_HZ: f64 = 30.0;
 const RECORDED_REQUEST_TIMEOUT_MS: u32 = 15_000;
 const TRACE_BUCKETS: usize = 240;
 
+/// One arm's recorded normalized joint positions at one frame.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineArmSample {
     arm: String,
     normalized: BTreeMap<String, Option<f64>>,
-    degrees: BTreeMap<String, Option<f64>>,
-    velocity: Option<BTreeMap<String, Option<f64>>>,
-    effort: Option<BTreeMap<String, Option<f64>>>,
-    action: Option<BTreeMap<String, Option<f64>>>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct TimelineOptionalArmChannels {
-    velocity: Option<BTreeMap<String, Option<f64>>>,
-    effort: Option<BTreeMap<String, Option<f64>>>,
-    action: Option<BTreeMap<String, Option<f64>>>,
-}
-
-impl TimelineOptionalArmChannels {
-    const fn new(
-        velocity: Option<BTreeMap<String, Option<f64>>>,
-        effort: Option<BTreeMap<String, Option<f64>>>,
-        action: Option<BTreeMap<String, Option<f64>>>,
-    ) -> Self {
-        Self {
-            velocity,
-            effort,
-            action,
-        }
-    }
 }
 
 impl TimelineArmSample {
-    pub(crate) fn new(
-        arm: impl Into<String>,
-        normalized: BTreeMap<String, Option<f64>>,
-        degrees: BTreeMap<String, Option<f64>>,
-    ) -> Self {
+    pub(crate) fn new(arm: impl Into<String>, normalized: BTreeMap<String, Option<f64>>) -> Self {
         Self {
             arm: arm.into(),
             normalized,
-            degrees,
-            velocity: None,
-            effort: None,
-            action: None,
         }
-    }
-
-    fn with_optional_channels(mut self, channels: TimelineOptionalArmChannels) -> Self {
-        self.velocity = channels.velocity;
-        self.effort = channels.effort;
-        self.action = channels.action;
-        self
     }
 
     pub(crate) fn arm(&self) -> &str {
@@ -88,39 +44,18 @@ impl TimelineArmSample {
     pub(crate) const fn normalized(&self) -> &BTreeMap<String, Option<f64>> {
         &self.normalized
     }
-
-    pub(crate) const fn degrees(&self) -> &BTreeMap<String, Option<f64>> {
-        &self.degrees
-    }
 }
 
 /// The nearest stored sample to a committed recorded playhead position.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineSample {
-    frame: u64,
     seconds: f64,
-    follow_error_degrees: Option<f64>,
     arms: Vec<TimelineArmSample>,
 }
 
 impl TimelineSample {
-    const fn new(frame: u64, seconds: f64) -> Self {
-        Self {
-            frame,
-            seconds,
-            follow_error_degrees: None,
-            arms: Vec::new(),
-        }
-    }
-
-    fn with_measurements(
-        mut self,
-        follow_error_degrees: Option<f64>,
-        arms: Vec<TimelineArmSample>,
-    ) -> Self {
-        self.follow_error_degrees = follow_error_degrees;
-        self.arms = arms;
-        self
+    const fn new(seconds: f64, arms: Vec<TimelineArmSample>) -> Self {
+        Self { seconds, arms }
     }
 
     pub(crate) const fn seconds(&self) -> f64 {
@@ -388,12 +323,6 @@ impl EpisodeSnapshot for EpisodeInspectionSnapshot {
                 self.episode().frames()
             ));
         }
-        if self.follow_error_degrees().len() != frames {
-            return Err(format!(
-                "Episode {:?} delivered an inconsistent follow-error track.",
-                self.episode().id()
-            ));
-        }
         let mut previous = None;
         for seconds in self.sample_times_seconds() {
             if !seconds.is_finite()
@@ -436,25 +365,13 @@ impl EpisodeSnapshot for EpisodeInspectionSnapshot {
             let values = frames
                 .checked_mul(arm.joints().len())
                 .ok_or_else(|| "Episode inspection dimensions overflowed.".to_owned())?;
-            if arm.normalized().len() != values
-                || arm.raw().len() != values
-                || arm.degrees().len() != values
-            {
+            if arm.normalized().len() != values {
                 return Err(format!(
                     "Episode {:?} delivered an incomplete state track for {:?}.",
                     self.episode().id(),
                     arm.arm()
                 ));
             }
-            let matrices = OptionalMatrixValidation {
-                snapshot: self,
-                arm,
-                frames,
-                values,
-            };
-            matrices.validate("velocity", arm.velocity())?;
-            matrices.validate("effort", arm.effort())?;
-            matrices.validate("action", arm.action())?;
         }
         Ok(())
     }
@@ -472,10 +389,10 @@ impl EpisodeSnapshot for EpisodeInspectionSnapshot {
             .iter()
             .map(|arm| arm.sample_at(frame))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(
-            TimelineSample::new(frame as u64, self.sample_times_seconds()[frame])
-                .with_measurements(self.follow_error_degrees()[frame], arms),
-        )
+        Ok(TimelineSample::new(
+            self.sample_times_seconds()[frame],
+            arms,
+        ))
     }
 
     fn signal_lanes(&self, buckets: usize) -> [TimelineSignalLane; 6] {
@@ -500,26 +417,6 @@ impl EpisodeSnapshot for EpisodeInspectionSnapshot {
             TimelineSignalLane::new(joint.name(), joint.label(), joint.name().signal_color())
                 .with_series(series)
         })
-    }
-}
-
-struct OptionalMatrixValidation<'a> {
-    snapshot: &'a EpisodeInspectionSnapshot,
-    arm: &'a EpisodeInspectionArm,
-    frames: usize,
-    values: usize,
-}
-
-impl OptionalMatrixValidation<'_> {
-    fn validate(&self, label: &str, matrix: &EpisodeOptionalFrameMatrix) -> Result<(), String> {
-        if matrix.present().len() != self.frames || matrix.values().len() != self.values {
-            return Err(format!(
-                "Episode {:?} delivered an incomplete {label} track for {:?}.",
-                self.snapshot.episode().id(),
-                self.arm.arm()
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -559,15 +456,6 @@ impl RecordedArm for EpisodeInspectionArm {
             .checked_mul(joint_count)
             .ok_or_else(|| "Episode inspection frame offset overflowed.".to_owned())?;
         let end = start + joint_count;
-        let optional = |matrix: &EpisodeOptionalFrameMatrix| {
-            matrix.present()[frame].then(|| {
-                self.joints()
-                    .iter()
-                    .cloned()
-                    .zip(matrix.values()[start..end].iter().copied())
-                    .collect::<BTreeMap<_, _>>()
-            })
-        };
         Ok(TimelineArmSample::new(
             self.arm(),
             self.joints()
@@ -575,17 +463,7 @@ impl RecordedArm for EpisodeInspectionArm {
                 .cloned()
                 .zip(self.normalized()[start..end].iter().copied())
                 .collect(),
-            self.joints()
-                .iter()
-                .cloned()
-                .zip(self.degrees()[start..end].iter().copied())
-                .collect(),
-        )
-        .with_optional_channels(TimelineOptionalArmChannels::new(
-            optional(self.velocity()),
-            optional(self.effort()),
-            optional(self.action()),
-        )))
+        ))
     }
 }
 
@@ -691,30 +569,15 @@ impl EpisodeDataDeadline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::recording::{
-        EpisodeArm, EpisodeArmScalarSamples, EpisodeInfo, EpisodeInspectionArm,
-        EpisodeOptionalFrameMatrix,
-    };
+    use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, EpisodeInspectionArm};
 
     fn snapshot_with_normalized(normalized: Vec<Option<f64>>) -> EpisodeInspectionSnapshot {
         let joints = vec!["shoulder_pan".to_owned(), "gripper".to_owned()];
-        let absent = EpisodeOptionalFrameMatrix::new(vec![false; 3], vec![None; 6]);
         let episode = EpisodeInfo::new("take-1", "default")
             .with_arms(vec![EpisodeArm::new("follower", None, joints.clone())])
-            .with_source("Teleoperation")
-            .with_timeline(3, 2.0)
-            .with_sample_hz(1.0);
-        let arm = EpisodeInspectionArm::new(
-            "follower",
-            joints,
-            EpisodeArmScalarSamples::new(normalized, vec![0, 1, 5, 6, 10, 11])
-                .with_degrees(vec![Some(0.0); 6]),
-        )
-        .with_velocity(absent.clone())
-        .with_effort(absent.clone())
-        .with_action(absent);
-        EpisodeInspectionSnapshot::new(episode, vec![0.0, 1.0, 2.0], vec![None, Some(0.5), None])
-            .with_arms(vec![arm])
+            .with_frames(3);
+        let arm = EpisodeInspectionArm::new("follower", joints, normalized);
+        EpisodeInspectionSnapshot::new(episode, vec![0.0, 1.0, 2.0], vec![arm])
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

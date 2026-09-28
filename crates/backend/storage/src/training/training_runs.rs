@@ -47,8 +47,9 @@ impl<'a> TrainingRunPersistence<'a> {
             .await
             .map_err(|error| error.to_string())?
             .into_iter()
-            .map(|row| crate::studio::StoredDocument::decode::<TrainingRunRecord>(row.document))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|row| serde_json::from_value::<TrainingRunRecord>(row.document))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         records.sort_by_key(|record| std::cmp::Reverse(record.identity.started_ms()));
         Ok(records)
     }
@@ -60,8 +61,9 @@ impl<'a> TrainingRunPersistence<'a> {
             .one(self.project_store.connection().await?)
             .await
             .map_err(|error| error.to_string())?
-            .map(|row| crate::studio::StoredDocument::decode(row.document))
+            .map(|row| serde_json::from_value(row.document))
             .transpose()
+            .map_err(|error| error.to_string())
     }
 
     pub async fn insert(&self, record: &TrainingRunRecord) -> Result<(), String> {
@@ -70,7 +72,7 @@ impl<'a> TrainingRunPersistence<'a> {
         table::Entity::insert(table::ActiveModel {
             project: Set(self.project_store.key().to_owned()),
             id: Set(record.identity.id().to_owned()),
-            document: Set(crate::studio::StoredDocument::encode(record)?),
+            document: Set(serde_json::to_value(record).map_err(|error| error.to_string())?),
         })
         .exec(self.project_store.connection().await?)
         .await
@@ -89,7 +91,8 @@ impl<'a> TrainingRunPersistence<'a> {
     }
 
     pub(crate) fn validate_record(id: &str, document: serde_json::Value) -> Result<(), String> {
-        let record: TrainingRunRecord = crate::studio::StoredDocument::decode(document)?;
+        let record: TrainingRunRecord =
+            serde_json::from_value(document).map_err(|error| error.to_string())?;
         if record.identity.id() != id || id.is_empty() {
             return Err("Training document identity disagrees with its row".into());
         }

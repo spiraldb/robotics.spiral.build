@@ -1,6 +1,6 @@
 # Series video 1: Score progress
 
-Drafted September 26, 2026, against the current Studio. **Target: under 60 seconds, including the title card, end card and crossfades, so the footage is at most 57 s.** It follows the series pattern: start from a problem, curate the dataset in Spiral, publish the curation, and open the published curation in Data to check it. This video renews [the September 23 demo](../unproductive-moment-demo.md) and uses today's graph: Dataset → Select → Score progress → Publish → Data.
+Drafted September 26, 2026, against the current Studio. **Target: under 60 seconds, including the title card, end card and crossfades, so the footage is at most 57 s.** It follows the series pattern: start from a problem, curate the dataset in Spiral, publish the curation, and open the published curation in Data to check it. This video renews the September 23 demo and uses today's graph: Dataset → Select → Score progress → Publish → Data.
 
 **This round is for story and pacing.** The proof-of-concept take was recorded with the headless Brave driver, so its cursor is a drawn overlay and its typing is synthetic: character by character through the DevTools protocol, not native keys. The serious take comes later, once the story is approved. That take uses native Safari capture with the real cursor and character typing, plus the zoom and highlight polish. See [Recording evidence](#recording-evidence).
 

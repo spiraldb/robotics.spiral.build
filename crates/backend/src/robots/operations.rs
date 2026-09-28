@@ -216,7 +216,7 @@ impl<'a> RobotOperations<'a> {
         let refusal = match selection {
             ModeSelection::Idle => None,
             ModeSelection::Policy { .. } => Some(
-                "start policy control with POST /api/rollout-runs, which validates and warms the checkpoint first",
+                "start policy control with POST /api/rollout, which validates and warms the checkpoint first",
             ),
             ModeSelection::Manual { robot } if robot.trim().is_empty() => {
                 Some("manual control requires a robot")

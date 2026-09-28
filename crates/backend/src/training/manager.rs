@@ -17,9 +17,8 @@ use spiral_robotics_training::{
 };
 
 use crate::OperationError;
-use crate::adapters::clock::SystemClock;
 use crate::adapters::compute_runtime::HttpTrainingBackend;
-use crate::clock::{Clock, StableIdSequence};
+use crate::clock::StableIdSequence;
 use crate::sync::MutexRecovery;
 use crate::training::service::StartTrainingAdmission as _;
 
@@ -32,7 +31,6 @@ pub(crate) struct TrainingManager {
 
 struct TrainingRuntime {
     storage: Arc<StorageManager>,
-    clock: Arc<dyn Clock>,
     run_ids: StableIdSequence,
     /// The last probe of the training runtime and Spiral, a live service
     /// state rather than history.
@@ -45,7 +43,6 @@ impl TrainingManager {
         Self {
             inner: Arc::new(TrainingRuntime {
                 storage,
-                clock: Arc::new(SystemClock),
                 run_ids: StableIdSequence::new("train", 0),
                 readiness: Mutex::new(None),
             }),
@@ -132,11 +129,7 @@ impl TrainingManager {
             .runtime_endpoint()
             .await
             .map_err(OperationError::External)?;
-        let (id, started_ms) = self
-            .inner
-            .run_ids
-            .next(self.inner.clock.as_ref())
-            .into_parts();
+        let (id, started_ms) = self.inner.run_ids.next().into_parts();
         let request = TrainingJobRequest::new(id.clone(), self.spiral_connection(), config.clone());
         let state = HttpTrainingBackend::request(endpoint.clone(), move |worker| {
             worker.create_job(&request)
@@ -202,7 +195,7 @@ impl TrainingManager {
         SpiralJobConnection::new(
             SpiralServiceEndpoints::new(project.endpoint(), project.spfs_endpoint()),
             project.project_id(),
-            project.table_prefix(),
+            spiral_robotics_storage::STUDIO_TABLE_PREFIX,
         )
     }
 
@@ -242,7 +235,7 @@ impl TrainingManager {
         };
         let (backend, connection) = tokio::join!(backend_probe, spiral_probe);
         let runtime = backend.as_ref().ok().map(|info| {
-            TrainingRuntimeInfo::new(info.id(), info.display_name(), info.runtime())
+            TrainingRuntimeInfo::new(info.display_name(), info.runtime())
                 .with_devices(info.devices().to_vec())
         });
         let spiral_ready = connection.0;
@@ -255,7 +248,7 @@ impl TrainingManager {
             (_, Ok(backend), None) => format!(
                 "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
                 self.inner.storage.project_store().project_id(),
-                self.inner.storage.project_store().table_prefix(),
+                spiral_robotics_storage::STUDIO_TABLE_PREFIX,
                 probe = backend.display_summary(),
             ),
         };
@@ -295,7 +288,7 @@ impl WorkerJobs {
             .iter()
             .map(|record| record.runtime_endpoint().to_owned())
             .collect::<BTreeSet<_>>();
-        let reports = futures::future::join_all(endpoints.into_iter().map(|endpoint| async {
+        let reports = futures_util::future::join_all(endpoints.into_iter().map(|endpoint| async {
             let jobs = HttpTrainingBackend::request(endpoint.clone(), |worker| worker.jobs())
                 .await
                 .map(|jobs| {

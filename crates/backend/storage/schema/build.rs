@@ -12,7 +12,7 @@ impl<'a> SchemaVersionGenerator<'a> {
         Self { schema_directory }
     }
 
-    pub(crate) fn generate(&self, visibility: &str) {
+    pub(crate) fn generate(&self) {
         let descriptor_path = self.schema_directory.join("version.json");
         let changelog_path = self.schema_directory.join("CHANGELOG.md");
         println!("cargo:rerun-if-changed={}", descriptor_path.display());
@@ -38,7 +38,7 @@ impl<'a> SchemaVersionGenerator<'a> {
             "/// Schema version written into every completed episode row.\n\
              ///\n\
              /// Generated from `crates/backend/storage/schema/version.json`.\n\
-             {visibility} const SCHEMA_VERSION: u32 = {current};\n"
+             pub const SCHEMA_VERSION: u32 = {current};\n"
         );
         let output = PathBuf::from(std::env::var("OUT_DIR").expect("Cargo supplies OUT_DIR"));
         fs::write(output.join("storage_schema_version.rs"), generated)

@@ -36,14 +36,13 @@ impl<'a> TransferPersistence<'a> {
         ProjectBundle
             .export(
                 &mut connection,
-                ProjectBundleExport::new(self.project_store.table_prefix(), self.studio, datasets),
+                ProjectBundleExport::new(self.studio, datasets),
             )
             .await
     }
 
     pub async fn import_project(&self, bytes: &[u8]) -> Result<ProjectImportSummary, String> {
-        let source =
-            ProjectBundleImport::new(self.project_store.table_prefix(), self.studio, bytes)?;
+        let source = ProjectBundleImport::new(self.studio, bytes)?;
         for name in source.dataset_names() {
             self.project_store.validate_mcap_destination(name).await?;
         }

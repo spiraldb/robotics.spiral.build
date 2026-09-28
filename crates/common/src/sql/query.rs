@@ -11,11 +11,11 @@ const MAX_QUERY_BYTES: usize = 64 * 1024;
 /// Product context in which a read-only query will run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadOnlyQueryMode {
-    /// Interactive data preview, where explaining a query is useful and safe.
+    /// Interactive data preview.
     Preview,
-    /// Training input selection, which must directly produce rows.
+    /// Training input selection.
     Training,
-    /// A published curation view, which must directly produce rows.
+    /// A published curation view.
     Curation,
 }
 
@@ -86,24 +86,10 @@ impl<'a> ReadOnlyQuery<'a> {
         }
 
         let first = tokens.first().map(String::as_str).unwrap_or_default();
-        let allowed = match self.mode {
-            ReadOnlyQueryMode::Preview => matches!(first, "SELECT" | "WITH" | "EXPLAIN"),
-            ReadOnlyQueryMode::Training | ReadOnlyQueryMode::Curation => {
-                matches!(first, "SELECT" | "WITH")
-            }
-        };
-        if !allowed {
-            return Err(QueryPolicyError::new(match self.mode {
-                ReadOnlyQueryMode::Preview => {
-                    "Spiral preview accepts SELECT, WITH, or EXPLAIN queries only"
-                }
-                ReadOnlyQueryMode::Training => {
-                    "Training SQL must be a read-only SELECT or WITH query"
-                }
-                ReadOnlyQueryMode::Curation => {
-                    "Curation SQL must be a read-only SELECT or WITH query"
-                }
-            }));
+        if !matches!(first, "SELECT" | "WITH") {
+            return Err(QueryPolicyError::new(format!(
+                "{label} must be a read-only SELECT or WITH query"
+            )));
         }
 
         const MUTATING_KEYWORDS: &[&str] = &[
@@ -293,10 +279,12 @@ mod tests {
                 .to_string(),
             "Curation SQL must be a read-only SELECT or WITH query"
         );
-        assert!(
+        assert_eq!(
             ReadOnlyQuery::new("EXPLAIN SELECT 1", ReadOnlyQueryMode::Preview)
                 .authorize()
-                .is_ok()
+                .unwrap_err()
+                .to_string(),
+            "Spiral preview must be a read-only SELECT or WITH query"
         );
         assert_eq!(
             ReadOnlyQuery::new("EXPLAIN SELECT 1", ReadOnlyQueryMode::Training)

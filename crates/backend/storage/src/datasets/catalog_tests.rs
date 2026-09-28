@@ -11,39 +11,6 @@ use tokio::{net::TcpListener, task::JoinHandle};
 
 use crate::{AdbcDatabase, ProjectStore, SpiralConnectionSettings};
 
-#[test]
-fn control_tables_are_excluded_without_hiding_data_plane_relations() {
-    let settings = crate::SpiralConnectionSettings::new(
-        "http://localhost:1".into(),
-        "http://localhost:2".into(),
-    )
-    .unwrap();
-    let connection =
-        crate::SpiralConnection::new(settings, crate::SpiralAccess::fixed("token".into()));
-    let store = ProjectStore::new(
-        connection.clone(),
-        "bench".into(),
-        Arc::new(AdbcDatabase::new(connection)),
-    )
-    .unwrap();
-    for (path, hidden) in [
-        (vec!["bench_robots"], true),
-        (vec!["bench_settings"], true),
-        (vec!["dataset_source"], false),
-        (vec!["dataset_source_default"], false),
-        (vec!["bench_training_checkpoints"], false),
-        (vec!["bench_experiment"], false),
-        (vec!["user", "bench_robots"], false),
-    ] {
-        assert_eq!(
-            store.is_studio_control_relation(
-                &path.into_iter().map(str::to_owned).collect::<Vec<_>>()
-            ),
-            hidden
-        );
-    }
-}
-
 #[derive(Default)]
 struct CatalogState {
     reads: usize,
@@ -104,7 +71,7 @@ impl CatalogServer {
             .unwrap();
         let connection = crate::SpiralConnection::new(settings, access);
         let database = Arc::new(AdbcDatabase::new(connection.clone()));
-        ProjectStore::new(connection, "studio".into(), database).unwrap()
+        ProjectStore::new(connection, database).unwrap()
     }
 }
 

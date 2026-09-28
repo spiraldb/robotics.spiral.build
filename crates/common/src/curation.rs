@@ -28,15 +28,19 @@ const MAX_NAME_LEN: usize = 200;
 pub struct CurationSummary {
     id: String,
     name: String,
-    revision: u64,
 }
 impl CurationSummary {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, revision: u64) -> Self {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
-            revision,
         }
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -94,7 +98,7 @@ impl CurationDocument {
     }
     #[cfg(any(test, feature = "test-support"))]
     pub fn summary(&self) -> CurationSummary {
-        CurationSummary::new(&self.id, &self.name, self.revision)
+        CurationSummary::new(&self.id, &self.name)
     }
     /// Identity and size rules both sides enforce before storing or sending.
     pub fn validate(&self) -> Result<(), String> {
@@ -235,7 +239,7 @@ mod tests {
         assert_eq!(document.revision(), 0);
         assert_eq!(
             document.summary(),
-            CurationSummary::new("curation-1", "Cloth folding", 0)
+            CurationSummary::new("curation-1", "Cloth folding")
         );
         assert!(CurationDocument::new("", "n", 1, "{}").validate().is_err());
         assert!(

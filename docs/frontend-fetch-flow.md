@@ -50,11 +50,11 @@ Data, Curation, and Training do not poll hardware telemetry.
 
 ## Drafts and background work
 
-Workflow owns its entire draft and Assistant loop locally. It fetches documents
-by ID and submits a complete graph once when starting a run. Save acknowledges
-the submitted document's saved version while preserving subsequent local edits.
-Only execution records are polled; graph drafts and conversations are never
-reconciled from backend editor snapshots. Settings similarly distinguishes fetched values from its draft.
+Curation owns its graph draft locally. It fetches documents by ID and submits
+the complete graph on an explicit Save, which acknowledges the saved revision
+while preserving subsequent local edits. Only preview runs are polled; the
+draft is never reconciled from a backend snapshot. Settings similarly
+distinguishes fetched values from its draft.
 
 Robot setup joins saved robot documents and native hardware observations locally.
 Port identification compares two ordinary scans in the browser. Port/camera edits
@@ -68,10 +68,9 @@ Training reads the run catalog and fetches bounded details by ID; selected tabs
 never appear in backend requests. Rollout observes and stops executions by ID.
 Configuration drafts remain independent of submitted jobs. Recording charts
 use cursor-based pages and a bounded retained sample window. Backend jobs and
-recovery own their lifetime independently of the browser activity.
-`ProjectContext::execute` runs robot, recording, training, rollout, and
-workflow-save commands to completion, retaining their project even when the
-HTTP caller disconnects.
+recovery own their lifetime independently of the browser activity. Every
+command runs to completion in its own backend task, retaining its project even
+when the HTTP caller disconnects.
 
-There is no frontend event inbox or event reducer. Camera/media transfers and
-the request-scoped model completion stream retain their own transport behavior.
+There is no frontend event inbox or event reducer. Camera transfers keep their
+own transport behavior.

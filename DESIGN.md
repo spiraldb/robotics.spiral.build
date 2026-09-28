@@ -27,8 +27,6 @@ colors:
   selected: "#eef5cf"
   info: "#5971fd"
   info-ink: "#3a4ec4"
-  info-wash: "#edf0ff"
-  info-line: "#d8defe"
   danger: "#c4302b"
   danger-soft: "#fbeaea"
   danger-line: "#f1cfcd"
@@ -40,7 +38,6 @@ colors:
   good-soft: "#f2f8d6"
   kind-dataset: "#1fa3bb"
   kind-episode: "#5971fd"
-  kind-stream: "#7a5ad6"
   kind-camera: "#e0752f"
   stage-source: "#5971fd"
   stage-media: "#e0752f"
@@ -341,8 +338,7 @@ hairlines for structure, mono for every measurement, and one lime mark that
 says "you are here". Paper panels sit on a warm off-white canvas; rails and
 tab bars take a half-step sidebar tone so a place reads as a place without
 becoming a grey slab. Camera pixels alone keep a dark mat for honest
-letterboxing. It replaced a washed-out grey workbench with blue selection, a
-left activity rail, and a bottom status bar; none of those return.
+letterboxing.
 
 The Studio has five activities, reached from one 44px top bar and the keys
 1–5 in this order: **Data** (catalog, episodes, import; the home route),
@@ -350,7 +346,8 @@ The Studio has five activities, reached from one 44px top bar and the keys
 episodes, ending in the parts worth training on),
 **Training** (configuring and observing policy runs), **Rollout** (staging a
 trained checkpoint against the configured follower), and **Live** (operating
-hardware and recording). Everything else is a panel in a session-owned
+hardware and recording). Training and Rollout are parked until Spiral decodes
+MCAP video into training images. Everything else is a panel in a session-owned
 tab-and-tile workspace (`dioxus-workbench`) that docks, tabs, splits, and
 resizes with pointer and keyboard. The layout is powerful; the chrome stays
 quiet.
@@ -430,7 +427,7 @@ line colour.
 ### Tertiary
 
 - **Kind hues** (`{colors.kind-dataset}`, `{colors.kind-episode}`,
-  `{colors.kind-stream}`, `{colors.kind-camera}`): The outline and letter of a
+  `{colors.kind-camera}`): The outline and letter of a
   kind mark, and the camera glyph in stream lists. Identity, not state.
 - **Stage kinds** (`{colors.stage-source}` … `{colors.stage-output}`): What a
   graph node does to the data. Each paints only the stage's outlined
@@ -484,7 +481,7 @@ show all three at once without ambiguity.
 
 **The Wash-Plus-Line Rule.** A semantic state is its ink colour on its soft
 wash behind its own line colour (`caution` / `caution-soft` /
-`caution-line`, and the same for danger, accent, info). A state never borrows
+`caution-line`, and the same for danger and accent). A state never borrows
 another state's line or uses a neutral hairline with a coloured wash.
 
 **The One-Spelling Rule.** Colours are spelled once, as role-named `--tone-*`
@@ -592,11 +589,11 @@ of MCAP files and each file is one episode. The canonical layout at
 ┌────────────────────── 44px top bar ─────────────────────────────────────┐
 ├── 21% ────┬── Overview │ E episode × │ E episode × ─────────────────────┤
 │ Datasets  │ D dataset / Episode …id   0:39.9 · 2025-04-14      J K step │
-│ Filter [/]│ camera · top │ camera · left-wrist │ camera · right-wrist   │
-│ Import    ├───────────────────────────────────────────────────────────────┤
-│ D name  40│ Plots — lanes on the Timeline's time axis                    │
-│  episodes │───────────────────────────────────────────────────────────────┤
-│  …        │ Timeline — transport, ruler, one row per stream              │
+│ Filter [/]│ camera · top │ camera · left-wrist │ camera · right │ Scene │ │
+│ Import    │              │                     │                │ Plots │ │
+│ D name  40├───────────────────────────────────────────────────────────────┤
+│  episodes │ Timeline — transport, ruler, one row per stream              │
+│  …        │                                                              │
 └───────────┴───────────────────────────────────────────────────────────────┘
 ```
 
@@ -632,20 +629,21 @@ of MCAP files and each file is one episode. The canonical layout at
   subject is a subtask or stretch. Below it, the shared episode inspection.
 
 The inspection arranges itself for the room its surface gives it
-(`activities/episode/arrangement.rs`), so it reads the same everywhere. Three
-bands share one clock, top to bottom: the views (cameras, the leading one
-first, then the Scene), Plots, and the Timeline. The views take only the
-height their pictures can use, in the grid that leaves the smallest picture
-largest and spends the least on camera mat; the leading camera takes a
-column of its own only where that makes its picture the larger. No view is
-drawn in a tile smaller than 256×200 px: views that do not fit join the last
-tile as tabs. Plots and the Timeline span the same width and give their names
-the same column, so one vertical line through both is one instant. A room too
-short for a Plots band (under 200 px after the Timeline's 30%) sends Plots to
-the last view tile as a tab, never behind the Timeline; asking to plot a
-stream brings it forward. Shares move in 2% steps, so a small resize keeps the
-operator's arrangement; a different arrangement is a new layout scope. The
-inspection keeps at least 30rem of height and its surface scrolls below that.
+(`activities/episode/arrangement.rs`), so it reads the same everywhere. Two
+bands share one clock: the recording above and the Timeline below, which
+keeps at least 30% of the height (more when a surface brings rows of its
+own). The recording's band holds the cameras, the leading one first, and
+beside them one tile of the robot's Scene with Plots as the tab behind it;
+asking to plot a stream brings Plots forward. The cameras take the width
+their pictures can use at the band's height, in the grid that leaves the
+smallest picture largest and spends the least on camera mat, and the Scene
+takes the rest. No camera is drawn narrower than 160 px: cameras that do not
+fit join the last camera's tile as tabs, and a room too narrow for a 280 px
+column beside them sends the Scene and Plots there too. Shares move in 2%
+steps, so a small resize keeps the operator's arrangement; a different
+arrangement is a new layout scope, and each dataset remembers the one the
+operator made. The inspection keeps at least 30rem of height and its surface
+scrolls below that.
 A camera panel's tab carries the camera glyph and the part of its stream name
 that differs from the episode's other cameras ("top", "left-wrist"), so the
 name survives a crowded tab strip; the leading camera is the one a surface
@@ -710,11 +708,11 @@ status line. Robot setup lives in Settings → Robots.
 
 ### Curation
 
-Curation is a graph beside the selected node's workspace. Under the shared
-document bar, the `curation-graph-v1` layout scope opens as two tiles: a 23%
-Graph of 190px stage cards on the dotted bench (Dataset, then the
-measurements and Selects it feeds, joined by edges that carry populations),
-beside the node's Workspace. A card says what the node holds, or while it
+Curation is a graph beside the selected node's workspace. The
+`curation-graph-v2` layout scope opens as two tiles: a 27% Graph, headed by
+the shared document bar, of 192px stage cards on the dotted bench (Dataset,
+then the measurements and Selects it feeds, joined by edges that carry
+populations), beside the node's Workspace. A card says what the node holds, or while it
 runs what it is doing; every output (Score progress, Find similar, Group
 similar, Select) wears the Output flag (Published once it is a catalog view,
 Out of date in caution once the saved curation has moved past it), and Score
@@ -815,9 +813,7 @@ Every node's workspace has the same anatomy, top to bottom:
   The canvas draws an edit in the frame it happens.
 - **A graph without a dataset** asks for one as Data's home offers them:
   "Choose a dataset", one sentence, and the datasets ledger
-  (`DatasetLedger`), a row pressed to choose it. The switcher's "From
-  dataset" keeps the compact field, since a popover has no room for a
-  ledger; both read the same catalog.
+  (`DatasetLedger`), a row pressed to choose it.
 - **Keys:** J and K step the episode tab in front through the node's index,
   as they step Data's episodes, and `/` goes to the index's filter.
 - **Saving:** the chip says "Saved" only for a graph Studio has stored;
@@ -948,11 +944,11 @@ VisualizationSource
 │   └── stable stream identity + current frame/state
 └── Recorded
     ├── episode identity + requested episode time
-    └── Loading | Ready | Unavailable | Failed
+    └── Loading | Ready | Failed
 ```
 
-`Loading`, `Unavailable`, and `Failed` are real recorded-source states. They
-are not aliases for Live. When a recorded sample or clip is missing, the
+`Loading` and `Failed` are real recorded-source states. They are not aliases
+for Live. When a recorded sample or clip is missing, the
 panel shows that recorded-source state and never substitutes current live
 telemetry or a live camera frame.
 
@@ -1004,7 +1000,7 @@ Plots, and the Timeline itself.
 ### Required Interaction Flows
 
 **Open an episode:** `Catalog rail → open(episode) → Data selection → episode
-tab in front + inspection (cameras, Plots, Timeline) on one clock`. J/K moves
+tab in front + inspection (cameras, Scene, Plots, Timeline) on one clock`. J/K moves
 the front tab to the neighbour; Esc brings the dataset forward in Overview.
 
 **Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity
@@ -1241,7 +1237,7 @@ parent.
 ### Inputs / Fields
 
 - **Components:** `TextInput` (a `TextInputKind` picks text, search,
-  password, number, decimal, integer) and `Select`, wrapped by `Field` when a
+  password, or number) and `Select`, wrapped by `Field` when a
   label names them; `FieldLayout::Inline` puts the label beside the control.
 - **Style:** 26px minimum, paper, 13px ink, 6px radius, one hairline, 8px
   padding; hover firms the hairline to line-strong. Numeric kinds are 12px
@@ -1274,7 +1270,7 @@ parent.
   chevron after it that opens the 320px switcher popover (saved documents,
   each row ending in a trash that shows on hover or focus and asks Keep /
   Delete in the row itself, saying the graph and every view it publishes go
-  with it, then New and From dataset),
+  with it, then New),
   then at right the state chip
   (Saved · good dot, Unsaved changes · caution, Changed in another session ·
   danger), Discard while dirty, and outlined Save. A longer state grows
@@ -1384,7 +1380,7 @@ row, and the playing span's words in the timeline's readout.
 - **Settings:** Replaces the activity workspace while the top bar stays: a
   sidebar-toned section nav (5px rows; the current section is solid lime,
   ink at 560) beside ordinary forms. Robots is the default, then SpiralDB,
-  Training, and Video. Restore alone uses the blocking dialog.
+  Training, Video, and Keys. Restore alone uses the blocking dialog.
 
 **The Fixed-Follower Rule.** Rollout never asks the operator to choose a
 motion target. It commands only the configured follower, and backend
@@ -1401,8 +1397,8 @@ ease-out. Entrances: popovers 180–220ms, dialogs 200–220ms,
 subject panels 260ms with a 4px rise, toast 320ms, stage cards 320ms. Lists
 deal in with short staggers (tree rows 12ms, dataset rows 40ms, tiles 12ms,
 stage cards 45ms) and the length histogram rises over 520ms, 9ms per bar.
-Rearrangements (FLIP slides) and Find similar's flight arrive on the same
-curve (`crates/ui/src/foundation/motion.rs`). A measurement's primer plays
+A slide to a new place and Find similar's flight arrive on the same curve
+(`crates/ui/src/foundation/motion.rs`). A measurement's primer plays
 its drawing once, about 2.5s, and rests on its last frame. Only work in
 progress loops: the 900ms pulse on run and tool dots, the
 reconnecting dot's 1.2s pulse, the spinner, and the 1.4s loading shimmer.

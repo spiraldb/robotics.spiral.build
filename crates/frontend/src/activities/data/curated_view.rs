@@ -366,13 +366,7 @@ pub(super) fn CuratedViewSubject(
                     "Its curation has changed since it was published. Publish it again from Curation to bring the view up to date."
                 }
             }
-            if view.is_bounded() {
-                CuratedRows { view, on_open }
-            } else {
-                Notice { class: "data-curated-notice", tone: NoticeTone::Caution,
-                    "Published before views were bounded, so reading it would ask its models about every episode of the dataset. Publish it again from Curation to inspect it here."
-                }
-            }
+            CuratedRows { view, on_open }
         }
     }
 }
@@ -548,7 +542,7 @@ mod tests {
             "listed_message_start_time",
             "listed_duration_ns",
         ]
-        .map(|name| QueryColumn::new(name, "Utf8", true))
+        .map(QueryColumn::new)
         .to_vec();
         let rows = rows
             .into_iter()

@@ -5,6 +5,7 @@ mod datasets;
 mod db;
 pub mod episodes;
 mod manager;
+mod provider_keys;
 mod settings;
 mod spiral_access;
 mod studio;
@@ -21,9 +22,7 @@ pub mod bundle {
 pub mod checkpoints {
     //! Training checkpoints the worker commits to Spiral.
 
-    pub use crate::training::{
-        CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore,
-    };
+    pub use crate::training::{CheckpointArtifact, CheckpointKey};
 }
 
 pub mod training_runs {
@@ -38,23 +37,19 @@ pub mod ingestion {
     pub use crate::transfer::HuggingFaceDatasetDiscovery;
 }
 
-pub mod video {
-    //! Persisted video values shared by camera capture and episode storage.
-
-    pub use crate::episodes::video::*;
-}
-
 // Keep the cross-crate storage boundary flat and explicit. The modules behind
 // these exports describe implementation mechanisms, not product features.
-pub use db::{AdbcDatabase, ModelCredentials, SpiralSql};
+pub use db::AdbcDatabase;
+pub(crate) use db::ProjectConnection;
+pub use db::ProjectStore;
 pub use db::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
     DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,
-    RecordBatchStream, RelationKind, RelationMetadata, RelationName, SqlStatement,
+    RecordBatchStream, RelationName, SqlStatement,
 };
-pub use db::{ProjectConnection, ProjectStore};
-pub use db::{SCHEMA_VERSION, StorageSchema};
+pub use db::{SCHEMA_VERSION, STUDIO_TABLE_PREFIX};
 pub use manager::StorageManager;
+pub use provider_keys::{ProviderKeyring, ProviderKeys};
 pub use settings::{
     BackendStateStore, SavedConnection, ServiceEndpoint, SpiralConnectionSettings,
     StoredStudioPreferences, StoredTrainingRuntimePreference, StoredVideoPreference,

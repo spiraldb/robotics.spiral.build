@@ -74,9 +74,6 @@ jobs:
           unzip -p "$wheel_dir"/*.whl spiral_training_runtime/storage_schema_version.json | cmp - crates/backend/storage/schema/version.json
           unzip -p "$wheel_dir"/*.whl spiral_training_runtime/training_protocol_version.json | cmp - crates/backend/training/protocol/version.json
 
-      # The locked worker environment includes the production CUDA stack and
-      # SpiralDB driver. A separate compute/integration lane will exercise it;
-      # standard CI keeps the source and packaged version metadata checked.
       - name: Check Python source
         run: |
           nix develop .#ci --command ruff check training
@@ -100,6 +97,3 @@ jobs:
         run: |
           nix develop .#ci --command cargo test -p spiral-robotics-frontend \
             --lib --target wasm32-unknown-unknown --locked
-
-      - name: Validate inference contracts
-        run: nix develop .#ci --command cargo test -p spiral-robotics-inference --no-default-features

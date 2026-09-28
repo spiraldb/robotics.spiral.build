@@ -1,19 +1,17 @@
 //! The views saved curations publish, as another activity lists and
 //! unpublishes them: each one's catalog name, the curation and output it
-//! comes from, the dataset its rows belong to, and whether it is bounded to
-//! the episodes its Selects keep first.
+//! comes from, and the dataset its rows belong to.
 //!
 //! The catalog holds a view as a bare statement, which names neither its
 //! curation nor the dataset its episodes are in; the curation that published
 //! it records both.
 use super::annotate::SubtaskRow;
+use super::client::CurationClient;
 use super::document::CurationGraph;
 use super::graph::PublishedViews;
 use super::score_progress::{Moment, ProgressRate};
 use super::state::CurationDraft as _;
-use crate::client::documents::DocumentClient;
 use crate::client::queries::{QueryDomain, QueryRefresh};
-use crate::components::document_session::StudioDocument;
 use futures_util::future::try_join_all;
 use spiral_robotics_common::curation::CurationDocument;
 use spiral_robotics_common::datasets::DatasetSelection;
@@ -26,7 +24,6 @@ pub(crate) struct CuratedView {
     curation: String,
     output: &'static str,
     dataset: DatasetSelection,
-    bounded: bool,
     current: bool,
 }
 
@@ -35,7 +32,7 @@ impl CuratedView {
     /// curation saved in an encoding this Studio no longer opens is left out:
     /// it names no dataset this Studio can read.
     pub(crate) async fn all() -> Result<Vec<Self>, String> {
-        let documents = DocumentClient::<CurationDocument>::current(CurationDocument::COLLECTION);
+        let documents = CurationClient::current();
         let summaries = documents.list().await.map_err(|error| error.to_string())?;
         let stored = try_join_all(summaries.iter().map(|summary| documents.load(summary.id())))
             .await
@@ -54,7 +51,7 @@ impl CuratedView {
     /// takes the change when the catalog is read again.
     pub(crate) async fn unpublish(&self) -> Result<(), String> {
         PublishedViews::drop_view(self.view.clone()).await?;
-        let documents = DocumentClient::<CurationDocument>::current(CurationDocument::COLLECTION);
+        let documents = CurationClient::current();
         let stored = documents
             .load(&self.curation_id)
             .await
@@ -91,7 +88,6 @@ impl CuratedView {
                 curation: document.name().to_owned(),
                 output: node.kind().label(),
                 dataset: dataset.clone(),
-                bounded: published.episodes().is_some(),
                 current: published.is_current(document.revision()),
             })
             .collect()
@@ -112,11 +108,6 @@ impl CuratedView {
     /// The dataset its episodes belong to.
     pub(crate) fn dataset(&self) -> &DatasetSelection {
         &self.dataset
-    }
-    /// Whether it reads only the first episodes its Selects keep; one
-    /// published before views were bounded reads every one.
-    pub(crate) fn is_bounded(&self) -> bool {
-        self.bounded
     }
     /// Whether it is still what its curation's saved recipe compiles to.
     pub(crate) fn is_current(&self) -> bool {

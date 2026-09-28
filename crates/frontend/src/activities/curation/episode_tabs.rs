@@ -5,7 +5,10 @@
 //! episode in a tab of its own, or brings its tab forward and plays the row's
 //! stretch in it. Several can stay open to be compared side by side, since
 //! the tabs are an ordinary workbench: they dock, split, and close.
-use crate::activities::episode::{Episode, PlayRequest};
+use super::document::EpisodeFact;
+use crate::activities::episode::{
+    Episode, EpisodeHeading, EpisodeInspection, FeaturedCamera, HeadingSubject, PlayRequest,
+};
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace};
 use spiral_robotics_common::datasets::EpisodeId;
@@ -196,6 +199,26 @@ impl OpenEpisodes {
                 .map(|tab| OpenEpisode::panel(&tab.episode))
                 .or_else(|| Some(PanelId::new(LEADING_PANEL)));
             self.front.set(next);
+        }
+    }
+}
+
+/// One episode's tab when the episode is open whole: its name and length
+/// over its recording.
+#[component]
+pub(super) fn WholeEpisodeTab(
+    episode: Episode,
+    featured_camera: FeaturedCamera,
+    focus: Option<PlayRequest>,
+) -> Element {
+    let facts = EpisodeFact::DurationSeconds
+        .reading(&episode)
+        .into_iter()
+        .collect();
+    rsx! {
+        EpisodeHeading { subject: HeadingSubject::episode(&episode).with_facts(facts) }
+        div { class: "curation-review-player",
+            EpisodeInspection { episode, featured_camera, focus }
         }
     }
 }

@@ -22,26 +22,16 @@
   --ui-primary-hover: var(--tone-primary-hover, #2b2b2a);
   --ui-primary-ink: var(--tone-primary-ink, #ffffff);
   --ui-accent: var(--tone-accent, #cee562);
-  --ui-accent-strong: var(--tone-accent-strong, #a3bc2a);
   --ui-accent-wash: var(--tone-accent-wash, #f2f8d6);
   --ui-accent-line: var(--tone-accent-line, #d6e595);
   --ui-accent-ink: var(--tone-accent-ink, #4a5610);
   --ui-selected: var(--tone-selected, #eef5cf);
   --ui-focus: var(--tone-focus, #5971fd);
-  --ui-info: var(--tone-info, #5971fd);
-  --ui-info-ink: var(--tone-info-ink, #3a4ec4);
-  --ui-info-wash: var(--tone-info-wash, #edf0ff);
-  --ui-info-line: var(--tone-info-line, #d8defe);
-  /* Text set on the camera mat: status and errors inside a recorded camera. */
-  --ui-camera-ink: rgb(255 255 255 / 0.72);
   --ui-danger: var(--tone-danger, #c4302b);
   --ui-danger-soft: var(--tone-danger-soft, #fbeaea);
   --ui-danger-line: var(--tone-danger-line, #f1cfcd);
   --ui-caution: var(--tone-caution, #a64b13);
   --ui-caution-soft: var(--tone-caution-soft, #fff1e8);
-  --ui-caution-line: var(--tone-caution-line, #f6d6c2);
-  --ui-good: var(--tone-good, #5b7400);
-  --ui-good-soft: var(--tone-good-soft, #f2f8d6);
   --ui-focus-halo: color-mix(in srgb, var(--ui-focus) 18%, transparent);
   --ui-font-mono: var(--font-mono, "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace);
   /* Entrances and settle-ins; the host's one easing when it names one. */
@@ -631,11 +621,6 @@
   border: 0;
 }
 
-.ui-icon--grip {
-  fill: currentColor;
-  stroke: none;
-}
-
 /* Fields ------------------------------------------------------------------
    A field is a label and its control as one hit target. Stacked, the label
    sits above; inline, it holds a fixed column so a run of one-line settings
@@ -1176,56 +1161,6 @@
     opacity: 0;
     translate: 0 -3px;
   }
-}
-
-/* Reorder -----------------------------------------------------------------
-   The list holds the insertion line; the handle is the only thing that
-   grabs. Items move by the inline transform the gesture writes. */
-.ui-reorder-list {
-  position: relative;
-}
-
-.ui-reorder-marker {
-  position: absolute;
-  z-index: 4;
-  right: 12px;
-  left: 12px;
-  display: none;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--ui-accent-strong);
-  pointer-events: none;
-}
-
-.ui-reorder-handle {
-  display: inline-flex;
-  width: var(--ui-target-compact);
-  height: var(--ui-target-compact);
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--ui-radius);
-  padding: 0;
-  color: var(--ui-ink-faint);
-  background: transparent;
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-}
-
-.ui-reorder-handle:hover,
-.ui-reorder-handle[aria-pressed="true"] {
-  color: var(--ui-ink);
-  background: var(--ui-hover);
-}
-
-.ui-reorder-handle[aria-pressed="true"] {
-  cursor: grabbing;
-}
-
-.ui-reorder-handle:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 1px;
 }
 
 @media (prefers-reduced-motion: reduce) {

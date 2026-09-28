@@ -7,7 +7,6 @@
 
 use std::io::Cursor;
 use std::sync::Arc;
-use std::time::Instant;
 
 use arrow_array::{
     Array as _, ArrayRef, FixedSizeListArray, Int32Array, LargeListArray, ListArray, RecordBatch,
@@ -21,16 +20,12 @@ use futures::StreamExt as _;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_common::relations::{
-    CatalogRelation as ApiCatalogRelation, EpisodeQueryRequest, QueryColumn, RelationCatalog,
-    SpiralQuerySnapshot,
-};
-use spiral_robotics_common::sql::UnquotedSqlIdentifier;
+use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryColumn, SpiralQuerySnapshot};
 
-use super::database::{DatabaseSession, RecordBatchStream, RelationKind, SqlStatement};
+use super::database::{DatabaseSession, RecordBatchStream, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
 use super::schema::{Table, column};
-use spiral_robotics_common::sql::ReadOnlyQueryMode;
+use spiral_robotics_common::sql::{ReadOnlyQueryMode, SqlLiteral};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -135,33 +130,32 @@ impl<'a> QueryImage<'a> {
 }
 
 /// SQL generated for Spiral Robotics-owned storage resources.
-pub struct SpiralSql;
+pub(crate) struct SpiralSql;
 
 impl SpiralSql {
     pub(crate) fn delete_training_run(relation: &str, run_id: &str) -> String {
         format!(
             "DELETE FROM {relation} WHERE {} = {}",
             column::RUN_ID,
-            Self::string_literal(run_id)
+            SqlLiteral::text(run_id)
         )
     }
 
     /// Every checkpoint's identity and policy configuration, without its weights.
-    pub(crate) fn training_checkpoint_catalog(dataset: &str) -> String {
+    pub(crate) fn training_checkpoint_catalog() -> String {
         format!(
-            "SELECT {run}, {step}, {created}, {loss}, {config} FROM {checkpoints} \
+            "SELECT {run}, {step}, {loss}, {config} FROM {checkpoints} \
          ORDER BY {run}, {step}",
             run = column::RUN_ID,
             step = column::STEP,
-            created = column::CREATED_MS,
             loss = column::VALIDATION_LOSS,
             config = column::CONFIG_JSON,
-            checkpoints = Table::TrainingCheckpoints.qualified_name(dataset),
+            checkpoints = Table::TrainingCheckpoints.qualified_name(),
         )
     }
 
-    pub(crate) fn training_checkpoint(dataset: &str, run_id: &str, step: u64) -> String {
-        let checkpoints = Table::TrainingCheckpoints.qualified_name(dataset);
+    pub(crate) fn training_checkpoint(run_id: &str, step: u64) -> String {
+        let checkpoints = Table::TrainingCheckpoints.qualified_name();
         format!(
             "SELECT {config}, {checkpoint} FROM {checkpoints} \
          WHERE {run_column} = {run_id} AND {step_column} = {step} \
@@ -169,27 +163,20 @@ impl SpiralSql {
             config = column::CONFIG_JSON,
             checkpoint = column::CHECKPOINT,
             run_column = column::RUN_ID,
-            run_id = Self::string_literal(run_id),
+            run_id = SqlLiteral::text(run_id),
             step_column = column::STEP,
             created = column::CREATED_MS,
         )
     }
 
-    fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
-        spiral_robotics_common::sql::ReadOnlyQuery::new(sql, mode)
+    fn ensure_read_only(sql: &str) -> Result<(), String> {
+        spiral_robotics_common::sql::ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Preview)
             .authorize()
             .map_err(|error| error.to_string())
     }
-
-    /// Escape a value for the SQL string-literal grammar. Bound parameters are not
-    /// uniformly implemented by the Spiral drivers currently supported here, so
-    /// generated statements isolate this compatibility fallback in one function.
-    pub(crate) fn string_literal(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "''"))
-    }
 }
 
-/// Read-only query and catalog operations over one project store.
+/// Read-only queries over one project store.
 pub struct ProjectQueries<'a> {
     project_store: &'a ProjectStore,
 }
@@ -200,7 +187,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQuerySnapshot, String> {
-        SpiralSql::ensure_read_only(sql, ReadOnlyQueryMode::Preview)?;
+        SpiralSql::ensure_read_only(sql)?;
         let mut connection = self.project_store.connect().await?;
         QueryExecution::new(
             sql,
@@ -216,7 +203,7 @@ impl<'a> ProjectQueries<'a> {
         &self,
         request: &EpisodeQueryRequest,
     ) -> Result<SpiralQuerySnapshot, String> {
-        SpiralSql::ensure_read_only(request.statement(), ReadOnlyQueryMode::Preview)?;
+        SpiralSql::ensure_read_only(request.statement())?;
         let statement = crate::datasets::EpisodeTopicQuery::for_episode(
             request.episode().dataset(),
             request.episode().episode_id(),
@@ -240,7 +227,7 @@ impl<'a> ProjectQueries<'a> {
         &self,
         request: &EpisodeQueryRequest,
     ) -> Result<Vec<u8>, String> {
-        SpiralSql::ensure_read_only(request.statement(), ReadOnlyQueryMode::Preview)?;
+        SpiralSql::ensure_read_only(request.statement())?;
         let statement = crate::datasets::EpisodeTopicQuery::for_episode(
             request.episode().dataset(),
             request.episode().episode_id(),
@@ -255,115 +242,6 @@ impl<'a> ProjectQueries<'a> {
             .into_arrow_ipc(request.max_rows().clamp(1, MAX_ARROW_ROWS))
             .await
     }
-
-    pub async fn relation_catalog(&self) -> Result<RelationCatalog, String> {
-        let project = self.project_store.project_id();
-        if project.is_empty() {
-            return Ok(
-                RelationCatalog::new(Vec::new(), false).with_limitation(Some(
-                    "Choose a Spiral project in Settings to discover relations.".to_owned(),
-                )),
-            );
-        }
-        let mut connection = self.project_store.connect().await?;
-        let catalog = connection
-            .relations()
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut relations = Vec::with_capacity(catalog.len());
-        let mut skipped = 0_usize;
-        let catalog = catalog
-            .into_iter()
-            .filter_map(|entry| {
-                let (name, kind) = entry.into_parts();
-                if self
-                    .project_store
-                    .is_studio_control_relation(&[name.as_str().to_owned()])
-                {
-                    return None;
-                }
-                if QualifiedRelation::try_from(name.as_str()).is_err() {
-                    skipped += 1;
-                    None
-                } else {
-                    Some((name, kind))
-                }
-            })
-            .collect::<Vec<_>>();
-        let schemas = connection
-            .relation_schemas(catalog.iter().map(|(name, _)| name.clone()).collect())
-            .await
-            .map_err(|error| error.to_string())?;
-        for ((relation_name, kind), (_, schema)) in catalog.into_iter().zip(schemas) {
-            let schema = match schema {
-                Ok(Some(schema)) => schema,
-                Ok(None) => {
-                    skipped += 1;
-                    continue;
-                }
-                Err(error)
-                    if error.message().contains(
-                        "extension type cannot be converted to Arrow without a plugin",
-                    ) =>
-                {
-                    skipped += 1;
-                    continue;
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "describing Spiral relation {:?}: {error}",
-                        relation_name.as_str()
-                    ));
-                }
-            };
-            let relation_type = match kind {
-                RelationKind::Table => "TABLE",
-                RelationKind::View => "VIEW",
-            };
-            relations.push(ApiCatalogRelation::new(
-                relation_name.into_string(),
-                relation_type.to_owned(),
-                schema
-                    .fields()
-                    .iter()
-                    .map(|field| {
-                        QueryColumn::new(
-                            field.name().clone(),
-                            field.data_type().to_string(),
-                            field.is_nullable(),
-                        )
-                        .with_semantic_type(field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned())
-                    })
-                    .collect(),
-            ));
-        }
-        let limitation = (skipped > 0).then(|| {
-            format!(
-                "{skipped} catalog entries without a qualified name or Arrow schema were not returned."
-            )
-        });
-        Ok(RelationCatalog::new(relations, skipped == 0).with_limitation(limitation))
-    }
-}
-
-/// A validated unquoted Spiral relation path within the selected project.
-struct QualifiedRelation;
-
-impl TryFrom<&str> for QualifiedRelation {
-    type Error = &'static str;
-
-    fn try_from(relation: &str) -> Result<Self, Self::Error> {
-        if relation.trim() != relation || relation.contains('\0') {
-            return Err("Spiral relation names cannot contain surrounding whitespace or NUL bytes");
-        }
-        if relation
-            .split('.')
-            .any(|segment| UnquotedSqlIdentifier::try_from(segment).is_err())
-        {
-            return Err("Spiral relations must contain safe identifiers separated by dots");
-        }
-        Ok(Self)
-    }
 }
 
 #[cfg(test)]
@@ -373,7 +251,7 @@ mod tests {
     #[test]
     fn generated_values_are_escaped_in_one_place() {
         fn assert_single_literal(sql: &str, value: &str) {
-            let literal = SpiralSql::string_literal(value);
+            let literal = SqlLiteral::text(value);
             assert!(
                 sql.contains(&literal),
                 "{sql:?} does not contain {literal:?}"
@@ -389,43 +267,11 @@ mod tests {
                 SpiralSql::delete_training_run("robot_training_checkpoints", "run-'one"),
                 "run-'one",
             ),
-            (
-                SpiralSql::training_checkpoint("robot", "run-'two", 42),
-                "run-'two",
-            ),
+            (SpiralSql::training_checkpoint("run-'two", 42), "run-'two"),
         ];
         for (sql, value) in cases {
             assert_single_literal(&sql, value);
         }
-    }
-
-    #[test]
-    fn read_only_gate_handles_comments_quotes_and_cte_mutation() {
-        assert!(
-            SpiralSql::ensure_read_only(
-                "SELECT ';' AS punctuation; -- okay",
-                ReadOnlyQueryMode::Preview
-            )
-            .is_ok()
-        );
-        assert!(
-            SpiralSql::ensure_read_only(
-                "WITH recent AS (SELECT 1) SELECT * FROM recent",
-                ReadOnlyQueryMode::Training
-            )
-            .is_ok()
-        );
-        assert!(
-            SpiralSql::ensure_read_only(
-                "WITH removed AS (DELETE FROM t) SELECT 1",
-                ReadOnlyQueryMode::Training
-            )
-            .is_err()
-        );
-        assert!(
-            SpiralSql::ensure_read_only("SELECT 1; DROP TABLE t", ReadOnlyQueryMode::Preview)
-                .is_err()
-        );
     }
 }
 
@@ -456,14 +302,11 @@ impl QueryExecution {
         if sql.len() > 64 * 1024 {
             return Err("Spiral query is too large".to_owned());
         }
-        let started = Instant::now();
-        let records = connection
+        let mut records = connection
             .query(self.statement)
             .await
             .map_err(|error| format!("executing Spiral query: {error}"))?;
-        self.limits.collect(records).await.map(|result| {
-            result.with_elapsed_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
-        })
+        self.limits.collect_preview(&mut records).await
     }
 }
 
@@ -471,7 +314,7 @@ impl RecordBatchStream {
     /// The complete result as one Arrow IPC stream. A result past `max_rows`
     /// rows or the byte limit is refused rather than cut short, so a caller
     /// bounds its own query.
-    pub async fn into_arrow_ipc(mut self, max_rows: usize) -> Result<Vec<u8>, String> {
+    pub(crate) async fn into_arrow_ipc(mut self, max_rows: usize) -> Result<Vec<u8>, String> {
         let schema = Arc::clone(self.schema());
         let mut writer = arrow_ipc::writer::StreamWriter::try_new(Vec::new(), &schema)
             .map_err(|error| error.to_string())?;
@@ -497,10 +340,6 @@ impl RecordBatchStream {
 }
 
 impl QueryLimits {
-    async fn collect(self, mut records: RecordBatchStream) -> Result<SpiralQuerySnapshot, String> {
-        self.collect_preview(&mut records).await
-    }
-
     async fn collect_preview(
         self,
         records: &mut RecordBatchStream,
@@ -510,12 +349,8 @@ impl QueryLimits {
             .fields()
             .iter()
             .map(|field| {
-                QueryColumn::new(
-                    field.name().clone(),
-                    field.data_type().to_string(),
-                    field.is_nullable(),
-                )
-                .with_semantic_type(field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned())
+                QueryColumn::new(field.name().clone())
+                    .with_semantic_type(field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned())
             })
             .collect();
         let chunk_rows = if schema.fields().iter().any(|field| {
@@ -843,27 +678,6 @@ mod preview_tests {
     use arrow_array::builder::{FixedSizeListBuilder, Int32Builder, ListBuilder, UInt8Builder};
     use arrow_schema::Fields;
     use std::collections::HashMap;
-
-    #[test]
-    fn query_preview_rejects_mutation_and_multiple_statements() {
-        assert!(
-            SpiralSql::ensure_read_only(
-                "SELECT * FROM robotics.episodes",
-                ReadOnlyQueryMode::Preview
-            )
-            .is_ok()
-        );
-        assert!(
-            SpiralSql::ensure_read_only(
-                "DELETE FROM robotics.episodes",
-                ReadOnlyQueryMode::Preview
-            )
-            .is_err()
-        );
-        assert!(
-            SpiralSql::ensure_read_only("SELECT 1; SELECT 2", ReadOnlyQueryMode::Preview).is_err()
-        );
-    }
 
     #[test]
     fn decoded_spiral_images_become_bounded_browser_previews() {

@@ -8,6 +8,7 @@ use crate::{
 };
 use futures::StreamExt as _;
 use spiral_robotics_common::datasets::{DatasetTopic, EpisodeSelection};
+use spiral_robotics_common::sql::SqlLiteral;
 
 impl StorageManager {
     pub async fn episode_topics(
@@ -112,9 +113,9 @@ impl EpisodeTopicQuery {
             episode.episode_id(),
             format!(
                 "SELECT c.topic, c.schema_name, c.message_count \
-                 FROM (SELECT source FROM spql.mcap.episodes('{}') WHERE id = $1) AS e \
+                 FROM (SELECT source FROM spql.mcap.episodes({}) WHERE id = $1) AS e \
                  LEFT JOIN LATERAL spql.mcap.channels(e.source) AS c ON TRUE",
-                episode.dataset().sql_name().replace('\'', "''"),
+                SqlLiteral::text(&episode.dataset().sql_name()),
             ),
         )
     }

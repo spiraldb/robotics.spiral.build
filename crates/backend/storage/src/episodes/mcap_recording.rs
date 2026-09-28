@@ -1,12 +1,6 @@
 //! One self-contained MCAP recording: joint messages, metadata, and H.264 access units.
 use super::capture::FullEpisode;
-use super::episode_schema::{
-    JointSampleRows as _, SpiralEpisodeEncoder, StoredEpisodeRow, VideoStreamProperties,
-    VideoStreamRow, VideoStreamRows as _,
-};
-use super::mcap_schema::McapSchema;
-use crate::db::ArrowColumns;
-use arrow_array::RecordBatch;
+use super::mcap_schema::{McapMessage, RecordingSchema};
 use base64::Engine as _;
 use mcap::records::MessageHeader;
 use prost::Message as _;
@@ -99,6 +93,23 @@ impl CameraRecording {
     pub fn encoded_bytes(&self) -> usize {
         self.frames.iter().map(|frame| frame.data.len()).sum()
     }
+
+    /// The camera's video `Stream` message. Each is written alone, so every
+    /// camera stream carries ordinal 0.
+    fn stream_message(&self, episode_id: &str, schema: &RecordingSchema) -> McapMessage {
+        let (width, height, fps) = self.dimensions;
+        let mut message = schema.message("Stream", format!("/studio/streams/{}", self.stream));
+        message
+            .set("episode_id", Value::String(episode_id.to_owned()))
+            .set("stream_id", Value::String(self.stream.clone()))
+            .set("ordinal", Value::U32(0))
+            .set("modality", Value::String("video".to_owned()))
+            .set("camera_id", Value::String(self.camera_id.clone()))
+            .set("width", Value::U32(width))
+            .set("height", Value::U32(height))
+            .set("fps", Value::U32(fps));
+        message
+    }
 }
 
 pub(crate) struct McapRecording {
@@ -118,95 +129,57 @@ impl McapRecording {
             writer: mcap::Writer::new(Cursor::new(Vec::new())).map_err(|e| e.to_string())?,
             origin_ns,
         };
-        let row = StoredEpisodeRow::new(
-            episode.start().clone(),
-            episode.completion().clone(),
-            episode.samples().len() as u64,
-        );
-        recording.rows(
-            "Episode",
-            &StoredEpisodeRow::batch(&[row]).map_err(|e| e.to_string())?,
-        )?;
-        recording.rows(
-            "Stream",
+        let schema = RecordingSchema::load()?;
+        let start = episode.start();
+        recording.write(
             &episode
-                .start()
-                .streams_batch(episode.completion())
+                .episode_message(&schema)
                 .map_err(|e| e.to_string())?,
         )?;
-        let mut encoder =
-            SpiralEpisodeEncoder::new(episode.start().clone()).map_err(|e| e.to_string())?;
-        let mut rows = Vec::new();
-        for sample in episode.samples() {
-            rows.extend(encoder.encode(sample).map_err(|e| e.to_string())?);
-            if rows.len() >= 512 {
-                recording.rows("JointSample", &rows.batch().map_err(|e| e.to_string())?)?;
-                rows.clear();
-            }
+        for message in start.joint_stream_messages(episode.completion(), &schema) {
+            recording.write(&message)?;
         }
-        if !rows.is_empty() {
-            recording.rows("JointSample", &rows.batch().map_err(|e| e.to_string())?)?;
+        for (index, sample) in (0_u64..).zip(episode.samples()) {
+            for message in start
+                .joint_sample_messages(sample, index, &schema)
+                .map_err(|e| e.to_string())?
+            {
+                recording.write(&message)?;
+            }
         }
         let mut streams = std::collections::BTreeSet::new();
         for camera in cameras {
             if streams.insert(camera.stream.clone()) {
-                let row = VideoStreamRow::new(
-                    episode.start().id().into(),
-                    camera.stream.clone(),
-                    VideoStreamProperties::new(
-                        camera.camera_id.clone(),
-                        super::video::VideoSize::new(camera.dimensions.0, camera.dimensions.1),
-                        camera.dimensions.2,
-                    ),
-                );
-                recording.rows("Stream", &[row].batch().map_err(|e| e.to_string())?)?;
+                recording.write(&camera.stream_message(start.id(), &schema))?;
             }
             recording.camera(camera)?;
         }
         recording.writer.finish().map_err(|e| e.to_string())?;
         Ok(recording.writer.into_inner().into_inner())
     }
-    fn rows(&mut self, name: &str, batch: &RecordBatch) -> Result<(), String> {
-        let schema = McapSchema::recording(name)?;
+
+    fn write(&mut self, message: &McapMessage) -> Result<(), String> {
         let schema_id = self
             .writer
-            .add_schema(schema.name(), "protobuf", schema.bytes())
+            .add_schema(&message.schema_name(), "protobuf", RecordingSchema::BYTES)
             .map_err(|e| e.to_string())?;
-        let columns = ArrowColumns::new(batch, "MCAP recording");
-        for row in 0..batch.num_rows() {
-            let (topic, elapsed_ns, sequence) = match name {
-                "Episode" => ("/studio/episode".to_owned(), 0, 0),
-                "Stream" => (
-                    format!("/studio/streams/{}", columns.text("stream_id", row)?),
-                    0,
-                    columns.unsigned("ordinal", row)?,
-                ),
-                "JointSample" => (
-                    format!("/studio/joints/{}", columns.text("stream_id", row)?),
-                    columns.unsigned("episode_time_ns", row)?,
-                    columns.unsigned("sample_index", row)?,
-                ),
-                _ => return Err("Unknown recording message".into()),
-            };
-            let channel_id = self
-                .writer
-                .add_channel(schema_id, &topic, "protobuf", &BTreeMap::new())
-                .map_err(|e| e.to_string())?;
-            let timestamp = self
-                .origin_ns
-                .checked_add(elapsed_ns)
-                .ok_or("Recording timestamp overflow")?;
-            let header = MessageHeader {
-                channel_id,
-                sequence: u32::try_from(sequence).map_err(|_| "Recording sequence overflow")?,
-                log_time: timestamp,
-                publish_time: timestamp,
-            };
-            self.writer
-                .write_to_known_channel(&header, &schema.encode(batch, row)?)
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        let channel_id = self
+            .writer
+            .add_channel(schema_id, message.topic(), "protobuf", &BTreeMap::new())
+            .map_err(|e| e.to_string())?;
+        let timestamp = self
+            .origin_ns
+            .checked_add(message.elapsed_ns())
+            .ok_or("Recording timestamp overflow")?;
+        let header = MessageHeader {
+            channel_id,
+            sequence: message.sequence(),
+            log_time: timestamp,
+            publish_time: timestamp,
+        };
+        self.writer
+            .write_to_known_channel(&header, &message.encode())
+            .map_err(|e| e.to_string())
     }
     fn camera(&mut self, camera: &CameraRecording) -> Result<(), String> {
         let schema = include_bytes!("schemas/compressed-video.bin");

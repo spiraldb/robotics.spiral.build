@@ -81,35 +81,14 @@ impl AnnotationEpisode {
     pub(super) fn id(&self) -> &EpisodeId {
         self.0.id()
     }
-    /// Seconds from the first recorded message to the last.
-    #[cfg(test)]
-    fn duration(&self) -> f64 {
-        self.0.facts().duration_seconds().unwrap_or_default()
-    }
     pub(super) fn episode(&self) -> &Episode {
         &self.0
-    }
-
-    /// The fixture episode `ordinal`, of a fixed length, for tests that only
-    /// need its identity and duration.
-    #[cfg(test)]
-    fn fixture(ordinal: u32, duration_ns: u64) -> Self {
-        Self::new(Episode::fixture(&EpisodeId::fixture(ordinal), duration_ns))
-            .expect("a fixture has a recorded span")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_episode_takes_its_identity_and_length_from_the_recorded_bounds() {
-        let episode = AnnotationEpisode::fixture(1, 20_500_000_000);
-        assert_eq!(episode.id(), &EpisodeId::fixture(1));
-        assert!((episode.duration() - 20.5).abs() < 1e-9);
-        assert_eq!(episode.episode().name(), "Episode …00000001");
-    }
 
     #[test]
     fn an_episode_without_a_recorded_range_is_not_annotated() {

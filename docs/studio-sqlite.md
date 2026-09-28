@@ -2,14 +2,13 @@
 
 The backend owns two persistence boundaries:
 
-- **SQLite / SeaORM:** connection settings, robot documents and calibration,
-  project preferences, saved workflows and conversations, saved curation
-  recipes, explorations, and a record of each training run Studio started (its
-  configuration and worker endpoint).
-- **Spiral / ADBC:** datasets, recordings, MCAP payloads, query outputs and
-  feature-cache values, and model checkpoint artifacts. The training worker
-  publishes checkpoints directly to Spiral and owns each run's metrics and
-  logs.
+- **SQLite / SeaORM:** connection settings and provider keys, robot documents
+  and calibration, project preferences, each dataset's robot model, joint roles
+  and check report, saved curation recipes, and a record of each training run
+  Studio started (its configuration and worker endpoint).
+- **Spiral / ADBC:** datasets and their MCAP sources, published curation
+  views, and model checkpoint artifacts. The training worker publishes
+  checkpoints directly to Spiral and owns each run's metrics and logs.
 
 ## Location and lifetime
 
@@ -24,11 +23,7 @@ this override when deploying the executable outside its source checkout, and
 keep that directory on a persistent volume in a container. Backend reloads
 and rebuilds in the same checkout retain the database.
 
-`SPIRAL_ROBOTICS_BACKEND_STATE` selects the legacy JSON settings file to import;
-it does not change the SQLite destination. That JSON file is only read when
-the SQLite connection-settings row is absent.
-Subsequent starts use SQLite, including saved credentials. New database files
-use mode 0600 and new parent directories use mode 0700 on Unix.
+New database files use mode 0600 and new parent directories use mode 0700 on Unix.
 
 One database contains all local projects. A project's key is its normalized
 Spiral API endpoint plus project ID. Credentials and session IDs are excluded.
@@ -45,54 +40,72 @@ stopped backend's database can be copied after its connections have closed.
 
 SeaORM entities live in `crates/backend/storage/src/studio`. Product-facing
 methods stay with their feature; callers do not receive ORM models. Robot and
-workflow edits use conditional writes to preserve conflict detection. Training
-history is stored per run, with storage-owned versioned JSON for its nested
-configuration, metrics, checkpoint references, and logs. Non-finite metrics have
-an explicit JSON encoding, so diverged losses survive a restart.
+curation edits use conditional writes to preserve conflict detection. A
+training run is stored as its ID beside the JSON of what Studio asked its
+worker to do.
 
-An exploration is stored as its own row: identity, name, revision, the
-frontend's encoding version, and the payload as opaque TEXT. Storage never
-parses that payload, so a change to the exploration's schema needs no migration.
-Saves are conditional on the revision the document was loaded at.
+A curation is stored as its own row: identity, name, revision, the frontend's
+encoding version, and the payload as opaque TEXT. Storage never parses that
+payload, so a change to the curation's schema needs no migration. Saves are
+conditional on the revision the document was loaded at.
 
-Checked-in migration scripts live in `studio/migrations`. Add a new, uniquely
-named migration and register it in `Migrator`; do not edit an applied migration.
-Startup applies pending migrations **before accepting HTTP requests**. The
-migration operations and SeaORM migration journal share a SQLite transaction;
-a failure aborts startup. Schema downgrades require restoring a backup.
+Checked-in migration scripts live in `studio/migrations`, starting from one
+baseline that creates the whole schema. Add a new, uniquely named migration and
+register it in `Migrator`; do not edit an applied migration. Startup applies
+pending migrations **before accepting HTTP requests**. The migration operations
+and SeaORM migration journal share a SQLite transaction; a failure aborts
+startup. Schema downgrades require restoring a backup.
+
+The baseline, `m20260928_000001_studio`, replaced every earlier migration, so a
+database created before it cannot be upgraded. Startup then stops with
+`error: Studio database <path>: … Migration file of version '<old name>' is
+missing …`, one line per old migration: delete `.studio/studio.sqlite3` (and its
+`-wal` and `-shm` files) and start again. There is nothing to export first, because bundles
+exported before it cannot be imported.
 
 The SQLite migration sequence is independent of
 `crates/backend/storage/schema/version.json`. That version remains the Spiral
 data/artifact contract used by the training worker. Project bundles have their
 own format version.
 
-## Retired Spiral control tables
+## Leftover Spiral control tables
 
-Control records have moved to SQLite. Runtime reads never fall back to Spiral,
-and the one-time migration command has been removed. Original control tables
-may remain in Spiral as a safety copy; the backend filters their exact configured
-names out of catalog responses. `dataset_source`, its views, model artifacts,
-and user-created tables remain visible as data. The Data tree has no
-Studio-internals section.
+Studio keeps no control records in Spiral. A project older than the move to
+SQLite may still hold the retired `studio_robots`, `studio_settings`,
+`studio_training_runs`, `studio_training_run_metrics`,
+`studio_training_run_checkpoints`, `studio_rollout_runs`, `studio_workflows`,
+and `studio_feature_registry` tables, which the Data catalog lists like any
+other table. Drop them in Spiral; nothing reads them.
+`studio_training_checkpoints` is live: it holds the model artifacts.
 
 ## Project transfer
 
-Version **3** `.spiral-project` bundles are ZIP archives containing exactly:
+Version **4** `.spiral-project` bundles are ZIP archives containing:
 
 - `studio.sqlite3`: a native SQLite snapshot of the selected project's Studio
   records. SQLite's `VACUUM INTO` captures committed state, including WAL data.
   The export removes backend settings, credentials, and other projects, then
   vacuums again to remove their deleted bytes. Project keys are neutralized so
   the snapshot can be restored into another project.
-- `spiral.data`: a versioned manifest and Arrow streams containing MCAP source
-  files and training checkpoint artifacts. Arrow is used only for data-plane
-  payloads; Studio records have no Arrow backup schemas.
+- `manifest.json`: `{"format":"spiral-robotics-project","format_version":4,
+  "schema_version":<Spiral schema>,"mcap_datasets":[…]}`; unknown fields are
+  refused.
+- `dataset_source.arrows`: one Arrow IPC stream of `dataset_source`
+  (`dataset_name`, `recording`, and `payload`, the MCAP bytes).
+- `training_checkpoints.arrows`: one Arrow IPC stream of
+  `studio_training_checkpoints`.
 
-Older bundle formats are unsupported. SQLite snapshots must match the current
-managed schema. Imports open snapshots read-only, validate their integrity and
-records, and insert records through local ORM entities. They never execute
-uploaded schema or migration scripts. The archive and its total uncompressed
-contents are limited to 256 MiB; Arrow decoding has additional allocation bounds.
+A relation absent from Spiral is exported as an empty stream with its canonical
+schema. Arrow is used only for data-plane payloads; Studio records have no Arrow
+backup schemas. Import requires exactly these four entries. A ZIP without
+`manifest.json`, which includes every version-3 bundle, fails with "Not a
+format 4 project; project files from older Studio versions cannot be imported";
+any other `format_version` or Spiral schema version is refused. SQLite
+snapshots must match the current managed schema. Imports open snapshots
+read-only, validate their integrity and records, and insert records through
+local ORM entities. They never execute uploaded schema or migration scripts.
+The archive and its total uncompressed contents are limited to 256 MiB; Arrow
+decoding has additional allocation bounds.
 
 Import validates the bundle and stages local replacements, including constraint
 checks, in a SQLite transaction before mutating Spiral. Spiral's data transaction
@@ -106,7 +119,7 @@ cache of the replaced data survives.
 ## Availability and verification
 
 Studio features are independent of a chosen or reachable Spiral project.
-Robot setup, preferences, saved workflows, and history load locally. Data queries,
+Robot setup, preferences, curations, and training run records load locally. Data queries,
 recording publication, training data access, and artifact reads still require
 Spiral and report their own connection errors. Restart recovery never resumes
 interrupted robot motion.

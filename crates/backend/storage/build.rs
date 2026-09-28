@@ -9,5 +9,5 @@ fn main() {
             .join("schema")
             .as_path(),
     )
-    .generate("pub");
+    .generate();
 }

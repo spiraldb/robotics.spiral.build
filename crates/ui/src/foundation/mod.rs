@@ -11,11 +11,11 @@ mod styles;
 pub use focus::BrowserFocus;
 pub(crate) use focus::{RovingGroup, RovingStep};
 pub use icons::{
-    CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon, GripIcon, PauseIcon, PlayIcon,
+    CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon, PauseIcon, PlayIcon,
     RefreshIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon,
-    StopIcon, UnassignIcon, ZoomInIcon, ZoomOutIcon,
+    UnassignIcon, ZoomInIcon, ZoomOutIcon,
 };
-pub use motion::{Arrangement, Flight, Motion, Place};
+pub use motion::{Flight, Motion, Place};
 pub use remount::Remount;
 pub use styles::UiStyles;
 pub(crate) use styles::{AttributeClass, ClassNames};

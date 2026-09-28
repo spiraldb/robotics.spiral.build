@@ -1,6 +1,6 @@
-//! Native WebCodecs bindings, one-shot keyframe-interval decoding for Live
-//! review, and playhead-following playback for Data. Kept in Rust so decode
-//! cancellation and frame disposal follow component lifetime.
+//! Native WebCodecs bindings and playhead-following playback for every
+//! recorded camera. Kept in Rust so decode cancellation and frame disposal
+//! follow component lifetime.
 use base64::Engine as _;
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
 use spiral_robotics_common::datasets::EpisodeVideo;
@@ -183,7 +183,7 @@ impl EncodedCamera {
         self.first_frame_after(seconds).unwrap_or(seconds)
     }
 
-    pub(crate) fn group_at(&self, seconds: f64) -> Option<Range<usize>> {
+    fn group_at(&self, seconds: f64) -> Option<Range<usize>> {
         let timestamp = (seconds * 1e6).round() as i64;
         let index = self
             .packets
@@ -224,11 +224,11 @@ const FRAME_WAIT_ROUNDS: usize = 60;
 /// memory at once, so the camera says so rather than crashing the tab.
 const DECODED_INTERVAL_LIMIT: u64 = 128 * 1024 * 1024;
 
-/// Follows the shared playhead through one camera's packets: forward
+/// Follows a playhead through one camera's packets: forward
 /// playback decodes each frame once, a jump restarts from the preceding
 /// keyframe, and only frames near the playhead stay in memory. That is what
 /// lets every camera of an episode stay visible at once.
-pub(super) struct CameraPlayback {
+pub(crate) struct CameraPlayback {
     camera: Rc<EncodedCamera>,
     output: Rc<RefCell<DecoderOutput>>,
     session: Option<DecoderSession>,
@@ -238,7 +238,7 @@ pub(super) struct CameraPlayback {
 }
 
 impl CameraPlayback {
-    pub(super) fn new(camera: Rc<EncodedCamera>) -> Self {
+    pub(crate) fn new(camera: Rc<EncodedCamera>) -> Self {
         Self {
             camera,
             output: Rc::new(RefCell::new(DecoderOutput::default())),
@@ -294,7 +294,7 @@ impl CameraPlayback {
     }
 
     /// Decode up to the frame for `seconds`, releasing frames well behind it.
-    pub(super) async fn prepare(&mut self, seconds: f64) -> Result<(), String> {
+    pub(crate) async fn prepare(&mut self, seconds: f64) -> Result<(), String> {
         let Some((range, target_index)) = self.target(seconds) else {
             self.session = None;
             self.output.borrow_mut().clear();
@@ -341,7 +341,7 @@ impl CameraPlayback {
     }
 
     /// Paint the latest retained frame at or before `seconds`; `false` clears.
-    pub(super) fn draw(
+    pub(crate) fn draw(
         &self,
         canvas: &web_sys::HtmlCanvasElement,
         seconds: f64,
@@ -354,67 +354,9 @@ impl CameraPlayback {
             .rev()
             .find(|frame| frame.0.timestamp() <= timestamp)
         {
-            Some(frame) => DecodedGroup::paint(canvas, &frame.0).map(|()| true),
-            None => DecodedGroup::clear(canvas).map(|()| false),
+            Some(frame) => Self::paint(canvas, &frame.0).map(|()| true),
+            None => Self::clear(canvas).map(|()| false),
         }
-    }
-}
-
-pub(crate) struct DecodedGroup {
-    frames: Vec<DecodedFrame>,
-}
-impl DecodedGroup {
-    pub(crate) async fn decode(
-        camera: &EncodedCamera,
-        range: Range<usize>,
-    ) -> Result<Self, String> {
-        let output = Rc::new(RefCell::new(DecoderOutput::default()));
-        let session = DecoderSession::new(output.clone()).map_err(DecoderSession::error)?;
-        let config = Object::new();
-        Reflect::set(&config, &"codec".into(), &camera.codec.clone().into())
-            .map_err(DecoderSession::error)?;
-        Reflect::set(&config, &"optimizeForLatency".into(), &true.into())
-            .map_err(DecoderSession::error)?;
-        session
-            .decoder
-            .configure(&config)
-            .map_err(DecoderSession::error)?;
-        for packet in &camera.packets[range] {
-            session.push(packet).map_err(DecoderSession::error)?;
-            while session.decoder.queue_size() > 8 {
-                gloo_timers::future::TimeoutFuture::new(1).await;
-                output.borrow().check()?;
-            }
-        }
-        wasm_bindgen_futures::JsFuture::from(
-            session.decoder.flush().map_err(DecoderSession::error)?,
-        )
-        .await
-        .map_err(DecoderSession::error)?;
-        output.borrow().check()?;
-        let mut frames = std::mem::take(&mut output.borrow_mut().frames);
-        frames.sort_by(|left, right| left.0.timestamp().total_cmp(&right.0.timestamp()));
-        if frames.is_empty() {
-            return Err("The camera decoder returned no frames".into());
-        }
-        Ok(Self { frames })
-    }
-
-    pub(crate) fn draw(
-        &self,
-        canvas: &web_sys::HtmlCanvasElement,
-        seconds: f64,
-    ) -> Result<(), String> {
-        let timestamp = (seconds * 1e6).round();
-        let Some(frame) = self
-            .frames
-            .iter()
-            .rev()
-            .find(|frame| frame.0.timestamp() <= timestamp)
-        else {
-            return Self::clear(canvas);
-        };
-        Self::paint(canvas, &frame.0)
     }
 
     fn paint(canvas: &web_sys::HtmlCanvasElement, frame: &VideoFrame) -> Result<(), String> {
@@ -429,7 +371,7 @@ impl DecodedGroup {
             .map_err(DecoderSession::error)
     }
 
-    pub(crate) fn clear(canvas: &web_sys::HtmlCanvasElement) -> Result<(), String> {
+    fn clear(canvas: &web_sys::HtmlCanvasElement) -> Result<(), String> {
         Self::context(canvas)?.clear_rect(0.0, 0.0, canvas.width().into(), canvas.height().into());
         Ok(())
     }
@@ -611,19 +553,23 @@ mod tests {
             .filter_map(|(index, bytes)| (bytes == [0, 0, 0, 1, 9]).then_some(index))
             .collect::<Vec<_>>();
         offsets.push(bytes.len());
-        let packets = offsets
-            .windows(2)
-            .enumerate()
-            .map(|(index, range)| CameraPacket {
-                microseconds: index as i64 * 33_333,
-                bytes: bytes[range[0]..range[1]].to_vec(),
-                keyframe: index % 4 == 0,
+        assert_eq!(offsets.len(), 9);
+        // The same eight access units, seekable at every fourth one or only
+        // from the first, which decodes them in one run.
+        let camera = |keyframe_every: usize| {
+            let packets = offsets
+                .windows(2)
+                .enumerate()
+                .map(|(index, range)| CameraPacket {
+                    microseconds: index as i64 * 33_333,
+                    bytes: bytes[range[0]..range[1]].to_vec(),
+                    keyframe: index % keyframe_every == 0,
+                })
+                .collect();
+            Rc::new(EncodedCamera {
+                codec: "avc1.42c00a".into(),
+                packets,
             })
-            .collect::<Vec<_>>();
-        assert_eq!(packets.len(), 8);
-        let camera = EncodedCamera {
-            codec: "avc1.42c00a".into(),
-            packets,
         };
         let canvas = web_sys::window()
             .unwrap()
@@ -632,22 +578,21 @@ mod tests {
             .create_element("canvas")
             .unwrap()
             .unchecked_into::<web_sys::HtmlCanvasElement>();
-        let continuous = DecodedGroup::decode(&camera, 0..8).await.unwrap();
-        continuous.draw(&canvas, 0.2).unwrap();
-        let expected = DecodedGroup::context(&canvas)
-            .unwrap()
-            .get_image_data(0.0, 0.0, 32.0, 32.0)
-            .unwrap()
-            .data();
-        let seek = DecodedGroup::decode(&camera, 4..8).await.unwrap();
-        seek.draw(&canvas, 0.2).unwrap();
-        let actual = DecodedGroup::context(&canvas)
-            .unwrap()
-            .get_image_data(0.0, 0.0, 32.0, 32.0)
-            .unwrap()
-            .data();
-        assert_eq!(actual, expected);
-        assert!(actual.iter().any(|value| *value > 0));
+        let mut pixels = Vec::new();
+        for keyframe_every in [8, 4] {
+            let mut playback = CameraPlayback::new(camera(keyframe_every));
+            playback.prepare(0.2).await.unwrap();
+            assert!(playback.draw(&canvas, 0.2).unwrap());
+            pixels.push(
+                CameraPlayback::context(&canvas)
+                    .unwrap()
+                    .get_image_data(0.0, 0.0, 32.0, 32.0)
+                    .unwrap()
+                    .data(),
+            );
+        }
+        assert_eq!(pixels[0], pixels[1]);
+        assert!(pixels[1].iter().any(|value| *value > 0));
         assert_eq!(canvas.width(), 32);
     }
 

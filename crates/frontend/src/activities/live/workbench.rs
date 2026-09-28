@@ -12,7 +12,7 @@ use spiral_robotics_ui::{
 
 use crate::activities::live::actions::LiveAction;
 use crate::activities::live::control::JointPanel;
-use crate::components::dataset_picker::DatasetCatalog;
+use crate::components::dataset_catalog::DatasetCatalog;
 use crate::robots::Selection;
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;

@@ -25,19 +25,9 @@ impl StudioProjectState {
     pub(super) const fn notifications(self) -> Signal<NotificationCenterState> {
         self.notifications
     }
-    pub(crate) fn run_safety<F>(&self, success: impl Into<String>, future: F)
-    where
-        F: Future<Output = Result<(), String>> + 'static,
-    {
-        self.run_inner(success, future);
-    }
-    pub(crate) fn run_utility<F>(&self, success: impl Into<String>, future: F)
-    where
-        F: Future<Output = Result<(), String>> + 'static,
-    {
-        self.run_inner(success, future);
-    }
-    fn run_inner<F>(self, success: impl Into<String>, future: F)
+    /// Run a command on the project and report its outcome, `success` when
+    /// it succeeds.
+    pub(crate) fn run_reported<F>(self, success: impl Into<String>, future: F)
     where
         F: Future<Output = Result<(), String>> + 'static,
     {
@@ -83,8 +73,12 @@ impl StudioProjectState {
             source,
         ));
     }
-    pub(crate) fn report_info_from(&self, source: MessageSource, message: impl Into<String>) {
-        self.notify(MessageNotice::new(message, MessageSeverity::Info, source));
+    pub(crate) fn report_live_info(&self, message: impl Into<String>) {
+        self.notify(MessageNotice::new(
+            message,
+            MessageSeverity::Info,
+            MessageSource::Live,
+        ));
     }
     fn notify(&self, notice: MessageNotice) {
         let mut notifications = self.notifications;

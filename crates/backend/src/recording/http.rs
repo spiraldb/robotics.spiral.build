@@ -14,7 +14,7 @@ use crate::projects::context::StudioContext;
 
 use axum::{
     Json, Router,
-    routing::{delete, get, post},
+    routing::{get, post},
 };
 
 pub(crate) struct RecordingEndpoints;
@@ -33,7 +33,6 @@ impl RecordingEndpoints {
                 post(Self::start_recording).patch(Self::set_recording_paused),
             )
             .route("/recording/stop", post(Self::stop_recording))
-            .route("/recording/takes/{id}", delete(Self::delete_episode))
     }
     async fn fetch_recording_signals(
         Project(project): Project,
@@ -70,13 +69,6 @@ impl RecordingEndpoints {
     ) -> Result<Json<()>, OperationError> {
         let (paused,) = request.into_parts();
         TakeOperations::new(&project).set_paused(paused).await?;
-        Ok(Json(()))
-    }
-    async fn delete_episode(
-        Project(project): Project,
-        ApiPath(id): ApiPath<String>,
-    ) -> Result<Json<()>, OperationError> {
-        EpisodeCatalog::new(&project).delete(id).await?;
         Ok(Json(()))
     }
     async fn inspect_episode(

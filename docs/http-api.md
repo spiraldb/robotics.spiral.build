@@ -12,15 +12,14 @@ schema or versioned contract.
 2. Send `X-Spiral-Endpoint: <endpoint>` and `X-Spiral-Project: <project_id>` on
    project reads and commands. Omit the project header before a project is chosen;
    Studio-only features such as robot setup still work. Studio-wide `/providers`,
-   `/proxy`, `/account` reads, `GET /settings/connection`, and
+   `/keys`, `/proxy`, `/account` reads, `GET /settings/connection`, and
    `POST /datasets/hugging-face/inspect` need neither header.
 3. The backend keeps no current project. A request may name any project on the
    saved endpoint, which the backend reaches as the signed-in user. A request
    naming another endpoint fails with `stale_project`; read the saved connection
    again.
-4. The client decides which project it works on. `PUT /settings` and
-   `PUT /settings/connection` validate and save a new project; later requests
-   name it. Work already running in another project keeps running there.
+4. The client decides which project it works on. `PUT /settings` validates and
+   saves a new project; later requests name it. Work already running in another project keeps running there.
 
 The headers name a project; they are not an authentication credential. Existing
 listener and deployment access controls still apply.
@@ -117,11 +116,11 @@ A recording start body is `{"dataset_id":"example"}`. A pause update is
 `{"paused":true}`. A recording stop body is `{"keep":true}`. All remain subject
 to backend hardware and activity validation.
 
-Training polling accepts `?selected=<run-id>` to include bounded full history for
-one run. Omit it when only the run catalog and current metrics are needed.
-The frontend builds model requests for the provider `/providers` names and sends
-them through `/proxy`, which authenticates them. It parses provider streams and
-owns retry decisions and tool execution. Disconnecting cancels the proxied request.
+`GET /training/runs` lists the runs; `GET /training/runs/{id}` adds one run's
+metrics and log tail. The frontend builds model requests for the provider
+`/providers` names and sends them through `/proxy`, which authenticates them. It
+parses provider responses and owns retry decisions and tool execution.
+Disconnecting cancels the proxied request.
 
 ## Feature notes
 
@@ -148,15 +147,23 @@ responses never include one.
 
 ### External HTTP and credentials
 
-`GET /providers` and `/proxy?url=…` (any method) are Studio-wide and work without
+`GET /providers` and `GET` or `POST /proxy?url=…` are Studio-wide and work without
 the project headers. They do not select credentials or destinations based on a project.
 
-`StudioProviders` contains an optional `llm` (`base_url`, `default_model`). Its key
+`StudioProviders` contains an optional `llm` (`base_url`). Its key
 stays on the backend.
 
-Percent-encode the upstream URL in the `url` query parameter. Use the upstream
-HTTP method, content headers, and original request body, including binary or
-multipart content. There is no JSON or metadata envelope. The relay attaches the
+`GET /keys` returns `ProviderKeysStatus`: `llm_api_key_configured` and
+`huggingface_token_configured`, never the keys. `PUT /keys` takes
+`ProviderKeysUpdate`, whose `llm_api_key` and `huggingface_token` are
+write-only: omitted or `null` keeps the saved key, a non-empty string replaces
+it, and an empty string removes it. It returns the new status. The backend keeps
+the keys in its SQLite settings; the next relayed request and the next database
+connection use them, and open projects keep running. Project exports never contain them.
+
+Percent-encode the upstream URL in the `url` query parameter. Use `GET` or
+`POST`, the upstream content headers, and the original request body, including
+binary or multipart content. There is no JSON or metadata envelope. The relay attaches the
 key Studio holds for the destination's origin: the LLM key for the configured
 provider, and the saved Hugging Face token for `https://huggingface.co`. It
 refuses requests from other sites (`Sec-Fetch-Site` other than `same-origin`, or
@@ -166,16 +173,18 @@ and manages HTTP framing and connection headers.
 The response can contain JSON, text, binary data, or a live SSE stream. Provider
 errors retain their upstream status and body; relay setup/transport failures use
 Studio's structured errors. Dropping the browser request cancels transport.
-Provider-specific request construction, stream parsing, error handling, and
+Provider-specific request construction, response parsing, error handling, and
 retries belong to frontend clients. Native dataset queries and persistence keep
 their existing project APIs.
 
 ### Training and rollout
 
+Both are parked: starting a training run fails until Spiral decodes MCAP video
+into training images, so Rollout has only existing checkpoints to run.
 Training selection and assembly of catalog/detail responses are frontend state.
 Rollout IDs are execution `session_id` values, distinct from their training `run_id`.
-Every rollout is persisted under its ID and survives a restart; one still running
-when Studio stopped reads as failed. Stop targets an exact ID.
+Rollout keeps only its current session, in memory; a restarted Studio starts idle
+and never resumes motion. Stop targets an exact ID.
 
 ### Recording sessions
 
@@ -186,23 +195,13 @@ Take IDs refer to the current recording session. Published dataset content
 uses `/datasets/episode-topics` and episode queries with explicit
 dataset/member identities; no recording-header fallback exists.
 
-### Settings
-
-`SpiralConnectionUpdate.huggingface_token` is write-only: omitted or `null` keeps
-the saved token; a non-empty string replaces it; an empty string removes it.
-Settings responses contain only `huggingface_token_configured`. The backend keeps
-the token in its local SQLite database and supplies it to the native ADBC
-database. Saving a changed token replaces the project connection through the
-normal settings lifecycle. Project exports and agent context do not contain it.
-
 ### Hugging Face import
 
 Dataset import accepts public Hugging Face repositories containing MCAP files. The
 request has `dataset_id`, `repository`, and optional `revision` (default `main`);
 imports append rows tagged with `dataset_name` to the shared root `dataset_source`
 table, create the root filtered view `dataset_source_<dataset_id>`, and derive
-`dataset_<dataset_id>` from that view in one transaction. Studio application state
-uses root `studio_*` tables.
+`dataset_<dataset_id>` from that view in one transaction.
 There is no format selector or LeRobot import. Inspection pins a revision and
 lists the dataset and source relation to create. Import uses Spiral's
 `spql.mcap.dataset` producer, refreshes its population, and checks episode count
@@ -237,9 +236,9 @@ Both answer `null`. See [curation](curation.md).
 - `POST /project/import`: raw `.spiral-project` bytes with the project header. A
   body past 256 MiB fails with 413. The browser sends its native File without
   making a project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
-- `GET /project/export?endpoint=...&project_id=...`: version 3 project bundle download, a ZIP
-  containing exactly `studio.sqlite3` (project-scoped control records, no backend
-  credentials) and `spiral.data` (MCAP sources and checkpoint artifacts).
+- `GET /project/export?endpoint=...&project_id=...`: version 4 project bundle
+  download, a ZIP of `studio.sqlite3` (project-scoped control records, no
+  backend credentials) and the project's MCAP sources and checkpoint artifacts.
   Import accepts only this version and also bounds total uncompressed contents
   to 256 MiB. See [project transfer](studio-sqlite.md#project-transfer).
 - `POST /robots/save`: `{document, expected}`. `document` is the complete portable
@@ -251,8 +250,8 @@ Both answer `null`. See [curation](curation.md).
 
 
 Existing media/download error responses can contain plain text; JSON commands,
-reads, and uploads consistently use the structured failure above. Camera/media
-streaming and proxied provider SSE are separate from browser state polling.
+reads, and uploads consistently use the structured failure above. Camera
+streaming is separate from browser state polling.
 There is no browser event stream or `/api/events` endpoint.
 
 ## Maintaining the boundary

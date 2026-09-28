@@ -9,9 +9,6 @@ publish = false
 [lints]
 workspace = true
 
-[features]
-test-support = []
-
 [dependencies]
 serde.workspace = true
 spiral-robotics-common.workspace = true

@@ -5,7 +5,7 @@
 pub struct EpisodeId(String);
 
 impl EpisodeId {
-    pub const MAX_BYTES: usize = 64;
+    const MAX_BYTES: usize = 64;
 }
 
 impl TryFrom<&str> for EpisodeId {

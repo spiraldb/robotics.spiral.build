@@ -147,10 +147,10 @@ mod tests {
                 async move {
                     match phase {
                         0 => std::future::pending().await,
-                        1 => Ok(
-                            RolloutSnapshot::new(Some("session".into()), Some("run".into()))
-                                .with_robot(Some("follower".into())),
-                        ),
+                        1 => Ok(RolloutSnapshot::new(
+                            Some("session".into()),
+                            Some("run".into()),
+                        )),
                         _ => Err(crate::client::CommandError::new(
                             spiral_robotics_common::command_failure::CommandFailureCode::Transport,
                             "unavailable",
@@ -181,8 +181,7 @@ mod tests {
         dom.in_runtime(|| phase.set(1));
         dom.render_immediate_to_vec();
         dom.render_immediate_to_vec();
-        let expected = RolloutSnapshot::new(Some("session".into()), Some("run".into()))
-            .with_robot(Some("follower".into()));
+        let expected = RolloutSnapshot::new(Some("session".into()), Some("run".into()));
         dom.in_runtime(|| {
             assert_eq!(*controller.snapshot().peek(), expected);
             assert!(controller.loaded());

@@ -4,8 +4,10 @@ Spiral Robotics is a Rust-native robotics toolkit and browser studio inspired by
 [LeRobot](https://github.com/huggingface/lerobot) and
 [Rerun](https://github.com/rerun-io/rerun). It sets up, calibrates, and operates
 SO-ARM101 arms; records synchronized robot and camera data directly in SpiralDB;
-queries that data; trains vision-conditioned ACT policies; and safely
-executes trained policies through the follower's bounded rollout path.
+queries and curates that data; trains vision-conditioned ACT policies; and
+safely executes trained policies through the follower's bounded rollout path.
+Training and Rollout are parked until Spiral decodes MCAP video into training
+images: Studio refuses to start a run, and Rollout runs existing checkpoints.
 
 Studio stores its control-plane state in persistent backend-local SQLite
 (SeaORM and versioned migrations). SpiralDB stores datasets and model artifacts.
@@ -35,7 +37,7 @@ Run CI commands with `nix develop .#ci --command <command>`.
 
 The MCAP dataset inspector currently requires the `local-driver` shell;
 the pinned release driver predates its query functions. See
-[MCAP import design](docs/mcap-import-design.md).
+[datasets and recordings](docs/datasets.md).
 
 Start the studio from the workspace root with:
 
@@ -52,8 +54,9 @@ Dioxus SSR or hydration. The frontend and backend each own their executable;
 DX builds them together using the `@client` and `@server` package selections.
 
 Agent orchestration belongs to the frontend: imported robot discovery and
-Curation's model calls own their prompts, model responses, and tool selection
-in the browser. `GET /api/providers` tells the frontend which
+Curation's category proposals own their prompts, model responses, and tool
+selection in the browser. Curation's per-row model work runs in Spiral, as the
+`spql.ai` functions its views compile to. `GET /api/providers` tells the frontend which
 model provider is configured; it constructs provider requests and interprets
 responses. `/api/proxy` relays external HTTP requests, attaches the key Studio
 holds for the destination's origin, and streams the responses back.
@@ -75,8 +78,8 @@ Keep `--debug-symbols false` on browser builds: DX enables WASM debug symbols by
 default, and the bundled Binaryen currently fails when processing that DWARF.
 The Cargo profile's `debug = 0` does not disable DX's separate bundling option.
 
-Interface primitives (buttons, fields, facts, disclosures, trees, reordering,
-notices) live in `crates/ui` as `spiral-robotics-ui`, with their stylesheet; the
+Interface primitives (buttons, fields, facts, disclosures, trees, notices)
+live in `crates/ui` as `spiral-robotics-ui`, with their stylesheet; the
 frontend composes them and owns layout. Their unit tests run natively:
 
 ```console
@@ -99,33 +102,34 @@ alongside the backend without changing the workspace target. It uses the same
 browser implementation; only WASM registers its unit tests, and the native
 Studio server does not depend on the frontend.
 
-For developer-local model calls, put the provider credential in
-the repository root's ignored `.env.local` file. Studio reads this file
-automatically when a corresponding process value is absent, so it works
-without direnv or manually exporting secrets:
+The frontend's stylesheet, `crates/frontend/assets/tailwind.css`, is generated
+and untracked. `dx` builds it; before a plain `cargo check` or `cargo test` on a
+fresh clone, build it once in the Nix shell:
 
-```dotenv
-LLM_API_KEY=your-provider-key
+```console
+tailwindcss -i crates/frontend/tailwind.css -o crates/frontend/assets/tailwind.css
 ```
 
-The key never reaches the browser: the relay attaches it to requests bound for
-the provider's origin, and Studio passes it to the Spiral driver as
-`spiral.openrouter_api_key` for the `spql.ai` model functions Curation
-compiles to. A changed key takes effect on the next database connection. Credentials belong to Studio, independently of the
-selected project; keep them out of saved curations, browser storage, and logs.
+Enter the OpenRouter API key and the Hugging Face token in **Settings → Keys**.
+The backend saves them in its SQLite database, beside the saved connection, and
+the browser only learns which ones are saved. The relay attaches each key to
+requests bound for its provider's origin, and Studio passes both to the Spiral
+driver: the OpenRouter key as `spiral.openrouter_api_key` for the `spql.ai`
+model functions Curation compiles to, and the token as
+`spiral.huggingface_token`. A saved key takes effect on the next request and
+the next database connection; open projects keep running. Keys belong to
+Studio, independently of the selected project, and project exports never
+contain them.
 
-The default is `openai/gpt-5.6-terra` through OpenRouter, with `medium` reasoning
-effort and fast mode requested using `service_tier: "priority"`. Priority
-processing costs more than standard processing; the provider determines the
-actual served tier. `LLM_MODEL` and
-`LLM_BASE_URL` remain optional developer overrides, and explicit process values
-take precedence over `.env.local`. Keep the file owner-readable only
-(`chmod 600 .env.local`). Never commit it. Production deployments should
-continue to inject the same values through their secret manager rather than a
-repository-local file.
+Robot discovery calls `openai/gpt-5.6-terra` through OpenRouter, with `medium`
+reasoning effort and fast mode requested using `service_tier: "priority"`.
+Priority processing costs more than standard processing; the provider
+determines the actual served tier. The process environment's `LLM_BASE_URL`
+remains an optional developer override of the endpoint.
 
 Start the Python policy compute runtime separately (on the same machine or a
-remote compute host). It owns PyTorch for both training and rollout inference:
+remote compute host). It owns PyTorch for rollout inference and, once training
+is unparked, for training:
 
 ```console
 cd training
@@ -145,15 +149,6 @@ Both Studio and the policy runtime refuse non-loopback listeners by default.
 Use SSH forwarding for a remote worker. `--allow-remote-access` is reserved for
 deployments placed behind an authenticated TLS proxy.
 
-To connect Studio to a local SpiralDB stack:
-
-```console
-SPIRAL__DEV=1 \
-dx serve --fullstack --debug-symbols false \
-  @client --package spiral-robotics-frontend \
-  @server --package spiral-robotics-backend
-```
-
 On first launch, Studio opens **Settings → SpiralDB**. Choose **Sign in with
 Spiral**, confirm the code on the Spiral sign-in page, then pick a project. Studio
 signs in the same way `spiraldb login` does and shares that session: if the CLI
@@ -166,17 +161,13 @@ endpoints and project in its private local SQLite database. Project-only switche
 apply immediately while Studio is idle. Service-endpoint changes also apply live
 while Studio is idle, after the old repository pool drains; signing out or
 switching organization closes the open projects.
-`--spiral-project` or `SPIRAL_PROJECT_ID` may still provide an initial project
-override.
 The SQLite file defaults to `.studio/studio.sqlite3` in this repository;
 the entire `.studio/` directory is Git-ignored.
 `SPIRAL_ROBOTICS_STUDIO_DB` overrides the SQLite file path for development
-and deployment isolation. The old `SPIRAL_ROBOTICS_BACKEND_STATE` JSON is a
-one-time upgrade source; see the storage guide above.
+and deployment isolation.
 
 Studio currently has no product simulation mode. Use `--no-cameras` only when
 camera discovery is intentionally unavailable; configured robot connections
 remain physical. Settings may switch the SpiralDB project only while robots and
-project activity are stopped. The Studio table prefix (`studio` by default,
-configured with `--studio-table-prefix`) remains fixed for the server lifetime;
-project-owned training and video preferences remain inside Spiral.
+project activity are stopped. Project preferences live in Studio's SQLite
+database.

@@ -188,9 +188,6 @@ impl MessageWindow {
         self.limit = limit;
         self
     }
-    pub fn fields(&self) -> &[Vec<String>] {
-        &self.fields
-    }
     pub fn after(&self) -> Option<&MessageCursor> {
         self.after.as_ref()
     }

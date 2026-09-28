@@ -24,7 +24,7 @@ export function installCurationFetch() {
         const body = request.method === 'GET' ? null : await request.clone().json();
         requests.push({path, method: request.method, body});
         if (path === '/api/curations') {
-            return Response.json([{id:'curation-1', name:'Cloth folding curation', revision:3}]);
+            return Response.json([{id:'curation-1', name:'Cloth folding curation'}]);
         }
         if (path === '/api/curations/save') {
             return Response.json({...body, revision: body.revision + 1});

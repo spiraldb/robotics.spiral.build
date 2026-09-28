@@ -103,6 +103,12 @@ impl DiscoveryEpisode {
         else {
             return Value::Null;
         };
+        Self::documentation_at(repository, revision)
+    }
+
+    /// Where a Hugging Face dataset repository keeps its documentation and
+    /// its file listing at `revision`.
+    pub(super) fn documentation_at(repository: &str, revision: &str) -> Value {
         json!({
             "description_url": format!("https://huggingface.co/datasets/{repository}/resolve/{revision}/README.md"),
             "repository_files_url": format!("https://huggingface.co/api/datasets/{repository}/tree/{revision}"),
@@ -130,10 +136,11 @@ impl DiscoveryEpisode {
         ];
         tools.extend(T::tools());
         for _ in 0..TURNS {
-            let response = ModelClient::complete(
-                ModelRequest::new(messages.clone(), tools.clone()).with_model("gpt-5.6-terra"),
-                |_| {},
-            )
+            let response = ModelClient::complete(ModelRequest::new(
+                messages.clone(),
+                tools.clone(),
+                "gpt-5.6-terra",
+            ))
             .await?;
             if response.tool_calls().is_empty() {
                 return Err(format!("{} did not produce a result", T::NAME));

@@ -1,5 +1,5 @@
 use super::*;
-use futures::FutureExt as _;
+use futures_util::FutureExt as _;
 use spiral_robotics_storage::{
     Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
 };
@@ -40,7 +40,6 @@ impl LoadingFixture {
                     connection,
                     spiral_robotics_storage::SpiralAccessPublisher::new().1,
                 ),
-                "studio".into(),
                 Arc::new(UnavailableSpiral(calls.clone())),
             )
             .unwrap(),

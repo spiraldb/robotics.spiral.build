@@ -44,7 +44,6 @@ impl StudioProject {
             id: Set(config.id().to_owned()),
             document: Set(serde_json::to_value(config).map_err(|error| error.to_string())?),
             revision: Set(revision),
-            updated_ms: Set(crate::db::StorageClock::unix_millis()),
         };
         let written = match expected {
             None => {

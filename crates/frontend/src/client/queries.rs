@@ -14,12 +14,11 @@ pub(crate) enum QueryDomain {
     Rollout,
     Settings,
     Catalog,
-    Data,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct QueryRefresh {
-    revisions: [Signal<u64>; 9],
+    revisions: [Signal<u64>; 8],
 }
 impl QueryRefresh {
     pub(crate) fn use_provider() -> Self {
@@ -228,7 +227,7 @@ mod tests {
             let refresh = QueryRefresh::use_provider();
             let available = use_signal(|| true);
             let observations = self.0.clone();
-            let resource = QueryPolicy::new(QueryDomain::Data, 20).use_when(
+            let resource = QueryPolicy::new(QueryDomain::Catalog, 20).use_when(
                 move || *available.read(),
                 move || {
                     let read = Rc::new(ControlledRead::default());
@@ -249,7 +248,7 @@ mod tests {
                 .borrow()
                 .refresh
                 .unwrap()
-                .invalidate(&[QueryDomain::Data]);
+                .invalidate(&[QueryDomain::Catalog]);
         }
         fn result(&self) -> Option<Result<u32, CommandError>> {
             self.0.borrow().resource.unwrap().peek().clone()

@@ -9,7 +9,7 @@
 //! timeline, which Studio's packets count from the episode's first message,
 //! so a subtask's log time is that message's time plus its own.
 use super::subtask::SubtaskRow;
-use crate::activities::curation::document::SubtaskAnnotation;
+use crate::activities::curation::document::{DEFAULT_ANNOTATION_MODEL, SubtaskAnnotation};
 use crate::activities::curation::path::{
     EpisodeRow, PathError, PathFragment, PathStep, Relation, StepSql,
 };
@@ -33,7 +33,7 @@ impl PathFragment for SubtaskAnnotation {
             .unwrap_or_default();
         let call = format!(
             "spql.ai.breakdown_task({video}, sample_interval => {interval}, model => {}{task}{})",
-            SqlLiteral::text(self.model()),
+            SqlLiteral::text(DEFAULT_ANNOTATION_MODEL),
             row.on_error()
         );
         row.ask(SUBTASKS, call)

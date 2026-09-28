@@ -8,8 +8,7 @@
 //! downcast panic.
 
 use arrow_array::{
-    Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringViewArray, UInt32Array,
-    UInt64Array,
+    Array, Float64Array, LargeStringArray, RecordBatch, StringViewArray, UInt32Array, UInt64Array,
 };
 
 /// Column reads scoped to one relation, so every failure names the relation.
@@ -79,18 +78,6 @@ impl<'a> ArrowColumns<'a> {
     pub(crate) fn unsigned(&self, name: &str, row: usize) -> Result<u64, String> {
         self.optional_unsigned(name, row)?
             .ok_or_else(|| self.missing(name))
-    }
-
-    pub(crate) fn signed(&self, name: &str, row: usize) -> Result<i64, String> {
-        let column = self.column(name)?;
-        if column.is_null(row) {
-            return Err(self.missing(name));
-        }
-        column
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .map(|values| values.value(row))
-            .ok_or_else(|| self.mismatch(name, "a signed integer"))
     }
 
     pub(crate) fn optional_float(&self, name: &str, row: usize) -> Result<Option<f64>, String> {

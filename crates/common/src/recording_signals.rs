@@ -305,8 +305,8 @@ mod tests {
             )
             .with_recording(episode.map(|episode| {
                 RecordingProgress::new(
-                    RecordingIdentity::new(episode, "default", Vec::new()),
-                    RecordingClock::new(1, elapsed, elapsed),
+                    RecordingIdentity::new(episode, "default"),
+                    RecordingClock::new(1, elapsed),
                     RecordingState::default(),
                 )
             }))

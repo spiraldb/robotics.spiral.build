@@ -2,9 +2,8 @@ target
 .direnv
 /outputs
 /result
+# Pre-SQLite robot files (nothing reads them now); may hold calibration.
 /robots
-# Recorded takes: an operator's data, like /robots, and large.
-/episodes
 # Backend SQLite state, including WAL and shared-memory files.
 /.studio/
 /.agents
@@ -16,6 +15,9 @@ __pycache__/
 .uv-tool/
 *.egg-info/
 node_modules/
+
+# Generated from crates/frontend/tailwind.css by dx or the Tailwind CLI.
+/crates/frontend/assets/tailwind.css
 
 # Developer-local provider credentials. Never commit this file.
 /.env.local

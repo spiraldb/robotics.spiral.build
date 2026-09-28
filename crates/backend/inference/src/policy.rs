@@ -4,20 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::InferenceResult;
 
-/// Policy family implemented by an engine.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PolicyKind {
-    Act,
-}
-
-/// Pixel encoding accepted at the framework-independent API boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ImageFormat {
-    /// Interleaved red, green, and blue bytes.
-    Rgb8,
-}
-
 /// Width and height of one image plane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ImageDimensions {
@@ -39,14 +25,11 @@ impl ImageDimensions {
     }
 }
 
-/// A borrowed image plane. `row_stride` allows callers to pass camera buffers
-/// without repacking them first.
+/// A borrowed image plane of packed, interleaved RGB bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct ImageFrame<'a> {
     name: &'a str,
     dimensions: ImageDimensions,
-    row_stride: usize,
-    format: ImageFormat,
     data: &'a [u8],
 }
 
@@ -71,8 +54,6 @@ impl<'a> ImageFrame<'a> {
         Ok(Self {
             name,
             dimensions,
-            row_stride,
-            format: ImageFormat::Rgb8,
             data,
         })
     }
@@ -83,14 +64,6 @@ impl<'a> ImageFrame<'a> {
 
     pub fn dimensions(self) -> ImageDimensions {
         self.dimensions
-    }
-
-    pub fn row_stride(self) -> usize {
-        self.row_stride
-    }
-
-    pub fn format(self) -> ImageFormat {
-        self.format
     }
 
     pub fn data(self) -> &'a [u8] {
@@ -123,7 +96,6 @@ impl<'a> InferenceInput<'a> {
 /// physical rollout starts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PolicySpecification {
-    kind: PolicyKind,
     state_dimensions: usize,
     image_inputs: Vec<ImageInputSpecification>,
     action_dimensions: usize,
@@ -152,36 +124,6 @@ impl PolicySpecification {
     pub fn recommended_action_steps(&self) -> usize {
         self.recommended_action_steps
     }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(
-        kind: PolicyKind,
-        observation: ObservationSpecification,
-        actions: ActionChunkSpecification,
-    ) -> Self {
-        Self {
-            kind,
-            state_dimensions: observation.state_dimensions,
-            image_inputs: observation.image_inputs,
-            action_dimensions: actions.action_dimensions,
-            action_chunk_size: actions.chunk_size,
-            recommended_action_steps: actions.recommended_steps,
-        }
-    }
-}
-
-/// Observation shape accepted by a policy.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ObservationSpecification {
-    state_dimensions: usize,
-    image_inputs: Vec<ImageInputSpecification>,
-}
-
-/// Action shape and consumption recommendation produced by a policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ActionChunkSpecification {
-    action_dimensions: usize,
-    chunk_size: usize,
-    recommended_steps: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -217,26 +159,14 @@ impl ImageInputSpecification {
 /// Runtime measurements for one completed forward pass.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InferenceStats {
-    preprocessing: Duration,
     /// Backend execution including synchronization and device-to-host transfer.
     model: Duration,
-    postprocessing: Duration,
     total: Duration,
 }
 
 impl InferenceStats {
-    pub fn with_preprocessing(mut self, preprocessing: Duration) -> Self {
-        self.preprocessing = preprocessing;
-        self
-    }
-
     pub fn with_model(mut self, model: Duration) -> Self {
         self.model = model;
-        self
-    }
-
-    pub fn with_postprocessing(mut self, postprocessing: Duration) -> Self {
-        self.postprocessing = postprocessing;
         self
     }
 
@@ -348,27 +278,6 @@ pub trait Policy: Send {
 /// therefore use a remote policy without linking the loader implementation.
 pub trait PolicyLoader: Send + Sync {
     fn load(&self, artifact: crate::ModelArtifact) -> InferenceResult<Box<dyn Policy>>;
-}
-
-impl ActionChunkSpecification {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(action_dimensions: usize, chunk_size: usize, recommended_steps: usize) -> Self {
-        Self {
-            action_dimensions,
-            chunk_size,
-            recommended_steps,
-        }
-    }
-}
-
-impl ObservationSpecification {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(state_dimensions: usize, image_inputs: Vec<ImageInputSpecification>) -> Self {
-        Self {
-            state_dimensions,
-            image_inputs,
-        }
-    }
 }
 
 #[cfg(test)]

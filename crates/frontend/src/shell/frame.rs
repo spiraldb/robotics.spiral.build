@@ -304,8 +304,9 @@ impl StatusFact {
             destination: None,
         }
     }
-    fn opening(mut self, destination: Activity) -> Self {
-        self.destination = Some(destination);
+    /// The fact names something to fix in Settings.
+    fn opening_settings(mut self) -> Self {
+        self.destination = Some(Activity::Settings);
         self
     }
 }
@@ -421,12 +422,11 @@ impl StatusFacts {
         }
         match snapshot.issues().len() {
             0 => {}
-            1 => facts.push(
-                StatusFact::new("1 robot problem", StatusTone::Caution).opening(Activity::Settings),
-            ),
+            1 => facts
+                .push(StatusFact::new("1 robot problem", StatusTone::Caution).opening_settings()),
             count => facts.push(
                 StatusFact::new(format!("{count} robot problems"), StatusTone::Caution)
-                    .opening(Activity::Settings),
+                    .opening_settings(),
             ),
         }
         facts

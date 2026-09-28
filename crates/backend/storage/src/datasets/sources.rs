@@ -1,6 +1,6 @@
 //! Publish one complete MCAP file through the Dataset's declared source view.
 use crate::ProjectConnection;
-use crate::{StorageManager, db::SpiralSql};
+use crate::StorageManager;
 use arrow_array::{
     ArrayRef, BinaryViewArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt64Array,
 };
@@ -8,6 +8,7 @@ use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
+use spiral_robotics_common::sql::SqlLiteral;
 use std::sync::Arc;
 
 pub(crate) struct McapFile<'a> {
@@ -76,7 +77,7 @@ impl<'a> McapFile<'a> {
                     .query_rows(
                         &format!(
                             "SELECT recording FROM dataset_source WHERE dataset_name = {} LIMIT 1",
-                            SpiralSql::string_literal(self.dataset_name)
+                            SqlLiteral::text(self.dataset_name)
                         ),
                         1,
                     )
@@ -87,7 +88,7 @@ impl<'a> McapFile<'a> {
             }
             let duplicate = connection.read_batches(&format!(
                 "SELECT spql.io.read_bytes(source) AS payload FROM dataset_source WHERE dataset_name = {} AND recording = {} LIMIT 2",
-                SpiralSql::string_literal(self.dataset_name), SpiralSql::string_literal(self.key)
+                SqlLiteral::text(self.dataset_name), SqlLiteral::text(self.key)
             )).await?;
             let count = duplicate.iter().map(RecordBatch::num_rows).sum::<usize>();
             if count > 1 {
@@ -130,10 +131,10 @@ impl StorageManager {
     pub(crate) async fn append_mcap_file(&self, file: McapFile<'_>) -> Result<(), String> {
         let exists = self.validate_mcap_destination(file.dataset_name).await?;
         let mut connection = self.project_store().connect_exclusive().await?;
-        connection.begin_transaction().await?;
-        let result = file.publish(&mut connection, exists).await;
         connection
-            .finish_transaction(result, "MCAP file append")
+            .transaction("MCAP file append", async |connection| {
+                file.publish(connection, exists).await
+            })
             .await
     }
 }
@@ -285,35 +286,6 @@ impl McapSources {
     }
 }
 
-impl StorageManager {
-    pub async fn remove_mcap_file(&self, dataset: &str, key: &str) -> Result<(), String> {
-        self.validate_mcap_destination(dataset).await?;
-        let key = SpiralSql::string_literal(key);
-        let name = dataset;
-        let mut connection = self.project_store().connect_exclusive().await?;
-        connection.begin_transaction().await?;
-        let mutation = async {
-            connection
-                .execute_update_sql(&format!(
-                    "DELETE FROM dataset_source WHERE recording = {key} AND dataset_name = {}",
-                    SpiralSql::string_literal(name)
-                ))
-                .await?;
-            connection
-                .execute_update_sql(&format!(
-                    "REFRESH DATASET {}",
-                    McapDatasetDefinition::quoted(&format!("dataset_{name}"))
-                ))
-                .await?;
-            Ok(())
-        }
-        .await;
-        connection
-            .finish_transaction(mutation, "MCAP source removal")
-            .await
-    }
-}
-
 pub(crate) struct McapDatasetDefinition {
     dataset_name: String,
     dataset: String,
@@ -335,10 +307,6 @@ impl McapDatasetDefinition {
             .collect::<Vec<_>>()
             .join(".")
     }
-    pub(crate) fn dataset(&self) -> &str {
-        &self.dataset
-    }
-
     pub(crate) fn planned(&self) -> Vec<String> {
         vec![self.dataset.clone(), self.source.clone()]
     }
@@ -354,7 +322,7 @@ impl McapDatasetDefinition {
             "CREATE VIEW {} AS SELECT recording, source FROM {} WHERE dataset_name = {}",
             Self::quoted(&self.source),
             Self::SOURCE_TABLE,
-            SpiralSql::string_literal(&self.dataset_name)
+            SqlLiteral::text(&self.dataset_name)
         )
     }
 }
@@ -438,7 +406,7 @@ impl McapDatasetDefinition {
             .query_rows(
                 &format!(
                     "SELECT COUNT(*) AS members FROM spql.mcap.episodes({})",
-                    SpiralSql::string_literal(&self.dataset)
+                    SqlLiteral::text(&self.dataset)
                 ),
                 1,
             )
@@ -447,7 +415,7 @@ impl McapDatasetDefinition {
             .query_rows(
                 &format!(
                     "SELECT COUNT(*) AS members FROM dataset_source WHERE dataset_name = {}",
-                    SpiralSql::string_literal(&self.dataset_name)
+                    SqlLiteral::text(&self.dataset_name)
                 ),
                 1,
             )
@@ -574,23 +542,18 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires SPIRAL_MCAP_TEST_CONFIG and SPIRAL_ACCESS_TOKEN; creates and removes a uniquely named dataset"]
+    #[ignore = "requires SPIRAL_MCAP_TEST_PROJECT and SPIRAL_ACCESS_TOKEN (endpoints from SPIRAL__SERVER__URL and SPIRAL__SPFS__URL); creates and removes a uniquely named dataset"]
     async fn mcap_files_share_publication_and_dataset_reads() {
         use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
-        use crate::settings::{BackendStateStore, SpiralConnectionSettings};
-        let legacy_path = std::path::PathBuf::from(
-            std::env::var_os("SPIRAL_MCAP_TEST_CONFIG").expect("explicit test config"),
-        );
-        let config = BackendStateStore::new(crate::StudioStore::in_memory(), legacy_path)
-            .initialize()
-            .await
-            .unwrap();
+        use crate::settings::{ServiceEndpoint, SpiralConnectionSettings};
         let settings = SpiralConnectionSettings::new(
-            config.spiral_endpoint().unwrap(),
-            config.spiral_spfs_endpoint().unwrap(),
+            ServiceEndpoint::environment_spiral().into_string(),
+            ServiceEndpoint::environment_spiral_spfs().into_string(),
         )
         .unwrap()
-        .with_project(&config.project_id().unwrap())
+        .with_project(
+            &std::env::var("SPIRAL_MCAP_TEST_PROJECT").expect("the Spiral project to test in"),
+        )
         .unwrap();
         let access = crate::SpiralAccess::fixed(
             std::env::var("SPIRAL_ACCESS_TOKEN").expect("a user access token for the test"),
@@ -599,7 +562,6 @@ mod tests {
         let store = Arc::new(
             crate::ProjectStore::new(
                 connection.clone(),
-                "mcap_probe".into(),
                 Arc::new(crate::AdbcDatabase::new(connection)),
             )
             .unwrap(),
@@ -722,26 +684,14 @@ mod tests {
             assert!(storage.episode_topics(
                 spiral_robotics_common::datasets::EpisodeSelection::new(dataset, spiral_robotics_common::datasets::EpisodeId::try_from(uuid::Uuid::new_v4().simple().to_string()).unwrap())
             ).await.unwrap_err().contains("no longer in the dataset"));
-            storage.remove_mcap_file(&name, &format!("{name}_first.mcap")).await?;
-            let mut connection = store.connect().await?;
-            let rows = connection
-                .query_rows(
-                    &format!("SELECT id FROM spql.mcap.episodes('dataset_{name}')"),
-                    10,
-                )
-                .await?;
-            assert_eq!(rows.rows().len(), 2);
-            drop(connection);
             // A foreign producer needs no Studio DTO or topic-name convention.
             let bytes = SensorFixture::encode()?;
             storage.append_mcap_file(McapFile::new(&name, "arbitrary/nested-key", &bytes)).await?;
             storage.append_mcap_file(McapFile::new(&name, "arbitrary/nested-key", &bytes)).await?;
             // The same source key in another dataset is independent.
             storage.append_mcap_file(McapFile::new(&other_name, "arbitrary/nested-key", &bytes)).await?;
-            storage.remove_mcap_file(&name, "arbitrary/nested-key").await?;
             let other_members = store.connect().await?.query_rows(&format!("SELECT id FROM spql.mcap.episodes('dataset_{other_name}')"), 2).await?;
             assert_eq!(other_members.rows().len(), 1);
-            storage.append_mcap_file(McapFile::new(&name, "arbitrary/nested-key", &bytes)).await?;
             let members = store.connect().await?.query_rows(&format!("SELECT id FROM spql.mcap.read_topic('dataset_{name}', '/environment') LIMIT 1"), 1).await?;
             let member = spiral_robotics_common::datasets::EpisodeId::try_from(members.rows()[0]["id"].as_str().unwrap()).unwrap();
             let dataset = spiral_robotics_common::datasets::DatasetSelection::new(vec![format!("dataset_{name}")])?;

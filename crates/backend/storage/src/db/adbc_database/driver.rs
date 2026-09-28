@@ -9,13 +9,15 @@ use adbc_driver_manager::{ManagedDatabase, ManagedDriver};
 
 use super::{DatabaseError, DatabaseResult};
 use crate::db::DatabaseErrorKind;
-use crate::{SpiralAccess, SpiralConnection};
+use crate::{ProviderKeys, SpiralAccess, SpiralConnection};
 
 /// The driver option carrying the signed-in user's token; the driver never refreshes it.
 const ACCESS_TOKEN_OPTION: &str = "spiral.access_token";
 /// The driver option carrying the OpenRouter key Spiral's model functions
 /// call with. The driver takes it only when a database is created.
 const OPENROUTER_API_KEY_OPTION: &str = "spiral.openrouter_api_key";
+/// The driver option carrying the token Spiral downloads from Hugging Face with.
+const HUGGINGFACE_TOKEN_OPTION: &str = "spiral.huggingface_token";
 
 #[derive(Clone)]
 pub(super) struct DriverConfiguration {
@@ -31,7 +33,7 @@ impl DriverConfiguration {
         if let Some(project) = settings.project_id() {
             uri.query_pairs_mut().append_pair("project", project);
         }
-        let mut options = vec![
+        let options = vec![
             (OptionDatabase::Uri, uri.to_string().into()),
             (
                 OptionDatabase::Other("spiral.local_cache".into()),
@@ -46,25 +48,23 @@ impl DriverConfiguration {
                 settings.spfs_endpoint().into(),
             ),
         ];
-        if let Some(token) = settings.huggingface_token() {
-            options.push((
-                OptionDatabase::Other("spiral.huggingface_token".into()),
-                token.into(),
-            ));
-        }
         Self {
             options,
             access: Some(connection.access().clone()),
         }
     }
 
-    /// The same database with the OpenRouter key its model functions use.
-    pub(super) fn with_openrouter_api_key(mut self, key: Option<String>) -> Self {
-        if let Some(key) = key {
-            self.options.push((
-                OptionDatabase::Other(OPENROUTER_API_KEY_OPTION.into()),
-                key.into(),
-            ));
+    /// The same database with Studio's provider keys: its model functions
+    /// call OpenRouter with the LLM key, and it reads Hugging Face with the token.
+    pub(super) fn with_provider_keys(mut self, keys: &ProviderKeys) -> Self {
+        for (option, key) in [
+            (OPENROUTER_API_KEY_OPTION, keys.llm_api_key()),
+            (HUGGINGFACE_TOKEN_OPTION, keys.huggingface_token()),
+        ] {
+            if let Some(key) = key {
+                self.options
+                    .push((OptionDatabase::Other(option.into()), key.into()));
+            }
         }
         self
     }
@@ -239,33 +239,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn huggingface_token_reaches_the_native_driver_as_a_write_only_option() {
-        let settings = settings().with_huggingface_token(Some("hf_test_only".into()));
-        let connection = SpiralConnection::new(settings, SpiralAccess::fixed("token".into()));
-        let database = DriverConfiguration::hosted(connection).load().unwrap();
-        let error = database
-            .database()
-            .get_option_string(OptionDatabase::Other("spiral.huggingface_token".into()))
-            .unwrap_err();
-        assert_eq!(error.status, adbc_core::error::Status::InvalidState);
-        assert!(error.message.contains("write-only"));
-        assert!(!error.message.contains("hf_test_only"));
-    }
-
-    #[tokio::test]
-    async fn the_openrouter_key_reaches_the_native_driver_as_a_write_only_option() {
+    async fn provider_keys_reach_the_native_driver_as_write_only_options() {
+        let keys = ProviderKeys::default().updated(
+            &spiral_robotics_common::providers::ProviderKeysUpdate::default()
+                .with_llm_api_key(Some("sk-or-test-only".into()))
+                .with_huggingface_token(Some("hf_test_only".into())),
+        );
         let connection = SpiralConnection::new(settings(), SpiralAccess::fixed("token".into()));
         let database = DriverConfiguration::hosted(connection)
-            .with_openrouter_api_key(Some("sk-or-test-only".into()))
+            .with_provider_keys(&keys)
             .load()
             .unwrap();
-        let error = database
-            .database()
-            .get_option_string(OptionDatabase::Other(OPENROUTER_API_KEY_OPTION.into()))
-            .unwrap_err();
-        assert_eq!(error.status, adbc_core::error::Status::InvalidState);
-        assert!(error.message.contains("write-only"));
-        assert!(!error.message.contains("sk-or-test-only"));
+        for option in [OPENROUTER_API_KEY_OPTION, HUGGINGFACE_TOKEN_OPTION] {
+            let error = database
+                .database()
+                .get_option_string(OptionDatabase::Other(option.into()))
+                .unwrap_err();
+            assert_eq!(error.status, adbc_core::error::Status::InvalidState);
+            assert!(error.message.contains("write-only"));
+            assert!(!error.message.contains("test-only") && !error.message.contains("test_only"));
+        }
     }
 
     /// Spiral's API as the driver reaches it, recording each request's bearer token.

@@ -24,9 +24,7 @@ impl StudioWebAssets {
     pub(super) fn router(self, api: Router) -> Router {
         let index = self.public.join("index.html");
         let files = ServeDir::new(self.public).fallback(get(Self::navigation).with_state(index));
-        Router::new()
-            .nest("/api", api.fallback(|| async { StatusCode::NOT_FOUND }))
-            .fallback_service(files)
+        Router::new().nest("/api", api).fallback_service(files)
     }
 
     /// Only HTML navigation falls back to the application entrypoint. Missing
@@ -74,7 +72,9 @@ mod tests {
             )
             .unwrap();
             std::fs::write(public.path().join("assets/app.wasm"), b"\0asm\x01\0\0\0").unwrap();
-            let api = Router::new().route("/status", get(|| async { "ready" }));
+            let api = Router::new()
+                .route("/status", get(|| async { "ready" }))
+                .fallback(|| async { StatusCode::NOT_FOUND });
             Self {
                 router: StudioWebAssets::new(public.path().to_owned()).router(api),
                 _public: public,

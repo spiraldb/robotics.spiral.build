@@ -41,20 +41,13 @@ impl RobotDiscoveryAgent {
     ) -> Result<(), String> {
         let selection = DatasetSelection::new(vec![format!("dataset_{}", import.dataset_id())])?;
         let episode = DiscoveryEpisode::open(self.data.clone(), selection).await?;
-        let repository = import.repository();
-        let revision = import.resolved_revision();
+        let mut request =
+            DiscoveryEpisode::documentation_at(import.repository(), import.resolved_revision());
+        request["episodes"] = json!(import.files());
+        request["streams"] = json!(episode.topics());
         let messages = vec![
             ProviderMessage::text("system", include_str!("robot_discovery_prompt.txt")),
-            ProviderMessage::text(
-                "user",
-                json!({
-                    "description_url": format!("https://huggingface.co/datasets/{repository}/resolve/{revision}/README.md"),
-                    "repository_files_url": format!("https://huggingface.co/api/datasets/{repository}/tree/{revision}"),
-                    "episodes": import.files(),
-                    "streams": episode.topics(),
-                })
-                .to_string(),
-            ),
+            ProviderMessage::text("user", request.to_string()),
         ];
         episode.converse(self, messages).await
     }

@@ -493,8 +493,8 @@ mod tests {
     use super::*;
     use spiral_robotics_common::datasets::EpisodeId;
 
-    /// What reaches a Select below Break down and a search: the subtask and
-    /// its similarity.
+    /// What a search's rule judges below Break down: the subtask and its
+    /// similarity.
     fn searched() -> Relation {
         Relation::new("breakdown", vec![SubtaskRow::DESCRIPTION])
             .measuring("search", SubtaskRow::SIMILARITY)

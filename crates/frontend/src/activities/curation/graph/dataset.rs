@@ -10,22 +10,20 @@ use spiral_robotics_ui::{
 };
 
 use super::super::document::{CurationGraph, EpisodeFact};
-use super::super::episode_tabs::{EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes};
+use super::super::episode_tabs::{
+    EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes, WholeEpisodeTab,
+};
 use super::super::path::{PathError, PathFragment, PathStep, PublishedEpisodes, Relation, StepSql};
 use super::super::review::{
     Counted, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SubtaskReview, TabStop,
 };
+use super::super::session::UNTITLED;
 use super::super::state::CurationController;
 use super::super::thumbnail::Thumbnails;
 use crate::activities::data::{CheckedEpisode, DatasetLedger, DatasetOverview};
-use crate::activities::episode::{
-    Episode, EpisodeHeading, EpisodeInspection, EpisodeRows, FeaturedCamera, HeadingSubject,
-};
-use crate::components::dataset_picker::DatasetCatalog;
+use crate::activities::episode::{Episode, EpisodeRows, FeaturedCamera};
+use crate::components::dataset_catalog::DatasetCatalog;
 use crate::components::icons::SpinnerIcon;
-
-/// The name a graph carries until it has a dataset to take one from.
-const UNTITLED: &str = "Untitled curation";
 
 /// Every episode of the dataset, each as one whole interval from its first
 /// message to its last, with the facts Spiral records for it and its place in
@@ -94,10 +92,9 @@ fn DatasetChoice(controller: CurationController) -> Element {
                 })
                 .err(),
         );
-        // A graph that has never been named takes its dataset's name, the way
-        // one created from the switcher already does. Five saved curations
-        // all called "Untitled curation" are five nobody can tell apart in
-        // the list that offers them.
+        // A graph that has never been named takes its dataset's name. Five
+        // saved curations all called "Untitled curation" are five nobody can
+        // tell apart in the list that offers them.
         if controller.name() == UNTITLED {
             controller.set_name(label);
         }
@@ -257,13 +254,7 @@ fn DatasetEpisodeList(
                         let Some(episode) = opened.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
                             return rsx! {};
                         };
-                        let facts = EpisodeFact::DurationSeconds.reading(&episode).into_iter().collect::<Vec<_>>();
-                        rsx! {
-                            EpisodeHeading { subject: HeadingSubject::episode(&episode).with_facts(facts) }
-                            div { class: "curation-review-player",
-                                EpisodeInspection { episode, featured_camera: featured.clone(), focus: tab.play() }
-                            }
-                        }
+                        rsx! { WholeEpisodeTab { episode, featured_camera: featured.clone(), focus: tab.play() } }
                     },
                 }
             },

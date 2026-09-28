@@ -59,10 +59,12 @@ consumers**:
   out on real hardware, and backing up the complete project.
 
 The full hardware loop — connect, calibrate, teleoperate, record, train,
-run a policy — remains shipped and supported, but it is one path through the
-system rather than the system's spine. Vision-conditioned ACT training stores
-a native artifact, and Rollout loads, supervises, measures, and applies it
-through the follower's bounded control path.
+run a policy — is one path through the system rather than the system's spine.
+Vision-conditioned ACT training stores a native artifact, and Rollout loads,
+supervises, measures, and applies it through the follower's bounded control
+path. Training and Rollout are parked until Spiral decodes MCAP video into
+training images: starting a run is refused, and Rollout runs existing
+checkpoints.
 
 Success is an ML engineer pointing the Studio at data — theirs or the
 world's — understanding any episode against one synchronized clock, curating
@@ -82,17 +84,15 @@ writing glue code or operating a second data stack.
   never holds service credentials or drives hardware directly.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
-  interface are Rust. MCAP camera training
-  is unavailable until Spiral supports native decoding into training images.
-  The legacy registry/MP4 loader is removed. The selected remote ACT/CVAE
+  interface are Rust. The selected remote ACT/CVAE
   compute runtime retains Arrow transport and PyTorch policy sessions for
   rollout inference, subject to exact checkpoint-schema compatibility. Rust owns lifecycle,
   cancellation, validation, remote telemetry, and SafeTensors checkpoint
   persistence without linking the Studio server to
   LibTorch.
-- **One arm is one robot instance in SpiralDB.** Serial port, cameras, motors,
-  and calibration live in one versioned configuration row. JSON is an explicit
-  per-robot transfer format, not live storage.
+- **One arm is one robot instance.** Serial port, cameras, motors, and
+  calibration live in one revisioned robot document in Studio's SQLite. JSON
+  is an explicit per-robot transfer format, not live storage.
 - **Episode data keeps its natural streams and one clock.** Joint state,
   commanded action, camera media, and recording gaps are separate synchronized
   streams rather than one wide table of duplicated or resampled values. The
@@ -104,8 +104,9 @@ writing glue code or operating a second data stack.
   conditional capability an episode has when its streams match a configured
   robot's contract. Ingested episodes without a
   matching robot remain full citizens of the catalog.
-- **SpiralDB owns the queryable project.** Robots, settings, training runs,
-  and checkpoints use the shared ADBC repository. Each completed Live episode is first saved and synced as one
+- **SpiralDB owns the queryable data.** Datasets, published curations, and
+  checkpoints live in Spiral; robots, settings, curations, and training run
+  records live in Studio's local SQLite. Each completed Live episode is first saved and synced as one
   immutable local MCAP file, then imported as a native Blob into the selected
   Dataset. A failed import reports the retained file path; restart recovery
   and a local-file retry UI are not yet available. Backend bootstrap pointers
@@ -201,12 +202,12 @@ never becomes the motor-control runtime.
     judgments to `spql.ai` functions. Graphs persist in the Studio SQLite
     `curations` table with optimistic revisions and travel in project
     bundles. See `docs/curation.md`.
-  - **Training** retains remote HTTP runtime selection, vision ACT
+  - **Training** (parked) retains remote HTTP runtime selection, vision ACT
     configuration, historical learning/resource telemetry, and checkpoint
     inspection/downloads. Starting MCAP camera training is disabled until
     Spiral supports native video decoding into training images; the worker
     also rejects these dataset jobs explicitly.
-  - **Rollout** owns checkpoint selection, fixed-follower readiness, simple
+  - **Rollout** (parked with Training) owns checkpoint selection, fixed-follower readiness, simple
     action-chunk and control-rate settings, the live 3D scene, every follower
     camera recorded for the policy, authoritative start/stop lifecycle, and
     measured native inference evidence.
@@ -240,35 +241,32 @@ never becomes the motor-control runtime.
   camera timestamps follow capture time and seeks begin at a preceding
   keyframe. Scrubbing is visual only and never moves the follower.
 - Dataset semantics are explicit: one native Dataset contains many MCAP
-  episodes. An episode can be selected or deleted. Deletion removes its
-  source row and refreshes the Dataset while retaining the local MCAP file.
-  Calibration changes affect future recordings; existing recordings retain
-  their captured normalized values and are never rewritten. Historical degrees
-  require a calibration snapshot.
-- Settings imports and exports the active project as versioned
-  `.spiral-project` format 2, including original MCAP bytes, Dataset names
-  (including empty datasets), checkpoints, and Studio's local records.
+  episodes, and Studio never rewrites or deletes one. Calibration changes
+  affect future recordings; existing recordings retain their captured
+  normalized values. Historical degrees require a calibration snapshot.
+- Settings imports and exports the active project as a versioned
+  `.spiral-project` bundle (format 4), including original MCAP bytes, Dataset
+  names (including empty datasets), checkpoints, and Studio's local records.
   Restore rebuilds native Dataset populations with Studio state in one
-  transaction. Format-1 backups require the old application.
+  transaction; other bundle formats are refused.
 - Native recording import writes a Blob source row, creates the filtered
   source view and target Dataset when needed, and refreshes the population in
   one transaction. An identical recording key and byte payload is an
-  idempotent retry; different bytes at that key are rejected. No separate
-  recording registry, MP4 container, or per-episode video Dataset remains.
+  idempotent retry; different bytes at that key are rejected. There is no
+  separate recording registry, MP4 container, or per-episode video Dataset.
   The backend exposes bounded read-only query preview and H.264 retrieval;
   camera reads reject more than 18,000 packets or 64 MiB of encoded video.
-- **Data ownership.** Root `studio_*` tables hold application state.
-  `dataset_source` holds recording sources, `dataset_source_<name>` views
-  select each dataset's rows, and `dataset_<name>` native Datasets reference
-  those views through their definitions. Storage schema 11 replaces the old
-  container layout. Schema-10 checkpoints remain inspectable/downloadable;
-  rollout's exact schema check rejects them under schema 11.
+- **Data ownership.** `dataset_source` holds recording sources,
+  `dataset_source_<name>` views select each dataset's rows, `dataset_<name>`
+  native Datasets reference those views through their definitions, and
+  `studio_training_checkpoints` holds model artifacts. Rollout's exact
+  schema check rejects checkpoints written under another storage schema.
+  Studio's own records live in its local SQLite.
 - **Native MCAP ingestion.** Data imports MCAP recordings from a public
   Hugging Face repository into one native Spiral Dataset. Source inspection
   resolves a revision and previews files, size, destination, and warnings
   before import. The backend uses `spql.mcap.dataset` and `REFRESH`; there is
   no channel-to-table conversion or parallel Studio dataset row.
-  LeRobot/Parquet/MP4 dataset import is removed.
 - Product simulation is intentionally absent until it can be introduced as a
   separate, principled system rather than another storage or runtime mode.
 
@@ -305,24 +303,23 @@ today, and nothing below may be presented as existing behavior:
   checkpoints. MCAP dataset training jobs remain unavailable pending native
   Spiral image decoding. Studio owns queries, run history, checkpoint ingest,
   and bounded hardware control.
-- **Backend-scoped model provider.** The trusted backend can obtain
-  `LLM_API_KEY` from explicit process state or the ignored, owner-only
-  repository-root `.env.local`; the application loads that fallback itself.
-  `LLM_MODEL` and `LLM_BASE_URL` are optional developer overrides; with only
-  the key, the prototype defaults to Terra through OpenRouter's OpenAI-compatible endpoint. A
+- **Backend-scoped model provider.** The operator enters the OpenRouter key in
+  Settings → Keys, and the trusted backend saves it in its SQLite settings.
+  `LLM_BASE_URL` is an optional process-environment developer override; with
+  only the key, requests go to OpenRouter's OpenAI-compatible endpoint. A
   custom endpoint must use HTTPS, except localhost may use HTTP. The key is
   used only by the backend: its transport, and the Spiral driver, which
   receives it as the write-only database option `spiral.openrouter_api_key`
   for the `spql.ai` model functions. It never enters browser state, Spiral
-  persistence, or provider prompts. Browser readiness leaves provider and model
-  fields empty, and the product never asks an operator to configure them.
+  persistence, or provider prompts.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
-- **Standard CI is service- and compute-free.** It tests and lints the Rust
-  packages that do not require the native SpiralDB backend, and it lints and
-  packages the Python worker without syncing its CUDA stack or running worker
-  integration tests. Native-backend, live-SpiralDB, and compute-runtime tests
-  belong in separate integration lanes.
+- **Standard CI is service- and compute-free.** It lints and tests the Rust
+  packages against the pinned standalone ADBC library without contacting a
+  hosted project, runs the frontend's WASM tests in headless Firefox, and
+  lints and packages the Python worker without syncing its CUDA stack.
+  Hosted-SpiralDB and compute-runtime tests belong in separate integration
+  lanes.
 - **Safety is enforced by the server.** Enabling torque first copies measured
   position into the goal so an arm cannot snap to stale state. Uncalibrated
   arms cannot accept normalized position commands. Manual, teleoperation, and
@@ -337,14 +334,10 @@ today, and nothing below may be presented as existing behavior:
   contract permits a separately hosted browser, but authentication, TLS, and
   explicit allowed origins are required before exposing the backend beyond a
   trusted network.
-- **The Spiral ADBC driver is trusted native backend code.** During active
-  co-development, Studio links the Rust driver crate from SpiralDB's `develop`
-  branch at the revision pinned by `Cargo.lock`. Standard CI excludes the
-  native backend with selected-package dependency resolution until a separate
-  SpiralDB integration lane exists; it does not fetch the private driver or
-  connect to a live project. The browser cannot choose or load native code.
-  Python training workers continue to use the driver's shared library through
-  their language-neutral ADBC manager.
+- **The Spiral ADBC driver is trusted native backend code.** Studio loads
+  Spiral's standalone shared library through the ADBC driver manager;
+  `flake.nix` pins the published archive, and the `local-driver` shell selects
+  a current-upstream build. The browser cannot choose or load native code.
 
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*
@@ -377,19 +370,14 @@ rollout, export), *ingestion*
 
 Real, in-repo:
 
-- `crates/frontend/viewport/assets/so101.urdf` — the shipped robot description.
-- `examples/robot.json`, `examples/calibration-input.json` — real configuration
-  and calibration input.
-- `robots/leader.json`, `robots/follower.json` — a working two-arm setup.
 - `crates/backend/storage/src/episodes/mcap_recording.rs` and
   `recording_file.rs` — immutable MCAP packaging and local publication.
-- `crates/backend/storage/src/datasets/recording_import.rs` — native Blob
-  import, Dataset refresh, and idempotent recording retries.
+- `crates/backend/storage/src/datasets/sources.rs` — native Blob import,
+  Dataset refresh, and idempotent recording retries.
 - `crates/backend/src/robotics/video.rs` — server-owned H.264 capture with
   capture-time timestamps and parameter-bearing keyframes.
-- `docs/recording-mcap.md` — recording, playback, calibration, backup, and
-  training limits. Native import/retry/playback/delete checks and browser seek
-  pixel tests passed; physical robot/camera capture still needs a smoke test.
+- `docs/datasets.md` — recording, catalog layout, calibration, backup, and
+  training limits; physical robot/camera capture still needs a smoke test.
 - `crates/frontend/src/activities/curation/path.rs` — the compiler that
   chains each node's step into one statement, with
   `crates/backend/src/curation/manager.rs` owning saved curations and view
@@ -398,11 +386,10 @@ Real, in-repo:
 
 Deliberately absent, and not to be fabricated: there are **no users,
 testimonials, case studies, published benchmarks, performance guarantees,
-pricing, or deployment/endorsement claims**. The project has not been released. There is
-**no ingestion implementation yet**; ingestion is a committed direction, not
-a shipped capability. No provider credential is shipped as a distributable
-product fixture; a developer supplies one in the ignored local secret file or
-production secret manager, after which provider setup is invisible in Studio.
+pricing, or deployment/endorsement claims**. The project has not been released.
+Ingestion beyond public Hugging Face MCAP repositories is a committed
+direction, not a shipped capability. No provider credential is shipped as a distributable
+product fixture; an operator enters one in Settings → Keys.
 
 ## Product Principles
 
@@ -418,10 +405,10 @@ production secret manager, after which provider setup is invisible in Studio.
 4. **One clock composes the episode.** State, action, camera media, gaps,
    signals, and query selection meet at the Timeline without erasing their
    natural stream rates.
-5. **One SpiralDB project holds the complete durable system; explicit files are
-   transfer formats.** Robot JSON, whole-project bundles, and external source
-   files stay portable, while no filesystem spool or retry queue becomes a
-   second source of truth.
+5. **A SpiralDB project holds the data, Studio's SQLite its own records, and
+   explicit files are transfer formats.** Robot JSON, whole-project bundles,
+   and external source files stay portable, while no filesystem spool or retry
+   queue becomes a second source of truth.
 6. **Robot semantics are capabilities, not assumptions.** An episode earns
    training compatibility by matching a configured robot's contract; without
    a match it remains fully viewable, queryable, and curatable.

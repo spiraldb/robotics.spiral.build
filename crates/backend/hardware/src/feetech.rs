@@ -22,11 +22,10 @@ use std::time::{Duration, Instant};
 
 use serialport::{ClearBuffer, SerialPort};
 
-use crate::bus::{
-    BusError, MotorBus, MotorElectricalSample, MotorMechanicalSample, MotorVoltageLimits,
-};
-use crate::bus::{MotorFaults, MotorLimits, MotorSample};
+use crate::bus::{BusError, MotorBus, MotorElectricalSample, MotorMechanicalSample};
+use crate::bus::{MotorFaults, MotorSample};
 use crate::calibration::EncoderCounts;
+use spiral_robotics_common::robots::MotorLimits;
 use spiral_robotics_common::robots::config::MotorConfig;
 
 const BROADCAST_ID: u8 = 0xfe;
@@ -39,10 +38,9 @@ const PRESENT_POSITION_ADDRESS: u8 = 56;
 const IO_TIMEOUT: Duration = Duration::from_millis(20);
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(100);
 const RETRIES: usize = 3;
-/// Consecutive failed sync-read probes before falling back for this bus.
-const SYNC_READ_PROBES: u8 = 2;
-/// Consecutive failed status-block probes before reading position alone.
-const STATUS_BLOCK_PROBES: u8 = 2;
+/// Consecutive failed probes of an optional request before the bus stops
+/// asking for it.
+const SUPPORT_PROBES: u8 = 2;
 
 /// The status registers every protocol-0 STS/SMS servo publishes, in one run.
 ///
@@ -98,29 +96,32 @@ const MAX_SYNC_WRITE_MOTORS: usize = (u8::MAX as usize - 4) / 3;
 
 const SUPPORTED_MODELS: &[&str] = &["sts3215", "sts3250", "sts_series", "sms_series", "sm8512bl"];
 
-/// Whether the bus has established that its servos answer sync-read requests.
-///
-/// Sync read collects every motor in one transaction, which matters at control
-/// rates, but not all Feetech firmware implements instruction `0x82`. The bus
-/// probes it briefly and remembers the answer instead of paying for a failed
-/// transaction on every cycle.
+/// Whether the bus has established that its servos answer an optional
+/// request: sync read (instruction `0x82`, which not all Feetech firmware
+/// implements) or the wide status block. The bus probes it briefly and
+/// remembers the answer instead of paying for a failed transaction on every
+/// cycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SyncRead {
+enum ProbedSupport {
     Untested(u8),
     Supported,
     Unsupported,
 }
 
-/// Whether the bus has established that its servos publish the status block.
-///
-/// Same shape as [`SyncRead`], and for the same reason: a servo that answers a
-/// two-byte position read but not a fifteen-byte one must not cost a failed
-/// transaction on every cycle for the rest of the session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StatusBlock {
-    Untested(u8),
-    Supported,
-    Unsupported,
+impl ProbedSupport {
+    /// What the bus knows after one more probe failed where a fallback
+    /// succeeded. A supported request returns its error instead of probing.
+    fn after_failed_probe(self) -> Self {
+        let Self::Untested(failures) = self else {
+            unreachable!("only an untested request is probed")
+        };
+        let failures = failures.saturating_add(1);
+        if failures >= SUPPORT_PROBES {
+            Self::Unsupported
+        } else {
+            Self::Untested(failures)
+        }
+    }
 }
 
 /// A configured Feetech motor on the serial bus.
@@ -338,8 +339,8 @@ impl Motor {
 pub(crate) struct FeetechBus {
     port: Box<dyn SerialPort>,
     motors: Vec<Motor>,
-    sync_read: SyncRead,
-    status_block: StatusBlock,
+    sync_read: ProbedSupport,
+    status_block: ProbedSupport,
 }
 
 impl FeetechBus {
@@ -361,8 +362,8 @@ impl FeetechBus {
         Ok(Self {
             port,
             motors,
-            sync_read: SyncRead::Untested(0),
-            status_block: StatusBlock::Untested(0),
+            sync_read: ProbedSupport::Untested(0),
+            status_block: ProbedSupport::Untested(0),
         })
     }
 
@@ -375,36 +376,26 @@ impl FeetechBus {
     /// so an arm that was simply unplugged mid-transaction keeps its telemetry
     /// when it comes back.
     fn read_samples(&mut self) -> Result<BTreeMap<String, MotorSample>, FeetechError> {
-        if self.status_block != StatusBlock::Unsupported {
+        if self.status_block != ProbedSupport::Unsupported {
             match self.read_block(RegisterBlock {
                 address: PRESENT_POSITION_ADDRESS,
                 length: STATUS_BLOCK_LENGTH,
                 operation: "read motor status",
             }) {
                 Ok(blocks) => {
-                    self.status_block = StatusBlock::Supported;
+                    self.status_block = ProbedSupport::Supported;
                     return Ok(blocks
                         .into_iter()
                         .map(|(name, bytes)| (name, RegisterValues::new(&bytes).sample()))
                         .collect());
                 }
-                Err(error) if self.status_block == StatusBlock::Supported => return Err(error),
+                Err(error) if self.status_block == ProbedSupport::Supported => return Err(error),
                 Err(_) => {
                     let positions = self.read_positions()?;
                     // The narrow read went through where the wide one did not,
                     // which is the only evidence that separates firmware
                     // without these registers from a bus having a bad moment.
-                    let failures = match self.status_block {
-                        StatusBlock::Untested(failures) => failures.saturating_add(1),
-                        StatusBlock::Supported | StatusBlock::Unsupported => {
-                            unreachable!("a supported block returns its error above")
-                        }
-                    };
-                    self.status_block = if failures >= STATUS_BLOCK_PROBES {
-                        StatusBlock::Unsupported
-                    } else {
-                        StatusBlock::Untested(failures)
-                    };
+                    self.status_block = self.status_block.after_failed_probe();
                     return Ok(positions
                         .into_iter()
                         .map(|(name, position)| (name, MotorSample::at(position)))
@@ -472,28 +463,20 @@ impl FeetechBus {
         &mut self,
         register: RegisterBlock<'_>,
     ) -> Result<BTreeMap<String, Vec<u8>>, FeetechError> {
-        if self.sync_read != SyncRead::Unsupported {
+        if self.sync_read != ProbedSupport::Unsupported {
             match self.sync_read_block(register) {
                 Ok(values) => {
-                    self.sync_read = SyncRead::Supported;
+                    self.sync_read = ProbedSupport::Supported;
                     return Ok(values);
                 }
-                Err(error) if self.sync_read == SyncRead::Supported => return Err(error),
+                Err(error) if self.sync_read == ProbedSupport::Supported => return Err(error),
                 Err(_) => {
                     // A noisy first transaction is not proof that firmware
                     // lacks sync-read support. Giving it one more probe avoids
                     // permanently falling back to six sequential reads — a
                     // common cause of the control loop settling well below
                     // its target rate.
-                    let failures = match self.sync_read {
-                        SyncRead::Untested(failures) => failures.saturating_add(1),
-                        SyncRead::Supported | SyncRead::Unsupported => unreachable!(),
-                    };
-                    self.sync_read = if failures >= SYNC_READ_PROBES {
-                        SyncRead::Unsupported
-                    } else {
-                        SyncRead::Untested(failures)
-                    };
+                    self.sync_read = self.sync_read.after_failed_probe();
                 }
             }
         }
@@ -914,16 +897,17 @@ impl<'a> RegisterValues<'a> {
         // A limit register left at zero is a limit the servo is not enforcing, and
         // a zero-degree ceiling would put every motor permanently in caution.
         let byte = |offset: usize| self.0.get(offset).copied().filter(|value| *value != 0);
-        MotorLimits::new(
-            byte(0).map(f64::from),
-            MotorVoltageLimits::new(
+        MotorLimits::default()
+            .with_max_temperature_celsius(byte(0).map(f64::from))
+            .with_voltage_range(
                 byte(2).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
                 byte(1).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
-            ),
-            self.word(3)
-                .filter(|torque| *torque != 0)
-                .map(|torque| f64::from(torque) / LOAD_FULL_SCALE),
-        )
+            )
+            .with_max_load(
+                self.word(3)
+                    .filter(|torque| *torque != 0)
+                    .map(|torque| f64::from(torque) / LOAD_FULL_SCALE),
+            )
     }
 }
 

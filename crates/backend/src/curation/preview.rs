@@ -11,8 +11,7 @@
 //! since the page that wanted it has gone. Runs live in memory: a restarted
 //! backend holds none, as a reloaded page holds no preview.
 use crate::OperationError;
-use crate::adapters::clock::SystemClock;
-use crate::clock::{Clock, StableIdSequence};
+use crate::clock::StableIdSequence;
 use crate::data::query::QueryCommand;
 use crate::sync::MutexRecovery;
 use futures_util::StreamExt as _;
@@ -41,7 +40,6 @@ pub(super) enum PreviewAnswer {
 /// The preview runs one project has started, by identity.
 pub(crate) struct PreviewRuns {
     storage: Arc<StorageManager>,
-    clock: Arc<dyn Clock>,
     ids: StableIdSequence,
     runs: Mutex<BTreeMap<String, HeldRun>>,
 }
@@ -56,7 +54,6 @@ impl PreviewRuns {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
         Self {
             storage,
-            clock: Arc::new(SystemClock),
             ids: StableIdSequence::new("preview", 1),
             runs: Mutex::new(BTreeMap::new()),
         }
@@ -73,7 +70,7 @@ impl PreviewRuns {
             ));
         }
         self.forget_abandoned();
-        let (id, _) = self.ids.next(self.clock.as_ref()).into_parts();
+        let (id, _) = self.ids.next().into_parts();
         let run = Arc::new(PreviewRun::new(queries));
         let task = tokio::spawn(run.clone().answer_all(self.storage.clone())).abort_handle();
         let status = run.status(&id);

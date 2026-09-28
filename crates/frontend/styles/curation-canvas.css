@@ -1,15 +1,124 @@
 /* Curation › canvas styles. Prefix every class with `curation-canvas-`. Use
-   @layer components like tailwind.css; the kit CSS is unlayered, so overrides of kit controls
-   must be unlayered too. */
+   @layer components like tailwind.css; rules for what the flow draws sit
+   unlayered at the end, beside dioxus-flow's own unlayered stylesheet. */
 
 @layer components {
-  /* The graph pane uses the shared canvas wrap (pale dotted viewport, zoom
-     controls at the bottom left) and the stage card's anatomy. What is
-     Curation's alone is the + on a node's bottom edge, the menu it opens,
-     and the line a running measurement writes. */
+  /* The graph pane: the pale dotted viewport the flow draws on, clipped to
+     its tile, with the zoom controls at its bottom left. */
   .curation-canvas-graph {
-    display: flex;
-    flex-direction: column;
+    @apply relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden;
+    background: var(--tone-viewport);
+    container-type: inline-size;
+  }
+
+  /* Zoom and fit share one hairline group at the bottom left; the canvas
+     above them is nothing but nodes. */
+  .curation-canvas-controls {
+    @apply absolute bottom-2.5 left-2.5 z-[5] flex items-center gap-px bg-surface p-0.5;
+    border-radius: 8px;
+    box-shadow: var(--shadow-float);
+  }
+
+  /* Node cards are a fixed size so the layered layout can place them before
+     they mount; the glyph tile carries the kind, the title the meaning. A
+     column of cards reads downwards, so the entrance follows the data down
+     rather than across the pane. */
+  .curation-canvas-stage-source { --stage-tone: var(--tone-stage-source); }
+  .curation-canvas-stage-media { --stage-tone: var(--tone-stage-media); }
+  .curation-canvas-stage-model { --stage-tone: var(--tone-stage-model); }
+  .curation-canvas-stage-shape { --stage-tone: var(--tone-stage-shape); }
+  .curation-canvas-stage-join { --stage-tone: var(--tone-stage-join); }
+
+  .curation-canvas-node {
+    @apply relative flex flex-col gap-1 border border-line bg-surface px-3 pb-2 pt-2.5 text-left text-ink;
+    box-sizing: border-box;
+    width: 192px;
+    height: 100px;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgb(16 16 16 / 0.05);
+    cursor: pointer;
+    transition: border-color 120ms ease-out, box-shadow 160ms var(--ease-out-expo), translate 160ms var(--ease-out-expo);
+    animation: curation-canvas-node-enter 320ms var(--ease-out-expo) both;
+    animation-delay: calc(var(--stage-order, 0) * 45ms);
+  }
+
+  .curation-canvas-node:hover {
+    border-color: var(--tone-line-strong);
+    box-shadow: var(--shadow-float);
+    translate: 0 -1px;
+  }
+
+  .curation-canvas-node.is-selected,
+  .curation-canvas-node.is-selected:hover {
+    border-color: var(--tone-accent-strong);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-accent) 45%, transparent), 0 4px 14px rgb(16 16 16 / 0.08);
+    translate: none;
+  }
+
+  /* A node's name is its kind, and a long one takes a second line rather
+     than an ellipsis. */
+  .curation-canvas-heading {
+    @apply flex min-w-0 items-start gap-2;
+  }
+
+  /* The kind mark: the stage's glyph inside a thin outline of its hue, the
+     same letter-badge grammar the catalog wears. */
+  .curation-canvas-mark {
+    @apply inline-flex size-[18px] shrink-0 items-center justify-center;
+    margin-top: -1px;
+    border: 1.5px solid var(--stage-tone);
+    border-radius: 5px;
+    color: var(--stage-tone);
+  }
+
+  .curation-canvas-mark .ui-icon {
+    @apply size-3;
+  }
+
+  .curation-canvas-title {
+    @apply min-w-0 overflow-hidden text-ellipsis text-[12.5px] font-semibold leading-4 tracking-[-0.01em];
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  /* Paths offer their own break points (after each slash); anything else
+     breaks only as a last resort, so "video" never arrives as "vide / o". */
+  .curation-canvas-summary {
+    @apply m-0 min-h-0 flex-1 text-[11px] leading-[15px] text-ink-soft;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: break-word;
+  }
+
+  .curation-canvas-footer {
+    @apply flex min-w-0 items-baseline gap-1.5 font-mono text-[10.5px] leading-3 text-ink-faint;
+  }
+
+  .curation-canvas-footer > * {
+    @apply min-w-0 truncate;
+  }
+
+  .curation-canvas-footer code {
+    @apply font-mono;
+  }
+
+  /* An output is identity, not selection, so it wears the output stage's
+     hue rather than the lime that means "you are here", as a flag on the
+     card's top edge, like a tab. */
+  .curation-canvas-output {
+    @apply absolute rounded px-1 font-medium;
+    top: -9px;
+    right: 10px;
+    z-index: 1;
+    border: 1px solid color-mix(in srgb, var(--tone-stage-output) 35%, var(--tone-surface));
+    color: var(--tone-stage-output);
+    background: var(--tone-surface);
+    line-height: 16px;
+    font-family: var(--font-mono);
+    font-size: 10px;
   }
 
   .curation-canvas-notice {
@@ -152,50 +261,54 @@
   }
 }
 
-/* Unlayered from here down. This file is imported at the head of
-   tailwind.css, so a layered rule of mine loses to every later rule in the same
-   layer — `.workflow-stage-card`'s own animation and footer among them — and to
-   the kit stylesheet, which is unlayered and loads later still. Node rules that
-   adjust a stage card, and every override of a kit control, therefore sit here,
-   one class more specific than what they override. */
+/* Unlayered from here down: dioxus-flow injects its own unlayered
+   stylesheet, so a rule for anything the flow draws must be unlayered too or
+   the library's entrance animation, grey edges, and default handle sizes win
+   however specific the selector. */
 
-/* A column of cards reads downwards, so the entrance follows the data down
-   rather than across the pane. */
-.curation-canvas-node.workflow-stage-card {
-  position: relative;
-  width: 192px;
-  height: 100px;
+/* dioxus-flow, spoken in this palette. */
+.curation-canvas-graph .dioxus-flow {
+  --df-bg: var(--tone-viewport);
+  --df-accent: var(--tone-accent-strong);
+  --df-edge: color-mix(in srgb, var(--tone-ink-faint) 72%, transparent);
+  --df-edge-selected: var(--tone-accent-strong);
+  --df-handle-bg: var(--tone-surface);
+  --df-handle-border: var(--tone-ink-faint);
+  --df-grid: color-mix(in srgb, var(--tone-ink-faint) 20%, transparent);
+}
+
+/* The library's node entrance is replaced by the card's staggered one. */
+.curation-canvas-flow .df-node {
+  animation: none;
   cursor: pointer;
-  animation-name: curation-canvas-node-enter;
 }
 
-/* A node's name is its kind, and a long one takes a second line rather
-   than an ellipsis. */
-.curation-canvas-node .workflow-stage-heading {
-  align-items: flex-start;
+.curation-canvas-flow .df-edge {
+  animation: none;
 }
 
-.curation-canvas-node .workflow-stage-mark {
-  margin-top: -1px;
+.curation-canvas-flow .df-node:focus-visible {
+  border-radius: 4px;
+  outline-width: 2px;
+  outline-offset: 2px;
 }
 
-.curation-canvas-node .workflow-stage-title {
-  display: -webkit-box;
-  overflow: hidden;
-  white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+.curation-canvas-flow .df-edge-path {
+  stroke-width: 1.25;
 }
 
-/* An output wears its flag on the card's top edge, like a tab. */
-.curation-canvas-node .curation-canvas-output {
-  position: absolute;
-  top: -9px;
-  right: 10px;
-  z-index: 1;
-  line-height: 16px;
-  font-family: var(--font-mono);
-  font-size: 10px;
+.curation-canvas-node .df-handle {
+  width: 6px;
+  height: 6px;
+  border-width: 1px;
+  border-color: var(--tone-line-strong);
+  pointer-events: none;
+  cursor: default;
+  transition: border-color 120ms ease-out, background 120ms ease-out;
+}
+
+.curation-canvas-node:is(:hover, .is-selected) .df-handle {
+  border-color: var(--tone-accent-strong);
 }
 
 /* A published view the saved curation has moved past. */
@@ -222,7 +335,7 @@
   outline: none;
 }
 
-.curation-canvas-node.workflow-stage-card:has(> .curation-canvas-node-open:focus-visible) {
+.curation-canvas-node:has(> .curation-canvas-node-open:focus-visible) {
   outline: 2px solid var(--tone-focus);
   outline-offset: 1px;
 }
@@ -314,8 +427,17 @@
    steady dot rather than a breathing one, and Remove is simply there on hover.
    Nothing that carries meaning is removed — only the movement is. */
 @media (prefers-reduced-motion: reduce) {
-  .curation-canvas-node.workflow-stage-card {
+  .curation-canvas-node {
     animation: none;
+    transition: none;
+  }
+
+  .curation-canvas-node:hover {
+    translate: none;
+  }
+
+  .curation-canvas-node .df-handle {
+    transition: none;
   }
 
   .curation-canvas-node .curation-canvas-node-dot {

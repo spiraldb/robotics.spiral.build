@@ -4,7 +4,6 @@ import asyncio
 import gc
 import json
 import math
-import threading
 import time
 from itertools import pairwise
 from pathlib import Path
@@ -23,8 +22,8 @@ from spiral_training_runtime.act import (
     _gpu_utilization,
     _normalize_hwc_images,
 )
-from spiral_training_runtime.arrow import decode_training_batch
-from spiral_training_runtime.config import TrainingConfig
+from spiral_training_runtime.arrow import TrainingArrays, decode_inference_input
+from spiral_training_runtime.config import PolicyConfig, TrainingConfig
 from spiral_training_runtime.errors import RuntimeRequestError
 from spiral_training_runtime.jobs import (
     MetricSeries,
@@ -68,7 +67,6 @@ def training_request() -> dict:
             "decoder_layers": 1,
             "kl_weight": 1.0,
             "learning_rate": 1.0e-5,
-            "total_steps": 2,
             "seed": 7,
         },
         "device": "cpu",
@@ -153,7 +151,7 @@ def test_canonical_fixture_versions_follow_the_boundary_descriptor() -> None:
 
 def test_mcap_training_requires_native_spiral_image_decoding() -> None:
     with pytest.raises(RuntimeRequestError, match="MCAP camera training is unavailable"):
-        McapTrainingDataset(job_request())
+        McapTrainingDataset()
 
 
 def test_job_api_owns_data_training_and_checkpoint_lifecycle(
@@ -178,9 +176,6 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
         summary = "one test anchor"
         table_prefix = "spiral_robotics"
 
-        def __init__(self, _request: dict) -> None:
-            pass
-
         def fetch(self, _validation: bool = False) -> tuple[object, float]:
             return object(), 1.0
 
@@ -192,16 +187,14 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
 
     class Session:
         parameter_count = 10
+        device_name = "CPU"
 
         def __init__(self, _config: TrainingConfig) -> None:
-            self.info = {"device": "CPU"}
-
-        def buffer_batch(self, _arrays: object, _kind: str, _step: int) -> None:
             pass
 
-        def train_buffered(self, _step: int) -> dict:
+        def train_step(self, _arrays: object, _step: int) -> dict:
             return {
-                "loss": {"total": 0.25},
+                "loss": 0.25,
                 "learning_rate": 1.0e-5,
                 "telemetry": {
                     "cpu_percent": 1.0,
@@ -341,17 +334,6 @@ def arrow_stream(columns: dict[str, pa.Array]) -> bytes:
     return sink.getvalue().to_pybytes()
 
 
-def training_body() -> bytes:
-    return arrow_stream(
-        {
-            "states": fixed_list(np.zeros((1, 2), dtype=np.float32), 1),
-            "images": fixed_list(np.zeros((1, 3 * 32 * 32), dtype=np.uint8), 1),
-            "actions": fixed_list(np.zeros((1, 4), dtype=np.float32), 1),
-            "action_is_pad": fixed_list(np.zeros((1, 2), dtype=np.uint8), 1),
-        }
-    )
-
-
 def inference_body() -> bytes:
     return arrow_stream(
         {
@@ -362,14 +344,14 @@ def inference_body() -> bytes:
 
 
 def test_arrow_values_are_zero_copy_numpy_views() -> None:
-    config = TrainingConfig.from_request(training_request())
-    body = training_body()
+    config = PolicyConfig.from_json(policy_config())
+    body = inference_body()
     assert len(body) < 3 * 32 * 32
-    batch = decode_training_batch(body, config)
-    assert batch.states.shape == (1, 2)
-    assert batch.images.shape == (1, 3 * 32 * 32)
-    assert not batch.states.flags["OWNDATA"]
-    assert not batch.images.flags["OWNDATA"]
+    arrays = decode_inference_input(body, config)
+    assert arrays.state.shape == (1, 2)
+    assert arrays.images[0].shape == (1, 3 * 32 * 32)
+    assert not arrays.state.flags["OWNDATA"]
+    assert not arrays.images[0].flags["OWNDATA"]
 
 
 def test_http_surface_reports_pytorch_without_constructing_a_model() -> None:
@@ -394,12 +376,6 @@ def test_http_surface_reports_pytorch_without_constructing_a_model() -> None:
             assert response.status_code == 200
             assert response.json()["info"]["version"] == VERSIONS.training_protocol.display_version
 
-            response = await client.post(
-                "/v1/sessions/missing/train?step=1",
-            )
-            assert response.status_code == 404
-            assert response.json()["detail"] == "Not Found"
-
     asyncio.run(exercise())
 
 
@@ -415,7 +391,7 @@ def test_checkpoint_manifest_carries_the_job_schema_version() -> None:
         image_height=32,
         image_width=32,
     )
-    session = SimpleNamespace(info={"device": "cpu"})
+    session = SimpleNamespace(device_name="cpu")
 
     manifest, _model = _checkpoint_manifest(request, dataset, session, 1)
 
@@ -453,45 +429,18 @@ def test_hwc_uint8_training_images_match_imagenet_chw_normalization() -> None:
     torch.testing.assert_close(actual, expected, rtol=1.0e-6, atol=1.0e-6)
 
 
-def test_session_buffer_holds_exactly_one_batch_ahead() -> None:
-    config = TrainingConfig.from_request(training_request())
-    first = decode_training_batch(training_body(), config)
-    second = decode_training_batch(training_body(), config)
-    session = object.__new__(TrainingSession)
-    session.buffer_condition = threading.Condition()
-    session.buffered_batch = None
-    started = threading.Event()
-    finished = threading.Event()
-    errors: list[Exception] = []
-
-    session.buffer_batch(first, "training", 1)
-
-    def buffer_second() -> None:
-        started.set()
-        try:
-            session.buffer_batch(second, "training", 2)
-        except Exception as error:  # pragma: no cover - asserted below
-            errors.append(error)
-        finally:
-            finished.set()
-
-    worker = threading.Thread(target=buffer_second)
-    worker.start()
-    assert started.wait(1.0)
-    assert not finished.wait(0.05)
-    assert session._take_buffered_batch("training", 1) is first
-    assert finished.wait(1.0)
-    worker.join()
-    assert not errors
-    assert session._take_buffered_batch("training", 2) is second
-
-
 def test_real_pytorch_act_train_checkpoint_and_infer_round_trip() -> None:
     config = TrainingConfig.from_request(training_request())
     session = TrainingSession(config)
-    session.buffer_batch(decode_training_batch(training_body(), config), "training", 1)
-    trained = session.train_buffered(1)
-    assert math.isfinite(trained["loss"]["total"])
+    arrays = TrainingArrays(
+        owner=None,
+        states=np.zeros((1, 2), dtype=np.float32),
+        images=np.zeros((1, 3 * 32 * 32), dtype=np.uint8),
+        actions=np.zeros((1, 4), dtype=np.float32),
+        action_is_pad=np.zeros((1, 2), dtype=np.uint8),
+    )
+    trained = session.train_step(arrays, 1)
+    assert math.isfinite(trained["loss"])
     checkpoint = session.checkpoint(
         {
             "manifest_json": "{}",

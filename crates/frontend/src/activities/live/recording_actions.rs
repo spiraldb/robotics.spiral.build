@@ -77,7 +77,7 @@ impl LiveSession {
         };
         if paused {
             self.project()
-                .run_safety("Recording paused. The episode remains open.", future);
+                .run_reported("Recording paused. The episode remains open.", future);
         } else {
             self.commands()
                 .run("Recording resumed in the same episode.", future);
@@ -96,16 +96,16 @@ impl LiveSession {
                 .report("The recording changed before the Timeline action was applied.");
             return;
         }
-        self.project().run_safety("", async move {
+        self.project().run_reported("", async move {
             let summary = RecordingClient::current()
                 .stop_recording(completion.keep)
                 .await
                 .map_err(|error| error.to_string())?;
             if completion.keep {
-                self.project().report_info_from(
-                    MessageSource::Live,
-                    format!("Saving episode to dataset ‘{}’.", summary.dataset_id()),
-                );
+                self.project().report_live_info(format!(
+                    "Saving episode to dataset ‘{}’.",
+                    summary.dataset_id()
+                ));
             } else {
                 self.project().report_success_from(
                     MessageSource::Live,

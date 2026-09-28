@@ -6,12 +6,12 @@ use axum::{
     extract::{FromRequest, State},
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{MethodFilter, get, on},
+    routing::{get, put},
 };
 use futures_util::TryStreamExt as _;
 use http_body::Body as _;
 use reqwest::Url;
-use spiral_robotics_common::providers::StudioProviders;
+use spiral_robotics_common::providers::{ProviderKeysStatus, ProviderKeysUpdate, StudioProviders};
 use std::{str::FromStr, time::Duration};
 
 use super::credentials::ProviderCredentials;
@@ -20,22 +20,20 @@ pub(crate) struct TransportEndpoints;
 
 impl TransportEndpoints {
     pub(crate) fn reads() -> Router<StudioContext> {
-        let relayed = MethodFilter::GET
-            .or(MethodFilter::POST)
-            .or(MethodFilter::PUT)
-            .or(MethodFilter::PATCH)
-            .or(MethodFilter::DELETE)
-            .or(MethodFilter::HEAD)
-            .or(MethodFilter::OPTIONS);
         Router::new()
             .route("/providers", get(Self::providers))
-            .route("/proxy", on(relayed, Self::proxy))
+            .route("/keys", get(Self::keys))
+            .route("/proxy", get(Self::proxy).post(Self::proxy))
+    }
+
+    pub(crate) fn commands() -> Router<StudioContext> {
+        Router::new().route("/keys", put(Self::update_keys))
     }
 
     async fn providers(
         State(state): State<StudioContext>,
     ) -> Result<Json<StudioProviders>, HttpFailure> {
-        ProviderCredentials::load(&state.projects().saved_connection())
+        ProviderCredentials::load(&state.keys().current())
             .providers()
             .map(Json)
             .map_err(|error| crate::OperationError::External(error).into())
@@ -47,9 +45,28 @@ impl TransportEndpoints {
         State(state): State<StudioContext>,
         request: ProxyRequest,
     ) -> Result<ProxyResponse, HttpFailure> {
-        let credentials = ProviderCredentials::load(&state.projects().saved_connection());
+        let credentials = ProviderCredentials::load(&state.keys().current());
         let bearer = credentials.bearer_for(&request.url);
         ProxyRelay::new()?.send(request.with_bearer(bearer)).await
+    }
+
+    /// Which keys are saved, never the keys.
+    async fn keys(State(state): State<StudioContext>) -> Json<ProviderKeysStatus> {
+        Json(state.keys().current().status())
+    }
+
+    /// Save new keys. Requests and database connections made after the save
+    /// use them; open projects keep running.
+    async fn update_keys(
+        State(state): State<StudioContext>,
+        Json(update): Json<ProviderKeysUpdate>,
+    ) -> Result<Json<ProviderKeysStatus>, HttpFailure> {
+        state
+            .keys()
+            .update(&update)
+            .await
+            .map(|keys| Json(keys.status()))
+            .map_err(|error| crate::OperationError::Internal(error).into())
     }
 }
 
@@ -308,14 +325,6 @@ mod tests {
         Response::new(Body::from(format!("redirected:{method}")))
     }
 
-    async fn head() -> Response {
-        Response::builder()
-            .header(header::CONTENT_LENGTH, "99")
-            .header("x-head", "yes")
-            .body(Body::empty())
-            .unwrap()
-    }
-
     struct CancellationGuard(Option<oneshot::Sender<()>>);
     impl Drop for CancellationGuard {
         fn drop(&mut self) {
@@ -345,7 +354,6 @@ mod tests {
             .route("/echo", any(echo))
             .route("/redirect", get(redirect))
             .route("/target", get(target))
-            .route("/head", any(head))
             .route("/cancel", get(cancellable))
             .with_state(state);
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -372,7 +380,7 @@ mod tests {
         let response = relay
             .send(request(
                 format!("{base}/echo"),
-                Method::PATCH,
+                Method::POST,
                 headers,
                 Body::from(binary.clone()),
             ))
@@ -380,7 +388,7 @@ mod tests {
             .unwrap()
             .into_response();
         assert_eq!(response.status(), StatusCode::MULTI_STATUS);
-        assert_eq!(response.headers()["x-method"], "PATCH");
+        assert_eq!(response.headers()["x-method"], "POST");
         assert_eq!(response.headers().get_all("x-echo").iter().count(), 2);
         assert!(response.headers().get("x-hop").is_none());
         assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), binary);
@@ -398,25 +406,6 @@ mod tests {
         assert_eq!(
             to_bytes(response.into_body(), 1024).await.unwrap(),
             "redirected:GET"
-        );
-
-        let response = relay
-            .send(request(
-                format!("{base}/head"),
-                Method::HEAD,
-                HeaderMap::new(),
-                Body::empty(),
-            ))
-            .await
-            .unwrap()
-            .into_response();
-        assert_eq!(response.headers()["x-head"], "yes");
-        assert_eq!(response.headers()[header::CONTENT_LENGTH], "99");
-        assert!(
-            to_bytes(response.into_body(), 1024)
-                .await
-                .unwrap()
-                .is_empty()
         );
         server.abort();
     }

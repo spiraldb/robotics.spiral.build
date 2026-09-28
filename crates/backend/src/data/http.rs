@@ -11,13 +11,11 @@ use axum::{
 };
 use spiral_robotics_common::datasets::{
     DatasetCheckLookup, DatasetCheckSave, DatasetInspection, DatasetJointRoles,
-    DatasetJointRolesSave, DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetSummary,
-    DatasetTopic, EpisodeSelection, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
+    DatasetJointRolesSave, DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetTopic,
+    EpisodeSelection, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
     HuggingFaceDatasetSource, ProjectResource,
 };
-use spiral_robotics_common::relations::{
-    EpisodeQueryRequest, QueryRequest, RelationCatalog, SpiralQuerySnapshot,
-};
+use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest, SpiralQuerySnapshot};
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
 pub(crate) struct DatasetQueryEndpoints;
@@ -25,15 +23,12 @@ pub(crate) struct DatasetQueryEndpoints;
 impl DatasetQueryEndpoints {
     pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
-            .route("/datasets", get(Self::datasets))
             .route("/data-catalog", get(Self::project_resources))
             .route("/datasets/inspect", post(Self::inspect_dataset))
             .route("/datasets/robot", post(Self::dataset_robot))
             .route("/datasets/joint-roles", post(Self::dataset_joint_roles))
             .route("/datasets/checks", post(Self::dataset_check_report))
-            .route("/datasets/cameras", post(Self::dataset_cameras))
             .route("/datasets/episode-topics", post(Self::episode_topics))
-            .route("/relations", get(Self::relation_catalog))
             .route("/queries", post(Self::run_spiral_query))
             .route("/queries/episode", post(Self::run_episode_query))
             .route(
@@ -137,16 +132,6 @@ impl DatasetQueryEndpoints {
             .map_err(OperationError::External)?;
         Ok(Json(()))
     }
-    async fn datasets(
-        Project(project): Project,
-    ) -> Result<Json<Vec<DatasetSummary>>, OperationError> {
-        let datasets = project
-            .storage()
-            .datasets()
-            .await
-            .map_err(OperationError::External)?;
-        Ok(Json(datasets))
-    }
     async fn inspect_dataset(
         Project(project): Project,
         ApiJson(selection): ApiJson<DatasetSelection>,
@@ -158,24 +143,6 @@ impl DatasetQueryEndpoints {
             .map_err(OperationError::External)?;
         Ok(Json(inspection))
     }
-    /// A dataset with the camera topics that can be read as video.
-    async fn dataset_cameras(
-        Project(project): Project,
-        ApiJson(selection): ApiJson<DatasetSelection>,
-    ) -> Result<Json<serde_json::Value>, OperationError> {
-        let storage = project.storage();
-        let inspection = storage
-            .inspect_dataset(selection)
-            .await
-            .map_err(OperationError::External)?;
-        let cameras = storage
-            .dataset_cameras(&inspection)
-            .await
-            .map_err(OperationError::External)?;
-        Ok(Json(
-            serde_json::json!({"dataset": inspection, "cameras": cameras}),
-        ))
-    }
     async fn episode_topics(
         Project(project): Project,
         ApiJson(request): ApiJson<EpisodeSelection>,
@@ -186,17 +153,6 @@ impl DatasetQueryEndpoints {
             .await
             .map_err(OperationError::External)?;
         Ok(Json(topics))
-    }
-    async fn relation_catalog(
-        Project(project): Project,
-    ) -> Result<Json<RelationCatalog>, OperationError> {
-        let catalog = project
-            .storage()
-            .queries()
-            .relation_catalog()
-            .await
-            .map_err(OperationError::External)?;
-        Ok(Json(catalog))
     }
     async fn run_spiral_query(
         Project(project): Project,

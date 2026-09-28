@@ -854,13 +854,12 @@ impl RecordedRobotPose for TimelineArmSample {
     ) -> Option<BTreeMap<String, f32>> {
         let mut observed = false;
         let positions = configuration.positions(|name, input| {
+            // A recording keeps normalized positions, never degrees: those
+            // would reinterpret it with today's calibration.
             let value = match input {
-                TelemetryCoordinate::Degrees => self.degrees(),
-                TelemetryCoordinate::Normalized => self.normalized(),
+                TelemetryCoordinate::Degrees => None,
+                TelemetryCoordinate::Normalized => self.normalized().get(name).copied().flatten(),
             }
-            .get(name)
-            .copied()
-            .flatten()
             .filter(|value| value.is_finite());
             observed |= value.is_some();
             value
@@ -1070,29 +1069,10 @@ mod tests {
     use super::*;
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn recorded_pose_uses_backend_projected_degrees() {
+    fn recorded_pose_does_not_guess_degrees_from_normalized_positions() {
         let sample = TimelineArmSample::new(
             "follower",
             BTreeMap::from([("hinge".to_owned(), Some(1.0))]),
-            BTreeMap::from([("hinge".to_owned(), Some(90.0))]),
-        );
-
-        let configuration = serde_json::from_value(
-            serde_json::json!({"urdf":"", "joints":{"hinge":{"input":"degrees", "scale":std::f64::consts::PI / 180.0, "offset":0.0, "rest":0.0}}}),
-        )
-        .unwrap();
-        let pose = sample
-            .recorded_positions(&configuration)
-            .expect("episode_preview pose");
-        assert!((pose["hinge"] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn recorded_pose_does_not_guess_without_projected_degrees() {
-        let sample = TimelineArmSample::new(
-            "follower",
-            BTreeMap::from([("hinge".to_owned(), None)]),
-            BTreeMap::from([("hinge".to_owned(), None)]),
         );
         let configuration = serde_json::from_value(
             serde_json::json!({"urdf":"", "joints":{"hinge":{"input":"degrees", "scale":std::f64::consts::PI / 180.0, "offset":0.0, "rest":0.0}}}),

@@ -92,16 +92,6 @@ impl RecordingSession {
         };
         Some(CameraRecording::preview(&cameras, stream))
     }
-
-    pub(crate) fn forget_preview(&self, episode: &str) {
-        let mut review = self.review.recover_lock();
-        if review
-            .as_ref()
-            .is_some_and(|review| review.episode == episode)
-        {
-            *review = None;
-        }
-    }
 }
 
 impl TakeChange<'_> {
@@ -199,7 +189,6 @@ mod tests {
         .unwrap();
         session.try_change().unwrap().close(vec![camera]);
         assert!(session.camera_preview("another", "wrist").is_none());
-        session.forget_preview("another");
         assert_eq!(
             session
                 .camera_preview("take-one", "wrist")

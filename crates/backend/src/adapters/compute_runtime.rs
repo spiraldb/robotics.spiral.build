@@ -14,8 +14,8 @@ use arrow_schema::{DataType, Field};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, de::DeserializeOwned};
 use spiral_robotics_inference::{
-    ActionChunk, ActionChunkShape, ImageFormat, InferenceInput, InferenceStats, ModelArtifact,
-    Policy, PolicyLoader, PolicySpecification,
+    ActionChunk, ActionChunkShape, InferenceInput, InferenceStats, ModelArtifact, Policy,
+    PolicyLoader, PolicySpecification,
 };
 use spiral_robotics_training::{
     TrainingBackendError, TrainingBackendInfo, TrainingJobHistory, TrainingJobRequest,
@@ -259,18 +259,14 @@ struct CreatePolicyResponse {
 
 #[derive(Deserialize)]
 struct InferenceStatsResponse {
-    preprocessing_ms: f64,
     model_ms: f64,
-    postprocessing_ms: f64,
     total_ms: f64,
 }
 
 impl InferenceStatsResponse {
     fn into_stats(self) -> spiral_robotics_inference::InferenceResult<InferenceStats> {
         Ok(InferenceStats::default()
-            .with_preprocessing(self.preprocessing_ms.inference_duration()?)
             .with_model(self.model_ms.inference_duration()?)
-            .with_postprocessing(self.postprocessing_ms.inference_duration()?)
             .with_total(self.total_ms.inference_duration()?))
     }
 }
@@ -349,7 +345,7 @@ impl InferenceInputHttp for InferenceInput<'_> {
         let mut arrays = Vec::<(String, ArrayRef)>::with_capacity(self.images().len() + 1);
         arrays.push((
             "state".to_owned(),
-            FixedListLayout::new(DataType::Float32, 1, "state")
+            FixedListLayout::new(DataType::Float32, "state")
                 .build(Arc::new(Float32Array::from(self.state().to_vec())))
                 .map_err(|error| {
                     spiral_robotics_inference::InferenceError::Inference(error.to_string())
@@ -379,9 +375,7 @@ impl InferenceInputHttp for InferenceInput<'_> {
                 })?;
             if image.name() != expected.name()
                 || image.dimensions() != dimensions
-                || image.format() != ImageFormat::Rgb8
                 || expected.channels() != 3
-                || image.row_stride() != packed_stride
                 || image.data().len() != expected_len
             {
                 return Err(spiral_robotics_inference::InferenceError::Input(format!(
@@ -394,7 +388,7 @@ impl InferenceInputHttp for InferenceInput<'_> {
             }
             arrays.push((
                 format!("image_{index}"),
-                FixedListLayout::new(DataType::UInt8, 1, &format!("image_{index}"))
+                FixedListLayout::new(DataType::UInt8, &format!("image_{index}"))
                     .build(Arc::new(UInt8Array::from(image.data().to_vec())))
                     .map_err(|error| {
                         spiral_robotics_inference::InferenceError::Inference(error.to_string())
@@ -440,33 +434,20 @@ impl ArrowRecordHttp for RecordBatch {
     }
 }
 
+/// One tensor sent as a single fixed-size list row.
 struct FixedListLayout<'a> {
     data_type: DataType,
-    batch_size: usize,
     name: &'a str,
 }
 
 impl<'a> FixedListLayout<'a> {
-    fn new(data_type: DataType, batch_size: usize, name: &'a str) -> Self {
-        Self {
-            data_type,
-            batch_size,
-            name,
-        }
+    fn new(data_type: DataType, name: &'a str) -> Self {
+        Self { data_type, name }
     }
 
     fn build(self, values: ArrayRef) -> Result<ArrayRef, String> {
-        if self.batch_size == 0 || !values.len().is_multiple_of(self.batch_size) {
-            return Err(format!(
-                "{} has {} values for batch size {}",
-                self.name,
-                values.len(),
-                self.batch_size
-            ));
-        }
-        let width = values.len() / self.batch_size;
-        let width =
-            i32::try_from(width).map_err(|_| format!("{} row is too wide for Arrow", self.name))?;
+        let width = i32::try_from(values.len())
+            .map_err(|_| format!("{} row is too wide for Arrow", self.name))?;
         FixedSizeListArray::try_new(
             Arc::new(Field::new("item", self.data_type, false)),
             width,

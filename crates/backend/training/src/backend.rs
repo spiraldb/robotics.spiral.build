@@ -87,10 +87,6 @@ impl TrainingBackendInfo {
         self.protocol.spiral_schema_maximum
     }
 
-    pub fn id(&self) -> &str {
-        &self.identity.id
-    }
-
     pub fn display_name(&self) -> &str {
         &self.identity.display_name
     }

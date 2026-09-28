@@ -114,7 +114,7 @@ impl DatasetClient {
             .await
     }
 
-    pub(super) fn project_resources(
+    pub(crate) fn project_resources(
         &self,
     ) -> impl Future<Output = Result<Vec<ProjectResource>, CommandError>> + use<> {
         self.project
@@ -132,15 +132,6 @@ impl DatasetClient {
             project: ProjectClient::current(),
         }
     }
-    pub(crate) fn list_datasets(
-        &self,
-    ) -> impl Future<
-        Output = Result<Vec<spiral_robotics_common::datasets::DatasetSummary>, CommandError>,
-    > + use<> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/datasets"))
-    }
-
     pub(in crate::activities) fn episode_topics(
         &self,
         request: spiral_robotics_common::datasets::EpisodeSelection,

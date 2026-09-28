@@ -539,11 +539,11 @@ fn JointControls(
             class: if drivable { "joint-list joint-list-drivable" } else { "joint-list" },
             // The one blocker this panel cannot answer for itself: an
             // uncalibrated arm refuses every command, and the control that fixes
-            // it lives in the robot explorer. Mode and torque transitions belong
+            // it lives in Settings › Robots. Mode and torque transitions belong
             // to the workbench Control section rather than this detail panel.
             if !robot.config().calibrated() {
                 p { class: "joint-blocked joint-list-wide",
-                    "Calibrate this arm in the robot explorer to command its joints."
+                    "Calibrate this arm in Settings › Robots to command its joints."
                 }
             }
             for joint in arm.telemetry().joints().to_owned() {

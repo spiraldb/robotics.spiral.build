@@ -1,8 +1,8 @@
 //! Spiral Robotics interface primitives.
 //!
 //! One design language, spelled once: every Studio surface builds from the
-//! same actions, fields, facts, disclosures, trees, reorder gestures, and
-//! notices, and the surface owns only layout and domain content. The
+//! same actions, fields, facts, disclosures, trees, and notices, and the
+//! surface owns only layout and domain content. The
 //! stylesheet ships with the crate; install it once with [`UiStyles`] beside
 //! the application shell. Colours are role tokens (`--ui-*`) that follow the
 //! host's `--tone-*` palette when it defines one.
@@ -21,8 +21,7 @@ mod display;
 mod foundation;
 
 pub use containers::{
-    Disclosure, DisclosureProps, Menu, MenuProps, Reorder, ReorderHandle, ReorderHandleProps,
-    ReorderList, ReorderListProps, ReorderMove, Tree, TreeBranch, TreeItem, TreeItemProps,
+    Disclosure, DisclosureProps, Menu, MenuProps, Tree, TreeBranch, TreeItem, TreeItemProps,
     TreeProps,
 };
 pub use controls::{
@@ -38,22 +37,7 @@ pub use display::{
     KindMarkProps, Notice, NoticeProps, NoticeTone,
 };
 pub use foundation::{
-    Arrangement, BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon,
-    Flight, GripIcon, Motion, PauseIcon, Place, PlayIcon, RefreshIcon, Remount, SkipToEndIcon,
-    SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon, StopIcon, UiStyles, UnassignIcon,
-    ZoomInIcon, ZoomOutIcon,
+    BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon, Flight, Motion,
+    PauseIcon, Place, PlayIcon, RefreshIcon, Remount, SkipToEndIcon, SkipToStartIcon, SpinnerIcon,
+    StepBackIcon, StepForwardIcon, UiStyles, UnassignIcon, ZoomInIcon, ZoomOutIcon,
 };
-
-/// Everything a surface typically needs.
-pub mod prelude {
-    pub use crate::{
-        ActionPurpose, BlockingConfirmation, BrowserFocus, Button, ButtonAuxiliaryHandlers,
-        ButtonSize, ButtonVariant, CheckIcon, ChevronIcon, CloseIcon, ConfirmationCopy,
-        ConfirmationDismissal, ConfirmationResponse, DeleteIcon, Disclosure, EmptyState, Fact,
-        FactLayout, FactList, Field, FieldLayout, FileButton, FileInput, InlineConfirmation,
-        KindMark, LinkButton, ModeButton, ModeGroup, Notice, NoticeTone, PauseIcon, PlayIcon,
-        RefreshIcon, Reorder, ReorderHandle, ReorderList, ReorderMove, Select, SkipToEndIcon,
-        SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon, StopIcon, TextInput,
-        TextInputKind, Toggle, Tree, TreeBranch, TreeItem, UnassignIcon, ZoomInIcon, ZoomOutIcon,
-    };
-}

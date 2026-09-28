@@ -4,7 +4,6 @@ use dioxus::prelude::*;
 
 use crate::activities::live::recording_review::EpisodePreview;
 use crate::client::http::CameraApiPath;
-use crate::client::project::ProjectClient;
 use crate::components::icons::CameraStreamIcon;
 use crate::format::ClockPresentation;
 use crate::panels::recorded_source::{LoadState, RecordedSource};
@@ -69,18 +68,11 @@ pub(super) fn CameraEditor(element_id: String, source: CameraEditorSource) -> El
                     }
                 }
             } else {
-                let (title, detail) = match &source.state() {
-                    LoadState::Loading { .. } => (
+                let (title, detail) = match source.state().reason() {
+                    Some(reason) => ("Recorded camera unavailable", reason),
+                    None => (
                         "Loading recorded camera",
-                        "The recorded frame will appear here when the episode source is ready."
-                            .to_owned(),
-                    ),
-                    LoadState::Unavailable { reason } | LoadState::Failed { reason, .. } => {
-                        ("Recorded camera unavailable", reason.clone())
-                    }
-                    LoadState::Ready(_) => (
-                        "No recorded camera",
-                        "This episode has no recorded video for this camera.".to_owned(),
+                        "The recorded frame will appear here when the episode source is ready.",
                     ),
                 };
                 rsx! {
@@ -154,7 +146,7 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
             if workspace.is_active() && panel.geometry().visible() {
             img {
                 class: "camera-stream-image",
-                src: ProjectClient::current().scoped_url(&device.camera_stream_url()),
+                src: device.camera_stream_url(),
                 alt: "Live view from the {role} camera on {robot}",
                 loading: "eager",
                 decoding: "sync",
@@ -215,19 +207,17 @@ impl<'a> RecordedCameraSourceRequest<'a> {
 
     fn for_stream(self, stream_id: &str, label: &str) -> CameraEditorSource {
         let at = self.at;
-        CameraEditorSource::Recorded(self.map_camera(|preview| {
-            Some(RecordedCamera {
-                episode: preview.episode().to_owned(),
-                stream: stream_id.into(),
-                label: label.into(),
-                episode_seconds: at.max(0.0),
-            })
+        CameraEditorSource::Recorded(self.map_camera(|preview| RecordedCamera {
+            episode: preview.episode().to_owned(),
+            stream: stream_id.into(),
+            label: label.into(),
+            episode_seconds: at.max(0.0),
         }))
     }
 
     fn map_camera(
         self,
-        select: impl Fn(&EpisodePreview) -> Option<RecordedCamera>,
+        select: impl Fn(&EpisodePreview) -> RecordedCamera,
     ) -> RecordedSource<RecordedCamera> {
         let Some(source) = self
             .source
@@ -237,20 +227,12 @@ impl<'a> RecordedCameraSourceRequest<'a> {
         };
         let state = match source.state() {
             LoadState::Loading { previous } => LoadState::Loading {
-                previous: previous.as_ref().and_then(&select),
+                previous: previous.as_ref().map(&select),
             },
-            LoadState::Ready(preview) => select(preview).map_or_else(
-                || LoadState::Unavailable {
-                    reason: "This episode has no recorded video for this camera.".to_owned(),
-                },
-                LoadState::Ready,
-            ),
-            LoadState::Unavailable { reason } => LoadState::Unavailable {
-                reason: reason.clone(),
-            },
+            LoadState::Ready(preview) => LoadState::Ready(select(preview)),
             LoadState::Failed { reason, previous } => LoadState::Failed {
                 reason: reason.clone(),
-                previous: previous.as_ref().and_then(select),
+                previous: previous.as_ref().map(select),
             },
         };
         RecordedSource::new(source.episode(), source.seconds(), state)
@@ -280,6 +262,8 @@ fn RecordedCameraFrame(recorded: RecordedCamera, element_id: String) -> Element 
     }
 }
 
+/// One recorded camera at `seconds`, decoded by the same playback Data's
+/// cameras follow their playhead with.
 #[component]
 fn CameraFrameCanvas(
     source: std::rc::Rc<spiral_robotics_common::datasets::EpisodeVideo>,
@@ -287,51 +271,54 @@ fn CameraFrameCanvas(
     label: String,
     element_id: String,
 ) -> Element {
-    use crate::activities::episode::{DecodedGroup, EncodedCamera};
-    use std::rc::Rc;
-    let encoded = use_hook(|| Rc::new(EncodedCamera::new(&source, 0)));
+    use crate::activities::episode::{CameraPlayback, EncodedCamera};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+    let camera = use_hook(|| EncodedCamera::new(&source, 0).map(Rc::new));
+    // The decode loop takes the playback out of its cell while it awaits the
+    // decoder and puts it back afterwards, so no borrow spans an await; a
+    // playhead that moves meanwhile waits in `wanted` for the loop's next turn.
+    let playback = use_hook(|| Rc::new(RefCell::new(camera.clone().ok().map(CameraPlayback::new))));
+    let wanted = use_hook(|| Rc::new(Cell::new(None::<f64>)));
+    let running = use_hook(|| Rc::new(Cell::new(false)));
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);
-    let mut drawing_error = use_signal(|| None::<String>);
-    let camera = encoded.clone();
-    let group = use_memo(use_reactive((&seconds,), move |(seconds,)| {
-        camera
-            .as_ref()
-            .as_ref()
-            .ok()
-            .and_then(|camera| camera.group_at(seconds))
-    }));
-    let frames = use_resource(move || {
-        let range = group();
-        let encoded = encoded.clone();
-        async move {
-            let camera = encoded.as_ref().as_ref().map_err(Clone::clone)?;
-            match range {
-                Some(range) => DecodedGroup::decode(camera, range).await.map(Some),
-                None => Ok(None),
-            }
-        }
-    });
+    // Whether the last decode drew a frame; `None` until the first one lands.
+    let mut drawn = use_signal(|| None::<Result<bool, String>>);
     use_effect(use_reactive((&seconds,), move |(seconds,)| {
         let Some(canvas) = canvas() else {
             return;
         };
-        let pending = *frames.state().read() == UseResourceState::Pending;
-        let result = match &*frames.read() {
-            Some(Ok(Some(decoded))) if !pending => decoded.draw(&canvas, seconds),
-            _ => DecodedGroup::clear(&canvas),
-        };
-        if let Err(error) = result {
-            drawing_error.set(Some(error));
+        wanted.set(Some(seconds));
+        if running.replace(true) {
+            return;
         }
+        let (playback, wanted, running) = (playback.clone(), wanted.clone(), running.clone());
+        spawn(async move {
+            while let Some(target) = wanted.take() {
+                let Some(mut decoder) = playback.borrow_mut().take() else {
+                    break;
+                };
+                let outcome = decoder
+                    .prepare(target)
+                    .await
+                    .and_then(|()| decoder.draw(&canvas, target));
+                *playback.borrow_mut() = Some(decoder);
+                let failed = outcome.is_err();
+                drawn.set(Some(outcome));
+                if failed {
+                    break;
+                }
+            }
+            running.set(false);
+        });
     }));
-    let decoding = *frames.state().read() == UseResourceState::Pending;
-    let no_frame = matches!(&*frames.read(), Some(Ok(None)));
-    let error = drawing_error().or_else(|| {
-        frames
-            .read()
-            .as_ref()
-            .and_then(|result| result.as_ref().err().cloned())
-    });
+    let error = camera
+        .as_ref()
+        .err()
+        .cloned()
+        .or_else(|| drawn().and_then(Result::err));
     rsx! {
         canvas { id: element_id, class: "h-full w-full object-contain", width: 640, height: 360, role: "img",
             "aria-label": "Recorded {label} camera at {seconds.clock_label()}",
@@ -341,9 +328,9 @@ fn CameraFrameCanvas(
         }
         if let Some(error) = error {
             div { class: "camera-live-error", role: "alert", "{error}" }
-        } else if decoding {
+        } else if drawn().is_none() {
             div { class: "camera-live-error", role: "status", "Decoding recorded camera…" }
-        } else if no_frame {
+        } else if drawn() == Some(Ok(false)) {
             div { class: "camera-live-error", role: "status", "No camera frame at this time." }
         }
     }

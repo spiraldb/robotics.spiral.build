@@ -14,7 +14,9 @@ use spiral_robotics_hardware::{
     CameraRuntime, ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS,
     HardwareHandle,
 };
-use spiral_robotics_storage::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
+use spiral_robotics_storage::{
+    BackendStateStore, ProviderKeyring, ServiceEndpoint, SpiralConnectionSettings,
+};
 use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -38,8 +40,6 @@ struct StudioServerArguments {
     access: ServerAccessArguments,
     #[command(flatten)]
     video: VideoArguments,
-    #[command(flatten)]
-    spiral: SpiralArguments,
     #[command(flatten)]
     motion: MotionArguments,
 }
@@ -68,18 +68,6 @@ struct VideoArguments {
     /// FFmpeg video codec used for camera access units in MCAP recordings.
     #[arg(long, default_value = "libx264", value_name = "CODEC")]
     video_codec: String,
-}
-
-#[derive(Debug, clap::Args)]
-struct SpiralArguments {
-    /// Optional initial Spiral project. Settings in the local Studio database are
-    /// used when this and SPIRAL_PROJECT_ID are omitted.
-    #[arg(long, value_name = "PROJECT")]
-    spiral_project: Option<String>,
-
-    /// Namespace for model artifacts.
-    #[arg(long, default_value = "studio", value_name = "PREFIX")]
-    studio_table_prefix: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -213,10 +201,11 @@ impl ServerStartup {
             control_settings,
             public,
         } = self;
-        let saved = backend_state
+        let (saved, keys) = backend_state
             .initialize()
             .await
             .map_err(std::io::Error::other)?;
+        let keys = Arc::new(ProviderKeyring::new(backend_state.clone(), keys));
         if let Some(path) = backend_state.studio().path() {
             tracing::info!(path = %path.display(), "Studio state is stored in SQLite");
         }
@@ -241,30 +230,13 @@ impl ServerStartup {
             .bind
             .unwrap_or_else(dioxus_cli_config::fullstack_address_or_localhost);
         arguments.access.validate_bind_address(bind)?;
-        let spiral_project = arguments
-            .spiral
-            .spiral_project
-            .clone()
-            .or_else(|| std::env::var("SPIRAL_PROJECT_ID").ok())
-            .filter(|project| !project.trim().is_empty())
-            .or_else(|| saved.project_id());
-        if !spiral_robotics_storage::StorageSchema::is_identifier(
-            arguments.spiral.studio_table_prefix.trim(),
-        ) {
-            return Err(std::io::Error::other(
-            "Studio table prefix must start with a letter or '_' and contain only letters, numbers, or '_'",
-        )
-        .into());
-        }
-        let table_prefix = arguments.spiral.studio_table_prefix.trim().to_owned();
         let mut connection = SpiralConnectionSettings::new(spiral_endpoint, spiral_spfs_endpoint)
             .map_err(std::io::Error::other)?;
-        if let Some(project) = spiral_project {
+        if let Some(project) = saved.project_id() {
             connection = connection
                 .with_project(&project)
                 .map_err(std::io::Error::other)?;
         }
-        connection = connection.with_huggingface_token(saved.huggingface_token());
         let (account, spiral_access) = SpiralAccount::restore(connection.endpoint())
             .await
             .map_err(std::io::Error::other)?;
@@ -284,19 +256,17 @@ impl ServerStartup {
         let factory = crate::projects::ProjectFactory::new(
             resources,
             crate::projects::ProjectDataAccess::new(
-                table_prefix,
                 backend_state.studio().clone(),
                 spiral_access,
+                keys.subscribe(),
             ),
         );
         let projects = crate::projects::ProjectRegistry::new(factory, backend_state, connection);
-        let state = StudioContext::new(projects, account);
+        let state = StudioContext::new(projects, account, keys);
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 
-        let public_url = std::env::var("SPIRAL_ROBOTICS_PUBLIC_URL")
-            .unwrap_or_else(|_| format!("http://{address}"));
-        println!("Spiral Robotics Studio is running at {public_url}");
+        println!("Spiral Robotics Studio is running at http://{address}");
 
         let bootstrap = tokio::spawn(
             crate::projects::bootstrap::ProjectBootstrap::new(state.clone())

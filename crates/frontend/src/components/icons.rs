@@ -8,11 +8,11 @@
 use dioxus::prelude::*;
 
 pub(crate) use spiral_robotics_ui::{
-    CheckIcon, PauseIcon, PlayIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon,
+    PauseIcon, PlayIcon, SkipToEndIcon, SkipToStartIcon, SpinnerIcon, StepBackIcon,
     StepForwardIcon, ZoomInIcon, ZoomOutIcon,
 };
 
-/// The robot explorer: a compact arm silhouette rather than a generic sidebar.
+/// Live: a compact arm silhouette rather than a generic sidebar.
 #[component]
 pub(crate) fn RobotPanelIcon() -> Element {
     rsx! {
@@ -83,8 +83,9 @@ pub(crate) fn CurationIcon() -> Element {
     }
 }
 
+/// A funnel: what passes a rule.
 #[component]
-pub(crate) fn QueryNodeIcon() -> Element {
+pub(crate) fn FunnelIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M2.5 3h11L9.25 8v4l-2.5 1V8L2.5 3Z" }
@@ -93,7 +94,7 @@ pub(crate) fn QueryNodeIcon() -> Element {
 }
 
 #[component]
-pub(super) fn FitViewIcon() -> Element {
+pub(crate) fn FitViewIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" }
@@ -160,9 +161,9 @@ pub(crate) fn NotificationIcon() -> Element {
     }
 }
 
-/// Native video and image stages: a film frame with sprocket marks.
+/// A film frame with sprocket marks.
 #[component]
-pub(crate) fn MediaStageIcon() -> Element {
+pub(crate) fn FilmFrameIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             rect { x: "2.5", y: "3.5", width: "11", height: "9", rx: "1" }
@@ -171,9 +172,9 @@ pub(crate) fn MediaStageIcon() -> Element {
     }
 }
 
-/// Native AI inference: a four-point spark.
+/// A four-point spark: what a model reads.
 #[component]
-pub(crate) fn ModelStageIcon() -> Element {
+pub(crate) fn SparkIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M7.5 2.75 8.9 6.6l3.85 1.4-3.85 1.4L7.5 13.25 6.1 9.4 2.25 8l3.85-1.4L7.5 2.75Z" }
@@ -182,9 +183,9 @@ pub(crate) fn ModelStageIcon() -> Element {
     }
 }
 
-/// Two row populations combined on a key.
+/// Two overlapping circles.
 #[component]
-pub(crate) fn JoinStageIcon() -> Element {
+pub(crate) fn OverlapIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             circle { cx: "6", cy: "8", r: "3.75" }

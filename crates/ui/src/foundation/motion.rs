@@ -1,4 +1,4 @@
-//! Choreographed motion: elements sliding to where a state change put them,
+//! Choreographed motion: an element sliding to where a state change put it,
 //! and tokens flying from one place to another.
 //!
 //! Both run on the Web Animations API, so the compositor draws the frames and
@@ -8,7 +8,6 @@
 //! and never makes anyone wait to see it.
 
 use js_sys::{Array, Object, Promise, Reflect};
-use std::collections::BTreeMap;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -32,13 +31,10 @@ extern "C" {
     fn finished(this: &Animation) -> Promise;
 }
 
-/// How long a slide takes. Long enough to follow one row, short enough that
-/// three hundred of them are over before anyone reaches for the next click.
+/// How long a slide takes: long enough to follow one row.
 const SLIDE_MS: f64 = 360.0;
 /// How long one token is in the air.
 const FLIGHT_MS: f64 = 640.0;
-/// A cascade of slides never waits longer than this for its last member.
-const MAX_STAGGER_MS: f64 = 420.0;
 /// Points a flight's curve is drawn through; enough that the arc reads as a
 /// curve rather than two straight legs.
 const FLIGHT_SAMPLES: usize = 10;
@@ -51,7 +47,7 @@ pub struct Motion;
 
 impl Motion {
     /// Whether the operator asked for less motion.
-    pub fn reduced() -> bool {
+    fn reduced() -> bool {
         web_sys::window()
             .and_then(|window| {
                 window
@@ -146,95 +142,6 @@ impl Place {
     }
     pub fn center(&self) -> (f64, f64) {
         (self.left + self.width / 2.0, self.top + self.height / 2.0)
-    }
-    fn overlaps_rows_of(&self, other: &Self) -> bool {
-        self.top < other.top + other.height && other.top < self.top + self.height
-    }
-    /// The part of this rectangle the window shows, top to bottom. A list
-    /// taller than the screen is mostly out of view however it scrolls.
-    fn within(self, window_height: f64) -> Self {
-        let top = self.top.max(0.0);
-        let bottom = (self.top + self.height).min(window_height);
-        Self {
-            top,
-            height: (bottom - top).max(0.0),
-            ..self
-        }
-    }
-}
-
-/// Where each keyed element under one container sat, taken before a state
-/// change, so that after it every element can slide from there to where it
-/// landed (the FLIP technique: first, last, invert, play).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Arrangement(BTreeMap<String, Place>);
-
-impl Arrangement {
-    /// The attribute that names an element across renders.
-    pub const KEY: &'static str = "data-motion-key";
-
-    /// Every element under `container` carrying [`Self::KEY`].
-    pub fn measure(container: &web_sys::Element) -> Self {
-        let mut places = BTreeMap::new();
-        Self::each_keyed(container, |key, element| {
-            places.insert(key, Place::of(element));
-        });
-        Self(places)
-    }
-
-    /// Slide every keyed element that moved from its measured place to its
-    /// current one, `stagger_ms` apart in the order they now read. An element
-    /// that is out of the container's view before and after moves without
-    /// animating, so a long list costs only the rows anyone can see.
-    pub fn settle(&self, container: &web_sys::Element, stagger_ms: f64) {
-        if Motion::reduced() {
-            return;
-        }
-        let window_height = web_sys::window()
-            .and_then(|window| window.inner_height().ok())
-            .and_then(|height| height.as_f64())
-            .unwrap_or(f64::INFINITY);
-        let view = Place::of(container).within(window_height);
-        let mut order = 0.0;
-        Self::each_keyed(container, |key, element| {
-            let Some(before) = self.0.get(&key) else {
-                return;
-            };
-            let after = Place::of(element);
-            let (dx, dy) = (before.left - after.left, before.top - after.top);
-            if dx.abs() < 0.5 && dy.abs() < 0.5 {
-                return;
-            }
-            if !before.overlaps_rows_of(&view) && !after.overlaps_rows_of(&view) {
-                return;
-            }
-            let keyframes = Array::of2(
-                &Record::of(&[("transform", format!("translate({dx}px, {dy}px)").into())]),
-                &Record::of(&[("transform", "none".into())]),
-            );
-            let delay = (order * stagger_ms).min(MAX_STAGGER_MS);
-            element
-                .unchecked_ref::<Animatable>()
-                .animate(&keyframes, &Timing::slide(delay));
-            order += 1.0;
-        });
-    }
-
-    fn each_keyed(container: &web_sys::Element, mut visit: impl FnMut(String, &web_sys::Element)) {
-        let Ok(found) = container.query_selector_all(&format!("[{}]", Self::KEY)) else {
-            return;
-        };
-        for position in 0..found.length() {
-            let Some(element) = found
-                .item(position)
-                .and_then(|node| node.dyn_into::<web_sys::Element>().ok())
-            else {
-                continue;
-            };
-            if let Some(key) = element.get_attribute(Self::KEY) {
-                visit(key, &element);
-            }
-        }
     }
 }
 
@@ -359,10 +266,6 @@ impl Record {
 struct Timing;
 
 impl Timing {
-    /// A cascade member holds its old place while it waits its turn.
-    fn slide(delay_ms: f64) -> Object {
-        Self::record(SLIDE_MS, delay_ms, EASE_OUT, "backwards")
-    }
     /// One element carried from where it was to where it is.
     fn arrival() -> Object {
         Self::record(SLIDE_MS * 1.4, 0.0, EASE_OUT, "backwards")
@@ -394,33 +297,5 @@ mod tests {
         let (x, y) = flight.at(0.5);
         assert_eq!(x, 50.0);
         assert!(y < 100.0, "the curve rises toward its control point");
-    }
-
-    #[test]
-    fn places_overlap_only_when_their_rows_do() {
-        let view = Place {
-            left: 0.0,
-            top: 100.0,
-            width: 10.0,
-            height: 100.0,
-        };
-        let inside = Place { top: 150.0, ..view };
-        let below = Place { top: 400.0, ..view };
-        assert!(inside.overlaps_rows_of(&view));
-        assert!(!below.overlaps_rows_of(&view));
-        let tall = Place {
-            top: -500.0,
-            height: 5_000.0,
-            ..view
-        };
-        let shown = tall.within(900.0);
-        assert_eq!((shown.top, shown.height), (0.0, 900.0));
-        assert!(
-            !Place {
-                top: 1_200.0,
-                ..view
-            }
-            .overlaps_rows_of(&shown)
-        );
     }
 }

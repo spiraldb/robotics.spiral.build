@@ -31,10 +31,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use publication::PublishedOutput;
 pub(crate) use selection::{Comparison, EpisodeCondition, EpisodeFact, Selection, SelectionBasis};
 
-/// Encoding 4 keeps a grouping's chosen categories on the grouping, and a
-/// Select only follows the dataset. Encoding 3 chose categories in a Select
-/// after the grouping, encoding 2 kept every threshold in a Select of its
-/// own, and encoding 1 what the nodes measured; none is converted.
+/// The payload's encoding. A payload of any other encoding is refused, not
+/// converted.
 pub(crate) const CURATION_ENCODING_VERSION: u32 = 4;
 /// The root node every curation starts with.
 pub(crate) const DATASET_NODE_ID: &str = "dataset";
@@ -310,8 +308,6 @@ pub(crate) struct SubtaskAnnotation {
     /// Camera topic to sample; unset until the user picks one.
     #[serde(default)]
     camera: Option<String>,
-    /// Fully qualified provider model id.
-    model: String,
     sample_interval_seconds: f64,
     /// The topic each episode records the operator's instruction on, read as
     /// the episode's task; unset for a dataset that records none.
@@ -322,7 +318,6 @@ impl Default for SubtaskAnnotation {
     fn default() -> Self {
         Self {
             camera: None,
-            model: DEFAULT_ANNOTATION_MODEL.to_owned(),
             sample_interval_seconds: DEFAULT_SAMPLE_INTERVAL_SECONDS,
             task_topic: None,
         }
@@ -334,9 +329,6 @@ impl SubtaskAnnotation {
     }
     pub(crate) fn set_camera(&mut self, camera: Option<String>) {
         self.camera = camera.filter(|value| !value.trim().is_empty());
-    }
-    pub(crate) fn model(&self) -> &str {
-        &self.model
     }
     pub(crate) fn sample_interval_seconds(&self) -> f64 {
         self.sample_interval_seconds
@@ -355,9 +347,6 @@ impl SubtaskAnnotation {
         self.task_topic = topic.filter(|value| !value.trim().is_empty());
     }
     fn validate(&self) -> Result<(), String> {
-        if self.model.trim().is_empty() {
-            return Err("The annotation model id is empty.".into());
-        }
         if !self.sample_interval_seconds.is_finite() || self.sample_interval_seconds <= 0.0 {
             return Err("The sample interval must be a positive number of seconds.".into());
         }
@@ -678,15 +667,14 @@ impl CurationGraph {
         Ok(())
     }
     /// The Break down subtasks node whose rows reach `node`: the nearest one
-    /// above it, through any searches, groupings, and Selects between.
+    /// above it, through any searches and groupings between.
     pub(crate) fn subtask_source(&self, node: &str) -> Option<&str> {
         let mut current = self.parent_of(node)?;
         for _ in 0..self.nodes.len() {
             match self.node(current)?.kind() {
                 CurationNodeKind::BreakDownSubtasks(_) => return Some(current),
                 CurationNodeKind::FindSimilarSubtasks(_)
-                | CurationNodeKind::GroupSimilarSubtasks(_)
-                | CurationNodeKind::Select => current = self.parent_of(current)?,
+                | CurationNodeKind::GroupSimilarSubtasks(_) => current = self.parent_of(current)?,
                 _ => return None,
             }
         }

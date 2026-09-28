@@ -3,30 +3,24 @@
 //! saves. The controller is passed as a prop; every Curation view reads and
 //! edits through it. Shared contract: extend it, never change what is here.
 use super::annotate::SubtaskRow;
+use super::client::CurationClient;
 use super::document::{
     CURATION_ENCODING_VERSION, CurationGraph, CurationNode, DATASET_NODE_ID, Selection,
 };
-use super::graph::PublishedViews;
 use super::population::{EpisodeSample, Population, PopulationReader};
 use super::preview::{
     PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows, ReadInput,
 };
-use crate::client::documents::DocumentClient;
+use super::session::{DocumentCommand, DocumentSession};
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::components::document_session::{
-    DocumentCommand, DocumentSession, DocumentSummary, StudioDocument,
-};
 use crate::components::scoped_task::ScopedTask;
-use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use dioxus::dioxus_core::Task;
 use dioxus::prelude::*;
-use spiral_robotics_common::curation::CurationDocument;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::curation::{CurationDocument, CurationSummary};
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::Place;
 use std::collections::BTreeMap;
-
-const UNTITLED: &str = "Untitled curation";
 
 /// A save is refused while the document has another command in flight, so a
 /// publication's save waits for it rather than dropping what it recorded.
@@ -160,33 +154,6 @@ impl CurationRuns {
     }
 }
 
-impl StudioDocument for CurationDocument {
-    const NOUN: &'static str = "curation";
-    const COLLECTION: &'static str = "curations";
-    const REPORTS_AS: MessageSource = MessageSource::Curation;
-
-    fn id(&self) -> &str {
-        self.id()
-    }
-    fn name(&self) -> &str {
-        self.name()
-    }
-    fn set_name(&mut self, name: String) {
-        self.set_name(name);
-    }
-    fn revision(&self) -> u64 {
-        self.revision()
-    }
-    fn fresh(id: String) -> Self {
-        Self::new(id, UNTITLED, CURATION_ENCODING_VERSION, "{}").carrying(&CurationGraph::new(None))
-    }
-    fn acknowledge_save(&mut self, saved: &Self) {
-        if self.id() == saved.id() {
-            self.set_revision(saved.revision());
-        }
-    }
-}
-
 /// The graph travels inside the document as opaque text. Replacing that text
 /// keeps the document's identity, name, and revision, so one encoded payload
 /// is all that separates a draft from what Studio stored.
@@ -249,7 +216,7 @@ impl EpisodeFocus {
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct CurationController {
-    session: DocumentSession<CurationDocument>,
+    session: DocumentSession,
     /// The graph as the views read and edit it. Every accepted edit is encoded
     /// back into the session's draft, so "Unsaved changes" is one comparison.
     payload: Signal<CurationGraph>,
@@ -299,18 +266,13 @@ impl CurationController {
     fn use_stored_publications(self) {
         let open = use_memo(move || {
             self.session
-                .with_draft(|document| document.is_stored().then(|| document.id().to_owned()))
+                .with_draft(|document| (document.revision() > 0).then(|| document.id().to_owned()))
         });
         let stored = QueryPolicy::on_demand(QueryDomain::Catalog).use_resource(move || {
             let open = open();
             async move {
                 match open {
-                    Some(id) => {
-                        DocumentClient::<CurationDocument>::current(CurationDocument::COLLECTION)
-                            .load(&id)
-                            .await
-                            .map(Some)
-                    }
+                    Some(id) => CurationClient::current().load(&id).await.map(Some),
                     None => Ok(None),
                 }
             }
@@ -448,12 +410,8 @@ impl CurationController {
     /// copy publishes first, so no view outlives the recipe it was compiled
     /// from. The open one gives way to a blank graph.
     pub(crate) fn delete(self, id: String, studio: StudioProjectState) {
-        self.session.delete(
-            id,
-            studio,
-            |stored| PublishedViews::of(stored.payload()).drop_all(),
-            move |opened| self.adopt(opened),
-        );
+        self.session
+            .delete(id, studio, move |opened| self.adopt(opened));
     }
     /// What every running node is doing, which is all the top bar wants
     /// from a curation.
@@ -628,7 +586,7 @@ impl CurationController {
     pub(crate) fn error(&self) -> Option<String> {
         self.session.load_error()
     }
-    pub(crate) fn documents(&self) -> Vec<DocumentSummary> {
+    pub(crate) fn documents(&self) -> Vec<CurationSummary> {
         self.session.summaries()
     }
     /// Curation opens on a blank graph, so the first read lists what is saved
@@ -637,24 +595,16 @@ impl CurationController {
         self.session.refresh_summaries();
     }
 
-    /// Start a new, unsaved graph over `dataset`.
-    pub(crate) fn create(self, name: impl Into<String>, dataset: Option<DatasetSelection>) {
-        let name = name.into();
-        let mut document = DocumentSession::<CurationDocument>::fresh();
-        if !name.trim().is_empty() {
-            document.set_name(name);
-        }
-        self.session.install(
-            document.carrying(&CurationGraph::new(dataset)),
-            move |opened| self.adopt(opened),
-        );
+    /// Start a new, unsaved, blank graph.
+    pub(crate) fn create(self) {
+        self.session
+            .install(DocumentSession::fresh(), move |opened| self.adopt(opened));
     }
     pub(crate) fn open(self, id: String) {
         if self.session.command().is_some() {
             return;
         }
-        self.session
-            .open(Some(id), move |opened| self.adopt(opened));
+        self.session.open(id, move |opened| self.adopt(opened));
     }
     /// Take the document's graph as the one on screen. A payload this Studio
     /// cannot read refuses the document rather than emptying the canvas.

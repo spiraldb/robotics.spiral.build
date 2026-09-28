@@ -14,12 +14,11 @@ use spiral_robotics_ui::{
 use super::super::document::CurationGraph;
 use super::super::population::PopulationReader;
 use super::super::state::{CurationController, NodeActivity};
+use super::canvas_controls::CanvasControls;
+use super::flow_canvas::{CardGraph, FlowFit, FlowMargins, ReadableViewport};
 use super::node_card::{ChildMenu, NodeCard, NodeFace, OutputFlag};
-use crate::components::flow_canvas::{
-    CanvasControls, CardGraph, FlowFit, FlowMargins, ReadableViewport,
-};
 use crate::components::icons::{
-    DataIcon, JoinStageIcon, MediaStageIcon, ModelStageIcon, QueryNodeIcon, SignalStreamIcon,
+    DataIcon, FilmFrameIcon, FunnelIcon, OverlapIcon, SignalStreamIcon, SparkIcon,
 };
 
 /// A node's size, so the layout can place it before it mounts: the graph
@@ -37,8 +36,7 @@ const GRAPH: CardGraph = CardGraph::top_to_bottom(20.0, 40.0);
 /// Where the pane parks: the whole graph, clear of the canvas's own hairline,
 /// for as long as a card stays large enough to read. Past that the graph is
 /// panned rather than shrunk into cards nobody can read.
-const FIT: ReadableViewport =
-    ReadableViewport::new(FlowMargins::new(14.0, 18.0, 44.0), 0.66).showing_most();
+const FIT: ReadableViewport = ReadableViewport::new(FlowMargins::new(14.0, 18.0, 44.0), 0.66);
 
 /// The nodes and edges one payload draws as.
 #[derive(Clone)]
@@ -269,11 +267,11 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
     let overflowing = use_signal(|| false);
     let message = hand.problem().or_else(|| controller.error());
     rsx! {
-        section { class: "workflow-flow-wrap curation-canvas-graph", "aria-label": "Curation graph",
+        section { class: "curation-canvas-graph", "aria-label": "Curation graph",
             if let Some(message) = message {
                 Notice { tone: NoticeTone::Danger, class: "inline-error curation-canvas-notice", "{message}" }
             }
-            Flow { id: "curation-graph-flow", class: "workflow-flow curation-canvas-flow",
+            Flow { id: "curation-graph-flow", class: "curation-canvas-flow",
                 nodes, edges, fit_view: false, fit_view_padding: 0.14,
                 min_zoom: 0.4, max_zoom: 1.0, nodes_draggable: false, delete_key: false,
                 // Two fingers pan; a pinch (or ctrl/⌘ + wheel) and the controls
@@ -303,11 +301,11 @@ pub(in crate::activities::curation) fn CurationGraphCanvas(
 pub(in crate::activities::curation) fn NodeGlyph(face: NodeFace) -> Element {
     match face {
         NodeFace::Dataset => rsx! { DataIcon {} },
-        NodeFace::Annotation => rsx! { ModelStageIcon {} },
-        NodeFace::Search => rsx! { MediaStageIcon {} },
-        NodeFace::Grouping => rsx! { JoinStageIcon {} },
+        NodeFace::Annotation => rsx! { SparkIcon {} },
+        NodeFace::Search => rsx! { FilmFrameIcon {} },
+        NodeFace::Grouping => rsx! { OverlapIcon {} },
         NodeFace::Scoring => rsx! { SignalStreamIcon {} },
-        NodeFace::Select => rsx! { QueryNodeIcon {} },
+        NodeFace::Select => rsx! { FunnelIcon {} },
     }
 }
 
@@ -363,7 +361,7 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
     let activated = id.clone();
     rsx! {
         div {
-            class: "workflow-stage-card curation-canvas-node {card.face().class_name()}",
+            class: "curation-canvas-node {card.face().class_name()}",
             class: if ctx.node.selected { "is-selected" },
             style: "--stage-order: {card.order()}",
             onmounted: CardStop::take_over,
@@ -388,42 +386,42 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
             match card.output() {
                 Some(OutputFlag::Unpublished) => rsx! {
                     span {
-                        class: "workflow-stage-output-flag curation-canvas-output",
+                        class: "curation-canvas-output",
                         title: "One of this curation's outputs: publish it from its workspace",
                         "Output"
                     }
                 },
                 Some(OutputFlag::Published(published)) if published.is_current(hand.controller.saved_revision()) => rsx! {
                     span {
-                        class: "workflow-stage-output-flag curation-canvas-output",
+                        class: "curation-canvas-output",
                         title: "Published as the catalog view {published.view()}",
                         "Published"
                     }
                 },
                 Some(OutputFlag::Published(published)) => rsx! {
                     span {
-                        class: "workflow-stage-output-flag curation-canvas-output is-stale",
+                        class: "curation-canvas-output is-stale",
                         title: "The saved curation has changed since {published.view()} was published; publish it again from its workspace",
                         "Out of date"
                     }
                 },
                 None => rsx! {},
             }
-            div { class: "workflow-stage-heading",
-                span { class: "workflow-stage-mark", "aria-hidden": "true",
+            div { class: "curation-canvas-heading",
+                span { class: "curation-canvas-mark", "aria-hidden": "true",
                     NodeGlyph { face: card.face() }
                 }
-                strong { class: "workflow-stage-title", "{card.label()}" }
+                strong { class: "curation-canvas-title", "{card.label()}" }
             }
             // While it runs, what the node is doing replaces what it holds:
             // the run line carries the live count, so the card says it once.
             if card.is_running() {
-                footer { class: "workflow-stage-footer curation-canvas-node-status",
+                footer { class: "curation-canvas-footer curation-canvas-node-status",
                     span { class: "curation-canvas-node-dot", "aria-hidden": "true" }
                     span { "{card.summary()}" }
                 }
             } else {
-                p { class: "workflow-stage-summary", "{card.summary()}" }
+                p { class: "curation-canvas-summary", "{card.summary()}" }
             }
             if card.removable() {
                 Handle { id: "parent".to_owned(), kind: HandleKind::Target, position: Side::Top }

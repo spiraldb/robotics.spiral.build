@@ -31,10 +31,11 @@ A worker keeps a bounded, whole-run sample of each job's metrics and a tail of
 its logs in memory. A job a worker no longer holds reads as unavailable in
 Studio; its checkpoints remain in Spiral.
 
-The Studio backend implements this contract in its compute-runtime adapter.
-The Python service implements LeRobot ACT and opens the selected SpiralDB
-project itself. Arrow IPC remains only on the rollout observation/inference
-path because those live observations originate in Studio's hardware process.
+The Studio backend implements this contract in its compute-runtime adapter,
+and the Python service in [`training/`](../../../training) implements LeRobot
+ACT. Jobs are parked until Spiral decodes MCAP video into training images.
+Arrow IPC carries only rollout observations, which originate in Studio's
+hardware process.
 
 See the [protocol bump policy](protocol/README.md) before changing a request,
 response, or compatibility rule. Persisted-schema changes follow the

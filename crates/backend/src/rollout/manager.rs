@@ -16,9 +16,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
-use crate::adapters::clock::SystemClock;
 use crate::adapters::compute_runtime::HttpPolicyLoader;
-use crate::clock::{Clock, StableIdSequence};
+use crate::clock::{StableIdSequence, WallClock};
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::policy::{
@@ -36,7 +35,7 @@ use spiral_robotics_hardware::{
     HardwareHandle, HardwareState, ModeSelection, PolicyGoals, RobotTelemetry,
 };
 use spiral_robotics_storage::StorageManager;
-use spiral_robotics_storage::checkpoints::{CheckpointArtifact, CheckpointKey, CheckpointStore};
+use spiral_robotics_storage::checkpoints::{CheckpointArtifact, CheckpointKey};
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -438,7 +437,6 @@ impl RolloutLifecycle {
 pub(crate) struct RolloutManager {
     storage: Arc<StorageManager>,
     hardware: RolloutHardwareResources,
-    clock: Arc<dyn Clock>,
     lifecycle: RolloutLifecycle,
 }
 
@@ -451,7 +449,6 @@ impl RolloutManager {
         Arc::new(Self {
             storage,
             hardware,
-            clock: Arc::new(SystemClock),
             lifecycle: RolloutLifecycle {
                 state: watch::Sender::new(RolloutSnapshot::default()),
                 active: Mutex::new(None),
@@ -489,11 +486,7 @@ impl RolloutManager {
                 active.session
             ));
         }
-        let (session, created_ms) = self
-            .lifecycle
-            .session_ids
-            .next(self.clock.as_ref())
-            .into_parts();
+        let (session, created_ms) = self.lifecycle.session_ids.next().into_parts();
         let admitted =
             RolloutAdmission::new(session.clone(), created_ms, config.clone()).into_snapshot()?;
         self.lifecycle.state.send_replace(admitted.clone());
@@ -558,7 +551,7 @@ impl RolloutManager {
             .hardware
             .stop_policy_session(&run.session)
             .await;
-        progress.finish(outcome, CleanupResult::new(self.clock.now_ms(), cleanup));
+        progress.finish(outcome, CleanupResult::new(WallClock::now_ms(), cleanup));
         let mut active = self.lifecycle.active.recover_lock();
         if active
             .as_ref()
@@ -580,7 +573,14 @@ impl RolloutManager {
         const SAFELY: ExecutionOutcome =
             ExecutionOutcome::Completed(CompletionReason::StoppedSafely);
         let (session, config) = (run.session.as_str(), &run.config);
-        let artifact = config.load_checkpoint(self.storage.as_ref()).await;
+        let artifact = self
+            .storage
+            .training_checkpoints()
+            .load(CheckpointKey::new(
+                config.run_id().to_owned(),
+                config.checkpoint_step(),
+            ))
+            .await;
         if progress.stop_requested() {
             return Ok(BEFORE_MODEL);
         }
@@ -995,27 +995,6 @@ impl ModeSelectionPolicy for ModeSelection {
     }
 }
 
-trait RolloutCheckpointRequest {
-    async fn load_checkpoint(
-        &self,
-        checkpoint_store: &dyn CheckpointStore,
-    ) -> Result<CheckpointArtifact, String>;
-}
-
-impl RolloutCheckpointRequest for RolloutConfig {
-    async fn load_checkpoint(
-        &self,
-        checkpoint_store: &dyn CheckpointStore,
-    ) -> Result<CheckpointArtifact, String> {
-        checkpoint_store
-            .load_checkpoint(CheckpointKey::new(
-                self.run_id().to_owned(),
-                self.checkpoint_step(),
-            ))
-            .await
-    }
-}
-
 trait CheckpointManifest {
     fn manifest(&self) -> Result<ArtifactManifest, String>;
 }
@@ -1331,7 +1310,7 @@ mod tests {
         ActionChunkSize, ActiveRollout, ArtifactDataContract, ArtifactImageContract,
         ArtifactManifest, ArtifactObservationContract, CameraInput, CameraInputs,
         CompletedInference, INPUT_STALE_AFTER, InferenceObservation, InferenceTaskOutput,
-        LatestObservationSlot, ObservationSimilarity, RolloutCheckpointRequest, TimedActionQueue,
+        LatestObservationSlot, ObservationSimilarity, TimedActionQueue,
     };
     use crate::rollout::policy::{
         ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
@@ -1341,19 +1320,10 @@ mod tests {
     use bytes::Bytes;
     use spiral_robotics_common::rollout::RolloutConfig;
     use spiral_robotics_inference::{
-        ActionChunk, ActionChunkShape, ActionChunkSpecification, InferenceInput, InferenceStats,
-        ObservationSpecification, Policy, PolicyKind, PolicySpecification,
-    };
-    use spiral_robotics_storage::checkpoints::{
-        CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore,
+        ActionChunk, ActionChunkShape, InferenceInput, InferenceStats, Policy, PolicySpecification,
     };
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
-
-    struct FakeCheckpointStore {
-        loads: Mutex<Vec<CheckpointKey>>,
-        artifact: CheckpointArtifact,
-    }
 
     struct SlowPolicy {
         specification: PolicySpecification,
@@ -1363,11 +1333,14 @@ mod tests {
     impl SlowPolicy {
         fn new(latency: Duration) -> Self {
             Self {
-                specification: PolicySpecification::new(
-                    PolicyKind::Act,
-                    ObservationSpecification::new(1, Vec::new()),
-                    ActionChunkSpecification::new(1, 100, 20),
-                ),
+                specification: serde_json::from_value(serde_json::json!({
+                    "state_dimensions": 1,
+                    "image_inputs": [],
+                    "action_dimensions": 1,
+                    "action_chunk_size": 100,
+                    "recommended_action_steps": 20,
+                }))
+                .unwrap(),
                 latency,
             }
         }
@@ -1598,38 +1571,6 @@ mod tests {
         publisher.join().unwrap();
         shutdown.join().unwrap();
         assert!(active.lock().unwrap().is_none());
-    }
-
-    impl CheckpointStore for FakeCheckpointStore {
-        fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact> {
-            self.loads.lock().unwrap().push(key);
-            let artifact = self.artifact.clone();
-            Box::pin(async move { Ok(artifact) })
-        }
-    }
-
-    #[tokio::test]
-    async fn rollout_loads_the_selected_run_and_step_without_settings_access() {
-        let checkpoint_store = FakeCheckpointStore {
-            loads: Mutex::new(Vec::new()),
-            artifact: CheckpointArtifact::new(
-                br#"{"type":"act"}"#.to_vec(),
-                b"opaque model bytes".to_vec(),
-            )
-            .unwrap(),
-        };
-        let config = RolloutConfig::new("run-from-project-a", 20_000, "follower").with_duration(30);
-
-        let loaded = config
-            .load_checkpoint(&checkpoint_store)
-            .await
-            .expect("the fake checkpoint_store has no Settings dependency");
-
-        assert_eq!(loaded, checkpoint_store.artifact);
-        assert_eq!(
-            *checkpoint_store.loads.lock().unwrap(),
-            [CheckpointKey::new("run-from-project-a".to_owned(), 20_000)]
-        );
     }
 
     #[test]

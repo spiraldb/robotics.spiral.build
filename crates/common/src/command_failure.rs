@@ -11,7 +11,6 @@ pub enum CommandFailureCode {
     StaleProject,
     External,
     Transport,
-    #[serde(other)]
     Internal,
 }
 
@@ -44,11 +43,6 @@ impl CommandFailure {
 
     pub const fn code(&self) -> CommandFailureCode {
         self.code
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn message(&self) -> &str {
-        &self.message
     }
 }
 

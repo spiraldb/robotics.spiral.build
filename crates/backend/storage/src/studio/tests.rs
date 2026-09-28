@@ -290,15 +290,15 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 12);
-    // A conflict halfway through the actual initial migration must undo both
-    // earlier CREATE TABLE statements and the migration journal itself.
+    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 1);
+    // A conflict halfway through the baseline must undo both earlier CREATE
+    // TABLE statements and the migration journal itself.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("failed-upgrade.sqlite3");
     let raw = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
         .await
         .unwrap();
-    raw.execute_unprepared("CREATE TABLE workflows (id INTEGER PRIMARY KEY)")
+    raw.execute_unprepared("CREATE TABLE curations (id INTEGER PRIMARY KEY)")
         .await
         .unwrap();
     let failed = StudioStore::at(path);
@@ -311,7 +311,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap();
     assert!(result.is_none());
-    raw.execute_unprepared("DROP TABLE workflows")
+    raw.execute_unprepared("DROP TABLE curations")
         .await
         .unwrap();
     failed.initialize().await.unwrap();
@@ -360,60 +360,5 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
             .unwrap()
             .len(),
         1
-    );
-}
-
-#[tokio::test]
-async fn migration_moves_each_measured_range_into_its_motor() {
-    let mut options = sea_orm::ConnectOptions::new("sqlite::memory:");
-    options.max_connections(1).sqlx_logging(false);
-    let database = sea_orm::Database::connect(options).await.unwrap();
-    migrations::Migrator::up(&database, Some(7)).await.unwrap();
-    database
-        .execute_unprepared(
-            r#"INSERT INTO robots VALUES ('bench', 'arm', '{
-                "schema_version": 1, "robot_id": "arm", "robot_type": "so101_follower",
-                "extension": {"kept": false},
-                "port": {"path": "/dev/arm"},
-                "motors": {
-                    "shoulder": {"id": 1, "model": "sts3215"},
-                    "elbow": {"id": 2, "direction": "reversed"}
-                },
-                "calibration": {
-                    "format_version": 1, "units": "raw", "coordinate_space": "unhomed_raw",
-                    "motors": {
-                        "shoulder": {"id": 1, "direction": "normal", "range_min": 900, "center": 2100, "range_max": 3300},
-                        "elbow": {"id": 2, "direction": "normal", "range_min": 100, "center": 500, "range_max": 800}
-                    }
-                },
-                "cameras": {"wrist": {"id": "0", "type": "opencv", "width": 640, "mount": {"frame": "gripper_link"}}}
-            }', 0)"#,
-        )
-        .await
-        .unwrap();
-    migrations::Migrator::up(&database, None).await.unwrap();
-
-    let row = robots::Entity::find()
-        .one(&database)
-        .await
-        .unwrap()
-        .unwrap();
-    let (config, revision) = row.into_config().unwrap();
-    assert_eq!(revision, 1);
-    assert_eq!(
-        config.motors()["shoulder"].calibration(),
-        Some(spiral_robotics_common::robots::config::MotorRange::new(900, 2100, 3300).unwrap())
-    );
-    assert_eq!(
-        config.motors()["elbow"].calibration(),
-        None,
-        "a range measured under another direction was never usable"
-    );
-    assert_eq!(config.port().map(PortSettings::baud_rate), Some(1_000_000));
-    assert_eq!(
-        config.cameras()["wrist"]
-            .mount()
-            .and_then(|mount| mount.frame()),
-        Some("gripper_link")
     );
 }

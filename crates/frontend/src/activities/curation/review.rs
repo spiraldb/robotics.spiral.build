@@ -163,8 +163,8 @@ impl SubtaskContext {
     }
 }
 
-/// What an index says about one row beyond its own words: what jev made of
-/// a subtask, whether it is the row the evidence column is showing, and
+/// What an index says about one row beyond its own words: what the model made
+/// of a subtask, whether it is the row the evidence column is showing, and
 /// whether it answers Tab for its list.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct RowStanding {
@@ -387,8 +387,8 @@ impl IndexFocus {
     }
 }
 
-/// One row of an index: its thumbnail, what jev made of it, its words, and where
-/// in the dataset it happened, with the action that asks for more like it.
+/// One row of an index: its thumbnail, what the model made of it, its words, and
+/// where in the dataset it happened, with the action that asks for more like it.
 ///
 /// The same row in all three views, because it is the same thing in all three.
 #[component]
@@ -411,11 +411,9 @@ pub(super) fn SubtaskEntry(
         row.start_time().clock_label(),
         row.end_time().clock_label()
     );
-    let motion_key = format!("{}-{}", row.episode(), row.start_time());
     rsx! {
         li {
             class: "curation-entry-item",
-            "data-motion-key": "{motion_key}",
             "data-findable": on_find_similar.is_some().then_some("true"),
             onmounted: move |event: Event<MountedData>| {
                 item.set(event.data().downcast::<web_sys::Element>().cloned());

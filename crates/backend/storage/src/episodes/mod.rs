@@ -9,7 +9,6 @@ pub use mcap_recording::CameraRecording;
 pub(crate) use mcap_recording::McapRecording;
 pub(crate) use recording_file::RecordingFile;
 mod identity;
-pub(crate) mod video;
 
 pub use capture::*;
 pub use identity::EpisodeId;
@@ -26,7 +25,7 @@ impl EpisodeFixture {
     pub(crate) fn new(episode_id: &str, dataset_id: &str) -> Self {
         Self {
             start: EpisodeStart::new(episode_id.to_owned(), dataset_id.to_owned())
-                .with_source("transfer-e2e".to_owned(), None),
+                .with_source("transfer-e2e".to_owned()),
             duration_seconds: 0.0,
             samples: Vec::new(),
         }

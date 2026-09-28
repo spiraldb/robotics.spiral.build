@@ -39,7 +39,6 @@
               "rust-analyzer"
               "rustfmt"
               "clippy"
-              "llvm-tools-preview"
             ];
             # The studio's web interface compiles to WebAssembly.
             targets = [ "wasm32-unknown-unknown" ];
@@ -48,11 +47,10 @@
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
           # `dx` builds the web client and native server as one fullstack app,
           # compiles the declared Tailwind input, and bundles both. With
-          # NO_DOWNLOADS set it takes every tool from PATH instead of fetching
-          # its own, so the whole toolchain is pinned here.
+          # NO_DOWNLOADS set it takes every tool, Tailwind included, from PATH
+          # instead of fetching its own, so the whole toolchain is pinned here.
           webBuildInputs = [
             pkgs.dioxus-cli # fullstack dx bundle / dx serve
-            tailwind # compiles tailwind.css
             pkgs.binaryen # wasm-opt, used for release builds
           ];
           browserTestInputs = [
@@ -110,15 +108,12 @@
               pkgs.ruff
               tailwind
               pkgs.uv
-              llvmPackages.llvm
             ]
             ++ nativeBuildInputs
             ++ linuxBuildInputs
             ++ browserTestInputs;
-            CARGO_NET_GIT_FETCH_WITH_CLI = "true";
             NO_DOWNLOADS = "1";
             SPIRALDB_ADBC_DRIVER = "${spiralAdbc}/lib/${adbcLibrary}";
-            ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
             GECKODRIVER = pkgs.lib.getExe pkgs.geckodriver;
             # Select the pinned browser instead of a host Firefox installation.
@@ -141,11 +136,7 @@
           developmentShell = sharedShell // {
             packages =
               sharedShell.packages
-              ++ [
-                pkgs.cargo-fuzz
-                pkgs.cargo-binutils
-                pkgs.ffmpeg
-              ]
+              ++ [ pkgs.ffmpeg ]
               ++ webBuildInputs;
           };
         in

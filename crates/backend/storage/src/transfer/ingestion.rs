@@ -1,9 +1,8 @@
 //! Hugging Face discovery and Spiral dataset materialization.
 //!
 //! Studio owns only repository inspection and catalog admission. Remote byte
-//! reads and MCAP parsing remain inside
-//! Spiral so imported data has the same durable relation semantics as every
-//! other Data/Workflow input.
+//! reads and MCAP parsing remain inside Spiral, so imported data has the same
+//! durable relation semantics as every other dataset.
 
 use std::sync::Arc;
 
@@ -14,14 +13,13 @@ use reqwest::header::LINK;
 use serde::Deserialize;
 use spiral_robotics_common::datasets::{
     HuggingFaceDatasetFile, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
-    HuggingFaceDatasetSource, HuggingFaceImportOutcome, HuggingFaceInspectionContents,
-    HuggingFaceInspectionSource, HuggingFaceResolvedSource,
+    HuggingFaceDatasetSource, HuggingFaceInspectionContents, HuggingFaceInspectionSource,
 };
+use spiral_robotics_common::sql::SqlLiteral;
 use url::Url;
 
 use crate::datasets::{McapDatasetDefinition, McapSourceBlob};
 use crate::db::ProjectConnection;
-use crate::db::SpiralSql;
 use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
@@ -237,7 +235,6 @@ impl HuggingFaceResponse for reqwest::Response {
     }
 }
 
-/// One dataset and the durable source relation it reads.
 /// Storage-backed discovery behavior for the API inspection result type.
 #[allow(async_fn_in_trait)]
 pub trait HuggingFaceDatasetDiscovery: Sized {
@@ -296,7 +293,7 @@ impl HuggingFaceDatasetDiscovery for HuggingFaceDatasetInspection {
         );
         }
         let source = HuggingFaceInspectionSource::new(dataset_id, repository.0)
-            .with_revisions(requested_revision, info.sha);
+            .with_resolved_revision(info.sha);
         let contents =
             HuggingFaceInspectionContents::new(selected, total_bytes, relations.planned());
         Ok(Self::new(source, contents).with_warnings(warnings))
@@ -320,62 +317,17 @@ impl StorageManager {
                 "The dataset or its source already exists; choose another dataset name".to_owned(),
             );
         }
-        let mut warnings = inspection.warnings().to_vec();
         let mut connection = self.project_store().connect_exclusive().await?;
-        if let Err(error) = connection.begin_transaction().await {
-            connection.discard();
-            return Err(format!(
-                "starting Hugging Face import transaction failed and its connection was discarded: {error}"
-            ));
-        }
-        let mutation = inspection.materialize(&mut connection, &relations).await;
-        match mutation {
-            Ok(()) => {
-                if let Err(error) = connection.commit().await {
-                    connection.discard();
-                    return Err(format!(
-                        "committing Hugging Face import failed with an uncertain outcome; connection discarded: {error}"
-                    ));
-                }
-                match connection.reconnect().await {
-                    Ok(()) => {}
-                    Err(error) => {
-                        connection.discard();
-                        warnings.push(format!(
-                            "Hugging Face rows committed, but the post-commit Spiral connection could not open; relation names are reported from the import plan: {error}"
-                        ));
-                    }
-                }
-            }
-            Err(error) => {
-                let rollback = connection.rollback().await;
-                if rollback.is_err() {
-                    connection.discard();
-                }
-                if let Err(rollback) = rollback {
-                    return Err(format!(
-                        "{error}; rolling back Hugging Face import also failed: {rollback}; connection discarded"
-                    ));
-                }
-                return Err(error);
-            }
-        };
-
-        let created = relations.planned();
-        let suggested_sql = format!(
-            "SELECT * FROM spql.mcap.episodes({}) LIMIT 100",
-            SpiralSql::string_literal(relations.dataset())
-        );
-        let source =
-            HuggingFaceResolvedSource::new(inspection.dataset_id(), inspection.repository())
-                .with_resolved_revision(inspection.resolved_revision());
-        let outcome = HuggingFaceImportOutcome::new(
+        connection
+            .transaction("Hugging Face import", async |connection| {
+                inspection.materialize(connection, &relations).await
+            })
+            .await?;
+        Ok(HuggingFaceDatasetImportSummary::new(
             inspection.files().len() as u64,
-            inspection.total_bytes(),
-            created,
+            relations.planned(),
         )
-        .with_suggested_sql(suggested_sql);
-        Ok(HuggingFaceDatasetImportSummary::new(source, outcome).with_warnings(warnings))
+        .with_warnings(inspection.warnings().to_vec()))
     }
 }
 
@@ -454,7 +406,7 @@ impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
                     &format!(
                         "SELECT COUNT(*) AS sources FROM {} WHERE dataset_name = {}",
                         McapDatasetDefinition::SOURCE_TABLE,
-                        SpiralSql::string_literal(self.dataset_id())
+                        SqlLiteral::text(self.dataset_id())
                     ),
                     1,
                 )
@@ -561,7 +513,7 @@ mod tests {
     #[test]
     fn shared_source_rows_retain_dataset_identity_and_pinned_blob_uri() {
         let source = HuggingFaceInspectionSource::new("pick-place", "org/recordings")
-            .with_revisions("main", "abcdef");
+            .with_resolved_revision("abcdef");
         let contents = HuggingFaceInspectionContents::new(
             vec![HuggingFaceDatasetFile::new("episode.mcap", 12)],
             12,

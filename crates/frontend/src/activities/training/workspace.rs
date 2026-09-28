@@ -24,7 +24,7 @@ use spiral_robotics_ui::{
 };
 
 use crate::components::charts::{CharmingChart, ChartColor, ChartPoints, MONO_FONT, StudioTooltip};
-use crate::components::dataset_picker::DatasetCatalog;
+use crate::components::dataset_catalog::DatasetCatalog;
 use crate::format::{ByteCountPresentation, LossPresentation, MillisecondPresentation};
 use crate::shell::state::StudioProjectState;
 
@@ -1142,12 +1142,12 @@ impl TrainingPresentation for TrainingRun {
                     .contain_label(false),
             )
             .x_axis(
-                TrainingChartStyle::axis(AxisType::Value, true)
+                TrainingChartStyle::axis(true)
                     .min(0)
                     .max(self.observed_steps() as f64)
                     .split_number(4),
             )
-            .y_axis(TrainingChartStyle::axis(AxisType::Value, true).split_number(5))
+            .y_axis(TrainingChartStyle::axis(true).split_number(5))
             .data_zoom(TrainingChartStyle::slider_zoom(48.0, 12.0))
             .series(
                 MetricLineSpec::new("train-loss", "Train", train_color)
@@ -1215,17 +1215,13 @@ impl ResourceSeries {
             .tooltip(tooltip)
             .grid(Grid::new().left(0).right(0).top(6).bottom(40))
             .x_axis(
-                TrainingChartStyle::axis(AxisType::Value, false)
+                TrainingChartStyle::axis(false)
                     .min(0)
                     .max(run.observed_steps() as f64),
             )
             .y_axis(match self {
-                Self::Gpu => TrainingChartStyle::axis(AxisType::Value, false)
-                    .min(0)
-                    .max(100),
-                _ => TrainingChartStyle::axis(AxisType::Value, false)
-                    .min(0)
-                    .scale(true),
+                Self::Gpu => TrainingChartStyle::axis(false).min(0).max(100),
+                _ => TrainingChartStyle::axis(false).min(0).scale(true),
             })
             .data_zoom(TrainingChartStyle::slider_zoom(8.0, 8.0))
             .series(
@@ -1293,9 +1289,9 @@ impl TrainingChartStyle {
             .filler_color(ChartColor::Selected.css())
     }
 
-    fn axis(kind: AxisType, visible: bool) -> Axis {
+    fn axis(visible: bool) -> Axis {
         Axis::new()
-            .type_(kind)
+            .type_(AxisType::Value)
             .show(true)
             .axis_line(AxisLine::new().show(false))
             .axis_tick(AxisTick::new().show(false))
@@ -1422,7 +1418,7 @@ mod tests {
             TrainingRunStatus::default(),
             vec![TrainingMetricPoint::new(25, 0.5).with_event("loader stall")],
         );
-        let ticks = run.event_ticks(&[TrainingCheckpoint::new("run", 50, 0)]);
+        let ticks = run.event_ticks(&[TrainingCheckpoint::new("run", 50)]);
         assert_eq!(ticks[0].class, "training-event-checkpoint");
         assert_eq!(ticks[0].label, "Checkpoint saved at step 50");
         assert_eq!(ticks[1].class, "training-event-stall");
@@ -1450,10 +1446,11 @@ mod tests {
 
 #[component]
 pub(crate) fn TrainingWorkspace(is_active: ReadSignal<bool>) -> Element {
-    let (workspace, project) = crate::shell::activity::WorkspaceActivity::mount(
+    let workspace = crate::shell::activity::WorkspaceActivity::provide(
         crate::shell::activity::Activity::Training,
         is_active,
     );
+    let project = crate::shell::state::StudioProjectState::current();
     let controller = super::state::TrainingController::use_controller();
     let history =
         super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());

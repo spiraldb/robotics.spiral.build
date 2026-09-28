@@ -2,8 +2,7 @@
 
 use spiral_robotics_common::command_failure::{CommandFailure, CommandFailureCode};
 
-/// Stable failure categories that delivery adapters may present as HTTP,
-/// desktop, CLI, or other transport-specific responses.
+/// Stable failure categories the HTTP adapter presents as responses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OperationError {
     InvalidInput(String),
@@ -94,7 +93,7 @@ mod tests {
             let failure = CommandFailure::from(error);
             assert_eq!(failure.code(), expected);
             assert_eq!(failure.code().http_status(), status);
-            assert_eq!(failure.message(), "arbitrary text");
+            assert_eq!(failure.to_string(), "arbitrary text");
         }
     }
 }

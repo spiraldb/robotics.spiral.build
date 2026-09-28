@@ -4,7 +4,8 @@
 //! Every edge carries a population — the parts of which episodes a node hands
 //! on — and every node either measures what it receives or selects from it.
 //! `document` and `state` are the shared contract every view reads and edits
-//! through, and `population` what flows along an edge. `graph` is the canvas
+//! through, `session` the open curation's saves and `client` its requests,
+//! and `population` what flows along an edge. `graph` is the canvas
 //! and its workspace shell; `annotate` is the Break down subtasks
 //! measurement, `score_progress` the Score progress node, `similar` the Find
 //! similar and Group similar subtasks nodes, and `select` the Select node and
@@ -29,11 +30,13 @@ pub(crate) mod workspace;
 pub(crate) use curated_view::CuratedView;
 
 mod annotate;
+mod client;
 mod curated_view;
 mod document;
 mod episode_map;
 mod episode_tabs;
 mod graph;
+mod leave_guard;
 mod path;
 mod population;
 mod preview;
@@ -42,6 +45,7 @@ mod rerun;
 mod review;
 mod score_progress;
 mod select;
+mod session;
 mod similar;
 mod threshold;
 mod thumbnail;

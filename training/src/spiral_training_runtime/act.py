@@ -26,7 +26,6 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 NORMALIZATION_EPSILON = 1.0e-8
 GLOBAL_GRADIENT_NORM_LIMIT = 10.0
-BUFFER_WAIT_SECONDS = 30.0
 
 
 def backend_info() -> dict[str, Any]:
@@ -96,11 +95,6 @@ class TrainingSession:
         self.parameter_count = sum(
             parameter.numel() for parameter in self.policy.parameters() if parameter.requires_grad
         )
-        self.lock = threading.Lock()
-        self.last_step: int | None = None
-        self.last_response: dict[str, Any] | None = None
-        self.buffer_condition = threading.Condition()
-        self.buffered_batch: tuple[str, int, TrainingArrays] | None = None
         self.process = psutil.Process()
         self.process.cpu_percent(interval=None)
         self.image_mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32, device=self.device).view(
@@ -111,92 +105,37 @@ class TrainingSession:
         )
 
     @property
-    def info(self) -> dict[str, Any]:
-        return {
-            "backend": backend_info(),
-            "device": _device_name(self.device),
-            "parameter_count": self.parameter_count,
-        }
+    def device_name(self) -> str:
+        return _device_name(self.device)
 
-    def buffer_batch(self, arrays: TrainingArrays, kind: str, step: int) -> None:
-        deadline = time.monotonic() + BUFFER_WAIT_SECONDS
-        with self.buffer_condition:
-            while self.buffered_batch is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeRequestError(
-                        "training session upload buffer remained occupied", 409
-                    )
-                self.buffer_condition.wait(remaining)
-            self.buffered_batch = (kind, step, arrays)
+    def train_step(self, arrays: TrainingArrays, step: int) -> dict[str, Any]:
+        device_started = time.perf_counter()
+        batch = self._batch(arrays)
+        _synchronize(self.device)
+        device_copy_ms = _elapsed_ms(device_started)
+        model_started = time.perf_counter()
+        self.policy.train()
+        self.optimizer.zero_grad(set_to_none=True)
+        loss, _ = self.policy(batch)
+        if not torch.isfinite(loss):
+            raise RuntimeRequestError(f"ACT loss became non-finite at step {step}", 422)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), GLOBAL_GRADIENT_NORM_LIMIT)
+        self.optimizer.step()
+        _synchronize(self.device)
+        return self._step_response(loss, device_copy_ms, _elapsed_ms(model_started))
 
-    def _take_buffered_batch(self, kind: str, step: int) -> TrainingArrays:
-        with self.buffer_condition:
-            if self.buffered_batch is None:
-                raise RuntimeRequestError(f"{kind} step {step} has no buffered Arrow batch", 409)
-            buffered_kind, buffered_step, arrays = self.buffered_batch
-            if buffered_kind != kind or buffered_step != step:
-                raise RuntimeRequestError(
-                    f"{kind} step {step} cannot consume buffered "
-                    f"{buffered_kind} step {buffered_step}",
-                    409,
-                )
-            self.buffered_batch = None
-            self.buffer_condition.notify_all()
-            return arrays
-
-    def train_buffered(self, step: int) -> dict[str, Any]:
-        arrays = self._take_buffered_batch("training", step)
-        with self.lock:
-            if self.last_step == step and self.last_response is not None:
-                return self.last_response
-            if self.last_step is not None and step != self.last_step + 1:
-                raise RuntimeRequestError(
-                    f"optimizer step {step} cannot follow completed step {self.last_step}", 409
-                )
-            if step <= 0 or step > self.config.total_steps:
-                raise RuntimeRequestError(
-                    f"optimizer step must be between 1 and {self.config.total_steps}", 409
-                )
-            device_started = time.perf_counter()
-            batch = self._batch(arrays)
-            _synchronize(self.device)
-            device_copy_ms = _elapsed_ms(device_started)
-            model_started = time.perf_counter()
-            self.policy.train()
-            self.optimizer.zero_grad(set_to_none=True)
-            loss, loss_parts = self.policy(batch)
-            if not torch.isfinite(loss):
-                raise RuntimeRequestError(f"ACT loss became non-finite at step {step}", 422)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), GLOBAL_GRADIENT_NORM_LIMIT)
-            self.optimizer.step()
-            _synchronize(self.device)
-            model_ms = _elapsed_ms(model_started)
-            response = self._step_response(loss, loss_parts, device_copy_ms, model_ms)
-            self.last_step = step
-            self.last_response = response
-            return response
-
-    def validate_buffered(self, after_step: int) -> dict[str, Any]:
-        arrays = self._take_buffered_batch("validation", after_step)
-        with self.lock, torch.inference_mode():
-            if self.last_step != after_step:
-                raise RuntimeRequestError(
-                    f"validation after step {after_step} cannot follow completed step "
-                    f"{self.last_step}",
-                    409,
-                )
+    def validate(self, arrays: TrainingArrays) -> dict[str, Any]:
+        with torch.inference_mode():
             device_started = time.perf_counter()
             batch = self._batch(arrays)
             _synchronize(self.device)
             device_copy_ms = _elapsed_ms(device_started)
             model_started = time.perf_counter()
             self.policy.eval()
-            loss, loss_parts = self.policy(batch)
+            loss, _ = self.policy(batch)
             _synchronize(self.device)
-            model_ms = _elapsed_ms(model_started)
-            return self._step_response(loss, loss_parts, device_copy_ms, model_ms)
+            return self._step_response(loss, device_copy_ms, _elapsed_ms(model_started))
 
     def telemetry(self) -> dict[str, Any]:
         return {
@@ -206,37 +145,32 @@ class TrainingSession:
         }
 
     def checkpoint(self, request: dict[str, Any]) -> bytes:
-        with self.lock:
-            state_mean = _normalization_vector(request, "state_mean", self.config.state_dimensions)
-            state_std = _normalization_vector(request, "state_std", self.config.state_dimensions)
-            action_mean = _normalization_vector(
-                request, "action_mean", self.config.action_dimensions
-            )
-            action_std = _normalization_vector(request, "action_std", self.config.action_dimensions)
-            manifest = request.get("manifest_json")
-            if not isinstance(manifest, str):
-                raise RuntimeRequestError("checkpoint manifest_json must be a string", 422)
-            tensors = {
-                name: tensor.detach().to(device="cpu").contiguous()
-                for name, tensor in self.policy.state_dict().items()
-            }
-            tensors[_normalization_name("normalize_inputs", "observation.state", "mean")] = (
-                state_mean
-            )
-            tensors[_normalization_name("normalize_inputs", "observation.state", "std")] = state_std
-            for camera in self.config.camera_streams:
-                tensors[_normalization_name("normalize_inputs", camera, "mean")] = torch.tensor(
-                    IMAGENET_MEAN, dtype=torch.float32
-                ).view(3, 1, 1)
-                tensors[_normalization_name("normalize_inputs", camera, "std")] = torch.tensor(
-                    IMAGENET_STD, dtype=torch.float32
-                ).view(3, 1, 1)
-            tensors[_normalization_name("unnormalize_outputs", "action", "mean")] = action_mean
-            tensors[_normalization_name("unnormalize_outputs", "action", "std")] = action_std
-            return save_safetensors(
-                tensors,
-                metadata={"format": "spiral-act", "spiral_robotics": manifest},
-            )
+        state_mean = _normalization_vector(request, "state_mean", self.config.state_dimensions)
+        state_std = _normalization_vector(request, "state_std", self.config.state_dimensions)
+        action_mean = _normalization_vector(request, "action_mean", self.config.action_dimensions)
+        action_std = _normalization_vector(request, "action_std", self.config.action_dimensions)
+        manifest = request.get("manifest_json")
+        if not isinstance(manifest, str):
+            raise RuntimeRequestError("checkpoint manifest_json must be a string", 422)
+        tensors = {
+            name: tensor.detach().to(device="cpu").contiguous()
+            for name, tensor in self.policy.state_dict().items()
+        }
+        tensors[_normalization_name("normalize_inputs", "observation.state", "mean")] = state_mean
+        tensors[_normalization_name("normalize_inputs", "observation.state", "std")] = state_std
+        for camera in self.config.camera_streams:
+            tensors[_normalization_name("normalize_inputs", camera, "mean")] = torch.tensor(
+                IMAGENET_MEAN, dtype=torch.float32
+            ).view(3, 1, 1)
+            tensors[_normalization_name("normalize_inputs", camera, "std")] = torch.tensor(
+                IMAGENET_STD, dtype=torch.float32
+            ).view(3, 1, 1)
+        tensors[_normalization_name("unnormalize_outputs", "action", "mean")] = action_mean
+        tensors[_normalization_name("unnormalize_outputs", "action", "std")] = action_std
+        return save_safetensors(
+            tensors,
+            metadata={"format": "spiral-act", "spiral_robotics": manifest},
+        )
 
     def _batch(self, arrays: TrainingArrays) -> dict[str, torch.Tensor]:
         batch_size = arrays.batch_size
@@ -267,14 +201,8 @@ class TrainingSession:
         return batch
 
     def _step_response(
-        self,
-        loss: torch.Tensor,
-        loss_parts: dict[str, float],
-        device_copy_ms: float,
-        model_ms: float,
+        self, loss: torch.Tensor, device_copy_ms: float, model_ms: float
     ) -> dict[str, Any]:
-        l1 = float(loss_parts.get("l1_loss", loss.detach().item()))
-        kl = float(loss_parts.get("kld_loss", 0.0))
         telemetry = self.telemetry()
         telemetry.update(
             {
@@ -283,12 +211,7 @@ class TrainingSession:
             }
         )
         return {
-            "loss": {
-                "total": float(loss.detach().item()),
-                "l1": l1,
-                "kl": kl,
-                "pad": 0.0,
-            },
+            "loss": float(loss.detach().item()),
             "learning_rate": self.config.learning_rate,
             "telemetry": telemetry,
         }

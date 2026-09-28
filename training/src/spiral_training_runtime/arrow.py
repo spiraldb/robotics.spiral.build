@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pyarrow as pa
 
-from .config import PolicyConfig, TrainingConfig
+from .config import PolicyConfig
 from .errors import RuntimeRequestError
 
 
@@ -29,25 +29,6 @@ class InferenceArrays:
     owner: pa.RecordBatch | None
     state: np.ndarray
     images: tuple[np.ndarray, ...]
-
-
-def decode_training_batch(body: bytes, config: TrainingConfig) -> TrainingArrays:
-    batch = _one_batch(body)
-    if batch.num_rows == 0:
-        raise RuntimeRequestError("Arrow training batch cannot be empty")
-    states = _fixed_values(batch, "states", config.state_width, pa.float32())
-    images = _fixed_values(batch, "images", config.image_width_per_row, pa.uint8())
-    actions = _fixed_values(batch, "actions", config.action_width, pa.float32())
-    action_is_pad = _fixed_values(batch, "action_is_pad", config.chunk_size, pa.uint8())
-    if np.any(action_is_pad > 1):
-        raise RuntimeRequestError("action_is_pad values must be 0 or 1")
-    return TrainingArrays(
-        owner=batch,
-        states=states,
-        images=images,
-        actions=actions,
-        action_is_pad=action_is_pad,
-    )
 
 
 def decode_inference_input(body: bytes, config: PolicyConfig) -> InferenceArrays:

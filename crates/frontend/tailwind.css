@@ -10,8 +10,8 @@
    backend code, and viewport math cannot add unrelated CSS utilities. */
 @source "./src/**/*.rs";
 
-/* Curation styles live in one file per owner. Each file adds only classes
-   carrying the `curation-` prefix; nothing here is edited for Curation. */
+/* Feature styles live in one file per owner, each adding only classes that
+   carry its owner's prefix. */
 @import "./styles/episode-row.css";
 @import "./styles/episode-heading.css";
 @import "./styles/curation-canvas.css";
@@ -37,9 +37,6 @@
 */
 :root {
   color-scheme: light;
-
-  --font-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   --tone-canvas: #f7f7f5;
   --tone-surface: #ffffff;
@@ -70,12 +67,9 @@
   /* Text on the lime wash: lime pushed toward ink until it reads. */
   --tone-accent-ink: #4a5610;
   --tone-selected: #eef5cf;
-  --tone-selected-strong: var(--tone-accent);
 
   --tone-info: #5971fd;
   --tone-info-ink: #3a4ec4;
-  --tone-info-wash: #edf0ff;
-  --tone-info-line: #d8defe;
   --tone-focus: #5971fd;
 
   --tone-danger: #c4302b;
@@ -100,7 +94,6 @@
   /* Resource identity: the letter badge a kind of thing wears everywhere. */
   --tone-kind-dataset: #1fa3bb;
   --tone-kind-episode: #5971fd;
-  --tone-kind-stream: #7a5ad6;
   --tone-kind-camera: #e0752f;
   /* A curated view is what a curation's output publishes, so it wears the
      output stage's hue. */
@@ -173,10 +166,6 @@
   --wb-ink-faint: var(--tone-ink-faint);
   --wb-accent: var(--tone-accent-strong);
   --wb-selected: var(--tone-selected);
-  --wb-good: var(--tone-good);
-  --wb-caution: var(--tone-caution);
-  --wb-danger: var(--tone-danger);
-  --wb-danger-soft: var(--tone-danger-soft);
   --wb-shadow: var(--shadow-float);
   --wb-radius: 6px;
   --wb-font: var(--font-sans);
@@ -242,7 +231,7 @@
 }
 
 /* Focus is blue everywhere; lime is where you are, not where the keyboard is. */
-.wb-workspace :is(.wb-tab, .wb-icon-btn, .wb-rail-item, .wb-splitter):focus-visible {
+.wb-workspace :is(.wb-tab, .wb-icon-btn, .wb-splitter):focus-visible {
   outline-color: var(--tone-focus);
 }
 
@@ -1571,10 +1560,6 @@ button.studio-status-fact:hover {
     color: var(--tone-series-memory);
   }
 
-  .training-resource-lane span {
-    color: var(--tone-ink-soft);
-  }
-
   .training-resource-lane strong {
     color: var(--tone-ink);
   }
@@ -1731,11 +1716,11 @@ button.studio-status-fact:hover {
     max-width: calc(100% - 1rem);
     border-radius: 10px;
     box-shadow: var(--shadow-popover);
-    animation: workflow-popover-enter 180ms var(--ease-out-expo) both;
+    animation: curation-popover-enter 180ms var(--ease-out-expo) both;
     transform-origin: top left;
   }
 
-  @keyframes workflow-popover-enter {
+  @keyframes curation-popover-enter {
     from {
       opacity: 0;
       transform: translateY(-4px) scale(0.985);
@@ -1799,154 +1784,19 @@ button.studio-status-fact:hover {
     @apply grid gap-2 border-t border-line p-2;
   }
 
-  .workflow-dataset-creation {
-    @apply grid gap-1 text-[11px] text-ink-soft;
-  }
-
-  .workflow-dataset-creation > div {
-    @apply flex gap-1;
-  }
-
-  .workflow-dataset-creation .ui-select {
-    @apply min-w-0 flex-1;
-  }
-
-
   /* Shared empty and pending states inside any graph tile. */
   .inline-error {
     @apply shrink-0 border-b border-line;
   }
 
-  /* Graph canvas ---------------------------------------------------------- */
-  .workflow-flow-wrap {
-    @apply relative min-h-0 min-w-0 flex-1 overflow-hidden;
-    background: var(--tone-viewport);
-    container-type: inline-size;
-  }
-
-  /* Zoom and fit share one hairline group at the bottom left; the canvas
-     above them is nothing but stages. */
-  .workflow-canvas-controls {
-    @apply absolute bottom-2.5 left-2.5 z-[5] flex items-center gap-px bg-surface p-0.5;
-    border-radius: 8px;
-    box-shadow: var(--shadow-float);
-  }
-
-  /* Stage cards. Fixed 224×92 so the layered layout can place them before
-     they mount; the glyph tile carries the kind, the title carries the
-     meaning, the footer names what executes. */
-  .workflow-stage-source { --stage-tone: var(--tone-stage-source); }
-  .workflow-stage-media { --stage-tone: var(--tone-stage-media); }
-  .workflow-stage-model { --stage-tone: var(--tone-stage-model); }
-  .workflow-stage-shape { --stage-tone: var(--tone-stage-shape); }
-  .workflow-stage-join { --stage-tone: var(--tone-stage-join); }
-  .workflow-stage-output { --stage-tone: var(--tone-stage-output); }
-
-  .workflow-stage-card {
-    @apply relative flex flex-col gap-1 border border-line bg-surface px-3 pb-2 pt-2.5 text-left text-ink;
-    box-sizing: border-box;
-    width: 224px;
-    height: 92px;
-    border-radius: 8px;
-    box-shadow: 0 1px 2px rgb(16 16 16 / 0.05);
-    transition: border-color 120ms ease-out, box-shadow 160ms var(--ease-out-expo), translate 160ms var(--ease-out-expo);
-    animation: workflow-stage-enter 320ms var(--ease-out-expo) both;
-    animation-delay: calc(var(--stage-order, 0) * 45ms);
-  }
-
-  @keyframes workflow-stage-enter {
-    from {
-      opacity: 0;
-      translate: -6px 0;
-    }
-  }
-
-  /* Cards are as wide as the canvas lays them out, so two branches side by
-     side fit the graph pane at a readable zoom. */
-  .workflow-flow .workflow-stage-card {
-    width: 192px;
-  }
-
-  .workflow-stage-card:hover {
-    border-color: var(--tone-line-strong);
-    box-shadow: var(--shadow-float);
-    translate: 0 -1px;
-  }
-
-  .workflow-stage-card.is-selected,
-  .workflow-stage-card.is-selected:hover {
-    border-color: var(--tone-accent-strong);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-accent) 45%, transparent), 0 4px 14px rgb(16 16 16 / 0.08);
-    translate: none;
-  }
-
-  .workflow-stage-heading {
-    @apply flex min-w-0 items-center gap-2;
-  }
-
-  /* The kind mark: the stage's glyph inside a thin outline of its hue, the
-     same letter-badge grammar the catalog wears. */
-  .workflow-stage-mark {
-    @apply inline-flex size-[18px] shrink-0 items-center justify-center;
-    border: 1.5px solid var(--stage-tone);
-    border-radius: 5px;
-    color: var(--stage-tone);
-  }
-
-  .workflow-stage-mark .ui-icon {
-    @apply size-3;
-  }
-
-  .workflow-stage-title {
-    @apply min-w-0 truncate text-[12.5px] font-semibold leading-4 tracking-[-0.01em];
-  }
-
-  /* Paths offer their own break points (after each slash); anything else
-     breaks only as a last resort, so "video" never arrives as "vide / o". */
-  .workflow-stage-summary {
-    @apply m-0 min-h-0 flex-1 text-[11px] leading-[15px] text-ink-soft;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    overflow-wrap: break-word;
-  }
-
-  .workflow-stage-footer {
-    @apply flex min-w-0 items-baseline gap-1.5 font-mono text-[10.5px] leading-3 text-ink-faint;
-  }
-
-  .workflow-stage-footer > * {
-    @apply min-w-0 truncate;
-  }
-
-  .workflow-stage-footer code {
-    @apply font-mono;
-  }
-
-  /* An output is identity, not selection, so it wears the output stage's
-     hue rather than the lime that means "you are here". */
-  .workflow-stage-output-flag {
-    @apply ml-auto shrink-0 rounded px-1 font-medium;
-    border: 1px solid color-mix(in srgb, var(--tone-stage-output) 35%, var(--tone-surface));
-    color: var(--tone-stage-output);
-    background: var(--tone-surface);
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .document-switcher,
-    .workflow-stage-card {
+    .document-switcher {
       animation: none;
     }
 
-    .workflow-stage-card,
     .document-state,
     .document-switch .ui-icon {
       transition: none;
-    }
-
-    .workflow-stage-card:hover {
-      translate: none;
     }
   }
 
@@ -2250,6 +2100,10 @@ button.studio-status-fact:hover {
   line-height: 1.45;
 }
 
+.settings-key {
+  margin-bottom: 1.25rem;
+}
+
 .settings-project-transfer {
   margin-top: 1rem;
   padding-top: 1rem;
@@ -2345,17 +2199,13 @@ button.studio-status-fact:hover {
 
   --color-canvas: var(--tone-canvas);
   --color-surface: var(--tone-surface);
-  --color-sidebar: var(--tone-sidebar);
   --color-sunken: var(--tone-sunken);
-  --color-hover: var(--tone-hover);
   --color-line: var(--tone-line);
-  --color-line-strong: var(--tone-line-strong);
 
   --color-ink: var(--tone-ink);
   --color-ink-soft: var(--tone-ink-soft);
   --color-ink-faint: var(--tone-ink-faint);
 
-  --color-accent: var(--tone-accent);
   --color-accent-ink: var(--tone-accent-ink);
   --color-selected: var(--tone-selected);
 
@@ -2363,7 +2213,6 @@ button.studio-status-fact:hover {
   --color-danger-soft: var(--tone-danger-soft);
   --color-caution: var(--tone-caution);
   --color-caution-soft: var(--tone-caution-soft);
-  --color-good: var(--tone-good);
 
   --color-viewport: var(--tone-viewport);
   --color-camera: var(--tone-camera);
@@ -2984,94 +2833,6 @@ button.studio-status-fact:hover {
 /* Retained workspaces contribute to the shell grid only while selected. */
 .studio-workspace { display: contents; }
 .studio-workspace[hidden] { display: none; }
-
-/* dioxus-flow, spoken in this palette -------------------------------------
-   The graph library injects its own unlayered stylesheet, so these overrides
-   must be unlayered too or the library's entrance animation, grey edges, and
-   default handle sizes win however specific the selector. */
-.workflow-flow-wrap .dioxus-flow {
-  --df-bg: var(--tone-viewport);
-  --df-node-bg: var(--tone-surface);
-  --df-node-color: var(--tone-ink);
-  --df-node-border: var(--tone-line);
-  --df-accent: var(--tone-accent-strong);
-  --df-edge: color-mix(in srgb, var(--tone-ink-faint) 72%, transparent);
-  --df-edge-selected: var(--tone-accent-strong);
-  --df-edge-label: var(--tone-ink-faint);
-  --df-handle-bg: var(--tone-surface);
-  --df-handle-border: var(--tone-ink-faint);
-  --df-grid: color-mix(in srgb, var(--tone-ink-faint) 20%, transparent);
-  --df-panel-bg: var(--tone-surface);
-  --df-panel-border: var(--tone-line);
-  --df-panel-color: var(--tone-ink-soft);
-  --df-minimap-node: var(--tone-line);
-  --df-minimap-mask: rgb(16 16 16 / 0.06);
-}
-
-/* The library's node entrance is replaced by the stage's staggered one. */
-.workflow-flow .df-node {
-  animation: none;
-  cursor: pointer;
-}
-
-.workflow-flow .df-edge {
-  animation: none;
-}
-
-.workflow-flow .df-node:focus-visible {
-  border-radius: 4px;
-  outline-width: 2px;
-  outline-offset: 2px;
-}
-
-.workflow-flow .df-edge-path {
-  stroke-width: 1.25;
-}
-
-/* While a run is admitted every edge carries the accent, moving with the data. */
-.workflow-flow .df-edge.df-animated .df-edge-path {
-  stroke: var(--tone-info);
-  stroke-width: 1.5;
-  stroke-dasharray: 5 5;
-  animation-duration: 700ms;
-}
-
-.workflow-flow .df-edge.df-animated .df-edge-arrow {
-  fill: var(--tone-info);
-}
-
-.workflow-flow .df-edge-label {
-  font-size: 10px;
-  stroke: var(--tone-viewport);
-}
-
-.workflow-flow .df-minimap {
-  right: 10px;
-  bottom: 10px;
-  overflow: hidden;
-  border-radius: 8px;
-  box-shadow: var(--shadow-float);
-}
-
-.workflow-stage-card .df-handle {
-  width: 6px;
-  height: 6px;
-  border-width: 1px;
-  border-color: var(--tone-line-strong);
-  pointer-events: none;
-  cursor: default;
-  transition: border-color 120ms ease-out, background 120ms ease-out;
-}
-
-.workflow-stage-card:is(:hover, .is-selected) .df-handle {
-  border-color: var(--tone-accent-strong);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .workflow-stage-card .df-handle {
-    transition: none;
-  }
-}
 
 /* Data: the catalog rows, the streams ledger, quiet text actions, and the
    import form. Panel composition lives with the Data block below. */
@@ -3819,11 +3580,6 @@ button.studio-status-fact:hover {
   }
 
 }
-
-/* One episode stepper wherever a surface walks a list of episodes. */
-.episode-stepper { @apply flex items-center gap-1; }
-.episode-steps { @apply flex items-center gap-px; }
-.episode-select { @apply max-w-[22rem]; text-overflow: ellipsis; }
 
 /* Derived series extend the existing episode ruler and stream grid. */
 .data-numeric-track .data-numeric-name { height: auto; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 12px; gap: 4px; }

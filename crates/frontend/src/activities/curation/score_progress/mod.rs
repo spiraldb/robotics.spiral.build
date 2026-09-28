@@ -307,13 +307,10 @@ pub(super) fn MomentEvidence(
     episode: Episode,
     moments: Vec<Moment>,
     /// What places the recording, under its name.
-    #[props(default)]
     facts: Vec<String>,
     /// The threshold the node keeps moments by; `None` where nothing decides.
-    #[props(default)]
     cutoff: Option<f64>,
     /// The ask to play a stretch, counted, so choosing it again replays it.
-    #[props(default)]
     play: Option<PlayRequest>,
 ) -> Element {
     let samples = moments

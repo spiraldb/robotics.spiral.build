@@ -67,7 +67,7 @@ impl RecordingClient {
         keep: bool,
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
         self.project.mutate(
-            &[Telemetry, Recording, Data, Catalog, RobotSetup],
+            &[Telemetry, Recording, Catalog, RobotSetup],
             HttpRequest::new("POST", "/api/recording/stop").json(&RecordingFinish::new(keep)),
         )
     }

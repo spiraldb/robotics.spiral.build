@@ -10,9 +10,8 @@ mod policy;
 
 pub use artifact::ModelArtifact;
 pub use policy::{
-    ActionChunk, ActionChunkShape, ActionChunkSpecification, ImageDimensions, ImageFormat,
-    ImageFrame, ImageInputSpecification, InferenceInput, InferenceStats, ObservationSpecification,
-    Policy, PolicyKind, PolicyLoader, PolicySpecification,
+    ActionChunk, ActionChunkShape, ImageDimensions, ImageFrame, ImageInputSpecification,
+    InferenceInput, InferenceStats, Policy, PolicyLoader, PolicySpecification,
 };
 
 /// Errors surfaced by artifact validation, model loading, or inference.

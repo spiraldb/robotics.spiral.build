@@ -1,16 +1,15 @@
 //! One interface over real and simulated motor buses.
 //!
-//! The studio's control loop is written against [`MotorBus`] so that every
-//! screen — setup, calibration, joint control, teleoperation — can be exercised
-//! without an arm on the desk. The test-only `SimulatedBus` is deterministic: it advances
+//! The control loop is written against [`MotorBus`] so its tests can drive it
+//! without an arm. The test-only `SimulatedBus` is deterministic: it advances
 //! only when it is read, so a test can step it exactly as far as it likes.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-#[cfg(test)]
-use crate::calibration::EncoderCounts;
+use spiral_robotics_common::robots::MotorLimits;
+
 #[cfg(test)]
 use spiral_robotics_common::robots::config::MotorConfig;
 
@@ -106,21 +105,6 @@ pub(crate) struct MotorElectricalSample {
     current_amps: Option<f64>,
 }
 
-/// Limits a motor controller enforces on itself.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct MotorLimits {
-    max_temperature_celsius: Option<f64>,
-    voltage: MotorVoltageLimits,
-    /// Configured torque ceiling as a fraction of the motor's rated torque.
-    max_load: Option<f64>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct MotorVoltageLimits {
-    minimum_volts: Option<f64>,
-    maximum_volts: Option<f64>,
-}
-
 impl MotorSample {
     pub(crate) fn new(
         position: i64,
@@ -206,45 +190,6 @@ impl MotorElectricalSample {
 
     pub(crate) fn current_amps(self) -> Option<f64> {
         self.current_amps
-    }
-}
-
-impl MotorVoltageLimits {
-    pub(crate) fn new(minimum_volts: Option<f64>, maximum_volts: Option<f64>) -> Self {
-        Self {
-            minimum_volts,
-            maximum_volts,
-        }
-    }
-}
-
-impl MotorLimits {
-    pub(crate) fn new(
-        max_temperature_celsius: Option<f64>,
-        voltage: MotorVoltageLimits,
-        max_load: Option<f64>,
-    ) -> Self {
-        Self {
-            max_temperature_celsius,
-            voltage,
-            max_load,
-        }
-    }
-
-    pub(crate) fn max_temperature_celsius(self) -> Option<f64> {
-        self.max_temperature_celsius
-    }
-
-    pub(crate) fn min_voltage_volts(self) -> Option<f64> {
-        self.voltage.minimum_volts
-    }
-
-    pub(crate) fn max_voltage_volts(self) -> Option<f64> {
-        self.voltage.maximum_volts
-    }
-
-    pub(crate) fn max_load(self) -> Option<f64> {
-        self.max_load
     }
 }
 
@@ -350,43 +295,9 @@ const SIMULATED_DRIFT_PERIOD: f64 = 420.0;
 #[cfg(test)]
 const SIMULATED_VOLTS: f64 = 7.4;
 
-/// Reads per second the simulation assumes when it reports a rate.
-///
-/// The bus advances per read rather than per second — that is what makes it
-/// steppable from a test — so it has to be told what one read is worth before
-/// it can answer in degrees per second. This matches the studio's control rate
-/// and affects nothing but simulated readings.
+/// Temperature a simulated motor reports.
 #[cfg(test)]
-const SIMULATED_READS_PER_SECOND: f64 = 60.0;
-
-/// Temperature a simulated motor rests at.
-#[cfg(test)]
-const SIMULATED_AMBIENT_CELSIUS: f64 = 28.0;
-
-/// Temperature a simulated motor climbs toward while it is holding torque.
-#[cfg(test)]
-const SIMULATED_DRIVEN_CELSIUS: f64 = 52.0;
-
-/// Fraction of the remaining thermal gap a simulated motor closes per read.
-///
-/// At the control rate this is a climb of roughly nine degrees in the first
-/// minute under load — slow enough to read as a real motor warming up, fast
-/// enough that the studio's rise-rate readout has something to say during a
-/// session someone is actually watching.
-#[cfg(test)]
-const SIMULATED_THERMAL_RATE: f64 = 0.0001;
-
-/// Current a simulated motor draws at full effort, in amps.
-#[cfg(test)]
-const SIMULATED_STALL_AMPS: f64 = 1.4;
-
-/// Effort a simulated motor spends merely holding its position.
-#[cfg(test)]
-const SIMULATED_HOLDING_LOAD: f64 = 0.08;
-
-/// Position error at which a simulated motor is working at its rated torque.
-#[cfg(test)]
-const SIMULATED_FULL_LOAD_ERROR: f64 = 400.0;
+const SIMULATED_CELSIUS: f64 = 28.0;
 
 #[derive(Clone, Debug, PartialEq)]
 #[cfg(test)]
@@ -397,30 +308,23 @@ struct SimulatedMotor {
     /// Fraction of a sweep this motor starts ahead of the first one, so an
     /// undriven arm looks like an arm rather than a metronome.
     phase: f64,
-    /// Position at the previous read, so simulated speed is measured the same
-    /// way a servo measures it rather than declared.
-    previous_position: i64,
-    temperature: f64,
-    load: f64,
 }
 
 #[cfg(test)]
 impl SimulatedMotor {
     /// Limits a simulated motor claims for itself, in the shape a real one reports.
     fn limits() -> MotorLimits {
-        MotorLimits::new(
-            Some(70.0),
-            MotorVoltageLimits::new(Some(4.5), Some(9.0)),
-            Some(1.0),
-        )
+        MotorLimits::default()
+            .with_max_temperature_celsius(Some(70.0))
+            .with_voltage_range(Some(4.5), Some(9.0))
+            .with_max_load(Some(1.0))
     }
 }
 
 /// An in-process stand-in for a Feetech bus.
 ///
-/// Undriven motors sweep slowly through their travel so that an operator can
-/// see the UI, the calibration sweep, and teleoperation work end to end without
-/// hardware. A motor under torque ignores the sweep and tracks its goal.
+/// With drift, undriven motors sweep through their travel, as a calibration
+/// sweep needs. A motor under torque ignores the sweep and tracks its goal.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg(test)]
 pub(crate) struct SimulatedBus {
@@ -449,9 +353,6 @@ impl SimulatedBus {
                         position: SIMULATED_CENTER,
                         goal: SIMULATED_CENTER,
                         phase: index as f64 / count,
-                        previous_position: SIMULATED_CENTER,
-                        temperature: SIMULATED_AMBIENT_CELSIUS,
-                        load: 0.0,
                     },
                 )
             })
@@ -478,7 +379,6 @@ impl SimulatedBus {
         let (torque, drift) = (self.torque, self.drift);
 
         for motor in self.motors.values_mut() {
-            motor.previous_position = motor.position;
             let error = motor.goal - motor.position;
             if torque {
                 motor.position += error.clamp(-SIMULATED_STEP, SIMULATED_STEP);
@@ -490,23 +390,6 @@ impl SimulatedBus {
                 // enabling torque must not yank it back to an old target.
                 motor.goal = motor.position;
             }
-
-            // A released motor spends no effort and cools; a motor holding a
-            // target spends at least its holding load and warms toward the
-            // temperature that load settles at. Neither number is measured
-            // from anything real, but the studio's simulated environment is
-            // already announced on the page, and a bench that reports nothing
-            // cannot be used to check that the bench reports things.
-            motor.load = if torque {
-                let reach = error.abs() as f64 / SIMULATED_FULL_LOAD_ERROR;
-                let magnitude = (SIMULATED_HOLDING_LOAD + reach).min(0.9);
-                if error < 0 { -magnitude } else { magnitude }
-            } else {
-                0.0
-            };
-            let settles_at = SIMULATED_AMBIENT_CELSIUS
-                + (SIMULATED_DRIVEN_CELSIUS - SIMULATED_AMBIENT_CELSIUS) * motor.load.abs();
-            motor.temperature += (settles_at - motor.temperature) * SIMULATED_THERMAL_RATE;
         }
 
         self.motors
@@ -523,27 +406,15 @@ impl MotorBus for SimulatedBus {
     }
 
     fn read_samples(&mut self) -> Result<BTreeMap<String, MotorSample>, BusError> {
-        self.step();
+        let electrical =
+            MotorElectricalSample::new(Some(SIMULATED_VOLTS), Some(SIMULATED_CELSIUS), None);
         Ok(self
-            .motors
-            .iter()
-            .map(|(name, motor)| {
-                let travelled = motor.position - motor.previous_position;
-                (
-                    name.clone(),
-                    MotorSample::new(
-                        motor.position,
-                        MotorMechanicalSample::new(
-                            Some(EncoderCounts::degrees(travelled) * SIMULATED_READS_PER_SECOND),
-                            Some(motor.load),
-                        ),
-                        MotorElectricalSample::new(
-                            Some(SIMULATED_VOLTS),
-                            Some(motor.temperature.round()),
-                            Some(motor.load.abs() * SIMULATED_STALL_AMPS),
-                        ),
-                    ),
-                )
+            .step()
+            .into_iter()
+            .map(|(name, position)| {
+                let sample =
+                    MotorSample::new(position, MotorMechanicalSample::default(), electrical);
+                (name, sample)
             })
             .collect())
     }
@@ -679,49 +550,6 @@ mod tests {
         let after = bus.read_positions().unwrap();
 
         assert_eq!(before, after, "energizing must not move the arm");
-    }
-
-    #[test]
-    fn a_released_simulated_motor_rests_cool_and_a_driven_one_warms() {
-        let mut bus = SimulatedBus::new(&specs(), false);
-        let resting = bus.read_samples().unwrap();
-        let cold = resting["shoulder_pan"];
-
-        assert_eq!(cold.mechanical().load(), Some(0.0));
-        assert_eq!(cold.electrical().current_amps(), Some(0.0));
-        assert_eq!(cold.electrical().voltage_volts(), Some(SIMULATED_VOLTS));
-        assert_eq!(
-            cold.electrical().temperature_celsius(),
-            Some(SIMULATED_AMBIENT_CELSIUS.round())
-        );
-
-        // Work the joint end to end rather than parking it on one target: a
-        // motor that has arrived spends only its holding load, and barely
-        // warming is the correct answer for a motor that is barely working.
-        bus.set_torque(true).unwrap();
-        for cycle in 0..4_000 {
-            let goal = if (cycle / 100) % 2 == 0 { 3800 } else { 300 };
-            bus.write_goal_positions(&BTreeMap::from([("shoulder_pan".to_owned(), goal)]))
-                .unwrap();
-            bus.read_samples().unwrap();
-        }
-        let hot = bus.read_samples().unwrap()["shoulder_pan"];
-
-        // Load carries the direction the motor is pushing, so a joint on its
-        // way back down reports a negative one. Effort is its magnitude.
-        assert!(
-            hot.mechanical().load().unwrap().abs() > SIMULATED_HOLDING_LOAD,
-            "a motor under load reports more than its holding effort"
-        );
-        assert!(hot.electrical().current_amps().unwrap() > 0.0);
-        assert!(
-            hot.electrical().temperature_celsius().unwrap() > SIMULATED_AMBIENT_CELSIUS,
-            "a working motor warms above ambient"
-        );
-        assert!(
-            hot.electrical().temperature_celsius().unwrap() < SIMULATED_DRIVEN_CELSIUS,
-            "and does not arrive there instantly"
-        );
     }
 
     #[test]

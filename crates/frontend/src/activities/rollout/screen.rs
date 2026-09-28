@@ -47,10 +47,11 @@ impl RolloutCameras {
 
 #[component]
 pub(crate) fn RolloutWorkspace(is_active: ReadSignal<bool>) -> Element {
-    let (workspace, project) = crate::shell::activity::WorkspaceActivity::mount(
+    let workspace = crate::shell::activity::WorkspaceActivity::provide(
         crate::shell::activity::Activity::Rollout,
         is_active,
     );
+    let project = crate::shell::state::StudioProjectState::current();
     let telemetry = HardwareViewState::use_state(project, is_active);
     let robot_selection = RobotSelection::use_selection(telemetry.snapshot());
     let controller = super::state::RolloutController::use_controller(is_active);

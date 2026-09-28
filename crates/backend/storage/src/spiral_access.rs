@@ -21,7 +21,7 @@ impl SpiralConnection {
         Self { settings, access }
     }
 
-    pub fn settings(&self) -> &SpiralConnectionSettings {
+    pub(crate) fn settings(&self) -> &SpiralConnectionSettings {
         &self.settings
     }
 

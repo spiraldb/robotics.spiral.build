@@ -3,8 +3,8 @@
 //!
 //! Find similar compiles to `spql.ai.similarity` against its query, and Group
 //! similar to `spql.ai.classify` over its categories, written into the
-//! statement as a literal list. Both hand on every subtask with the judgment
-//! beside it, for a Select below to keep part of.
+//! statement as a literal list. Both judge every subtask, and the node's own
+//! rule keeps part of them.
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{SubtaskGrouping, SubtaskSearch};
 use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};

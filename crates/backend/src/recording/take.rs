@@ -7,7 +7,6 @@ use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingStart}
 use spiral_robotics_hardware::{CaptureClock, HardwareState, ModeSelection};
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter,
-    JointMotorLimits,
 };
 
 use super::session::{OpenTake, TakeChange};
@@ -407,7 +406,7 @@ impl<'a> TakeOperations<'a> {
                                 .map(|name| {
                                     limits
                                         .and_then(|limits| limits.get(name))
-                                        .map(JointMotorLimits::from)
+                                        .copied()
                                         .unwrap_or_default()
                                 })
                                 .collect(),
@@ -421,15 +420,12 @@ impl<'a> TakeOperations<'a> {
             .state
             .recording_buffer()
             .begin(
-                EpisodeRecordingRequest::new(request.dataset_id.clone(), source.clone(), sample_hz)
+                EpisodeRecordingRequest::new(request.dataset_id.clone(), source, sample_hz)
                     .with_arms(arms.clone(), condition),
             )
             .map_err(OperationError::from)?;
         let summary = EpisodeInfo::new(writer.id().to_owned(), request.dataset_id.clone())
-            .with_arms(arms.clone())
-            .with_source(source)
-            .with_sample_hz(sample_hz)
-            .with_started_ms(writer.started_ms());
+            .with_arms(arms.clone());
         Ok(TakeDraft {
             writer,
             arms,

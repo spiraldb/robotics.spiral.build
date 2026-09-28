@@ -10,7 +10,6 @@ use crate::OperationError;
 
 pub(crate) const ACT_ARTIFACT_FORMAT: &str = "spiral_robotics.act.safetensors.v2";
 pub(crate) const ACT_TENSOR_NAMESPACE: &str = "lerobot_act_state_dict_v1";
-const LEGACY_BURN_ACT_TENSOR_NAMESPACE: &str = "burn_act_state_dict_v1";
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ArtifactIdentity {
@@ -173,11 +172,9 @@ impl ArtifactIdentity {
         expected_run: &str,
         expected_step: u64,
     ) -> Result<(), OperationError> {
-        let supported_namespace = matches!(
-            self.tensor_namespace.as_str(),
-            ACT_TENSOR_NAMESPACE | LEGACY_BURN_ACT_TENSOR_NAMESPACE
-        );
-        if self.format != ACT_ARTIFACT_FORMAT || self.purpose != "inference" || !supported_namespace
+        if self.format != ACT_ARTIFACT_FORMAT
+            || self.purpose != "inference"
+            || self.tensor_namespace != ACT_TENSOR_NAMESPACE
         {
             return Err(OperationError::invalid_input(
                 "checkpoint is not a native Spiral ACT inference artifact",

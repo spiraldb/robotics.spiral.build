@@ -7,7 +7,6 @@
 pub(crate) enum LoadState<T> {
     Loading { previous: Option<T> },
     Ready(T),
-    Unavailable { reason: String },
     Failed { reason: String, previous: Option<T> },
 }
 
@@ -16,14 +15,13 @@ impl<T> LoadState<T> {
         match self {
             Self::Loading { previous } | Self::Failed { previous, .. } => previous.as_ref(),
             Self::Ready(value) => Some(value),
-            Self::Unavailable { .. } => None,
         }
     }
 
     pub(crate) fn reason(&self) -> Option<&str> {
         match self {
             Self::Loading { .. } | Self::Ready(_) => None,
-            Self::Unavailable { reason } | Self::Failed { reason, .. } => Some(reason),
+            Self::Failed { reason, .. } => Some(reason),
         }
     }
 
@@ -37,7 +35,6 @@ impl<T> LoadState<T> {
                 previous: previous.map(&mut transform),
             },
             Self::Ready(value) => LoadState::Ready(transform(value)),
-            Self::Unavailable { reason } => LoadState::Unavailable { reason },
             Self::Failed { reason, previous } => LoadState::Failed {
                 reason,
                 previous: previous.map(transform),

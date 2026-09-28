@@ -15,16 +15,18 @@ pub(crate) use arrow_rows::ArrowColumns;
 pub use database::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
     DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,
-    RecordBatchStream, RelationKind, RelationMetadata, RelationName, SqlStatement,
+    RecordBatchStream, RelationName, SqlStatement,
 };
-pub use project_store::{ProjectConnection, ProjectStore};
+pub(crate) use project_store::ProjectConnection;
+pub use project_store::ProjectStore;
 pub(crate) use project_store::{ProjectDatabasePersistence, StorageClock};
-pub use schema::{SCHEMA_VERSION, StorageSchema};
+pub(crate) use schema::StorageSchema;
+pub use schema::{SCHEMA_VERSION, STUDIO_TABLE_PREFIX};
 pub(crate) use schema::{Table, column};
 pub(crate) use sql::ProjectQueries;
-pub use sql::SpiralSql;
+pub(crate) use sql::SpiralSql;
 
-pub use adbc_database::{AdbcDatabase, ModelCredentials};
+pub use adbc_database::AdbcDatabase;
 
 #[cfg(test)]
 mod contract_tests;

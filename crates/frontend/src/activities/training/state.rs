@@ -195,7 +195,7 @@ impl TrainingController {
         }
         self.commands.stopping.set(Some(id.clone()));
         let mut stopping = self.commands.stopping;
-        studio.run_utility("Stop requested.", async move {
+        studio.run_reported("Stop requested.", async move {
             let result = TrainingClient::current()
                 .stop_training_run(id)
                 .await
@@ -215,7 +215,7 @@ impl TrainingController {
         let mut deleting = self.commands.deleting;
         let mut selected_run = self.history.selected_run;
         let mut opened_runs = self.history.opened_runs;
-        studio.run_utility(format!("Deleted run {}.", run.name), async move {
+        studio.run_reported(format!("Deleted run {}.", run.name), async move {
             let result = TrainingClient::current()
                 .delete_training_run(run_id)
                 .await

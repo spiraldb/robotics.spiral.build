@@ -95,11 +95,10 @@ impl ProjectClient {
         response
     }
 
-    /// Browser-native media (images, downloads) name the project in the URL.
+    /// A browser-native download names the project in the URL.
     pub(crate) fn scoped_url(&self, path: &str) -> String {
-        let separator = if path.contains('?') { '&' } else { '?' };
         let project = serde_urlencoded::to_string(&self.project)
             .expect("a project key encodes as a query string");
-        format!("{path}{separator}{project}")
+        format!("{path}?{project}")
     }
 }

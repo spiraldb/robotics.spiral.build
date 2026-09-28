@@ -23,9 +23,7 @@ impl LiveSession {
             LiveAction::Point(selection) => self.selection().pointed().set(selection),
             LiveAction::Hold(robot) => self.hold_robot(robot),
             LiveAction::Release(robot) => self.release_robot(robot),
-            LiveAction::Teleoperate { leader, follower } => {
-                self.set_mode(ModeSelection::Teleoperate { leader, follower });
-            }
+            LiveAction::Teleoperate { leader, follower } => self.teleoperate(leader, follower),
         }
     }
 
@@ -39,7 +37,7 @@ impl LiveSession {
     }
 
     fn release_robot(self, id: String) {
-        self.project().run_safety("Motors released.", async move {
+        self.project().run_reported("Motors released.", async move {
             RobotClient::current()
                 .release_robot(id)
                 .await
@@ -47,21 +45,12 @@ impl LiveSession {
         });
     }
 
-    fn set_mode(self, selection: ModeSelection) {
-        let stops_motion = matches!(selection, ModeSelection::Idle);
-        let future = async move {
+    fn teleoperate(self, leader: String, follower: String) {
+        self.commands().run("", async move {
             RobotClient::current()
-                .set_mode(selection)
+                .set_mode(ModeSelection::Teleoperate { leader, follower })
                 .await
                 .map_err(|error| error.to_string())
-        };
-        if stops_motion {
-            self.project().run_safety(
-                "Motion commands stopped. Motors may still be holding position.",
-                future,
-            );
-        } else {
-            self.commands().run("", future);
-        }
+        });
     }
 }

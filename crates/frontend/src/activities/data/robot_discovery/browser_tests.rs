@@ -19,7 +19,7 @@ export function installRobotDiscoveryFetch() {
     globalThis.fetch = async (input, options) => {
         const request = input instanceof Request ? input : new Request(input, options);
         const path = new URL(request.url).pathname;
-        if (path === '/api/providers') return Response.json({llm:{base_url:'https://provider.test/v1',default_model:'openai/gpt-5.6-terra'}});
+        if (path === '/api/providers') return Response.json({llm:{base_url:'https://provider.test/v1'}});
         let metadata = null;
         if (path === '/api/proxy') {
             metadata = {url:new URL(request.url).searchParams.get('url'),method:request.method,authorization:request.headers.get('authorization')};
@@ -32,13 +32,13 @@ export function installRobotDiscoveryFetch() {
         const recordedPath = path === '/api/proxy' ? metadata.url : path;
         robotRequests.push({path:recordedPath, transport:path, project: request.headers.get('X-Spiral-Project'), metadata, body});
         if (path === '/api/queries') return Response.json({
-            columns:[{name:'id',data_type:'Utf8',nullable:false}],rows:[{id:'01a0989fb65870a7a5459902f9e3e090'}],truncated:false,elapsed_ms:0
+            columns:[{name:'id'}],rows:[{id:'01a0989fb65870a7a5459902f9e3e090'}],truncated:false
         });
         if (path === '/api/datasets/episode-topics') return Response.json([
             {name:'/joints',schemas:['sensor_msgs/JointState'],members:1,samples:3,revision:{variant:'joints'}}
         ]);
         if (path === '/api/queries/episode') return Response.json({
-            columns:[{name:'value',data_type:'Struct',nullable:false}],rows:[{value:{position:[0.25]}}],truncated:false,elapsed_ms:0
+            columns:[{name:'value'}],rows:[{value:{position:[0.25]}}],truncated:false
         });
         if (path === '/api/datasets/robot/save') {
             saveCount += 1;
@@ -55,9 +55,7 @@ export function installRobotDiscoveryFetch() {
         ];
         const [id, name, args] = calls[completionCount - 1];
         const message = {role:'assistant',content:'Inspecting the imported robot.',tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]};
-        const tool_calls = message.tool_calls.map((call,index) => ({...call,index}));
-        const payload = new TextEncoder().encode('data: '+JSON.stringify({choices:[{delta:{content:message.content,tool_calls},finish_reason:'tool_calls'}]})+'\n\ndata: [DONE]\n\n');
-        return new Response(new ReadableStream({start(controller) { controller.enqueue(payload); controller.close(); }}), {headers:{'Content-Type':'text/event-stream'}});
+        return Response.json({choices:[{message,finish_reason:'tool_calls'}]});
     };
 }
 export function restoreRobotDiscoveryFetch() { globalThis.fetch = previousFetch; }
@@ -127,7 +125,7 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
     let mut dom = VirtualDom::new_with_props(DiscoveryHarness::render, harness.clone());
     dom.rebuild_in_place();
     let inspection = HuggingFaceDatasetInspection::new(
-        HuggingFaceInspectionSource::new("demo", "acme/demo").with_revisions("main", "pinned-sha"),
+        HuggingFaceInspectionSource::new("demo", "acme/demo").with_resolved_revision("pinned-sha"),
         HuggingFaceInspectionContents::new(
             vec![HuggingFaceDatasetFile::new("episodes/episode.mcap", 42)],
             42,

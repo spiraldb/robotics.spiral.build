@@ -5,8 +5,9 @@
 [application]
 name = "spiral-robotics-frontend"
 # Let DX own the stylesheet pipeline too. Both `dx serve --fullstack` and `dx bundle --fullstack`
-# compile it before the client is built. The generated asset is also checked
-# in so plain Cargo checks can resolve it without running DX first.
+# compile it before the client is built. The generated asset is not checked in:
+# on a fresh clone, run `tailwindcss -i crates/frontend/tailwind.css -o
+# crates/frontend/assets/tailwind.css` once before a plain Cargo check.
 tailwind_input = "tailwind.css"
 tailwind_output = "assets/tailwind.css"
 

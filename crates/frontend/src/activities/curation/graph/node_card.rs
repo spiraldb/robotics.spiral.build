@@ -36,11 +36,11 @@ impl NodeFace {
     }
     pub(super) const fn class_name(self) -> &'static str {
         match self {
-            Self::Dataset => "workflow-stage-source",
-            Self::Annotation | Self::Scoring => "workflow-stage-model",
-            Self::Search => "workflow-stage-media",
-            Self::Grouping => "workflow-stage-join",
-            Self::Select => "workflow-stage-shape",
+            Self::Dataset => "curation-canvas-stage-source",
+            Self::Annotation | Self::Scoring => "curation-canvas-stage-model",
+            Self::Search => "curation-canvas-stage-media",
+            Self::Grouping => "curation-canvas-stage-join",
+            Self::Select => "curation-canvas-stage-shape",
         }
     }
 }

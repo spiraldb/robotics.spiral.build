@@ -25,21 +25,75 @@ impl StudioProviders {
 #[serde(deny_unknown_fields)]
 pub struct LlmProvider {
     base_url: String,
-    default_model: String,
 }
 
 impl LlmProvider {
-    pub fn new(base_url: String, default_model: String) -> Self {
-        Self {
-            base_url,
-            default_model,
-        }
+    pub fn new(base_url: String) -> Self {
+        Self { base_url }
     }
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
-    pub fn default_model(&self) -> &str {
-        &self.default_model
+}
+
+/// Which provider keys the backend holds. The keys themselves never leave it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderKeysStatus {
+    llm_api_key_configured: bool,
+    huggingface_token_configured: bool,
+}
+
+impl ProviderKeysStatus {
+    pub const fn new(llm_api_key_configured: bool, huggingface_token_configured: bool) -> Self {
+        Self {
+            llm_api_key_configured,
+            huggingface_token_configured,
+        }
+    }
+    pub const fn llm_api_key_configured(&self) -> bool {
+        self.llm_api_key_configured
+    }
+    pub const fn huggingface_token_configured(&self) -> bool {
+        self.huggingface_token_configured
+    }
+}
+
+/// New values for the provider keys. For each key, omitted or `null` keeps the
+/// saved key and an empty string removes it.
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderKeysUpdate {
+    #[serde(default)]
+    llm_api_key: Option<String>,
+    #[serde(default)]
+    huggingface_token: Option<String>,
+}
+
+impl ProviderKeysUpdate {
+    pub fn with_llm_api_key(mut self, key: Option<String>) -> Self {
+        self.llm_api_key = key;
+        self
+    }
+    pub fn with_huggingface_token(mut self, token: Option<String>) -> Self {
+        self.huggingface_token = token;
+        self
+    }
+    pub fn llm_api_key(&self) -> Option<&str> {
+        self.llm_api_key.as_deref()
+    }
+    pub fn huggingface_token(&self) -> Option<&str> {
+        self.huggingface_token.as_deref()
+    }
+}
+
+impl std::fmt::Debug for ProviderKeysUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |key: &Option<String>| key.as_ref().map(|_| "<redacted>");
+        f.debug_struct("ProviderKeysUpdate")
+            .field("llm_api_key", &redacted(&self.llm_api_key))
+            .field("huggingface_token", &redacted(&self.huggingface_token))
+            .finish()
     }
 }
 
@@ -145,6 +199,17 @@ impl ProviderFunctionCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_updates_redact_their_values() {
+        let update = ProviderKeysUpdate::default()
+            .with_llm_api_key(Some("sk-or-private".into()))
+            .with_huggingface_token(Some("hf_private".into()));
+        let debug = format!("{update:?}");
+        assert!(!debug.contains("sk-or-private") && !debug.contains("hf_private"));
+        let omitted: ProviderKeysUpdate = serde_json::from_str("{}").unwrap();
+        assert_eq!(omitted, ProviderKeysUpdate::default());
+    }
 
     #[test]
     fn text_travels_as_the_content_string() {

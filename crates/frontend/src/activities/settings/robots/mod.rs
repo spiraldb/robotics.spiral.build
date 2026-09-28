@@ -140,7 +140,7 @@ fn RobotEntry(
                     variant: ButtonVariant::Row,
                     class: "device-main",
                     aria_pressed: focused,
-                    title: "Show {robot.id()} in the joints panel",
+                    title: "Select {robot.id()}",
                     onclick: move |_| chosen.set(Some(Selection::Robot(id.clone()))),
                     span {
                         class: "device-accent",

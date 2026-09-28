@@ -191,7 +191,7 @@ impl TimelineSignalLanes for [TimelineSignalLane] {
             let y_axis = if layout.labelled {
                 TimelineChartStyle::labelled_value_axis(grid_index)
             } else {
-                TimelineChartStyle::hidden_axis(AxisType::Value, grid_index).scale(true)
+                TimelineChartStyle::hidden_axis(grid_index).scale(true)
             };
             chart = chart
                 .grid(
@@ -203,7 +203,7 @@ impl TimelineSignalLanes for [TimelineSignalLane] {
                         .height(layout.lane_height),
                 )
                 .x_axis(
-                    TimelineChartStyle::hidden_axis(AxisType::Value, grid_index)
+                    TimelineChartStyle::hidden_axis(grid_index)
                         .min(layout.window.0)
                         .max(layout.window.1),
                 )
@@ -250,9 +250,9 @@ impl TimelineSignalLanes for [TimelineSignalLane] {
 struct TimelineChartStyle;
 
 impl TimelineChartStyle {
-    fn hidden_axis(kind: AxisType, grid_index: f64) -> Axis {
+    fn hidden_axis(grid_index: f64) -> Axis {
         Axis::new()
-            .type_(kind)
+            .type_(AxisType::Value)
             .grid_index(grid_index)
             .show(false)
             .axis_line(AxisLine::new().show(false))

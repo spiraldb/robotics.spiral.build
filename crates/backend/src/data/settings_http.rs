@@ -1,6 +1,5 @@
 //! HTTP endpoints for settings.
 
-use super::settings::UpdateDataSettingsCommand;
 use crate::OperationError;
 use crate::http::delivery::{ApiJson, Project};
 use crate::projects::context::StudioContext;
@@ -12,9 +11,8 @@ use axum::{
     routing::{get, post, put},
 };
 use spiral_robotics_common::settings::{
-    ConnectionTest, DataSettings, SettingsUpdate, SpiralConnectionUpdate, SpiralSettings,
+    ConnectionTest, DataSettings, SettingsUpdate, SpiralSettings,
 };
-use std::sync::Arc;
 
 pub(crate) struct SettingsEndpoints;
 
@@ -27,24 +25,11 @@ impl SettingsEndpoints {
             .route("/settings/training/test", post(Self::test_training_runtime))
     }
     pub(crate) fn commands() -> Router<StudioContext> {
-        Router::new()
-            .route("/settings/connection", put(Self::update_connection))
-            .route("/settings", put(Self::update_data_settings))
+        Router::new().route("/settings", put(Self::update_data_settings))
     }
     /// The saved connection names the project a browser starts on.
     async fn connection_settings(State(state): State<StudioContext>) -> Json<SpiralSettings> {
         Json(state.projects().saved_settings())
-    }
-    async fn update_connection(
-        Project(project): Project,
-        ApiJson(change): ApiJson<SpiralConnectionUpdate>,
-    ) -> Result<Json<SpiralSettings>, OperationError> {
-        let origin = project.project();
-        let switched = project.projects().update_connection(origin, change).await?;
-        if !Arc::ptr_eq(&switched, origin) {
-            RobotOperations::spawn_auto_connect(project.with_project(switched));
-        }
-        Ok(Json(project.projects().saved_settings()))
     }
     async fn data_settings(
         Project(project): Project,
@@ -55,11 +40,10 @@ impl SettingsEndpoints {
         Project(project): Project,
         ApiJson(request): ApiJson<SettingsUpdate>,
     ) -> Result<Json<DataSettings>, OperationError> {
-        let update = project
+        let (settings, switched_to) = project
             .projects()
-            .update_settings(project.project(), UpdateDataSettingsCommand::from(request))
+            .update_settings(project.project(), request)
             .await?;
-        let (settings, switched_to) = update.into_parts();
         if let Some(switched) = switched_to {
             RobotOperations::spawn_auto_connect(project.with_project(switched));
         }

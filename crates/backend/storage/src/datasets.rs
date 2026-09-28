@@ -1,5 +1,4 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
-mod cameras;
 #[cfg(test)]
 mod catalog_tests;
 mod sources;
@@ -356,21 +355,13 @@ impl EpisodeTopicQuery {
 
 impl StorageManager {
     pub async fn project_resources(&self) -> Result<Vec<ProjectResource>, String> {
-        let store = self.project_store();
-        let resources = store.dataset_catalog().resources().await?;
-        Ok(resources
-            .into_iter()
-            .filter(|resource| !store.is_studio_control_relation(resource.selection().path()))
-            .collect())
+        self.project_store().dataset_catalog().resources().await
     }
 
     pub async fn validate_mcap_destination(&self, name: &str) -> Result<bool, String> {
         self.project_store().validate_mcap_destination(name).await
     }
 
-    pub async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
-        self.project_store().dataset_catalog().datasets().await
-    }
     pub async fn inspect_dataset(
         &self,
         selection: DatasetSelection,

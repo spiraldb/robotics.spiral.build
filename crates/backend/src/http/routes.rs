@@ -32,6 +32,7 @@ impl StudioApi {
         let commands = Router::new()
             .merge(crate::account::http::AccountEndpoints::commands())
             .merge(crate::projects::http::ProjectEndpoints::commands())
+            .merge(crate::transport::http::TransportEndpoints::commands())
             .merge(crate::recording::http::RecordingEndpoints::commands())
             .merge(crate::training::http::TrainingEndpoints::commands())
             .merge(crate::curation::http::CurationEndpoints::commands())

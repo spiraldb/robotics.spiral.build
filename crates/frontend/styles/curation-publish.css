@@ -24,20 +24,12 @@
     max-height: min(32rem, calc(100vh - 8rem));
     border-radius: 10px;
     box-shadow: var(--shadow-popover);
-    animation: workflow-popover-enter 180ms var(--ease-out-expo) both;
+    animation: curation-popover-enter 180ms var(--ease-out-expo) both;
     transform-origin: top right;
   }
 
   .curation-publish-intro {
     @apply m-0 border-b border-line px-3 py-2 text-[11.5px] text-ink-soft;
-  }
-
-  /* Why nothing publishes yet, said once over the list. */
-  .curation-publish-unsaved {
-    @apply flex items-center justify-between gap-2 border-b border-line bg-caution-soft px-3 py-1.5 text-[11.5px] text-caution;
-  }
-  .curation-publish-unsaved p {
-    @apply m-0;
   }
 
   .curation-publish-outputs {

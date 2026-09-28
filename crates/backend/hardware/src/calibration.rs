@@ -105,20 +105,6 @@ impl NormalizedPosition {
     }
 }
 
-impl TryFrom<f64> for NormalizedPosition {
-    type Error = CalibrationError;
-
-    fn try_from(value: f64) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<NormalizedPosition> for f64 {
-    fn from(value: NormalizedPosition) -> Self {
-        value.get()
-    }
-}
-
 /// Every motor of one arm with its measured range, keyed by motor name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Calibration {
@@ -265,9 +251,8 @@ impl MotorTravelRange {
 
 /// Accumulates the extrema of every motor while an operator sweeps the arm.
 ///
-/// The terminal calibration command and the studio's control loop both feed
-/// this the same way, so "did this joint move far enough" has exactly one
-/// definition.
+/// The control loop feeds this every sweep sample, so "did this joint move
+/// far enough" has exactly one definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MotorRangeTracker {
     ranges: BTreeMap<String, MotorTravelRange>,

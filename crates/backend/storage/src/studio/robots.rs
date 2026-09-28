@@ -11,7 +11,6 @@ pub struct Model {
     pub(super) document: Json,
     /// Increments on every write, so a save can name the version it replaces.
     pub(super) revision: i64,
-    pub updated_ms: i64,
 }
 
 impl Model {
