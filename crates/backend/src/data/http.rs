@@ -10,7 +10,8 @@ use axum::{
     routing::{get, post},
 };
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetSummary,
+    DatasetCheckLookup, DatasetCheckSave, DatasetInspection, DatasetJointRoles,
+    DatasetJointRolesSave, DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetSummary,
     DatasetTopic, EpisodeSelection, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
     HuggingFaceDatasetSource, ProjectResource,
 };
@@ -28,6 +29,8 @@ impl DatasetQueryEndpoints {
             .route("/data-catalog", get(Self::project_resources))
             .route("/datasets/inspect", post(Self::inspect_dataset))
             .route("/datasets/robot", post(Self::dataset_robot))
+            .route("/datasets/joint-roles", post(Self::dataset_joint_roles))
+            .route("/datasets/checks", post(Self::dataset_check_report))
             .route("/datasets/cameras", post(Self::dataset_cameras))
             .route("/datasets/episode-topics", post(Self::episode_topics))
             .route("/relations", get(Self::relation_catalog))
@@ -45,6 +48,14 @@ impl DatasetQueryEndpoints {
     pub(crate) fn commands() -> Router<StudioContext> {
         Router::new()
             .route("/datasets/robot/save", post(Self::save_dataset_robot))
+            .route(
+                "/datasets/joint-roles/save",
+                post(Self::save_dataset_joint_roles),
+            )
+            .route(
+                "/datasets/checks/save",
+                post(Self::save_dataset_check_report),
+            )
             .route(
                 "/datasets/hugging-face/import",
                 post(Self::import_hugging_face_dataset),
@@ -78,6 +89,50 @@ impl DatasetQueryEndpoints {
         project
             .storage()
             .save_dataset_robot(save)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(()))
+    }
+    async fn dataset_joint_roles(
+        Project(project): Project,
+        ApiJson(selection): ApiJson<DatasetSelection>,
+    ) -> Result<Json<Option<DatasetJointRoles>>, OperationError> {
+        let roles = project
+            .storage()
+            .dataset_joint_roles(selection)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(roles))
+    }
+    async fn save_dataset_joint_roles(
+        Project(project): Project,
+        ApiJson(save): ApiJson<DatasetJointRolesSave>,
+    ) -> Result<Json<()>, OperationError> {
+        project
+            .storage()
+            .save_dataset_joint_roles(save)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(()))
+    }
+    async fn dataset_check_report(
+        Project(project): Project,
+        ApiJson(lookup): ApiJson<DatasetCheckLookup>,
+    ) -> Result<Json<Option<serde_json::Value>>, OperationError> {
+        let report = project
+            .storage()
+            .dataset_check_report(lookup)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(report))
+    }
+    async fn save_dataset_check_report(
+        Project(project): Project,
+        ApiJson(save): ApiJson<DatasetCheckSave>,
+    ) -> Result<Json<()>, OperationError> {
+        project
+            .storage()
+            .save_dataset_check_report(save)
             .await
             .map_err(OperationError::External)?;
         Ok(Json(()))

@@ -17,6 +17,7 @@ impl MigratorTrait for Migrator {
             Box::new(WorkerOwnedTraining),
             Box::new(CurationGraphs),
             Box::new(RetireWorkflowAndOldCurations),
+            Box::new(CreateDatasetChecks),
         ]
     }
 }
@@ -262,7 +263,33 @@ impl MigrationTrait for RetireWorkflowAndOldCurations {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared(include_str!("m20260924_000011_drop_workflows_and_old_curations.sql"))
+            .execute_unprepared(include_str!(
+                "m20260924_000011_drop_workflows_and_old_curations.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+    async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Migration(
+            "Studio schema downgrades require restoring a backup".into(),
+        ))
+    }
+}
+
+/// Each dataset version's joint roles and check report, computed by the
+/// browser and kept like its robot.
+struct CreateDatasetChecks;
+impl MigrationName for CreateDatasetChecks {
+    fn name(&self) -> &str {
+        "m20260927_000012_dataset_checks"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for CreateDatasetChecks {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("m20260927_000012_dataset_checks.sql"))
             .await?;
         Ok(())
     }

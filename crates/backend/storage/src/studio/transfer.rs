@@ -1,5 +1,8 @@
 //! Native SQLite snapshots contain one project's records and no backend secrets.
-use super::{StudioProject, curations, dataset_robots, robots, studio_settings, training_runs};
+use super::{
+    StudioProject, curations, dataset_check_reports, dataset_joint_roles, dataset_robots, robots,
+    studio_settings, training_runs,
+};
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
     DatabaseTransaction, DbBackend, EntityTrait, IntoActiveModel, Statement, TransactionTrait,
@@ -12,8 +15,10 @@ pub(crate) struct StudioSnapshot {
 }
 
 impl StudioSnapshot {
-    const TABLES: [&str; 5] = [
+    const TABLES: [&str; 7] = [
         "dataset_robots",
+        "dataset_joint_roles",
+        "dataset_check_reports",
         "robots",
         "curations",
         "training_runs",
@@ -199,6 +204,13 @@ impl StudioSnapshot {
                 robot.validate()?;
             }
         }
+        for row in dataset_joint_roles::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            row.roles()?;
+        }
         for row in robots::Entity::find()
             .all(&self.database)
             .await
@@ -257,6 +269,28 @@ impl StudioSnapshot {
                 .map_err(|error| error.to_string())?;
         }
         for mut row in dataset_robots::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            row.project = project.key().to_owned();
+            row.into_active_model()
+                .insert(&transaction)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        for mut row in dataset_joint_roles::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            row.project = project.key().to_owned();
+            row.into_active_model()
+                .insert(&transaction)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        for mut row in dataset_check_reports::Entity::find()
             .all(&self.database)
             .await
             .map_err(|error| error.to_string())?

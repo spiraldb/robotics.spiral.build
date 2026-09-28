@@ -104,6 +104,9 @@ pub struct TextInputProps {
     autofocus: bool,
     #[props(default)]
     onkeydown: Option<EventHandler<KeyboardEvent>>,
+    /// Focus left the input, as when an operator tabs or clicks away.
+    #[props(default)]
+    onblur: Option<EventHandler<FocusEvent>>,
     #[props(extends = GlobalAttributes, extends = input)]
     attributes: Vec<Attribute>,
 }
@@ -115,6 +118,7 @@ pub fn TextInput(props: TextInputProps) -> Element {
     let (class, attributes) = props.attributes.with_base_class(props.kind.class_name());
     let oninput = props.oninput;
     let onkeydown = props.onkeydown;
+    let onblur = props.onblur;
     rsx! {
         input {
             class,
@@ -125,6 +129,7 @@ pub fn TextInput(props: TextInputProps) -> Element {
             autofocus: props.autofocus,
             oninput: move |event| oninput.call(event.value()),
             onkeydown: move |event| if let Some(handler) = onkeydown { handler.call(event) },
+            onblur: move |event| if let Some(handler) = onblur { handler.call(event) },
             ..attributes,
         }
     }

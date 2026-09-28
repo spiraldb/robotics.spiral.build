@@ -541,6 +541,16 @@
   }
 }
 
+/* Narrower still, even one line of letters down the span is cut into a
+   column of dots (measured at 10.5px type: a 21px span reads whole, a 20px
+   one clips its descenders), so the span says nothing and the readout
+   beside the lane names it. */
+@container (max-width: 10.5px) {
+  .curation-review-player .data-interval-label {
+    display: none;
+  }
+}
+
 /* Unlayered, over Data's own strip: in a tab beside an index, Data's
    overview has less width than Data gives it, so its facts wrap onto a second
    row rather than running off the tab. */

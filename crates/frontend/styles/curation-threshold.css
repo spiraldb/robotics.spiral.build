@@ -40,9 +40,21 @@
     background: var(--tone-surface);
     box-shadow: inset 0 0 0 1.5px var(--tone-ink-soft);
   }
+  /* A strip of hundreds of values (Score progress judges every frame) is a
+     density, not a row of dots: at full ink they merge into one black band.
+     Faint dots add up, so crowded values read darkest and a lone one still
+     shows. Kept stays darker than left out. */
+  .curation-threshold-strip-track:has(> .curation-threshold-strip-dot:nth-of-type(400)) .curation-threshold-strip-dot {
+    opacity: 0.16;
+  }
+  .curation-threshold-strip-track:has(> .curation-threshold-strip-dot:nth-of-type(400)) .curation-threshold-strip-dot[data-side="left-out"] {
+    background: var(--tone-ink-soft);
+    opacity: 0.1;
+  }
   .curation-threshold-strip-dot:hover,
   .curation-threshold-strip-dot[aria-current="true"] {
     transform: scale(1.5);
+    opacity: 1;
   }
   .curation-threshold-strip-dot[aria-current="true"] {
     box-shadow: 0 0 0 1.5px var(--tone-accent-strong);

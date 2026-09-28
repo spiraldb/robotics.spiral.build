@@ -108,6 +108,7 @@ fn ProjectStudioShell(project: ProjectKey) -> Element {
     use_context_provider(|| ProjectSelection::current().client(project));
     crate::activities::episode::EpisodeStills::use_provider();
     crate::activities::data::DatasetOverviewMemory::use_provider();
+    crate::activities::data::DatasetChecks::use_provider();
     let project = StudioProjectState::use_provider();
     project.use_polling();
     let route = use_route::<StudioRoute>();

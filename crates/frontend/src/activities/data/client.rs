@@ -74,6 +74,46 @@ impl DatasetClient {
             .await
     }
 
+    /// The joint roles resolved for the dataset's current version; `None`
+    /// until they are.
+    pub(super) fn joint_roles(
+        &self,
+        selection: &DatasetSelection,
+    ) -> impl Future<
+        Output = Result<Option<spiral_robotics_common::datasets::DatasetJointRoles>, CommandError>,
+    > + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/joint-roles").json(selection))
+    }
+
+    pub(super) async fn save_joint_roles(
+        &self,
+        save: &spiral_robotics_common::datasets::DatasetJointRolesSave,
+    ) -> Result<(), CommandError> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/joint-roles/save").json(save))
+            .await
+    }
+
+    /// The check report kept for the dataset's current version, from checks
+    /// at the lookup's definition.
+    pub(super) fn check_report(
+        &self,
+        lookup: &spiral_robotics_common::datasets::DatasetCheckLookup,
+    ) -> impl Future<Output = Result<Option<serde_json::Value>, CommandError>> + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/checks").json(lookup))
+    }
+
+    pub(super) async fn save_check_report(
+        &self,
+        save: &spiral_robotics_common::datasets::DatasetCheckSave,
+    ) -> Result<(), CommandError> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/checks/save").json(save))
+            .await
+    }
+
     pub(super) fn project_resources(
         &self,
     ) -> impl Future<Output = Result<Vec<ProjectResource>, CommandError>> + use<> {

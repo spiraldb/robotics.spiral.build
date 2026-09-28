@@ -17,7 +17,7 @@ use super::super::review::{
 };
 use super::super::state::CurationController;
 use super::super::thumbnail::Thumbnails;
-use crate::activities::data::{DatasetClient, DatasetLedger, DatasetOverview};
+use crate::activities::data::{CheckedEpisode, DatasetLedger, DatasetOverview};
 use crate::activities::episode::{
     Episode, EpisodeHeading, EpisodeInspection, EpisodeRows, FeaturedCamera, HeadingSubject,
 };
@@ -178,12 +178,6 @@ fn DatasetEpisodeList(
 ) -> Element {
     let tabs = OpenEpisodes::use_open();
     let mut wanted = use_signal(String::new);
-    let inspection = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
-        DatasetClient::current()
-            .inspect_dataset(dataset)
-            .await
-            .map_err(|error| error.to_string())
-    }));
     let rows = EpisodeRows::of(&episodes);
     // Matched the way Data's rail matches, on the id and the source path as
     // well as the words the row shows, so an id pasted from anywhere finds
@@ -253,7 +247,11 @@ fn DatasetEpisodeList(
                     open: tabs,
                     empty: "Choose an episode to watch it.".to_owned(),
                     leading: LeadingTab::dataset(rsx! {
-                        DatasetOverview { dataset: dataset.clone(), inspection: inspection.read().clone() }
+                        DatasetOverview { dataset: dataset.clone(),
+                            on_open: move |checked: CheckedEpisode| {
+                                tabs.open(checked.episode().id(), checked.moment().map(|moment| (moment, moment)));
+                            },
+                        }
                     }),
                     render: move |tab: OpenEpisode| {
                         let Some(episode) = opened.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
@@ -263,7 +261,7 @@ fn DatasetEpisodeList(
                         rsx! {
                             EpisodeHeading { subject: HeadingSubject::episode(&episode).with_facts(facts) }
                             div { class: "curation-review-player",
-                                EpisodeInspection { episode, featured_camera: featured.clone() }
+                                EpisodeInspection { episode, featured_camera: featured.clone(), focus: tab.play() }
                             }
                         }
                     },

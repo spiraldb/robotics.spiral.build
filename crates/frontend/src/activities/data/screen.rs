@@ -300,7 +300,10 @@ fn DataPanels() -> Element {
     .with_view(selection.active_view());
 
     let overview = match dataset {
-        Some(dataset) => rsx! { DatasetOverview { dataset, inspection: dataset_inspection } },
+        Some(dataset) => rsx! {
+            DatasetOverview { dataset,
+                on_open: move |checked| selection.open_episode(OpenedEpisode::checked(checked)) }
+        },
         None => {
             let datasets = resources
                 .read()

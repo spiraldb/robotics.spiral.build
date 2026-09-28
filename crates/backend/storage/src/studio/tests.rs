@@ -77,6 +77,83 @@ async fn dataset_models_follow_dataset_revision_and_project() {
 }
 
 #[tokio::test]
+async fn joint_roles_and_check_reports_follow_dataset_version_definition_and_project() {
+    let store = StudioStore::in_memory();
+    let project = store.project(&Fixture::connection("checks"));
+    let identity = ("dataset-id", "revision-1");
+    assert_eq!(project.dataset_joint_roles(identity).await.unwrap(), None);
+    let roles: spiral_robotics_common::datasets::DatasetJointRoles =
+        serde_json::from_value(serde_json::json!({"arms": [{
+            "name": "left",
+            "state": {"topic": "/frame", "schema": "Frame", "field": ["state"], "element": [], "indices": [0, 1]},
+            "action": null, "gripper": null
+        }]}))
+        .unwrap();
+    project
+        .save_dataset_joint_roles(identity, &roles)
+        .await
+        .unwrap();
+    assert_eq!(
+        project.dataset_joint_roles(identity).await.unwrap(),
+        Some(roles.clone())
+    );
+    assert_eq!(
+        project
+            .dataset_joint_roles((identity.0, "revision-2"))
+            .await
+            .unwrap(),
+        None
+    );
+
+    let report = serde_json::json!({"streams": []});
+    assert_eq!(
+        project.dataset_check_report(identity, 1).await.unwrap(),
+        None
+    );
+    project
+        .save_dataset_check_report(identity, 1, report.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        project.dataset_check_report(identity, 1).await.unwrap(),
+        Some(report.clone())
+    );
+    // Changed checks, or a new dataset version, read as no report.
+    assert_eq!(
+        project.dataset_check_report(identity, 2).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        project
+            .dataset_check_report((identity.0, "revision-2"), 1)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let other = store.project(&Fixture::connection("other"));
+    assert_eq!(other.dataset_check_report(identity, 1).await.unwrap(), None);
+    let archive = StudioSnapshot::capture(&project).await.unwrap();
+    StudioSnapshot::open(&archive.bytes().unwrap(), &other)
+        .await
+        .unwrap()
+        .stage(&other)
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+    assert_eq!(
+        other.dataset_joint_roles(identity).await.unwrap(),
+        Some(roles)
+    );
+    assert_eq!(
+        other.dataset_check_report(identity, 1).await.unwrap(),
+        Some(report)
+    );
+}
+
+#[tokio::test]
 async fn local_state_survives_reopening() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("Studio state #1.sqlite3");
@@ -213,7 +290,7 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 11);
+    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 12);
     // A conflict halfway through the actual initial migration must undo both
     // earlier CREATE TABLE statements and the migration journal itself.
     let directory = tempfile::tempdir().unwrap();

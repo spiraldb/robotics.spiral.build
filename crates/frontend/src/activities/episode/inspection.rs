@@ -76,6 +76,10 @@ impl PlayRequest {
     pub(in crate::activities) fn new(start: f64) -> Self {
         Self { start, asked: 0 }
     }
+    /// The instant to play from.
+    pub(in crate::activities) fn start(&self) -> f64 {
+        self.start
+    }
     /// The ask after `previous`, which differs from it even for the same
     /// instant.
     pub(in crate::activities) fn after(previous: Option<Self>, start: f64) -> Self {

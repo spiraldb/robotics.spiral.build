@@ -98,6 +98,17 @@ impl RobotModel {
             .collect())
     }
 
+    /// Each limited joint's `(lower, upper)` limit, by name, read from a
+    /// description alone.
+    pub fn joint_limits(urdf: &str) -> Result<BTreeMap<String, (f32, f32)>, String> {
+        let description = Urdf::parse(urdf).map_err(|error| error.to_string())?;
+        Ok(description
+            .joints()
+            .iter()
+            .filter_map(|joint| Some((joint.name().to_owned(), joint.limit()?)))
+            .collect())
+    }
+
     pub fn tool_position(&self, link: &str, positions: &BTreeMap<String, f32>) -> Option<[f32; 3]> {
         let index = self.description.link_index(link)?;
         Some(
@@ -178,6 +189,14 @@ mod tests {
             poses[model.description.link_index("right").unwrap()].transform_point3(Vec3::ZERO);
         assert!((left.y - 0.08).abs() < 1e-6);
         assert!((right.y + 0.07).abs() < 1e-6);
+    }
+
+    #[test]
+    fn joint_limits_read_from_the_description_alone() {
+        assert_eq!(
+            RobotModel::joint_limits(&Fixture::gripper()).unwrap(),
+            BTreeMap::from([("opening".to_owned(), (0.0, 0.04))])
+        );
     }
 
     #[test]

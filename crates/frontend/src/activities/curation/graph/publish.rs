@@ -68,11 +68,15 @@ impl PublishableOutput {
 
 /// What the operator has chosen while the panel is open: the name typed for
 /// each output, starting from the view it is published as, and which outputs
-/// to publish.
+/// to publish; and whether an unnamed view has become worth pointing out.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct PublishChoice {
     names: BTreeMap<String, String>,
     chosen: BTreeSet<String>,
+    /// Outputs whose name field the operator has left.
+    left: BTreeSet<String>,
+    /// Whether Publish was pressed while a chosen view could not be created.
+    attempted: bool,
 }
 
 impl PublishChoice {
@@ -85,7 +89,7 @@ impl PublishChoice {
                     (output.node.clone(), name.unwrap_or_default().to_owned())
                 })
                 .collect(),
-            chosen: BTreeSet::new(),
+            ..Self::default()
         }
     }
     fn name(&self, node: &str) -> &str {
@@ -113,6 +117,23 @@ impl PublishChoice {
                         .is_some_and(|published| published.view() == name)
             });
         taken.then(|| format!("Another output is named “{name}”."))
+    }
+    /// The problem to show beside `output`'s name. A view not yet named is
+    /// only unfinished until the operator leaves its field empty or presses
+    /// Publish; a name they typed is judged as they type it.
+    fn shown_problem(
+        &self,
+        output: &PublishableOutput,
+        outputs: &[PublishableOutput],
+    ) -> Option<String> {
+        if !self.chosen.contains(&output.node) {
+            return None;
+        }
+        let problem = self.problem(output, outputs)?;
+        let due = !self.name(&output.node).is_empty()
+            || self.attempted
+            || self.left.contains(&output.node);
+        due.then_some(problem)
     }
     /// The chosen outputs as views to create, once every one of them can be.
     fn views(&self, outputs: &[PublishableOutput]) -> Option<Vec<(String, String, String)>> {
@@ -335,9 +356,7 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                         for output in outputs.clone() {
                             PublishRow {
                                 key: "{output.node}",
-                                problem: choice.read().chosen.contains(&output.node)
-                                    .then(|| choice.read().problem(&output, &outputs))
-                                    .flatten(),
+                                problem: choice.read().shown_problem(&output, &outputs),
                                 name: choice.read().name(&output.node).to_owned(),
                                 chosen: choice.read().chosen.contains(&output.node),
                                 current: controller.saved_revision(),
@@ -359,6 +378,12 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                                         choice.write().names.insert(node.clone(), name);
                                     }
                                 },
+                                on_leave: {
+                                    let node = output.node.clone();
+                                    move |()| {
+                                        choice.write().left.insert(node.clone());
+                                    }
+                                },
                                 on_unpublish: {
                                     let node = output.node.clone();
                                     move |view: String| publisher.unpublish(node.clone(), view)
@@ -375,18 +400,20 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                         }
                         Button {
                             purpose: ActionPurpose::Export, variant: ButtonVariant::Solid,
-                            disabled: views.is_none() || waiting,
+                            disabled: count == 0 || waiting,
                             title: if count == 0 {
                                 "Choose the outputs to publish"
                             } else {
                                 "Save the curation, then create or replace each chosen view under its name"
                             },
-                            onclick: move |_| {
-                                if let Some(views) = views.clone() {
+                            // A chosen view that cannot be created yet says why.
+                            onclick: move |_| match views.clone() {
+                                Some(views) => {
                                     publisher.publish(views);
                                     choice.write().chosen.clear();
                                     close();
                                 }
+                                None => choice.write().attempted = true,
                             },
                             if count > 1 { "Publish {count} views" } else { "Publish" }
                         }
@@ -411,6 +438,8 @@ fn PublishRow(
     disabled: bool,
     on_choose: EventHandler<bool>,
     on_name: EventHandler<String>,
+    /// The name field lost focus.
+    on_leave: EventHandler<()>,
     on_unpublish: EventHandler<String>,
 ) -> Element {
     let unwritten = output.statement.as_ref().err().cloned();
@@ -464,6 +493,7 @@ fn PublishRow(
                         "aria-label": "View name for this {output.label}",
                         "aria-invalid": problem.is_some().then_some("true"),
                         oninput: move |text| on_name.call(text),
+                        onblur: move |_| on_leave.call(()),
                     }
                     if let Some(problem) = problem {
                         p { class: "curation-publish-problem", role: "alert", "{problem}" }
@@ -471,5 +501,68 @@ fn PublishRow(
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PublishChoice, PublishableOutput};
+
+    fn output(node: &str) -> PublishableOutput {
+        PublishableOutput {
+            node: node.to_owned(),
+            label: "Score progress",
+            summary: String::new(),
+            statement: Ok("SELECT 1".to_owned()),
+            published: None,
+        }
+    }
+
+    #[test]
+    fn an_unnamed_view_is_pointed_out_only_once_left_empty_or_published() {
+        let outputs = vec![output("score_progress-1")];
+        let mut choice = PublishChoice::of(&outputs);
+        choice.chosen.insert("score_progress-1".to_owned());
+        assert_eq!(choice.shown_problem(&outputs[0], &outputs), None);
+        assert!(
+            choice.views(&outputs).is_none(),
+            "it still cannot be published"
+        );
+
+        let mut left = choice.clone();
+        left.left.insert("score_progress-1".to_owned());
+        assert_eq!(
+            left.shown_problem(&outputs[0], &outputs).as_deref(),
+            Some("Name the view.")
+        );
+
+        let mut attempted = choice.clone();
+        attempted.attempted = true;
+        assert_eq!(
+            attempted.shown_problem(&outputs[0], &outputs).as_deref(),
+            Some("Name the view.")
+        );
+    }
+
+    #[test]
+    fn a_typed_name_is_judged_as_it_is_typed() {
+        let outputs = vec![output("score_progress-1")];
+        let mut choice = PublishChoice::of(&outputs);
+        choice
+            .names
+            .insert("score_progress-1".to_owned(), "Not a view!".to_owned());
+        assert_eq!(
+            choice.shown_problem(&outputs[0], &outputs),
+            None,
+            "unchosen outputs say nothing"
+        );
+        choice.chosen.insert("score_progress-1".to_owned());
+        assert!(choice.shown_problem(&outputs[0], &outputs).is_some());
+        choice.names.insert(
+            "score_progress-1".to_owned(),
+            "long_demos_steady".to_owned(),
+        );
+        assert_eq!(choice.shown_problem(&outputs[0], &outputs), None);
+        assert!(choice.views(&outputs).is_some());
     }
 }

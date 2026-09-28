@@ -124,6 +124,16 @@ impl JointBinding {
     pub fn schema(&self) -> &str {
         &self.schema
     }
+    pub fn field(&self) -> &[String] {
+        &self.field
+    }
+    pub fn selector(&self) -> Option<&JointSelector> {
+        self.selector.as_ref()
+    }
+    /// The recorded value that reads as `position` in URDF units.
+    pub fn recorded(&self, position: f64) -> f64 {
+        (position - self.offset) / self.scale
+    }
     fn position(&self, value: f64) -> Option<f32> {
         let position = (value * self.scale + self.offset) as f32;
         position.is_finite().then_some(position)

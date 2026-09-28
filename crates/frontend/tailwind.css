@@ -24,6 +24,7 @@
 @import "./styles/curation-publish.css";
 @import "./styles/curation-primer.css";
 @import "./styles/data-curated.css";
+@import "./styles/data-checks.css";
 
 /*
   One palette, named by role rather than by hue. A colour is only ever spelled
@@ -3167,7 +3168,7 @@ button.studio-status-fact:hover {
 .calibration-joint-check[data-ready="true"] { color: var(--tone-good); }
 .calibration-joint-check .ui-icon { width: 12px; height: 12px; }
 
-/* Streams ledger: mono measures on hairlines, cameras first. */
+/* Ledgers: mono measures on hairlines. */
 /* A narrow pane scrolls a ledger sideways rather than cutting its last column. */
 .data-ledger-card { overflow-x: auto; border: 1px solid var(--tone-line); border-radius: 8px; }
 .data-ledger { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12.5px; }
@@ -3181,9 +3182,6 @@ button.studio-status-fact:hover {
 .data-ledger-stream { display: flex; align-items: center; gap: 8px; color: var(--tone-ink); font-family: var(--font-mono); font-size: 12px; }
 .data-ledger-glyph { display: inline-flex; color: var(--tone-ink-faint); }
 .data-ledger-glyph.is-camera { color: var(--tone-kind-camera); }
-.data-ledger-schema { color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 11.5px; }
-.data-ledger-all { color: var(--tone-ink-faint); }
-.data-ledger-partial { color: var(--tone-caution); font-weight: 500; }
 
 /* Inference metrics read label-left, value-right in one 48px row; the kit's
    strip stacks a fact, so the row form is restated here at the same layer. */
@@ -3294,17 +3292,6 @@ button.studio-status-fact:hover {
     @apply min-h-0 flex-1 overflow-y-auto pb-8;
   }
 
-  /* Where the episodes come from, in the walkthrough's footer voice. */
-  .data-overview-footer {
-    @apply flex min-h-8 shrink-0 items-center gap-3 border-t px-6 font-mono text-[11px] text-ink-faint;
-    border-color: var(--tone-line);
-    background: var(--tone-sidebar);
-  }
-
-  .data-overview-footer code {
-    @apply text-ink-soft;
-  }
-
   .data-overview-head {
     @apply flex shrink-0 items-center gap-3 px-6 pb-4 pt-6;
   }
@@ -3326,116 +3313,12 @@ button.studio-status-fact:hover {
     @apply px-6 pt-6;
   }
 
-  .data-overview-section h3 {
-    @apply mb-3 text-[12.5px] font-semibold text-ink;
-  }
-
-  /* Episode lengths: one bar per slice, rising in as the counts arrive. */
-  .data-lengths {
-    @apply m-0;
-  }
-
-  .data-lengths-plot {
-    position: relative;
-    display: grid;
-    height: 104px;
-    grid-auto-columns: minmax(0, 1fr);
-    grid-auto-flow: column;
-    align-items: end;
-    gap: 3px;
-    padding-top: 22px;
-    border-bottom: 1px solid var(--tone-line);
-  }
-
-  .data-lengths-bin {
-    display: flex;
-    height: 100%;
-    align-items: flex-end;
-    cursor: default;
-  }
-
-  .data-lengths-bin i {
-    width: 100%;
-    min-height: 2px;
-    border-radius: 2px 2px 0 0;
-    background: color-mix(in srgb, var(--tone-ink) 20%, transparent);
-    transform-origin: bottom;
-    animation: data-bar-rise 520ms var(--ease-out-expo) both;
-    animation-delay: calc(var(--i, 0) * 9ms);
-    transition: background-color 120ms ease-out;
-  }
-
-  .data-lengths-bin i[data-empty="true"] {
-    min-height: 0;
-  }
-
-  .data-lengths-bin:hover i {
-    background: var(--tone-ink);
-  }
-
-  .data-lengths-average {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 0;
-    border-left: 1px dashed var(--tone-ink-faint);
-    pointer-events: none;
-  }
-
-  .data-lengths-average > span {
-    position: absolute;
-    top: 0;
-    left: 6px;
-    border: 1px solid var(--tone-line);
-    border-radius: 4px;
-    padding: 1px 6px;
-    color: var(--tone-ink-soft);
-    background: var(--tone-surface);
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    white-space: nowrap;
-  }
-
-  .data-lengths-average[data-side="left"] > span {
-    right: 6px;
-    left: auto;
-  }
-
-  .data-lengths-axis {
-    @apply mt-1.5 flex justify-between font-mono text-[10.5px] tabular-nums text-ink-faint;
-  }
-
-  .data-lengths.is-loading {
-    height: 104px;
-    border-radius: 6px;
-    background: linear-gradient(90deg, var(--tone-sunken) 0%, var(--tone-sidebar) 50%, var(--tone-sunken) 100%);
-    background-size: 200% 100%;
-    animation: data-shimmer 1.4s ease-in-out infinite;
-  }
-
-  @keyframes data-bar-rise {
-    from {
-      transform: scaleY(0);
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .data-lengths-bin i,
     .data-overview,
     .data-glance,
     .data-glance-row,
     .data-plot {
       animation: none;
-    }
-
-    .data-lengths.is-loading {
-      animation: none;
-    }
-  }
-
-  @keyframes data-shimmer {
-    to {
-      background-position: -200% 0;
     }
   }
 

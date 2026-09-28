@@ -2,6 +2,7 @@
 //! a dataset is a folder of MCAP files, and each file is one episode. Above
 //! them, the views curations published of those episodes.
 use super::curated_view::ViewSpans;
+use super::dataset_checks::CheckedEpisode;
 use crate::activities::curation::CuratedView;
 use crate::activities::episode::{
     Episode, EpisodeFactsPresentation as _, EpisodeRows, EpisodeStill, EpisodeStills, PlayRequest,
@@ -53,6 +54,14 @@ impl OpenedEpisode {
             ..Self::new(episode, label)
         }
     }
+    /// `checked` opened from the dataset's check report, playing from the
+    /// moment its finding names.
+    pub(super) fn checked(checked: CheckedEpisode) -> Self {
+        Self {
+            play: checked.moment().map(PlayRequest::new),
+            ..Self::new(checked.episode().clone(), checked.label().clone())
+        }
+    }
     pub(super) fn episode(&self) -> &Episode {
         &self.episode
     }
@@ -66,11 +75,14 @@ impl OpenedEpisode {
         self.play
     }
     /// Take what opening this episode again asks of its tab. A view's
-    /// intervals replace the ones shown and play the chosen one, asked anew
-    /// even when it is the one already playing; opened again from the rail,
-    /// the tab stays as it is.
+    /// intervals replace the ones shown and play the chosen one, and a
+    /// finding plays from its moment, asked anew even when it is the one
+    /// already playing; opened again from the rail, the tab stays as it is.
     pub(super) fn reopen(&mut self, again: Self) {
         let Some(spans) = again.spans else {
+            if let Some(play) = again.play {
+                self.play = Some(PlayRequest::after(self.play, play.start()));
+            }
             return;
         };
         if let Some(start) = spans.chosen() {

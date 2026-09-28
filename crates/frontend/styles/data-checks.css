@@ -1,0 +1,628 @@
+/* Data › dataset check report: its bottom line — how many checks came out
+   each way, drawn with the marks the rows wear — then two sections of
+   checks, Recording and Joints. A row's form says how its check came out:
+   a check mark when clean, a caution diamond when flagged, a ring for a
+   measurement, a dashed ring when the dataset lacks what the check reads.
+   A flagged row lights its episodes on a strip of the dataset's episodes,
+   oldest first; its streams, arms and episodes open on demand.
+   Prefix every class with `data-checks-`. Use @layer components like
+   tailwind.css. */
+
+@layer components {
+  .data-checks-report {
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    container-type: inline-size;
+  }
+
+  /* The bottom line: a count per way the checks came out, each with its
+     mark, so it doubles as the key to the marks below. */
+  .data-checks-tally {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 20px;
+    margin: 0;
+    color: var(--tone-ink-soft);
+    font-size: 13px;
+  }
+
+  .data-checks-tally-part {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .data-checks-tally-count {
+    color: var(--tone-ink);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 560;
+  }
+
+  .data-checks-tally-part[data-verdict="flagged"],
+  .data-checks-tally-lead {
+    color: var(--tone-ink);
+    font-weight: 560;
+  }
+
+  .data-checks-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* A section's name, and what its checks read: the name over the rows'
+     mark column, the sentence over their name column. */
+  .data-checks-section-head {
+    display: flex;
+    min-height: 26px;
+    align-items: baseline;
+    gap: 14px;
+    padding: 0 8px;
+  }
+
+  .data-checks-section-head h3 {
+    margin: 0;
+    color: var(--tone-ink);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .data-checks-about-text {
+    margin: 0;
+    color: var(--tone-ink-soft);
+    font-size: 12.5px;
+  }
+
+  .data-checks-about {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .data-checks-about > .ui-disclosure-summary {
+    display: inline-flex;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    border-radius: 4px;
+  }
+
+  .data-checks-about > .ui-disclosure-summary:hover .data-checks-about-text {
+    color: var(--tone-ink);
+  }
+
+  .data-checks-about > .data-checks-details {
+    padding: 12px 0 4px;
+  }
+
+  .data-checks-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid var(--tone-line);
+  }
+
+  .data-checks-item {
+    border-bottom: 1px solid var(--tone-line-soft);
+  }
+
+  /* A row is one line: chevron, mark, name, what it found. */
+  .data-checks-row {
+    display: block;
+    color: var(--tone-ink);
+    font-size: 13px;
+  }
+
+  /* The chevron, mark and name sit on a row's first line, so a row whose
+     finding runs to a second line still reads from its top. */
+  .data-checks-row > .ui-disclosure-summary,
+  .data-checks-row.is-plain {
+    display: flex;
+    width: 100%;
+    min-height: 40px;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0;
+    padding: 10px 8px;
+    border-radius: 0;
+    line-height: 20px;
+  }
+
+  .data-checks-row > .ui-disclosure-summary > .ui-icon {
+    margin-top: 3px;
+  }
+
+  /* Aligned with the rows a chevron leads: 8px, a 14px chevron, 10px. */
+  .data-checks-row.is-plain {
+    padding-left: 32px;
+  }
+
+  /* Mark, name, what it found, and where it holds, in columns every row
+     shares; a narrow report (Curation's Dataset tab) moves where it holds
+     under what it found. */
+  .data-checks-row > .ui-disclosure-summary > .ui-disclosure-title,
+  .data-checks-row.is-plain {
+    display: grid;
+    min-width: 0;
+    flex: 1;
+    grid-template-columns: 16px 10.5rem minmax(0, 1fr) auto;
+    align-items: start;
+    column-gap: 10px;
+  }
+
+  @container (max-width: 760px) {
+    .data-checks-row > .ui-disclosure-summary > .ui-disclosure-title,
+    .data-checks-row.is-plain {
+      grid-template-columns: 16px 8.5rem minmax(0, 1fr);
+      row-gap: 6px;
+    }
+
+    .data-checks-scope {
+      grid-column: 3;
+      justify-self: start;
+      margin-left: 0;
+    }
+
+    .data-checks-details {
+      padding-left: 32px;
+    }
+  }
+
+  .data-checks-mark {
+    display: inline-flex;
+    width: 16px;
+    height: 20px;
+    flex: 0 0 16px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .data-checks-mark .ui-icon {
+    width: 14px;
+    height: 14px;
+  }
+
+  .data-checks-mark[data-verdict="clean"] {
+    color: var(--tone-good);
+  }
+
+  .data-checks-mark[data-verdict="flagged"]::before {
+    width: 9px;
+    height: 9px;
+    background: var(--tone-caution);
+    content: "";
+    transform: rotate(45deg);
+  }
+
+  .data-checks-mark[data-verdict="measured"]::before,
+  .data-checks-mark[data-verdict="unavailable"]::before {
+    width: 9px;
+    height: 9px;
+    border: 1.5px solid var(--tone-ink-faint);
+    border-radius: 50%;
+    content: "";
+  }
+
+  .data-checks-mark[data-verdict="unavailable"]::before {
+    border-color: var(--tone-line-strong);
+    border-style: dashed;
+  }
+
+  .data-checks-name {
+    min-width: 0;
+    color: var(--tone-ink);
+    font-weight: 560;
+  }
+
+  .data-checks-summary {
+    min-width: 0;
+    color: var(--tone-ink-soft);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+
+  /* Where a flagged finding holds: one cell per episode, oldest first,
+     lit in caution where it holds, and how many that is. */
+  .data-checks-scope {
+    display: inline-flex;
+    height: 20px;
+    flex: none;
+    align-items: center;
+    gap: 10px;
+    margin-left: 8px;
+  }
+
+  .data-checks-strip {
+    display: grid;
+    width: min(calc(var(--episodes) * 4px), 168px);
+    height: 14px;
+    grid-template-columns: repeat(var(--episodes), minmax(0, 1fr));
+    gap: var(--strip-gap, 1px);
+  }
+
+  .data-checks-strip i {
+    background: var(--tone-line);
+  }
+
+  .data-checks-strip i.is-lit {
+    background: var(--tone-caution);
+    cursor: pointer;
+  }
+
+  .data-checks-strip i.is-lit:hover {
+    background: color-mix(in srgb, var(--tone-caution) 62%, var(--tone-ink));
+  }
+
+  /* How many episodes it holds for, or the one under the pointer and its
+     reading; wide enough for the longest reading, so the strip holds still. */
+  .data-checks-scope-count {
+    width: 8rem;
+    overflow: hidden;
+    color: var(--tone-ink-faint);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .data-checks-scope-count.is-pointed {
+    color: var(--tone-caution);
+  }
+
+  @container (max-width: 760px) {
+    .data-checks-scope-count {
+      text-align: left;
+    }
+  }
+
+  .data-checks-item[data-verdict="flagged"] .data-checks-summary {
+    color: var(--tone-ink);
+  }
+
+  .data-checks-item[data-verdict="unavailable"] .data-checks-name,
+  .data-checks-item[data-verdict="unavailable"] .data-checks-summary {
+    color: var(--tone-ink-faint);
+  }
+
+  /* The detail behind a row, under its name. */
+  .data-checks-details {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 2px 8px 16px 58px;
+  }
+
+  .data-checks-details > .data-checks-table {
+    border: 1px solid var(--tone-line);
+    border-radius: 8px;
+  }
+
+  .data-checks-table th:first-child,
+  .data-checks-table td:first-child {
+    width: 1%;
+    white-space: nowrap;
+  }
+
+  .data-checks-table td {
+    vertical-align: top;
+  }
+
+  /* A measurement is one reading: it never breaks across lines. */
+  .data-checks-table td.is-number,
+  .data-checks-table th.is-number {
+    white-space: nowrap;
+  }
+
+  .data-checks-arm {
+    color: var(--tone-ink);
+    font-weight: 560;
+    text-transform: capitalize;
+  }
+
+  .data-checks-read {
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    white-space: nowrap;
+  }
+
+  .data-checks-read-line,
+  .data-checks-read-note {
+    display: block;
+  }
+
+  .data-checks-read-note {
+    color: var(--tone-ink-faint);
+  }
+
+  .data-checks-table td.data-checks-streams {
+    display: grid;
+    width: auto;
+    grid-template-columns: repeat(2, max-content);
+    gap: 2px 20px;
+    white-space: nowrap;
+  }
+
+  .data-checks-streams .data-ledger-stream {
+    display: inline-flex;
+    font-size: 11.5px;
+  }
+
+  .data-checks-extremes {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+
+  .data-checks-facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 6px 16px;
+    margin: 0;
+  }
+
+  .data-checks-facts > div {
+    display: contents;
+  }
+
+  .data-checks-facts dt {
+    color: var(--tone-ink-faint);
+    font-size: 12px;
+    line-height: 24px;
+  }
+
+  .data-checks-facts dd {
+    margin: 0;
+  }
+
+  .data-checks-note {
+    max-width: 44rem;
+    margin: 0;
+    color: var(--tone-ink-faint);
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+
+  /* Evidence: an episode by its id tail, and what was measured in it. */
+  .data-checks-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .data-checks-chip {
+    display: inline-flex;
+    min-height: 22px;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 7px;
+    border: 1px solid var(--tone-line);
+    border-radius: 4px;
+    background: var(--tone-surface);
+    color: var(--tone-ink);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 120ms ease-out, border-color 120ms ease-out;
+  }
+
+  .data-checks-chip:hover:not(:disabled) {
+    border-color: var(--tone-line-strong);
+    background: var(--tone-hover);
+  }
+
+  .data-checks-chip:focus-visible {
+    outline: 2px solid var(--tone-focus);
+    outline-offset: 1px;
+  }
+
+  .data-checks-chip:disabled {
+    cursor: default;
+    opacity: 0.6;
+  }
+
+  .data-checks-chip-measure {
+    color: var(--tone-ink-faint);
+  }
+
+  .data-checks-none {
+    color: var(--tone-ink-faint);
+  }
+
+  /* Gripper closes: how far each close went, as one split bar. */
+  .data-checks-split {
+    display: flex;
+    min-width: 12rem;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .data-checks-split-count {
+    min-width: 2.5rem;
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  .data-checks-split-bar {
+    display: flex;
+    height: 8px;
+    flex: 1;
+    overflow: hidden;
+    border-radius: 4px;
+    background: var(--tone-sunken);
+  }
+
+  .data-checks-split-bar i {
+    height: 100%;
+  }
+
+  .data-checks-split-bar .is-shut {
+    background: var(--tone-ink);
+  }
+
+  .data-checks-split-bar .is-nearly {
+    background: color-mix(in srgb, var(--tone-ink) 45%, transparent);
+  }
+
+  .data-checks-split-bar .is-holding {
+    background: color-mix(in srgb, var(--tone-ink) 16%, transparent);
+  }
+
+  /* Computing the report the first time: every step, the running one in
+     focus blue, the finished ones checked. */
+  .data-checks-status {
+    margin: 0;
+    color: var(--tone-ink-faint);
+    font-size: 12.5px;
+  }
+
+  .data-checks-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .data-checks-progress-lede {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    font-size: 13px;
+  }
+
+  .data-checks-progress-lede strong {
+    color: var(--tone-ink);
+    font-weight: 600;
+  }
+
+  .data-checks-progress-lede span {
+    color: var(--tone-ink-faint);
+    font-size: 12.5px;
+  }
+
+  .data-checks-steps {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    gap: 0;
+    list-style: none;
+  }
+
+  .data-checks-steps li {
+    display: flex;
+    min-height: 26px;
+    align-items: center;
+    gap: 10px;
+    color: var(--tone-ink-faint);
+    font-size: 12.5px;
+    transition: color 220ms var(--ease-out-expo);
+  }
+
+  .data-checks-steps li[data-step="done"] {
+    color: var(--tone-ink-soft);
+  }
+
+  .data-checks-steps li[data-step="current"] {
+    color: var(--tone-ink);
+    font-weight: 560;
+  }
+
+  .data-checks-step-mark {
+    display: inline-flex;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .data-checks-steps li[data-step="ahead"] .data-checks-step-mark::before {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--tone-line-strong);
+    content: "";
+  }
+
+  .data-checks-steps li[data-step="current"] .data-checks-step-mark::before {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--tone-info);
+    content: "";
+    animation: data-checks-running 1.2s ease-in-out infinite;
+  }
+
+  @keyframes data-checks-running {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* The report arriving: rows settle in down the page, then each flagged
+     row's episodes light along its strip, oldest first, so the eye follows
+     the finding through the recording's life. */
+  .data-checks-tally,
+  .data-checks-section-head,
+  .data-checks-item {
+    animation: data-checks-arrive 260ms var(--ease-out-expo) both;
+    animation-delay: min(calc(var(--i, 0) * 18ms), 200ms);
+  }
+
+  .data-checks-strip i.is-lit {
+    animation: data-checks-light 360ms var(--ease-out-expo) both;
+    animation-delay: calc(240ms + min(var(--c, 0) * 14ms, 420ms));
+  }
+
+  @keyframes data-checks-arrive {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+
+  @keyframes data-checks-light {
+    from {
+      background: var(--tone-line);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .data-checks-tally,
+    .data-checks-section-head,
+    .data-checks-item {
+      animation-name: data-checks-fade;
+    }
+
+    .data-checks-strip i.is-lit,
+    .data-checks-steps li[data-step="current"] .data-checks-step-mark::before {
+      animation: none;
+    }
+
+    @keyframes data-checks-fade {
+      from {
+        opacity: 0;
+      }
+    }
+  }
+
+  .data-checks-failure {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+}

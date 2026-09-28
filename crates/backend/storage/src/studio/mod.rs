@@ -15,6 +15,10 @@ pub(crate) mod training_runs;
 mod transfer;
 pub(crate) use transfer::StudioSnapshot;
 #[allow(unreachable_pub)]
+mod dataset_check_reports;
+#[allow(unreachable_pub)]
+mod dataset_joint_roles;
+#[allow(unreachable_pub)]
 mod dataset_robots;
 mod robot_configs;
 

@@ -2,8 +2,10 @@
 
 mod camera_video;
 mod catalog;
+mod check_report;
 mod episode_id;
 mod h264;
+mod joint_roles;
 mod messages;
 mod robot;
 pub use camera_video::CameraVideo;
@@ -11,8 +13,12 @@ pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
     EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
 };
+pub use check_report::{DatasetCheckLookup, DatasetCheckSave};
 pub use episode_id::EpisodeId;
 pub use h264::H264AccessUnit;
+pub use joint_roles::{
+    ArmRoles, DatasetJointRoles, DatasetJointRolesSave, GripperRoles, RecordedValues,
+};
 pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision, ValueSchemaRead};
 pub use robot::{DatasetRobot, DatasetRobotSave, JointBinding, JointSelector};
 
