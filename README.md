@@ -102,6 +102,15 @@ loads its video runtime from this checkout's build directory, so the app runs
 only on the Mac that built it. Camera recording still runs `ffmpeg` from
 `PATH`, which an app opened from Finder does not see.
 
+Every push to `main` releases the app through
+`.github/workflows/desktop-release.yml`. It builds the driver from the SpiralDB
+branch named in its `SPIRALDB_REF`, reading the private repository with the
+`SPIRALDB_DEPLOY_KEY` deploy key, with static OpenSSL and the video runtime and
+LGPL FFmpeg libraries beside it in `Contents/Frameworks`. A driver is built
+once per SpiralDB commit and cached. The ad-hoc signed DMG is published as a
+`desktop-v0.1.<run>` release of this repository, which only organization
+members can download.
+
 Interface primitives (buttons, fields, facts, disclosures, trees, notices)
 live in `crates/ui` as `spiral-robotics-ui`, with their stylesheet; the
 frontend composes them and owns layout. Their unit tests run natively:

@@ -134,6 +134,20 @@
               }
             );
           };
+          # Only what building the desktop app needs, for its release workflow.
+          desktopShell = {
+            packages = [
+              rustToolchain
+              pkgs.git
+              pkgs.pkg-config
+              tailwind
+              pkgs.wasm-bindgen-cli_0_2_126
+            ]
+            ++ nativeBuildInputs
+            ++ webBuildInputs;
+            NO_DOWNLOADS = "1";
+            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
+          };
           developmentShell = sharedShell // {
             packages =
               sharedShell.packages
@@ -147,6 +161,7 @@
 
           devShells.default = pkgs.mkShell developmentShell;
           devShells.ci = pkgs.mkShell sharedShell;
+          devShells.desktop = pkgs.mkShell desktopShell;
 
           # Explicit validation environment until the public release includes
           # the upstream persistence fixes. No hand-written exports are needed.
