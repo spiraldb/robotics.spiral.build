@@ -52,6 +52,7 @@
           webBuildInputs = [
             pkgs.dioxus-cli # fullstack dx bundle / dx serve
             pkgs.binaryen # wasm-opt, used for release builds
+            pkgs.cargo-tauri # packages the desktop app
           ];
           browserTestInputs = [
             # Includes wasm-bindgen-test-runner; must match the frontend pin.

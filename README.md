@@ -78,6 +78,30 @@ Keep `--debug-symbols false` on browser builds: DX enables WASM debug symbols by
 default, and the bundled Binaryen currently fails when processing that DWARF.
 The Cargo profile's `debug = 0` does not disable DX's separate bundling option.
 
+### Desktop app
+
+`crates/desktop` packages Studio as a macOS app with [Tauri](https://tauri.app).
+The backend runs inside the app on a loopback port the operating system picks,
+and one window shows the same web interface `dx serve` builds. The app keeps
+its SQLite state in `~/Library/Application Support/com.spiraldb.robotics/`
+and shares the Spiral sign-in with the `spiraldb` CLI. A second launch shows
+the running app's window.
+
+Build it from `crates/desktop` in the `local-driver` shell, which supplies
+`cargo tauri`:
+
+```console
+cd crates/desktop
+CARGO_TARGET_DIR=../../target/desktop cargo tauri build --bundles app
+```
+
+The app lands in `target/desktop/release/bundle/macos/`. The desktop build
+keeps its own target directory, so it never touches a running `dx serve`.
+It bundles this checkout's local driver, which links Homebrew's OpenSSL and
+loads its video runtime from this checkout's build directory, so the app runs
+only on the Mac that built it. Camera recording still runs `ffmpeg` from
+`PATH`, which an app opened from Finder does not see.
+
 Interface primitives (buttons, fields, facts, disclosures, trees, notices)
 live in `crates/ui` as `spiral-robotics-ui`, with their stylesheet; the
 frontend composes them and owns layout. Their unit tests run natively:

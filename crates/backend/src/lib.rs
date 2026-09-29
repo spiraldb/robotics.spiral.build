@@ -2,7 +2,9 @@
 //!
 //! This crate is deliberately independent of the frontend crate. Its binary
 //! starts [`StudioServer::run`], which serves the built browser assets
-//! alongside the HTTP API. Browser rendering stays in the frontend crate.
+//! alongside the HTTP API; the desktop app runs the same server in its own
+//! process through [`DesktopStudio`]. Browser rendering stays in the frontend
+//! crate.
 
 #![allow(async_fn_in_trait)]
 
@@ -23,4 +25,4 @@ mod training;
 mod transport;
 
 pub(crate) use error::OperationError;
-pub use http::server::StudioServer;
+pub use http::server::{DesktopFiles, DesktopStudio, StudioServer};

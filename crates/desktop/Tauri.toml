@@ -1,0 +1,33 @@
+# Spiral Robotics Studio as a macOS app. The Studio backend runs inside the
+# app (src/main.rs) and serves the web build bundled below.
+productName = "Spiral Robotics Studio"
+identifier = "com.spiraldb.robotics"
+
+[build]
+# The web interface, as `dx serve` builds it but for release. It builds in the
+# desktop app's own target directory, so a `dx serve` running from this
+# checkout is never touched. dx keeps earlier builds' hashed assets, so the
+# bundle and dx's copy of it start empty.
+beforeBuildCommand = 'cd "$(git rev-parse --show-toplevel)" && rm -rf crates/desktop/web target/desktop/dx/spiral-robotics-frontend/release/web/public && CARGO_TARGET_DIR=target/desktop dx bundle --web --release --debug-symbols false --package spiral-robotics-frontend --out-dir crates/desktop/web'
+
+[bundle]
+active = true
+targets = ["app"]
+category = "DeveloperTool"
+icon = [
+  "icons/32x32.png",
+  "icons/128x128.png",
+  "icons/128x128@2x.png",
+  "icons/icon.icns",
+  "icons/icon.png",
+]
+
+[bundle.resources]
+"web/public/" = "public/"
+
+[bundle.macOS]
+# The Spiral driver this checkout's local-driver shell selects. It links
+# Homebrew's OpenSSL and finds its video runtime in this checkout's build
+# directory, so the app runs only on the Mac that built it. A release bundles
+# a self-contained driver instead.
+frameworks = ["../../target/release/libadbc_driver_spiraldb.dylib"]

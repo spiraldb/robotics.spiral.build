@@ -1,6 +1,7 @@
-//! Native HTTP runtime for the Spiral Robotics backend.
+//! Native HTTP runtime for the Spiral Robotics backend, started from the
+//! command line or inside the desktop app.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -15,8 +16,9 @@ use spiral_robotics_hardware::{
     HardwareHandle,
 };
 use spiral_robotics_storage::{
-    BackendStateStore, ProviderKeyring, ServiceEndpoint, SpiralConnectionSettings,
+    BackendStateStore, ProviderKeyring, ServiceEndpoint, SpiralConnectionSettings, StudioStore,
 };
+use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -27,6 +29,11 @@ const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_mill
 /// Motor and camera cleanup normally completes within one control/frame cycle;
 /// the final encoder segment and MCAP publication need time to finish.
 const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+/// Blocking camera work gets this long to return once the desktop app has
+/// stopped Studio; the process is exiting either way.
+const RUNTIME_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const DEFAULT_FFMPEG: &str = "ffmpeg";
+const DEFAULT_VIDEO_CODEC: &str = "libx264";
 
 /// Set up, calibrate, and drive SO-ARM101 arms from a browser.
 #[derive(Debug, Parser)]
@@ -62,12 +69,22 @@ struct VideoArguments {
     no_cameras: bool,
 
     /// FFmpeg executable used by the backend for episode camera recording.
-    #[arg(long, default_value = "ffmpeg", value_name = "PATH")]
+    #[arg(long, default_value = DEFAULT_FFMPEG, value_name = "PATH")]
     ffmpeg: String,
 
     /// FFmpeg video codec used for camera access units in MCAP recordings.
-    #[arg(long, default_value = "libx264", value_name = "CODEC")]
+    #[arg(long, default_value = DEFAULT_VIDEO_CODEC, value_name = "CODEC")]
     video_codec: String,
+}
+
+impl Default for VideoArguments {
+    fn default() -> Self {
+        Self {
+            no_cameras: false,
+            ffmpeg: DEFAULT_FFMPEG.to_owned(),
+            video_codec: DEFAULT_VIDEO_CODEC.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -95,15 +112,18 @@ impl MotionArguments {
     }
 }
 
+/// Everything a Studio server needs before it listens: its address, its
+/// browser bundle and state, and its hardware settings.
 struct ServerStartup {
-    arguments: StudioServerArguments,
+    bind: SocketAddr,
+    video: VideoArguments,
     camera_access_error: Option<String>,
     backend_state: Arc<BackendStateStore>,
     control_settings: ControlSettings,
     public: PathBuf,
 }
 
-/// Desktop Studio process launcher.
+/// Command-line Studio process launcher.
 pub struct StudioServer;
 
 impl StudioServer {
@@ -128,13 +148,7 @@ impl StudioServer {
             );
             return ExitCode::FAILURE;
         };
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                    EnvFilter::new("spiral_robotics_backend=info,tower_http=warn")
-                }),
-            )
-            .init();
+        ServerStartup::install_logging();
         tracing::debug!("Dioxus public directory: {}", public.display());
 
         let control_settings = match arguments.motion.control_settings() {
@@ -144,6 +158,16 @@ impl StudioServer {
                 return ExitCode::FAILURE;
             }
         };
+        // `dx serve` publishes its chosen address through the standard fullstack
+        // environment. An explicit CLI value still wins for standalone launches.
+        let bind = arguments
+            .access
+            .bind
+            .unwrap_or_else(dioxus_cli_config::fullstack_address_or_localhost);
+        if let Err(error) = arguments.access.validate_bind_address(bind) {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
         let backend_state = match BackendStateStore::open_default() {
             Ok(state) => Arc::new(state),
             Err(error) => {
@@ -151,16 +175,11 @@ impl StudioServer {
                 return ExitCode::FAILURE;
             }
         };
-        // On macOS this puts up the system camera prompt, which has to happen on
-        // the main thread before any runtime starts.
-        let camera_access = if arguments.video.no_cameras {
-            Ok(())
+        let camera_access_error = if arguments.video.no_cameras {
+            None
         } else {
-            CameraRuntime::initialize_access().map_err(|error| error.to_string())
+            ServerStartup::request_camera_access()
         };
-        if let Err(error) = &camera_access {
-            tracing::warn!("camera access unavailable: {error}");
-        }
 
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -173,16 +192,15 @@ impl StudioServer {
             }
         };
 
-        match runtime.block_on(
-            ServerStartup {
-                arguments,
-                camera_access_error: camera_access.err(),
-                backend_state,
-                control_settings,
-                public,
-            }
-            .serve(),
-        ) {
+        let startup = ServerStartup {
+            bind,
+            video: arguments.video,
+            camera_access_error,
+            backend_state,
+            control_settings,
+            public,
+        };
+        match runtime.block_on(startup.serve_until_ctrl_c()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("error: {error}");
@@ -192,10 +210,129 @@ impl StudioServer {
     }
 }
 
+/// Where the desktop app keeps Studio's browser bundle and its SQLite state.
+pub struct DesktopFiles {
+    public: PathBuf,
+    database: PathBuf,
+}
+
+impl DesktopFiles {
+    pub fn new(public: PathBuf, database: PathBuf) -> Self {
+        Self { public, database }
+    }
+}
+
+/// Studio inside the desktop app: the same server as [`StudioServer`], on a
+/// loopback port the operating system picks, with the app's own files. It
+/// serves until the app stops it.
+pub struct DesktopStudio {
+    runtime: tokio::runtime::Runtime,
+    address: SocketAddr,
+    shutdown: watch::Sender<bool>,
+    served: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl DesktopStudio {
+    /// Camera probing relaunches the app's executable as an isolated worker.
+    /// Call this first in `main`: `true` means this process was that worker
+    /// and has done its job.
+    pub fn run_camera_worker() -> std::result::Result<bool, String> {
+        CameraRuntime::run_worker_from_environment().map_err(|error| error.to_string())
+    }
+
+    /// Start Studio and wait until it listens. Call on the main thread, which
+    /// macOS needs for the camera prompt.
+    pub fn start(files: DesktopFiles) -> std::result::Result<Self, String> {
+        let DesktopFiles { public, database } = files;
+        if !public.join("index.html").is_file() {
+            return Err(format!(
+                "the Studio web bundle is missing from {}",
+                public.display()
+            ));
+        }
+        ServerStartup::install_logging();
+        let camera_access_error = ServerStartup::request_camera_access();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("could not start the async runtime: {error}"))?;
+        let startup = ServerStartup {
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            video: VideoArguments::default(),
+            camera_access_error,
+            backend_state: Arc::new(BackendStateStore::new(StudioStore::at(database))),
+            control_settings: ControlSettings::default(),
+            public,
+        };
+        let bound = runtime
+            .block_on(startup.bind())
+            .map_err(|error| error.to_string())?;
+        let address = bound.address;
+        let (shutdown, requested) = watch::channel(false);
+        let served = runtime.spawn(bound.serve(requested));
+        Ok(Self {
+            runtime,
+            address,
+            shutdown,
+            served,
+        })
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    /// Stop serving, release robots and cameras, and wait until that is done.
+    pub fn stop(self) {
+        let _ = self.shutdown.send(true);
+        match self.runtime.block_on(self.served) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!("Studio stopped with an error: {error}"),
+            Err(error) => tracing::error!("Studio's server task failed: {error}"),
+        }
+        self.runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    }
+}
+
 impl ServerStartup {
-    async fn serve(self) -> Result<()> {
+    fn install_logging() {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    EnvFilter::new("spiral_robotics_backend=info,tower_http=warn")
+                }),
+            )
+            .init();
+    }
+
+    /// On macOS this puts up the system camera prompt, which has to happen on
+    /// the main thread before any runtime starts. Returns why camera previews
+    /// will stay blank, if they will.
+    fn request_camera_access() -> Option<String> {
+        let error = CameraRuntime::initialize_access().err()?.to_string();
+        tracing::warn!("camera access unavailable: {error}");
+        Some(error)
+    }
+
+    /// Serve until the first Ctrl+C, then release the hardware.
+    async fn serve_until_ctrl_c(self) -> Result<()> {
+        let bound = self.bind().await?;
+        println!(
+            "Spiral Robotics Studio is running at http://{}",
+            bound.address
+        );
+        let (shutdown, requested) = watch::channel(false);
+        let signal_task = tokio::spawn(ShutdownSignal::listen(shutdown));
+        let served = bound.serve(requested).await;
+        signal_task.abort();
+        served
+    }
+
+    /// Open Studio's state, account, and hardware, and listen on its address.
+    async fn bind(self) -> Result<BoundServer> {
         let Self {
-            arguments,
+            bind,
+            video,
             camera_access_error,
             backend_state,
             control_settings,
@@ -223,13 +360,6 @@ impl ServerStartup {
         )
         .map_err(std::io::Error::other)?
         .into_string();
-        // `dx serve` publishes its chosen address through the standard fullstack
-        // environment. An explicit CLI value still wins for standalone launches.
-        let bind = arguments
-            .access
-            .bind
-            .unwrap_or_else(dioxus_cli_config::fullstack_address_or_localhost);
-        arguments.access.validate_bind_address(bind)?;
         let mut connection = SpiralConnectionSettings::new(spiral_endpoint, spiral_spfs_endpoint)
             .map_err(std::io::Error::other)?;
         if let Some(project) = saved.project_id() {
@@ -246,12 +376,9 @@ impl ServerStartup {
             cameras.note_issue(format!("camera previews will stay blank: {error}"));
         }
         let resources = crate::projects::ProjectHardware::new(
-            hardware.clone(),
-            cameras.clone(),
-            VideoEncoderSettings::new(
-                arguments.video.ffmpeg.clone(),
-                arguments.video.video_codec.clone(),
-            ),
+            hardware,
+            cameras,
+            VideoEncoderSettings::new(video.ffmpeg, video.video_codec),
         );
         let factory = crate::projects::ProjectFactory::new(
             resources,
@@ -266,31 +393,66 @@ impl ServerStartup {
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 
-        println!("Spiral Robotics Studio is running at http://{address}");
-
         let bootstrap = tokio::spawn(
-            crate::projects::bootstrap::ProjectBootstrap::new(state.clone())
-                .run(!arguments.video.no_cameras),
+            crate::projects::bootstrap::ProjectBootstrap::new(state.clone()).run(!video.no_cameras),
         );
-        let cleanup_state = state.clone();
         let app = super::web_assets::StudioWebAssets::new(public)
             .router(super::routes::StudioApi::router(state.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http());
+        Ok(BoundServer {
+            listener,
+            address,
+            app,
+            state,
+            bootstrap,
+        })
+    }
 
+    /// DX sets the public path during development; a distributed server keeps
+    /// its browser bundle in the adjacent public directory.
+    fn dioxus_public_directory() -> Option<PathBuf> {
+        std::env::var_os("DIOXUS_PUBLIC_PATH")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()?
+                    .parent()
+                    .map(|path| path.join("public"))
+            })
+    }
+}
+
+/// A Studio server listening on its address, and the state it serves.
+struct BoundServer {
+    listener: tokio::net::TcpListener,
+    address: SocketAddr,
+    app: axum::Router,
+    state: StudioContext,
+    bootstrap: tokio::task::JoinHandle<()>,
+}
+
+impl BoundServer {
+    /// Serve until `shutdown` turns true, then release motors and cameras.
+    async fn serve(self, shutdown: watch::Receiver<bool>) -> Result<()> {
+        let Self {
+            listener,
+            app,
+            state,
+            bootstrap,
+            ..
+        } = self;
         // Both the server and this task observe the same edge. The server begins
         // graceful draining immediately; this task enforces a deadline because
         // Camera connections are designed not to finish on their own.
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let signal_task = tokio::spawn(ShutdownSignal::listen(shutdown_tx));
         let server_result = {
             let server = axum::serve(listener, app)
-                .with_graceful_shutdown(ShutdownSignal::requested(shutdown_rx.clone()))
+                .with_graceful_shutdown(ShutdownSignal::requested(shutdown.clone()))
                 .into_future();
             tokio::pin!(server);
 
             tokio::select! {
                 result = &mut server => Some(result),
-            () = ShutdownSignal::requested(shutdown_rx) => {
+            () = ShutdownSignal::requested(shutdown) => {
                     match tokio::time::timeout(SERVER_DRAIN_TIMEOUT, &mut server).await {
                         Ok(result) => Some(result),
                         Err(_) => {
@@ -303,9 +465,9 @@ impl ServerStartup {
         };
         tracing::info!("releasing motors and cameras");
         let cleanup = async {
-            let opened = cleanup_state.opened();
-            cleanup_state.projects().shutdown().await;
-            if let Err(error) = hardware.shutdown().await {
+            let opened = state.opened();
+            state.projects().shutdown().await;
+            if let Err(error) = state.projects().hardware().shutdown().await {
                 tracing::error!("hardware shutdown did not verify every motor release: {error}");
             }
             for project in &opened {
@@ -314,7 +476,7 @@ impl ServerStartup {
                     .await;
             }
             let camera_result = tokio::task::spawn_blocking({
-                let cameras = cameras.clone();
+                let cameras = state.cameras().clone();
                 move || cameras.shutdown()
             })
             .await;
@@ -329,24 +491,10 @@ impl ServerStartup {
             tracing::warn!("resource cleanup timed out; the operating system will release devices");
         }
         bootstrap.abort();
-        signal_task.abort();
         if let Some(result) = server_result {
             result?;
         }
         Ok(())
-    }
-
-    /// DX sets the public path during development; a distributed server keeps
-    /// its browser bundle in the adjacent public directory.
-    fn dioxus_public_directory() -> Option<PathBuf> {
-        std::env::var_os("DIOXUS_PUBLIC_PATH")
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()?
-                    .parent()
-                    .map(|path| path.join("public"))
-            })
     }
 }
 

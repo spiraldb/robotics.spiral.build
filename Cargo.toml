@@ -9,6 +9,7 @@ members = [
     "crates/backend",
     "crates/frontend/viewport",
     "crates/frontend",
+    "crates/desktop",
     "crates/ui",
 ]
 

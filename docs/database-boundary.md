@@ -19,7 +19,9 @@ Spiral; this boundary isolates its client implementation.
 
 Set `SPIRALDB_ADBC_DRIVER` to an absolute path to the standalone library.
 Without that override, the adapter loads `libadbc_driver_spiraldb.dylib` on
-macOS or `libadbc_driver_spiraldb.so` on Linux alongside the server executable.
+macOS or `libadbc_driver_spiraldb.so` on Linux alongside the server executable;
+the macOS desktop app, whose executable has no driver beside it, loads the one
+in its `Contents/Frameworks`.
 Loading and database initialization happen on the first async `connect`.
 Endpoints and the signed-in user's access token are passed as database options,
 without changing process environment variables. The driver never refreshes the
