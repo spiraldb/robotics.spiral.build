@@ -104,9 +104,11 @@ impl Moment {
                 )?);
             }
         }
+        // A stored failure is an empty answer: the scorer rejected the
+        // video, or the recording has none, when it was first scored.
         if moments.is_empty() {
             return Err(format!(
-                "This recording has no {} frames to score.",
+                "The progress scorer could not score this recording's {} video.",
                 ProgressScorer::WarpSimBottles.camera()
             ));
         }
@@ -166,7 +168,7 @@ mod tests {
         assert!(
             Moment::read(&stream(&[]), &episode)
                 .unwrap_err()
-                .contains("no /cameras/top_camera-images-rgb frames")
+                .contains("could not score this recording's /cameras/top_camera-images-rgb video")
         );
     }
 }

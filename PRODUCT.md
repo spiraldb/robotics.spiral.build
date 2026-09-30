@@ -258,8 +258,10 @@ never becomes the motor-control runtime.
   camera reads reject more than 18,000 packets or 64 MiB of encoded video.
 - **Data ownership.** `dataset_source` holds recording sources,
   `dataset_source_<name>` views select each dataset's rows, `dataset_<name>`
-  native Datasets reference those views through their definitions, and
-  `studio_training_checkpoints` holds model artifacts. Rollout's exact
+  native Datasets reference those views through their definitions,
+  `dataset_answers_<name>` tables hold the model answers curations stored
+  about each dataset's episodes, and `studio_training_checkpoints` holds
+  model artifacts. Rollout's exact
   schema check rejects checkpoints written under another storage schema.
   Studio's own records live in its local SQLite.
 - **Native MCAP ingestion.** Data imports MCAP recordings from a public

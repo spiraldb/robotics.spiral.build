@@ -22,7 +22,7 @@ fn sample() -> EpisodeSample {
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        DatasetSelection::new(vec!["folding".to_owned()]).unwrap(),
+        DatasetSelection::new(vec!["dataset_folding".to_owned()]).unwrap(),
     ))
 }
 
@@ -237,8 +237,15 @@ fn a_node_below_a_changed_one_is_stale_and_reads_again_only_what_changed() {
 }
 
 #[test]
-fn a_judgment_asks_about_as_many_episodes_as_one_query_carries() {
+fn every_measurement_previews_what_it_has_the_backend_answer_and_store_first() {
+    use spiral_robotics_common::curation::{AnswerSource, FillEpisodes};
     let mut graph = graph();
+    let score = graph
+        .add_child(
+            DATASET_NODE_ID,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        )
+        .unwrap();
     let annotate = graph.add_child(DATASET_NODE_ID, breakdown()).unwrap();
     let grouping = SubtaskGrouping::of(vec![
         SubtaskCategory::new("fold", "Folding cloth.").unwrap(),
@@ -246,63 +253,37 @@ fn a_judgment_asks_about_as_many_episodes_as_one_query_carries() {
     let group = graph
         .add_child(&annotate, CurationNodeKind::GroupSimilarSubtasks(grouping))
         .unwrap();
-    let mut reads = PreviewReads::default();
-    // Episode 1's descriptions are long enough that the two episodes cannot
-    // share one query; episode 2's are short.
-    let long = "fold ".repeat(400);
-    record_current(
-        &graph,
-        &mut reads,
-        (&annotate, &EpisodeId::fixture(1)),
-        PreviewRows::Subtasks(
-            (0..30)
-                .map(|second| subtask(1, (second as f64 * 0.5, second as f64 * 0.5 + 0.5), &long))
-                .collect(),
-        ),
-    );
-    record_current(
-        &graph,
-        &mut reads,
-        (&annotate, &EpisodeId::fixture(2)),
-        PreviewRows::Subtasks(vec![subtask(2, (0.0, 3.0), "grasp")]),
-    );
+    let episodes = [EpisodeId::fixture(1), EpisodeId::fixture(2)];
     let sample = sample();
-    let reader = PopulationReader::new(&graph, &sample, &reads);
-    let plan = PreviewPlan::of(
-        &reader,
-        &group,
-        &[EpisodeId::fixture(1), EpisodeId::fixture(2)],
-    )
-    .unwrap();
-    assert_eq!(plan.statements().len(), 2);
-    assert!(
-        plan.statements()
-            .iter()
-            .all(|statement| statement.len() < 64 * 1024)
-    );
-    assert!(plan.statements()[1].contains("'grasp'"));
-    assert!(
-        !plan.statements()[1].contains("$1"),
-        "a judgment spells ids as text"
-    );
-
-    // Short descriptions share one query.
     let mut reads = PreviewReads::default();
-    for episode in [1, 2] {
+    for (fixture, episode) in (1..).zip(&episodes) {
         record_current(
             &graph,
             &mut reads,
-            (&annotate, &EpisodeId::fixture(episode)),
-            PreviewRows::Subtasks(vec![subtask(episode, (0.0, 3.0), "grasp")]),
+            (&annotate, episode),
+            PreviewRows::Subtasks(vec![subtask(fixture, (0.0, 3.0), "grasp")]),
         );
     }
     let reader = PopulationReader::new(&graph, &sample, &reads);
-    let plan = PreviewPlan::of(
-        &reader,
-        &group,
-        &[EpisodeId::fixture(1), EpisodeId::fixture(2)],
-    )
-    .unwrap();
-    assert_eq!(plan.statements().len(), 1);
+    for node in [&score, &annotate, &group] {
+        let plan = PreviewPlan::of(&reader, node, &episodes).unwrap();
+        let fill = plan.fill();
+        assert_eq!(fill.episodes(), &FillEpisodes::Listed(episodes.to_vec()));
+        // Each episode's preview then reads what was stored, and asks nothing.
+        assert_eq!(plan.statements().len(), 2);
+        for statement in plan.statements() {
+            assert!(statement.contains(&format!("a.{}.value", fill.column())));
+            assert!(!statement.contains("spql.ai."), "{statement}");
+        }
+        match fill.source() {
+            AnswerSource::ProgressService { .. } => assert_eq!(node, &score),
+            AnswerSource::Statement { statement } if node == &group => {
+                assert!(statement.contains("spql.ai.classify(a."), "{statement}")
+            }
+            AnswerSource::Statement { statement } => {
+                assert!(statement.contains("spql.ai.breakdown_task("), "{statement}")
+            }
+        }
+    }
     let _ = CategoryPlacement::new("fold", 0.5).unwrap();
 }

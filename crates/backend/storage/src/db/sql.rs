@@ -20,11 +20,13 @@ use futures::StreamExt as _;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryColumn, SpiralQuerySnapshot};
 
 use super::database::{DatabaseSession, RecordBatchStream, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
 use super::schema::{Table, column};
+use crate::datasets::EpisodeUuids;
 use spiral_robotics_common::sql::{ReadOnlyQueryMode, SqlLiteral};
 
 const MAX_QUERY_ROWS: usize = 1_000;
@@ -203,13 +205,7 @@ impl<'a> ProjectQueries<'a> {
         &self,
         request: &EpisodeQueryRequest,
     ) -> Result<SpiralQuerySnapshot, String> {
-        SpiralSql::ensure_read_only(request.statement())?;
-        let statement = crate::datasets::EpisodeTopicQuery::for_episode(
-            request.episode().dataset(),
-            request.episode().episode_id(),
-            request.statement().trim().to_owned(),
-        )?
-        .into_statement();
+        let statement = Self::bound(request)?;
         let mut connection = self.project_store.connect().await?;
         QueryExecution::bound(
             statement,
@@ -227,13 +223,7 @@ impl<'a> ProjectQueries<'a> {
         &self,
         request: &EpisodeQueryRequest,
     ) -> Result<Vec<u8>, String> {
-        SpiralSql::ensure_read_only(request.statement())?;
-        let statement = crate::datasets::EpisodeTopicQuery::for_episode(
-            request.episode().dataset(),
-            request.episode().episode_id(),
-            request.statement().trim().to_owned(),
-        )?
-        .into_statement();
+        let statement = Self::bound(request)?;
         let mut connection = self.project_store.connect().await?;
         connection
             .query(statement)
@@ -241,6 +231,56 @@ impl<'a> ProjectQueries<'a> {
             .map_err(|error| format!("executing Spiral query: {error}"))?
             .into_arrow_ipc(request.max_rows().clamp(1, MAX_ARROW_ROWS))
             .await
+    }
+
+    /// The same episode read whole, as the backend works with it: every
+    /// batch, and the schema they share even when there is none.
+    pub async fn batches_for_episode(
+        &self,
+        request: &EpisodeQueryRequest,
+    ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+        let statement = Self::bound(request)?;
+        let mut connection = self.project_store.connect().await?;
+        let mut records = connection
+            .query(statement)
+            .await
+            .map_err(|error| format!("executing Spiral query: {error}"))?;
+        let schema = Arc::clone(records.schema());
+        let mut batches = Vec::new();
+        while let Some(batch) = records.next().await {
+            batches.push(batch.map_err(|error| format!("reading Spiral result: {error}"))?);
+        }
+        Ok((schema, batches))
+    }
+
+    /// The episodes a read-only statement lists in its `episode_id` column.
+    pub async fn episode_ids(&self, sql: &str) -> Result<Vec<EpisodeId>, String> {
+        SpiralSql::ensure_read_only(sql)?;
+        let batches = self
+            .project_store
+            .connect()
+            .await?
+            .read_batches(sql)
+            .await?;
+        let mut ids = Vec::new();
+        for batch in batches {
+            let listed = batch
+                .column_by_name("episode_id")
+                .ok_or("The statement lists no episode_id.")?;
+            ids.extend(EpisodeUuids::read(listed.as_ref())?);
+        }
+        Ok(ids)
+    }
+
+    /// `request`'s read-only statement with its episode bound as `$1`.
+    fn bound(request: &EpisodeQueryRequest) -> Result<SqlStatement, String> {
+        SpiralSql::ensure_read_only(request.statement())?;
+        Ok(crate::datasets::EpisodeTopicQuery::for_episode(
+            request.episode().dataset(),
+            request.episode().episode_id(),
+            request.statement().trim().to_owned(),
+        )?
+        .into_statement())
     }
 }
 

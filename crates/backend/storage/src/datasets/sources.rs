@@ -8,6 +8,7 @@ use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
+use spiral_robotics_common::curation::AnswerTable;
 use spiral_robotics_common::sql::SqlLiteral;
 use std::sync::Arc;
 
@@ -122,7 +123,7 @@ impl<'a> McapFile<'a> {
         if !exists {
             relations.publish(connection).await?;
         } else {
-            relations.refresh(connection).await?;
+            relations.append(connection).await?;
         }
         Ok(())
     }
@@ -258,6 +259,8 @@ impl McapSources {
                     McapDatasetDefinition::quoted(&format!("dataset_{name}"))
                 ))
                 .await?;
+            // A bundle carries no answers: the restored dataset starts over.
+            relations.create_answers(connection).await?;
         }
         Ok(())
     }
@@ -269,9 +272,11 @@ impl McapSources {
         names: &[String],
     ) -> Result<(), String> {
         for name in names {
+            // Refreshing materializes each topic as a signal under the
+            // Dataset, which only a cascading drop removes.
             connection
                 .execute_update_sql(&format!(
-                    "DROP DATASET IF EXISTS {}",
+                    "DROP DATASET IF EXISTS {} CASCADE",
                     McapDatasetDefinition::quoted(&format!("dataset_{name}"))
                 ))
                 .await?;
@@ -281,15 +286,25 @@ impl McapSources {
                     McapDatasetDefinition::quoted(&format!("dataset_source_{name}"))
                 ))
                 .await?;
+            connection
+                .execute_update_sql(&format!(
+                    "DROP TABLE IF EXISTS {}",
+                    AnswerTable::for_dataset_id(name).quoted()
+                ))
+                .await?;
         }
         Ok(())
     }
 }
 
+/// The relations Studio keeps for one MCAP dataset: its `dataset_<id>`
+/// Dataset, the `dataset_source_<id>` view it reads its files through, and
+/// the `dataset_answers_<id>` table of model answers about its episodes.
 pub(crate) struct McapDatasetDefinition {
     dataset_name: String,
     dataset: String,
     source: String,
+    answers: AnswerTable,
 }
 impl McapDatasetDefinition {
     pub(crate) const SOURCE_TABLE: &str = "dataset_source";
@@ -299,7 +314,15 @@ impl McapDatasetDefinition {
             dataset_name: dataset_id.to_owned(),
             dataset: format!("dataset_{dataset_id}"),
             source: format!("dataset_source_{dataset_id}"),
+            answers: AnswerTable::for_dataset_id(dataset_id),
         }
+    }
+    /// The Dataset's SQL name.
+    pub(crate) fn dataset(&self) -> &str {
+        &self.dataset
+    }
+    pub(crate) fn answers(&self) -> &AnswerTable {
+        &self.answers
     }
     fn quoted(name: &str) -> String {
         name.split('.')
@@ -308,7 +331,11 @@ impl McapDatasetDefinition {
             .join(".")
     }
     pub(crate) fn planned(&self) -> Vec<String> {
-        vec![self.dataset.clone(), self.source.clone()]
+        vec![
+            self.dataset.clone(),
+            self.source.clone(),
+            self.answers.name(),
+        ]
     }
     pub(crate) fn create_sql(&self) -> String {
         format!(
@@ -390,12 +417,22 @@ impl McapSourceBlob {
 }
 
 impl McapDatasetDefinition {
+    /// Create the Dataset over its source view, refresh it, and create its
+    /// answers table from what the refresh found.
     pub(crate) async fn publish(&self, connection: &mut ProjectConnection) -> Result<(), String> {
         connection
             .execute_update_sql(&self.source_view_sql())
             .await?;
         connection.execute_update_sql(&self.create_sql()).await?;
-        self.refresh(connection).await
+        self.refresh(connection).await?;
+        self.create_answers(connection).await
+    }
+
+    /// Refresh the Dataset after an append, and give each episode it added a
+    /// row of the answers table.
+    async fn append(&self, connection: &mut ProjectConnection) -> Result<(), String> {
+        self.refresh(connection).await?;
+        self.add_answer_rows(connection).await
     }
 
     async fn refresh(&self, connection: &mut ProjectConnection) -> Result<(), String> {
@@ -478,7 +515,7 @@ impl crate::ProjectStore {
 }
 
 impl crate::ProjectStore {
-    async fn managed_mcap_datasets(&self) -> Result<Vec<String>, String> {
+    pub(crate) async fn managed_mcap_datasets(&self) -> Result<Vec<String>, String> {
         let client = self.dataset_catalog();
         let resources = client.resources().await?;
         let mut names = Vec::new();
@@ -545,31 +582,7 @@ mod tests {
     #[ignore = "requires SPIRAL_MCAP_TEST_PROJECT and SPIRAL_ACCESS_TOKEN (endpoints from SPIRAL__SERVER__URL and SPIRAL__SPFS__URL); creates and removes a uniquely named dataset"]
     async fn mcap_files_share_publication_and_dataset_reads() {
         use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
-        use crate::settings::{ServiceEndpoint, SpiralConnectionSettings};
-        let settings = SpiralConnectionSettings::new(
-            ServiceEndpoint::environment_spiral().into_string(),
-            ServiceEndpoint::environment_spiral_spfs().into_string(),
-        )
-        .unwrap()
-        .with_project(
-            &std::env::var("SPIRAL_MCAP_TEST_PROJECT").expect("the Spiral project to test in"),
-        )
-        .unwrap();
-        let access = crate::SpiralAccess::fixed(
-            std::env::var("SPIRAL_ACCESS_TOKEN").expect("a user access token for the test"),
-        );
-        let connection = crate::SpiralConnection::new(settings, access);
-        let store = Arc::new(
-            crate::ProjectStore::new(
-                connection.clone(),
-                Arc::new(crate::AdbcDatabase::new(connection)),
-            )
-            .unwrap(),
-        );
-        let storage = StorageManager::new(
-            store.clone(),
-            crate::StudioStore::in_memory().project(&store.connection_settings()),
-        );
+        let (store, storage) = crate::datasets::HostedProject::storage();
         let name = format!("source_probe_{}", uuid::Uuid::new_v4().simple());
         let other_name = format!("{name}_other");
         let cameras = ["wrist", "overhead"]
@@ -715,44 +728,15 @@ mod tests {
             Ok(())
         }
         .await;
-        let mut connection = store.connect_exclusive().await.unwrap();
-        connection
-            .execute_update_sql(&format!("DROP DATASET IF EXISTS dataset_{other_name}"))
-            .await
-            .unwrap();
-        connection
-            .execute_update_sql(&format!("DROP VIEW IF EXISTS dataset_source_{other_name}"))
-            .await
-            .unwrap();
-        if connection.table_exists("dataset_source").await.unwrap() {
-            connection
-                .execute_update_sql(&format!(
-                    "DELETE FROM dataset_source WHERE dataset_name = '{other_name}'"
-                ))
-                .await
-                .unwrap();
+        for probe in [&name, &other_name] {
+            storage.drop_probe_dataset(probe).await.unwrap();
         }
-        connection
-            .execute_update_sql(&format!("DROP DATASET IF EXISTS dataset_{name}"))
-            .await
-            .unwrap();
-        connection
-            .execute_update_sql(&format!("DROP VIEW IF EXISTS dataset_source_{name}"))
-            .await
-            .unwrap();
-        if connection.table_exists("dataset_source").await.unwrap() {
+        let mut connection = store.connect_exclusive().await.unwrap();
+        if !source_existed && connection.table_exists("dataset_source").await.unwrap() {
             connection
-                .execute_update_sql(&format!(
-                    "DELETE FROM dataset_source WHERE dataset_name = '{name}'"
-                ))
+                .execute_update_sql("DROP TABLE dataset_source")
                 .await
                 .unwrap();
-            if !source_existed {
-                connection
-                    .execute_update_sql("DROP TABLE dataset_source")
-                    .await
-                    .unwrap();
-            }
         }
         outcome.expect("MCAP source boundary");
     }

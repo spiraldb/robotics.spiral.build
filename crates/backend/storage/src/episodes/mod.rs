@@ -13,14 +13,14 @@ mod identity;
 pub use capture::*;
 pub use identity::EpisodeId;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct EpisodeFixture {
     start: EpisodeStart,
     duration_seconds: f64,
     samples: Vec<Sample>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl EpisodeFixture {
     pub(crate) fn new(episode_id: &str, dataset_id: &str) -> Self {
         Self {
@@ -36,6 +36,7 @@ impl EpisodeFixture {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_arms(
         mut self,
         arms: Vec<spiral_robotics_common::recording::EpisodeArm>,
@@ -49,6 +50,7 @@ impl EpisodeFixture {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_samples(mut self, samples: Vec<Sample>) -> Self {
         self.samples = samples;
         self

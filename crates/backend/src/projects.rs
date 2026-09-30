@@ -123,7 +123,10 @@ impl ProjectFactory {
         let recording_buffer = Arc::new(RecordingBuffer::new());
         let storage = Arc::new(StorageManager::new(store, studio));
         let training = Arc::new(TrainingManager::new(storage.clone()));
-        let curation = Arc::new(CurationManager::new(storage.clone()));
+        let curation = Arc::new(CurationManager::new(
+            storage.clone(),
+            self.data.keys.clone(),
+        ));
         let rollout = RolloutManager::new(
             storage.clone(),
             RolloutHardwareResources::new(

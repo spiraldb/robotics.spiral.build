@@ -19,6 +19,7 @@ The selected Spiral project holds Studio's resources at its root:
 | `dataset_source` | Table | Every managed MCAP source: `dataset_name`, `recording` (an opaque source key within its dataset, not an episode identity), and the `source` Blob |
 | `dataset_source_<name>` | View | Selects `recording, source` where `dataset_name = '<name>'` |
 | `dataset_<name>` | Native Dataset | Reads its source view through `spql.mcap.dataset`, with `recording` as the member key |
+| `dataset_answers_<name>` | Table | One row per episode, keyed by `episode_id`, and one column per exact model call a curation made, each value `STRUCT(value …)`: NULL not asked yet, a NULL `value` asked and failed. Created from the Dataset's first refresh, given a row by every append, dropped with the Dataset |
 | `studio_training_checkpoints` | Table | Model checkpoint artifacts |
 
 Curation publishes its views at the root too. A Dataset refresh consumes its

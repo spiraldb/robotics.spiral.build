@@ -1,7 +1,8 @@
 //! Saved curations: list, load by identity, and a revision-guarded save and
-//! delete;
-//! publishing an output as a catalog view, or dropping it; and the preview
-//! runs a node's Run starts, polls, stops, and reads answers from.
+//! delete; the fill runs that write the answers a view reads and then
+//! publish it, which Publish and a Score progress preview start and poll;
+//! dropping a view; and the preview runs a node's Run starts, polls, stops,
+//! and reads answers from.
 use super::preview::PreviewAnswer;
 use crate::OperationError;
 use crate::http::delivery::{ApiJson, ApiPath, ArrowResponse, Project};
@@ -13,8 +14,8 @@ use axum::{
     routing::{get, post},
 };
 use spiral_robotics_common::curation::{
-    CurationDeletion, CurationDocument, CurationSummary, MAX_CURATION_PAYLOAD_BYTES, PreviewQuery,
-    PreviewRunStatus, PublishRequest, UnpublishRequest,
+    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+    MAX_CURATION_PAYLOAD_BYTES, PreviewQuery, PreviewRunStatus, UnpublishRequest,
 };
 
 /// The body carries the payload as a JSON string, so escaping and the
@@ -29,6 +30,8 @@ impl CurationEndpoints {
         Router::new()
             .route("/curations", get(Self::list))
             .route("/curations/{id}", get(Self::load))
+            .route("/curation-fills", get(Self::publications))
+            .route("/curation-fills/{id}", get(Self::fill_status))
             .route("/curation-previews/{id}", get(Self::preview_status))
             .route(
                 "/curation-previews/{id}/answers/{query}",
@@ -43,8 +46,9 @@ impl CurationEndpoints {
                 post(Self::save).layer(DefaultBodyLimit::max(MAX_SAVE_BODY_BYTES)),
             )
             .route("/curations/delete", post(Self::delete))
-            .route("/curations/publish", post(Self::publish))
             .route("/curations/unpublish", post(Self::unpublish))
+            .route("/curation-fills", post(Self::start_fill))
+            .route("/curation-fills/{id}/stop", post(Self::stop_fill))
             .route("/curation-previews", post(Self::start_preview))
             .route("/curation-previews/{id}/stop", post(Self::stop_preview))
     }
@@ -70,11 +74,27 @@ impl CurationEndpoints {
         project.curation().delete(request).await?;
         Ok(Json(()))
     }
-    async fn publish(
+    async fn start_fill(
         Project(project): Project,
-        ApiJson(request): ApiJson<PublishRequest>,
+        ApiJson(request): ApiJson<FillRequest>,
+    ) -> Result<Json<FillStatus>, OperationError> {
+        Ok(Json(project.curation().fill(request).await?))
+    }
+    /// Every run that publishes a view, as Data shows them.
+    async fn publications(Project(project): Project) -> Json<Vec<FillStatus>> {
+        Json(project.curation().fills().publications())
+    }
+    async fn fill_status(
+        Project(project): Project,
+        ApiPath(id): ApiPath<String>,
+    ) -> Result<Json<FillStatus>, OperationError> {
+        Ok(Json(project.curation().fills().status(&id)?))
+    }
+    async fn stop_fill(
+        Project(project): Project,
+        ApiPath(id): ApiPath<String>,
     ) -> Result<Json<()>, OperationError> {
-        project.curation().publish(request).await?;
+        project.curation().fills().stop(&id)?;
         Ok(Json(()))
     }
     async fn unpublish(

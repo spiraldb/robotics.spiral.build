@@ -1,8 +1,10 @@
 //! Native Dataset discovery through the same project journal used by the ADBC driver.
+mod answers;
 #[cfg(test)]
 mod catalog_tests;
 mod sources;
 mod topics;
+pub use answers::{ColumnAnswers, DatasetAnswers, EpisodeAnswer};
 pub(crate) use sources::{McapDatasetDefinition, McapFile, McapSourceBlob, McapSources};
 
 use crate::{SpiralAccess, SpiralConnection, StorageManager};
@@ -331,16 +333,9 @@ impl EpisodeTopicQuery {
         if !selection.can_preview() {
             return Err("Preview is unavailable for this dataset name".to_owned());
         }
-        let id = uuid::Uuid::parse_str(episode_id.as_str())
-            .map_err(|_| "Invalid recording UUID".to_owned())?;
-        let values = arrow_array::FixedSizeBinaryArray::try_from_iter([id.as_bytes()].into_iter())
-            .map_err(|error| error.to_string())?;
-        let field =
-            arrow_schema::Field::new("id", arrow_schema::DataType::FixedSizeBinary(16), false)
-                .with_extension_type(arrow_schema::extension::Uuid);
         let parameters = arrow_array::RecordBatch::try_new(
-            std::sync::Arc::new(arrow_schema::Schema::new(vec![field])),
-            vec![std::sync::Arc::new(values)],
+            std::sync::Arc::new(arrow_schema::Schema::new(vec![EpisodeUuids::field("id")])),
+            vec![EpisodeUuids::array(std::slice::from_ref(episode_id))?],
         )
         .map_err(|error| error.to_string())?;
         crate::db::SqlStatement::from(sql)
@@ -350,6 +345,125 @@ impl EpisodeTopicQuery {
     }
     pub(crate) fn into_statement(self) -> crate::db::SqlStatement {
         self.statement
+    }
+}
+
+/// Dataset member ids as Spiral types them: `arrow.uuid`, sixteen bytes each.
+pub(crate) struct EpisodeUuids;
+
+impl EpisodeUuids {
+    pub(crate) fn field(name: &str) -> arrow_schema::Field {
+        arrow_schema::Field::new(name, arrow_schema::DataType::FixedSizeBinary(16), false)
+            .with_extension_type(arrow_schema::extension::Uuid)
+    }
+
+    pub(crate) fn array(ids: &[EpisodeId]) -> Result<arrow_array::ArrayRef, String> {
+        let uuids = ids
+            .iter()
+            .map(|id| {
+                uuid::Uuid::parse_str(id.as_str()).map_err(|_| "Invalid recording UUID".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let values = arrow_array::FixedSizeBinaryArray::try_from_iter(
+            uuids.iter().map(|uuid| uuid.as_bytes()),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(std::sync::Arc::new(values))
+    }
+
+    /// The ids a column of member UUIDs holds, in order.
+    pub(crate) fn read(array: &dyn arrow_array::Array) -> Result<Vec<EpisodeId>, String> {
+        use arrow_array::Array as _;
+        let uuids = array
+            .as_any()
+            .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
+            .filter(|uuids| uuids.value_length() == 16 && uuids.null_count() == 0)
+            .ok_or("Episode ids must be member UUIDs")?;
+        (0..uuids.len())
+            .map(|row| {
+                let uuid = uuid::Uuid::from_slice(uuids.value(row)).map_err(|e| e.to_string())?;
+                EpisodeId::try_from(uuid.simple().to_string())
+            })
+            .collect()
+    }
+}
+
+/// The Spiral project hosted tests run in, named by `SPIRAL_MCAP_TEST_PROJECT`
+/// and reached with `SPIRAL_ACCESS_TOKEN` at `SPIRAL__SERVER__URL` and
+/// `SPIRAL__SPFS__URL`. Each test creates and drops its own scratch
+/// relations there.
+#[cfg(test)]
+pub(crate) struct HostedProject;
+
+#[cfg(test)]
+impl HostedProject {
+    pub(crate) fn storage() -> (std::sync::Arc<crate::ProjectStore>, StorageManager) {
+        use crate::settings::{ServiceEndpoint, SpiralConnectionSettings};
+        let settings = SpiralConnectionSettings::new(
+            ServiceEndpoint::environment_spiral().into_string(),
+            ServiceEndpoint::environment_spiral_spfs().into_string(),
+        )
+        .unwrap()
+        .with_project(
+            &std::env::var("SPIRAL_MCAP_TEST_PROJECT").expect("the Spiral project to test in"),
+        )
+        .unwrap();
+        let access = SpiralAccess::fixed(
+            std::env::var("SPIRAL_ACCESS_TOKEN").expect("a user access token for the test"),
+        );
+        let connection = SpiralConnection::new(settings, access);
+        let store = std::sync::Arc::new(
+            crate::ProjectStore::new(
+                connection.clone(),
+                std::sync::Arc::new(crate::AdbcDatabase::new(connection)),
+            )
+            .unwrap(),
+        );
+        let storage = StorageManager::new(
+            store.clone(),
+            crate::StudioStore::in_memory().project(&store.connection_settings()),
+        );
+        (store, storage)
+    }
+}
+
+/// Probe datasets for hosted tests, here and in the crates above storage.
+#[cfg(any(test, feature = "test-support"))]
+impl StorageManager {
+    /// Record the short episode `episode` into the MCAP dataset `dataset`,
+    /// creating it with the first: eight frames of `/camera/top/video`, 33 ms
+    /// apart.
+    pub async fn record_probe_episode(&self, dataset: &str, episode: &str) -> Result<(), String> {
+        use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
+        let camera = CameraRecording::from_annex_b(
+            "top".into(),
+            (32, 32, 30),
+            (
+                include_bytes!("../../../frontend/src/activities/episode/fixtures/seek.h264")
+                    .to_vec(),
+                (0..8).map(|index| index * 33_333_333).collect(),
+            ),
+        )?;
+        let recording = EpisodeFixture::new(episode, dataset)
+            .with_timing(1_700_000_000_000, 500.0)
+            .with_duration_seconds(0.3)
+            .into_episode();
+        let bytes = McapRecording::encode(&recording, &[camera])?;
+        self.append_mcap_file(McapFile::new(dataset, &format!("{episode}.mcap"), &bytes))
+            .await
+    }
+
+    /// Drop the probe dataset `name` with everything Studio made for it.
+    pub async fn drop_probe_dataset(&self, name: &str) -> Result<(), String> {
+        let mut connection = self.project_store().connect_exclusive().await?;
+        McapSources::retire(&mut connection, &[name.to_owned()]).await?;
+        connection
+            .execute_update_sql(&format!(
+                "DELETE FROM {} WHERE dataset_name = {}",
+                McapDatasetDefinition::SOURCE_TABLE,
+                spiral_robotics_common::sql::SqlLiteral::text(name)
+            ))
+            .await
     }
 }
 
@@ -408,6 +522,18 @@ mod tests {
         assert_eq!(values.value(0), id.as_bytes());
         // An id that is not a member UUID never reaches a statement at all.
         assert!(EpisodeId::try_from("' OR true --").is_err());
+    }
+
+    #[test]
+    fn member_ids_travel_as_uuids_and_read_back_as_they_went() {
+        let ids = [
+            EpisodeId::try_from("01900000000070008000000000000001").unwrap(),
+            EpisodeId::try_from("01a0b63c7b7f779b9237d4e0206c08ff").unwrap(),
+        ];
+        let array = EpisodeUuids::array(&ids).unwrap();
+        assert_eq!(EpisodeUuids::read(array.as_ref()).unwrap(), ids);
+        let text = arrow_array::StringArray::from(vec!["01900000000070008000000000000001"]);
+        assert!(EpisodeUuids::read(&text).is_err());
     }
 
     #[test]

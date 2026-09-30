@@ -1,6 +1,6 @@
 //! Studio-wide model providers as the browser sees them, and the messages it
 //! exchanges with them. Their credentials stay on the backend, which attaches
-//! them when it relays a request.
+//! them when it relays a request or calls the Modal service itself.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +42,8 @@ impl LlmProvider {
 pub struct ProviderKeysStatus {
     llm_api_key_configured: bool,
     huggingface_token_configured: bool,
+    modal_base_url_configured: bool,
+    modal_token_configured: bool,
 }
 
 impl ProviderKeysStatus {
@@ -49,13 +51,28 @@ impl ProviderKeysStatus {
         Self {
             llm_api_key_configured,
             huggingface_token_configured,
+            modal_base_url_configured: false,
+            modal_token_configured: false,
         }
+    }
+    /// The same, saying whether the Modal service's base URL and token are
+    /// saved.
+    pub const fn with_modal(mut self, base_url_configured: bool, token_configured: bool) -> Self {
+        self.modal_base_url_configured = base_url_configured;
+        self.modal_token_configured = token_configured;
+        self
     }
     pub const fn llm_api_key_configured(&self) -> bool {
         self.llm_api_key_configured
     }
     pub const fn huggingface_token_configured(&self) -> bool {
         self.huggingface_token_configured
+    }
+    pub const fn modal_base_url_configured(&self) -> bool {
+        self.modal_base_url_configured
+    }
+    pub const fn modal_token_configured(&self) -> bool {
+        self.modal_token_configured
     }
 }
 
@@ -68,6 +85,10 @@ pub struct ProviderKeysUpdate {
     llm_api_key: Option<String>,
     #[serde(default)]
     huggingface_token: Option<String>,
+    #[serde(default)]
+    modal_base_url: Option<String>,
+    #[serde(default)]
+    modal_token: Option<String>,
 }
 
 impl ProviderKeysUpdate {
@@ -79,11 +100,25 @@ impl ProviderKeysUpdate {
         self.huggingface_token = token;
         self
     }
+    pub fn with_modal_base_url(mut self, base_url: Option<String>) -> Self {
+        self.modal_base_url = base_url;
+        self
+    }
+    pub fn with_modal_token(mut self, token: Option<String>) -> Self {
+        self.modal_token = token;
+        self
+    }
     pub fn llm_api_key(&self) -> Option<&str> {
         self.llm_api_key.as_deref()
     }
     pub fn huggingface_token(&self) -> Option<&str> {
         self.huggingface_token.as_deref()
+    }
+    pub fn modal_base_url(&self) -> Option<&str> {
+        self.modal_base_url.as_deref()
+    }
+    pub fn modal_token(&self) -> Option<&str> {
+        self.modal_token.as_deref()
     }
 }
 
@@ -93,6 +128,8 @@ impl std::fmt::Debug for ProviderKeysUpdate {
         f.debug_struct("ProviderKeysUpdate")
             .field("llm_api_key", &redacted(&self.llm_api_key))
             .field("huggingface_token", &redacted(&self.huggingface_token))
+            .field("modal_base_url", &redacted(&self.modal_base_url))
+            .field("modal_token", &redacted(&self.modal_token))
             .finish()
     }
 }
@@ -204,9 +241,14 @@ mod tests {
     fn key_updates_redact_their_values() {
         let update = ProviderKeysUpdate::default()
             .with_llm_api_key(Some("sk-or-private".into()))
-            .with_huggingface_token(Some("hf_private".into()));
+            .with_huggingface_token(Some("hf_private".into()))
+            .with_modal_token(Some("modal_private".into()));
         let debug = format!("{update:?}");
-        assert!(!debug.contains("sk-or-private") && !debug.contains("hf_private"));
+        assert!(
+            !debug.contains("sk-or-private")
+                && !debug.contains("hf_private")
+                && !debug.contains("modal_private")
+        );
         let omitted: ProviderKeysUpdate = serde_json::from_str("{}").unwrap();
         assert_eq!(omitted, ProviderKeysUpdate::default());
     }

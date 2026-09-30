@@ -10,8 +10,8 @@
 //! and its answer is thrown away. A run nobody polls only starts nothing new,
 //! since the page that wanted it has gone. Runs live in memory: a restarted
 //! backend holds none, as a reloaded page holds no preview.
+use super::held_runs::{HeldRuns, HeldWork};
 use crate::OperationError;
-use crate::clock::StableIdSequence;
 use crate::data::query::QueryCommand;
 use crate::sync::MutexRecovery;
 use futures_util::StreamExt as _;
@@ -21,14 +21,13 @@ use spiral_robotics_storage::StorageManager;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::task::AbortHandle;
 use tokio::time::Instant;
 
 /// How many of a run's queries are in flight at once.
 const QUERIES_IN_FLIGHT: usize = 8;
 /// How long a run goes unpolled before it starts nothing new, and a settled
 /// run before it is dropped.
-const ABANDONED_AFTER: Duration = Duration::from_secs(30);
+pub(super) const ABANDONED_AFTER: Duration = Duration::from_secs(30);
 
 /// One query's answer, in the form it was asked for.
 #[derive(Clone)]
@@ -40,22 +39,14 @@ pub(super) enum PreviewAnswer {
 /// The preview runs one project has started, by identity.
 pub(crate) struct PreviewRuns {
     storage: Arc<StorageManager>,
-    ids: StableIdSequence,
-    runs: Mutex<BTreeMap<String, HeldRun>>,
-}
-
-/// A run and the task that works through its queries.
-struct HeldRun {
-    run: Arc<PreviewRun>,
-    task: AbortHandle,
+    runs: HeldRuns<PreviewRun>,
 }
 
 impl PreviewRuns {
     pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
         Self {
             storage,
-            ids: StableIdSequence::new("preview", 1),
-            runs: Mutex::new(BTreeMap::new()),
+            runs: HeldRuns::new("preview"),
         }
     }
 
@@ -69,19 +60,17 @@ impl PreviewRuns {
                 "A preview run needs at least one query.",
             ));
         }
-        self.forget_abandoned();
-        let (id, _) = self.ids.next().into_parts();
         let run = Arc::new(PreviewRun::new(queries));
-        let task = tokio::spawn(run.clone().answer_all(self.storage.clone())).abort_handle();
-        let status = run.status(&id);
-        self.runs.recover_lock().insert(id, HeldRun { run, task });
-        Ok(status)
+        let id = self
+            .runs
+            .start(run.clone(), run.clone().answer_all(self.storage.clone()));
+        Ok(run.status(&id))
     }
 
     /// Where run `id` stands. Reading it is what keeps the run wanted.
     pub(super) fn status(&self, id: &str) -> Result<PreviewRunStatus, OperationError> {
-        self.forget_abandoned();
-        let run = self.run(id)?;
+        self.runs.forget();
+        let run = self.runs.get(id)?;
         run.polled();
         Ok(run.status(id))
     }
@@ -89,43 +78,19 @@ impl PreviewRuns {
     /// End run `id` now: start none of its remaining queries, and drop the
     /// ones in flight.
     pub(super) fn stop(&self, id: &str) -> Result<(), OperationError> {
-        let runs = self.runs.recover_lock();
-        let held = runs.get(id).ok_or_else(Self::not_held)?;
-        held.run.stop();
-        held.task.abort();
-        Ok(())
+        self.runs.get(id)?.stop();
+        self.runs.abort(id)
     }
 
     /// What query `query` of run `id` answered.
     pub(super) fn answer(&self, id: &str, query: usize) -> Result<PreviewAnswer, OperationError> {
-        self.run(id)?.answer(query)
+        self.runs.get(id)?.answer(query)
     }
 
     /// Abandon every run, including the queries in flight: the project they
     /// read is closing.
     pub(super) fn shutdown(&self) {
-        for held in std::mem::take(&mut *self.runs.recover_lock()).into_values() {
-            held.task.abort();
-        }
-    }
-
-    fn run(&self, id: &str) -> Result<Arc<PreviewRun>, OperationError> {
-        self.runs
-            .recover_lock()
-            .get(id)
-            .map(|held| held.run.clone())
-            .ok_or_else(Self::not_held)
-    }
-
-    fn not_held() -> OperationError {
-        OperationError::NotFound("This preview run is no longer held; run the node again.".into())
-    }
-
-    /// Drop the settled runs nobody has asked about since they settled.
-    fn forget_abandoned(&self) {
-        self.runs
-            .recover_lock()
-            .retain(|_, held| !held.run.is_abandoned());
+        self.runs.shutdown();
     }
 }
 
@@ -254,8 +219,11 @@ impl PreviewRun {
             .cloned()
             .ok_or_else(|| OperationError::NotFound("That query has not been answered.".into()))
     }
+}
 
-    fn is_abandoned(&self) -> bool {
+/// A settled run is dropped once nobody has asked about it for a while.
+impl HeldWork for PreviewRun {
+    fn is_forgotten(&self) -> bool {
         let progress = self.progress.recover_lock();
         PreviewQueryState::settled(&progress.states, progress.stopped)
             && progress.polled.elapsed() > ABANDONED_AFTER

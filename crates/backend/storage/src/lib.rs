@@ -13,6 +13,12 @@ pub use studio::{StudioProject, StudioStore};
 mod training;
 mod transfer;
 
+pub mod answers {
+    //! Each dataset's table of stored model answers, which curation fills write.
+
+    pub use crate::datasets::{ColumnAnswers, DatasetAnswers, EpisodeAnswer};
+}
+
 pub mod bundle {
     //! Portable snapshots containing Studio metadata and Spiral data.
 

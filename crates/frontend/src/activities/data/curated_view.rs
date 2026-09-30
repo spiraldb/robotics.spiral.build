@@ -2,12 +2,13 @@
 //! tab opens and listed by episode, each interval opening its episode with
 //! the view's intervals drawn on its timeline.
 //!
-//! Nothing caches a model's answers, so every read of a view asks its models
-//! again about each episode it reads. The tab reads it once and holds the
-//! rows for as long as it stays open.
+//! A view reads the answers its models stored, which the run publishing it
+//! writes first; while that run goes on, the tab says what it is doing and
+//! reads nothing. The tab reads the view once and holds the rows for as long
+//! as it stays open.
 use super::DatasetClient;
 use super::catalog_rail::OpenedEpisode;
-use crate::activities::curation::CuratedView;
+use crate::activities::curation::{CuratedView, ViewFill};
 use crate::activities::episode::{
     Episode, EpisodeRows, EpisodeStill, EpisodeStills, RowFace, RowFaceView, StillMoment,
 };
@@ -361,12 +362,28 @@ pub(super) fn CuratedViewSubject(
                     },
                 }
             }
-            if !view.is_current() {
-                Notice { class: "data-curated-notice", tone: NoticeTone::Caution,
-                    "Its curation has changed since it was published. Publish it again from Curation to bring the view up to date."
-                }
+            match view.fill().cloned() {
+                Some(fill @ ViewFill::Running(_)) => rsx! {
+                    p { class: "data-curated-status", role: "status",
+                        SpinnerIcon {}
+                        "Curation in progress. {fill.doing()}"
+                    }
+                },
+                Some(ViewFill::Failed(reason)) => rsx! {
+                    Notice { class: "data-curated-notice", tone: NoticeTone::Danger,
+                        "Its curation could not finish: {reason} Publish it again from Curation to go on where it stopped."
+                    }
+                    CuratedRows { view, on_open }
+                },
+                None => rsx! {
+                    if !view.is_current() {
+                        Notice { class: "data-curated-notice", tone: NoticeTone::Caution,
+                            "Its curation has changed since it was published. Publish it again from Curation to bring the view up to date."
+                        }
+                    }
+                    CuratedRows { view, on_open }
+                },
             }
-            CuratedRows { view, on_open }
         }
     }
 }
@@ -437,7 +454,7 @@ fn CuratedRows(view: CuratedView, on_open: EventHandler<OpenedEpisode>) -> Eleme
         None => rsx! {
             p { class: "data-curated-status", role: "status",
                 SpinnerIcon {}
-                "Curation in progress. This can take a few minutes."
+                "Reading the view…"
             }
         },
         Some(Err(error)) => rsx! {

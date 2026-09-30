@@ -12,7 +12,7 @@ use super::{
     curated_view::CuratedViewSubject,
     dataset_overview::{DatasetOverview, DatasetsAtAGlance},
 };
-use crate::activities::curation::CuratedView;
+use crate::activities::curation::{CuratedFills, CuratedView};
 use crate::activities::episode::{
     EpisodeFactsPresentation as _, EpisodeHeading, EpisodeInspection, HeadingSubject,
 };
@@ -32,6 +32,8 @@ const CATALOG_PANEL: &str = "catalog";
 const OVERVIEW_PANEL: &str = "data-overview";
 const IMPORT_PANEL: &str = "data-import";
 const SUBJECT_TILE: &str = "subject";
+/// How often Data asks how far the runs publishing views have got.
+const FILL_POLL_MS: u32 = 2_000;
 
 #[component]
 pub(crate) fn DataWorkspace(is_active: ReadSignal<bool>) -> Element {
@@ -188,6 +190,42 @@ impl DataSelection {
     }
 }
 
+/// The runs publishing curated views, as the workspace follows them.
+struct ViewFills;
+
+impl ViewFills {
+    /// Read the catalog again whenever a run stops filling a view, so a view
+    /// it just created is listed and a tab that waited on it reads it.
+    fn use_catalog_refresh(fills: Memo<CuratedFills>) {
+        let refresh = crate::client::queries::QueryRefresh::current();
+        let mut filling = use_signal(std::collections::BTreeSet::<String>::new);
+        use_effect(move || {
+            let running = fills.read().running();
+            let ended = filling.peek().iter().any(|view| !running.contains(view));
+            if ended {
+                refresh.invalidate(&[crate::client::queries::QueryDomain::Catalog]);
+            }
+            if *filling.peek() != running {
+                filling.set(running);
+            }
+        });
+    }
+
+    /// `opened` as `listed` has it now, or as it was opened while the list
+    /// is read again.
+    fn current(
+        listed: &Option<Result<Vec<CuratedView>, String>>,
+        opened: CuratedView,
+    ) -> CuratedView {
+        listed
+            .as_ref()
+            .and_then(|read| read.as_ref().ok())
+            .and_then(|views| views.iter().find(|view| view.view() == opened.view()))
+            .cloned()
+            .unwrap_or(opened)
+    }
+}
+
 #[component]
 fn DataPanels() -> Element {
     let project = crate::shell::project::ProjectSelection::current();
@@ -206,11 +244,32 @@ fn DataPanels() -> Element {
     );
     let resources = catalog.value();
     // Which of the catalog's views curations published, and from what; read
-    // again with the catalog, and once a publication is saved.
-    let curated = crate::client::queries::QueryPolicy::on_demand(
+    // again with the catalog, and once a publication is saved. Beside each,
+    // how far the run publishing it has got, read every few seconds.
+    let published = crate::client::queries::QueryPolicy::on_demand(
         crate::client::queries::QueryDomain::Catalog,
     )
     .use_when(move || *available.read(), CuratedView::all);
+    let fills = crate::client::queries::QueryPolicy::new(
+        crate::client::queries::QueryDomain::Catalog,
+        FILL_POLL_MS,
+    )
+    .use_when(move || *available.read(), CuratedFills::read);
+    let fills = use_memo(move || {
+        fills
+            .read()
+            .as_ref()
+            .and_then(|read| read.as_ref().ok())
+            .cloned()
+            .unwrap_or_default()
+    });
+    let curated = use_memo(move || {
+        published
+            .read()
+            .clone()
+            .map(|read| read.map(|views| fills.read().applied(&views)))
+    });
+    ViewFills::use_catalog_refresh(fills);
     let selection = DataSelection::use_selection();
     let inspection = use_resource(move || {
         let dataset = selection.dataset.read().clone();
@@ -330,7 +389,7 @@ fn DataPanels() -> Element {
             "Datasets",
             CATALOG_PANEL,
             rsx! {
-                CatalogRail { resources, curated: curated.value(), selection: rail_selection, actions: rail_actions }
+                CatalogRail { resources, curated: curated.into(), selection: rail_selection, actions: rail_actions }
             },
         )
         .with_class("data-catalog-panel"),
@@ -358,7 +417,10 @@ fn DataPanels() -> Element {
             .with_tab_icon(rsx! { KindMark { letter: 'E', hue: "var(--tone-kind-episode)", label: "Episode" } }),
         );
     }
-    for view in selection.views.read().iter().cloned() {
+    for opened in selection.views.read().iter().cloned() {
+        // A tab shows its view as the catalog lists it now, its run's
+        // progress included.
+        let view = ViewFills::current(&curated.read(), opened);
         let dataset = view.dataset().clone();
         let panel = DataSelection::view_panel(view.view());
         panels.push(

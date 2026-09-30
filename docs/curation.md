@@ -4,10 +4,11 @@ Curation chooses the data to train on: which stretches of which episodes, and
 what to call them. A curation is a graph rooted at one dataset. You build it
 against a preview of the dataset's first 100 episodes, and you publish what it
 selects as a named view in the Spiral catalog. The view is a read-only query
-Spiral runs whenever it is read, with one row per kept interval of an episode.
-Nothing caches a model's answers, so a view reads at most the first 20
-episodes, in recording order, that pass the Selects under the dataset, and
-every model below them is asked about those alone.
+Spiral runs whenever it is read, with one row per kept interval of an episode,
+over every episode of the dataset. Every model answer is stored: publishing
+asks each model about the episodes that reach its node once, in the
+background, and writes the answers into the dataset's answers table, which
+the view reads without asking any model again.
 
 How a model sees that data (sample rate, cameras, image size, normalization)
 is Training's concern, not Curation's. [Why](#why) records the decisions
@@ -81,10 +82,10 @@ rows that reach it.
 | --- | --- | --- | --- |
 | Dataset | | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
 | Select | | Its rule alone: a `WHERE` of every condition, from the same `Selection` the browser filters with | `document/selection.rs` |
-| Score progress | `scores`: `spql.ai.score_progress` over the top camera's packet video | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on; then its rule keeps the moments at least its threshold, and those with no progress rate, and joins touching ones into stretches carrying their mean progress rate | `score_progress/scoring.rs` |
-| Break down subtasks | `subtasks`: `spql.ai.breakdown_task` over the chosen camera's packet video, with Studio's annotation model and the configured sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks unnested, moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
-| Find similar subtasks | | `spql.ai.similarity(subtask, query)` as `similarity`; then its rule keeps the subtasks at least its cutoff | `similar/judgment.rs` |
-| Group similar subtasks | | `spql.ai.classify(subtask, categories)` as `subtask_category`, the categories written into the statement as a literal list; then its rule keeps the subtasks of the categories it keeps | `similar/judgment.rs` |
+| Score progress | Its stored scores: the Modal service's WARP scores of the top camera's packets | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on; then its rule keeps the moments at least its threshold, and those with no progress rate, and joins touching ones into stretches carrying their mean progress rate | `score_progress/scoring.rs` |
+| Break down subtasks | Its stored subtasks: `spql.ai.breakdown_task` over the chosen camera's packet video, with Studio's annotation model and the configured sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks listed with their place in the answer (`subtask_index`), moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
+| Find similar subtasks | Its stored similarities: `spql.ai.similarity(subtask, query)` of every subtask of the Break down above, one list per episode aligned with its subtasks | Each subtask's similarity at its `subtask_index` as `similarity`; then its rule keeps the subtasks at least its cutoff | `similar/judgment.rs` |
+| Group similar subtasks | Its stored categories: `spql.ai.classify(subtask, categories)` the same way, the categories written into the call as a literal list | Each subtask's category at its `subtask_index` as `subtask_category`; then its rule keeps the subtasks of the categories it keeps | `similar/judgment.rs` |
 
 A node's rule is its own entry after its step, named after it
 (`score_progress_1_kept`); a Select's rule is its whole step (`select_1`).
@@ -92,27 +93,48 @@ A node's rule is its own entry after its step, named after it
 A published view is one stream of episode rows (decided 2026-09-25). The
 dataset's listing and its Select of episodes come first; a Select only
 follows the dataset, so it always comes before the first measure, and it is
-the `WHERE` on the episode rows. The listing numbers every episode in
-recording order (`recorded_place`), and after the last Select the view keeps
-the first 20 of what passed (`select_1_first`, or `dataset_0_first` without
-a Select), so every camera read and model call below reads those alone.
-Where the path leaves whole episodes, it builds each episode's row once:
+the `WHERE` on the episode rows. Where the path leaves whole episodes, it
+builds each episode's row once, joined to the dataset's answers table:
 
 ```text
 dataset_0, select_1       the listing with its facts, and the Selects of episodes
-select_1_first            the first 20 episodes they keep, in recording order
-camera_video_1            each camera a model on the path watches, read once
-instruction_1             each episode's first instruction, when Break down reads one
-episodes                  one row per episode: origin_ns, scores, subtasks; no video
+episodes                  one row per episode: origin_ns and each stored answer the path reads
 score_progress_…, …_kept each step, and each rule after it, reads the entry above it once
-break_down_…, find_…      unnesting the answer it asked for when it reaches it
+break_down_…, find_…      unnesting or indexing the answer it reads when it reaches it
 ```
 
 The row carries the episode's first message as `origin_ns` and one column per
-model answer. The answers ride on the interval rows until the step of the
-node that asked for them unnests them: on Dataset → Score progress → Break
-down, `subtasks` rides on every moment and every stretch. Spiral joins and windows rows that carry these lists of structs as
-readily as scalar ones.
+stored answer. The answers ride on the interval rows until the step of the
+node that reads them: on Dataset → Score progress → Break down, the subtasks
+ride on every moment and every stretch. A judgment's list rides on to the
+end, so a node below asking the same reads it too. Spiral joins and windows
+rows that carry these lists of structs as readily as scalar ones.
+
+### Stored answers
+
+Each dataset has an answers table, `dataset_answers_<id>` beside
+`dataset_<id>`: one row per episode keyed by `episode_id`, created at import
+from the Dataset's first refresh and given a row by each append. Every model
+call a node makes is one column, named for what it measures and six hex
+digits of a SHA-256 of the exact call (`score_progress_3f9a2c`): the function
+or service, the model revision, the Modal service revision, the arguments,
+the camera or instruction
+topic, and for a judgment the Break down column it reads. Identical calls
+across curations share a column. A value is `STRUCT(value …)`: a NULL struct
+is an episode not asked yet, a NULL `value` one the model could not answer,
+which is never asked again. Unpublishing drops only the view.
+
+`CurationPath::fills` compiles, for each node that asks a model in path
+order, its column, the episodes that reach it (the path above compiled over
+the columns already filled, `SELECT DISTINCT episode_id`), and how one
+episode's answer is computed: a statement over the episode bound as `$1`,
+or, for Score progress, the Modal service. Break down's statement asks its
+model once per episode, and a judgment's judges the episode's whole stored
+list of subtasks in one call (the list forms of `spql.ai.similarity` and
+`spql.ai.classify`), which answers with a list aligned with them. Break down
+lists its subtasks with `spql.range` and `spql.list.get`, each carrying its
+place (`subtask_index`), and a judgment reads each subtask's answer at that
+place; Spiral has no `WITH ORDINALITY`.
 
 The scorer and Break down read each episode whole, so what they are asked
 never depends on anything above the node. Studio's packets carry presentation
@@ -132,13 +154,13 @@ every step from the dataset down into one statement over every episode. A
 holds, supplied as `VALUES` in place of the parent's entry
 (`CurationPath::preview`), so nothing above the node runs again. Those rows
 are flat: a previewed node that asks each episode anything builds its own row
-for the episode bound as `$1`, reading the bound episode wherever a topic is
-read, and joins it to them before the same step. And the preview passes
-`on_error => 'fail'` to every `spql.ai` call that takes it, so an episode the
-model cannot answer fails with its reason; the view keeps the functions'
-default, a NULL for that row, so one episode never ends a read of thousands.
-The preview leaves the node's rule out: the browser keeps by it over what the
-step read, so sliding a threshold asks nothing again.
+for the episode bound as `$1`, reading its stored answers, and joins it to
+them before the same step. No preview asks a model: it fills the node's
+column for the episodes it reads first. A fill keeps the functions' NULL for
+an answer they cannot give, which it stores as the episode's failed answer,
+so one episode never ends a fill of thousands. The preview leaves the node's
+rule out: the browser keeps by it over what the step read, so sliding a
+threshold asks nothing again.
 
 The next frame's time is `LEAD`, and the last frame lasts as long as the one
 before it (`LAG`); the frames and the window over them are separate entries.
@@ -162,15 +184,16 @@ down ran `spql.ai.score_progress` twice per episode and read the camera
 three times. Having SpiralDB compute a CTE read in several places once is not
 pursued for now; the compiler keeps these rules instead.
 
-- **An entry containing a model call is read once.** Every step reads the
-  entry above it once. A test compiles every path of up to six nodes the
-  grammar allows and counts the reads of each such entry, and each model
-  node's call.
-- **Per-episode work stays on the episode row.** A model call over one
-  episode's video is a column of the episode's row, built on the episode
-  listing; the episode's first message and instruction are columns there
-  too, rather than joined back in after the call. A camera two models watch
-  is read once.
+- **A published view asks no model.** Every step reads the entry above it
+  once, and the answers table is joined to the episode row once. A test
+  compiles every path of up to six nodes the grammar allows and checks that
+  no view calls `spql.ai`, that each stored column is read once, and that
+  each fill finds its episodes over the columns filled before it.
+- **Per-episode work stays on the episode row.** A stored answer, or a
+  preview's model call over one episode's video, is a column of the
+  episode's row, built on the episode listing; the episode's first message
+  and instruction are columns there too, rather than joined back in after
+  the call. A camera two models watch is read once.
 - **Change grain once, as late as possible.** Unnesting to moment or subtask
   rows comes after the episode row, and the answers a later step needs ride
   along as list columns. Find similar and Group similar add their columns on
@@ -178,35 +201,25 @@ pursued for now; the compiler keeps these rules instead.
   filter or map functions (`spql.list` has `contains`, `get`, `is_empty`,
   `len`, `sum`, and the aggregate `collect`), so work over one row's list is
   written as unnest, then compute over the rows.
-- **Only a Select of episodes spares an episode its model calls.** A model's
-  column is on the episode row, before any interval is cut, so a rule below
-  a measure keeps rows but never skips a call. On Score progress → Break
-  down, the view asks `breakdown_task` of every episode, including one where
-  no frame passes Score progress's threshold. Its rows are still the
-  preview's, which asks only the episodes that reach Break down; only the
-  cost differs.
+- **A model is asked only about the episodes that reach its node.** A fill
+  finds them over the columns above, so on Score progress → Break down,
+  `breakdown_task` is asked of the episodes with a stretch that passes Score
+  progress's threshold, and no other.
 
 ## Preview
 
 Every measurement previews the same way. Pressing Run reads the episodes that
 reach the node as the curation's own run, and the node card and the top bar
-say how far it has got ("Breaking down 3 of 5 episodes"). What reaches the
-node is its parent's preview rows, written into the statement (`preview/`):
-
-- **Break down and Score progress** read one recording per
-  query. Each is handed the intervals of its episode that reach the node,
-  with the episode bound as `$1`, and answers as rows (subtasks) or as one
-  Arrow stream (moments). Touching intervals are handed on joined, so below
-  Score progress Break down is handed the stretches its rule keeps, never a
-  row per frame.
-- **Find similar and Group similar** read no recording, so they judge the
-  subtasks of many episodes in one statement: as many as fit
-  in 60 KiB and 1,000 rows, which is one statement for a sample of short
-  episodes. One call over many rows costs the same model time as many small
-  ones and saves the round trips. The ids travel as text, because Spiral
-  casts no text to a UUID and only `$1` binds one, and `subtask_category`
-  travels as its two fields, rebuilt with `STRUCT_PACK`, because `VALUES`
-  takes literals only.
+say how far it has got ("Breaking down 3 of 5 episodes"). The backend first
+fills the node's stored answers for those episodes (a fill run over listed
+episodes, `POST /api/curation-fills`, polled every second; Stop stops it and
+keeps what it answered), then each episode is read with one query, the
+episode bound as `$1`, handed the intervals of it that reach the node, its
+parent's preview rows written into the statement (`preview/`). It answers as
+rows (subtasks) or as one Arrow stream (moments). Touching intervals are
+handed on joined, so below Score progress Break down is handed the stretches
+its rule keeps, never a row per frame; `subtask_category` travels as its two
+fields, rebuilt with `STRUCT_PACK`, because `VALUES` takes literals only.
 
 A pass hands every query to the backend as one run
 (`POST /api/curation-previews`), which answers at once and works through them
@@ -223,8 +236,7 @@ model calls it made are still spent. A run nobody polls for 30 seconds only
 starts nothing more, since the page that wanted it has gone, and a settled
 run is dropped once it has gone unread that long. Runs live in the backend's
 memory, so a restarted backend holds none. A failed episode is listed with its reason and
-never stops the rest; a failed batch fails each episode in it, since
-`on_error => 'fail'` fails the statement. What the preview reads is held in
+never stops the rest. What the preview reads is held in
 the browser for the session and is gone after a reload.
 
 Each read keeps what went into it: the configuration of the measure above
@@ -261,17 +273,34 @@ answers, the two readings return the same rows for every measure.
 Publish, at the end of the document bar, lists every output with the name of
 its view. Choose the outputs to publish and give each a view name: one plain
 identifier, at the catalog root. Publish saves the curation first, because
-each view is compiled from the saved recipe. Studio then sends
-each compiled statement to `POST /api/curations/publish` in turn, records
-every `node → view name, revision` it created in one edit, and saves once: a
-publication is recorded against the saved revision, and the save that records
-it must come next.
+each view is compiled from the saved recipe. Studio then starts one fill run
+(`POST /api/curation-fills`) with every column the chosen views read, each
+once, and the views, records every `node → view name, revision` in one edit,
+and saves once: a publication is recorded against the saved revision, and the
+save that records it must come next.
 
-The backend checks the name, admits the statement as one read-only query,
-refuses a name that a table or a Dataset holds, and runs one `CREATE OR
-REPLACE VIEW`, so a reader sees the old view or the new one. (Spiral refuses a
-`DROP VIEW` and a `CREATE VIEW` of one name in one transaction as a namespace
-conflict once the view exists.) Unpublish drops the view.
+Before the run starts, the backend checks each view name, admits every
+statement as one read-only query, and refuses a name a table or a Dataset
+holds. The run is the backend's and outlives the page. For each column in
+order it
+reads the episodes that reach the node, skips those the column holds, asks
+about the rest (a statement eight at a time; the Modal service twenty
+across runs, its containers each taking in eight uploads while the GPU
+scores, and
+retries 429s, 5xx, and timeouts with a pause), and holds the answers in
+memory; then it ingests them into a staging table, adds the column the first
+time, merges it in by `episode_id`, and drops the staging table. A rejected
+video (422) is that episode's failed answer; a refused token, a service on
+another revision (409), or an error ends the run once what it answered is
+written.
+Once every column is filled it runs one `CREATE OR REPLACE VIEW` per view,
+so a reader sees the old view or the new one. (Spiral refuses a `DROP VIEW` and a `CREATE VIEW`
+of one name in one transaction as a namespace conflict once the view
+exists.) A restarted backend loses the answers of the column in flight;
+publishing again resumes past every episode already written. While a run
+fills a view, Data lists it as "In progress", says which node and how many
+of its episodes are answered, and opens it once the run is done. Unpublish
+drops the view; its stored answers stay.
 
 A later save that changes the recipe moves the curation past the published
 revision, and Publish then lists the output's view as out of date until it
@@ -302,21 +331,20 @@ earlier encoding is refused.
 | --- | --- | --- |
 | No SQL node, joins, or free-form query shapes | Curation always ends in training input; analytics is not the product | A SQL escape-hatch node |
 | Every node compiles to Spiral SQL, and a published view is the whole curation | One executable form: every reader sees exactly what was curated | Studio materializing results |
-| Per-row model work is a `spql.ai` function; an authoring suggestion, such as proposed categories, stays in the browser and becomes a literal | Spiral alone must be able to evaluate the view | Browser-orchestrated calls per episode |
-| Caching model answers is Spiral's, later | Correctness first; users shouldn't manage cost | Studio-side caches |
-| A preview runs only its node's step, over its parent's preview rows | Each step is written once, and a search or grouping makes only its own text calls | Recomputing the whole path per episode |
+| Per-row model work is a `spql.ai` function, and progress scoring the Modal service; an authoring suggestion, such as proposed categories, stays in the browser and becomes a literal | A view reads only what Spiral stores | Browser-orchestrated calls per episode |
+| Model answers are stored per dataset, one column per exact call, filled by a backend run | A view over the whole dataset must not ask its models on every read, and identical calls share their work | Re-asking on every read over the first 20 episodes; waiting for Spiral to cache |
+| A preview runs only its node's step, over its parent's preview rows, reading its stored answers | Each step is written once, and a preview's answers are the ones a publish reuses | Recomputing the whole path per episode |
 | Preview reads the first 100 episodes in recording order | Fast enough to iterate on | A random sample |
 | Every Score progress, Find similar, Group similar, and Select node is an output; a measure keeps by its own rule; Publish chooses and names the views | Break down's free text is not trainable until a search or grouping reads it; a threshold belongs with the measure it divides | An explicit Output node; progress and similarity Selects |
 | One row per kept interval | It is what the graph carries, so publishing converts nothing | One row per episode with nested ranges; one row per moment |
 | Curation only chooses data | Sample rate, cameras, image size, and normalization are the policy's input contract, which rollout replays | Shape nodes in Curation |
 | Publish is explicit and named; Save stays local | Exploratory leaves must not create catalog resources, and readers need a stable name | Auto-publishing every leaf |
-| The frontend compiles; the backend only admits a read-only statement and creates the view | The backend stays thin and the browser never sends DDL | The backend compiles the graph |
+| The frontend compiles; the backend admits read-only statements, fills the columns they name, and creates the view | The backend stays thin and the browser never sends DDL | The backend compiles the graph |
 
 ## Not yet
 
-- Every read of a published view repeats its model calls; caching them, per
-  call so that preview, published views, and curations over one dataset
-  share the work, is Spiral's to add. So is cancelling a running query.
+- Columns no curation reads any more stay in the answers table; collecting
+  them is later. Cancelling a running query is Spiral's to add.
 - Training does not read published views yet. When it does, it resamples:
   a recording keeps every stream at its own rate and a view only names
   intervals, so Training picks a sample rate and makes one moment per tick

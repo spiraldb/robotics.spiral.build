@@ -7,11 +7,20 @@
 //! stored document comes back one higher; a delete carries it too. A mismatch
 //! is a `conflict` failure.
 //!
-//! The frontend also compiles each output to one read-only statement; the
-//! backend publishes it under a plain name at the catalog root. A node's
-//! preview queries run on the backend as one polled run (`preview`).
+//! The frontend also compiles each output to one read-only statement over
+//! the dataset's stored model answers (`answers`); the backend fills the
+//! answers the statement reads and then publishes it under a plain name at
+//! the catalog root, as one polled run (`fill`). A node's preview queries run
+//! on the backend as one polled run too (`preview`).
+mod answers;
+mod fill;
 mod preview;
 
+pub use answers::{AnswerColumn, AnswerTable};
+pub use fill::{
+    AnswerSource, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest, FillState, FillStatus,
+    FillStep,
+};
 pub use preview::{PreviewQuery, PreviewQueryState, PreviewRunStatus};
 
 use crate::sql::UnquotedSqlIdentifier;
@@ -157,8 +166,8 @@ impl Display for ViewName {
     }
 }
 
-/// Publish one curation output: the view's name and the read-only statement
-/// the view is defined as.
+/// One curation output a fill run publishes: the view's name and the
+/// read-only statement the view is defined as.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishRequest {

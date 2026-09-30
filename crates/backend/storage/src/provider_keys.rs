@@ -1,7 +1,8 @@
-//! The keys Studio holds for its providers: the model provider's API key and
-//! the Hugging Face token. The backend saves them in its SQLite settings,
-//! attaches them to its own requests, and hands them to every database it
-//! opens; the browser only learns which are saved.
+//! The keys Studio holds for its providers: the model provider's API key,
+//! the Hugging Face token, and the Modal service's base URL and token. The
+//! backend saves them in its SQLite settings, attaches them to its own
+//! requests, and hands the first two to every database it opens; the browser
+//! only learns which are saved.
 
 use std::sync::Arc;
 
@@ -19,6 +20,10 @@ pub struct ProviderKeys {
     llm_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     huggingface_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modal_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modal_token: Option<String>,
 }
 
 impl ProviderKeys {
@@ -30,8 +35,18 @@ impl ProviderKeys {
         self.huggingface_token.as_deref()
     }
 
+    /// Where the Modal service that scores progress is reached.
+    pub fn modal_base_url(&self) -> Option<&str> {
+        self.modal_base_url.as_deref()
+    }
+
+    pub fn modal_token(&self) -> Option<&str> {
+        self.modal_token.as_deref()
+    }
+
     pub fn status(&self) -> ProviderKeysStatus {
         ProviderKeysStatus::new(self.llm_api_key.is_some(), self.huggingface_token.is_some())
+            .with_modal(self.modal_base_url.is_some(), self.modal_token.is_some())
     }
 
     /// These keys with `update` applied: an omitted key is kept and an empty
@@ -44,14 +59,18 @@ impl ProviderKeys {
         Self {
             llm_api_key: apply(&self.llm_api_key, update.llm_api_key()),
             huggingface_token: apply(&self.huggingface_token, update.huggingface_token()),
+            modal_base_url: apply(&self.modal_base_url, update.modal_base_url()),
+            modal_token: apply(&self.modal_token, update.modal_token()),
         }
     }
 
-    /// A merge patch that replaces both saved keys, removing the absent ones.
+    /// A merge patch that replaces every saved key, removing the absent ones.
     pub(crate) fn merge_patch(&self) -> serde_json::Value {
         serde_json::json!({
             "llm_api_key": self.llm_api_key,
             "huggingface_token": self.huggingface_token,
+            "modal_base_url": self.modal_base_url,
+            "modal_token": self.modal_token,
         })
     }
 }
@@ -120,5 +139,16 @@ mod tests {
         assert_eq!(removed.llm_api_key(), Some("sk-or-first"));
         assert_eq!(removed.status(), ProviderKeysStatus::new(true, false));
         assert!(!format!("{saved:?}").contains("sk-or-first"));
+        let modal = removed.updated(
+            &ProviderKeysUpdate::default()
+                .with_modal_base_url(Some(" https://scores.modal.run ".into()))
+                .with_modal_token(Some("modal-secret".into())),
+        );
+        assert_eq!(modal.modal_base_url(), Some("https://scores.modal.run"));
+        assert_eq!(
+            modal.status(),
+            ProviderKeysStatus::new(true, false).with_modal(true, true)
+        );
+        assert!(!format!("{modal:?}").contains("modal-secret"));
     }
 }

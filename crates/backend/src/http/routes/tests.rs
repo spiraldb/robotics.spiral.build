@@ -147,22 +147,25 @@ async fn saved_keys_reach_the_providers_and_only_their_presence_reaches_the_brow
     };
     let (status, saved) = fixture
         .send(save(
-            r#"{"llm_api_key":"sk-or-private","huggingface_token":"hf_private"}"#,
+            r#"{"llm_api_key":"sk-or-private","huggingface_token":"hf_private","modal_token":"modal_private"}"#,
         ))
         .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(
         saved,
-        serde_json::json!({"llm_api_key_configured": true, "huggingface_token_configured": true})
+        serde_json::json!({"llm_api_key_configured": true, "huggingface_token_configured": true,
+            "modal_base_url_configured": false, "modal_token_configured": true})
     );
     let (_, providers) = fixture.send(get("/providers")).await;
     assert!(providers["llm"]["base_url"].is_string());
     assert!(!providers.to_string().contains("sk-or-private"));
+    assert!(!providers.to_string().contains("modal_private"));
     // An omitted key stays saved; an empty one is removed.
     let (_, saved) = fixture.send(save(r#"{"huggingface_token":""}"#)).await;
     assert_eq!(
         saved,
-        serde_json::json!({"llm_api_key_configured": true, "huggingface_token_configured": false})
+        serde_json::json!({"llm_api_key_configured": true, "huggingface_token_configured": false,
+            "modal_base_url_configured": false, "modal_token_configured": true})
     );
     let (_, status) = fixture.send(get("/keys")).await;
     assert_eq!(status, saved);

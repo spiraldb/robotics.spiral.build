@@ -1,4 +1,5 @@
-//! The saved curations: list them, load one by id, store one back, delete one.
+//! The saved curations: list them, load one by id, store one back, delete one;
+//! and the fill runs that store their model answers and publish their views.
 //!
 //! Build one inside the task that awaits it, as every other Studio client is
 //! built, so the request names the mounting scope's project.
@@ -6,7 +7,9 @@
 use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
-use spiral_robotics_common::curation::{CurationDeletion, CurationDocument, CurationSummary};
+use spiral_robotics_common::curation::{
+    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+};
 
 pub(super) struct CurationClient(ProjectClient);
 
@@ -50,6 +53,44 @@ impl CurationClient {
                 HttpRequest::new("POST", "/api/curations/delete")
                     .json(&CurationDeletion::new(id, revision)),
             )
+            .await
+    }
+
+    /// Start filling what `request` asks for; the backend works on it after
+    /// this returns.
+    pub(super) async fn start_fill(
+        &self,
+        request: &FillRequest,
+    ) -> Result<FillStatus, CommandError> {
+        self.0
+            .request(HttpRequest::new("POST", "/api/curation-fills").json(request))
+            .await
+    }
+
+    /// Where fill run `id` stands.
+    pub(super) async fn fill(&self, id: &str) -> Result<FillStatus, CommandError> {
+        self.0
+            .request(HttpRequest::new(
+                "GET",
+                format!("/api/curation-fills/{}", id.url_component()),
+            ))
+            .await
+    }
+
+    /// Ask fill run `id` to start nothing more; what is in flight is written.
+    pub(super) async fn stop_fill(&self, id: &str) -> Result<(), CommandError> {
+        self.0
+            .request(HttpRequest::new(
+                "POST",
+                format!("/api/curation-fills/{}/stop", id.url_component()),
+            ))
+            .await
+    }
+
+    /// Every fill run that publishes a view.
+    pub(super) async fn publications(&self) -> Result<Vec<FillStatus>, CommandError> {
+        self.0
+            .request(HttpRequest::new("GET", "/api/curation-fills"))
             .await
     }
 }

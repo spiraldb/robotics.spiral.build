@@ -4,57 +4,54 @@
 //! `start_ns`, `end_ns` in the recording's clock (MCAP log time), then the
 //! properties the nodes above measured. A node adds to a path in two parts
 //! ([`PathFragment`]). What it asks a model about each whole episode is a
-//! column of that episode's row ([`EpisodeRow`]), beside the camera videos
-//! and the instruction the call reads. Its step then works over the interval
-//! rows that reach it: a judgment adds a column, and the node that asked the
-//! episode unnests the answer and cuts it to the interval of the row it
-//! arrived on. A node's rule, when it keeps by one, filters what its step
-//! wrote; a Select is a rule alone.
+//! column of that episode's row ([`EpisodeRow`]). Its step then works over
+//! the interval rows that reach it: the node that asked the episode unnests
+//! the answer and cuts it to the interval of the row it arrived on, and a
+//! judgment of each subtask reads its answer at the subtask's place in the
+//! Break down it came from. A node's rule, when it keeps by one, filters what
+//! its step wrote; a Select is a rule alone.
 //!
-//! Each step is written once and read two ways. The published view is one
-//! stream of rows over the first episodes the dataset's Selects keep
-//! ([`PublishedEpisodes`]). Where the path leaves
-//! whole episodes, each episode's row is built once with every answer the
-//! nodes below ask for, and the answers ride on the interval rows until the
-//! step that unnests them. Every step reads the one before it exactly once,
-//! so Spiral, which pastes a `WITH` entry into every place that reads it,
-//! never asks a model twice. A preview writes only the last node, over the
-//! rows its parent's preview already holds, supplied to Spiral as `VALUES`
-//! ([`StepInput`]): the node's own row for the episode bound as `$1` alone,
-//! joined to those rows, then the same step. No model call above the node is
-//! made again, and one that cannot answer fails the preview with its reason
-//! where the view answers NULL for that row. The preview leaves the node's
-//! rule out: the browser keeps by it over what the step read, so moving the
-//! rule's threshold asks nothing again.
+//! Every model answer is stored: each node that asks a model writes one
+//! column of the dataset's answers table per exact call ([`AnswerColumn`]),
+//! and a fill run computes it for every episode that reaches the node and
+//! does not have it yet ([`CurationPath::fills`]), in path order, so the
+//! episodes reaching a node are read over the columns above it. The
+//! published view reads those columns and asks no model: where the path
+//! leaves whole episodes, each episode's row is built once, joined to the
+//! answers table, and the answers ride on the interval rows until the step
+//! that unnests them. Every step reads the one before it exactly once, so
+//! Spiral, which pastes a `WITH` entry into every place that reads it, reads
+//! each answer once.
+//!
+//! A preview writes only the last node, over the rows its parent's preview
+//! already holds, supplied to Spiral as `VALUES` ([`StepInput`]): the node's
+//! own row for the episode bound as `$1` alone, joined to those rows, then
+//! the same step, reading the node's stored column, which the preview fills
+//! first for the episodes it reads. The preview leaves the node's rule out:
+//! the browser keeps by it over what the step read, so moving the rule's
+//! threshold asks nothing again.
 mod episode_row;
 
 pub(super) use episode_row::EpisodeRow;
 
 use super::document::{CurationGraph, CurationNode, CurationNodeKind, PopulationKind};
-use super::population::PUBLISHED_EPISODES;
 use episode_row::RowAnswers;
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, ColumnFill, FillEpisodes};
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
 /// Which reading of a path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PathSource {
     /// Over the rows a parent's preview holds; the node's own episode row
-    /// reads the episode bound as `$1`.
+    /// reads the stored answers of the episode bound as `$1`.
     Preview,
-    /// Chained into the view over the episodes it is bounded to.
+    /// Chained into the view over every episode of the dataset, reading the
+    /// stored answers.
     Published,
-}
-
-impl PathSource {
-    /// The trailing argument of a `spql.ai` call: a preview reads one episode
-    /// and shows why it failed, while a view over thousands of episodes must
-    /// not die on one, so it keeps the functions' own NULL.
-    pub(super) fn on_error(self) -> &'static str {
-        match self {
-            Self::Preview => ", on_error => 'fail'",
-            Self::Published => "",
-        }
-    }
+    /// The one call filling a node's stored column, for the episode bound as
+    /// `$1`. A call keeps its function's NULL for an answer it cannot give,
+    /// which the fill stores as the episode's failed answer.
+    Fill,
 }
 
 /// One column after the interval: where it is written, and which measure
@@ -119,6 +116,10 @@ impl Relation {
     /// The answers riding on these rows.
     pub(super) fn answers(&self) -> &RowAnswers {
         &self.answers
+    }
+    /// The same rows as a preview holds them: no episode answer rides on.
+    pub(super) fn without_answers(&self) -> Self {
+        self.clone().carrying(RowAnswers::default())
     }
     /// These columns under `name`, plus one more `measure` wrote, which the
     /// output view shows. The column is named for the measure, with a suffix
@@ -208,11 +209,12 @@ impl StepInput {
 }
 
 /// Where one node's step is written: the name its relation takes, what
-/// reaches it, and which reading this is.
+/// reaches it, and the column its answers are stored in when it asks a
+/// model.
 pub(super) struct PathStep<'a> {
     name: String,
     input: Option<&'a Relation>,
-    source: PathSource,
+    column: Option<&'a AnswerColumn>,
 }
 
 impl PathStep<'_> {
@@ -226,46 +228,49 @@ impl PathStep<'_> {
         self.input
             .ok_or_else(|| PathError::new("Only the dataset starts a path."))
     }
-    pub(super) fn source(&self) -> PathSource {
-        self.source
+    /// The column the node's answers are stored in.
+    pub(super) fn column(&self) -> Result<&AnswerColumn, PathError> {
+        self.column
+            .ok_or_else(|| PathError::new("This node asks no model."))
     }
 }
 
 /// A node configuration that writes its own part of a path.
 pub(super) trait PathFragment {
     /// What the node asks a model about each whole episode, as columns of
-    /// its row. Most nodes ask nothing.
-    fn episode_columns(&self, _row: &mut EpisodeRow) -> Result<(), PathError> {
+    /// its row, stored in `column`. Most nodes ask nothing.
+    fn episode_columns(
+        &self,
+        _row: &mut EpisodeRow,
+        _column: &AnswerColumn,
+    ) -> Result<(), PathError> {
         Ok(())
     }
     /// Its step over the interval rows that reach it.
     fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError>;
 }
 
-/// The whole episodes a published view reads: the first
-/// [`PUBLISHED_EPISODES`] that the dataset and its Selects hand on, in
-/// recording order. Nothing caches a model's answers, so every read of the
-/// view asks each model below about these again, and no more.
-pub(super) struct PublishedEpisodes;
-
-impl PublishedEpisodes {
-    /// The column carrying each episode's place in the dataset's recording
-    /// order, from the dataset's listing down to the bound.
-    pub(super) const PLACE: &'static str = "recorded_place";
+/// A node configuration that asks a model, whose answers are stored: one
+/// column of the dataset's answers table per exact call.
+pub(super) trait StoredAnswers {
+    /// The column the node's call stores its answers in. `subtasks` is the
+    /// column of the Break down above, for a node that judges its subtasks.
+    fn answer_column(&self, subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError>;
+    /// How a fill computes one episode's answer over `dataset`: the node's
+    /// column, and the Break down column it judges, as `answer_column` had.
+    fn answer_source(
+        &self,
+        dataset: &DatasetSelection,
+        columns: (&AnswerColumn, Option<&AnswerColumn>),
+    ) -> Result<AnswerSource, PathError>;
 }
 
-impl PathFragment for PublishedEpisodes {
-    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
-        let input = step.input()?;
-        let name = step.name();
-        let first = format!(
-            "{name} AS (SELECT {} FROM {} ORDER BY {} LIMIT {PUBLISHED_EPISODES})",
-            input.columns(),
-            input.name(),
-            Self::PLACE
-        );
-        Ok(StepSql::new(vec![first], input.renamed(name)))
-    }
+/// Where one node of a path stores its answers: its column, and the column
+/// of the Break down whose subtasks it judges, when it judges them.
+#[derive(Clone)]
+struct NodeColumns {
+    column: AnswerColumn,
+    subtasks: Option<AnswerColumn>,
 }
 
 /// Why a path has no statement, in the words a workspace shows.
@@ -324,10 +329,14 @@ impl<'a> CurationPath<'a> {
         let dataset = self.dataset()?;
         let fragment = Self::fragment(self.nodes[depth].kind(), dataset)
             .ok_or_else(|| PathError::new("Only a measurement previews."))?;
+        let columns = self.answer_columns()?;
+        let column = columns[depth].as_ref().map(|stored| &stored.column);
         let mut row = EpisodeRow::new(dataset, PathSource::Preview);
-        fragment.episode_columns(&mut row)?;
+        if let Some(column) = column {
+            fragment.episode_columns(&mut row, column)?;
+        }
         let mut entries = input.entries;
-        let reached = match row.over(&input.relation) {
+        let reached = match row.over(&input.relation)? {
             Some(built) => {
                 entries.extend(built.entries);
                 built.relation
@@ -337,7 +346,7 @@ impl<'a> CurationPath<'a> {
         let written = fragment.interval_step(&PathStep {
             name: self.step_name(depth),
             input: Some(&reached),
-            source: PathSource::Preview,
+            column,
         })?;
         entries.extend(written.entries);
         Ok(Self::select(&entries, &written.relation))
@@ -346,6 +355,68 @@ impl<'a> CurationPath<'a> {
     /// The relation the last node hands on in the published view.
     pub(super) fn relation(&self) -> Result<Relation, PathError> {
         self.compile().map(|compiled| compiled.relation)
+    }
+
+    /// Every column the published view reads, in the order a fill writes
+    /// them: for each node that asks a model, the episodes that reach it,
+    /// read over the columns above, and how one episode's answer is
+    /// computed.
+    pub(super) fn fills(&self) -> Result<Vec<ColumnFill>, PathError> {
+        let columns = self.answer_columns()?;
+        let mut fills = Vec::new();
+        for (depth, stored) in columns.iter().enumerate() {
+            let Some(stored) = stored else {
+                continue;
+            };
+            let node = self.nodes[depth];
+            let reaching = CurationPath {
+                graph: self.graph,
+                nodes: self.nodes[..depth].to_vec(),
+            }
+            .reaching()?;
+            fills.push(self.fill(node, stored, FillEpisodes::Reaching(reaching))?);
+        }
+        Ok(fills)
+    }
+
+    /// The last node's column filled for `episodes`, as its preview fills
+    /// it before reading it.
+    pub(super) fn fill_for(&self, episodes: Vec<EpisodeId>) -> Result<ColumnFill, PathError> {
+        let depth = self.nodes.len() - 1;
+        let columns = self.answer_columns()?;
+        let stored = columns[depth]
+            .as_ref()
+            .ok_or_else(|| PathError::new("This node asks no model."))?;
+        self.fill(self.nodes[depth], stored, FillEpisodes::Listed(episodes))
+    }
+
+    fn fill(
+        &self,
+        node: &CurationNode,
+        stored: &NodeColumns,
+        episodes: FillEpisodes,
+    ) -> Result<ColumnFill, PathError> {
+        let answers =
+            Self::stored(node.kind()).ok_or_else(|| PathError::new("This node asks no model."))?;
+        let source =
+            answers.answer_source(self.dataset()?, (&stored.column, stored.subtasks.as_ref()))?;
+        Ok(ColumnFill::new(
+            node.kind().label(),
+            stored.column.clone(),
+            episodes,
+            source,
+        ))
+    }
+
+    /// Every episode the path hands on, once each, read over the stored
+    /// answers.
+    fn reaching(&self) -> Result<String, PathError> {
+        let compiled = self.compile()?;
+        Ok(format!(
+            "WITH\n  {}\nSELECT DISTINCT episode_id FROM {}",
+            compiled.entries.join(",\n  "),
+            compiled.relation.name
+        ))
     }
 
     fn dataset(&self) -> Result<&'a DatasetSelection, PathError> {
@@ -367,40 +438,58 @@ impl<'a> CurationPath<'a> {
         )
     }
 
+    /// Where each node of the path stores its answers, in path order;
+    /// nothing for a node that asks no model. A judgment's call names the
+    /// Break down above whose subtasks it reads.
+    fn answer_columns(&self) -> Result<Vec<Option<NodeColumns>>, PathError> {
+        let mut subtasks = None::<AnswerColumn>;
+        self.nodes
+            .iter()
+            .map(|node| {
+                let Some(answers) = Self::stored(node.kind()) else {
+                    return Ok(None);
+                };
+                let column = answers.answer_column(subtasks.as_ref())?;
+                let stored = NodeColumns {
+                    column: column.clone(),
+                    subtasks: subtasks.clone(),
+                };
+                if matches!(node.kind(), CurationNodeKind::BreakDownSubtasks(_)) {
+                    subtasks = Some(column);
+                }
+                Ok(Some(stored))
+            })
+            .collect()
+    }
+
     /// Every node's step from the dataset down, each followed by its rule,
     /// with the episode row built once, before the first node below the
-    /// dataset's own Select: until then every row is a whole episode. Where
-    /// the dataset's Selects end, the view is bounded to the first episodes
-    /// they keep, so every model below is asked about those alone.
+    /// dataset's own Select: until then every row is a whole episode.
     fn compile(&self) -> Result<StepSql, PathError> {
         let dataset = self.dataset()?;
+        let columns = self.answer_columns()?;
+        let column = |depth: usize| columns[depth].as_ref().map(|stored| &stored.column);
         let mut row = EpisodeRow::new(dataset, PathSource::Published);
-        for node in &self.nodes {
-            if let Some(fragment) = Self::fragment(node.kind(), dataset) {
-                fragment.episode_columns(&mut row)?;
+        for (depth, node) in self.nodes.iter().enumerate() {
+            if let (Some(fragment), Some(column)) =
+                (Self::fragment(node.kind(), dataset), column(depth))
+            {
+                fragment.episode_columns(&mut row, column)?;
             }
         }
         let mut row = Some(row);
         let mut entries = Vec::new();
         let mut relation = None::<Relation>;
-        let bounded_at = self
-            .nodes
-            .iter()
-            .take_while(|node| {
-                matches!(
-                    node.kind(),
-                    CurationNodeKind::Dataset | CurationNodeKind::Select
-                )
-            })
-            .count()
-            .saturating_sub(1);
         for (depth, node) in self.nodes.iter().enumerate() {
             let whole_episodes =
                 self.graph.population_kind(node.id()) == Some(PopulationKind::Episodes);
             if !whole_episodes
-                && let Some(built) = relation
-                    .as_ref()
-                    .and_then(|episodes| row.take()?.over(episodes))
+                && let Some(episodes) = relation.as_ref()
+                && let Some(built) = row
+                    .take()
+                    .map(|row| row.over(episodes))
+                    .transpose()?
+                    .flatten()
             {
                 entries.extend(built.entries);
                 relation = Some(built.relation);
@@ -413,7 +502,7 @@ impl<'a> CurationPath<'a> {
                 let written = fragment.interval_step(&PathStep {
                     name,
                     input: relation.as_ref(),
-                    source: PathSource::Published,
+                    column: column(depth),
                 })?;
                 entries.extend(written.entries);
                 relation = Some(written.relation);
@@ -423,19 +512,10 @@ impl<'a> CurationPath<'a> {
                 let kept = rule.interval_step(&PathStep {
                     name: rule_name,
                     input: relation.as_ref(),
-                    source: PathSource::Published,
+                    column: None,
                 })?;
                 entries.extend(kept.entries);
                 relation = Some(kept.relation);
-            }
-            if depth == bounded_at {
-                let first = PublishedEpisodes.interval_step(&PathStep {
-                    name: format!("{}_first", self.step_name(depth)),
-                    input: relation.as_ref(),
-                    source: PathSource::Published,
-                })?;
-                entries.extend(first.entries);
-                relation = Some(first.relation);
             }
         }
         let relation = relation.ok_or_else(|| PathError::new("The path compiled to nothing."))?;
@@ -451,6 +531,17 @@ impl<'a> CurationPath<'a> {
         match kind {
             CurationNodeKind::Dataset => Some(dataset),
             CurationNodeKind::Select => None,
+            CurationNodeKind::ScoreProgress(scoring) => Some(scoring),
+            CurationNodeKind::BreakDownSubtasks(annotation) => Some(annotation),
+            CurationNodeKind::FindSimilarSubtasks(search) => Some(search),
+            CurationNodeKind::GroupSimilarSubtasks(grouping) => Some(grouping),
+        }
+    }
+
+    /// The configuration of a node that asks a model, by its kind.
+    fn stored(kind: &CurationNodeKind) -> Option<&dyn StoredAnswers> {
+        match kind {
+            CurationNodeKind::Dataset | CurationNodeKind::Select => None,
             CurationNodeKind::ScoreProgress(scoring) => Some(scoring),
             CurationNodeKind::BreakDownSubtasks(annotation) => Some(annotation),
             CurationNodeKind::FindSimilarSubtasks(search) => Some(search),

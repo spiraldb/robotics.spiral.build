@@ -13,7 +13,7 @@ use super::super::document::{CurationGraph, EpisodeFact};
 use super::super::episode_tabs::{
     EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes, WholeEpisodeTab,
 };
-use super::super::path::{PathError, PathFragment, PathStep, PublishedEpisodes, Relation, StepSql};
+use super::super::path::{PathError, PathFragment, PathStep, Relation, StepSql};
 use super::super::review::{
     Counted, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SubtaskReview, TabStop,
 };
@@ -26,11 +26,9 @@ use crate::components::dataset_catalog::DatasetCatalog;
 use crate::components::icons::SpinnerIcon;
 
 /// Every episode of the dataset, each as one whole interval from its first
-/// message to its last, with the facts Spiral records for it and its place in
-/// recording order, by which the published view later reads only the first
-/// of them its Selects keep ([`PublishedEpisodes`]). Only the published view reads the
-/// dataset this way; a preview is given the episodes the sample already
-/// listed.
+/// message to its last, with the facts Spiral records for it. Only the
+/// published view and a fill read the dataset this way; a preview is given
+/// the episodes the sample already listed.
 impl PathFragment for DatasetSelection {
     fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let facts = EpisodeFact::ALL
@@ -40,18 +38,11 @@ impl PathFragment for DatasetSelection {
             .join(", ");
         let entry = format!(
             "{} AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, \
-             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts}, \
-             ROW_NUMBER() OVER (ORDER BY {}) AS {} FROM ({}) listed)",
+             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts} FROM ({}) listed)",
             step.name(),
-            Episode::RECORDING_ORDER,
-            PublishedEpisodes::PLACE,
             Episode::listing_sql(self),
         );
-        let properties = EpisodeFact::ALL
-            .iter()
-            .map(|fact| fact.key())
-            .chain([PublishedEpisodes::PLACE])
-            .collect();
+        let properties = EpisodeFact::ALL.iter().map(|fact| fact.key()).collect();
         Ok(StepSql::new(
             vec![entry],
             Relation::new(step.name(), properties),

@@ -73,7 +73,7 @@ impl ProjectConnection {
             .map_err(|error| error.to_string())
     }
 
-    async fn relation_schema(&mut self, table: &str) -> Result<Option<Schema>, String> {
+    pub(crate) async fn relation_schema(&mut self, table: &str) -> Result<Option<Schema>, String> {
         let relation = RelationName::parse(table).map_err(|error| error.to_string())?;
         self.table_schema(relation)
             .await

@@ -1,10 +1,12 @@
 //! The views saved curations publish, as another activity lists and
 //! unpublishes them: each one's catalog name, the curation and output it
-//! comes from, and the dataset its rows belong to.
+//! comes from, the dataset its rows belong to, and, while its models are
+//! still answering, how far the run publishing it has got.
 //!
 //! The catalog holds a view as a bare statement, which names neither its
 //! curation nor the dataset its episodes are in; the curation that published
-//! it records both.
+//! it records both. The run publishing it is the backend's, which keeps it
+//! until the view is published again.
 use super::annotate::SubtaskRow;
 use super::client::CurationClient;
 use super::document::CurationGraph;
@@ -13,8 +15,9 @@ use super::score_progress::{Moment, ProgressRate};
 use super::state::CurationDraft as _;
 use crate::client::queries::{QueryDomain, QueryRefresh};
 use futures_util::future::try_join_all;
-use spiral_robotics_common::curation::CurationDocument;
+use spiral_robotics_common::curation::{CurationDocument, FillState, FillStatus, FillStep};
 use spiral_robotics_common::datasets::DatasetSelection;
+use std::collections::BTreeSet;
 
 /// A catalog view a saved curation published.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +28,7 @@ pub(crate) struct CuratedView {
     output: &'static str,
     dataset: DatasetSelection,
     current: bool,
+    fill: Option<ViewFill>,
 }
 
 impl CuratedView {
@@ -89,6 +93,7 @@ impl CuratedView {
                 output: node.kind().label(),
                 dataset: dataset.clone(),
                 current: published.is_current(document.revision()),
+                fill: None,
             })
             .collect()
     }
@@ -113,6 +118,10 @@ impl CuratedView {
     pub(crate) fn is_current(&self) -> bool {
         self.current
     }
+    /// How the run publishing it stands, while it runs or once it failed.
+    pub(crate) fn fill(&self) -> Option<&ViewFill> {
+        self.fill.as_ref()
+    }
     /// A number one of its columns holds, printed the way Curation prints
     /// it, when a node publishes the column: a progress rate reads "0.69×",
     /// a similarity "69%".
@@ -124,5 +133,142 @@ impl CuratedView {
             }
             _ => None,
         }
+    }
+}
+
+/// Where the run publishing a view stands, while it runs or once it failed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ViewFill {
+    Running(FillStep),
+    Failed(String),
+}
+
+impl ViewFill {
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(self, Self::Running(_))
+    }
+    /// What the run is doing, in the words Data shows: the node whose
+    /// answers it stores and how many of the episodes that need them are
+    /// answered; or why it stopped.
+    pub(crate) fn doing(&self) -> String {
+        match self {
+            Self::Running(step) => match step.total() {
+                Some(total) => format!("{}: {} of {total} episodes", step.node(), step.done()),
+                None => format!("{}: finding the episodes to ask", step.node()),
+            },
+            Self::Failed(reason) => reason.clone(),
+        }
+    }
+}
+
+/// The runs publishing curated views, as Data polls them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CuratedFills(Vec<FillStatus>);
+
+impl CuratedFills {
+    pub(crate) async fn read() -> Result<Self, String> {
+        CurationClient::current()
+            .publications()
+            .await
+            .map(Self)
+            .map_err(|error| error.to_string())
+    }
+    /// The views a run is filling now.
+    pub(crate) fn running(&self) -> BTreeSet<String> {
+        self.0
+            .iter()
+            .filter(|status| !status.state().is_settled())
+            .flat_map(|status| status.views().iter().cloned())
+            .collect()
+    }
+    /// `views`, each with how the run publishing it stands.
+    pub(crate) fn applied(&self, views: &[CuratedView]) -> Vec<CuratedView> {
+        views
+            .iter()
+            .map(|view| CuratedView {
+                fill: self.of(&view.view),
+                ..view.clone()
+            })
+            .collect()
+    }
+    /// How the run publishing `view` stands, unless it finished.
+    fn of(&self, view: &str) -> Option<ViewFill> {
+        let status = self
+            .0
+            .iter()
+            .find(|status| status.views().iter().any(|published| published == view))?;
+        match status.state() {
+            FillState::Running(step) => Some(ViewFill::Running(step.clone())),
+            FillState::Failed(reason) => Some(ViewFill::Failed(reason.clone())),
+            FillState::Stopped => Some(ViewFill::Failed(
+                "Its run was stopped before it finished.".into(),
+            )),
+            FillState::Finished => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spiral_robotics_common::curation::EpisodeFailure;
+
+    fn view(name: &str) -> CuratedView {
+        CuratedView {
+            view: name.to_owned(),
+            curation_id: "curation-1".to_owned(),
+            curation: "Cloth folding".to_owned(),
+            output: "Score progress",
+            dataset: DatasetSelection::new(vec!["dataset_folding".into()]).unwrap(),
+            current: true,
+            fill: None,
+        }
+    }
+
+    fn status(views: &[&str], state: FillState) -> FillStatus {
+        FillStatus::new(
+            "fill-1".to_owned(),
+            views.iter().map(|view| (*view).to_owned()).collect(),
+            state,
+            Vec::<EpisodeFailure>::new(),
+        )
+    }
+
+    #[test]
+    fn a_view_carries_how_the_run_publishing_it_stands_until_it_finishes() {
+        let fills = CuratedFills(vec![
+            status(
+                &["moving", "folds"],
+                FillState::Running(FillStep::new("Score progress", 12, Some(340))),
+            ),
+            status(
+                &["grasps"],
+                FillState::Failed("the token was refused".into()),
+            ),
+            status(&["reaches"], FillState::Finished),
+        ]);
+        assert_eq!(
+            fills.running(),
+            BTreeSet::from(["folds".to_owned(), "moving".to_owned()])
+        );
+        let views = fills.applied(&[
+            view("folds"),
+            view("grasps"),
+            view("reaches"),
+            view("unfilled"),
+        ]);
+        let folds = views[0].fill().unwrap();
+        assert!(folds.is_running());
+        assert_eq!(folds.doing(), "Score progress: 12 of 340 episodes");
+        assert_eq!(
+            views[1].fill(),
+            Some(&ViewFill::Failed("the token was refused".into()))
+        );
+        assert_eq!((views[2].fill(), views[3].fill()), (None, None));
+        let finding = ViewFill::Running(FillStep::new("Break down subtasks", 0, None));
+        assert_eq!(
+            finding.doing(),
+            "Break down subtasks: finding the episodes to ask"
+        );
     }
 }

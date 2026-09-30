@@ -3,7 +3,7 @@
 //! them, the views curations published of those episodes.
 use super::curated_view::ViewSpans;
 use super::dataset_checks::CheckedEpisode;
-use crate::activities::curation::CuratedView;
+use crate::activities::curation::{CuratedView, ViewFill};
 use crate::activities::episode::{
     Episode, EpisodeFactsPresentation as _, EpisodeRows, EpisodeStill, EpisodeStills, PlayRequest,
     RowFaceView, SourceLabel, StillMoment,
@@ -278,7 +278,12 @@ fn DatasetBranch(
     let members = inspection
         .as_ref()
         .and_then(DatasetInspection::members)
-        .or_else(|| counted.read().as_ref().and_then(|count| count.as_ref().ok().copied()));
+        .or_else(|| {
+            counted
+                .read()
+                .as_ref()
+                .and_then(|count| count.as_ref().ok().copied())
+        });
     let select = dataset.clone();
     // A search opens every dataset so its matches show; the operator's own
     // expansion choice returns when the field clears.
@@ -410,7 +415,8 @@ fn DatasetEpisodes(
 }
 
 /// The curated views the rail lists: those a saved curation records that the
-/// catalog still holds, and whose name the filter matches.
+/// catalog still holds, or that a run is publishing, and whose name the
+/// filter matches.
 struct ListedViews;
 
 impl ListedViews {
@@ -418,10 +424,11 @@ impl ListedViews {
         views
             .iter()
             .filter(|view| {
-                catalog.iter().any(|resource| {
-                    resource.kind() == "view"
-                        && matches!(resource.selection().path(), [name] if name.eq_ignore_ascii_case(view.view()))
-                })
+                view.fill().is_some()
+                    || catalog.iter().any(|resource| {
+                        resource.kind() == "view"
+                            && matches!(resource.selection().path(), [name] if name.eq_ignore_ascii_case(view.view()))
+                    })
             })
             .filter(|view| view.view().to_lowercase().contains(needle))
             .cloned()
@@ -431,7 +438,8 @@ impl ListedViews {
 
 /// The views curations published, above the datasets their episodes belong
 /// to: each named as the catalog reads it, over the dataset and the output it
-/// comes from.
+/// comes from. One whose models are still answering says so, and opens once
+/// they are done.
 #[component]
 fn CuratedViewList(
     views: Vec<CuratedView>,
@@ -447,11 +455,15 @@ fn CuratedViewList(
             for view in views {
                 TreeItem { key: "{view.view()}", class: "data-curated-item",
                     selected: selected.as_deref() == Some(view.view()),
-                    title: "{view.output()} of the curation “{view.curation()}”",
-                    onselect: {
-                        let view = view.clone();
-                        move |_| on_open.call(view.clone())
+                    title: match view.fill() {
+                        Some(fill) if fill.is_running() => format!("Curation in progress: {}", fill.doing()),
+                        _ => format!("{} of the curation “{}”", view.output(), view.curation()),
                     },
+                    "aria-disabled": view.fill().is_some_and(ViewFill::is_running).then_some("true"),
+                    onselect: (!view.fill().is_some_and(ViewFill::is_running)).then(|| {
+                        let view = view.clone();
+                        EventHandler::new(move |_| on_open.call(view.clone()))
+                    }),
                     label: rsx! {
                         KindMark { letter: 'C', hue: "var(--tone-kind-curated)", label: "Curated view" }
                         span { class: "data-curated-item-words",
@@ -459,9 +471,17 @@ fn CuratedViewList(
                             span { class: "data-curated-item-origin", "{view.dataset().display_name()} · {view.output()}" }
                         }
                     },
-                    trailing: (!view.is_current()).then(|| rsx! {
-                        span { class: "data-curated-item-stale", title: "Its curation has changed since it was published", "Changed" }
-                    }),
+                    trailing: match view.fill() {
+                        Some(ViewFill::Running(_)) => Some(rsx! {
+                            span { class: "data-curated-item-filling", role: "status", "In progress" }
+                        }),
+                        Some(ViewFill::Failed(reason)) => Some(rsx! {
+                            span { class: "data-curated-item-stale", title: "Its curation failed: {reason}", "Failed" }
+                        }),
+                        None => (!view.is_current()).then(|| rsx! {
+                            span { class: "data-curated-item-stale", title: "Its curation has changed since it was published", "Changed" }
+                        }),
+                    },
                 }
             }
         }

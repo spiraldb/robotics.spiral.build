@@ -274,9 +274,7 @@ impl RuleView {
     fn empty_side(&self, listed_kept: bool) -> &'static str {
         match listed_kept {
             _ if self.input.len() == 0 => match self.measure.kind() {
-                CurationNodeKind::ScoreProgress(_) => {
-                    "No episode is scored yet. Run scores them on this machine."
-                }
+                CurationNodeKind::ScoreProgress(_) => "No episode is scored yet. Run scores them.",
                 _ => "Nothing reaches this rule yet.",
             },
             true => "Nothing passes this rule. Loosen it above to keep something.",

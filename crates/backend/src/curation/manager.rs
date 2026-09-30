@@ -1,19 +1,22 @@
 //! Saved curations and the views their outputs are published as. The manager
 //! owns identity, size, and revision policy; the payload passes through
 //! untouched. The browser compiles an output; publishing admits its statement
-//! as read-only and leaves the DDL to storage.
+//! as read-only and hands it to a fill run, which writes the answers it reads
+//! and leaves the DDL to storage.
 //!
 //! There is no in-process save lock: the conditional write in storage is the
 //! single authority on which revision a document currently holds, so two tabs
 //! racing to save produce exactly one winner and one conflict.
+use super::fill::FillRuns;
 use super::preview::PreviewRuns;
 use crate::OperationError;
 use spiral_robotics_common::curation::{
-    CurationDeletion, CurationDocument, CurationSummary, PublishRequest, UnpublishRequest, ViewName,
+    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus, UnpublishRequest,
+    ViewName,
 };
-use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
-use spiral_robotics_storage::StorageManager;
+use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::sync::Arc;
+use tokio::sync::watch;
 
 /// The one message a losing save shows; reopening reloads the stored revision.
 const SAVED_ELSEWHERE: &str = "This curation was saved elsewhere. Reopen it before saving.";
@@ -24,12 +27,15 @@ const DELETE_SAVED_ELSEWHERE: &str =
 pub(crate) struct CurationManager {
     storage: Arc<StorageManager>,
     previews: PreviewRuns,
+    fills: FillRuns,
 }
 
 impl CurationManager {
-    pub(crate) fn new(storage: Arc<StorageManager>) -> Self {
+    /// `keys` reach the Modal service that scores progress.
+    pub(crate) fn new(storage: Arc<StorageManager>, keys: watch::Receiver<ProviderKeys>) -> Self {
         Self {
             previews: PreviewRuns::new(storage.clone()),
+            fills: FillRuns::new(storage.clone(), keys),
             storage,
         }
     }
@@ -39,9 +45,15 @@ impl CurationManager {
         &self.previews
     }
 
-    /// Abandon every preview run; the project is closing.
+    /// The fill runs this project's curations have started.
+    pub(super) fn fills(&self) -> &FillRuns {
+        &self.fills
+    }
+
+    /// Abandon every preview and fill run; the project is closing.
     pub(crate) fn shutdown(&self) {
         self.previews.shutdown();
+        self.fills.shutdown();
     }
 
     pub(super) async fn list(&self) -> Result<Vec<CurationSummary>, OperationError> {
@@ -111,20 +123,15 @@ impl CurationManager {
         }
     }
 
-    /// Publish one output under `name`, replacing the view it names. The
-    /// statement must be one read-only query, and the name must not belong to
-    /// a table or a Dataset.
-    pub(super) async fn publish(&self, request: PublishRequest) -> Result<(), OperationError> {
-        let name = ViewName::try_from(request.name()).map_err(OperationError::InvalidInput)?;
-        ReadOnlyQuery::new(request.statement(), ReadOnlyQueryMode::Curation)
-            .authorize()
-            .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
-        self.refuse_held(&name).await?;
-        self.storage
-            .curated_views()
-            .replace(&name, request.statement())
-            .await
-            .map_err(OperationError::External)
+    /// Start filling the answers `request` asks for, then publishing its
+    /// views, each replacing the view it names. A view's name must not belong
+    /// to a table or a Dataset.
+    pub(super) async fn fill(&self, request: FillRequest) -> Result<FillStatus, OperationError> {
+        let admitted = self.fills.admit(request)?;
+        for view in admitted.views() {
+            self.refuse_held(view).await?;
+        }
+        Ok(self.fills.start(admitted))
     }
 
     /// Drop the view `name`, if one exists.

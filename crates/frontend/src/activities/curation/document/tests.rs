@@ -523,19 +523,20 @@ fn a_view_is_current_until_a_later_save_changes_the_recipe() {
 }
 
 #[test]
-fn a_view_reads_the_first_episodes() {
+fn a_publication_an_older_studio_bounded_to_its_first_episodes_still_reads() {
     let (mut payload, long, _) = two_outputs();
     payload
         .record_publication(&long, "long_episodes", 3)
         .unwrap();
-    let recorded =
-        CurationGraph::decode(CURATION_ENCODING_VERSION, &payload.encode().unwrap()).unwrap();
+    let mut encoded: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
+    encoded["published"][0]["episodes"] = serde_json::json!(20);
+    let recorded = CurationGraph::decode(CURATION_ENCODING_VERSION, &encoded.to_string()).unwrap();
     let (published, node) = recorded.publications().next().unwrap();
-    assert_eq!(node.id(), long);
     assert_eq!(
-        published.episodes(),
-        crate::activities::curation::population::PUBLISHED_EPISODES
+        (node.id(), published.view()),
+        (long.as_str(), "long_episodes")
     );
+    assert!(!recorded.encode().unwrap().contains("episodes\":20"));
 }
 
 #[test]

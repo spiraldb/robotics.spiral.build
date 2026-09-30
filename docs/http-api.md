@@ -153,13 +153,17 @@ the project headers. They do not select credentials or destinations based on a p
 `StudioProviders` contains an optional `llm` (`base_url`). Its key
 stays on the backend.
 
-`GET /keys` returns `ProviderKeysStatus`: `llm_api_key_configured` and
-`huggingface_token_configured`, never the keys. `PUT /keys` takes
-`ProviderKeysUpdate`, whose `llm_api_key` and `huggingface_token` are
-write-only: omitted or `null` keeps the saved key, a non-empty string replaces
-it, and an empty string removes it. It returns the new status. The backend keeps
-the keys in its SQLite settings; the next relayed request and the next database
-connection use them, and open projects keep running. Project exports never contain them.
+`GET /keys` returns `ProviderKeysStatus`: `llm_api_key_configured`,
+`huggingface_token_configured`, `modal_base_url_configured`, and
+`modal_token_configured`, never the keys. `PUT /keys` takes
+`ProviderKeysUpdate`, whose `llm_api_key`, `huggingface_token`,
+`modal_base_url`, and `modal_token` are write-only: omitted or `null` keeps the
+saved key, a non-empty string replaces it, and an empty string removes it. It
+returns the new status. The backend keeps the keys in its SQLite settings; the
+next relayed request, the next database connection, and the next fill run use
+them, and open projects keep running. The Modal base URL and token reach only
+the Modal service that scores progress, never the relay or the driver. Project
+exports never contain them.
 
 Percent-encode the upstream URL in the `url` query parameter. Use `GET` or
 `POST`, the upstream content headers, and the original request body, including
@@ -223,13 +227,27 @@ since only the payload names them. A payload over 32 MiB fails with
 `invalid_input`. This is the only JSON route with a raised request-body bound,
 twice the payload limit so a document's JSON framing always fits.
 
-`POST /curations/publish` takes `{name, statement}`: a view name, one plain
-identifier at the catalog root, and the read-only `SELECT` or `WITH` the
-browser compiled from an output. The backend refuses an invalid name or
-statement with `invalid_input` and a name held by a table or Dataset with
-`conflict`, then creates the view with one `CREATE OR REPLACE VIEW`.
-`POST /curations/unpublish` takes `{name}` and drops the view.
-Both answer `null`. See [curation](curation.md).
+Publishing is a fill run. `POST /curation-fills` takes `{dataset, columns,
+views}`: for each node that asks a model, in path order, its answers-table
+`column`, the `episodes` it is filled for (a read-only statement listing the
+episodes that reach the node, or listed ids), the `node` label the run
+reports, and the `source` of one episode's answer (a read-only statement with
+the episode bound as `$1`, or the Modal service's progress scores of a camera);
+then the views, each `{name, statement}`: one plain identifier at the catalog
+root and the read-only `SELECT` or `WITH` the browser compiled from an output.
+The backend refuses an invalid name, statement, or dataset with
+`invalid_input`, a column the Modal service answers while its base URL or token
+is not saved with `invalid_input`, and a name held by a table or Dataset with
+`conflict`. It answers the run's `FillStatus` at once and works in the
+background: each column is written for the episodes it does not hold yet, then
+every view is created with one `CREATE OR REPLACE VIEW`. A run publishing a
+view replaces any earlier run publishing it. `GET /curation-fills` lists the
+runs that publish views, `GET /curation-fills/{id}` reads one, and
+`POST /curation-fills/{id}/stop` starts nothing more; what is in flight is
+written. A Score progress preview starts the same run over the episodes it
+previews, with no views. `POST /curations/unpublish` takes `{name}`, drops the
+view, and answers `null`; its stored answers stay. See
+[curation](curation.md).
 
 ## Files and media
 

@@ -1,18 +1,21 @@
 //! The pinned progress scorer, and what a Score progress node adds to a
 //! path.
 //!
-//! The node asks each episode's row for `spql.ai.score_progress` over the
-//! scorer's camera, which answers with a velocity for every frame. Its step
-//! unnests those scores from every row that reaches the node: each frame
-//! becomes one moment, from its time to the next frame's, cut to the
-//! interval of the row it arrived on. The scorer reads whole episodes, so
-//! what it is asked never depends on anything above the node.
+//! The scorer runs on the Modal service, which scores the scorer's camera of
+//! each episode with a velocity for every frame; a fill stores those scores
+//! in the dataset's answers table, and every reading of the node, a preview
+//! included, reads them from there. Its step unnests the scores from every
+//! row that reaches the node: each frame becomes one moment, from its time to
+//! the next frame's, cut to the interval of the row it arrived on. The
+//! scorer reads whole episodes, so what it is asked never depends on
+//! anything above the node.
 use super::moment::Moment;
 use crate::activities::curation::document::ProgressScoring;
 use crate::activities::curation::path::{
-    EpisodeRow, PathError, PathFragment, PathStep, Relation, StepSql,
+    EpisodeRow, PathError, PathFragment, PathStep, Relation, StepSql, StoredAnswers,
 };
-use spiral_robotics_common::sql::SqlLiteral;
+use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
+use spiral_robotics_common::datasets::DatasetSelection;
 
 /// The most moments one recording's preview reads: every frame of five and a
 /// half minutes at 30 Hz, the Arrow episode query's own bound. A longer
@@ -35,6 +38,14 @@ impl ProgressScorer {
             }
         }
     }
+    /// The Modal service revision whose scores the answers store. A service
+    /// that runs another one refuses the request, so answers of two
+    /// revisions never share a column.
+    const fn revision(self) -> &'static str {
+        match self {
+            Self::WarpSimBottles => "warp-progress-0.2.0-fp16",
+        }
+    }
     /// The camera topic the checkpoint was trained on. A dataset that does not
     /// record it cannot be scored.
     pub(in crate::activities::curation) const fn camera(self) -> &'static str {
@@ -44,19 +55,44 @@ impl ProgressScorer {
     }
 }
 
-/// The column each episode's scores ride in until the node's step unnests
-/// them.
-const SCORES: &str = "scores";
+/// Every episode's scores are the Modal service's, stored under the scorer's
+/// checkpoint, service revision and camera.
+impl StoredAnswers for ProgressScoring {
+    fn answer_column(&self, _subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
+        let scorer = ProgressScorer::WarpSimBottles;
+        AnswerColumn::of(
+            "score_progress",
+            &[
+                "modal.score_progress",
+                scorer.model(),
+                scorer.revision(),
+                scorer.camera(),
+            ],
+        )
+        .map_err(PathError::new)
+    }
+
+    fn answer_source(
+        &self,
+        _dataset: &DatasetSelection,
+        _columns: (&AnswerColumn, Option<&AnswerColumn>),
+    ) -> Result<AnswerSource, PathError> {
+        let scorer = ProgressScorer::WarpSimBottles;
+        Ok(AnswerSource::ProgressService {
+            camera: scorer.camera().to_owned(),
+            model: scorer.model().to_owned(),
+            revision: scorer.revision().to_owned(),
+        })
+    }
+}
 
 impl PathFragment for ProgressScoring {
-    fn episode_columns(&self, row: &mut EpisodeRow) -> Result<(), PathError> {
-        let scorer = ProgressScorer::WarpSimBottles;
-        let call = format!(
-            "spql.ai.score_progress({}, model => {})",
-            row.video(scorer.camera()),
-            SqlLiteral::text(scorer.model())
-        );
-        row.ask(SCORES, call)
+    fn episode_columns(
+        &self,
+        row: &mut EpisodeRow,
+        column: &AnswerColumn,
+    ) -> Result<(), PathError> {
+        row.stored(column)
     }
 
     /// Every scored frame of every row that reaches the node, as a moment
@@ -64,7 +100,8 @@ impl PathFragment for ProgressScoring {
     /// carries none.
     fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
         let input = step.input()?;
-        let rides = input.answers().without(SCORES)?;
+        let scores = step.column()?;
+        let rides = input.answers().without(scores)?;
         let (name, rate, origin) = (step.name(), Moment::PROGRESS_RATE, EpisodeRow::ORIGIN);
         // Each row that reaches the node brings every frame of its episode,
         // and a frame's next is the next one the same row brought. The frames
@@ -78,7 +115,7 @@ impl PathFragment for ProgressScoring {
                 "{name}_frames AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns{}, \
                  r.{origin} + CAST(p.timestamp_ns AS BIGINT) AS start_ns, p.frame_index AS frame_index, \
                  CASE WHEN p.support > 0 AND NOT isnan(p.velocity) THEN p.velocity END AS {rate} \
-                 FROM {} r CROSS JOIN LATERAL UNNEST(r.{SCORES}) p)",
+                 FROM {} r CROSS JOIN LATERAL UNNEST(r.{scores}) p)",
                 rides.following("r."),
                 input.name()
             ),

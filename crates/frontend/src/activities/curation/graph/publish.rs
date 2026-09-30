@@ -1,17 +1,22 @@
 //! Publishing from the document bar: the outputs the operator chooses, each
-//! compiled over the first episodes the dataset's Selects keep and created as
-//! a catalog view under the name they give it, then recorded in the curation,
-//! which saves. A view cannot be turned back into a graph, so the recipe
-//! stays in the curation and the view is what it produces.
+//! compiled over every episode of the dataset and created as a catalog view
+//! under the name they give it, then recorded in the curation, which saves.
+//! A view cannot be turned back into a graph, so the recipe stays in the
+//! curation and the view is what it produces.
+//!
+//! A view reads the answers its models stored, so publishing is one fill run
+//! on the backend: it asks each model about every episode that reaches its
+//! node and has no answer yet, then creates the views. The run goes on after
+//! the press, and Data shows each view as in progress until it is done.
 //!
 //! A publication is recorded against the saved recipe, and the save that
-//! records it must come next. So one press saves what is drawn, creates every
-//! chosen view, records them all in one edit, and saves again; and nothing
+//! records it must come next. So one press saves what is drawn, starts the
+//! run, records every chosen view in one edit, and saves again; and nothing
 //! else publishes or unpublishes until that is done.
 use super::node_card::NodeCard;
+use crate::activities::curation::client::CurationClient;
 use crate::activities::curation::document::PublishedOutput;
-use crate::activities::curation::path::CurationPath;
-use crate::activities::curation::population::PUBLISHED_EPISODES;
+use crate::activities::curation::path::{CurationPath, PathError};
 use crate::activities::curation::state::CurationController;
 use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryRefresh};
@@ -19,7 +24,10 @@ use crate::client::transport::HttpRequest;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
-use spiral_robotics_common::curation::{PublishRequest, UnpublishRequest, ViewName};
+use spiral_robotics_common::curation::{
+    ColumnFill, FillRequest, PublishRequest, UnpublishRequest, ViewName,
+};
+use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, TextInput, Toggle,
 };
@@ -29,16 +37,56 @@ use std::collections::{BTreeMap, BTreeSet};
 /// key, the way the document switcher's is.
 const PUBLISH_DIALOG_ID: &str = "curation-publish-dialog";
 
-/// One output as the panel lists it: its node, how its card reads, the
-/// statement its view would be, or why it has none, and the view it is
-/// published as.
+/// What an output publishes as: the statement its view is, and every column
+/// of stored answers the view reads, in the order a fill writes them.
+#[derive(Clone, Debug, PartialEq)]
+struct CompiledOutput {
+    statement: String,
+    fills: Vec<ColumnFill>,
+}
+
+impl CompiledOutput {
+    fn of(path: &CurationPath<'_>) -> Result<Self, PathError> {
+        Ok(Self {
+            statement: path.statement()?,
+            fills: path.fills()?,
+        })
+    }
+}
+
+/// One output as the panel lists it: its node, how its card reads, what it
+/// publishes as, or why it cannot be, and the view it is published as.
 #[derive(Clone, Debug, PartialEq)]
 struct PublishableOutput {
     node: String,
     label: &'static str,
     summary: String,
-    statement: Result<String, String>,
+    compiled: Result<CompiledOutput, String>,
     published: Option<PublishedOutput>,
+}
+
+/// One chosen output: its node, and the view it publishes as with the
+/// answers it reads.
+#[derive(Clone, Debug, PartialEq)]
+struct ChosenView {
+    node: String,
+    view: PublishRequest,
+    fills: Vec<ColumnFill>,
+}
+
+impl ChosenView {
+    /// The one run publishing `views` over `dataset`: every column they
+    /// read, each once, in the order a fill writes them.
+    fn run(dataset: DatasetSelection, views: &[Self]) -> FillRequest {
+        let mut columns = Vec::<ColumnFill>::new();
+        for fill in views.iter().flat_map(|chosen| chosen.fills.iter()) {
+            if !columns.contains(fill) {
+                columns.push(fill.clone());
+            }
+        }
+        let published = views.iter().map(|chosen| chosen.view.clone()).collect();
+        FillRequest::new(dataset, columns).publishing(published)
+    }
 }
 
 impl PublishableOutput {
@@ -55,8 +103,8 @@ impl PublishableOutput {
                         node: output.id().to_owned(),
                         label: card.label(),
                         summary: card.summary().to_owned(),
-                        statement: CurationPath::to(payload, output.id())
-                            .and_then(|path| path.statement())
+                        compiled: CurationPath::to(payload, output.id())
+                            .and_then(|path| CompiledOutput::of(&path))
                             .map_err(|error| error.message().to_owned()),
                         published: payload.publication(output.id()).cloned(),
                     })
@@ -136,7 +184,7 @@ impl PublishChoice {
         due.then_some(problem)
     }
     /// The chosen outputs as views to create, once every one of them can be.
-    fn views(&self, outputs: &[PublishableOutput]) -> Option<Vec<(String, String, String)>> {
+    fn views(&self, outputs: &[PublishableOutput]) -> Option<Vec<ChosenView>> {
         let chosen = outputs
             .iter()
             .filter(|output| self.chosen.contains(&output.node))
@@ -150,12 +198,12 @@ impl PublishChoice {
                 if self.problem(output, outputs).is_some() {
                     return None;
                 }
-                let statement = output.statement.clone().ok()?;
-                Some((
-                    output.node.clone(),
-                    self.name(&output.node).to_owned(),
-                    statement,
-                ))
+                let compiled = output.compiled.clone().ok()?;
+                Some(ChosenView {
+                    node: output.node.clone(),
+                    view: PublishRequest::new(self.name(&output.node), compiled.statement),
+                    fills: compiled.fills,
+                })
             })
             .collect()
     }
@@ -172,9 +220,9 @@ struct ViewPublisher {
 
 impl ViewPublisher {
     /// Save what is drawn, since a view is recorded against the saved recipe;
-    /// then create each `(node, view, statement)` in turn, record every view
-    /// that was created in one edit, and save again.
-    fn publish(self, views: Vec<(String, String, String)>) {
+    /// then start the one run filling every column the chosen views read and
+    /// creating them, record every view in one edit, and save again.
+    fn publish(self, views: Vec<ChosenView>) {
         let Self {
             controller,
             studio,
@@ -187,44 +235,47 @@ impl ViewPublisher {
                 return;
             }
             let saved = controller.saved_revision();
-            let mut created = Vec::new();
-            for (node, view, statement) in views {
-                controller.report_activity(&node, Some(format!("Publishing as {view}")));
-                let request = HttpRequest::new("POST", "/api/curations/publish")
-                    .json(&PublishRequest::new(view.clone(), statement));
-                let outcome = ProjectClient::current()
-                    .mutate::<()>(&[QueryDomain::Catalog], request)
-                    .await;
-                controller.report_activity(&node, None);
-                match outcome {
-                    Ok(()) => created.push((node, view)),
-                    Err(error) => studio.report_from(MessageSource::Curation, error.to_string()),
-                }
+            let names = views
+                .iter()
+                .map(|chosen| chosen.view.name().to_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
+            for chosen in &views {
+                controller.report_activity(
+                    &chosen.node,
+                    Some(format!("Publishing as {}", chosen.view.name())),
+                );
             }
-            if !created.is_empty() {
-                let recorded = controller.edit(|payload| {
-                    created
-                        .iter()
-                        .try_for_each(|(node, view)| payload.record_publication(node, view, saved))
-                });
-                match recorded {
-                    Ok(()) => {
-                        controller.save_when_idle(studio).await;
-                        // Data lists a view by the curation recording it, so
-                        // the catalog is read again once the record is saved.
-                        QueryRefresh::current().invalidate(&[QueryDomain::Catalog]);
-                        let views = created
-                            .iter()
-                            .map(|(_, view)| view.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        studio.report_success_from(
-                            MessageSource::Curation,
-                            format!("Published {views}"),
-                        );
-                    }
-                    Err(error) => studio.report_from(MessageSource::Curation, error),
+            let dataset = controller.with_payload(|payload| payload.dataset().cloned());
+            let started = match dataset {
+                Some(dataset) => CurationClient::current()
+                    .start_fill(&ChosenView::run(dataset, &views))
+                    .await
+                    .map_err(|error| error.to_string()),
+                None => Err("Choose the dataset this curation reads.".to_owned()),
+            };
+            for chosen in &views {
+                controller.report_activity(&chosen.node, None);
+            }
+            let recorded = started.and_then(|_| {
+                controller.edit(|payload| {
+                    views.iter().try_for_each(|chosen| {
+                        payload.record_publication(&chosen.node, chosen.view.name(), saved)
+                    })
+                })
+            });
+            match recorded {
+                Ok(()) => {
+                    controller.save_when_idle(studio).await;
+                    // Data lists a view by the curation recording it, and
+                    // shows how far its run has got.
+                    QueryRefresh::current().invalidate(&[QueryDomain::Catalog]);
+                    studio.report_success_from(
+                        MessageSource::Curation,
+                        format!("Publishing {names}. Data shows how far its models have got."),
+                    );
                 }
+                Err(error) => studio.report_from(MessageSource::Curation, error),
             }
             busy.set(false);
         });
@@ -350,7 +401,7 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                         }
                     },
                     p { class: "curation-publish-intro",
-                        "Each output you choose becomes a catalog view of what it keeps in the first {PUBLISHED_EPISODES} episodes that pass the dataset's Selects. Every read of a view asks its models again."
+                        "Each output you choose becomes a catalog view of what it keeps across the dataset. Its models answer each episode once, in the background, and the view reads what they stored."
                     }
                     ul { class: "curation-publish-outputs",
                         for output in outputs.clone() {
@@ -404,7 +455,7 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                             title: if count == 0 {
                                 "Choose the outputs to publish"
                             } else {
-                                "Save the curation, then create or replace each chosen view under its name"
+                                "Save the curation, then store its models' answers and create or replace each chosen view under its name"
                             },
                             // A chosen view that cannot be created yet says why.
                             onclick: move |_| match views.clone() {
@@ -442,7 +493,7 @@ fn PublishRow(
     on_leave: EventHandler<()>,
     on_unpublish: EventHandler<String>,
 ) -> Element {
-    let unwritten = output.statement.as_ref().err().cloned();
+    let unwritten = output.compiled.as_ref().err().cloned();
     rsx! {
         li { class: "curation-publish-output", "data-chosen": "{chosen}",
             div { class: "curation-publish-output-head",
@@ -506,14 +557,58 @@ fn PublishRow(
 
 #[cfg(test)]
 mod tests {
-    use super::{PublishChoice, PublishableOutput};
+    use super::{ChosenView, CompiledOutput, PublishChoice, PublishableOutput};
+    use spiral_robotics_common::curation::{
+        AnswerColumn, AnswerSource, ColumnFill, FillEpisodes, PublishRequest,
+    };
+    use spiral_robotics_common::datasets::DatasetSelection;
+
+    #[test]
+    fn one_run_publishes_every_chosen_view_and_fills_what_they_share_once() {
+        let fill = |node: &str, reaching: &str| {
+            ColumnFill::new(
+                node,
+                AnswerColumn::of("probe", &[node]).unwrap(),
+                FillEpisodes::Reaching(reaching.to_owned()),
+                AnswerSource::Statement {
+                    statement: "SELECT $1 AS episode_id, 1 AS answer".to_owned(),
+                },
+            )
+        };
+        let (scores, subtasks) = (fill("Score progress", "all"), fill("Break down", "kept"));
+        let views = [
+            ChosenView {
+                node: "score_progress-1".into(),
+                view: PublishRequest::new("moving", "SELECT 1"),
+                fills: vec![scores.clone()],
+            },
+            ChosenView {
+                node: "group-1".into(),
+                view: PublishRequest::new("folds", "SELECT 2"),
+                fills: vec![scores.clone(), subtasks.clone()],
+            },
+        ];
+        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
+        let run = ChosenView::run(dataset, &views);
+        assert_eq!(run.columns(), [scores, subtasks]);
+        assert_eq!(
+            run.views()
+                .iter()
+                .map(PublishRequest::name)
+                .collect::<Vec<_>>(),
+            ["moving", "folds"]
+        );
+    }
 
     fn output(node: &str) -> PublishableOutput {
         PublishableOutput {
             node: node.to_owned(),
             label: "Score progress",
             summary: String::new(),
-            statement: Ok("SELECT 1".to_owned()),
+            compiled: Ok(CompiledOutput {
+                statement: "SELECT 1".to_owned(),
+                fills: Vec::new(),
+            }),
             published: None,
         }
     }

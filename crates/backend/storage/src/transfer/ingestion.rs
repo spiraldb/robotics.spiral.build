@@ -503,7 +503,11 @@ mod tests {
         );
         assert_eq!(
             target.planned(),
-            ["dataset_pick-place", "dataset_source_pick-place"]
+            [
+                "dataset_pick-place",
+                "dataset_source_pick-place",
+                "dataset_answers_pick-place"
+            ]
         );
         assert_eq!(
             target.source_view_sql(),

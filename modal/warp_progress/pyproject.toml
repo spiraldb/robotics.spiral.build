@@ -1,0 +1,26 @@
+[project]
+name = "warp-progress"
+version = "0.2.0"
+description = "WARP-RM task progress for one episode's camera video, served on Modal."
+requires-python = "==3.12.*"
+dependencies = [
+    "av==19.0.0",
+    "fastapi==0.142.1",
+    "huggingface-hub==1.33.0",
+    "numpy==2.5.3",
+    "pyarrow==25.0.1",
+    "safetensors==0.8.0",
+    "torch==2.14.0",
+    "transformers==5.17.0",
+]
+
+[dependency-groups]
+dev = [
+    "adbc-driver-manager==1.12.0",
+    "httpx2==2.13.1",
+    "modal==1.6.0",
+    "pytest==9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

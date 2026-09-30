@@ -359,7 +359,7 @@ pub struct FullEpisode {
 }
 
 impl FullEpisode {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn from_recording(
         start: EpisodeStart,
         samples: Vec<Sample>,

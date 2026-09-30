@@ -50,11 +50,21 @@
     color: var(--tone-accent-ink);
   }
 
-  .data-curated-item-stale {
+  .data-curated-item-stale,
+  .data-curated-item-filling {
     flex: 0 0 auto;
     color: var(--tone-caution);
     font-size: 11px;
     font-weight: 500;
+  }
+
+  /* A view whose models are still answering opens once they are done. */
+  .data-curated-item-filling {
+    color: var(--tone-ink-faint);
+  }
+
+  .data-curated-item[aria-disabled="true"] .data-curated-item-name {
+    color: var(--tone-ink-soft);
   }
 
   /* Tab ----------------------------------------------------------------- */

@@ -34,6 +34,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
 arrow-ipc = { version = "58.4.0", features = ["zstd"] }
+arrow-cast = "58.4.0"
+arrow-select = "58.4.0"
 safetensors = "0.7"
 image.workspace = true
 spiral-robotics-inference.workspace = true

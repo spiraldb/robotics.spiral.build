@@ -83,6 +83,9 @@ impl SubtaskRow {
     pub(in crate::activities::curation) const SIMILARITY: &'static str = "similarity";
     /// The measure Group similar writes: the category and its probability.
     pub(in crate::activities::curation) const CATEGORY: &'static str = "subtask_category";
+    /// The column a subtask's place in the Break down answer travels in, by
+    /// which a stored judgment below reads its own answer for it.
+    pub(in crate::activities::curation) const INDEX: &'static str = "subtask_index";
 
     /// Whether `column` is one a Find similar writes: its own, or a repeat's
     /// below it on the same path (`similarity_2`).
@@ -199,6 +202,9 @@ impl SubtaskRow {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SubtaskColumn {
     Description,
+    /// The subtask's place in its Break down answer. Only a stored judgment
+    /// reads it, and a preview judges inline, so a preview hands on NULL.
+    Index,
     Similarity,
     Category,
 }
@@ -217,6 +223,7 @@ impl SubtaskColumns {
             .map(|(column, measure)| {
                 let kind = match measure {
                     SubtaskRow::DESCRIPTION => SubtaskColumn::Description,
+                    SubtaskRow::INDEX => SubtaskColumn::Index,
                     SubtaskRow::SIMILARITY => SubtaskColumn::Similarity,
                     SubtaskRow::CATEGORY => SubtaskColumn::Category,
                     other => return Err(format!("A relation of subtasks carries no {other}.")),
@@ -277,6 +284,7 @@ impl SubtaskColumns {
         for (column, kind) in &self.0 {
             let cell = row.get(column).unwrap_or(&Value::Null);
             described = Some(match (kind, described) {
+                (SubtaskColumn::Index, Some(row)) => row,
                 (SubtaskColumn::Description, None) => SubtaskRow::new(
                     episode.clone(),
                     (start, end),
@@ -319,7 +327,7 @@ impl SubtaskColumns {
         ];
         for (column, kind) in &self.0 {
             match kind {
-                SubtaskColumn::Description | SubtaskColumn::Similarity => {
+                SubtaskColumn::Description | SubtaskColumn::Index | SubtaskColumn::Similarity => {
                     names.push(column.clone())
                 }
                 SubtaskColumn::Category => {
@@ -340,7 +348,9 @@ impl SubtaskColumns {
         ];
         for (column, kind) in &self.0 {
             columns.push(match kind {
-                SubtaskColumn::Description | SubtaskColumn::Similarity => column.clone(),
+                SubtaskColumn::Description | SubtaskColumn::Index | SubtaskColumn::Similarity => {
+                    column.clone()
+                }
                 SubtaskColumn::Category => format!(
                     "CASE WHEN {column}_category IS NULL THEN NULL \
                      ELSE STRUCT_PACK(category := {column}_category, probability := {column}_probability) END AS {column}"
@@ -378,6 +388,7 @@ impl SubtaskColumns {
         for (column, kind) in &self.0 {
             match (kind, row.judgment(column)) {
                 (SubtaskColumn::Description, _) => values.push(SqlLiteral::text(&row.description)),
+                (SubtaskColumn::Index, _) => values.push("CAST(NULL AS BIGINT)".to_owned()),
                 (SubtaskColumn::Similarity, Some(JudgmentValue::Similarity(similarity))) => {
                     values.push(match similarity {
                         Some(similarity) => unit(*similarity)?,
@@ -411,9 +422,12 @@ mod tests {
 
     fn columns() -> SubtaskColumns {
         SubtaskColumns::of(
-            &Relation::new("breakdown", vec![SubtaskRow::DESCRIPTION])
-                .measuring("grouping", SubtaskRow::CATEGORY)
-                .measuring("search", SubtaskRow::SIMILARITY),
+            &Relation::new(
+                "breakdown",
+                vec![SubtaskRow::DESCRIPTION, SubtaskRow::INDEX],
+            )
+            .measuring("grouping", SubtaskRow::CATEGORY)
+            .measuring("search", SubtaskRow::SIMILARITY),
         )
         .unwrap()
     }
@@ -479,7 +493,7 @@ mod tests {
         assert_eq!(
             columns().values(&row, 1_000_000_000).unwrap(),
             format!(
-                "('{}', CAST(1500000000 AS BIGINT), CAST(5000000000 AS BIGINT), 'fold the towel''s edge', 'fold', CAST(0.75 AS DOUBLE), CAST(NULL AS DOUBLE))",
+                "('{}', CAST(1500000000 AS BIGINT), CAST(5000000000 AS BIGINT), 'fold the towel''s edge', CAST(NULL AS BIGINT), 'fold', CAST(0.75 AS DOUBLE), CAST(NULL AS DOUBLE))",
                 EpisodeId::fixture(1)
             )
         );
@@ -490,13 +504,14 @@ mod tests {
                 "start_ns",
                 "end_ns",
                 "subtask",
+                "subtask_index",
                 "subtask_category_category",
                 "subtask_category_probability",
                 "similarity"
             ]
         );
         assert_eq!(
-            columns().rebuilt()[4],
+            columns().rebuilt()[5],
             "CASE WHEN subtask_category_category IS NULL THEN NULL ELSE STRUCT_PACK(category := subtask_category_category, probability := subtask_category_probability) END AS subtask_category"
         );
         // A subtask read before a judgment was made has none to hand on.

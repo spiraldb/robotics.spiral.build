@@ -8,22 +8,19 @@
 //! publication is itself a save that edits no recipe, so every view current
 //! before it stays current after it.
 use super::{CurationGraph, CurationNode};
-use crate::activities::curation::population::PUBLISHED_EPISODES;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::curation::ViewName;
 use std::collections::BTreeSet;
 
-/// One output published as a catalog view.
+/// One output published as a catalog view, over every episode of the
+/// dataset. A view an older Studio published also recorded the most
+/// episodes it read, which this one reads past.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct PublishedOutput {
     node: String,
     view: String,
     /// The saved revision whose recipe the view was compiled from.
     revision: u64,
-    /// The most whole episodes the view reads, the first its dataset's
-    /// Selects keep.
-    episodes: usize,
 }
 
 impl PublishedOutput {
@@ -53,10 +50,6 @@ impl PublishedOutput {
     pub(crate) fn view(&self) -> &str {
         &self.view
     }
-    #[cfg(test)]
-    pub(crate) fn episodes(&self) -> usize {
-        self.episodes
-    }
     /// Whether the view is still what the recipe saved at `saved` compiles to.
     pub(crate) fn is_current(&self, saved: u64) -> bool {
         self.revision >= saved
@@ -79,9 +72,8 @@ impl CurationGraph {
     }
 
     /// Record that `node` is published as `view`, compiled from the recipe
-    /// saved at `saved` and bounded to [`PUBLISHED_EPISODES`] episodes. The
-    /// save that records it comes next, at `saved + 1`. A refused record
-    /// changes nothing.
+    /// saved at `saved`. The save that records it comes next, at
+    /// `saved + 1`. A refused record changes nothing.
     pub(crate) fn record_publication(
         &mut self,
         node: &str,
@@ -105,7 +97,6 @@ impl CurationGraph {
             node: node.to_owned(),
             view: view.to_owned(),
             revision: saved + 1,
-            episodes: PUBLISHED_EPISODES,
         });
         Ok(())
     }

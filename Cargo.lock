@@ -6685,8 +6685,10 @@ name = "spiral-robotics-backend"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "arrow-cast",
  "arrow-ipc",
  "arrow-schema",
+ "arrow-select",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -6724,6 +6726,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -6802,10 +6805,12 @@ dependencies = [
  "adbc_driver_manager",
  "arrow-array",
  "arrow-buffer",
+ "arrow-cast",
  "arrow-data",
  "arrow-ipc",
  "arrow-json",
  "arrow-schema",
+ "arrow-select",
  "axum",
  "base64 0.22.1",
  "dirs 6.0.0",

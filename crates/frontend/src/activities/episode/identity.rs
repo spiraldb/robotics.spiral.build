@@ -158,8 +158,7 @@ impl Episode {
     }
 
     /// The order of `listing_sql`'s columns every list of episodes follows.
-    pub(in crate::activities) const RECORDING_ORDER: &'static str =
-        "message_start_time, source_uri, id";
+    const RECORDING_ORDER: &'static str = "message_start_time, source_uri, id";
     /// The facts `listing_sql` lists beside each episode's id.
     const LISTED_FACTS: [&'static str; 6] = [
         "source_uri",

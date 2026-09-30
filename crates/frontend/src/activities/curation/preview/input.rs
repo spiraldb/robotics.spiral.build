@@ -70,7 +70,10 @@ impl PreviewInput {
             }
             CurationNodeKind::FindSimilarSubtasks(_)
             | CurationNodeKind::GroupSimilarSubtasks(_) => {
-                let relation = CurationPath::to(graph, parent)?.relation()?.renamed(INPUT);
+                let relation = CurationPath::to(graph, parent)?
+                    .relation()?
+                    .without_answers()
+                    .renamed(INPUT);
                 let columns = SubtaskColumns::of(&relation).map_err(PathError::new)?;
                 Ok(Self::Subtasks { relation, columns })
             }

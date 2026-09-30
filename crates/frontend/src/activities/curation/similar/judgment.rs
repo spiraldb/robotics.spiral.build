@@ -1,94 +1,157 @@
 //! The steps Find similar and Group similar subtasks add to a path: one text
 //! judgment of every subtask's description that reaches the node.
 //!
-//! Find similar compiles to `spql.ai.similarity` against its query, and Group
-//! similar to `spql.ai.classify` over its categories, written into the
-//! statement as a literal list. Both judge every subtask, and the node's own
-//! rule keeps part of them.
+//! Find similar asks `spql.ai.similarity` against its query, and Group
+//! similar `spql.ai.classify` over its categories, written into the
+//! statement as a literal list. A fill judges the whole list of subtasks the
+//! Break down above stored for an episode in one call, which answers with a
+//! list aligned with them; the published view and the preview read each
+//! subtask's judgment at its place in that list. The node's own rule keeps
+//! part of them.
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{SubtaskGrouping, SubtaskSearch};
-use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
+use crate::activities::curation::path::{
+    EpisodeRow, PathError, PathFragment, PathStep, StepSql, StoredAnswers,
+};
+use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, AnswerTable};
+use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::sql::SqlLiteral;
 
 /// The decision model both judgments are asked of, pinned so every published
 /// answer names the model that gave it.
 const JUDGMENT_MODEL: &str = "typesafe/jev-1.13";
 
-/// Where one judgment is written: what reaches the node, the description
-/// it reads, the column it writes, and the relation it hands on.
-struct JudgedStep<'a> {
-    name: &'a str,
-    input: &'a Relation,
-    description: &'a str,
-    column: String,
-    relation: Relation,
-}
+/// A text judgment of every subtask in a list, as either node asks it.
+trait SubtaskJudgment {
+    /// What the node measures, which names its column on the path.
+    const MEASURE: &'static str;
+    /// The function its call is to, which names its stored column.
+    const FUNCTION: &'static str;
+    /// Everything besides the subtasks that changes the answer, or why the
+    /// node cannot ask yet.
+    fn arguments(&self) -> Result<serde_json::Value, PathError>;
+    /// The call judging every subtask in `subtasks`, a stored Break down.
+    fn call(&self, subtasks: &str) -> Result<String, PathError>;
 
-impl<'a> JudgedStep<'a> {
-    /// The step writing `measure` over what reaches `step`, which must carry
-    /// the subtasks a Break down above described.
-    fn of(step: &'a PathStep<'_>, measure: &'static str) -> Result<Self, PathError> {
-        let input = step.input()?;
-        let description = input.measured(SubtaskRow::DESCRIPTION).ok_or_else(|| {
+    /// The column the judgments are stored in: its function, its model, what
+    /// it asks, and the Break down column whose subtasks it judges.
+    fn column(&self, subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
+        let call = serde_json::json!([
+            Self::FUNCTION,
+            JUDGMENT_MODEL,
+            self.arguments()?,
+            Self::judged(subtasks)?.as_str()
+        ]);
+        AnswerColumn::of(Self::MEASURE, &call).map_err(PathError::new)
+    }
+
+    /// The Break down column a judgment reads, which one above it must store.
+    fn judged(subtasks: Option<&AnswerColumn>) -> Result<&AnswerColumn, PathError> {
+        subtasks.ok_or_else(|| {
             PathError::new("This node reads the subtasks a Break down above it describes.")
-        })?;
-        let relation = input.measuring(step.name(), measure);
-        let column = relation
-            .measured(measure)
-            .expect("the relation carries what it just measured")
-            .to_owned();
-        Ok(Self {
-            name: step.name(),
-            input,
-            description,
-            column,
-            relation,
         })
     }
-    /// The one entry: every column that reached the node, then `call` of the
-    /// description as the new column.
-    fn sql(self, call: impl FnOnce(&str) -> String) -> StepSql {
+}
+
+/// Every subtask that reaches the node, with its judgment read from the
+/// stored list at the subtask's place; the list rides on for any node below
+/// asking the same.
+impl<J: SubtaskJudgment> PathFragment for J {
+    fn episode_columns(
+        &self,
+        row: &mut EpisodeRow,
+        column: &AnswerColumn,
+    ) -> Result<(), PathError> {
+        row.stored(column)
+    }
+
+    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+        let input = step.input()?;
+        let stored = step.column()?;
+        input.answers().without(stored)?;
+        let index = input.measured(SubtaskRow::INDEX).ok_or_else(|| {
+            PathError::new("This node reads the subtasks a Break down above it lists.")
+        })?;
+        let relation = input.measuring(step.name(), Self::MEASURE);
+        let column = relation
+            .measured(Self::MEASURE)
+            .expect("the relation carries what it just measured");
         let entry = format!(
-            "{} AS (SELECT {}, {} AS {} FROM {})",
-            self.name,
-            self.input.columns(),
-            call(self.description),
-            self.column,
-            self.input.name()
+            "{} AS (SELECT {}, spql.list.get({stored}, {index}) AS {column} FROM {})",
+            step.name(),
+            input.columns(),
+            input.name()
         );
-        StepSql::new(vec![entry], self.relation)
+        Ok(StepSql::new(vec![entry], relation))
     }
 }
 
-/// Every subtask that reaches the node, with how likely it is the operation
-/// the query names.
-impl PathFragment for SubtaskSearch {
-    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+/// A fill judges, for the episode bound as `$1`, every subtask the Break
+/// down above stored, in one call.
+impl<J: SubtaskJudgment> StoredAnswers for J {
+    fn answer_column(&self, subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
+        self.column(subtasks)
+    }
+
+    fn answer_source(
+        &self,
+        dataset: &DatasetSelection,
+        (_, subtasks): (&AnswerColumn, Option<&AnswerColumn>),
+    ) -> Result<AnswerSource, PathError> {
+        let table = AnswerTable::of(dataset).map_err(PathError::new)?;
+        let call = self.call(&format!("a.{}.value", J::judged(subtasks)?))?;
+        Ok(AnswerSource::Statement {
+            statement: format!(
+                "SELECT a.episode_id, {call} AS answer FROM {} a WHERE a.episode_id = $1",
+                table.quoted()
+            ),
+        })
+    }
+}
+
+/// How likely each subtask is the operation the query names.
+impl SubtaskJudgment for SubtaskSearch {
+    const MEASURE: &'static str = SubtaskRow::SIMILARITY;
+    const FUNCTION: &'static str = "spql.ai.similarity";
+
+    fn arguments(&self) -> Result<serde_json::Value, PathError> {
         let query = self.query().trim();
         if query.is_empty() {
             return Err(PathError::new("Type the subtask to search for."));
         }
-        let judged = JudgedStep::of(step, SubtaskRow::SIMILARITY)?;
-        Ok(judged.sql(|description| {
-            format!(
-                "spql.ai.similarity({description}, {}, model => {}{})",
-                SqlLiteral::text(query),
-                SqlLiteral::text(JUDGMENT_MODEL),
-                step.source().on_error()
-            )
-        }))
+        Ok(serde_json::json!([query]))
+    }
+
+    fn call(&self, subtasks: &str) -> Result<String, PathError> {
+        self.arguments()?;
+        Ok(format!(
+            "spql.ai.similarity({subtasks}, {}, model => {})",
+            SqlLiteral::text(self.query().trim()),
+            SqlLiteral::text(JUDGMENT_MODEL)
+        ))
     }
 }
 
-/// Every subtask that reaches the node, with the category it fits best and
-/// how probable that is.
-impl PathFragment for SubtaskGrouping {
-    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+/// The category each subtask fits best, and how probable that is.
+impl SubtaskJudgment for SubtaskGrouping {
+    const MEASURE: &'static str = SubtaskRow::CATEGORY;
+    const FUNCTION: &'static str = "spql.ai.classify";
+
+    fn arguments(&self) -> Result<serde_json::Value, PathError> {
         if self.categories().is_empty() {
             return Err(PathError::new(
                 "Generate the categories, or write them, before grouping.",
             ));
         }
+        Ok(self
+            .categories()
+            .iter()
+            .map(|category| serde_json::json!([category.name(), category.definition()]))
+            .collect())
+    }
+
+    fn call(&self, subtasks: &str) -> Result<String, PathError> {
+        self.arguments()?;
         let categories = self
             .categories()
             .iter()
@@ -101,13 +164,9 @@ impl PathFragment for SubtaskGrouping {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let judged = JudgedStep::of(step, SubtaskRow::CATEGORY)?;
-        Ok(judged.sql(|description| {
-            format!(
-                "spql.ai.classify({description}, [{categories}], model => {}{})",
-                SqlLiteral::text(JUDGMENT_MODEL),
-                step.source().on_error()
-            )
-        }))
+        Ok(format!(
+            "spql.ai.classify({subtasks}, [{categories}], model => {})",
+            SqlLiteral::text(JUDGMENT_MODEL)
+        ))
     }
 }

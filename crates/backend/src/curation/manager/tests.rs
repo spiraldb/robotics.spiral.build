@@ -1,4 +1,6 @@
 use super::*;
+use spiral_robotics_common::curation::PublishRequest;
+use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_storage::{ProjectStore, StudioStore};
 
 struct CurationFixture {
@@ -9,7 +11,10 @@ impl CurationFixture {
         let store = Arc::new(ProjectStore::in_memory());
         let studio = StudioStore::in_memory().project(&store.connection_settings());
         Self {
-            manager: CurationManager::new(Arc::new(StorageManager::new(store, studio))),
+            manager: CurationManager::new(
+                Arc::new(StorageManager::new(store, studio)),
+                watch::channel(ProviderKeys::default()).1,
+            ),
         }
     }
     fn document() -> CurationDocument {
@@ -103,15 +108,21 @@ async fn a_delete_removes_only_the_revision_it_names() {
     ));
 }
 
+/// A run over the folding dataset that only publishes `view` as `statement`.
+fn publishing(view: &str, statement: &str) -> FillRequest {
+    FillRequest::new(
+        DatasetSelection::new(vec!["dataset_folding".into()]).unwrap(),
+        Vec::new(),
+    )
+    .publishing(vec![PublishRequest::new(view, statement)])
+}
+
 #[tokio::test]
 async fn a_publish_is_refused_before_the_catalog_when_its_name_is_not_an_identifier() {
     let fixture = CurationFixture::new();
     for name in ["", "2folds", "folds; DROP TABLE robots", "my folds"] {
         assert!(matches!(
-            fixture
-                .manager
-                .publish(PublishRequest::new(name, "SELECT 1"))
-                .await,
+            fixture.manager.fill(publishing(name, "SELECT 1")).await,
             Err(OperationError::InvalidInput(_))
         ));
         assert!(matches!(
@@ -132,10 +143,7 @@ async fn a_publish_admits_only_one_read_only_query() {
     ] {
         assert!(
             matches!(
-                fixture
-                    .manager
-                    .publish(PublishRequest::new("folds", statement))
-                    .await,
+                fixture.manager.fill(publishing("folds", statement)).await,
                 Err(OperationError::InvalidInput(_))
             ),
             "{statement}"

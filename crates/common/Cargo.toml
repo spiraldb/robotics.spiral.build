@@ -17,5 +17,7 @@ test-support = []
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# Names each stored answer column by a hash of the call that answered it.
+sha2 = "0.10"
 # Robot descriptions double as the frontend model tool's JSON schema.
 schemars = "1.2"

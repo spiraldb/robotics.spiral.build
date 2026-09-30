@@ -1,13 +1,15 @@
-//! Score progress: score every episode that reaches the node with the native
-//! progress model, and keep the stretches of it progressing fast enough.
+//! Score progress: score every episode that reaches the node with the pinned
+//! progress model on the Modal service, and keep the stretches of it
+//! progressing fast enough.
 //!
 //! Each scored frame is a moment with the progress rate it made; how fast is
 //! fast enough is the node's own rule, and the moments it keeps join into the
 //! stretches the node hands on, which is what its view publishes and what
 //! Break down reads. The rule is reviewed as every rule is, and each episode
-//! is drawn with `MomentEvidence`. What the node reads is its own step run
-//! over each episode's intervals that reach it, held for the session, so
-//! moving the threshold scores nothing again.
+//! is drawn with `MomentEvidence`. The scores are stored once scored; what
+//! the node reads is its own step run over them for each episode's intervals
+//! that reach it, held for the session, so moving the threshold scores
+//! nothing again.
 mod moment;
 mod scoring;
 
@@ -60,6 +62,17 @@ impl ScoringInput {
             .filter(|episode| pending.contains(episode.id()))
             .cloned()
             .collect()
+    }
+    /// Why the episodes that failed did, when one reason stands for every
+    /// one of them, such as the Modal service not being set up.
+    fn failure(&self) -> Option<&str> {
+        let mut reasons = self
+            .preview
+            .failed()
+            .iter()
+            .map(|(_, reason)| reason.as_str());
+        let first = reasons.next()?;
+        reasons.all(|reason| reason == first).then_some(first)
     }
     fn failed(&self) -> Vec<Episode> {
         self.episodes
@@ -134,6 +147,10 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
         .preview
         .is_stale()
         .then(|| "Out of date: what reaches this node changed since it ran".to_owned());
+    let failures = FailedEpisodes::note(failed.len()).map(|note| match input.failure() {
+        Some(reason) => format!("{note}: {reason}"),
+        None => note,
+    });
     let blocked = unsupported.is_some() || uncompiled.is_some();
     // Nothing scored yet: the workspace says what scoring is for, beside the
     // run that starts it, rather than an empty strip, map, and index.
@@ -149,7 +166,7 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
         section { class: "curation-score-progress-workspace", "aria-label": "Score progress",
             NodeBar {
                 lead: rsx! { ProgressRule { threshold } },
-                note: NodeNotes::join([unsupported.clone(), uncompiled.clone(), problem(), stale, FailedEpisodes::note(failed.len())]),
+                note: NodeNotes::join([unsupported.clone(), uncompiled.clone(), problem(), stale, failures]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
                     if !unmeasured {
@@ -180,9 +197,10 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
                                 "Retry failed"
                             }
                         }
-                        // Scoring runs on this machine and costs nothing; what
-                        // it reads is held until the page reloads. Before the
-                        // first score the primer holds the run.
+                        // Scoring runs on the Modal service and what it scores
+                        // is stored, so no later Run or Publish scores an
+                        // episode again. Before the first score the primer
+                        // holds the run.
                         if !pending.is_empty() && !unmeasured {
                             Button {
                                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
@@ -212,7 +230,7 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
                             Button {
                                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
                                 disabled: blocked,
-                                title: "Score the {unscored} episodes not yet scored, on this machine",
+                                title: "Score the {unscored} episodes not yet scored",
                                 onclick: {
                                     let start = start.clone();
                                     let fresh = pending.clone();
