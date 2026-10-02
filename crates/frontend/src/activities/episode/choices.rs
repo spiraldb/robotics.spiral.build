@@ -251,10 +251,8 @@ impl StreamChoices {
                 Ok(roots) => roots,
                 Err(error) => {
                     for stream in &ranked {
-                        schemas.insert(
-                            stream.key().to_owned(),
-                            StreamSchema::Failed(error.clone()),
-                        );
+                        schemas
+                            .insert(stream.key().to_owned(), StreamSchema::Failed(error.clone()));
                     }
                     return;
                 }

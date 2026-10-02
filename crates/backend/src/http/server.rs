@@ -1,7 +1,7 @@
 //! Native HTTP runtime for the Spiral Robotics backend, started from the
-//! command line or inside the desktop app.
+//! command line.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use spiral_robotics_hardware::{
     HardwareHandle,
 };
 use spiral_robotics_storage::{
-    BackendStateStore, ProviderKeyring, ServiceEndpoint, SpiralConnectionSettings, StudioStore,
+    BackendStateStore, ProviderKeyring, ServiceEndpoint, SpiralConnectionSettings,
 };
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
@@ -29,9 +29,6 @@ const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_mill
 /// Motor and camera cleanup normally completes within one control/frame cycle;
 /// the final encoder segment and MCAP publication need time to finish.
 const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
-/// Blocking camera work gets this long to return once the desktop app has
-/// stopped Studio; the process is exiting either way.
-const RUNTIME_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const DEFAULT_FFMPEG: &str = "ffmpeg";
 const DEFAULT_VIDEO_CODEC: &str = "libx264";
 
@@ -75,16 +72,6 @@ struct VideoArguments {
     /// FFmpeg video codec used for camera access units in MCAP recordings.
     #[arg(long, default_value = DEFAULT_VIDEO_CODEC, value_name = "CODEC")]
     video_codec: String,
-}
-
-impl Default for VideoArguments {
-    fn default() -> Self {
-        Self {
-            no_cameras: false,
-            ffmpeg: DEFAULT_FFMPEG.to_owned(),
-            video_codec: DEFAULT_VIDEO_CODEC.to_owned(),
-        }
-    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -207,90 +194,6 @@ impl StudioServer {
                 ExitCode::FAILURE
             }
         }
-    }
-}
-
-/// Where the desktop app keeps Studio's browser bundle and its SQLite state.
-pub struct DesktopFiles {
-    public: PathBuf,
-    database: PathBuf,
-}
-
-impl DesktopFiles {
-    pub fn new(public: PathBuf, database: PathBuf) -> Self {
-        Self { public, database }
-    }
-}
-
-/// Studio inside the desktop app: the same server as [`StudioServer`], on a
-/// loopback port the operating system picks, with the app's own files. It
-/// serves until the app stops it.
-pub struct DesktopStudio {
-    runtime: tokio::runtime::Runtime,
-    address: SocketAddr,
-    shutdown: watch::Sender<bool>,
-    served: tokio::task::JoinHandle<Result<()>>,
-}
-
-impl DesktopStudio {
-    /// Camera probing relaunches the app's executable as an isolated worker.
-    /// Call this first in `main`: `true` means this process was that worker
-    /// and has done its job.
-    pub fn run_camera_worker() -> std::result::Result<bool, String> {
-        CameraRuntime::run_worker_from_environment().map_err(|error| error.to_string())
-    }
-
-    /// Start Studio and wait until it listens. Call on the main thread, which
-    /// macOS needs for the camera prompt.
-    pub fn start(files: DesktopFiles) -> std::result::Result<Self, String> {
-        let DesktopFiles { public, database } = files;
-        if !public.join("index.html").is_file() {
-            return Err(format!(
-                "the Studio web bundle is missing from {}",
-                public.display()
-            ));
-        }
-        ServerStartup::install_logging();
-        let camera_access_error = ServerStartup::request_camera_access();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| format!("could not start the async runtime: {error}"))?;
-        let startup = ServerStartup {
-            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-            video: VideoArguments::default(),
-            camera_access_error,
-            backend_state: Arc::new(BackendStateStore::new(StudioStore::at(database))),
-            control_settings: ControlSettings::default(),
-            public,
-        };
-        let bound = runtime
-            .block_on(startup.bind())
-            .map_err(|error| error.to_string())?;
-        let address = bound.address;
-        let (shutdown, requested) = watch::channel(false);
-        let served = runtime.spawn(bound.serve(requested));
-        Ok(Self {
-            runtime,
-            address,
-            shutdown,
-            served,
-        })
-    }
-
-    pub fn address(&self) -> SocketAddr {
-        self.address
-    }
-
-    /// Stop serving, release robots and cameras, and wait until that is done.
-    pub fn stop(self) {
-        let _ = self.shutdown.send(true);
-        match self.runtime.block_on(self.served) {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::error!("Studio stopped with an error: {error}"),
-            Err(error) => tracing::error!("Studio's server task failed: {error}"),
-        }
-        self.runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     }
 }
 

@@ -39,7 +39,9 @@ impl MessageField {
         }
     }
     /// Each read's `value` root, in order, from one episode query.
-    pub(in crate::activities) async fn values_of(reads: &[MessageRead]) -> Result<Vec<Self>, String> {
+    pub(in crate::activities) async fn values_of(
+        reads: &[MessageRead],
+    ) -> Result<Vec<Self>, String> {
         let read = ValueSchemaRead::new(reads)?;
         let response = DatasetClient::current()
             .run_episode_arrow_query(&EpisodeQueryRequest::new(

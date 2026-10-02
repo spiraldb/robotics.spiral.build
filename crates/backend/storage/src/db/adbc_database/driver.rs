@@ -107,22 +107,11 @@ impl DriverConfiguration {
             return Ok(path);
         }
         let executable = std::env::current_exe().map_err(DatabaseError::from_io)?;
-        let filename = format!(
+        Ok(executable.with_file_name(format!(
             "{}adbc_driver_spiraldb{}",
             std::env::consts::DLL_PREFIX,
             std::env::consts::DLL_SUFFIX
-        );
-        let beside = executable.with_file_name(&filename);
-        // A macOS app keeps its executable in Contents/MacOS and the libraries
-        // it bundles in Contents/Frameworks.
-        let bundled = executable
-            .parent()
-            .and_then(std::path::Path::parent)
-            .map(|contents| contents.join("Frameworks").join(&filename));
-        Ok(match bundled {
-            Some(bundled) if cfg!(target_os = "macos") && !beside.is_file() => bundled,
-            _ => beside,
-        })
+        )))
     }
 
     #[cfg(any(test, feature = "test-support"))]

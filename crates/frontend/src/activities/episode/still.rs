@@ -169,9 +169,8 @@ impl EpisodeStills {
             .as_ref()
             .and_then(|dataset| stills.cameras.read().get(dataset).cloned());
         let recorded = StreamCatalog::use_camera_topics(first.filter(|_| known.is_none()));
-        let found = known.or_else(|| {
-            StreamCatalog::overview_camera(recorded.as_deref()?).map(str::to_owned)
-        });
+        let found = known
+            .or_else(|| StreamCatalog::overview_camera(recorded.as_deref()?).map(str::to_owned));
         use_effect(use_reactive((&dataset, &found), move |(dataset, found)| {
             let (Some(dataset), Some(found)) = (dataset, found) else {
                 return;
@@ -193,7 +192,12 @@ impl EpisodeStills {
     ///
     /// A failed still is not kept, so the next row to ask tries again; the
     /// row that saw it fail keeps saying why.
-    fn request(self, moment: &StillMoment, camera: &str, datasets: DatasetClient) -> Signal<StillState> {
+    fn request(
+        self,
+        moment: &StillMoment,
+        camera: &str,
+        datasets: DatasetClient,
+    ) -> Signal<StillState> {
         let key = moment.key(camera);
         if let Some(known) = self.decoded.peek().get(&key) {
             return *known;
@@ -302,8 +306,14 @@ mod tests {
     fn one_instant_on_one_camera_is_filed_once() {
         let episode = Episode::fixture(&EpisodeId::fixture(1), 30_000_000_000);
         let early = StillMoment::at(&episode, 1.2344);
-        assert_eq!(early.key("/top"), StillMoment::at(&episode, 1.2341).key("/top"));
+        assert_eq!(
+            early.key("/top"),
+            StillMoment::at(&episode, 1.2341).key("/top")
+        );
         assert_ne!(early.key("/top"), early.key("/wrist"));
-        assert_ne!(early.key("/top"), StillMoment::opening(&episode).key("/top"));
+        assert_ne!(
+            early.key("/top"),
+            StillMoment::opening(&episode).key("/top")
+        );
     }
 }

@@ -6,4 +6,3 @@
 !.cargo
 !crates
 **/target
-crates/desktop/web

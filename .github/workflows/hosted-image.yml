@@ -17,13 +17,49 @@ permissions:
   contents: read
 
 env:
-  # The SpiralDB branch whose driver the image ships, as in the desktop app.
+  # The SpiralDB branch whose driver the image ships.
   SPIRALDB_REF: develop
   IMAGE: ghcr.io/spiraldb/spiral-robotics-studio
 
 jobs:
+  # The web interface builds on its own runner: the Nix toolchain and the
+  # image's Rust builds do not fit on one runner's disk together.
+  web:
+    name: Web interface
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/hosted"
+
+      # dx keeps earlier builds' hashed assets, so the bundle and dx's copy of
+      # it start empty.
+      - name: Build the web interface
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/hosted
+        run: |
+          set -euo pipefail
+          rm -rf target/hosted/web target/hosted/dx/spiral-robotics-frontend/release/web/public
+          nix develop .#web --command dx bundle --web --release --debug-symbols false \
+            --package spiral-robotics-frontend --out-dir target/hosted/web
+          test -f target/hosted/web/public/index.html
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: target/hosted/web/public
+          if-no-files-found: error
+
   image:
     name: Hosted image
+    needs: web
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
@@ -34,7 +70,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # SpiralDB is private: the desktop release's read-only deploy key checks
+      # SpiralDB is private: a read-only deploy key on spiraldb/spiraldb checks
       # it out. The image's build context leaves this directory out.
       - name: Check out SpiralDB
         uses: actions/checkout@v6
@@ -49,23 +85,10 @@ jobs:
         name: Name the SpiralDB commit
         run: echo "commit=$(git -C spiraldb rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - uses: DeterminateSystems/determinate-nix-action@v3
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
         with:
-          workspaces: ". -> target/hosted"
-
-      # dx keeps earlier builds' hashed assets, so the bundle and dx's copy of
-      # it start empty, as in the desktop app's build.
-      - name: Build the web interface
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target/hosted
-        run: |
-          set -euo pipefail
-          rm -rf target/hosted/web target/hosted/dx/spiral-robotics-frontend/release/web/public
-          nix develop .#desktop --command dx bundle --web --release --debug-symbols false \
-            --package spiral-robotics-frontend --out-dir target/hosted/web
-          test -f target/hosted/web/public/index.html
+          name: web
+          path: web
 
       - uses: docker/setup-buildx-action@v4
 
@@ -82,7 +105,7 @@ jobs:
           file: deploy/hosted/Dockerfile
           build-contexts: |
             spiraldb=spiraldb
-            web=target/hosted/web/public
+            web=web
           push: true
           tags: |
             ${{ env.IMAGE }}:latest

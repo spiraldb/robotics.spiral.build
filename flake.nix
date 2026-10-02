@@ -44,7 +44,6 @@
           webBuildInputs = [
             pkgs.dioxus-cli # fullstack dx bundle / dx serve
             pkgs.binaryen # wasm-opt, used for release builds
-            pkgs.cargo-tauri # packages the desktop app
           ];
           browserTestInputs = [
             # Includes wasm-bindgen-test-runner; must match the frontend pin.
@@ -126,9 +125,8 @@
               }
             );
           };
-          # Only what the release workflows need: the desktop app and the
-          # hosted image's web interface.
-          desktopShell = {
+          # Only what building the hosted image's web interface needs.
+          webShell = {
             packages = [
               rustToolchain
               pkgs.git
@@ -154,7 +152,7 @@
 
           devShells.default = pkgs.mkShell developmentShell;
           devShells.ci = pkgs.mkShell sharedShell;
-          devShells.desktop = pkgs.mkShell desktopShell;
+          devShells.web = pkgs.mkShell webShell;
 
           # Explicit validation environment until the public release includes
           # the upstream persistence fixes. No hand-written exports are needed.

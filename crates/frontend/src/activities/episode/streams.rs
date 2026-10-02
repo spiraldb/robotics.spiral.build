@@ -182,7 +182,10 @@ impl StreamCatalog {
     }
     /// What to call camera topic `name` among the episode's `cameras`: the
     /// part of its name the others do not share ("top", "left-wrist").
-    pub(in crate::activities) fn camera_title_among(name: &str, cameras: &[impl AsRef<str>]) -> String {
+    pub(in crate::activities) fn camera_title_among(
+        name: &str,
+        cameras: &[impl AsRef<str>],
+    ) -> String {
         let mut names = cameras.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         if !names.contains(&name) {
             names.push(name);

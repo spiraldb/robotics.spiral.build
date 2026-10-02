@@ -176,7 +176,7 @@ Build the web interface in its own target directory, so a running `dx serve` is 
 
 ```bash
 rm -rf target/hosted/web target/hosted/dx/spiral-robotics-frontend/release/web/public
-CARGO_TARGET_DIR=target/hosted nix develop .#desktop --command dx bundle --web --release \
+CARGO_TARGET_DIR=target/hosted nix develop .#web --command dx bundle --web --release \
   --debug-symbols false --package spiral-robotics-frontend --out-dir target/hosted/web
 ```
 
