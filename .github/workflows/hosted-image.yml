@@ -1,14 +1,14 @@
 name: Hosted image
 
-# Every push to main publishes the hosted Studio image (deploy/hosted), with a
-# Spiral driver built from the SpiralDB branch below, and deploys it.
+# Each release, a pushed `v*` tag, publishes the hosted Studio image
+# (deploy/hosted), with a Spiral driver built from the SpiralDB branch below,
+# and deploys it.
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch:
+    tags:
+      - v*
 
-# A newer main supersedes an image that is still building.
+# A newer release supersedes one that is still building.
 concurrency:
   group: hosted-image
   cancel-in-progress: true
@@ -109,7 +109,7 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ github.ref_name }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             com.spiraldb.spiraldb.revision=${{ steps.spiraldb.outputs.commit }}
@@ -118,13 +118,12 @@ jobs:
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
           cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
 
-  # Runs the new image on the VM in spiraldb-robotics, over IAP SSH as a deployer
-  # account only this repository can use (deploy/hosted/README.md). A restart stops
-  # curation runs in progress.
+  # Runs the release's image on the VM in spiraldb-robotics, over IAP SSH as a
+  # deployer account only this repository can use (deploy/hosted/README.md). A
+  # restart stops curation runs in progress.
   deploy:
     name: Deploy
     needs: image
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -157,4 +156,4 @@ jobs:
           gcloud compute scp "${vm[@]}" compose.yaml deploy.sh spiral-robotics-studio:
           printf '%s\n' "$REGISTRY_TOKEN" "$TUNNEL_TOKEN" \
             | gcloud compute ssh spiral-robotics-studio "${vm[@]}" \
-                --command="sudo bash deploy.sh $GITHUB_SHA '$GITHUB_ACTOR'"
+                --command="sudo bash deploy.sh '$GITHUB_REF_NAME' '$GITHUB_ACTOR'"

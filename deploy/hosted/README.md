@@ -9,7 +9,7 @@ behind the same Cloudflare Access sign-in as `next.spiraldb.com`.
 - A Cloudflare Tunnel carries all traffic. The VM publishes no ports and admits only IAP SSH.
 - Cloudflare Access admits only Spiral team identities and provides HTTPS.
 - Studio keeps its state in one Docker volume: its SQLite database and its Spiral sign-in.
-- Every push to `main` builds the image and deploys it to the VM.
+- Each release, a pushed `v*` tag, builds the image and deploys it to the VM.
 - The heavy work runs elsewhere: data lives in SpiralDB, model calls go to OpenRouter, and Score progress runs on Modal. The VM needs no GPU.
 
 | Path | Purpose |
@@ -32,8 +32,8 @@ Studio was built for one person on one machine. Hosted, everyone who passes Acce
 
 ## Image
 
-The `Hosted image` workflow publishes `ghcr.io/spiraldb/spiral-robotics-studio` on every push to `main`.
-It tags each image `latest` and with the Studio commit.
+The `Hosted image` workflow publishes `ghcr.io/spiraldb/spiral-robotics-studio` for each release.
+It tags each image with its release, such as `v0.1.0`, and `latest`.
 The image ships a Spiral driver built from SpiralDB `develop`, with its video runtime and LGPL FFmpeg.
 The `com.spiraldb.spiraldb.revision` label names the SpiralDB commit.
 
@@ -156,8 +156,7 @@ gh secret set CLOUDFLARE_TUNNEL_TOKEN --repo spiraldb/spiral-robotics
 
 ### 5. Deploy
 
-Run **Actions → Hosted image → Run workflow** on `main`.
-From then on, every push to `main` deploys.
+Release `v0.1.0` as **Operations** describes.
 
 ### 6. Sign in once
 
@@ -176,10 +175,18 @@ The volume keeps the sign-in and the keys across restarts and updates.
 
 ## Operations
 
-Every push to `main` deploys its image to the VM.
-A deploy restarts Studio, which stops curation runs in progress.
+A release deploys Studio. Tag a commit on `main` with the next version and push the tag:
 
-To run an earlier commit, re-run the **Deploy** job of that commit's `Hosted image` run.
+```bash
+git fetch origin
+git tag v0.1.1 origin/main
+git push origin v0.1.1
+```
+
+The tag starts the `Hosted image` workflow, which builds the image and deploys it to the VM.
+A deploy restarts Studio, which stops curation runs in progress. Release when nobody is running one.
+
+To run an earlier release again, re-run the **Deploy** job of that release's `Hosted image` run.
 
 Connect to the VM:
 

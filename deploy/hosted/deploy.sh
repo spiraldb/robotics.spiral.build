@@ -3,7 +3,7 @@
 # The Hosted image workflow copies compose.yaml and this script to the working
 # directory, then runs:
 #
-#   bash deploy.sh STUDIO_COMMIT REGISTRY_USER
+#   bash deploy.sh STUDIO_TAG REGISTRY_USER
 #
 # with two lines on stdin: a token that can pull from ghcr.io, then the tunnel token.
 set -euo pipefail
