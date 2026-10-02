@@ -35,7 +35,8 @@ The image ships a Spiral driver built from SpiralDB `develop`, with its video ru
 The `com.spiraldb.spiraldb.revision` label names the SpiralDB commit.
 
 The package is private, like this repository.
-Pulling it needs a GitHub token with the `read:packages` scope.
+Pulling it needs a classic GitHub personal access token with the `read:packages` scope.
+If the spiraldb organization enforces single sign-on, authorize the token for it.
 
 ## Production setup
 
@@ -70,9 +71,15 @@ Add one public hostname:
 
 ### Create the VM
 
+SpiralDB manages the `pyspiral-dev` project with Terraform in `spiraldb/infra`.
+Add the VM there through a pull request; CI applies it after approval.
+`devbox/vm.tf` in that repository defines a similar VM.
+
+The VM to add is equivalent to this command:
+
 ```bash
 gcloud compute instances create spiral-robotics-studio \
-  --project=PROJECT \
+  --project=pyspiral-dev \
   --zone=us-east4-a \
   --machine-type=e2-standard-4 \
   --image-family=debian-13 \
@@ -89,18 +96,18 @@ gcloud compute instances create spiral-robotics-studio \
 - Add no ingress firewall rule. SSH is the only way in that an administrator needs.
 
 The disk holds the only copy of Studio's drafts and settings.
-Attach a daily snapshot schedule:
+Give it a daily snapshot schedule, equivalent to:
 
 ```bash
 gcloud compute resource-policies create snapshot-schedule spiral-robotics-studio-daily \
-  --project=PROJECT \
+  --project=pyspiral-dev \
   --region=us-east4 \
   --daily-schedule \
   --start-time=08:00 \
   --max-retention-days=14
 
 gcloud compute disks add-resource-policies spiral-robotics-studio \
-  --project=PROJECT \
+  --project=pyspiral-dev \
   --zone=us-east4-a \
   --resource-policies=spiral-robotics-studio-daily
 ```
