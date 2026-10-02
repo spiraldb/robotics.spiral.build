@@ -3,7 +3,7 @@ name = "spiral-robotics-frontend"
 version.workspace = true
 edition.workspace = true
 description = "Browser interface for Spiral Robotics Studio"
-publish = false
+publish.workspace = true
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@ name = "spiral-robotics-hardware"
 version.workspace = true
 edition.workspace = true
 description = "Physical I/O and fixed-rate control for Spiral Robotics"
-publish = false
+publish.workspace = true
 
 [lints]
 workspace = true

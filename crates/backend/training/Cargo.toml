@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Studio/training-worker HTTP contract for Spiral Robotics"
 readme = "README.md"
-publish = false
+publish.workspace = true
 
 [lints]
 workspace = true

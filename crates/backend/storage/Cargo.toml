@@ -3,7 +3,7 @@ name = "spiral-robotics-storage"
 version.workspace = true
 edition.workspace = true
 description = "SpiralDB storage, schemas, queries, ingestion, and project transfer"
-publish = false
+publish.workspace = true
 
 [lints]
 workspace = true

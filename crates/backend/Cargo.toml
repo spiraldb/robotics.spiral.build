@@ -3,7 +3,7 @@ name = "spiral-robotics-backend"
 version.workspace = true
 edition.workspace = true
 description = "Server runtime for Spiral Robotics Studio"
-publish = false
+publish.workspace = true
 
 [lints]
 workspace = true

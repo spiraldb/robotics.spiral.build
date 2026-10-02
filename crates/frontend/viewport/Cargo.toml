@@ -3,7 +3,7 @@ name = "spiral-robotics-viewport"
 version.workspace = true
 edition.workspace = true
 description = "The studio's 3D bench: a WebGL scene of addressable, pickable entities"
-publish = false
+publish.workspace = true
 
 [lints]
 workspace = true

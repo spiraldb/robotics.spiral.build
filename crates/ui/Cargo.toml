@@ -3,7 +3,7 @@ name = "spiral-robotics-ui"
 version.workspace = true
 edition.workspace = true
 description = "Spiral Robotics interface primitives: actions, fields, facts, disclosures, trees, and notices in one design language"
-publish = false
+publish.workspace = true
 
 [lints]
 workspace = true

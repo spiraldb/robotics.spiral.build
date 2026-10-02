@@ -3,7 +3,7 @@ name = "spiral-robotics-common"
 version.workspace = true
 edition.workspace = true
 description = "Dependency-minimal types shared across Spiral Robotics crates"
-publish = false
+publish.workspace = true
 
 [lib]
 name = "spiral_robotics_common"

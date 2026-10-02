@@ -54,7 +54,7 @@
           nativeBuildInputs = [
             llvmPackages.libclang
           ];
-          linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
+          linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.v4l-utils
           ];
           # Pin the official standalone release and its archive checksums here.
@@ -80,8 +80,8 @@
               url = "https://downloads.spiraldb.com/adbc/${adbcVersion}/adbc-driver-spiraldb-${adbcVersion}-${adbcTarget}.tar.gz";
               sha256 = adbcArchiveHashes.${adbcTarget};
             };
-            nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
-            buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.stdenv.cc.cc.lib ];
+            nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.stdenv.cc.cc.lib ];
             dontBuild = true;
             installPhase = ''
               runHook preInstall
@@ -113,7 +113,7 @@
               builtins.toJSON {
                 "moz:firefoxOptions" = {
                   binary =
-                    if pkgs.stdenv.isDarwin then
+                    if pkgs.stdenv.hostPlatform.isDarwin then
                       "${pkgs.firefox}/Applications/Firefox.app/Contents/MacOS/firefox"
                     else
                       pkgs.lib.getExe pkgs.firefox;
