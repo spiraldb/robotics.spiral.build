@@ -9,16 +9,15 @@ behind the same Cloudflare Access sign-in as `next.spiraldb.com`.
 - A Cloudflare Tunnel carries all traffic. The VM publishes no ports and admits only IAP SSH.
 - Cloudflare Access admits only Spiral team identities and provides HTTPS.
 - Studio keeps its state in one Docker volume: its SQLite database and its Spiral sign-in.
-- Each release, a pushed `v*` tag, builds the image and deploys it to the VM.
+- Like SpiralDB's Cloud Run services, Terraform owns the spec and CI owns the image. Each release, a pushed `v*` tag, publishes the image as `latest`, and the VM pulls it within two minutes. CI has no access to the VM.
 - The heavy work runs elsewhere: data lives in SpiralDB, model calls go to OpenRouter, and Score progress runs on Modal. The VM needs no GPU.
 
 | Path | Purpose |
 | --- | --- |
 | `Dockerfile` | The image: backend, web interface, Spiral driver with its video runtime |
-| `compose.yaml` | Studio and `cloudflared` on the VM |
-| `deploy.sh` | Runs on the VM: installs `compose.yaml` and runs one image |
-| `../../.github/workflows/hosted-image.yml` | Builds and publishes the image, then deploys it |
-| `robotics.tf` in `spiraldb/infra` | The VM, its network and its snapshot schedule |
+| `../../.github/workflows/hosted-image.yml` | Builds the image and pushes it to Artifact Registry |
+| `robotics.tf` in `spiraldb/infra` | The VM, its network, its snapshot schedule and its image access |
+| `config/robotics-studio/` in `spiraldb/infra` | The Compose spec and the startup script that keeps the VM on it |
 
 ## What colleagues share
 
@@ -32,15 +31,12 @@ Studio was built for one person on one machine. Hosted, everyone who passes Acce
 
 ## Image
 
-The `Hosted image` workflow publishes `ghcr.io/spiraldb/spiral-robotics-studio` for each release.
-It tags each image with its release, such as `v0.1.0`, and `latest`.
+The `Hosted image` workflow publishes `us-docker.pkg.dev/pyspiral-dev/spiral-docker/spiral-robotics-studio`, beside SpiralDB's own images.
+It publishes one image per release, tagged with the release, such as `v0.1.0`, and `latest`, the tag the VM runs.
 The image ships a Spiral driver built from SpiralDB `develop`, with its video runtime and LGPL FFmpeg.
 The `com.spiraldb.spiraldb.revision` label names the SpiralDB commit.
 
-The package is private, like this repository.
-The deploy job pulls it on the VM with the job's own token.
-Pulling it anywhere else needs a classic GitHub personal access token with the `read:packages` scope.
-If the spiraldb organization enforces single sign-on, authorize the token for it.
+To pull it elsewhere, run `gcloud auth configure-docker us-docker.pkg.dev` with an account that can read `spiral-docker`.
 
 ## Production setup
 
@@ -57,12 +53,12 @@ gcloud billing projects describe spiraldb-auth --format='value(billingAccountNam
 gcloud projects create spiraldb-robotics --folder=FOLDER_ID
 gcloud billing projects link spiraldb-robotics --billing-account=BILLING_ACCOUNT_ID
 gcloud services enable compute.googleapis.com iap.googleapis.com oslogin.googleapis.com \
-  --project=spiraldb-robotics
+  secretmanager.googleapis.com --project=spiraldb-robotics
 ```
 
 Delete the default network, whose rules admit SSH and RDP from anywhere.
 Terraform creates the VM's network.
-Forbid service account keys: the deployer signs in through Workload Identity Federation only.
+Forbid service account keys: the VM's account uses Google's managed credentials only.
 
 ```bash
 gcloud compute firewall-rules delete default-allow-icmp default-allow-internal \
@@ -72,53 +68,43 @@ gcloud resource-manager org-policies enable-enforce \
   iam.disableServiceAccountKeyCreation --project=spiraldb-robotics
 ```
 
-Create the deployer account. Only this repository's workflows can act as it:
+Create the VM's service account.
+It reads the tunnel token and pulls the image; `robotics.tf` grants the image access.
 
 ```bash
-gcloud iam service-accounts create studio-deployer --project=spiraldb-robotics \
-  --display-name="Studio deployer"
-gcloud iam service-accounts add-iam-policy-binding \
-  studio-deployer@spiraldb-robotics.iam.gserviceaccount.com --project=spiraldb-robotics \
-  --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/733253205867/locations/global/workloadIdentityPools/github-actions/attribute.repository/spiraldb/spiral-robotics"
+gcloud iam service-accounts create spiral-robotics-studio --project=spiraldb-robotics \
+  --display-name="Spiral Robotics Studio VM"
 ```
 
-Let the deployer and the administrators SSH to the VM through IAP, with sudo:
+Let Terraform CI in `spiraldb/infra` manage the project's Compute Engine resources and attach the account to the VM:
 
 ```bash
-for MEMBER in serviceAccount:studio-deployer@spiraldb-robotics.iam.gserviceaccount.com \
-  user:xiangpeng@spiraldb.com; do
-  for ROLE in roles/compute.osAdminLogin roles/iap.tunnelResourceAccessor roles/compute.viewer; do
-    gcloud projects add-iam-policy-binding spiraldb-robotics \
-      --member="$MEMBER" --role="$ROLE" --condition=None
-  done
+for ROLE in roles/compute.admin roles/iam.serviceAccountViewer; do
+  gcloud projects add-iam-policy-binding spiraldb-robotics \
+    --member=serviceAccount:terraform-ci@pyspiral-dev.iam.gserviceaccount.com \
+    --role="$ROLE" --condition=None
 done
+gcloud iam service-accounts add-iam-policy-binding \
+  spiral-robotics-studio@spiraldb-robotics.iam.gserviceaccount.com --project=spiraldb-robotics \
+  --member=serviceAccount:terraform-ci@pyspiral-dev.iam.gserviceaccount.com \
+  --role=roles/iam.serviceAccountUser
 ```
 
-Let Terraform CI in `spiraldb/infra` manage the project's Compute Engine resources:
+Let administrators SSH to the VM through IAP, with sudo.
+OS Login also requires `serviceAccountUser` on the VM's account:
 
 ```bash
-gcloud projects add-iam-policy-binding spiraldb-robotics \
-  --member=serviceAccount:terraform-ci@pyspiral-dev.iam.gserviceaccount.com \
-  --role=roles/compute.admin --condition=None
+ADMIN=user:xiangpeng@spiraldb.com
+for ROLE in roles/compute.osAdminLogin roles/iap.tunnelResourceAccessor roles/compute.viewer; do
+  gcloud projects add-iam-policy-binding spiraldb-robotics \
+    --member="$ADMIN" --role="$ROLE" --condition=None
+done
+gcloud iam service-accounts add-iam-policy-binding \
+  spiral-robotics-studio@spiraldb-robotics.iam.gserviceaccount.com --project=spiraldb-robotics \
+  --member="$ADMIN" --role=roles/iam.serviceAccountUser
 ```
 
-### 2. Create the VM (`spiraldb/infra`)
-
-`robotics.tf` in `spiraldb/infra` owns the VPC, the IAP SSH firewall rule, the VM and its snapshot schedule.
-Change them there through a pull request; CI applies it after approval.
-
-- `spiral-robotics-studio` in `us-east4-a`: `e2-standard-4`, Debian 13, a 100 GB `pd-balanced` boot disk.
-- `us-east4` is SpiralDB's US region. Every Studio query makes several round trips to SpiralDB.
-- Studio calls no Google Cloud API, so the VM has no service account.
-- An external IP serves egress. The VPC admits nothing but IAP SSH.
-- OS Login is on. A startup script installs Docker and Compose from Debian.
-
-The boot disk holds the only copy of Studio's drafts and settings.
-It is snapshotted daily at 08:00 UTC, and each snapshot is kept for 14 days.
-Terraform refuses to destroy the VM.
-
-### 3. Create the Access application
+### 2. Create the Access application
 
 Create a Cloudflare Access self-hosted application before the tunnel routes any traffic.
 
@@ -133,7 +119,7 @@ Attach the same allow policy that protects `next.spiraldb.com`.
 Do not route the hostname before this application exists.
 Studio has no sign-in of its own: anyone who reaches it uses the shared Spiral account.
 
-### 4. Create the tunnel
+### 3. Create the tunnel
 
 In Cloudflare Zero Trust, create a `cloudflared` tunnel named `spiral-robotics-studio`.
 Copy its token.
@@ -147,16 +133,40 @@ Add one public hostname:
 
 `studio` is the Compose service name. `cloudflared` reaches it on the Compose network.
 
-Save the token as a secret of this repository. The deploy job writes it to the VM.
-`gh` prompts for the value:
+Store the token in Secret Manager and let the VM's account read it.
+Paste the token at the silent prompt, so it stays out of shell history:
 
 ```bash
-gh secret set CLOUDFLARE_TUNNEL_TOKEN --repo spiraldb/spiral-robotics
+gcloud secrets create cloudflare-tunnel-token --project=spiraldb-robotics \
+  --replication-policy=automatic
+read -rs TUNNEL_TOKEN && printf '%s' "$TUNNEL_TOKEN" \
+  | gcloud secrets versions add cloudflare-tunnel-token --project=spiraldb-robotics --data-file=- \
+  && unset TUNNEL_TOKEN
+gcloud secrets add-iam-policy-binding cloudflare-tunnel-token --project=spiraldb-robotics \
+  --member=serviceAccount:spiral-robotics-studio@spiraldb-robotics.iam.gserviceaccount.com \
+  --role=roles/secretmanager.secretAccessor
 ```
 
-### 5. Deploy
+### 4. Create the VM (`spiraldb/infra`)
+
+`robotics.tf` in `spiraldb/infra` owns the VPC, the IAP SSH firewall rule, the VM, its snapshot schedule and its read access to `spiral-docker`.
+`config/robotics-studio/` beside it holds the Compose spec and the startup script.
+Change them there through a pull request; CI applies it after approval.
+
+- `spiral-robotics-studio` in `us-east4-a`: `e2-standard-4`, Debian 13, a 100 GB `pd-balanced` boot disk.
+- `us-east4` is SpiralDB's US region. Every Studio query makes several round trips to SpiralDB.
+- An external IP serves egress. The VPC admits nothing but IAP SSH.
+- On every boot, the startup script installs Docker and Compose from Debian and the `studio-update` timer.
+- Every two minutes, `studio-update` writes the Compose spec from instance metadata and the tunnel token from Secret Manager. Then it pulls `latest` and runs `docker compose up`.
+
+The boot disk holds the only copy of Studio's drafts and settings.
+It is snapshotted daily at 08:00 UTC, and each snapshot is kept for 14 days.
+Terraform refuses to destroy the VM.
+
+### 5. Release
 
 Release `v0.1.0` as **Operations** describes.
+The VM starts Studio within two minutes of the image.
 
 ### 6. Sign in once
 
@@ -183,10 +193,18 @@ git tag v0.1.1 origin/main
 git push origin v0.1.1
 ```
 
-The tag starts the `Hosted image` workflow, which builds the image and deploys it to the VM.
-A deploy restarts Studio, which stops curation runs in progress. Release when nobody is running one.
+The tag starts the `Hosted image` workflow, which publishes the image as `latest`.
+Within two minutes the VM pulls it and restarts Studio, which stops curation runs in progress. Release when nobody is running one.
 
-To run an earlier release again, re-run the **Deploy** job of that release's `Hosted image` run.
+To run an earlier release again, point `latest` at its image. The next release moves it again:
+
+```bash
+IMAGE=us-docker.pkg.dev/pyspiral-dev/spiral-docker/spiral-robotics-studio
+gcloud artifacts docker tags add "$IMAGE:v0.1.0" "$IMAGE:latest"
+```
+
+To rotate the tunnel token, add a secret version. The next update picks it up.
+To change the Compose spec, edit `config/robotics-studio/compose.yaml` in `spiraldb/infra`.
 
 Connect to the VM:
 
@@ -195,11 +213,11 @@ gcloud compute ssh spiral-robotics-studio --project=spiraldb-robotics --zone=us-
   --tunnel-through-iap
 ```
 
-Read the logs:
+Read the updates and Studio's logs:
 
 ```bash
-cd /opt/spiral-robotics-studio
-sudo docker compose logs --follow studio
+sudo journalctl --unit=studio-update --since=-1h
+cd /opt/spiral-robotics-studio && sudo docker compose logs --follow studio
 ```
 
 ## Limits
