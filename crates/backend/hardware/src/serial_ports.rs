@@ -38,6 +38,7 @@ impl SerialPortCatalog {
     ///
     /// `serialport` reports both names for a physical serial device. LeRobot uses
     /// the `/dev/tty.*` namespace, so prefer it whenever both aliases are present.
+    #[cfg(any(target_os = "macos", test))]
     fn collapse_macos_aliases(ports: Vec<String>) -> Vec<String> {
         let mut by_device = BTreeMap::<String, String>::new();
 
