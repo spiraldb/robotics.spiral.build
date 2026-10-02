@@ -2,12 +2,13 @@
 # network: cloudflared reaches Studio at http://studio:8080 on this project's
 # network, and Cloudflare Access gates the public hostname.
 #
-# Put the tunnel's token in a `.env` file beside this one:
+# deploy.sh writes a `.env` file beside this one:
+#   STUDIO_TAG=<Studio commit of the image to run>
 #   TUNNEL_TOKEN=<token from the Cloudflare dashboard>
 
 services:
   studio:
-    image: ghcr.io/spiraldb/spiral-robotics-studio:latest
+    image: ghcr.io/spiraldb/spiral-robotics-studio:${STUDIO_TAG:?set STUDIO_TAG in .env}
     restart: unless-stopped
     volumes:
       - studio-state:/var/lib/spiral-robotics

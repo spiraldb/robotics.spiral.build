@@ -1,7 +1,7 @@
 name: Hosted image
 
 # Every push to main publishes the hosted Studio image (deploy/hosted), with a
-# Spiral driver built from the SpiralDB branch below.
+# Spiral driver built from the SpiralDB branch below, and deploys it.
 on:
   push:
     branches:
@@ -117,3 +117,44 @@ jobs:
           # only when the SpiralDB commit changes.
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
           cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+
+  # Runs the new image on the VM in spiraldb-robotics, over IAP SSH as a deployer
+  # account only this repository can use (deploy/hosted/README.md). A restart stops
+  # curation runs in progress.
+  deploy:
+    name: Deploy
+    needs: image
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: deploy/hosted
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/733253205867/locations/global/workloadIdentityPools/github-actions/providers/github-actions
+          service_account: studio-deployer@spiraldb-robotics.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # The job's own token pulls the image; it expires when the job ends.
+      - name: Deploy
+        working-directory: deploy/hosted
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          # OS Login keeps each run's key for an hour.
+          vm=(--project=spiraldb-robotics --zone=us-east4-a --tunnel-through-iap --ssh-key-expire-after=1h --quiet)
+          gcloud compute scp "${vm[@]}" compose.yaml deploy.sh spiral-robotics-studio:
+          printf '%s\n' "$REGISTRY_TOKEN" "$TUNNEL_TOKEN" \
+            | gcloud compute ssh spiral-robotics-studio "${vm[@]}" \
+                --command="sudo bash deploy.sh $GITHUB_SHA '$GITHUB_ACTOR'"
