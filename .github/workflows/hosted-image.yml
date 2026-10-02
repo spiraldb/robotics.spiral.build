@@ -1,14 +1,15 @@
 name: Hosted image
 
-# Every push to main publishes the hosted Studio image (deploy/hosted), with a
-# Spiral driver built from the SpiralDB branch below.
+# Each release, a pushed `v*` tag, publishes the hosted Studio image
+# (deploy/hosted), with a Spiral driver built from the SpiralDB branch below, as
+# `latest`. The VM in spiraldb-robotics runs `latest` within minutes (robotics.tf
+# in spiraldb/infra).
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch:
+    tags:
+      - v*
 
-# A newer main supersedes an image that is still building.
+# A newer release supersedes one that is still building.
 concurrency:
   group: hosted-image
   cancel-in-progress: true
@@ -19,7 +20,7 @@ permissions:
 env:
   # The SpiralDB branch whose driver the image ships.
   SPIRALDB_REF: develop
-  IMAGE: ghcr.io/spiraldb/spiral-robotics-studio
+  IMAGE: us-docker.pkg.dev/pyspiral-dev/spiral-docker/spiral-robotics-studio
 
 jobs:
   # The web interface builds on its own runner: the Nix toolchain and the
@@ -64,7 +65,7 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
-      packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -92,11 +93,17 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v4
+      - uses: google-github-actions/auth@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          workload_identity_provider: projects/733253205867/locations/global/workloadIdentityPools/github-actions/providers/github-actions
+          service_account: github-actions-wif@pyspiral-dev.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # The credential helper mints a token whenever the push needs one: the
+      # build can outlast a single access token.
+      - name: Sign in to Artifact Registry
+        run: gcloud auth configure-docker us-docker.pkg.dev --quiet
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -109,11 +116,11 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ github.ref_name }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             com.spiraldb.spiraldb.revision=${{ steps.spiraldb.outputs.commit }}
           # The registry holds every stage's layers, so the driver rebuilds
           # only when the SpiralDB commit changes.
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
-          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
