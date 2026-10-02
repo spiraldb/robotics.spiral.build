@@ -1,7 +1,5 @@
 //! Serial-port discovery helpers.
 
-use std::collections::BTreeMap;
-
 use serialport::SerialPortInfo;
 
 /// A stable, de-duplicated snapshot of the serial devices visible to Studio.
@@ -40,7 +38,7 @@ impl SerialPortCatalog {
     /// the `/dev/tty.*` namespace, so prefer it whenever both aliases are present.
     #[cfg(any(target_os = "macos", test))]
     fn collapse_macos_aliases(ports: Vec<String>) -> Vec<String> {
-        let mut by_device = BTreeMap::<String, String>::new();
+        let mut by_device = std::collections::BTreeMap::<String, String>::new();
 
         for port in ports {
             let key = port
