@@ -4,7 +4,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
-use spiral_robotics_common::curation::PublishRequest;
+use spiral_robotics_common::curation::PublishedView;
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::project::ProjectKey;
 use tower::ServiceExt;
@@ -51,7 +51,7 @@ async fn publishing_is_a_command_that_refuses_a_name_that_is_not_an_identifier()
     let fixture = ProjectFixture::new();
     let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
     let publishing = FillRequest::new(dataset, Vec::new())
-        .publishing(vec![PublishRequest::new("2folds", "SELECT 1")]);
+        .publishing(vec![PublishedView::new("2folds", "SELECT 1")]);
     for (uri, body) in [
         (
             "/curation-fills",

@@ -1,4 +1,4 @@
-"""Compare this port with SpiralDB's `spql.ai.score_progress` on episodes of the hosted sample dataset.
+"""Compare this port with SpiralDB's `spql.ai.warp_rm` on episodes of the hosted sample dataset.
 
 Each episode's packets go through the service's own FastAPI app in-process, exactly as Studio sends
 them; the Rust reference runs locally through Studio's release ADBC driver. Credentials are read at
@@ -46,7 +46,7 @@ REFERENCE = f"""WITH {PACKETS},
 videos AS (SELECT id, spql.video.from_packets(spql.list.collect(STRUCT_PACK(payload := payload,
   decode_index := decode_index, presentation_time := presentation_time)), 'h264', 'annex_b') AS source
   FROM packets GROUP BY id)
-SELECT spql.ai.score_progress(source, model => '{SELECTOR}') AS scores FROM videos"""
+SELECT spql.ai.warp_rm(source, model => '{SELECTOR}') AS scores FROM videos"""
 
 
 class SpiralProject:

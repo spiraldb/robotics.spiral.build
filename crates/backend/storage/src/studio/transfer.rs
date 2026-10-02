@@ -56,6 +56,11 @@ impl StudioSnapshot {
             .execute_unprepared("DELETE FROM backend_settings")
             .await
             .map_err(|error| error.to_string())?;
+        // A bundle carries no model answers, so no view that reads them.
+        transaction
+            .execute_unprepared("DELETE FROM curated_views")
+            .await
+            .map_err(|error| error.to_string())?;
         for table in Self::TABLES {
             transaction
                 .execute(Statement::from_sql_and_values(
@@ -258,7 +263,9 @@ impl StudioSnapshot {
             .begin()
             .await
             .map_err(|error| error.to_string())?;
-        for table in Self::TABLES {
+        // The restore replaces every dataset, and with it the answers the
+        // project's published views read.
+        for table in Self::TABLES.into_iter().chain(["curated_views"]) {
             transaction
                 .execute(Statement::from_sql_and_values(
                     DbBackend::Sqlite,

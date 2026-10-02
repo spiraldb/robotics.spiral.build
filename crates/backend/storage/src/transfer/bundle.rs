@@ -1,6 +1,6 @@
 //! Format 4 project ZIP: a manifest, a project-scoped SQLite snapshot, and
 //! one Arrow IPC stream per Spiral data relation.
-use crate::datasets::McapSources;
+use crate::datasets::{McapDatasetDefinition, McapSources};
 use crate::db::{self as spiral, ProjectConnection, Table};
 use crate::studio::StudioSnapshot;
 use arrow_array::RecordBatch;
@@ -116,19 +116,21 @@ impl ProjectBundle {
         source: ProjectBundleExport<'_>,
     ) -> Result<Vec<u8>, String> {
         let snapshot = StudioSnapshot::capture(source.studio).await?;
-        let mut bundle =
-            BundleWriter::new(&Manifest::current(source.datasets), &snapshot.bytes()?)?;
+        let mut bundle = BundleWriter::new(
+            &Manifest::current(source.datasets.clone()),
+            &snapshot.bytes()?,
+        )?;
         for table in Table::ALL {
-            let relation = table.qualified_name();
             bundle.start(&Self::relation_entry(table))?;
+            if table == Table::DatasetSources {
+                Self::export_sources(connection, &source.datasets, &mut bundle).await?;
+                continue;
+            }
+            let relation = table.qualified_name();
             if connection.table_exists(&relation).await? {
-                let query = match table {
-                    Table::DatasetSources => format!(
-                        "SELECT dataset_name, recording, spql.io.read_bytes(source) AS payload FROM {relation}"
-                    ),
-                    Table::TrainingCheckpoints => format!("SELECT * FROM {relation}"),
-                };
-                let mut records = connection.execute_query(query).await?;
+                let mut records = connection
+                    .execute_query(format!("SELECT * FROM {relation}"))
+                    .await?;
                 table.validate(records.schema().as_ref(), "project export")?;
                 let mut writer = StreamWriter::try_new(&mut bundle, records.schema().as_ref())
                     .map_err(|error| error.to_string())?;
@@ -145,6 +147,28 @@ impl ProjectBundle {
             }
         }
         bundle.finish()
+    }
+
+    /// Every dataset's files in one stream, each row naming its dataset.
+    async fn export_sources(
+        connection: &mut ProjectConnection,
+        datasets: &[String],
+        bundle: &mut BundleWriter,
+    ) -> Result<(), String> {
+        let mut writer = StreamWriter::try_new(bundle, &Table::DatasetSources.schema())
+            .map_err(|error| error.to_string())?;
+        for name in datasets {
+            let mut records = connection
+                .execute_query(McapDatasetDefinition::new(name).bundle_sql())
+                .await?;
+            while let Some(batch) = records.next().await {
+                let batch = batch.map_err(|error| error.to_string())?;
+                writer
+                    .write(&McapSources::bundled(name, &batch)?)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        writer.finish().map_err(|error| error.to_string())
     }
 
     fn relation_entry(table: Table) -> String {
@@ -197,22 +221,17 @@ impl ProjectBundle {
                     summary.record_relation(
                         batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
                     );
-                    let batches = if table == Table::DatasetSources {
-                        batches
-                            .into_iter()
-                            .map(McapSources::restore)
-                            .collect::<Result<Vec<_>, _>>()?
-                            .into_iter()
-                            .flatten()
-                            .collect()
-                    } else {
-                        batches
-                    };
-                    connection
-                        .replace_or_create_batches(&table.qualified_name(), batches)
-                        .await?;
+                    match table {
+                        Table::DatasetSources => {
+                            McapSources::restore(connection, &batches, &archive.datasets).await?;
+                        }
+                        Table::TrainingCheckpoints => {
+                            connection
+                                .replace_or_create_batches(&table.qualified_name(), batches)
+                                .await?;
+                        }
+                    }
                 }
-                McapSources::refresh(connection, &archive.datasets).await?;
                 Ok(summary)
             })
             .await?;

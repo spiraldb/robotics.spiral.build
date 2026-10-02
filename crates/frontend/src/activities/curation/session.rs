@@ -313,7 +313,7 @@ impl DocumentSession {
 
     /// Delete the saved curation `id`, open or not, and the views its stored
     /// copy publishes first, so no view outlives the recipe it was compiled
-    /// from; a view the catalog refuses to drop stops the delete and is
+    /// from; a view that fails to drop stops the delete and is
     /// reported like any command failure. Then it is deleted at the revision
     /// just read, so a save landing in between is refused rather than lost;
     /// if it is the open curation, a fresh one opens in its place.

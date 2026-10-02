@@ -166,12 +166,6 @@ pub(super) struct AdmittedFill {
     work: FillWork,
 }
 
-impl AdmittedFill {
-    pub(super) fn views(&self) -> &[ViewName] {
-        &self.views
-    }
-}
-
 /// What a run works with: the project's storage, the answers table it
 /// writes when it fills a column, and the Modal service when one needs it.
 struct FillWork {

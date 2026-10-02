@@ -4,6 +4,8 @@
 #[allow(unreachable_pub)]
 mod backend_settings;
 #[allow(unreachable_pub)]
+pub(crate) mod curated_views;
+#[allow(unreachable_pub)]
 pub(crate) mod curations;
 mod migrations;
 #[allow(unreachable_pub)]

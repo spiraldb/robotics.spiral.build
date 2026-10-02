@@ -33,16 +33,8 @@
           };
           llvmPackages = pkgs.llvmPackages_latest;
           # This flake owns the toolchain, tools, and exported build environment.
-          rustToolchain = pkgs.rust-bin.nightly."2026-06-29".default.override {
-            extensions = [
-              "rust-src"
-              "rust-analyzer"
-              "rustfmt"
-              "clippy"
-            ];
-            # The studio's web interface compiles to WebAssembly.
-            targets = [ "wasm32-unknown-unknown" ];
-          };
+          # rust-toolchain.toml pins Rust for the shells and for builds without Nix.
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
           # `dx` builds the web client and native server as one fullstack app,
@@ -134,7 +126,8 @@
               }
             );
           };
-          # Only what building the desktop app needs, for its release workflow.
+          # Only what the release workflows need: the desktop app and the
+          # hosted image's web interface.
           desktopShell = {
             packages = [
               rustToolchain

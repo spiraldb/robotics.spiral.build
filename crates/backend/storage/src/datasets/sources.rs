@@ -1,21 +1,25 @@
-//! Publish one complete MCAP file through the Dataset's declared source view.
+//! Studio's MCAP datasets: each one's files are rows of its own files table,
+//! and its Dataset copies every topic of them into Spiral at each refresh, so
+//! reads never reopen the files.
 use crate::ProjectConnection;
 use crate::StorageManager;
 use arrow_array::{
     ArrayRef, BinaryViewArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt64Array,
 };
 use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
-use arrow_schema::{DataType, Field, Fields, Schema};
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use spiral_robotics_common::curation::AnswerTable;
 use spiral_robotics_common::sql::SqlLiteral;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub(crate) struct McapFile<'a> {
     dataset_name: &'a str,
     key: &'a str,
     bytes: &'a [u8],
+    sha256: String,
 }
 impl<'a> McapFile<'a> {
     pub(crate) fn new(dataset_name: &'a str, key: &'a str, bytes: &'a [u8]) -> Self {
@@ -23,16 +27,12 @@ impl<'a> McapFile<'a> {
             dataset_name,
             key,
             bytes,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
         }
     }
+    /// The file as one row of its dataset's files table, its bytes inline.
     fn batch(&self) -> Result<RecordBatch, String> {
         let text = || Arc::new(StringViewArray::from(vec![None::<&str>])) as ArrayRef;
-        let schema = Arc::new(Schema::new(vec![
-            arrow_schema::Field::new("dataset_name", arrow_schema::DataType::Utf8, false),
-            arrow_schema::Field::new("recording", arrow_schema::DataType::Utf8, false),
-            McapSourceBlob::field("source"),
-        ]));
-        let hash = format!("{:x}", Sha256::digest(self.bytes));
         let blob = StructArray::try_new(
             McapSourceBlob::fields(),
             vec![
@@ -46,86 +46,34 @@ impl<'a> McapFile<'a> {
                 text(),
                 text(),
                 text(),
-                Arc::new(StringViewArray::from(vec![hash.as_str()])),
+                Arc::new(StringViewArray::from(vec![self.sha256.as_str()])),
                 text(),
             ],
             None,
         )
         .map_err(|e| e.to_string())?;
         RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec![self.dataset_name])),
-                Arc::new(StringArray::from(vec![self.key])),
-                Arc::new(blob),
-            ],
+            McapDatasetDefinition::files_schema(),
+            vec![Arc::new(StringArray::from(vec![self.key])), Arc::new(blob)],
         )
         .map_err(|e| e.to_string())
     }
     async fn publish(
         &self,
-        connection: &mut crate::ProjectConnection,
+        connection: &mut ProjectConnection,
         exists: bool,
     ) -> Result<(), String> {
         let relations = McapDatasetDefinition::new(self.dataset_name);
-        let mut already_imported = false;
-        if connection
-            .table_exists(McapDatasetDefinition::SOURCE_TABLE)
-            .await?
-        {
-            if !exists {
-                let orphaned = connection
-                    .query_rows(
-                        &format!(
-                            "SELECT recording FROM dataset_source WHERE dataset_name = {} LIMIT 1",
-                            SqlLiteral::text(self.dataset_name)
-                        ),
-                        1,
-                    )
-                    .await?;
-                if !orphaned.rows().is_empty() {
-                    return Err("MCAP sources already exist without their Dataset; repair the catalog before appending files".into());
-                }
-            }
-            let duplicate = connection.read_batches(&format!(
-                "SELECT spql.io.read_bytes(source) AS payload FROM dataset_source WHERE dataset_name = {} AND recording = {} LIMIT 2",
-                SqlLiteral::text(self.dataset_name), SqlLiteral::text(self.key)
-            )).await?;
-            let count = duplicate.iter().map(RecordBatch::num_rows).sum::<usize>();
-            if count > 1 {
-                return Err(
-                    "Duplicate MCAP sources exist; repair the catalog before appending files"
-                        .into(),
-                );
-            }
-            if count == 1 {
-                let batch = duplicate
-                    .iter()
-                    .find(|batch| batch.num_rows() == 1)
-                    .ok_or("MCAP source row is missing")?;
-                let data = batch
-                    .column_by_name("payload")
-                    .ok_or("MCAP source has no bytes")?;
-                let previous = McapSources::bytes(data.as_ref(), 0)?;
-                if previous != self.bytes {
-                    return Err(
-                        "Refusing to replace an immutable MCAP file with different bytes".into(),
-                    );
-                }
-                already_imported = true;
-            }
-        }
-        if !already_imported {
-            connection
-                .create_or_append_batches(McapDatasetDefinition::SOURCE_TABLE, vec![self.batch()?])
-                .await?;
-        }
         if !exists {
-            relations.publish(connection).await?;
-        } else {
-            relations.append(connection).await?;
+            return relations.publish(connection, vec![self.batch()?]).await;
         }
-        Ok(())
+        // The same file sent again only refreshes the Dataset.
+        let files = if relations.holds(connection, self).await? {
+            Vec::new()
+        } else {
+            vec![self.batch()?]
+        };
+        relations.append(connection, files).await
     }
 }
 impl StorageManager {
@@ -150,6 +98,29 @@ impl McapSources {
             arrow_schema::Field::new("payload", arrow_schema::DataType::Binary, false),
         ])
     }
+
+    /// Rows [`McapDatasetDefinition::bundle_sql`] read, as a project bundle
+    /// carries them: each under the dataset it belongs to.
+    pub(crate) fn bundled(dataset_name: &str, batch: &RecordBatch) -> Result<RecordBatch, String> {
+        let column = |name: &str| {
+            batch
+                .column_by_name(name)
+                .cloned()
+                .ok_or_else(|| format!("MCAP source export has no {name}"))
+        };
+        RecordBatch::try_new(
+            Arc::new(Self::bundle_schema()),
+            vec![
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                    dataset_name,
+                    batch.num_rows(),
+                ))),
+                column("recording")?,
+                column("payload")?,
+            ],
+        )
+        .map_err(|error| format!("MCAP source export: {error}"))
+    }
 }
 impl McapSources {
     fn bytes(array: &dyn arrow_array::Array, row: usize) -> Result<&[u8], String> {
@@ -171,96 +142,54 @@ impl McapSources {
         Err("MCAP source payload must be binary".into())
     }
 
-    pub(crate) async fn validate_ownership(
-        store: &crate::ProjectStore,
-        connection: &mut crate::ProjectConnection,
-    ) -> Result<Vec<String>, String> {
-        let owned = store.managed_mcap_datasets().await?;
-        if !connection.table_exists("dataset_source").await? {
-            if !owned.is_empty() {
-                return Err("MCAP datasets have no source table".into());
+    /// The files a project bundle carries, as files table rows of each
+    /// dataset its manifest `names`; a dataset with no files still gets its
+    /// empty table.
+    fn source_files(
+        batches: &[RecordBatch],
+        names: &[String],
+    ) -> Result<BTreeMap<String, Vec<RecordBatch>>, String> {
+        let mut files = names
+            .iter()
+            .map(|name| (name.clone(), Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        for batch in batches {
+            let columns = crate::db::ArrowColumns::new(batch, "MCAP source backup");
+            let data = batch
+                .column_by_name("payload")
+                .ok_or("MCAP backup has no payload")?;
+            for row in 0..batch.num_rows() {
+                let name = columns.text("dataset_name", row)?;
+                let rows = files
+                    .get_mut(name)
+                    .ok_or("MCAP source names do not match the project manifest")?;
+                let file = McapFile::new(
+                    name,
+                    columns.text("recording", row)?,
+                    Self::bytes(data.as_ref(), row)?,
+                );
+                rows.push(file.batch()?);
             }
-            return Ok(owned);
         }
-        let names = connection
-            .query_rows("SELECT DISTINCT dataset_name FROM dataset_source", 100_000)
-            .await?;
-        if names.truncated() {
-            return Err("Too many datasets to validate for project transfer".into());
-        }
-        for row in names.rows() {
-            let name = row
-                .get("dataset_name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("MCAP source has no dataset name")?;
-            if !store.validate_mcap_destination(name).await? {
-                return Err(format!(
-                    "MCAP source {name} has no Dataset definition; repair the catalog before transferring the project"
-                ));
+        for rows in files.values_mut() {
+            if rows.is_empty() {
+                rows.push(RecordBatch::new_empty(McapDatasetDefinition::files_schema()));
             }
         }
-        Ok(owned)
+        Ok(files)
     }
 
-    pub(crate) fn restore(batch: RecordBatch) -> Result<Vec<RecordBatch>, String> {
-        let columns = crate::db::ArrowColumns::new(&batch, "MCAP source backup");
-        let mut rows = Vec::new();
-        let data = batch
-            .column_by_name("payload")
-            .ok_or("MCAP backup has no payload")?;
-        for row in 0..batch.num_rows() {
-            let name = columns.text("dataset_name", row)?;
-            if !crate::db::StorageSchema::is_dataset_id(name) || name.contains('.') {
-                return Err("MCAP backup contains an invalid dataset name".into());
-            }
-            let bytes = Self::bytes(data.as_ref(), row)?;
-            rows.push(
-                McapFile::new(
-                    columns.text("dataset_name", row)?,
-                    columns.text("recording", row)?,
-                    bytes,
-                )
-                .batch()?,
-            );
-        }
-        if rows.is_empty() {
-            rows.push(McapFile::new("", "", &[]).batch()?.slice(0, 0));
-        }
-        Ok(rows)
-    }
-    pub(crate) async fn refresh(
+    /// Publish every dataset a project bundle names over the files it
+    /// carries. A bundle carries no answers: each restored dataset starts over.
+    pub(crate) async fn restore(
         connection: &mut crate::ProjectConnection,
+        batches: &[RecordBatch],
         names: &[String],
     ) -> Result<(), String> {
-        let source_names = connection
-            .query_rows("SELECT DISTINCT dataset_name FROM dataset_source", 100_000)
-            .await?;
-        if source_names.truncated()
-            || source_names.rows().iter().any(|row| {
-                row.get("dataset_name")
-                    .and_then(serde_json::Value::as_str)
-                    .is_none_or(|name| !names.iter().any(|declared| declared == name))
-            })
-        {
-            return Err("MCAP source names do not match the project manifest".into());
-        }
-        for name in names {
-            let relations = McapDatasetDefinition::new(name);
-            // Restore into a new project requires the source view and dataset definition.
-            connection
-                .execute_update_sql(&relations.source_view_sql())
+        for (name, files) in Self::source_files(batches, names)? {
+            McapDatasetDefinition::new(&name)
+                .publish(connection, files)
                 .await?;
-            connection
-                .execute_update_sql(&relations.create_sql())
-                .await?;
-            connection
-                .execute_update_sql(&format!(
-                    "REFRESH DATASET {}",
-                    McapDatasetDefinition::quoted(&format!("dataset_{name}"))
-                ))
-                .await?;
-            // A bundle carries no answers: the restored dataset starts over.
-            relations.create_answers(connection).await?;
         }
         Ok(())
     }
@@ -272,24 +201,25 @@ impl McapSources {
         names: &[String],
     ) -> Result<(), String> {
         for name in names {
+            let relations = McapDatasetDefinition::new(name);
             // Refreshing materializes each topic as a signal under the
             // Dataset, which only a cascading drop removes.
             connection
                 .execute_update_sql(&format!(
                     "DROP DATASET IF EXISTS {} CASCADE",
-                    McapDatasetDefinition::quoted(&format!("dataset_{name}"))
-                ))
-                .await?;
-            connection
-                .execute_update_sql(&format!(
-                    "DROP VIEW IF EXISTS {}",
-                    McapDatasetDefinition::quoted(&format!("dataset_source_{name}"))
+                    McapDatasetDefinition::quoted(&relations.dataset)
                 ))
                 .await?;
             connection
                 .execute_update_sql(&format!(
                     "DROP TABLE IF EXISTS {}",
-                    AnswerTable::for_dataset_id(name).quoted()
+                    McapDatasetDefinition::quoted(&relations.files)
+                ))
+                .await?;
+            connection
+                .execute_update_sql(&format!(
+                    "DROP TABLE IF EXISTS {}",
+                    relations.answers.quoted()
                 ))
                 .await?;
         }
@@ -298,22 +228,18 @@ impl McapSources {
 }
 
 /// The relations Studio keeps for one MCAP dataset: its `dataset_<id>`
-/// Dataset, the `dataset_source_<id>` view it reads its files through, and
+/// Dataset, the `dataset_files_<id>` table of the files it is made from, and
 /// the `dataset_answers_<id>` table of model answers about its episodes.
 pub(crate) struct McapDatasetDefinition {
-    dataset_name: String,
     dataset: String,
-    source: String,
+    files: String,
     answers: AnswerTable,
 }
 impl McapDatasetDefinition {
-    pub(crate) const SOURCE_TABLE: &str = "dataset_source";
-
     pub(crate) fn new(dataset_id: &str) -> Self {
         Self {
-            dataset_name: dataset_id.to_owned(),
             dataset: format!("dataset_{dataset_id}"),
-            source: format!("dataset_source_{dataset_id}"),
+            files: format!("dataset_files_{dataset_id}"),
             answers: AnswerTable::for_dataset_id(dataset_id),
         }
     }
@@ -333,23 +259,32 @@ impl McapDatasetDefinition {
     pub(crate) fn planned(&self) -> Vec<String> {
         vec![
             self.dataset.clone(),
-            self.source.clone(),
+            self.files.clone(),
             self.answers.name(),
         ]
     }
+    /// The files table's columns: each file's name, and the Blob holding it.
+    pub(crate) fn files_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("recording", DataType::Utf8, false),
+            McapSourceBlob::field("source"),
+        ]))
+    }
+    /// The Dataset over the files table, copying every topic into Spiral at
+    /// each refresh.
     pub(crate) fn create_sql(&self) -> String {
         format!(
-            "CREATE DATASET {} USING spql.mcap.dataset FROM {} WITH (key = 'recording', blob = 'source', on_error = 'fail')",
+            "CREATE DATASET {} USING spql.mcap.dataset FROM {} WITH (key = 'recording', blob = 'source', on_error = 'fail', materialization = 'all')",
             Self::quoted(&self.dataset),
-            Self::quoted(&self.source)
+            Self::quoted(&self.files)
         )
     }
-    pub(crate) fn source_view_sql(&self) -> String {
+    /// The files as a project bundle carries them, each read back whole from
+    /// wherever its Blob points.
+    pub(crate) fn bundle_sql(&self) -> String {
         format!(
-            "CREATE VIEW {} AS SELECT recording, source FROM {} WHERE dataset_name = {}",
-            Self::quoted(&self.source),
-            Self::SOURCE_TABLE,
-            SqlLiteral::text(&self.dataset_name)
+            "SELECT recording, spql.io.read_bytes(source) AS payload FROM {}",
+            Self::quoted(&self.files)
         )
     }
 }
@@ -417,22 +352,65 @@ impl McapSourceBlob {
 }
 
 impl McapDatasetDefinition {
-    /// Create the Dataset over its source view, refresh it, and create its
-    /// answers table from what the refresh found.
-    pub(crate) async fn publish(&self, connection: &mut ProjectConnection) -> Result<(), String> {
+    /// Store `files` as the files table, create the Dataset over it, refresh
+    /// it, and create its answers table from what the refresh found.
+    pub(crate) async fn publish(
+        &self,
+        connection: &mut ProjectConnection,
+        files: Vec<RecordBatch>,
+    ) -> Result<(), String> {
         connection
-            .execute_update_sql(&self.source_view_sql())
+            .create_or_append_batches(&self.files, files)
             .await?;
         connection.execute_update_sql(&self.create_sql()).await?;
         self.refresh(connection).await?;
         self.create_answers(connection).await
     }
 
-    /// Refresh the Dataset after an append, and give each episode it added a
-    /// row of the answers table.
-    async fn append(&self, connection: &mut ProjectConnection) -> Result<(), String> {
+    /// Add `files` to the files table, refresh the Dataset, and give each
+    /// episode it added a row of the answers table.
+    async fn append(
+        &self,
+        connection: &mut ProjectConnection,
+        files: Vec<RecordBatch>,
+    ) -> Result<(), String> {
+        connection
+            .create_or_append_batches(&self.files, files)
+            .await?;
         self.refresh(connection).await?;
         self.add_answer_rows(connection).await
+    }
+
+    /// Whether the files table already holds `file`. Another file under its
+    /// name is refused: a source file never changes.
+    async fn holds(
+        &self,
+        connection: &mut ProjectConnection,
+        file: &McapFile<'_>,
+    ) -> Result<bool, String> {
+        let stored = connection
+            .query_rows(
+                &format!(
+                    "SELECT s.source.sha256 AS sha256 FROM {} s WHERE s.recording = {} LIMIT 2",
+                    Self::quoted(&self.files),
+                    SqlLiteral::text(file.key)
+                ),
+                2,
+            )
+            .await?;
+        match stored.rows() {
+            [] => Ok(false),
+            [row]
+                if row.get("sha256").and_then(serde_json::Value::as_str)
+                    == Some(file.sha256.as_str()) =>
+            {
+                Ok(true)
+            }
+            [_] => Err("Refusing to replace an immutable MCAP file with different bytes".into()),
+            _ => Err(
+                "Duplicate MCAP sources exist; repair the catalog before appending files".into(),
+            ),
+        }
     }
 
     async fn refresh(&self, connection: &mut ProjectConnection) -> Result<(), String> {
@@ -451,8 +429,8 @@ impl McapDatasetDefinition {
         let sources = connection
             .query_rows(
                 &format!(
-                    "SELECT COUNT(*) AS members FROM dataset_source WHERE dataset_name = {}",
-                    SqlLiteral::text(&self.dataset_name)
+                    "SELECT COUNT(*) AS members FROM {}",
+                    Self::quoted(&self.files)
                 ),
                 1,
             )
@@ -472,16 +450,16 @@ impl crate::ProjectStore {
         let client = self.dataset_catalog();
         let resources = client.resources().await?;
         let dataset_name = format!("dataset_{name}");
-        let source_name = format!("dataset_source_{name}");
+        let files_name = format!("dataset_files_{name}");
         let Some(resource) = resources
             .iter()
             .find(|r| r.selection().label() == dataset_name)
         else {
             if resources
                 .iter()
-                .any(|r| r.selection().label() == source_name)
+                .any(|r| r.selection().label() == files_name)
             {
-                return Err("The MCAP source exists without its dataset; repair the catalog before appending files".into());
+                return Err("The dataset's files table exists without its Dataset; repair the catalog before appending files".into());
             }
             return Ok(false);
         };
@@ -504,11 +482,11 @@ impl crate::ProjectStore {
         )
         .map_err(|e| e.to_string())?;
         if definition["producerId"] != "spql.mcap.dataset"
-            || payload["sourceRelation"] != json!([source_name])
+            || payload["sourceRelation"] != json!([files_name])
             || payload["options"]["key"] != "recording"
             || payload["options"]["blob"] != "source"
         {
-            return Err("This dataset does not use Studio's managed MCAP source; choose a MCAP append destination with the shared source view".into());
+            return Err("This dataset does not use Studio's managed MCAP source; choose a MCAP append destination with its own files table".into());
         }
         Ok(true)
     }
@@ -527,10 +505,10 @@ impl crate::ProjectStore {
             let Some(name) = label.strip_prefix("dataset_") else {
                 continue;
             };
-            let source_name = format!("dataset_source_{name}");
+            let files_name = format!("dataset_files_{name}");
             if resources
                 .iter()
-                .any(|resource| resource.selection().label() == source_name)
+                .any(|resource| resource.selection().label() == files_name)
                 && self.validate_mcap_destination(name).await?
             {
                 names.push(name.to_owned());
@@ -546,7 +524,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backup_restores_every_file_in_a_multirow_batch() {
+    fn backup_restores_every_file_into_its_own_dataset() {
         let batch = RecordBatch::try_new(
             Arc::new(McapSources::bundle_schema()),
             vec![
@@ -559,13 +537,21 @@ mod tests {
             ],
         )
         .unwrap();
-        let restored = McapSources::restore(batch).unwrap();
-        assert_eq!(restored.len(), 2);
-        for (batch, expected) in restored
-            .iter()
-            .zip([b"first file".as_slice(), b"second file".as_slice()])
-        {
-            let source = batch
+        let names = ["first", "second", "empty"].map(str::to_owned);
+        let restored = McapSources::source_files(std::slice::from_ref(&batch), &names).unwrap();
+        assert_eq!(
+            restored.keys().collect::<Vec<_>>(),
+            ["empty", "first", "second"]
+        );
+        for (name, expected) in [
+            ("first", b"first file".as_slice()),
+            ("second", b"second file"),
+        ] {
+            let [file] = restored[name].as_slice() else {
+                panic!("{name} restored more than one file");
+            };
+            assert_eq!(file.schema(), McapDatasetDefinition::files_schema());
+            let source = file
                 .column_by_name("source")
                 .unwrap()
                 .as_any()
@@ -576,6 +562,14 @@ mod tests {
                 expected
             );
         }
+        let [empty] = restored["empty"].as_slice() else {
+            panic!("a dataset without files restores one empty batch");
+        };
+        assert_eq!(
+            (empty.num_rows(), empty.schema()),
+            (0, McapDatasetDefinition::files_schema())
+        );
+        assert!(McapSources::source_files(&[batch], &names[..1]).is_err());
     }
 
     #[tokio::test]
@@ -610,13 +604,6 @@ mod tests {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        let source_existed = store
-            .connect()
-            .await
-            .unwrap()
-            .table_exists("dataset_source")
-            .await
-            .unwrap();
         let outcome: Result<(), String> = async {
             for (id, camera_count) in [("first", 2), ("second", 1), ("third", 0)] {
                 let id = format!("{name}_{id}");
@@ -730,13 +717,6 @@ mod tests {
         .await;
         for probe in [&name, &other_name] {
             storage.drop_probe_dataset(probe).await.unwrap();
-        }
-        let mut connection = store.connect_exclusive().await.unwrap();
-        if !source_existed && connection.table_exists("dataset_source").await.unwrap() {
-            connection
-                .execute_update_sql("DROP TABLE dataset_source")
-                .await
-                .unwrap();
         }
         outcome.expect("MCAP source boundary");
     }

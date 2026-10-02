@@ -1,6 +1,6 @@
 //! Where the model answers curations ask for are kept: one answers table per
 //! dataset, `dataset_answers_<id>` beside `dataset_<id>` and
-//! `dataset_source_<id>`, holding one row per episode keyed by
+//! `dataset_files_<id>`, holding one row per episode keyed by
 //! `episode_id`, and one column per exact call a node makes.
 //!
 //! A column is named for what it measures and a short hash of the call, so

@@ -29,10 +29,8 @@ impl<'a> TransferPersistence<'a> {
     }
 
     pub async fn export_project(&self) -> Result<Vec<u8>, String> {
+        let datasets = self.project_store.managed_mcap_datasets().await?;
         let mut connection = self.project_store.connect_exclusive().await?;
-        let datasets =
-            crate::datasets::McapSources::validate_ownership(self.project_store, &mut connection)
-                .await?;
         ProjectBundle
             .export(
                 &mut connection,
@@ -46,10 +44,8 @@ impl<'a> TransferPersistence<'a> {
         for name in source.dataset_names() {
             self.project_store.validate_mcap_destination(name).await?;
         }
+        let datasets = self.project_store.managed_mcap_datasets().await?;
         let mut connection = self.project_store.connect_exclusive().await?;
-        let datasets =
-            crate::datasets::McapSources::validate_ownership(self.project_store, &mut connection)
-                .await?;
         ProjectBundle
             .import(&mut connection, source.with_current_datasets(datasets))
             .await

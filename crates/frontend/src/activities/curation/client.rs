@@ -8,7 +8,7 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::curation::{
-    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus, PublishedView,
 };
 
 pub(super) struct CurationClient(ProjectClient);
@@ -91,6 +91,14 @@ impl CurationClient {
     pub(super) async fn publications(&self) -> Result<Vec<FillStatus>, CommandError> {
         self.0
             .request(HttpRequest::new("GET", "/api/curation-fills"))
+            .await
+    }
+
+    /// Every view the project's curations published, with the statement each
+    /// is read through.
+    pub(super) async fn published_views(&self) -> Result<Vec<PublishedView>, CommandError> {
+        self.0
+            .request(HttpRequest::new("GET", "/api/curated-views"))
             .await
     }
 }

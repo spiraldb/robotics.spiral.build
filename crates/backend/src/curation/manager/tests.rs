@@ -1,5 +1,5 @@
 use super::*;
-use spiral_robotics_common::curation::PublishRequest;
+use spiral_robotics_common::curation::PublishedView;
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_storage::{ProjectStore, StudioStore};
 
@@ -114,15 +114,15 @@ fn publishing(view: &str, statement: &str) -> FillRequest {
         DatasetSelection::new(vec!["dataset_folding".into()]).unwrap(),
         Vec::new(),
     )
-    .publishing(vec![PublishRequest::new(view, statement)])
+    .publishing(vec![PublishedView::new(view, statement)])
 }
 
 #[tokio::test]
-async fn a_publish_is_refused_before_the_catalog_when_its_name_is_not_an_identifier() {
+async fn a_publish_is_refused_when_its_name_is_not_an_identifier() {
     let fixture = CurationFixture::new();
     for name in ["", "2folds", "folds; DROP TABLE robots", "my folds"] {
         assert!(matches!(
-            fixture.manager.fill(publishing(name, "SELECT 1")).await,
+            fixture.manager.fill(publishing(name, "SELECT 1")),
             Err(OperationError::InvalidInput(_))
         ));
         assert!(matches!(
@@ -143,7 +143,7 @@ async fn a_publish_admits_only_one_read_only_query() {
     ] {
         assert!(
             matches!(
-                fixture.manager.fill(publishing("folds", statement)).await,
+                fixture.manager.fill(publishing("folds", statement)),
                 Err(OperationError::InvalidInput(_))
             ),
             "{statement}"

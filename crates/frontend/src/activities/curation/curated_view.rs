@@ -1,12 +1,13 @@
-//! The views saved curations publish, as another activity lists and
-//! unpublishes them: each one's catalog name, the curation and output it
-//! comes from, the dataset its rows belong to, and, while its models are
-//! still answering, how far the run publishing it has got.
+//! The views saved curations publish, as another activity lists, reads and
+//! unpublishes them: each one's name, the curation and output it comes from,
+//! the dataset its rows belong to, the statement it is read through once it
+//! is published, and, while its models are still answering, how far the run
+//! publishing it has got.
 //!
-//! The catalog holds a view as a bare statement, which names neither its
-//! curation nor the dataset its episodes are in; the curation that published
-//! it records both. The run publishing it is the backend's, which keeps it
-//! until the view is published again.
+//! Studio keeps a published view as a bare statement, which names neither
+//! its curation nor the dataset its episodes are in; the curation that
+//! published it records both. The run publishing it is the backend's, which
+//! keeps it until the view is published again.
 use super::annotate::SubtaskRow;
 use super::client::CurationClient;
 use super::document::CurationGraph;
@@ -15,11 +16,13 @@ use super::score_progress::{Moment, ProgressRate};
 use super::state::CurationDraft as _;
 use crate::client::queries::{QueryDomain, QueryRefresh};
 use futures_util::future::try_join_all;
-use spiral_robotics_common::curation::{CurationDocument, FillState, FillStatus, FillStep};
+use spiral_robotics_common::curation::{
+    CurationDocument, FillState, FillStatus, FillStep, PublishedView,
+};
 use spiral_robotics_common::datasets::DatasetSelection;
 use std::collections::BTreeSet;
 
-/// A catalog view a saved curation published.
+/// A view a saved curation published.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CuratedView {
     view: String,
@@ -28,6 +31,7 @@ pub(crate) struct CuratedView {
     output: &'static str,
     dataset: DatasetSelection,
     current: bool,
+    published: Option<String>,
     fill: Option<ViewFill>,
 }
 
@@ -41,18 +45,36 @@ impl CuratedView {
         let stored = try_join_all(summaries.iter().map(|summary| documents.load(summary.id())))
             .await
             .map_err(|error| error.to_string())?;
+        let published = documents
+            .published_views()
+            .await
+            .map_err(|error| error.to_string())?;
         let mut views = stored
             .iter()
             .flat_map(Self::published_by)
+            .map(|view| view.reading_from(&published))
             .collect::<Vec<_>>();
         views.sort_by(|left, right| left.view.cmp(&right.view));
         Ok(views)
     }
 
-    /// Drop the view from the catalog and forget it in the curation that
-    /// published it, saved at the revision just read, so a save landing in
-    /// between is refused rather than lost. The curation, open in Curation,
-    /// takes the change when the catalog is read again.
+    /// The view with the statement `published` keeps under its name, which
+    /// as a SQL identifier ignores case.
+    fn reading_from(self, published: &[PublishedView]) -> Self {
+        let statement = published
+            .iter()
+            .find(|stored| stored.name().eq_ignore_ascii_case(&self.view))
+            .map(|stored| stored.statement().to_owned());
+        Self {
+            published: statement,
+            ..self
+        }
+    }
+
+    /// Drop the view and forget it in the curation that published it, saved
+    /// at the revision just read, so a save landing in between is refused
+    /// rather than lost. The curation, open in Curation, takes the change
+    /// when the catalog is read again.
     pub(crate) async fn unpublish(&self) -> Result<(), String> {
         PublishedViews::drop_view(self.view.clone()).await?;
         let documents = CurationClient::current();
@@ -93,14 +115,19 @@ impl CuratedView {
                 output: node.kind().label(),
                 dataset: dataset.clone(),
                 current: published.is_current(document.revision()),
+                published: None,
                 fill: None,
             })
             .collect()
     }
 
-    /// The name the catalog reads it by.
+    /// The name it is listed and read by.
     pub(crate) fn view(&self) -> &str {
         &self.view
+    }
+    /// The statement it is read through, once its run published it.
+    pub(crate) fn statement(&self) -> Option<&str> {
+        self.published.as_deref()
     }
     /// The curation that published it.
     pub(crate) fn curation(&self) -> &str {
@@ -221,6 +248,7 @@ mod tests {
             output: "Score progress",
             dataset: DatasetSelection::new(vec!["dataset_folding".into()]).unwrap(),
             current: true,
+            published: None,
             fill: None,
         }
     }

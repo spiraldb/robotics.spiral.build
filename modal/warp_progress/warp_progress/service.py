@@ -16,7 +16,7 @@ from warp_progress.warp import WarpModel
 
 LOG = logging.getLogger(__name__)
 ARROW_STREAM = "application/vnd.apache.arrow.stream"
-IMPLEMENTATION = "warp-progress 0.2.0: PyTorch port of SpiralDB spql.ai.score_progress, fp16 on CUDA"
+IMPLEMENTATION = "warp-progress 0.2.0: PyTorch port of SpiralDB spql.ai.warp_rm, fp16 on CUDA"
 # Requests name the revision they were built for, so Studio never stores answers from another one.
 REVISION = "warp-progress-0.2.0-fp16"
 REQUEST_METADATA = {"codec": "h264", "framing": "annex_b", "model": SELECTOR}

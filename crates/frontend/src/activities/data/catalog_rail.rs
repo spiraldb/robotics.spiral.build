@@ -201,7 +201,7 @@ pub(super) fn CatalogRail(
                         // Curated views lead, so an open dataset's episodes
                         // never push them out of sight.
                         let curated = match &*curated.read() {
-                            Some(Ok(views)) => Ok(ListedViews::of(views, entries, &needle)),
+                            Some(Ok(views)) => Ok(ListedViews::of(views, &needle)),
                             Some(Err(error)) => Err(error.clone()),
                             None => Ok(Vec::new()),
                         };
@@ -414,22 +414,16 @@ fn DatasetEpisodes(
     }
 }
 
-/// The curated views the rail lists: those a saved curation records that the
-/// catalog still holds, or that a run is publishing, and whose name the
-/// filter matches.
+/// The curated views the rail lists: those a saved curation records that
+/// are published or that a run is publishing, and whose name the filter
+/// matches.
 struct ListedViews;
 
 impl ListedViews {
-    fn of(views: &[CuratedView], catalog: &[ProjectResource], needle: &str) -> Vec<CuratedView> {
+    fn of(views: &[CuratedView], needle: &str) -> Vec<CuratedView> {
         views
             .iter()
-            .filter(|view| {
-                view.fill().is_some()
-                    || catalog.iter().any(|resource| {
-                        resource.kind() == "view"
-                            && matches!(resource.selection().path(), [name] if name.eq_ignore_ascii_case(view.view()))
-                    })
-            })
+            .filter(|view| view.fill().is_some() || view.statement().is_some())
             .filter(|view| view.view().to_lowercase().contains(needle))
             .cloned()
             .collect()
@@ -437,7 +431,7 @@ impl ListedViews {
 }
 
 /// The views curations published, above the datasets their episodes belong
-/// to: each named as the catalog reads it, over the dataset and the output it
+/// to: each by the name it is read by, over the dataset and the output it
 /// comes from. One whose models are still answering says so, and opens once
 /// they are done.
 #[component]

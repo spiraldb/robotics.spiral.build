@@ -11,8 +11,8 @@ use super::fill::FillRuns;
 use super::preview::PreviewRuns;
 use crate::OperationError;
 use spiral_robotics_common::curation::{
-    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus, UnpublishRequest,
-    ViewName,
+    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus, PublishedView,
+    UnpublishRequest, ViewName,
 };
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::sync::Arc;
@@ -124,41 +124,29 @@ impl CurationManager {
     }
 
     /// Start filling the answers `request` asks for, then publishing its
-    /// views, each replacing the view it names. A view's name must not belong
-    /// to a table or a Dataset.
-    pub(super) async fn fill(&self, request: FillRequest) -> Result<FillStatus, OperationError> {
+    /// views, each replacing the view it names.
+    pub(super) fn fill(&self, request: FillRequest) -> Result<FillStatus, OperationError> {
         let admitted = self.fills.admit(request)?;
-        for view in admitted.views() {
-            self.refuse_held(view).await?;
-        }
         Ok(self.fills.start(admitted))
+    }
+
+    /// Every view the project's curations published.
+    pub(super) async fn published(&self) -> Result<Vec<PublishedView>, OperationError> {
+        self.storage
+            .curated_views()
+            .list()
+            .await
+            .map_err(OperationError::External)
     }
 
     /// Drop the view `name`, if one exists.
     pub(super) async fn unpublish(&self, request: UnpublishRequest) -> Result<(), OperationError> {
         let name = ViewName::try_from(request.name()).map_err(OperationError::InvalidInput)?;
-        self.refuse_held(&name).await?;
         self.storage
             .curated_views()
             .drop(&name)
             .await
             .map_err(OperationError::External)
-    }
-
-    /// Refuse a name a table or a Dataset holds: publishing replaces only views.
-    async fn refuse_held(&self, name: &ViewName) -> Result<(), OperationError> {
-        let holder = self
-            .storage
-            .curated_views()
-            .holder(name)
-            .await
-            .map_err(OperationError::External)?;
-        match holder {
-            Some(kind) => Err(OperationError::Conflict(format!(
-                "“{name}” is a {kind} in this project; choose another name."
-            ))),
-            None => Ok(()),
-        }
     }
 }
 

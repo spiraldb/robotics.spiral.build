@@ -1,8 +1,8 @@
 //! Saved curations: list, load by identity, and a revision-guarded save and
 //! delete; the fill runs that write the answers a view reads and then
 //! publish it, which Publish and a Score progress preview start and poll;
-//! dropping a view; and the preview runs a node's Run starts, polls, stops,
-//! and reads answers from.
+//! the published views and dropping one; and the preview runs a node's Run
+//! starts, polls, stops, and reads answers from.
 use super::preview::PreviewAnswer;
 use crate::OperationError;
 use crate::http::delivery::{ApiJson, ApiPath, ArrowResponse, Project};
@@ -15,7 +15,7 @@ use axum::{
 };
 use spiral_robotics_common::curation::{
     CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
-    MAX_CURATION_PAYLOAD_BYTES, PreviewQuery, PreviewRunStatus, UnpublishRequest,
+    MAX_CURATION_PAYLOAD_BYTES, PreviewQuery, PreviewRunStatus, PublishedView, UnpublishRequest,
 };
 
 /// The body carries the payload as a JSON string, so escaping and the
@@ -30,6 +30,7 @@ impl CurationEndpoints {
         Router::new()
             .route("/curations", get(Self::list))
             .route("/curations/{id}", get(Self::load))
+            .route("/curated-views", get(Self::published))
             .route("/curation-fills", get(Self::publications))
             .route("/curation-fills/{id}", get(Self::fill_status))
             .route("/curation-previews/{id}", get(Self::preview_status))
@@ -78,7 +79,12 @@ impl CurationEndpoints {
         Project(project): Project,
         ApiJson(request): ApiJson<FillRequest>,
     ) -> Result<Json<FillStatus>, OperationError> {
-        Ok(Json(project.curation().fill(request).await?))
+        Ok(Json(project.curation().fill(request)?))
+    }
+    async fn published(
+        Project(project): Project,
+    ) -> Result<Json<Vec<PublishedView>>, OperationError> {
+        Ok(Json(project.curation().published().await?))
     }
     /// Every run that publishes a view, as Data shows them.
     async fn publications(Project(project): Project) -> Json<Vec<FillStatus>> {

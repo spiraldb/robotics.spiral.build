@@ -290,7 +290,12 @@ async fn migration_runs_once_and_failed_schema_changes_roll_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.try_get::<i64>("", "count").unwrap(), 1);
+    // Initializing twice journals each migration once.
+    assert_eq!(
+        before.try_get::<i64>("", "count").unwrap(),
+        <super::migrations::Migrator as sea_orm_migration::MigratorTrait>::migrations().len()
+            as i64
+    );
     // A conflict halfway through the baseline must undo both earlier CREATE
     // TABLE statements and the migration journal itself.
     let directory = tempfile::tempdir().unwrap();

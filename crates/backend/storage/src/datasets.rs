@@ -456,14 +456,7 @@ impl StorageManager {
     /// Drop the probe dataset `name` with everything Studio made for it.
     pub async fn drop_probe_dataset(&self, name: &str) -> Result<(), String> {
         let mut connection = self.project_store().connect_exclusive().await?;
-        McapSources::retire(&mut connection, &[name.to_owned()]).await?;
-        connection
-            .execute_update_sql(&format!(
-                "DELETE FROM {} WHERE dataset_name = {}",
-                McapDatasetDefinition::SOURCE_TABLE,
-                spiral_robotics_common::sql::SqlLiteral::text(name)
-            ))
-            .await
+        McapSources::retire(&mut connection, &[name.to_owned()]).await
     }
 }
 

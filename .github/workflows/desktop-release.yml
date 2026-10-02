@@ -19,7 +19,7 @@ permissions:
 env:
   # The SpiralDB branch whose driver the app ships. Each release builds its
   # head and names that commit in the release notes.
-  SPIRALDB_REF: xiangpeng/curation-functions
+  SPIRALDB_REF: develop
   TARGET: aarch64-apple-darwin
 
 jobs:

@@ -8,7 +8,7 @@
 //! column already holds, so a run cut short resumes when it is asked again.
 //! Publishing is one run over the whole dataset; a Score progress preview is
 //! one run over the episodes it previews, publishing nothing.
-use super::PublishRequest;
+use super::PublishedView;
 use super::answers::AnswerColumn;
 use crate::datasets::{DatasetSelection, EpisodeId};
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,7 @@ pub struct FillRequest {
     dataset: DatasetSelection,
     columns: Vec<ColumnFill>,
     #[serde(default)]
-    views: Vec<PublishRequest>,
+    views: Vec<PublishedView>,
 }
 
 impl FillRequest {
@@ -101,7 +101,7 @@ impl FillRequest {
         }
     }
     /// The same run, publishing `views` once every column is filled.
-    pub fn publishing(mut self, views: Vec<PublishRequest>) -> Self {
+    pub fn publishing(mut self, views: Vec<PublishedView>) -> Self {
         self.views = views;
         self
     }
@@ -111,7 +111,7 @@ impl FillRequest {
     pub fn columns(&self) -> &[ColumnFill] {
         &self.columns
     }
-    pub fn views(&self) -> &[PublishRequest] {
+    pub fn views(&self) -> &[PublishedView] {
         &self.views
     }
 }
@@ -245,7 +245,7 @@ mod tests {
                 },
             )],
         )
-        .publishing(vec![PublishRequest::new("folds", "SELECT 1")]);
+        .publishing(vec![PublishedView::new("folds", "SELECT 1")]);
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["columns"][0]["source"]["kind"], "statement");
         assert_eq!(json["columns"][0]["episodes"]["kind"], "listed");

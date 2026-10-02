@@ -65,7 +65,7 @@ impl StorageManager {
     }
 
     pub fn curated_views(&self) -> CuratedViews<'_> {
-        CuratedViews::new(&self.project_store)
+        CuratedViews::new(&self.studio, &self.project_store)
     }
 
     /// The robot saved for the dataset version `selection` resolves to now.

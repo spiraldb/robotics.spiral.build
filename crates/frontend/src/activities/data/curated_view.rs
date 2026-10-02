@@ -161,12 +161,11 @@ impl ViewReading {
     /// belongs to beside it: the view keeps the first episodes its Selects
     /// keep, wherever they fall in the dataset.
     async fn read(view: CuratedView) -> Result<Self, String> {
-        let rows = format!("SELECT * FROM {}", view.view());
+        let rows = view
+            .statement()
+            .ok_or_else(|| format!("“{}” is not published yet.", view.view()))?;
         let answer = DatasetClient::current()
-            .run_spiral_query(
-                Episode::beside_sql(view.dataset(), &rows, LISTED),
-                VIEW_ROWS,
-            )
+            .run_spiral_query(Episode::beside_sql(view.dataset(), rows, LISTED), VIEW_ROWS)
             .await
             .map_err(|error| error.to_string())?;
         Self::of(view.dataset(), &answer)
@@ -348,7 +347,7 @@ pub(super) fn CuratedViewSubject(
                 if !confirming() {
                     Button { id: unpublish_id.clone(), purpose: ActionPurpose::Remove, variant: ButtonVariant::Link,
                         size: ButtonSize::Compact, class: "data-curated-unpublish",
-                        title: "Drop this view from the catalog",
+                        title: "Drop this view",
                         onclick: move |_| confirming.set(true), "Unpublish" }
                 }
             }
@@ -389,7 +388,7 @@ pub(super) fn CuratedViewSubject(
 }
 
 /// Whether to unpublish the view, asked under its head: confirmed, the view
-/// leaves the catalog and its curation forgets it, keeping the recipe.
+/// is dropped and its curation forgets it, keeping the recipe.
 /// `on_done` says whether it was unpublished.
 #[component]
 fn UnpublishConfirmation(
@@ -406,7 +405,7 @@ fn UnpublishConfirmation(
             class: "data-curated-confirmation",
             copy: ConfirmationCopy::new(
                 format!(
-                    "Unpublish {name}? The catalog view is dropped; the curation “{}” keeps its recipe and can publish it again.",
+                    "Unpublish {name}? The view is dropped; the curation “{}” keeps its recipe and can publish it again.",
                     view.curation()
                 ),
                 if pending() { "Unpublishing…" } else { "Unpublish" },

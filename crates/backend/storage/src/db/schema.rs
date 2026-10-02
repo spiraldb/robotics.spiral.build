@@ -10,9 +10,11 @@ include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 /// `studio_training_checkpoints`.
 pub const STUDIO_TABLE_PREFIX: &str = "studio";
 
-/// Data-plane tables included in project bundles.
+/// Data-plane relations included in project bundles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Table {
+    /// Every MCAP dataset's source files, in one entry naming each file's
+    /// dataset; each dataset keeps them in its own source table.
     DatasetSources,
     TrainingCheckpoints,
 }

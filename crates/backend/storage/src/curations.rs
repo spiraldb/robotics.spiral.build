@@ -6,14 +6,14 @@
 //! [`CurationDocument::validate`] states plus the revision guard below, so a
 //! change to the frontend's document schema never needs a migration here.
 //!
-//! A published output is a view at the Spiral catalog root, replaced whole
-//! on every publish; [`CuratedViews`] owns that DDL.
+//! A published output is a statement Studio keeps under the view's name,
+//! replaced whole on every publish; [`CuratedViews`] owns those rows.
 
-use spiral_robotics_common::curation::{CurationDocument, CurationSummary, ViewName};
-use spiral_robotics_common::datasets::ProjectResource;
+use spiral_robotics_common::curation::{
+    CurationDocument, CurationSummary, PublishedView, ViewName,
+};
 
 use crate::db::StorageClock;
-use crate::{ProjectConnection, ProjectStore};
 
 pub struct CurationPersistence<'a> {
     project_store: &'a crate::StudioProject,
@@ -136,63 +136,79 @@ impl<'a> CurationPersistence<'a> {
     }
 }
 
-/// The views curation outputs are published as, at the catalog root.
+/// The views curation outputs are published as: each one's statement, under
+/// the name Data reads it by.
 pub struct CuratedViews<'a> {
-    project_store: &'a ProjectStore,
+    project_store: &'a crate::StudioProject,
+    spiral: &'a crate::ProjectStore,
 }
 
 impl<'a> CuratedViews<'a> {
-    pub(crate) const fn new(project_store: &'a ProjectStore) -> Self {
-        Self { project_store }
+    pub(crate) const fn new(
+        project_store: &'a crate::StudioProject,
+        spiral: &'a crate::ProjectStore,
+    ) -> Self {
+        Self {
+            project_store,
+            spiral,
+        }
     }
 
-    /// The kind of resource other than a view that already holds `name` at
-    /// the catalog root: a table or a Dataset, which a publish must not
-    /// replace.
-    pub async fn holder(&self, name: &ViewName) -> Result<Option<String>, String> {
-        let resources = self.project_store.dataset_catalog().resources().await?;
-        Ok(Self::held_by(&resources, name))
+    /// Every view the project's curations published, by name.
+    pub async fn list(&self) -> Result<Vec<PublishedView>, String> {
+        use crate::studio::curated_views as table;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+        let rows = table::Entity::find()
+            .filter(table::Column::Project.eq(self.project_store.key()))
+            .order_by_asc(table::Column::Name)
+            .all(self.project_store.connection().await?)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|row| PublishedView::new(row.name, row.statement))
+            .collect())
     }
 
-    fn held_by(resources: &[ProjectResource], name: &ViewName) -> Option<String> {
-        resources
-            .iter()
-            .filter(|resource| matches!(resource.kind(), "table" | "dataset"))
-            .find(|resource| {
-                matches!(resource.selection().path(), [root] if root.eq_ignore_ascii_case(name.as_str()))
-            })
-            .map(|resource| resource.kind().to_owned())
-    }
-
-    /// Define `name` as `statement`, replacing the view it named before.
+    /// Define `name` as `statement`, replacing the view it named before. A
+    /// statement Spiral cannot plan is refused, so every published view reads.
     pub async fn replace(&self, name: &ViewName, statement: &str) -> Result<(), String> {
-        Self::define(
-            &mut self.project_store.connect_exclusive().await?,
-            name,
-            statement,
-        )
-        .await
-    }
-
-    /// One statement, so a reader sees the old view or the new one. Spiral
-    /// refuses a `DROP VIEW` and a `CREATE VIEW` of one name in one
-    /// transaction as a namespace conflict once the view exists.
-    async fn define(
-        connection: &mut ProjectConnection,
-        name: &ViewName,
-        statement: &str,
-    ) -> Result<(), String> {
-        connection
-            .execute_update_sql(&format!("CREATE OR REPLACE VIEW {name} AS {statement}"))
-            .await
-    }
-
-    pub async fn drop(&self, name: &ViewName) -> Result<(), String> {
-        self.project_store
-            .connect_exclusive()
+        use crate::studio::curated_views as table;
+        use sea_orm::{EntityTrait, Set, sea_query::OnConflict};
+        self.spiral
+            .connect()
             .await?
-            .execute_update_sql(&format!("DROP VIEW IF EXISTS {name}"))
+            .query_rows(&format!("SELECT * FROM ({statement}) {name} LIMIT 0"), 1)
             .await
+            .map_err(|error| format!("“{name}” cannot be read: {error}"))?;
+        let view = table::ActiveModel {
+            project: Set(self.project_store.key().to_owned()),
+            name: Set(name.as_str().to_owned()),
+            statement: Set(statement.to_owned()),
+        };
+        table::Entity::insert(view)
+            .on_conflict(
+                OnConflict::columns([table::Column::Project, table::Column::Name])
+                    .update_columns([table::Column::Name, table::Column::Statement])
+                    .to_owned(),
+            )
+            .exec(self.project_store.connection().await?)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Forget the view `name`; one already gone is forgotten too.
+    pub async fn drop(&self, name: &ViewName) -> Result<(), String> {
+        use crate::studio::curated_views as table;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        table::Entity::delete_many()
+            .filter(table::Column::Project.eq(self.project_store.key()))
+            .filter(table::Column::Name.eq(name.as_str()))
+            .exec(self.project_store.connection().await?)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 

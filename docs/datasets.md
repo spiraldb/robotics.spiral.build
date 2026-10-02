@@ -6,7 +6,7 @@ kinds, and readers never ask which one produced an episode.
 
 ```text
 Live capture → complete MCAP bytes ─┐
-                                   ├→ dataset_source → dataset_<name> → Data, Curation
+                                   ├→ dataset_files_<name> → dataset_<name> → Data, Curation
 Hugging Face → pinned Blob URIs ───┘
 ```
 
@@ -16,25 +16,25 @@ The selected Spiral project holds Studio's resources at its root:
 
 | Resource | Kind | Purpose |
 | --- | --- | --- |
-| `dataset_source` | Table | Every managed MCAP source: `dataset_name`, `recording` (an opaque source key within its dataset, not an episode identity), and the `source` Blob |
-| `dataset_source_<name>` | View | Selects `recording, source` where `dataset_name = '<name>'` |
-| `dataset_<name>` | Native Dataset | Reads its source view through `spql.mcap.dataset`, with `recording` as the member key |
+| `dataset_files_<name>` | Table | The dataset's MCAP files: `recording` (an opaque source key within its dataset, not an episode identity) and the `source` Blob |
+| `dataset_<name>` | Native Dataset | Made from its files table through `spql.mcap.dataset`, with `recording` as the member key and `materialization = 'all'` |
 | `dataset_answers_<name>` | Table | One row per episode, keyed by `episode_id`, and one column per exact model call a curation made, each value `STRUCT(value …)`: NULL not asked yet, a NULL `value` asked and failed. Created from the Dataset's first refresh, given a row by every append, dropped with the Dataset |
 | `studio_training_checkpoints` | Table | Model checkpoint artifacts |
 
-Curation publishes its views at the root too. A Dataset refresh consumes its
-view's rows and updates the Dataset's native population, so datasets share one
-source table without sharing recordings. The definition's `sourceRelation`
-records the association; ownership is never inferred from names. Source views
-sit at the root because Spiral's child-view path needs keyed parent metadata
-that Arbor does not expose. The source table declares no primary key.
+A Dataset refresh reads every file of its files table and copies every
+topic into Spiral, so reads never reopen an MCAP file. Adding a file rebuilds
+every copied topic, and Spiral keeps the earlier copies. The definition's
+`sourceRelation` records the association; ownership is never inferred from
+names. The files table declares no primary key. Studio's datasets made before
+October 2026 read their files through `dataset_source_<name>` views, which
+Spiral retired; their dead entries still hold those names. Curation's published views
+are not Spiral resources: Studio keeps them ([curation](curation.md#publishing)).
 
-Publication creates or appends the source table, creates the view, creates and
-refreshes the Dataset, and verifies its member count in one transaction.
-Publishing the same recording key with the same bytes again is an idempotent
-retry; different bytes at that key are refused. Hugging Face import refuses
-existing target resources or source rows with the same dataset name; Live
-recording appends to a validated matching Dataset. Browser uploads carry
+Publication creates or appends the files table, creates and refreshes the
+Dataset, and verifies its member count in one transaction. Publishing the same
+recording key with the same bytes (by SHA-256) again is an idempotent retry;
+different bytes at that key are refused. Hugging Face import refuses existing
+target resources; Live recording appends to a validated matching Dataset. Browser uploads carry
 bytes, never filesystem paths for the server to open. The committed Spiral
 project journal supplies resource kinds, identities, and versions; ADBC table
 listings are not the authority for Dataset membership. Studio does not write

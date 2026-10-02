@@ -1,0 +1,7 @@
+# The workspace's Rust toolchain. The flake installs it for every Nix shell, and
+# rustup reads it directly where there is no Nix, as in the hosted image build.
+[toolchain]
+channel = "nightly-2026-06-29"
+components = ["rust-src", "rust-analyzer", "rustfmt", "clippy"]
+# The studio's web interface compiles to WebAssembly.
+targets = ["wasm32-unknown-unknown"]

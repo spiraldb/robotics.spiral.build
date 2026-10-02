@@ -1,6 +1,6 @@
 """WARP-RM sim-bottles task progress over one episode's 30 Hz top-camera video.
 
-A PyTorch port of SpiralDB's `spql.ai.score_progress`: engine/plugins/spiral-ai/src/warp.rs,
+A PyTorch port of SpiralDB's `spql.ai.warp_rm`: engine/plugins/spiral-ai/src/warp.rs,
 warp/dinov3.rs and warp/temporal.rs. The names below follow theirs.
 """
 

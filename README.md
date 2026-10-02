@@ -111,6 +111,14 @@ once per SpiralDB commit and cached. The ad-hoc signed DMG is published as a
 `desktop-v0.1.<run>` release of this repository, which only organization
 members can download.
 
+### Hosted
+
+[`deploy/hosted`](deploy/hosted/README.md) runs Studio for Spiral colleagues at
+`robotics.spiraldb.com`, on one Compute Engine VM behind Cloudflare Access.
+Every push to `main` publishes its Linux image through
+`.github/workflows/hosted-image.yml`, with a driver built from the same SpiralDB
+branch as the desktop app.
+
 Interface primitives (buttons, fields, facts, disclosures, trees, notices)
 live in `crates/ui` as `spiral-robotics-ui`, with their stylesheet; the
 frontend composes them and owns layout. Their unit tests run natively:

@@ -1,4 +1,4 @@
-"""The pinned checkpoint files `spql.ai.score_progress` reads, laid out as its Rust reference test expects."""
+"""The pinned checkpoint files `spql.ai.warp_rm` reads, laid out as its Rust reference test expects."""
 
 from pathlib import Path
 

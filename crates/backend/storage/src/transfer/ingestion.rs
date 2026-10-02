@@ -7,7 +7,6 @@
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field, Schema};
 use reqwest::StatusCode;
 use reqwest::header::LINK;
 use serde::Deserialize;
@@ -15,11 +14,9 @@ use spiral_robotics_common::datasets::{
     HuggingFaceDatasetFile, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
     HuggingFaceDatasetSource, HuggingFaceInspectionContents, HuggingFaceInspectionSource,
 };
-use spiral_robotics_common::sql::SqlLiteral;
 use url::Url;
 
 use crate::datasets::{McapDatasetDefinition, McapSourceBlob};
-use crate::db::ProjectConnection;
 use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
@@ -317,10 +314,11 @@ impl StorageManager {
                 "The dataset or its source already exists; choose another dataset name".to_owned(),
             );
         }
+        let files = vec![HuggingFaceSourceBatch::build(&inspection)?];
         let mut connection = self.project_store().connect_exclusive().await?;
         connection
             .transaction("Hugging Face import", async |connection| {
-                inspection.materialize(connection, &relations).await
+                relations.publish(connection, files).await
             })
             .await?;
         Ok(HuggingFaceDatasetImportSummary::new(
@@ -382,59 +380,6 @@ impl HuggingFaceFileSelection {
     }
 }
 
-trait HuggingFaceInspectionStorage {
-    async fn materialize(
-        &self,
-        connection: &mut ProjectConnection,
-        relations: &McapDatasetDefinition,
-    ) -> Result<(), String>;
-}
-impl HuggingFaceInspectionStorage for HuggingFaceDatasetInspection {
-    async fn materialize(
-        &self,
-        connection: &mut ProjectConnection,
-        relations: &McapDatasetDefinition,
-    ) -> Result<(), String> {
-        // Orphaned source rows must not silently become a second import with
-        // duplicate member keys after a Dataset or View was removed manually.
-        if connection
-            .table_exists(McapDatasetDefinition::SOURCE_TABLE)
-            .await?
-        {
-            let rows = connection
-                .query_rows(
-                    &format!(
-                        "SELECT COUNT(*) AS sources FROM {} WHERE dataset_name = {}",
-                        McapDatasetDefinition::SOURCE_TABLE,
-                        SqlLiteral::text(self.dataset_id())
-                    ),
-                    1,
-                )
-                .await?;
-            if rows
-                .rows()
-                .first()
-                .and_then(|row| row.get("sources"))
-                .and_then(|value| value.as_u64())
-                != Some(0)
-            {
-                return Err(
-                    "Source rows already exist for this dataset; choose another dataset name"
-                        .to_owned(),
-                );
-            }
-        }
-        connection
-            .create_or_append_batches(
-                McapDatasetDefinition::SOURCE_TABLE,
-                vec![HuggingFaceSourceBatch::build(self)?],
-            )
-            .await?;
-        relations.publish(connection).await?;
-        Ok(())
-    }
-}
-
 struct HuggingFaceSourceBatch;
 
 impl HuggingFaceSourceBatch {
@@ -447,17 +392,9 @@ impl HuggingFaceSourceBatch {
                     .file_uri(inspection.resolved_revision(), file.path())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("dataset_name", DataType::Utf8, false),
-            Field::new("recording", DataType::Utf8, false),
-            McapSourceBlob::field("source"),
-        ]));
         RecordBatch::try_new(
-            schema,
+            McapDatasetDefinition::files_schema(),
             vec![
-                Arc::new(StringArray::from_iter_values(
-                    files.iter().map(|_| inspection.dataset_id()),
-                )) as ArrayRef,
                 Arc::new(StringArray::from_iter_values(
                     files.iter().map(|file| file.path()),
                 )) as ArrayRef,
@@ -496,26 +433,21 @@ mod tests {
     #[test]
     fn import_uses_native_producer_and_quoted_names() {
         let target = McapDatasetDefinition::new("pick-place");
-        assert!(
-            target
-                .create_sql()
-                .contains("CREATE DATASET \"dataset_pick-place\" USING spql.mcap.dataset")
+        assert_eq!(
+            target.create_sql(),
+            "CREATE DATASET \"dataset_pick-place\" USING spql.mcap.dataset FROM \"dataset_files_pick-place\" WITH (key = 'recording', blob = 'source', on_error = 'fail', materialization = 'all')"
         );
         assert_eq!(
             target.planned(),
             [
                 "dataset_pick-place",
-                "dataset_source_pick-place",
+                "dataset_files_pick-place",
                 "dataset_answers_pick-place"
             ]
         );
-        assert_eq!(
-            target.source_view_sql(),
-            "CREATE VIEW \"dataset_source_pick-place\" AS SELECT recording, source FROM dataset_source WHERE dataset_name = 'pick-place'"
-        );
     }
     #[test]
-    fn shared_source_rows_retain_dataset_identity_and_pinned_blob_uri() {
+    fn source_rows_keep_each_file_and_its_pinned_blob_uri() {
         let source = HuggingFaceInspectionSource::new("pick-place", "org/recordings")
             .with_resolved_revision("abcdef");
         let contents = HuggingFaceInspectionContents::new(
@@ -525,14 +457,15 @@ mod tests {
         );
         let inspection = HuggingFaceDatasetInspection::new(source, contents);
         let batch = HuggingFaceSourceBatch::build(&inspection).unwrap();
-        let names = batch.column_by_name("dataset_name").unwrap();
+        assert_eq!(batch.schema(), McapDatasetDefinition::files_schema());
+        let recordings = batch.column_by_name("recording").unwrap();
         assert_eq!(
-            names
+            recordings
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .unwrap()
                 .value(0),
-            "pick-place"
+            "episode.mcap"
         );
         let blobs = batch.column_by_name("source").unwrap();
         let blobs = blobs.as_any().downcast_ref::<StructArray>().unwrap();

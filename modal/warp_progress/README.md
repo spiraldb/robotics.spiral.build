@@ -1,7 +1,7 @@
 # warp-progress
 
 A Modal GPU service that scores WARP-RM task progress for one episode's top-camera video. It is a
-PyTorch port of SpiralDB's `spql.ai.score_progress`
+PyTorch port of SpiralDB's `spql.ai.warp_rm`
 (`engine/plugins/spiral-ai/src/warp.rs`, `warp/dinov3.rs`, `warp/temporal.rs`) with the same pinned
 checkpoint: `uynitsuj/warp-rm-sim-bottles-sss15@6417be05…` over DINOv3 ViT-B/16 `@5931719e…`.
 

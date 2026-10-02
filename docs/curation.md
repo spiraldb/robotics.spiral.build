@@ -3,8 +3,8 @@
 Curation chooses the data to train on: which stretches of which episodes, and
 what to call them. A curation is a graph rooted at one dataset. You build it
 against a preview of the dataset's first 100 episodes, and you publish what it
-selects as a named view in the Spiral catalog. The view is a read-only query
-Spiral runs whenever it is read, with one row per kept interval of an episode,
+selects as a named view: a read-only query Studio keeps and Spiral runs
+whenever it is read, with one row per kept interval of an episode,
 over every episode of the dataset. Every model answer is stored: publishing
 asks each model about the episodes that reach its node once, in the
 background, and writes the answers into the dataset's answers table, which
@@ -272,16 +272,16 @@ answers, the two readings return the same rows for every measure.
 
 Publish, at the end of the document bar, lists every output with the name of
 its view. Choose the outputs to publish and give each a view name: one plain
-identifier, at the catalog root. Publish saves the curation first, because
+identifier. Publish saves the curation first, because
 each view is compiled from the saved recipe. Studio then starts one fill run
 (`POST /api/curation-fills`) with every column the chosen views read, each
 once, and the views, records every `node → view name, revision` in one edit,
 and saves once: a publication is recorded against the saved revision, and the
 save that records it must come next.
 
-Before the run starts, the backend checks each view name, admits every
-statement as one read-only query, and refuses a name a table or a Dataset
-holds. The run is the backend's and outlives the page. For each column in
+Before the run starts, the backend checks each view name and admits every
+statement as one read-only query. The run is the backend's and outlives the
+page. For each column in
 order it
 reads the episodes that reach the node, skips those the column holds, asks
 about the rest (a statement eight at a time; the Modal service twenty
@@ -293,14 +293,16 @@ time, merges it in by `episode_id`, and drops the staging table. A rejected
 video (422) is that episode's failed answer; a refused token, a service on
 another revision (409), or an error ends the run once what it answered is
 written.
-Once every column is filled it runs one `CREATE OR REPLACE VIEW` per view,
-so a reader sees the old view or the new one. (Spiral refuses a `DROP VIEW` and a `CREATE VIEW`
-of one name in one transaction as a namespace conflict once the view
-exists.) A restarted backend loses the answers of the column in flight;
+Once every column is filled it checks that each view's statement plans
+(`LIMIT 0`) and stores it in the Studio SQLite table `curated_views`,
+replacing the statement its name had, so a reader sees the old view or the
+new one. Spiral keeps no hosted views, so Studio does: Data reads a view by
+running its statement, and no other client reads it by name. A project bundle
+carries none, since it carries no answers. A restarted backend loses the answers of the column in flight;
 publishing again resumes past every episode already written. While a run
 fills a view, Data lists it as "In progress", says which node and how many
 of its episodes are answered, and opens it once the run is done. Unpublish
-drops the view; its stored answers stay.
+forgets the view; its stored answers stay.
 
 A later save that changes the recipe moves the curation past the published
 revision, and Publish then lists the output's view as out of date until it
@@ -315,7 +317,7 @@ equal the stored one, and the saved copy carries the next. A rename saves at
 once, from the stored copy, so only the name moves and unsaved graph edits
 stay unsaved. Any saved curation can be deleted from its row in the switcher, open or not:
 Studio reads its stored copy, drops every view that copy publishes, and then
-deletes it at the revision just read. A view the catalog refuses to drop stops
+deletes it at the revision just read. A view that fails to drop stops
 the delete. Deleting the open one opens a blank graph. The payload is
 opaque to the backend and versioned by the frontend. Encoding 4 keeps only the
 recipe: nodes, edges, each node's configuration and rule, and the published
@@ -338,8 +340,8 @@ earlier encoding is refused.
 | Every Score progress, Find similar, Group similar, and Select node is an output; a measure keeps by its own rule; Publish chooses and names the views | Break down's free text is not trainable until a search or grouping reads it; a threshold belongs with the measure it divides | An explicit Output node; progress and similarity Selects |
 | One row per kept interval | It is what the graph carries, so publishing converts nothing | One row per episode with nested ranges; one row per moment |
 | Curation only chooses data | Sample rate, cameras, image size, and normalization are the policy's input contract, which rollout replays | Shape nodes in Curation |
-| Publish is explicit and named; Save stays local | Exploratory leaves must not create catalog resources, and readers need a stable name | Auto-publishing every leaf |
-| The frontend compiles; the backend admits read-only statements, fills the columns they name, and creates the view | The backend stays thin and the browser never sends DDL | The backend compiles the graph |
+| Publish is explicit and named; Save stays local | Exploratory leaves must not become views readers depend on, and readers need a stable name | Auto-publishing every leaf |
+| The frontend compiles; the backend admits read-only statements, fills the columns they name, and stores the view | The backend stays thin and the browser never sends DDL | The backend compiles the graph |
 
 ## Not yet
 
@@ -363,13 +365,11 @@ earlier encoding is refused.
 - Picking that up means: a training config of a published view, observation
   streams, an action stream, a sample rate, and a fill rule per stream, in
   place of `dataset_id`, `sql`, `state_column`, and `action_column`; a picker
-  listing catalog relations with `episode_id`, `start_ns`, and `end_ns`; a
+  listing published views with `episode_id`, `start_ns`, and `end_ns`; a
   training choice of whether action chunks read past an interval's edges; a
   run record of the view definition it read; and `McapTrainingDataset` as the
   resampler. Spiral would need every frame of a camera within an interval
   decoded sequentially, reliable per-frame presentation times, state and
   command fields as numeric columns keyed by log time, and an exposure
   adjustment in `spql.image`.
-- Open: should published views take a prefix such as `curated_` rather than
-  plain root names (the catalog infers no ownership from names)? And since a
-  view is live, should a training run pin the data it read?
+- Open: since a view is live, should a training run pin the data it read?

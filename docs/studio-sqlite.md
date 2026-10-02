@@ -4,10 +4,11 @@ The backend owns two persistence boundaries:
 
 - **SQLite / SeaORM:** connection settings and provider keys, robot documents
   and calibration, project preferences, each dataset's robot model, joint roles
-  and check report, saved curation recipes, and a record of each training run
-  Studio started (its configuration and worker endpoint).
-- **Spiral / ADBC:** datasets and their MCAP sources, published curation
-  views, and model checkpoint artifacts. The training worker publishes
+  and check report, saved curation recipes and the statements of the views
+  they publish, and a record of each training run Studio started (its
+  configuration and worker endpoint).
+- **Spiral / ADBC:** datasets, their MCAP sources and model answers, and model
+  checkpoint artifacts. The training worker publishes
   checkpoints directly to Spiral and owns each run's metrics and logs.
 
 ## Location and lifetime
@@ -84,14 +85,16 @@ Version **4** `.spiral-project` bundles are ZIP archives containing:
 
 - `studio.sqlite3`: a native SQLite snapshot of the selected project's Studio
   records. SQLite's `VACUUM INTO` captures committed state, including WAL data.
-  The export removes backend settings, credentials, and other projects, then
-  vacuums again to remove their deleted bytes. Project keys are neutralized so
+  The export removes backend settings, credentials, published curation views
+  (a bundle carries no model answers for them to read), and other projects,
+  then vacuums again to remove their deleted bytes. Project keys are neutralized so
   the snapshot can be restored into another project.
 - `manifest.json`: `{"format":"spiral-robotics-project","format_version":4,
   "schema_version":<Spiral schema>,"mcap_datasets":[…]}`; unknown fields are
   refused.
-- `dataset_source.arrows`: one Arrow IPC stream of `dataset_source`
-  (`dataset_name`, `recording`, and `payload`, the MCAP bytes).
+- `dataset_source.arrows`: one Arrow IPC stream of every dataset's source
+  files (`dataset_name`, `recording`, and `payload`, the MCAP bytes); each
+  dataset restores into its own `dataset_files_<name>`.
 - `training_checkpoints.arrows`: one Arrow IPC stream of
   `studio_training_checkpoints`.
 

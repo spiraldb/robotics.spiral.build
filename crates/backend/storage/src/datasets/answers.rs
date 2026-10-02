@@ -77,37 +77,9 @@ impl McapDatasetDefinition {
             .await
             .map_err(|error| format!("adding episodes to {}: {error}", table.name()))
     }
-
-    /// Create the answers table of a dataset imported before Studio kept
-    /// answers; `false` when it already has one.
-    pub(crate) async fn provision_answers(
-        &self,
-        connection: &mut ProjectConnection,
-    ) -> Result<bool, String> {
-        if connection.table_exists(&self.answers().name()).await? {
-            return Ok(false);
-        }
-        self.create_answers(connection).await?;
-        Ok(true)
-    }
 }
 
 impl StorageManager {
-    /// The one-time migration: every dataset Studio imported before it kept
-    /// model answers gets its answers table. Returns the tables it created.
-    pub async fn provision_answer_tables(&self) -> Result<Vec<String>, String> {
-        let datasets = self.project_store().managed_mcap_datasets().await?;
-        let mut connection = self.project_store().connect_exclusive().await?;
-        let mut created = Vec::new();
-        for dataset in datasets {
-            let definition = McapDatasetDefinition::new(&dataset);
-            if definition.provision_answers(&mut connection).await? {
-                created.push(definition.answers().name());
-            }
-        }
-        Ok(created)
-    }
-
     /// What fill runs read and write of the answers table `table`.
     pub fn dataset_answers(&self, table: AnswerTable) -> DatasetAnswers<'_> {
         DatasetAnswers {
@@ -643,15 +615,6 @@ mod tests {
             assert_eq!(rows(&store).await?, 3);
             assert_eq!(answers.filled(&similarity).await?.len(), 2);
 
-            // The migration leaves a table that exists and makes one that does not.
-            let mut connection = store.connect_exclusive().await?;
-            assert!(!definition.provision_answers(&mut connection).await?);
-            connection
-                .execute_update_sql(&format!("DROP TABLE {}", table.quoted()))
-                .await?;
-            assert!(definition.provision_answers(&mut connection).await?);
-            drop(connection);
-            assert_eq!(rows(&store).await?, 3);
             Ok::<_, String>(())
         }))
         .await;

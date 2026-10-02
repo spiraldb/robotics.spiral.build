@@ -203,9 +203,9 @@ dataset/member identities; no recording-header fallback exists.
 
 Dataset import accepts public Hugging Face repositories containing MCAP files. The
 request has `dataset_id`, `repository`, and optional `revision` (default `main`);
-imports append rows tagged with `dataset_name` to the shared root `dataset_source`
-table, create the root filtered view `dataset_source_<dataset_id>`, and derive
-`dataset_<dataset_id>` from that view in one transaction.
+imports create `dataset_files_<dataset_id>`, a table of the repository's MCAP
+files, and derive `dataset_<dataset_id>` from it in one transaction, copying
+every topic into Spiral.
 There is no format selector or LeRobot import. Inspection pins a revision and
 lists the dataset and source relation to create. Import uses Spiral's
 `spql.mcap.dataset` producer, refreshes its population, and checks episode count
@@ -233,20 +233,20 @@ views}`: for each node that asks a model, in path order, its answers-table
 episodes that reach the node, or listed ids), the `node` label the run
 reports, and the `source` of one episode's answer (a read-only statement with
 the episode bound as `$1`, or the Modal service's progress scores of a camera);
-then the views, each `{name, statement}`: one plain identifier at the catalog
-root and the read-only `SELECT` or `WITH` the browser compiled from an output.
-The backend refuses an invalid name, statement, or dataset with
-`invalid_input`, a column the Modal service answers while its base URL or token
-is not saved with `invalid_input`, and a name held by a table or Dataset with
-`conflict`. It answers the run's `FillStatus` at once and works in the
+then the views, each `{name, statement}`: one plain identifier and the
+read-only `SELECT` or `WITH` the browser compiled from an output. The backend
+refuses an invalid name, statement, or dataset with `invalid_input`, and a
+column the Modal service answers while its base URL or token is not saved with
+`invalid_input`. It answers the run's `FillStatus` at once and works in the
 background: each column is written for the episodes it does not hold yet, then
-every view is created with one `CREATE OR REPLACE VIEW`. A run publishing a
-view replaces any earlier run publishing it. `GET /curation-fills` lists the
+each view's statement is checked to plan and stored under its name, replacing
+the one before. A run publishing a view replaces any earlier run publishing
+it. `GET /curated-views` lists the published views, each `{name, statement}`. `GET /curation-fills` lists the
 runs that publish views, `GET /curation-fills/{id}` reads one, and
 `POST /curation-fills/{id}/stop` starts nothing more; what is in flight is
 written. A Score progress preview starts the same run over the episodes it
-previews, with no views. `POST /curations/unpublish` takes `{name}`, drops the
-view, and answers `null`; its stored answers stay. See
+previews, with no views. `POST /curations/unpublish` takes `{name}`, forgets
+the view, and answers `null`; its stored answers stay. See
 [curation](curation.md).
 
 ## Files and media

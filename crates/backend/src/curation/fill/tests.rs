@@ -1,6 +1,6 @@
 use super::*;
 use crate::curation::progress_service::tests::MockService;
-use spiral_robotics_common::curation::{AnswerColumn, PublishRequest};
+use spiral_robotics_common::curation::{AnswerColumn, PublishedView};
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::providers::ProviderKeysUpdate;
 use spiral_robotics_storage::{ProjectStore, StudioStore};
@@ -70,7 +70,7 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
     ));
     // A run that only publishes stores nothing, so any dataset will do.
     let selected = FillRequest::new(dataset("folding"), Vec::new())
-        .publishing(vec![PublishRequest::new("long", "SELECT 1")]);
+        .publishing(vec![PublishedView::new("long", "SELECT 1")]);
     assert!(fills.admit(selected).is_ok());
     let writing = column(
         "Break down subtasks",
@@ -84,7 +84,7 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
         FillRequest::new(dataset("dataset_folding"), vec![writing])
     ));
     let published = FillRequest::new(dataset("dataset_folding"), Vec::new())
-        .publishing(vec![PublishRequest::new("folds", "SELECT 1; SELECT 2")]);
+        .publishing(vec![PublishedView::new("folds", "SELECT 1; SELECT 2")]);
     assert!(refused(&fills, published));
 }
 
@@ -166,7 +166,7 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
         answers.quoted()
     );
     let request = FillRequest::new(dataset.clone(), vec![scores, velocities])
-        .publishing(vec![PublishRequest::new(view.clone(), statement)]);
+        .publishing(vec![PublishedView::new(view.clone(), statement)]);
     // An assertion that fails still lets the probe be dropped.
     let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
         for episode in ["one", "two", "three"] {

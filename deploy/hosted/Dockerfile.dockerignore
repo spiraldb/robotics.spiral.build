@@ -1,0 +1,9 @@
+# The server stage builds the Cargo workspace; nothing else enters the image.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!.cargo
+!crates
+**/target
+crates/desktop/web

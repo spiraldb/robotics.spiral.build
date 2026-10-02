@@ -1,6 +1,6 @@
 //! Publishing from the document bar: the outputs the operator chooses, each
-//! compiled over every episode of the dataset and created as a catalog view
-//! under the name they give it, then recorded in the curation, which saves.
+//! compiled over every episode of the dataset and published as a view under
+//! the name they give it, then recorded in the curation, which saves.
 //! A view cannot be turned back into a graph, so the recipe stays in the
 //! curation and the view is what it produces.
 //!
@@ -25,7 +25,7 @@ use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use spiral_robotics_common::curation::{
-    ColumnFill, FillRequest, PublishRequest, UnpublishRequest, ViewName,
+    ColumnFill, FillRequest, PublishedView, UnpublishRequest, ViewName,
 };
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_ui::{
@@ -70,7 +70,7 @@ struct PublishableOutput {
 #[derive(Clone, Debug, PartialEq)]
 struct ChosenView {
     node: String,
-    view: PublishRequest,
+    view: PublishedView,
     fills: Vec<ColumnFill>,
 }
 
@@ -201,7 +201,7 @@ impl PublishChoice {
                 let compiled = output.compiled.clone().ok()?;
                 Some(ChosenView {
                     node: output.node.clone(),
-                    view: PublishRequest::new(self.name(&output.node), compiled.statement),
+                    view: PublishedView::new(self.name(&output.node), compiled.statement),
                     fills: compiled.fills,
                 })
             })
@@ -312,7 +312,7 @@ impl PublishedViews {
     pub(in crate::activities::curation) fn of(payload: &str) -> Self {
         Self(PublishedOutput::views_in(payload))
     }
-    /// Drop every one of them, stopping at the first the catalog refuses.
+    /// Drop every one of them, stopping at the first that fails.
     /// Dropping a view already gone succeeds, so a delete that stopped
     /// part-way can simply be asked again.
     pub(in crate::activities::curation) async fn drop_all(self) -> Result<(), String> {
@@ -321,7 +321,7 @@ impl PublishedViews {
         }
         Ok(())
     }
-    /// Drop the catalog view `view`; one already gone is dropped too.
+    /// Drop the published view `view`; one already gone is dropped too.
     pub(in crate::activities::curation) async fn drop_view(view: String) -> Result<(), String> {
         let request =
             HttpRequest::new("POST", "/api/curations/unpublish").json(&UnpublishRequest::new(view));
@@ -372,7 +372,7 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                 title: if none {
                     "Add Score progress, Find similar, Group similar, or a Select: each is an output that publishes as a view"
                 } else {
-                    "Choose outputs to publish as catalog views"
+                    "Choose outputs to publish as views"
                 },
                 onclick: {
                     let outputs = outputs.clone();
@@ -401,7 +401,7 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                         }
                     },
                     p { class: "curation-publish-intro",
-                        "Each output you choose becomes a catalog view of what it keeps across the dataset. Its models answer each episode once, in the background, and the view reads what they stored."
+                        "Each output you choose becomes a view of what it keeps across the dataset. Its models answer each episode once, in the background, and the view reads what they stored."
                     }
                     ul { class: "curation-publish-outputs",
                         for output in outputs.clone() {
@@ -507,7 +507,7 @@ fn PublishRow(
                 if let Some(published) = output.published.clone() {
                     if published.is_current(current) {
                         p { class: "curation-publish-status", role: "status",
-                            title: "The catalog view {published.view()} is what the saved curation keeps here",
+                            title: "The view {published.view()} is what the saved curation keeps here",
                             "Published as "
                             code { "{published.view()}" }
                         }
@@ -521,7 +521,7 @@ fn PublishRow(
                     Button {
                         purpose: ActionPurpose::Remove, variant: ButtonVariant::Link,
                         disabled,
-                        title: "Drop the catalog view",
+                        title: "Drop the view",
                         onclick: {
                             let view = published.view().to_owned();
                             move |_| on_unpublish.call(view.clone())
@@ -559,7 +559,7 @@ fn PublishRow(
 mod tests {
     use super::{ChosenView, CompiledOutput, PublishChoice, PublishableOutput};
     use spiral_robotics_common::curation::{
-        AnswerColumn, AnswerSource, ColumnFill, FillEpisodes, PublishRequest,
+        AnswerColumn, AnswerSource, ColumnFill, FillEpisodes, PublishedView,
     };
     use spiral_robotics_common::datasets::DatasetSelection;
 
@@ -579,12 +579,12 @@ mod tests {
         let views = [
             ChosenView {
                 node: "score_progress-1".into(),
-                view: PublishRequest::new("moving", "SELECT 1"),
+                view: PublishedView::new("moving", "SELECT 1"),
                 fills: vec![scores.clone()],
             },
             ChosenView {
                 node: "group-1".into(),
-                view: PublishRequest::new("folds", "SELECT 2"),
+                view: PublishedView::new("folds", "SELECT 2"),
                 fills: vec![scores.clone(), subtasks.clone()],
             },
         ];
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(
             run.views()
                 .iter()
-                .map(PublishRequest::name)
+                .map(PublishedView::name)
                 .collect::<Vec<_>>(),
             ["moving", "folds"]
         );

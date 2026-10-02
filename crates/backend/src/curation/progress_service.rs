@@ -1,6 +1,6 @@
 //! The Modal service that scores progress: the backend reads one episode's
 //! camera packets from Spiral, posts them, and reads the scores back as the
-//! answer the Score progress node consumes, `spql.ai.score_progress`'s shape.
+//! answer the Score progress node consumes, `spql.ai.warp_rm`'s shape.
 //!
 //! `POST {base_url}/score_progress`, with the saved token as a bearer, takes
 //! one Arrow IPC record batch: a row per packet in decode order — `payload`,

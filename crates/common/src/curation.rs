@@ -166,15 +166,15 @@ impl Display for ViewName {
     }
 }
 
-/// One curation output a fill run publishes: the view's name and the
-/// read-only statement the view is defined as.
+/// One published curation output: the name Data lists it by, and the
+/// read-only statement Studio reads it through.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublishRequest {
+pub struct PublishedView {
     name: String,
     statement: String,
 }
-impl PublishRequest {
+impl PublishedView {
     pub fn new(name: impl Into<String>, statement: impl Into<String>) -> Self {
         Self {
             name: name.into(),

@@ -5,23 +5,41 @@ pub(super) struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(StudioSchema)]
+        vec![
+            Box::new(SqlMigration::new(
+                "m20260928_000001_studio",
+                include_str!("m20260928_000001_studio.sql"),
+            )),
+            Box::new(SqlMigration::new(
+                "m20261001_000001_curated_views",
+                include_str!("m20261001_000001_curated_views.sql"),
+            )),
+        ]
     }
 }
 
-struct StudioSchema;
-impl MigrationName for StudioSchema {
+/// One forward-only schema step, written as SQL.
+struct SqlMigration {
+    name: &'static str,
+    sql: &'static str,
+}
+impl SqlMigration {
+    const fn new(name: &'static str, sql: &'static str) -> Self {
+        Self { name, sql }
+    }
+}
+impl MigrationName for SqlMigration {
     fn name(&self) -> &str {
-        "m20260928_000001_studio"
+        self.name
     }
 }
 
 #[async_trait::async_trait]
-impl MigrationTrait for StudioSchema {
+impl MigrationTrait for SqlMigration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared(include_str!("m20260928_000001_studio.sql"))
+            .execute_unprepared(self.sql)
             .await?;
         Ok(())
     }
