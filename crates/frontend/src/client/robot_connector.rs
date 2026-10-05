@@ -81,6 +81,21 @@ impl RobotConnector {
         ]);
     }
 
+    /// Ask again now rather than at the next poll.
+    pub(crate) fn check_again(self) {
+        self.refresh.invalidate(&[QueryDomain::RobotConnector]);
+    }
+
+    /// Whether this page may need the browser's permission to reach the robot
+    /// connector: a secure page calling a plain-HTTP address on the local
+    /// network.
+    pub(crate) fn needs_local_network_permission(self) -> bool {
+        let secure_page = web_sys::window()
+            .and_then(|window| window.location().protocol().ok())
+            .is_some_and(|protocol| protocol == "https:");
+        secure_page && self.address.read().starts_with("http://")
+    }
+
     /// The robot connector's build when it last answered, or why it did not.
     pub(crate) fn health(self) -> Option<Result<RobotConnectorHealth, CommandError>> {
         self.health.read().clone()

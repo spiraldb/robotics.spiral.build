@@ -78,11 +78,13 @@ writing glue code or operating a second data stack.
   producer among several; query, curation, training, rollout, and export are
   consumers. The Studio competes as the *database-backed* robot-data
   workbench: viewers show files, the Studio owns a queryable project.
-- **One trusted Rust backend, one portable browser frontend.** The backend owns
-  hardware, safety, recording, ingestion, media encoding, and data services.
-  It also holds model-provider credentials and relays the browser's provider
-  requests. The browser is an interchangeable operating surface that talks only to that backend; it
-  never holds service credentials or drives hardware directly.
+- **Two trusted Rust servers, one portable browser frontend.** The Studio
+  backend owns ingestion and data services, holds model-provider credentials,
+  and relays the browser's provider requests. The robot connector owns
+  hardware, safety, recording, and media encoding next to the arms. The
+  browser is an interchangeable operating surface over both; it never holds
+  service credentials, and it drives hardware only through the robot
+  connector's bounded commands.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
   interface are Rust. The selected remote ACT/CVAE

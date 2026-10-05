@@ -1,0 +1,297 @@
+/* Robots › arm setup: reaching the robot connector, and Live's first-run
+   guide through a follower and a leader. Prefix every class with `arm-guide`
+   or `robot-connector`. Use @layer components like tailwind.css.
+
+   The guide is one ledger on the canvas: three rows, each a mark, a title,
+   and — once done — what it settled on in mono. Only the current row opens,
+   and it holds the same sections Settings → Robots shows. A finished row's
+   check draws itself once; that is the guide's only motion. */
+
+@layer components {
+  .arm-guide {
+    height: 100%;
+    min-height: 0;
+    overflow: auto;
+    padding: clamp(32px, 9vh, 88px) 24px 64px;
+    background: var(--tone-canvas);
+  }
+
+  .arm-guide-sheet {
+    width: min(640px, 100%);
+    margin: 0 auto;
+  }
+
+  .arm-guide-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 20px;
+  }
+
+  .arm-guide-head h2 {
+    margin: 0 0 6px;
+    color: var(--tone-ink);
+    font-size: 19px;
+    font-weight: 600;
+    line-height: 1.25;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+
+  .arm-guide-head p {
+    max-width: 56ch;
+    margin: 0;
+    color: var(--tone-ink-soft);
+    font-size: 13px;
+    line-height: 1.45;
+    text-wrap: pretty;
+  }
+
+  .arm-guide-head > .ui-button {
+    flex-shrink: 0;
+    margin-top: 1px;
+    white-space: nowrap;
+  }
+
+  .arm-guide-steps {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--tone-line);
+    border-radius: 8px;
+    background: var(--tone-surface);
+    list-style: none;
+  }
+
+  .arm-guide-step {
+    padding: 14px 16px;
+  }
+
+  .arm-guide-step + .arm-guide-step {
+    border-top: 1px solid var(--tone-line-soft);
+  }
+
+  .arm-guide-step-head {
+    display: grid;
+    min-height: 22px;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 12px;
+  }
+
+  .arm-guide-step-head h3 {
+    margin: 0;
+    color: var(--tone-ink);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .arm-guide-step[data-state="pending"] h3 {
+    color: var(--tone-ink-faint);
+    font-weight: 500;
+  }
+
+  .arm-guide-mark {
+    display: grid;
+    width: 20px;
+    height: 20px;
+    place-items: center;
+    border: 1px solid var(--tone-line-strong);
+    border-radius: 999px;
+    background: var(--tone-surface);
+    color: var(--tone-ink-faint);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    line-height: 1;
+  }
+
+  .arm-guide-step[data-state="current"] .arm-guide-mark {
+    border: 1.5px solid var(--tone-ink);
+    color: var(--tone-ink);
+  }
+
+  .arm-guide-step[data-state="done"] .arm-guide-mark {
+    border-color: var(--tone-good-dot);
+    background: var(--tone-good-soft);
+    color: var(--tone-good);
+  }
+
+  .arm-guide-mark .ui-icon {
+    width: 12px;
+    height: 12px;
+    stroke-width: 1.8;
+  }
+
+  .arm-guide-step[data-state="done"] .arm-guide-mark path {
+    stroke-dasharray: 14;
+    animation: arm-guide-check 480ms var(--ease-out-expo) 60ms backwards;
+  }
+
+  .arm-guide-summary {
+    min-width: 0;
+    max-width: 300px;
+    overflow: hidden;
+    color: var(--tone-ink-faint);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .arm-guide-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 12px 0 2px 32px;
+  }
+
+  .arm-guide-purpose {
+    max-width: 62ch;
+    margin: 0;
+    color: var(--tone-ink-soft);
+    font-size: 12.5px;
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+
+  /* The port and calibration sections keep their Settings anatomy; the
+     guide only drops the outer padding the Settings list gives them. */
+  .arm-guide-sections .device-setup-section:first-child {
+    padding-top: 2px;
+  }
+
+  .arm-guide-new {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .arm-guide-new > .ui-input {
+    width: 180px;
+  }
+
+  /* Importing a saved arm is the quiet alternative to naming a new one. */
+  .arm-guide-new .device-list-action {
+    min-height: 26px;
+    margin-left: 6px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--tone-info-ink);
+    font-size: 12px;
+  }
+
+  .arm-guide-new .device-list-action:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .robot-connector-setup {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .provider-heading + .robot-connector-setup {
+    margin-bottom: 20px;
+  }
+
+  .robot-connector-command {
+    display: flex;
+    height: 32px;
+    align-items: center;
+    gap: 6px;
+    padding: 0 3px 0 10px;
+    border: 1px solid var(--tone-line);
+    border-radius: 6px;
+    background: var(--tone-sunken);
+  }
+
+  .robot-connector-command code {
+    min-width: 0;
+    flex: 1;
+    overflow-x: auto;
+    color: var(--tone-ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    white-space: nowrap;
+    user-select: all;
+    scrollbar-width: none;
+  }
+
+  /* The prompt is drawn, not copied. */
+  .robot-connector-command code::before {
+    content: "$ ";
+    color: var(--tone-ink-faint);
+    user-select: none;
+  }
+
+  .robot-connector-address {
+    display: flex;
+    max-width: 440px;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .robot-connector-address > .ui-field {
+    flex: 1;
+  }
+
+  .robot-connector-address .ui-field-label {
+    color: var(--tone-ink-faint);
+  }
+
+  .robot-connector-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    color: var(--tone-ink-soft);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .robot-connector-status-dot {
+    width: 7px;
+    height: 7px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: var(--tone-good-dot);
+  }
+
+  .robot-connector-status[data-tone="waiting"] .robot-connector-status-dot {
+    background: var(--tone-info);
+    animation: robot-connector-wait 1.6s ease-in-out infinite;
+  }
+
+  .robot-connector-permission {
+    margin: -4px 0 0 15px;
+    color: var(--tone-ink-faint);
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+
+  @keyframes arm-guide-check {
+    from {
+      stroke-dashoffset: 14;
+    }
+  }
+
+  @keyframes robot-connector-wait {
+    50% {
+      opacity: 0.3;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .arm-guide-step[data-state="done"] .arm-guide-mark path,
+    .robot-connector-status[data-tone="waiting"] .robot-connector-status-dot {
+      animation: none;
+    }
+  }
+}

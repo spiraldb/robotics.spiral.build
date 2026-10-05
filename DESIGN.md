@@ -706,6 +706,17 @@ Live begins with Control; recording identity and capture transport stay in
 the Timeline, and recording, torque, and robot problems reach the top bar's
 status line. Robot setup lives in Settings → Robots.
 
+Until the robot connector answers and a follower and a leader each have a port
+and a calibration, Live shows its first-run guide instead of the bench: one
+640px ledger on the canvas under a 19px title, three rows — start the robot
+connector, set up the follower, set up the leader — each a 20px mark (mono
+numeral; ink ring when current; olive check when done), a 13px title, and the
+mono value it settled on. Only the current row opens, holding the start
+command, the address, and the same port and calibration sections Settings →
+Robots shows. Every row is read from the robot connector, so the guide
+resumes where the bench is. "Skip setup" shows the bench for the visit; once
+the bench shows it stays, and finishing setup says so once in a toast.
+
 ### Curation
 
 Curation is a graph beside the selected node's workspace. The

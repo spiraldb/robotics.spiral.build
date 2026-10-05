@@ -34,6 +34,9 @@ pub(crate) enum StudioRoute {
     Rollout {},
     #[route("/settings", SelectedActivityRoute)]
     Settings {},
+    /// Settings, opened on the robots this browser drives.
+    #[route("/settings/robots", SelectedActivityRoute)]
+    RobotSettings {},
 }
 
 impl StudioRoute {
@@ -44,7 +47,7 @@ impl StudioRoute {
             Self::Curation {} => Activity::Curation,
             Self::Training {} => Activity::Training,
             Self::Rollout {} => Activity::Rollout,
-            Self::Settings {} => Activity::Settings,
+            Self::Settings {} | Self::RobotSettings {} => Activity::Settings,
         }
     }
 

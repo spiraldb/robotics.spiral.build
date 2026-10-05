@@ -37,7 +37,8 @@ pub use display::{
     KindMarkProps, Notice, NoticeProps, NoticeTone,
 };
 pub use foundation::{
-    BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, DeleteIcon, Flight, Motion,
-    PauseIcon, Place, PlayIcon, RefreshIcon, Remount, SkipToEndIcon, SkipToStartIcon, SpinnerIcon,
-    StepBackIcon, StepForwardIcon, UiStyles, UnassignIcon, ZoomInIcon, ZoomOutIcon,
+    BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, CopyIcon, DeleteIcon,
+    Flight, Motion, PauseIcon, Place, PlayIcon, RefreshIcon, Remount, SkipToEndIcon,
+    SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon, UiStyles, UnassignIcon,
+    ZoomInIcon, ZoomOutIcon,
 };

@@ -1,4 +1,5 @@
 //! Robot selection, hardware readings, and command admission have independent owners.
+pub(crate) mod arm_setup;
 mod client;
 mod commands;
 mod selection;

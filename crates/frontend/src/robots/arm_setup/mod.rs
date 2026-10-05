@@ -1,11 +1,13 @@
 //! Creating robot instances and getting them ready to move.
 //!
-//! One arm is one robot instance in Studio. Everything on this panel—the
-//! port, cameras, motors, and calibration—is one durable configuration row.
+//! One arm is one robot instance on the robot connector. Everything here—the
+//! port, cameras, motors, and calibration—is one durable configuration
+//! document.
 //!
-//! The panel lives in Settings as the durable owner of ports, camera
-//! assignments, and calibration. Live consumes that configuration without
-//! mixing setup work into the operating surface.
+//! Settings → Robots shows the whole panel, the durable owner of ports, camera
+//! assignments, and calibration. Live shows the first-run guide built from the
+//! same sections until a leader and a follower are ready, then consumes that
+//! configuration without mixing setup work into the operating surface.
 
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::config::{RobotConfig, RobotConfigSave};
@@ -20,11 +22,15 @@ use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection, Selecti
 use crate::shell::state::StudioProjectState;
 
 mod calibration;
+mod connector;
 mod delete;
 mod discovery;
+mod guide;
 use calibration::CalibrationSection;
+pub(crate) use connector::RobotConnectorSetup;
 use delete::DeleteRobotAction;
 use discovery::IdentifiedSerialPort;
+pub(crate) use guide::{ArmSetupGuide, BenchSetup, BenchStage};
 
 /// Robot types offered when creating an instance.
 const ROBOT_TYPES: [(&str, &str); 2] = [
@@ -33,28 +39,14 @@ const ROBOT_TYPES: [(&str, &str); 2] = [
 ];
 
 #[component]
-pub(super) fn RobotPanel(
+pub(crate) fn RobotPanel(
     project: StudioProjectState,
     telemetry: HardwareViewState,
     selection: RobotSelection,
 ) -> Element {
     let robots = telemetry.snapshot().read().robots().to_owned();
     let focused = selection.focused(&robots);
-    let connector = crate::client::robot_connector::RobotConnector::current();
-    let mut ports = use_resource(move || {
-        let available = connector.reachable();
-        async move {
-            if !available {
-                return std::future::pending().await;
-            }
-            RobotClient::current()
-                .list_serial_ports()
-                .await
-                .map_err(|error| error.to_string())
-        }
-    });
-    let port_catalog =
-        PortCatalogState::new(ports.read_unchecked().to_owned(), move |()| ports.restart());
+    let port_catalog = PortCatalogState::use_catalog();
 
     rsx! {
         div { class: "flex flex-col",
@@ -65,7 +57,7 @@ pub(super) fn RobotPanel(
                         state: RobotEntryState::new(
                             focused.as_ref().is_some_and(|chosen| chosen.id() == robot.id()),
                             ScenePalette::accent_css(index),
-                            port_catalog.clone(),
+                            port_catalog,
                         ),
                         robot,
                     }
@@ -185,6 +177,32 @@ impl RobotEntryState {
     }
 }
 
+/// An arm about to be saved on the robot connector: named, typed, and not
+/// yet given a port or a calibration.
+struct NewArm {
+    id: String,
+    robot_type: String,
+}
+
+impl NewArm {
+    fn new(id: impl Into<String>, robot_type: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            robot_type: robot_type.into(),
+        }
+    }
+
+    /// Save the arm and answer its ID.
+    async fn save(self) -> Result<String, String> {
+        let config = RobotConfig::so101(&self.id, &self.robot_type)?;
+        let saved = RobotClient::current()
+            .save_robot(RobotConfigSave::new(config, None))
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(saved.id().to_owned())
+    }
+}
+
 /// Adding an arm, kept folded away so the list stays a list.
 #[component]
 fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Element {
@@ -195,15 +213,11 @@ fn NewRobotForm(project: StudioProjectState, selection: RobotSelection) -> Eleme
     let mut create_robot = use_action(move |name: String, robot_type: String| async move {
         project
             .execute_utility(format!("Created {name}."), async move {
-                let config = RobotConfig::so101(&name, &robot_type)?;
-                RobotClient::current()
-                    .save_robot(RobotConfigSave::new(config, None))
-                    .await
-                    .map_err(|error| error.to_string())?;
-                // Keep the form intact until the server accepts the new robot.
+                let saved = NewArm::new(name, robot_type).save().await?;
+                // Keep the form intact until the robot connector accepts the new robot.
                 id.set(String::new());
                 open.set(false);
-                chosen.set(Some(Selection::Robot(name)));
+                chosen.set(Some(Selection::Robot(saved)));
                 Ok(())
             })
             .await
@@ -369,9 +383,9 @@ fn RobotSetup(
                 PortSection { project, telemetry,
                     robot: robot.clone(),
                     state: PortSectionState::new(
-                        port_catalog.scan.clone(),
+                        port_catalog.scan(),
                         progress.is_some(),
-                        move |()| port_catalog.on_rescan.call(()),
+                        move |()| port_catalog.rescan(),
                     ),
                 }
             }
@@ -382,7 +396,7 @@ fn RobotSetup(
                 CalibrationSection { project, telemetry, robot: robot.clone() }
             }
             div { class: "device-file-row",
-                span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Saved on this backend" }
+                span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Saved on the robot connector" }
                 DeleteRobotAction { project, telemetry, robot: robot.clone() }
             }
         }
@@ -425,18 +439,37 @@ impl RobotConnectionErrorPresentation for str {
 /// The result of the shared serial-port scan: still running, failed, or done.
 type PortScan = Option<Result<Vec<SerialPortSummary>, String>>;
 
-#[derive(Clone, PartialEq)]
+/// The serial ports the robot connector can see, scanned once the robot
+/// connector answers and again on request.
+#[derive(Clone, Copy, PartialEq)]
 struct PortCatalogState {
-    scan: PortScan,
-    on_rescan: EventHandler<()>,
+    ports: Resource<Result<Vec<SerialPortSummary>, String>>,
 }
 
 impl PortCatalogState {
-    fn new(scan: PortScan, on_rescan: impl FnMut(()) + 'static) -> Self {
-        Self {
-            scan,
-            on_rescan: EventHandler::new(on_rescan),
-        }
+    fn use_catalog() -> Self {
+        let connector = crate::client::robot_connector::RobotConnector::current();
+        let ports = use_resource(move || {
+            let available = connector.reachable();
+            async move {
+                if !available {
+                    return std::future::pending().await;
+                }
+                RobotClient::current()
+                    .list_serial_ports()
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        });
+        Self { ports }
+    }
+
+    fn scan(self) -> PortScan {
+        self.ports.read_unchecked().to_owned()
+    }
+
+    fn rescan(mut self) {
+        self.ports.restart();
     }
 }
 

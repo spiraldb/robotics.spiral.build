@@ -209,7 +209,11 @@ pub(crate) fn WorkspaceFrame(
     rsx! {
         div { class: "studio-route-content", style: "grid-template-rows: auto minmax(0, 1fr)",
             div {
-                if let WorkspaceStatus::Hardware(hardware) = status {
+                // A robot connector that is not answering is the status line's
+                // to report; until it answers there is no setup to load.
+                if let WorkspaceStatus::Hardware(hardware) = status
+                    && crate::client::robot_connector::RobotConnector::current().reachable()
+                {
                     if let Some(error) = hardware.setup().error() {
                         div { class: "flex items-center gap-2 px-3 py-2 text-xs text-danger", role: "alert",
                             span { "Robot setup unavailable: {error}" }
@@ -243,11 +247,11 @@ fn WorkspaceStatusLine(mode: Activity, status: WorkspaceStatus) -> Element {
                 "{facts.connection.text}"
             }
             for (index, fact) in facts.facts.iter().enumerate() {
-                match fact.destination {
+                match fact.destination.clone() {
                     Some(destination) => rsx! {
                         button { key: "{index}", r#type: "button", class: "studio-status-fact", "data-tone": fact.tone.name(),
                             title: "Open {destination.label()}",
-                            onclick: move |_| { navigator.push(crate::shell::routes::StudioRoute::for_activity(destination)); },
+                            onclick: move |_| { navigator.push(destination.clone()); },
                             "{fact.text}"
                         }
                     },
@@ -293,7 +297,7 @@ struct StatusFact {
     text: String,
     tone: StatusTone,
     /// Where pressing the fact goes, when it names something to fix.
-    destination: Option<Activity>,
+    destination: Option<crate::shell::routes::StudioRoute>,
 }
 
 impl StatusFact {
@@ -305,8 +309,8 @@ impl StatusFact {
         }
     }
     /// The fact names something to fix in Settings.
-    fn opening_settings(mut self) -> Self {
-        self.destination = Some(Activity::Settings);
+    fn opening_robot_settings(mut self) -> Self {
+        self.destination = Some(crate::shell::routes::StudioRoute::RobotSettings {});
         self
     }
 }
@@ -337,8 +341,19 @@ impl StatusFacts {
             _ => None,
         };
         let controls_available = hardware.is_some_and(|robot| robot.controls_available());
+        let connector = crate::client::robot_connector::RobotConnector::current().health();
         let (text, tone) = if !backend_connected {
             ("Reconnecting".to_owned(), StatusTone::Danger)
+        } else if hardware.is_some() && connector.is_none() {
+            (
+                "Looking for the robot connector…".to_owned(),
+                StatusTone::Caution,
+            )
+        } else if hardware.is_some() && matches!(connector, Some(Err(_))) {
+            (
+                "Robot connector unreachable".to_owned(),
+                StatusTone::Caution,
+            )
         } else if hardware.is_some_and(|hardware| hardware.setup().error().is_some()) {
             ("Robot setup unavailable".to_owned(), StatusTone::Caution)
         } else if hardware.is_some_and(|hardware| !hardware.setup().available()) {
@@ -384,15 +399,6 @@ impl StatusFacts {
         let snapshot = hardware.snapshot().read().clone();
         let telemetry = hardware.frame().read().clone();
         let mut facts = Vec::new();
-        if matches!(
-            crate::client::robot_connector::RobotConnector::current().health(),
-            Some(Err(_))
-        ) {
-            facts.push(
-                StatusFact::new("Robot connector unreachable", StatusTone::Caution)
-                    .opening_settings(),
-            );
-        }
         if let Some(recording) = telemetry.recording().as_ref() {
             facts.push(StatusFact::new(
                 format!(
@@ -431,11 +437,12 @@ impl StatusFacts {
         }
         match snapshot.issues().len() {
             0 => {}
-            1 => facts
-                .push(StatusFact::new("1 robot problem", StatusTone::Caution).opening_settings()),
+            1 => facts.push(
+                StatusFact::new("1 robot problem", StatusTone::Caution).opening_robot_settings(),
+            ),
             count => facts.push(
                 StatusFact::new(format!("{count} robot problems"), StatusTone::Caution)
-                    .opening_settings(),
+                    .opening_robot_settings(),
             ),
         }
         facts

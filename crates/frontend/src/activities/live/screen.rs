@@ -1,24 +1,99 @@
-//! Live owns recording controls, scene, cameras, timeline, and docking.
+//! Live owns recording controls, scene, cameras, timeline, and docking, and,
+//! until a leader and a follower are ready, the guide that gets them there.
 
 use super::playback::LiveTimeline;
 use super::session::LiveSession;
 use super::workbench::LiveWorkbench;
 use crate::panels::camera_panel::{AssignedCamera, CameraWorkspaceLayout};
 use crate::panels::scene::{Viewport, ViewportPresentation};
+use crate::robots::arm_setup::{ArmSetupGuide, BenchSetup, BenchStage};
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::activity::{Activity, WorkspaceActivity};
-use crate::shell::frame::WorkspaceFrame;
+use crate::shell::frame::{WorkspaceFrame, WorkspaceStatus};
+use crate::shell::notifications::MessageSource;
+use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use dioxus_workbench::{Panel, PanelWorkspace};
+use spiral_robotics_ui::{EmptyState, SpinnerIcon};
 
 #[component]
 pub(crate) fn LiveWorkspace(is_active: ReadSignal<bool>) -> Element {
     let workspace = WorkspaceActivity::provide(Activity::Live, is_active);
-    let project = crate::shell::state::StudioProjectState::current();
+    let project = StudioProjectState::current();
     let telemetry = HardwareViewState::use_state(project, is_active);
     let selection = RobotSelection::use_selection(telemetry.snapshot());
     let session = LiveSession::use_session(project, telemetry, selection);
-    rsx! { WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(session.telemetry()), LivePanels { session } } }
+    let gate = BenchGate::use_gate(project, telemetry);
+    let (status, content) = if gate.showing_bench() {
+        (
+            WorkspaceStatus::Hardware(telemetry),
+            rsx! { LivePanels { session } },
+        )
+    } else if gate.stage() == BenchStage::Checking {
+        (
+            WorkspaceStatus::General,
+            rsx! { EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Looking for the robot connector…" } } },
+        )
+    } else {
+        (
+            WorkspaceStatus::General,
+            rsx! { ArmSetupGuide { project, telemetry, selection, on_skip: move |_| gate.skip() } },
+        )
+    };
+    rsx! { WorkspaceFrame { workspace, status, {content} } }
+}
+
+/// Whether Live shows its bench or the setup guide.
+///
+/// Once the bench shows it stays for this visit: a robot connector that stops
+/// answering mid-session is the status line's to report, not a reason to take
+/// the controls away.
+#[derive(Clone, Copy)]
+struct BenchGate {
+    stage: Memo<BenchStage>,
+    bench_shown: Signal<bool>,
+}
+
+impl BenchGate {
+    fn use_gate(project: StudioProjectState, telemetry: HardwareViewState) -> Self {
+        let connector = crate::client::robot_connector::RobotConnector::current();
+        let stage = use_memo(move || {
+            let health = connector.health();
+            let snapshot = telemetry.snapshot();
+            let snapshot = snapshot.read();
+            let robots = telemetry.setup().loaded().then(|| snapshot.robots());
+            BenchSetup::new(health.as_ref(), robots).stage()
+        });
+        let mut bench_shown = use_signal(|| false);
+        let mut guided = use_signal(|| false);
+        use_effect(move || match stage() {
+            BenchStage::Ready if !*bench_shown.peek() => {
+                bench_shown.set(true);
+                if *guided.peek() {
+                    project.report_success_from(
+                        MessageSource::Live,
+                        "Both arms are ready. Choose Teleop to drive the follower from the leader.",
+                    );
+                }
+            }
+            BenchStage::Setup if !*guided.peek() => guided.set(true),
+            _ => {}
+        });
+        Self { stage, bench_shown }
+    }
+
+    fn stage(self) -> BenchStage {
+        (self.stage)()
+    }
+
+    fn showing_bench(self) -> bool {
+        (self.bench_shown)() || self.stage() == BenchStage::Ready
+    }
+
+    /// Show the bench without finishing setup.
+    fn skip(mut self) {
+        self.bench_shown.set(true);
+    }
 }
 
 #[component]

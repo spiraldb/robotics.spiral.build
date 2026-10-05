@@ -67,6 +67,17 @@ pub fn SpinnerIcon() -> Element {
     }
 }
 
+/// Put text on the clipboard.
+#[component]
+pub fn CopyIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "5.25", y: "5.25", width: "8", height: "8", rx: "1.5" }
+            path { d: "M10.75 5.25V4.25a1.5 1.5 0 0 0-1.5-1.5h-5a1.5 1.5 0 0 0-1.5 1.5v5a1.5 1.5 0 0 0 1.5 1.5h1" }
+        }
+    }
+}
+
 /// Done, confirmed, satisfied.
 #[component]
 pub fn CheckIcon() -> Element {

@@ -10,10 +10,11 @@ use spiral_robotics_ui::{
     TextInput,
 };
 
-use crate::activities::settings::robots::RobotPanel;
 use crate::client::robot_connector::RobotConnector;
+use crate::robots::arm_setup::{RobotConnectorSetup, RobotPanel};
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::notifications::MessageSource;
+use crate::shell::routes::StudioRoute;
 use crate::shell::{project::ProjectSelection, state::StudioProjectState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +35,6 @@ struct SettingsDraftSignals {
     current: Signal<DataSettings>,
     base: Signal<DataSettings>,
     saved: Signal<Option<DataSettings>>,
-    section: Signal<SettingsSection>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,13 +53,12 @@ struct ProjectTransferSignals {
 }
 
 impl SettingsPanelState {
-    fn use_state(initial: DataSettings, section: SettingsSection) -> Self {
+    fn use_state(initial: DataSettings) -> Self {
         use_hook(|| Self {
             draft: SettingsDraftSignals {
                 base: Signal::new(initial.clone()),
                 saved: Signal::new(None),
                 current: Signal::new(initial),
-                section: Signal::new(section),
             },
             operations: SettingsOperationSignals {
                 saving: Signal::new(false),
@@ -78,30 +77,27 @@ impl SettingsPanelState {
 #[component]
 fn SettingsPanel(
     project: StudioProjectState,
-    telemetry: HardwareViewState,
-    selection: RobotSelection,
+    is_active: ReadSignal<bool>,
+    section: Signal<SettingsSection>,
+    robots: RobotSettingsView,
 ) -> Element {
-    let settings = super::resource::SettingsResource::use_resource(telemetry.is_active_signal());
+    let RobotSettingsView {
+        telemetry,
+        selection,
+    } = robots;
+    let mut section = section;
+    let settings = super::resource::SettingsResource::use_resource(is_active);
     let initial = settings.loaded();
     let load_error = settings.error();
     let initial_value = initial.clone().unwrap_or_default();
     let settings_loaded = initial.is_some();
     let project_selection = ProjectSelection::current();
-    let initial_section = if project_selection
-        .selected()
-        .is_none_or(|project| !project.is_chosen())
-    {
-        SettingsSection::Spiral
-    } else {
-        SettingsSection::Robots
-    };
     let SettingsPanelState {
         draft:
             SettingsDraftSignals {
                 mut current,
                 mut base,
                 mut saved,
-                mut section,
             },
         operations:
             SettingsOperationSignals {
@@ -115,7 +111,7 @@ fn SettingsPanel(
                         error: mut project_transfer_error,
                     },
             },
-    } = SettingsPanelState::use_state(initial_value, initial_section);
+    } = SettingsPanelState::use_state(initial_value);
     let on_saved = move || {
         settings.refresh();
     };
@@ -278,9 +274,11 @@ fn SettingsPanel(
                 div { class: "settings-content",
                     match section() {
                         SettingsSection::Robots => rsx! {
-                            ProviderHeading { title: "Robot setup", description: "Configure ports, camera assignments, and calibration for each arm." }
-                            RobotConnectorAddress {}
-                            div { class: "robot-settings-panel", RobotPanel { project, telemetry, selection } }
+                            ProviderHeading { title: "Robot setup", description: "The arms, cameras, and calibration on the robot connector this browser drives." }
+                            RobotConnectorSetup {}
+                            if RobotConnector::current().reachable() {
+                                div { class: "robot-settings-panel", RobotPanel { project, telemetry, selection } }
+                            }
                         },
                         _ if !settings_loaded => rsx! {
                             div { class: "settings-loading", role: "status",
@@ -423,48 +421,6 @@ fn SettingsPanel(
     }
 }
 
-/// The robot connector this browser drives, and whether it answers.
-#[component]
-fn RobotConnectorAddress() -> Element {
-    let connector = RobotConnector::current();
-    let mut draft = use_signal(|| connector.address());
-    let status = match connector.health() {
-        None => rsx! { p { class: "connection-test", role: "status", "Connecting…" } },
-        Some(Ok(health)) => rsx! {
-            p { class: "connection-test connection-test-ok", role: "status",
-                "Connected to robot connector {health.version()}."
-            }
-        },
-        Some(Err(error)) => rsx! {
-            p { class: "connection-test connection-test-failed", role: "status",
-                "{error} Start it next to the arms with `cargo run -p spiral-robotics-robot-connector`."
-            }
-        },
-    };
-    rsx! {
-        div { class: "robot-connector-address",
-            Field { label: "Robot connector", class: "settings-field",
-                TextInput {
-                    value: draft(),
-                    placeholder: "http://localhost:7070",
-                    oninput: move |value| draft.set(value),
-                }
-            }
-            Button {
-                purpose: ActionPurpose::Apply,
-                variant: ButtonVariant::Outline,
-                disabled: draft.read().trim().trim_end_matches('/') == connector.address(),
-                onclick: move |_| connector.set_address(&draft.peek()),
-                "Connect"
-            }
-            p { class: "settings-help",
-                "The arms, cameras, recordings, and rollouts live on the robot connector. This browser talks to it directly, so the address is kept in this browser."
-            }
-            {status}
-        }
-    }
-}
-
 #[component]
 fn SettingsSectionAction(label: &'static str, active: bool, onclick: EventHandler<()>) -> Element {
     rsx! {
@@ -497,6 +453,13 @@ fn SettingsField(
     }
 }
 
+/// The robots this browser drives, as the Robots section shows them.
+#[derive(Clone, Copy, PartialEq)]
+struct RobotSettingsView {
+    telemetry: HardwareViewState,
+    selection: RobotSelection,
+}
+
 #[component]
 pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
     let workspace = crate::shell::activity::WorkspaceActivity::provide(
@@ -504,11 +467,30 @@ pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
         is_active,
     );
     let project = crate::shell::state::StudioProjectState::current();
-    let telemetry = HardwareViewState::use_state(project, is_active);
+    let route = use_route::<StudioRoute>();
+    let mut section = use_signal(|| match route {
+        StudioRoute::RobotSettings {} => SettingsSection::Robots,
+        _ => SettingsSection::Spiral,
+    });
+    // Opening the robot settings shows the robots, whichever section was open.
+    use_effect(use_reactive((&route,), move |(route,)| {
+        if route == (StudioRoute::RobotSettings {}) {
+            section.set(SettingsSection::Robots);
+        }
+    }));
+    // Only the Robots section reaches for the robot connector, so opening
+    // Settings for anything else never asks to reach the local network.
+    let robots_shown = use_memo(move || is_active() && section() == SettingsSection::Robots);
+    let telemetry = HardwareViewState::use_state(project, robots_shown.into());
     let selection = RobotSelection::use_selection(telemetry.snapshot());
+    let status = if robots_shown() {
+        crate::shell::frame::WorkspaceStatus::Hardware(telemetry)
+    } else {
+        crate::shell::frame::WorkspaceStatus::General
+    };
     rsx! {
-        crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Hardware(telemetry),
-            SettingsPanel { project, telemetry, selection }
+        crate::shell::frame::WorkspaceFrame { workspace, status,
+            SettingsPanel { project, is_active, section, robots: RobotSettingsView { telemetry, selection } }
         }
     }
 }

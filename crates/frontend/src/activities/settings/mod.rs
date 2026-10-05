@@ -1,8 +1,7 @@
-//! Settings screen and robot configuration flows.
+//! Settings screen: SpiralDB, training, and the robots this browser drives.
 
 mod account;
 pub(crate) mod panel;
-pub(crate) mod robots;
 
 mod client;
 pub(crate) use client::SettingsClient;
