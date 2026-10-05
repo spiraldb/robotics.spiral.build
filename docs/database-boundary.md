@@ -36,7 +36,9 @@ the database they started on.
 `flake.nix` pins the official version and SHA-256 archive digests in
 `adbcVersion` and `adbcArchiveHashes`.
 The Nix development and CI shells install that archive and set the library
-path; `nix build .#spiral-adbc` produces a separate driver package. For a
+path; `nix build .#spiral-adbc` produces a separate driver package. It keeps the
+archive's video runtime beside the driver and points it at the FFmpeg 9
+libraries from nixpkgs, which the archive leaves out. For a
 standalone deployment, include its library beside the server or supply the
 absolute override. The `local-driver` development shell selects an upstream
 validation build without adding a Spiral source dependency to Studio.

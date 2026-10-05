@@ -14,7 +14,7 @@ behind the same Cloudflare Access sign-in as `next.spiraldb.com`.
 
 | Path | Purpose |
 | --- | --- |
-| `Dockerfile` | The image: backend, web interface, Spiral driver with its video runtime |
+| `hosted-image` in `../../flake.nix` | The image: backend, web interface, Spiral driver with its video runtime and FFmpeg |
 | `../../.github/workflows/hosted-image.yml` | Builds the image and pushes it to Artifact Registry |
 | `robotics.tf` in `spiraldb/infra` | The VM, its network, its snapshot schedule and its image access |
 | `config/robotics-studio/` in `spiraldb/infra` | The Compose spec and the startup script that keeps the VM on it |
@@ -33,8 +33,8 @@ Studio was built for one person on one machine. Hosted, everyone who passes Acce
 
 The `Hosted image` workflow publishes `us-docker.pkg.dev/pyspiral-dev/spiral-docker/spiral-robotics-studio`, beside SpiralDB's own images.
 It publishes one image per release, tagged with the release, such as `v0.1.0`, and `latest`, the tag the VM runs.
-The image ships a Spiral driver built from SpiralDB `develop`, with its video runtime and LGPL FFmpeg.
-The `com.spiraldb.spiraldb.revision` label names the SpiralDB commit.
+The image ships the Spiral driver release that `flake.nix` pins, with its video runtime and the FFmpeg 9 libraries from nixpkgs.
+The `com.spiraldb.adbc.version` label names the driver release.
 
 To pull it elsewhere, run `gcloud auth configure-docker us-docker.pkg.dev` with an account that can read `spiral-docker`.
 
@@ -228,20 +228,10 @@ cd /opt/spiral-robotics-studio && sudo docker compose logs --follow studio
 
 ## Build the image locally
 
-Build the web interface in its own target directory, so a running `dx serve` is never touched:
+The image builds on x86_64 Linux, or on a Linux builder.
+The result is a script that streams the image; load it into Docker:
 
 ```bash
-rm -rf target/hosted/web target/hosted/dx/spiral-robotics-frontend/release/web/public
-CARGO_TARGET_DIR=target/hosted nix develop .#web --command dx bundle --web --release \
-  --debug-symbols false --package spiral-robotics-frontend --out-dir target/hosted/web
-```
-
-Then build the image with a SpiralDB checkout:
-
-```bash
-docker buildx build --platform linux/amd64 \
-  --file deploy/hosted/Dockerfile \
-  --build-context spiraldb=../spiraldb \
-  --build-context web=target/hosted/web/public \
-  --tag spiral-robotics-studio .
+nix build .#packages.x86_64-linux.hosted-image
+./result | docker image load
 ```

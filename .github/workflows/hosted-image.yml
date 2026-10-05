@@ -1,9 +1,8 @@
 name: Hosted image
 
-# Each release, a pushed `v*` tag, publishes the hosted Studio image
-# (deploy/hosted), with a Spiral driver built from the SpiralDB branch below, as
-# `latest`. The VM in spiraldb-robotics runs `latest` within minutes (robotics.tf
-# in spiraldb/infra).
+# Each release, a pushed `v*` tag, publishes the hosted Studio image, the
+# flake's `hosted-image`, as `latest`. The VM in spiraldb-robotics runs `latest`
+# within minutes (robotics.tf in spiraldb/infra).
 on:
   push:
     tags:
@@ -18,51 +17,13 @@ permissions:
   contents: read
 
 env:
-  # The SpiralDB branch whose driver the image ships.
-  SPIRALDB_REF: develop
   IMAGE: us-docker.pkg.dev/pyspiral-dev/spiral-docker/spiral-robotics-studio
 
 jobs:
-  # The web interface builds on its own runner: the Nix toolchain and the
-  # image's Rust builds do not fit on one runner's disk together.
-  web:
-    name: Web interface
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - uses: DeterminateSystems/determinate-nix-action@v3
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target/hosted"
-
-      # dx keeps earlier builds' hashed assets, so the bundle and dx's copy of
-      # it start empty.
-      - name: Build the web interface
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target/hosted
-        run: |
-          set -euo pipefail
-          rm -rf target/hosted/web target/hosted/dx/spiral-robotics-frontend/release/web/public
-          nix develop .#web --command dx bundle --web --release --debug-symbols false \
-            --package spiral-robotics-frontend --out-dir target/hosted/web
-          test -f target/hosted/web/public/index.html
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: web
-          path: target/hosted/web/public
-          if-no-files-found: error
-
   image:
     name: Hosted image
-    needs: web
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 90
     permissions:
       contents: read
       id-token: write
@@ -71,56 +32,29 @@ jobs:
         with:
           persist-credentials: false
 
-      # SpiralDB is private: a read-only deploy key on spiraldb/spiraldb checks
-      # it out. The image's build context leaves this directory out.
-      - name: Check out SpiralDB
-        uses: actions/checkout@v6
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      # The result is a script that streams the image as a Docker archive.
+      - name: Build the image
+        run: nix build .#hosted-image --out-link hosted-image
+
+      # Signed in after the build, so the token is fresh for the push.
+      - id: auth
+        uses: google-github-actions/auth@v3
         with:
-          repository: spiraldb/spiraldb
-          ref: ${{ env.SPIRALDB_REF }}
-          ssh-key: ${{ secrets.SPIRALDB_DEPLOY_KEY }}
-          persist-credentials: false
-          path: spiraldb
-
-      - id: spiraldb
-        name: Name the SpiralDB commit
-        run: echo "commit=$(git -C spiraldb rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: web
-          path: web
-
-      - uses: docker/setup-buildx-action@v4
-
-      - uses: google-github-actions/auth@v3
-        with:
+          token_format: access_token
           workload_identity_provider: projects/733253205867/locations/global/workloadIdentityPools/github-actions/providers/github-actions
           service_account: github-actions-wif@pyspiral-dev.iam.gserviceaccount.com
 
-      - uses: google-github-actions/setup-gcloud@v3
-
-      # The credential helper mints a token whenever the push needs one: the
-      # build can outlast a single access token.
-      - name: Sign in to Artifact Registry
-        run: gcloud auth configure-docker us-docker.pkg.dev --quiet
-
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: deploy/hosted/Dockerfile
-          build-contexts: |
-            spiraldb=spiraldb
-            web=web
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.ref_name }}
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            com.spiraldb.spiraldb.revision=${{ steps.spiraldb.outputs.commit }}
-          # The registry holds every stage's layers, so the driver rebuilds
-          # only when the SpiralDB commit changes.
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
-          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+      # The release tag first, then `latest` on the same manifest. The source is
+      # the archive built above, so no signature policy applies.
+      - name: Push the image
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          RELEASE: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          skopeo() { nix run --inputs-from . nixpkgs#skopeo -- "$@"; }
+          skopeo login --username oauth2accesstoken --password-stdin us-docker.pkg.dev <<< "$ACCESS_TOKEN"
+          ./hosted-image | skopeo --insecure-policy copy docker-archive:/dev/stdin "docker://$IMAGE:$RELEASE"
+          skopeo --insecure-policy copy --preserve-digests "docker://$IMAGE:$RELEASE" "docker://$IMAGE:latest"

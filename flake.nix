@@ -12,6 +12,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       rust-overlay,
       flake-utils,
@@ -31,10 +32,24 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
+          inherit (pkgs) lib;
+          inherit (pkgs.stdenv) hostPlatform;
           llvmPackages = pkgs.llvmPackages_latest;
           # This flake owns the toolchain, tools, and exported build environment.
-          # rust-toolchain.toml pins Rust for the shells and for builds without Nix.
+          # rust-toolchain.toml pins Rust for the shells, the packages, and
+          # builds without Nix.
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          # The packages build with the same compiler but none of the shells'
+          # components: with rust-src installed, panic locations name the
+          # toolchain's store path, which would put all of it in the image.
+          packageRustToolchain = pkgs.rust-bin.fromRustupToolchain {
+            inherit ((lib.importTOML ./rust-toolchain.toml).toolchain) channel targets;
+            profile = "minimal";
+          };
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = packageRustToolchain;
+            rustc = packageRustToolchain;
+          };
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
           # `dx` builds the web client and native server as one fullstack app,
@@ -54,16 +69,16 @@
           nativeBuildInputs = [
             llvmPackages.libclang
           ];
-          linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+          linuxBuildInputs = lib.optionals hostPlatform.isLinux [
             pkgs.v4l-utils
           ];
           # Pin the official standalone release and its archive checksums here.
           # Rust builds never compile the embedded engine.
-          adbcVersion = "0.16.26";
+          adbcVersion = "0.16.41";
           adbcArchiveHashes = {
-            aarch64-apple-darwin = "37df6fd5c8601c2d97675742a9646d4023e8c3239dac0d2cf3a0266de3bdd427";
-            aarch64-unknown-linux-gnu = "1221685bc4dbe1cadd4ccc2389d8b83aa81786749b0f86ddf2a6d65f16365ada";
-            x86_64-unknown-linux-gnu = "74f2c17200ca653cac22d5423603581222464c496787ea450768c5d649794982";
+            aarch64-apple-darwin = "a794846ef442afae8ef23c648161b009ce96e2d021001b6ca66b7568bb4868db";
+            aarch64-unknown-linux-gnu = "26176532a8c83ac10f1105646b6e4aa3f0cec4fd99ad71cd9e1d3212d0559e4a";
+            x86_64-unknown-linux-gnu = "90752bfc12b167086834df3d0505a5a06ca6e801895710f879ad9aacf6de2324";
           };
           adbcTarget =
             {
@@ -72,7 +87,12 @@
               x86_64-linux = "x86_64-unknown-linux-gnu";
             }
             .${system};
-          adbcLibrary = "libadbc_driver_spiraldb${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
+          adbcLibrary = "libadbc_driver_spiraldb${hostPlatform.extensions.sharedLibrary}";
+          # The driver loads the video runtime from its own directory.
+          videoRuntimeLibrary = "libspiral_video_runtime${hostPlatform.extensions.sharedLibrary}";
+          # The archive leaves out the FFmpeg 9 libraries the video runtime
+          # links. Headless is the smallest nixpkgs build that has them.
+          ffmpegLibraries = lib.getLib pkgs.ffmpeg_9-headless;
           spiralAdbc = pkgs.stdenvNoCC.mkDerivation {
             pname = "spiral-adbc";
             version = adbcVersion;
@@ -80,15 +100,123 @@
               url = "https://downloads.spiraldb.com/adbc/${adbcVersion}/adbc-driver-spiraldb-${adbcVersion}-${adbcTarget}.tar.gz";
               sha256 = adbcArchiveHashes.${adbcTarget};
             };
-            nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
-            buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.stdenv.cc.cc.lib ];
+            nativeBuildInputs =
+              lib.optionals hostPlatform.isLinux [ pkgs.autoPatchelfHook ]
+              ++ lib.optionals hostPlatform.isDarwin [ pkgs.cctools ];
+            buildInputs = lib.optionals hostPlatform.isLinux [
+              pkgs.stdenv.cc.cc.lib
+              ffmpegLibraries
+            ];
             dontBuild = true;
+            # On Linux, autoPatchelfHook points the runtime at FFmpeg. On macOS
+            # the runtime names FFmpeg by @rpath and carries no rpath itself.
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/lib"
-              cp ${adbcLibrary} "$out/lib/"
+              cp ${adbcLibrary} ${videoRuntimeLibrary} "$out/lib/"
+            ''
+            + lib.optionalString hostPlatform.isDarwin ''
+              install_name_tool -add_rpath ${ffmpegLibraries}/lib "$out/lib/${videoRuntimeLibrary}"
+            ''
+            + ''
               runHook postInstall
             '';
+          };
+          workspaceVersion = (lib.importTOML ./Cargo.toml).workspace.package.version;
+          workspaceSource = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./rust-toolchain.toml
+              ./.cargo
+              ./crates
+            ];
+          };
+          cargoDeps = rustPlatform.importCargoLock { lockFile = ./Cargo.lock; };
+          studioServer = rustPlatform.buildRustPackage {
+            pname = "spiral-robotics-backend";
+            version = workspaceVersion;
+            src = workspaceSource;
+            inherit cargoDeps;
+            cargoBuildFlags = [
+              "--package"
+              "spiral-robotics-backend"
+            ];
+            # bindgen generates the Linux camera bindings.
+            nativeBuildInputs = lib.optionals hostPlatform.isLinux [ rustPlatform.bindgenHook ];
+            doCheck = false;
+            meta.mainProgram = "spiral-robotics-backend";
+          };
+          # The `public/` directory the server serves the web interface from.
+          studioWeb = pkgs.stdenv.mkDerivation {
+            pname = "spiral-robotics-web";
+            version = workspaceVersion;
+            src = workspaceSource;
+            inherit cargoDeps;
+            nativeBuildInputs = [
+              rustPlatform.cargoSetupHook
+              packageRustToolchain
+              tailwind
+              pkgs.wasm-bindgen-cli_0_2_126
+            ]
+            ++ webBuildInputs;
+            buildPhase = ''
+              runHook preBuild
+              dx bundle --web --release --debug-symbols false --frozen \
+                --package spiral-robotics-frontend --out-dir bundle
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r bundle/public "$out"
+              runHook postInstall
+            '';
+          };
+          # Studio as a Linux server for the hosted VM. The `studio` user owns
+          # HOME, the one volume: Studio's SQLite state and the Spiral sign-in
+          # (under ~/.config).
+          studioHome = "/var/lib/spiral-robotics";
+          hostedImage = pkgs.dockerTools.streamLayeredImage {
+            name = "spiral-robotics-studio";
+            contents = [
+              # The driver verifies TLS against the system's certificates.
+              pkgs.dockerTools.caCertificates
+              (pkgs.dockerTools.fakeNss.override {
+                extraPasswdLines = [ "studio:x:10001:10001::${studioHome}:/sbin/nologin" ];
+                extraGroupLines = [ "studio:x:10001:" ];
+              })
+            ];
+            # Studio writes temporary files to /tmp.
+            fakeRootCommands = ''
+              mkdir -p ./tmp .${studioHome}
+              chmod 1777 ./tmp
+              chown 10001:10001 .${studioHome}
+            '';
+            config = {
+              User = "10001:10001";
+              Entrypoint = [
+                (lib.getExe studioServer)
+                "--bind"
+                "0.0.0.0:8080"
+                "--allow-remote-access"
+                "--no-cameras"
+              ];
+              Env = [
+                "HOME=${studioHome}"
+                "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
+                "SPIRALDB_ADBC_DRIVER=${spiralAdbc}/lib/${adbcLibrary}"
+                "DIOXUS_PUBLIC_PATH=${studioWeb}"
+              ];
+              Volumes.${studioHome} = { };
+              ExposedPorts."8080/tcp" = { };
+              # Studio drains and releases its resources on Ctrl+C.
+              StopSignal = "SIGINT";
+              Labels = {
+                "org.opencontainers.image.revision" = self.rev or self.dirtyRev;
+                "com.spiraldb.adbc.version" = adbcVersion;
+              };
+            };
           };
           sharedShell = {
             packages = [
@@ -107,16 +235,16 @@
             NO_DOWNLOADS = "1";
             SPIRALDB_ADBC_DRIVER = "${spiralAdbc}/lib/${adbcLibrary}";
             LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
-            GECKODRIVER = pkgs.lib.getExe pkgs.geckodriver;
+            GECKODRIVER = lib.getExe pkgs.geckodriver;
             # Select the pinned browser instead of a host Firefox installation.
             WASM_BINDGEN_TEST_WEBDRIVER_JSON = pkgs.writeText "studio-webdriver.json" (
               builtins.toJSON {
                 "moz:firefoxOptions" = {
                   binary =
-                    if pkgs.stdenv.hostPlatform.isDarwin then
+                    if hostPlatform.isDarwin then
                       "${pkgs.firefox}/Applications/Firefox.app/Contents/MacOS/firefox"
                     else
-                      pkgs.lib.getExe pkgs.firefox;
+                      lib.getExe pkgs.firefox;
                   args = [
                     "--width=1280"
                     "--height=800"
@@ -125,34 +253,23 @@
               }
             );
           };
-          # Only what building the hosted image's web interface needs.
-          webShell = {
-            packages = [
-              rustToolchain
-              pkgs.git
-              pkgs.pkg-config
-              tailwind
-              pkgs.wasm-bindgen-cli_0_2_126
-            ]
-            ++ nativeBuildInputs
-            ++ webBuildInputs;
-            NO_DOWNLOADS = "1";
-            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
-          };
           developmentShell = sharedShell // {
-            packages =
-              sharedShell.packages
-              ++ [ pkgs.ffmpeg ]
-              ++ webBuildInputs;
+            packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
           };
         in
         {
           formatter = pkgs.nixfmt;
-          packages.spiral-adbc = spiralAdbc;
+          packages = {
+            spiral-adbc = spiralAdbc;
+            studio-server = studioServer;
+            studio-web = studioWeb;
+          }
+          // lib.optionalAttrs hostPlatform.isLinux {
+            hosted-image = hostedImage;
+          };
 
           devShells.default = pkgs.mkShell developmentShell;
           devShells.ci = pkgs.mkShell sharedShell;
-          devShells.web = pkgs.mkShell webShell;
 
           # Explicit validation environment until the public release includes
           # the upstream persistence fixes. No hand-written exports are needed.
