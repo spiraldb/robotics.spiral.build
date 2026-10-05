@@ -8,14 +8,16 @@ and cached results.
 
 ## Project and activity lifetime
 
-The browser chooses the project it works on; the backend keeps no current
-project. [`shell/project.rs`](../crates/frontend/src/shell/project.rs) takes the
-first project from the saved connection and changes it only when this browser
-saves another one, or when the saved endpoint moves.
-[`shell/routes.rs`](../crates/frontend/src/shell/routes.rs) keys the project
-subtree by that project. Switching projects disposes that subtree, including its
-resources, tasks, drafts, and selections. An unreachable backend keeps the mount
-and its drafts; views pause until the saved connection reads again.
+The browser chooses the workspace it works in, named by its Spiral project; the
+backend keeps no current project.
+[`shell/project.rs`](../crates/frontend/src/shell/project.rs) takes the first
+workspace from the saved connection and changes it only when this browser
+switches to another, when the saved endpoint moves, or when a request finds its
+workspace deleted. [`shell/routes.rs`](../crates/frontend/src/shell/routes.rs)
+keys the project subtree by that project. Switching workspaces disposes that
+subtree, including its resources, tasks, drafts, and selections. An unreachable
+backend keeps the mount and its drafts; views pause until the saved connection
+reads again.
 
 Each activity mounts on its first visit and remains mounted for that project.
 Navigation hides inactive workspaces and passes an explicit `is_active` signal
@@ -23,9 +25,9 @@ to their controllers. Activity components own their state; there is no generic
 retained-state registry. Hidden workspaces preserve drafts and results while
 suspending reads and playback that require visibility.
 
-The project shell owns the selected project, backend liveness, the robot
-connector's address, saved setup and settings, notifications, and
-cross-activity navigation. Live owns capture state; Data owns
+The project shell owns the selected workspace and its settings
+([`shell/workspace.rs`](../crates/frontend/src/shell/workspace.rs)), backend
+liveness, the robot connector, notifications, and cross-activity navigation. Live owns capture state; Data owns
 its resource selection and queries; Curation owns its graph draft and preview;
 Training owns configuration and selected history; Rollout owns checkpoint and
 robot selection; Settings owns its unsaved configuration and calibration state.
@@ -34,11 +36,11 @@ robot selection; Settings owns its unsaved configuration and calibration state.
 
 [`client/project.rs`](../crates/frontend/src/client/project.rs) names the mounted
 project on every request and rejects responses that arrive after another project
-was selected. Catalog-dependent reads wait until Studio is reachable and a Spiral
-project is chosen.
+was selected. Catalog-dependent reads wait until Studio is reachable and a
+workspace is chosen.
 [`client/robot_connector.rs`](../crates/frontend/src/client/robot_connector.rs)
 sends robot, recording, and rollout requests to the robot connector at the
-address this browser saved, and asks whether it answers only while a hardware
+address the workspace keeps, and asks whether it answers only while a hardware
 view is active, so a browser that never opens one never reaches for a local
 network address.
 

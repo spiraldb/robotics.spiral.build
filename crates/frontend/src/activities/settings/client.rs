@@ -16,19 +16,12 @@ impl SettingsClient {
             project: ProjectClient::current(),
         }
     }
-    pub(super) fn data_settings(
-        &self,
-    ) -> impl Future<Output = Result<DataSettings, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/settings"))
-    }
-
     pub(super) fn update_data_settings(
         &self,
         update: SettingsUpdate,
     ) -> impl Future<Output = Result<DataSettings, CommandError>> + use<> {
         self.project.mutate(
-            &[Project, Settings, RobotSetup, Training, Catalog],
+            &[Settings, Training],
             HttpRequest::new("PUT", "/api/settings").json(&update),
         )
     }

@@ -3,7 +3,8 @@
 The backend owns two persistence boundaries:
 
 - **SQLite / SeaORM:** each browser's Spiral session (its WorkOS tokens and
-  chosen project), project preferences, each dataset's robot model, joint roles
+  chosen workspace), the workspaces, project preferences (the training
+  runtime and robot connector address), each dataset's robot model, joint roles
   and check report, saved curation recipes and the statements of the views
   they publish, and a record of each training run Studio started (its
   configuration and worker endpoint).
@@ -31,6 +32,11 @@ New database files use mode 0600 and new parent directories use mode 0700 on Uni
 
 One database contains all local projects. A project's key is its normalized
 Spiral API endpoint plus project ID. Credentials and session IDs are excluded.
+The `workspaces` table names projects: one row per endpoint and project, with
+the name every user sees. A project's records keep the project key, so renaming
+a workspace moves nothing; deleting one deletes its project's records with it.
+Projects that held records when the table was added became workspaces named by
+their project ID.
 The `sessions` table holds each browser's refresh token, so the database file
 is as sensitive as a signed-in session; project bundles never include it.
 Different backends have independent Studio records even when they use the same
@@ -90,7 +96,7 @@ Version **4** `.spiral-project` bundles are ZIP archives containing:
 
 - `studio.sqlite3`: a native SQLite snapshot of the selected project's Studio
   records. SQLite's `VACUUM INTO` captures committed state, including WAL data.
-  The export removes Spiral sessions, published curation views
+  The export removes Spiral sessions, workspaces, published curation views
   (a bundle carries no model answers for them to read), and other projects,
   then vacuums again to remove their deleted bytes. Project keys are neutralized so
   the snapshot can be restored into another project.

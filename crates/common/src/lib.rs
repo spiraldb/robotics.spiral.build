@@ -22,3 +22,4 @@ pub mod rollout;
 pub mod settings;
 pub mod sql;
 pub mod training;
+pub mod workspace;

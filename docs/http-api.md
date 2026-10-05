@@ -9,18 +9,19 @@ by the robot connector instead; see [robot connector API](robot-connector-api.md
 ## Request and response conventions
 
 1. Fetch `GET /api/settings/connection`, the saved connection. Its `endpoint` and
-   `project_id` name the project Studio starts with.
+   `project_id` name the [workspace](#workspaces) Studio starts with.
 2. Send `X-Spiral-Endpoint: <endpoint>` and `X-Spiral-Project: <project_id>` on
-   project reads and commands. Omit the project header before a project is chosen;
-   Studio-wide features still work. Studio-wide `/providers`,
-   `/keys`, `/proxy`, `/account` reads, `GET /settings/connection`, and
+   project reads and commands. Omit the project header before a workspace is
+   chosen; Studio-wide features still work. Studio-wide `/providers`,
+   `/keys`, `/proxy`, `/account` reads, `/workspaces`, `/settings/connection`, and
    `POST /datasets/hugging-face/inspect` need neither header.
-3. The backend keeps no current project. A request may name any project on the
-   saved endpoint, which the backend reaches as the signed-in user. A request
-   naming another endpoint fails with `stale_project`; read the saved connection
-   again.
-4. The client decides which project it works on. `PUT /settings` validates and
-   saves a new project; later requests name it. Work already running in another project keeps running there.
+3. The backend keeps no current project. A request may name the project of any
+   workspace on the saved endpoint, which the backend reaches as the signed-in
+   user. A request naming another endpoint, or a project whose workspace was
+   deleted, fails with `stale_project`; read the saved connection again.
+4. The client decides which workspace it works in. `PUT /settings/connection`
+   saves another one; later requests name it. Work already running in another
+   project keeps running there.
 
 The headers name a project; they are not an authentication credential. Existing
 listener and deployment access controls still apply.
@@ -48,7 +49,7 @@ JSON endpoint failures have this shape:
 | `invalid_input` | 400 | Invalid parameters |
 | `not_found` | 404 | Missing resource or endpoint |
 | `conflict` | 409 | Operation conflicts with current activity |
-| `stale_project` | 409 | Request names an endpoint Studio no longer uses |
+| `stale_project` | 409 | Request names an endpoint Studio no longer uses, or a deleted workspace |
 | `external` | 502 | An upstream operation failed |
 | `internal` | 500 | Backend failure |
 
@@ -133,15 +134,44 @@ The sign-in pages are outside `/api`, because the browser navigates to them:
 The account endpoints:
 
 - `GET /account` returns the `SpiralIdentity`: `email` and `organization`.
-- `GET /settings/connection` returns the Spiral endpoints and the project the
-  session works on, empty before one is chosen.
 - `GET /account/organizations` and `GET /account/projects` list the user's
   organizations and the projects they can open in the current one.
 - `POST /account/sign-out` and `PUT /account/organization`
   (`{"organization_id": …}`) name the mounted project. They refuse while any of
   the session's projects is training, then close the
   session's open projects. Signing out ends the session and its cookie;
-  another organization forgets the session's project.
+  another organization forgets the session's workspace.
+
+### Workspaces
+
+A workspace is one Spiral project under the name Studio shows for it, with
+everything Studio keeps for that project: its curations, preferences, robot
+connector, and training runtime. Every signed-in user sees the workspaces whose
+projects Spiral lets them open; Spiral alone decides who may open, change, or
+delete which. Each backend keeps its own workspaces, in its
+[Studio database](studio-sqlite.md).
+
+- `GET /workspaces` lists the `Workspace`s (`project_id`, `name`) the user can
+  open, by name.
+- `POST /workspaces` (`NewWorkspace`: `{"name": …, "project_id": … | null}`)
+  makes a workspace on an existing project the user can open, or with a null
+  `project_id` on a new project Spiral creates in the user's organization. A
+  project has at most one workspace: another fails with `conflict`.
+- `DELETE /workspaces/{project_id}` forgets the workspace and every Studio
+  record of its project, and closes it in every browser. The Spiral project and
+  its data stay. It refuses while the project is training.
+- `GET /settings/connection` returns the Spiral endpoints and the project of the
+  workspace the session works in: the one it chose while that exists, else the
+  oldest workspace the user can open, else empty.
+- `PUT /settings/connection` (`{"project_id": …}`) makes the session work in
+  that workspace and returns the same shape.
+- `GET /settings` returns the named workspace's `DataSettings`: the Spiral
+  endpoints and project, its `name`, `training` runtime, and `robot_connector`
+  address.
+- `PUT /settings` (`{"name": …, "training": {"endpoint": …}}`) renames the named
+  workspace and sets its training runtime; `PUT /settings/robot-connector`
+  (`{"address": …}`) sets the robot connector every browser in it drives. Both
+  return `DataSettings` and refuse before a workspace is chosen.
 
 ### External HTTP and credentials
 

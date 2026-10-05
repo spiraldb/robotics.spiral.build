@@ -57,9 +57,9 @@ impl LoadingFixture {
 #[tokio::test]
 async fn studio_loads_and_saves_without_opening_spiral() {
     let fixture = LoadingFixture::new().await;
-    let preferences =
-        spiral_robotics_storage::StoredStudioPreferences::from_settings("http://127.0.0.1:9")
-            .unwrap();
+    let preferences = spiral_robotics_storage::StoredStudioPreferences::default()
+        .with_training_endpoint("http://127.0.0.1:9")
+        .unwrap();
     fixture
         .session
         .storage()

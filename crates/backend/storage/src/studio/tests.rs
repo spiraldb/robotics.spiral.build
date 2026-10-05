@@ -154,7 +154,11 @@ async fn local_state_survives_reopening() {
     let connection = Fixture::connection("bench");
     let project = store.project(&connection);
     StudioPreferencePersistence::new(&project)
-        .save(&StoredStudioPreferences::from_settings("http://localhost:9").unwrap())
+        .save(
+            &StoredStudioPreferences::default()
+                .with_training_endpoint("http://localhost:9")
+                .unwrap(),
+        )
         .await
         .unwrap();
     for (run, started_ms) in [("run", 2), ("second_run", 1)] {
@@ -324,5 +328,38 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn projects_with_records_become_workspaces_named_by_their_id() {
+    use sea_orm_migration::MigratorTrait as _;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("before-workspaces.sqlite3");
+    let raw = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
+        .await
+        .unwrap();
+    let before = super::migrations::Migrator::migrations().len() - 1;
+    super::migrations::Migrator::up(&raw, Some(before as u32))
+        .await
+        .unwrap();
+    raw.execute_unprepared(
+        r#"INSERT INTO curations VALUES ('["https://api.spiraldb.dev","arms-618551"]', 'c', 'Grasp', 1, 1, '{}', 1);
+           INSERT INTO studio_settings VALUES ('["https://api.spiraldb.dev","arms-618551"]', '{}');
+           INSERT INTO studio_settings VALUES ('["https://api.spiraldb.dev",""]', '{}');"#,
+    )
+    .await
+    .unwrap();
+    let store = StudioStore::at(path);
+    store.initialize().await.unwrap();
+    assert_eq!(
+        crate::WorkspaceStore::new(store, "https://api.spiraldb.dev")
+            .all()
+            .await
+            .unwrap(),
+        [spiral_robotics_common::workspace::Workspace::new(
+            "arms-618551",
+            "arms-618551"
+        )]
     );
 }

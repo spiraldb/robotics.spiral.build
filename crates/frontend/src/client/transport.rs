@@ -18,7 +18,7 @@ impl CommandError {
     pub(crate) fn recovery_guidance(&self) -> &'static str {
         match self.code() {
             CommandFailureCode::StaleProject => {
-                "Studio's saved connection changed. Reload this view to continue."
+                "This workspace is no longer available; Studio opens your saved one."
             }
             CommandFailureCode::Unauthenticated => "Sign in to Spiral to continue.",
             CommandFailureCode::InvalidInput => "Check the supplied values and try again.",

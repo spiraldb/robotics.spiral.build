@@ -1,8 +1,8 @@
-//! The project this browser works on. The browser chooses it, not the
-//! backend: its session's saved project supplies the first one, and this
-//! browser's settings saves change it. Every project resource, draft, and
-//! request is mounted under it. A browser without a Spiral session works on
-//! no project until it signs in.
+//! The workspace this browser works in, named by its Spiral project. The
+//! browser chooses it, not the backend: its session's saved workspace supplies
+//! the first one, and switching workspaces changes it. Every project resource,
+//! draft, and request is mounted under it. A browser without a Spiral session
+//! works in no workspace until it signs in.
 use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use crate::client::{CommandError, transport::HttpRequest};
@@ -45,12 +45,19 @@ impl ProjectSelection {
     pub(crate) fn signed_out(self) -> bool {
         *self.signed_out.read()
     }
+    /// Leave the mounted workspace; the next read of the saved connection
+    /// mounts the one this browser's session works in now.
+    pub(crate) fn forget(mut self) {
+        if self.selected.peek().is_some() {
+            self.selected.set(None);
+        }
+    }
     /// This browser just ended its session; only signing in again continues.
     pub(crate) fn sign_out(mut self) {
         self.signed_out.set(true);
     }
-    /// Whether catalog features can run: Studio is reachable and a Spiral
-    /// project is chosen.
+    /// Whether catalog features can run: Studio is reachable and a workspace
+    /// is chosen.
     pub(crate) fn catalog_available(self) -> bool {
         self.live()
             && self
@@ -60,7 +67,7 @@ impl ProjectSelection {
                 .is_some_and(ProjectKey::is_chosen)
     }
     pub(super) fn client(self, project: ProjectKey) -> ProjectClient {
-        ProjectClient::new(project, self.refresh)
+        ProjectClient::new(project, self.refresh).forgotten_when_stale(self.selected)
     }
     /// Work on `project` from now on, once this browser has saved it.
     pub(crate) fn select(mut self, project: ProjectKey) {
@@ -69,9 +76,10 @@ impl ProjectSelection {
         }
     }
     /// The saved connection proves Studio is reachable and this browser
-    /// signed in. It picks the project only before one is chosen, or when its
-    /// endpoint moved, because the backend then refuses projects on the old
-    /// endpoint.
+    /// signed in. It picks the workspace only before one is chosen, or when
+    /// its endpoint moved, because the backend then refuses projects on the
+    /// old endpoint. A workspace deleted under this browser is forgotten by
+    /// the request the backend refused, and the saved one picked next.
     fn accept(mut self, result: Result<SpiralSettings, CommandError>) {
         let live = result.is_ok();
         if *self.live.peek() != live {
@@ -90,7 +98,7 @@ impl ProjectSelection {
             .selected
             .peek()
             .as_ref()
-            .is_none_or(|project| project.endpoint() != saved.endpoint())
+            .is_none_or(|project| !project.is_chosen() || project.endpoint() != saved.endpoint())
         {
             self.select(saved.project());
         }
@@ -231,6 +239,22 @@ mod tests {
             observed.mounts[1].client.project().endpoint(),
             "https://moved.spiraldb.dev"
         );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn a_browser_without_a_workspace_takes_the_saved_one_when_there_is_one() {
+        let harness = SelectionHarness::default();
+        let mut dom = VirtualDom::new_with_props(SelectionHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        dom.in_runtime(|| harness.saved(ENDPOINT, ""));
+        dom.render_immediate_to_vec();
+        assert!(!harness.0.borrow().mounts[0].client.project().is_chosen());
+        // Someone made a workspace, or this browser left a deleted one.
+        dom.in_runtime(|| harness.saved(ENDPOINT, "first"));
+        dom.render_immediate_to_vec();
+        let observed = harness.0.borrow();
+        assert_eq!(observed.mounts.len(), 2);
+        assert_eq!(observed.mounts[1].client.project().project_id(), "first");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

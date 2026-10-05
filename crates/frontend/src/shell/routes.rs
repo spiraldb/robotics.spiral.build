@@ -34,9 +34,12 @@ pub(crate) enum StudioRoute {
     Rollout {},
     #[route("/settings", SelectedActivityRoute)]
     Settings {},
-    /// Settings, opened on the robots this browser drives.
+    /// Settings, opened on the robots this workspace drives.
     #[route("/settings/robots", SelectedActivityRoute)]
     RobotSettings {},
+    /// Settings, opened on a new workspace.
+    #[route("/settings/workspaces/new", SelectedActivityRoute)]
+    NewWorkspace {},
 }
 
 impl StudioRoute {
@@ -47,7 +50,9 @@ impl StudioRoute {
             Self::Curation {} => Activity::Curation,
             Self::Training {} => Activity::Training,
             Self::Rollout {} => Activity::Rollout,
-            Self::Settings {} | Self::RobotSettings {} => Activity::Settings,
+            Self::Settings {} | Self::RobotSettings {} | Self::NewWorkspace {} => {
+                Activity::Settings
+            }
         }
     }
 
@@ -85,15 +90,11 @@ pub(super) fn StudioRouter() -> Element {
 }
 
 /// Only the saved connection is read above the project mount. A browser
-/// without a Spiral session mounts no project. The robot connector belongs to
-/// the browser, so every project drives the same one.
+/// without a Spiral session mounts no project.
 #[component]
 fn StudioShell() -> Element {
     let selection = ProjectSelection::use_provider();
     selection.use_polling();
-    crate::client::robot_connector::RobotConnector::use_provider(
-        crate::client::queries::QueryRefresh::current(),
-    );
     let project = selection.selected().filter(|_| !selection.signed_out());
     rsx! {
         document::Stylesheet { href: TAILWIND }
@@ -112,10 +113,16 @@ fn StudioShell() -> Element {
 
 /// Every project resource, controller, selection, and draft is owned below this
 /// key. Dioxus drops this scope and its tasks before mounting another project.
+/// The robot connector is the workspace's, so it is mounted here too.
 #[component]
 fn ProjectStudioShell(project: ProjectKey) -> Element {
     let chosen = project.is_chosen();
     use_context_provider(|| ProjectSelection::current().client(project));
+    let settings = crate::shell::workspace::WorkspaceSettings::use_provider();
+    crate::client::robot_connector::RobotConnector::use_provider(
+        settings,
+        crate::client::queries::QueryRefresh::current(),
+    );
     crate::activities::episode::EpisodeStills::use_provider();
     crate::activities::data::DatasetOverviewMemory::use_provider();
     crate::activities::data::DatasetChecks::use_provider();
@@ -124,10 +131,10 @@ fn ProjectStudioShell(project: ProjectKey) -> Element {
     let route = use_route::<StudioRoute>();
     let selected_view = use_memo(use_reactive((&route,), |(route,)| route.activity()));
     let navigator = use_navigator();
-    // The mount is per project, so this asks once for a project to be chosen.
+    // The mount is per workspace, so this asks once for one to be made.
     use_effect(move || {
         if !chosen {
-            navigator.push(StudioRoute::Settings {});
+            navigator.push(StudioRoute::NewWorkspace {});
         }
     });
     let title = format!("Spiral Robotics Studio · {}", route.label());

@@ -22,6 +22,7 @@ struct HttpFixture {
 impl HttpFixture {
     async fn new() -> Self {
         let project = ProjectFixture::new().await;
+        project.workspace("http_project").await;
         let router = StudioApi::router(project.context());
         Self { project, router }
     }
@@ -140,6 +141,64 @@ async fn snapshots_are_plain_gets_of_the_project_a_request_names() {
 }
 
 #[tokio::test]
+async fn a_browser_creates_chooses_and_deletes_workspaces() {
+    let fixture = HttpFixture::new().await;
+    let request = |method: &str, uri: &str, body: Option<Value>| {
+        let request = Request::builder().method(method).uri(uri);
+        match body {
+            Some(body) => request
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string())),
+            None => request.body(Body::empty()),
+        }
+        .unwrap()
+    };
+    let working_in = async || {
+        let (_, saved) = fixture
+            .send(request("GET", "/settings/connection", None))
+            .await;
+        saved["project_id"].clone()
+    };
+    let (status, created) = fixture
+        .send(request(
+            "POST",
+            "/workspaces",
+            Some(serde_json::json!({"name": "Lab arms", "project_id": null})),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["project_id"], "lab-arms-000001");
+    let existing = serde_json::json!({"name": "Bench", "project_id": "project_a"});
+    for expected in [StatusCode::OK, StatusCode::CONFLICT] {
+        let (status, _) = fixture
+            .send(request("POST", "/workspaces", Some(existing.clone())))
+            .await;
+        assert_eq!(status, expected);
+    }
+    let (_, listed) = fixture.send(request("GET", "/workspaces", None)).await;
+    let names: Vec<_> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Bench", "Lab arms"]);
+
+    let choice = serde_json::json!({"project_id": "lab-arms-000001"});
+    let (status, chosen) = fixture
+        .send(request("PUT", "/settings/connection", Some(choice)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{chosen}");
+    assert_eq!(working_in().await, "lab-arms-000001");
+    let (status, _) = fixture
+        .send(request("DELETE", "/workspaces/lab-arms-000001", None))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    // The browser goes on in the oldest workspace it can open.
+    assert_eq!(working_in().await, "project_a");
+}
+
+#[tokio::test]
 async fn the_browser_learns_of_no_model_provider_without_its_key() {
     let fixture = HttpFixture::new().await;
     let request = Request::builder()
@@ -172,7 +231,7 @@ async fn malformed_requests_and_unknown_routes_have_structured_failures() {
         (
             "PUT",
             "/settings",
-            r#"{"project_id":"example","typo":true}"#,
+            r#"{"name":"example","typo":true}"#,
             Some("application/json"),
             StatusCode::UNPROCESSABLE_ENTITY,
         ),

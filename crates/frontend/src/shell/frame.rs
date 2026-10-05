@@ -241,10 +241,11 @@ fn WorkspaceStatusLine(mode: Activity, status: WorkspaceStatus) -> Element {
     let navigator = use_navigator();
     rsx! {
         div { class: "studio-status-line", role: "status",
-            span { class: "studio-status-connection", "data-tone": facts.connection.tone.name(),
-                title: "{facts.connection.title}",
+            crate::shell::workspace::WorkspaceSwitcher {
+                tone: facts.connection.tone.name(),
+                title: facts.connection.title.clone(),
                 span { class: "studio-status-dot" }
-                "{facts.connection.text}"
+                span { class: "studio-status-workspace", "{facts.connection.text}" }
             }
             for (index, fact) in facts.facts.iter().enumerate() {
                 match fact.destination.clone() {
@@ -315,7 +316,8 @@ impl StatusFact {
     }
 }
 
-/// The connection the status line leads with: what is connected, and how.
+/// The connection the status line leads with: the workspace, once connected,
+/// and otherwise what is wrong.
 struct StatusConnection {
     text: String,
     title: String,
@@ -336,6 +338,11 @@ impl StatusFacts {
             .selected()
             .map(|project| project.project_id().to_owned())
             .unwrap_or_default();
+        let workspace = match crate::shell::workspace::WorkspaceSettings::current().name() {
+            _ if project.is_empty() => "No workspace".to_owned(),
+            Some(name) if !name.is_empty() => name,
+            _ => project.clone(),
+        };
         let hardware = match status {
             WorkspaceStatus::Hardware(hardware) => Some(hardware),
             _ => None,
@@ -358,20 +365,23 @@ impl StatusFacts {
             ("Robot setup unavailable".to_owned(), StatusTone::Caution)
         } else if hardware.is_some_and(|hardware| !hardware.setup().available()) {
             ("Loading robots…".to_owned(), StatusTone::Caution)
-        } else if matches!(
-            mode,
-            Activity::Live | Activity::Rollout | Activity::Settings
-        ) && !controls_available
+        } else if hardware.is_some()
+            && matches!(
+                mode,
+                Activity::Live | Activity::Rollout | Activity::Settings
+            )
+            && !controls_available
         {
             ("Reconnecting".to_owned(), StatusTone::Danger)
+        } else if project.is_empty() {
+            (workspace.clone(), StatusTone::Caution)
         } else {
-            (project.clone(), StatusTone::Good)
+            (workspace.clone(), StatusTone::Good)
         };
         let connection = StatusConnection {
-            title: if tone == StatusTone::Good {
-                format!("Connected to Spiral project {project}")
-            } else {
-                text.clone()
+            title: match tone {
+                StatusTone::Good => format!("Workspace {workspace} · Spiral project {project}"),
+                _ => text.clone(),
             },
             text,
             tone,

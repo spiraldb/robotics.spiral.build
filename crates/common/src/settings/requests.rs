@@ -1,23 +1,23 @@
 //! Explicit request messages shared by HTTP clients and the backend.
 use super::*;
 
-/// Updates the browser's project and its training runtime together.
+/// Renames the request's workspace and sets its training runtime together.
 /// The Spiral endpoints are the backend's own; no browser changes them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsUpdate {
-    project_id: String,
+    name: String,
     training: TrainingRuntimeSettings,
 }
 impl SettingsUpdate {
-    pub fn new(project_id: impl Into<String>, training: TrainingRuntimeSettings) -> Self {
+    pub fn new(name: impl Into<String>, training: TrainingRuntimeSettings) -> Self {
         Self {
-            project_id: project_id.into(),
+            name: name.into(),
             training,
         }
     }
     pub fn into_parts(self) -> (String, TrainingRuntimeSettings) {
-        (self.project_id, self.training)
+        (self.name, self.training)
     }
 }
 

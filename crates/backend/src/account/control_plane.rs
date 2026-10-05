@@ -1,10 +1,10 @@
 //! What Spiral's API says about a signed-in user: who they are, their
-//! organizations, and the projects they can open.
+//! organizations, and the projects they can open; and the projects they create.
 
 use std::time::Duration;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use spiral_robotics_common::account::{SpiralIdentity, SpiralOrganization, SpiralProject};
 
 /// Spiral's API at one endpoint.
@@ -66,6 +66,56 @@ impl SpiralControlPlane {
         }
     }
 
+    /// A new project in the session's organization, described by `name`.
+    /// Spiral appends random digits to an ID prefix taken from the name.
+    pub(super) async fn create_project(
+        &self,
+        token: &str,
+        name: &str,
+    ) -> Result<SpiralProject, String> {
+        let request = NewProject {
+            id_prefix: Self::id_prefix(name),
+            description: name,
+        };
+        let response = self
+            .http
+            .post(self.url("/v1/projects"))
+            .bearer_auth(token)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| self.unreachable(error))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "Spiral refused to create a project ({status}): {}",
+                detail.trim()
+            ));
+        }
+        let project: Project = response
+            .json()
+            .await
+            .map_err(|error| format!("Reading Spiral's new project: {error}"))?;
+        Ok(SpiralProject::new(project.id, project.description))
+    }
+
+    /// Spiral takes an ID prefix of at most 25 lowercase letters, digits,
+    /// and dashes; without one, it makes up a name.
+    fn id_prefix(name: &str) -> Option<String> {
+        let mut prefix = String::new();
+        for character in name.chars().flat_map(char::to_lowercase) {
+            if character.is_ascii_alphanumeric() {
+                prefix.push(character);
+            } else if !prefix.is_empty() && !prefix.ends_with('-') {
+                prefix.push('-');
+            }
+        }
+        prefix.truncate(25);
+        let prefix = prefix.trim_end_matches('-');
+        (!prefix.is_empty()).then(|| prefix.to_owned())
+    }
+
     async fn get<T: DeserializeOwned>(&self, token: &str, path: &str) -> Result<T, String> {
         let response = self.send(token, path).await?;
         if !response.status().is_success() {
@@ -79,11 +129,19 @@ impl SpiralControlPlane {
 
     async fn send(&self, token: &str, path: &str) -> Result<reqwest::Response, String> {
         self.http
-            .get(format!("{}{path}", self.endpoint.trim_end_matches('/')))
+            .get(self.url(path))
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|error| format!("Could not reach Spiral at {}: {error}", self.endpoint))
+            .map_err(|error| self.unreachable(error))
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.endpoint.trim_end_matches('/'))
+    }
+
+    fn unreachable(&self, error: reqwest::Error) -> String {
+        format!("Could not reach Spiral at {}: {error}", self.endpoint)
     }
 }
 
@@ -114,4 +172,39 @@ struct Organization {
 struct Project {
     id: String,
     description: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NewProject<'a> {
+    id_prefix: Option<String>,
+    description: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpiralControlPlane;
+
+    #[test]
+    fn a_project_id_prefix_is_the_name_in_spirals_alphabet() {
+        for (name, prefix) in [
+            ("Lab arms", Some("lab-arms")),
+            ("  YAM — station #2 ", Some("yam-station-2")),
+            ("Ünïcode", Some("n-code")),
+            (
+                "A very long workspace name for the arms",
+                Some("a-very-long-workspace-nam"),
+            ),
+            (
+                "everything-after-25-is-cut-",
+                Some("everything-after-25-is-cu"),
+            ),
+            ("??", None),
+        ] {
+            assert_eq!(
+                SpiralControlPlane::id_prefix(name).as_deref(),
+                prefix,
+                "{name}"
+            );
+        }
+    }
 }

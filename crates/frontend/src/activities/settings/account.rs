@@ -1,13 +1,10 @@
-//! Who this browser is signed in to Spiral as, and the project it works on.
-//! The backend holds the session; this page only learns who is signed in.
+//! Who this browser is signed in to Spiral as, in which organization. The
+//! backend holds the session; this page only learns who is signed in.
 
 use std::future::Future;
 
 use dioxus::prelude::*;
-use spiral_robotics_common::account::{
-    OrganizationSwitch, SpiralIdentity, SpiralOrganization, SpiralProject,
-};
-use spiral_robotics_common::project::ProjectKey;
+use spiral_robotics_common::account::{OrganizationSwitch, SpiralIdentity, SpiralOrganization};
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, Field, Notice, NoticeTone, Select};
 
 use crate::client::project::ProjectClient;
@@ -40,11 +37,6 @@ impl AccountClient {
             .request(HttpRequest::new("GET", "/api/account/organizations"))
     }
 
-    fn projects(&self) -> impl Future<Output = Result<Vec<SpiralProject>, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/account/projects"))
-    }
-
     fn sign_out(&self) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
             &[QueryDomain::Project, QueryDomain::Settings],
@@ -67,7 +59,8 @@ impl AccountClient {
 /// Where this browser goes once an account command succeeds.
 #[derive(Clone, Copy)]
 enum AccountChange {
-    /// Another organization's projects are others: start over without one.
+    /// Another organization's workspaces are others: start over in the
+    /// first one it can open.
     LeavesProject,
     /// Only signing in again continues.
     SignsOut,
@@ -102,14 +95,11 @@ impl AccountActions {
         self.pending.set(true);
         self.failure.set(None);
         let client = ProjectClient::current();
-        let endpoint = client.project().endpoint().to_owned();
         client.spawn(async move {
             let result = command.await;
             self.pending.set(false);
             match (result, change) {
-                (Ok(_), AccountChange::LeavesProject) => {
-                    self.selection.select(ProjectKey::new(endpoint, ""));
-                }
+                (Ok(_), AccountChange::LeavesProject) => self.selection.forget(),
                 (Ok(_), AccountChange::SignsOut) => self.selection.sign_out(),
                 (Err(error), _) => self.failure.set(Some(error)),
             }
@@ -117,24 +107,15 @@ impl AccountActions {
     }
 }
 
-/// Who this browser reaches Spiral as, and the project it works on. Choosing a
-/// project edits the settings draft; saving applies it.
+/// Who this browser reaches Spiral as, and in which organization.
 #[component]
-pub(super) fn SpiralAccountSection(
-    project_id: String,
-    on_project: EventHandler<String>,
-    disabled: bool,
-) -> Element {
+pub(super) fn SpiralAccountSection(disabled: bool) -> Element {
     let identity = QueryPolicy::new(QueryDomain::Settings, 1_000)
         .use_resource(|| AccountClient::current().identity());
     let signed_in = use_memo(move || matches!(&*identity.read(), Some(Ok(_))));
     let organizations = QueryPolicy::on_demand(QueryDomain::Settings).use_when(
         move || *signed_in.read(),
         || AccountClient::current().organizations(),
-    );
-    let projects = QueryPolicy::on_demand(QueryDomain::Settings).use_when(
-        move || *signed_in.read(),
-        || AccountClient::current().projects(),
     );
     let actions = AccountActions::use_actions();
     let disabled = disabled || (actions.pending)();
@@ -169,11 +150,6 @@ pub(super) fn SpiralAccountSection(
                         EventHandler::new(move |organization| actions.run(AccountClient::current().switch_organization(organization), AccountChange::LeavesProject)),
                         disabled,
                     ),
-                }
-                ProjectChoice {
-                    project_id,
-                    projects: projects.read().clone(),
-                    choice: AccountChoice::new(on_project, disabled),
                 }
             },
         }
@@ -224,53 +200,6 @@ fn OrganizationChoice(
                         selected: organization.id() == current.id(),
                         "{organization.label()}"
                     }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn ProjectChoice(
-    project_id: String,
-    projects: Option<Result<Vec<SpiralProject>, CommandError>>,
-    choice: AccountChoice,
-) -> Element {
-    let projects = match projects {
-        None => {
-            return rsx! { p { class: "settings-help", role: "status", "Loading your projects…" } };
-        }
-        Some(Err(error)) => return rsx! { Notice { tone: NoticeTone::Caution, "{error}" } },
-        Some(Ok(projects)) => projects,
-    };
-    if projects.is_empty() {
-        return rsx! {
-            p { class: "settings-help", "This organization has no projects you can open." }
-        };
-    }
-    // A saved project outside this organization stays visible rather than
-    // silently becoming another one.
-    let unlisted = (!project_id.is_empty()
-        && projects.iter().all(|project| project.id() != project_id))
-    .then(|| project_id.clone());
-    let on_project = choice.on_choose;
-    rsx! {
-        Field { label: "Project", class: "settings-field",
-            Select {
-                value: project_id.clone(),
-                disabled: choice.disabled,
-                onchange: move |chosen| on_project.call(chosen),
-                option { value: "", disabled: true, selected: project_id.is_empty(), "Choose a project" }
-                for project in projects.iter() {
-                    option {
-                        key: "{project.id()}",
-                        value: "{project.id()}",
-                        selected: project.id() == project_id,
-                        {project.description().map_or_else(|| project.id().to_owned(), |description| format!("{} — {description}", project.id()))}
-                    }
-                }
-                if let Some(unlisted) = unlisted {
-                    option { value: "{unlisted}", selected: true, "{unlisted} (not in this organization)" }
                 }
             }
         }

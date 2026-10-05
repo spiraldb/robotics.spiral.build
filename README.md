@@ -58,8 +58,8 @@ cargo run -p spiral-robotics-robot-connector
 It listens on `http://127.0.0.1:7070` and keeps its robots, unsent takes, and
 policies under the platform's local data directory (`--data-dir` chooses
 another). In Studio, **Settings → Robots → Robot connector** sets the address
-this browser drives; it is kept in the browser, since `localhost` means the
-machine the browser runs on.
+the workspace drives, for everyone in it: `localhost` means each person's own
+machine, and a network address one robot connector they share.
 
 Start the studio from the workspace root with:
 

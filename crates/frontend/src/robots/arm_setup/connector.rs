@@ -1,24 +1,47 @@
-//! Reaching the robot connector: how to start it, where this browser looks
+//! Reaching the robot connector: how to start it, where this workspace looks
 //! for it, and whether it answers.
 
 use dioxus::prelude::*;
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, CopyIcon, Field, FieldLayout, TextInput,
+    ActionPurpose, Button, ButtonVariant, CopyIcon, Field, FieldLayout, Notice, NoticeTone,
+    TextInput,
 };
 
+use crate::client::CommandError;
+use crate::client::project::ProjectClient;
 use crate::client::robot_connector::RobotConnector;
 
 /// The command that starts the robot connector from a Studio checkout.
 const START_COMMAND: &str = "cargo run -p spiral-robotics-robot-connector";
 
 /// Until the robot connector answers: the command that starts it. Always: the
-/// address this browser looks at, and what it heard there.
+/// address this workspace looks at, and what it heard there. Connecting saves
+/// the address for everyone in the workspace.
 #[component]
 pub(crate) fn RobotConnectorSetup() -> Element {
     let connector = RobotConnector::current();
     let mut draft = use_signal(|| connector.address());
+    let mut saving = use_signal(|| false);
+    let mut failure = use_signal(|| None::<CommandError>);
+    // The address moves with a save here or in another browser; so does the field.
+    use_effect(move || draft.set(connector.address()));
     let answering = connector.reachable();
     let changed = draft.read().trim().trim_end_matches('/') != connector.address();
+    let mut connect = move || {
+        if *saving.peek() {
+            return;
+        }
+        let address = draft.peek().clone();
+        saving.set(true);
+        failure.set(None);
+        ProjectClient::current().spawn(async move {
+            match connector.save_address(&address).await {
+                Ok(()) => connector.check_again(),
+                Err(error) => failure.set(Some(error)),
+            }
+            saving.set(false);
+        });
+    };
     rsx! {
         div { class: "robot-connector-setup",
             if !answering {
@@ -32,8 +55,7 @@ pub(crate) fn RobotConnectorSetup() -> Element {
                         oninput: move |value| draft.set(value),
                         onkeydown: move |event: KeyboardEvent| {
                             if event.key() == Key::Enter {
-                                connector.set_address(&draft.peek());
-                                connector.check_again();
+                                connect();
                             }
                         },
                     }
@@ -42,13 +64,16 @@ pub(crate) fn RobotConnectorSetup() -> Element {
                     Button {
                         purpose: ActionPurpose::Connect,
                         variant: ButtonVariant::Outline,
-                        onclick: move |_| {
-                            connector.set_address(&draft.peek());
-                            connector.check_again();
-                        },
+                        disabled: saving(),
+                        aria_busy: saving(),
+                        title: "Saves the address for everyone in this workspace",
+                        onclick: move |_| connect(),
                         "Connect"
                     }
                 }
+            }
+            if let Some(error) = failure() {
+                Notice { tone: NoticeTone::Danger, "{error} {error.recovery_guidance()}" }
             }
             RobotConnectorStatus {}
         }

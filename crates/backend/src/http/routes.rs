@@ -20,6 +20,7 @@ impl StudioApi {
     pub(crate) fn router(studio: StudioContext) -> Router {
         let reads = Router::new()
             .merge(crate::account::http::AccountEndpoints::reads())
+            .merge(crate::projects::http::WorkspaceEndpoints::reads())
             .merge(crate::transport::http::TransportEndpoints::reads())
             .merge(crate::training::http::TrainingEndpoints::reads())
             .merge(crate::curation::http::CurationEndpoints::reads())
@@ -29,6 +30,7 @@ impl StudioApi {
         let commands = Router::new()
             .merge(crate::account::http::AccountEndpoints::commands())
             .merge(crate::projects::http::ProjectEndpoints::commands())
+            .merge(crate::projects::http::WorkspaceEndpoints::commands())
             .merge(crate::training::http::TrainingEndpoints::commands())
             .merge(crate::curation::http::CurationEndpoints::commands())
             .merge(crate::data::settings_http::SettingsEndpoints::commands())

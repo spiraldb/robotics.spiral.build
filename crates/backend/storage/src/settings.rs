@@ -121,6 +121,10 @@ impl ServiceEndpoint {
         Self::parse(endpoint, "Training runtime endpoint")
     }
 
+    fn robot_connector(address: &str) -> Result<Self, String> {
+        Self::parse(address, "Robot connector address")
+    }
+
     pub fn environment_spiral() -> Self {
         Self(
             std::env::var("SPIRAL__SERVER__URL")
@@ -160,7 +164,8 @@ impl ServiceEndpoint {
     }
 }
 
-/// Storage-owned persisted form of the Studio preferences document.
+/// Storage-owned persisted form of the Studio preferences document: what one
+/// workspace keeps besides its name.
 ///
 /// These field names are the durable `value_json` format for
 /// the managed `studio_settings` relation. They are deliberately independent
@@ -169,24 +174,44 @@ impl ServiceEndpoint {
 /// shape and another pins the defaults to the wire defaults.
 ///
 /// Documents written before cameras moved to the robot connector also hold a
-/// `video` preference; reads ignore it.
+/// `video` preference; reads ignore it. Documents written before workspaces
+/// kept a robot connector read as the default one.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StoredStudioPreferences {
     #[serde(default)]
     training: StoredTrainingRuntimePreference,
+    #[serde(default)]
+    robot_connector: StoredRobotConnectorPreference,
 }
 
 impl StoredStudioPreferences {
-    /// Validate raw preference edits into the persisted form.
-    pub fn from_settings(training_endpoint: &str) -> Result<StoredStudioPreferences, String> {
-        let endpoint = ServiceEndpoint::training_runtime(training_endpoint.trim())?.into_string();
-        Ok(StoredStudioPreferences {
-            training: StoredTrainingRuntimePreference { endpoint },
-        })
+    /// These preferences with the training runtime at `endpoint`, validated.
+    pub fn with_training_endpoint(mut self, endpoint: &str) -> Result<Self, String> {
+        self.training.endpoint = ServiceEndpoint::training_runtime(endpoint)?.into_string();
+        Ok(self)
+    }
+
+    /// These preferences with the robot connector at `address`, validated.
+    pub fn with_robot_connector(mut self, address: &str) -> Result<Self, String> {
+        self.robot_connector.address = ServiceEndpoint::robot_connector(address)?.into_string();
+        Ok(self)
+    }
+
+    /// These preferences, refused unless every endpoint in them is valid: a
+    /// document from an imported snapshot is untrusted.
+    pub(crate) fn validated(self) -> Result<Self, String> {
+        let training = self.training.endpoint.clone();
+        let robot_connector = self.robot_connector.address.clone();
+        self.with_training_endpoint(&training)?
+            .with_robot_connector(&robot_connector)
     }
 
     pub const fn training(&self) -> &StoredTrainingRuntimePreference {
         &self.training
+    }
+
+    pub const fn robot_connector(&self) -> &StoredRobotConnectorPreference {
+        &self.robot_connector
     }
 }
 
@@ -210,6 +235,27 @@ impl StoredTrainingRuntimePreference {
     }
 }
 
+/// Persisted robot connector preference: the address every browser in the
+/// workspace drives.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredRobotConnectorPreference {
+    address: String,
+}
+
+impl Default for StoredRobotConnectorPreference {
+    fn default() -> Self {
+        Self {
+            address: "http://localhost:7070".to_owned(),
+        }
+    }
+}
+
+impl StoredRobotConnectorPreference {
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,16 +270,32 @@ mod tests {
     }
 
     #[test]
-    fn training_runtime_requires_an_http_or_https_endpoint() {
+    fn training_runtime_and_robot_connector_require_an_http_or_https_endpoint() {
+        let preferences = StoredStudioPreferences::default();
         assert!(
-            StoredStudioPreferences::from_settings("ftp://runtime.example")
+            preferences
+                .clone()
+                .with_training_endpoint("ftp://runtime.example")
+                .unwrap_err()
+                .contains("http:// or https://")
+        );
+        assert!(
+            preferences
+                .clone()
+                .with_robot_connector("lab-arms:7070")
                 .unwrap_err()
                 .contains("http:// or https://")
         );
 
-        let staged = StoredStudioPreferences::from_settings(" http://runtime.example:50051 ")
-            .expect("HTTP runtime endpoint is accepted");
+        let staged = preferences
+            .with_training_endpoint(" http://runtime.example:50051 ")
+            .and_then(|staged| staged.with_robot_connector("http://lab-arms.example:7070/"))
+            .expect("HTTP endpoints are accepted");
         assert_eq!(staged.training().endpoint(), "http://runtime.example:50051");
+        assert_eq!(
+            staged.robot_connector().address(),
+            "http://lab-arms.example:7070"
+        );
     }
 
     /// The persisted document format is storage's, not the wire crate's: these
@@ -243,23 +305,31 @@ mod tests {
         let json = serde_json::to_string(&StoredStudioPreferences::default()).unwrap();
         assert_eq!(
             json,
-            r#"{"training":{"endpoint":"http://127.0.0.1:50051"}}"#
+            r#"{"training":{"endpoint":"http://127.0.0.1:50051"},"robot_connector":{"address":"http://localhost:7070"}}"#
         );
         let earlier: StoredStudioPreferences = serde_json::from_str(
             r#"{"training":{"endpoint":"http://runtime.example"},"video":{"enabled":false}}"#,
         )
         .unwrap();
         assert_eq!(earlier.training().endpoint(), "http://runtime.example");
+        assert_eq!(
+            earlier.robot_connector().address(),
+            StoredRobotConnectorPreference::default().address()
+        );
     }
 
     /// A fresh project and a fresh browser session must agree on defaults.
     #[test]
     fn stored_preference_defaults_match_the_wire_defaults() {
-        use spiral_robotics_common::settings::TrainingRuntimeSettings;
+        use spiral_robotics_common::settings::{RobotConnectorSettings, TrainingRuntimeSettings};
 
         assert_eq!(
             StoredTrainingRuntimePreference::default().endpoint(),
             TrainingRuntimeSettings::default().endpoint()
+        );
+        assert_eq!(
+            StoredRobotConnectorPreference::default().address(),
+            RobotConnectorSettings::default().address()
         );
     }
 }

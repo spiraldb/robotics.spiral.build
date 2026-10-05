@@ -13,6 +13,8 @@ pub(crate) mod studio_settings;
 #[allow(unreachable_pub)]
 pub(crate) mod training_runs;
 mod transfer;
+#[allow(unreachable_pub)]
+pub(crate) mod workspaces;
 pub(crate) use transfer::StudioSnapshot;
 #[allow(unreachable_pub)]
 mod dataset_check_reports;
@@ -148,12 +150,15 @@ impl StudioStore {
     }
 
     pub fn project(&self, connection: &crate::SpiralConnectionSettings) -> StudioProject {
-        // Credentials and ephemeral session UUIDs are deliberately absent.
-        let key = serde_json::to_string(&(
+        self.project_at(
             connection.endpoint(),
             connection.project_id().unwrap_or_default(),
-        ))
-        .expect("strings serialize");
+        )
+    }
+
+    pub(crate) fn project_at(&self, endpoint: &str, project_id: &str) -> StudioProject {
+        // Credentials and ephemeral session UUIDs are deliberately absent.
+        let key = serde_json::to_string(&(endpoint, project_id)).expect("strings serialize");
         StudioProject {
             store: self.clone(),
             key,
@@ -169,8 +174,40 @@ pub struct StudioProject {
 }
 
 impl StudioProject {
+    /// Tables whose rows belong to one project, under its key in their
+    /// `project` column. Published views are not among them: a project
+    /// bundle carries none.
+    pub(crate) const RECORD_TABLES: [&str; 6] = [
+        "dataset_robots",
+        "dataset_joint_roles",
+        "dataset_check_reports",
+        "curations",
+        "training_runs",
+        "studio_settings",
+    ];
+
     pub(crate) fn key(&self) -> &str {
         &self.key
+    }
+
+    /// Delete every record this project holds, its published views too, as
+    /// part of `transaction`.
+    pub(crate) async fn delete_records(
+        &self,
+        transaction: &sea_orm::DatabaseTransaction,
+    ) -> Result<(), String> {
+        use sea_orm::{ConnectionTrait as _, DbBackend, Statement};
+        for table in Self::RECORD_TABLES.into_iter().chain(["curated_views"]) {
+            transaction
+                .execute(Statement::from_sql_and_values(
+                    DbBackend::Sqlite,
+                    format!("DELETE FROM {table} WHERE project = ?"),
+                    [self.key().into()],
+                ))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
     pub(crate) async fn connection(&self) -> Result<&DatabaseConnection, String> {
         self.store.connection().await

@@ -26,6 +26,10 @@ impl MigratorTrait for Migrator {
                 "m20261005_000003_robot_connector",
                 include_str!("m20261005_000003_robot_connector.sql"),
             )),
+            Box::new(SqlMigration::new(
+                "m20261005_000004_workspaces",
+                include_str!("m20261005_000004_workspaces.sql"),
+            )),
         ]
     }
 }

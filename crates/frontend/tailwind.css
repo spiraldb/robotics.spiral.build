@@ -422,6 +422,77 @@ button.studio-status-fact:hover {
   text-decoration-color: currentColor;
 }
 
+/* The workspace leads the status line and switches workspaces when pressed. */
+button.studio-status-connection {
+  margin: 0 -6px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--tone-ink-soft);
+  font: inherit;
+  cursor: pointer;
+  transition: color 120ms ease-out;
+}
+
+button.studio-status-connection:hover,
+button.studio-status-connection[aria-expanded="true"] {
+  color: var(--tone-ink);
+}
+
+.studio-status-workspace {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The chevron points down, and up while the menu is open. */
+.studio-status-connection .ui-icon {
+  width: 10px;
+  height: 10px;
+  margin-left: -3px;
+  transform: rotate(90deg);
+  opacity: 0.6;
+}
+
+.studio-status-connection .ui-icon--chevron-open {
+  transform: rotate(-90deg);
+}
+
+/* Placed on the page under the status line, which clips what overflows it. */
+.studio-workspace-menu {
+  position: fixed;
+  z-index: 60;
+}
+
+.studio-workspace-menu .ui-menu {
+  min-width: 15rem;
+  max-width: 22rem;
+}
+
+.studio-workspace-menu .ui-button--row[aria-checked="true"] {
+  font-weight: 560;
+}
+
+.studio-workspace-menu-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+.studio-workspace-menu-note {
+  padding: 6px 8px;
+  color: var(--tone-ink-faint);
+  font-size: 12px;
+}
+
+.studio-workspace-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--tone-line);
+}
+
 .studio-status-dot {
   width: 7px;
   height: 7px;

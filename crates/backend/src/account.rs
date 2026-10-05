@@ -280,12 +280,13 @@ impl SpiralSession {
         Ok(self.active().await?.identity.clone())
     }
 
-    /// The project this session's browser works on; empty before one is chosen.
+    /// The project of the workspace this session's browser works in; empty
+    /// before one is chosen.
     pub(crate) async fn project_id(&self) -> Result<String, OperationError> {
         Ok(self.active().await?.project_id.clone())
     }
 
-    /// Work on `project_id` from now on, across restarts.
+    /// Work in the workspace on `project_id` from now on, across restarts.
     pub(crate) async fn choose_project(&self, project_id: &str) -> Result<(), OperationError> {
         let mut state = self.active().await?;
         if state.project_id != project_id {
@@ -322,6 +323,16 @@ impl SpiralSession {
         self.services
             .control_plane
             .projects(&token)
+            .await
+            .map_err(OperationError::External)
+    }
+
+    /// A new Spiral project in the session's organization, described by `name`.
+    pub(crate) async fn create_project(&self, name: &str) -> Result<SpiralProject, OperationError> {
+        let token = self.access_token().await?;
+        self.services
+            .control_plane
+            .create_project(&token, name)
             .await
             .map_err(OperationError::External)
     }

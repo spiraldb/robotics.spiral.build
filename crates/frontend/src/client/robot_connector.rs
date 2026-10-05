@@ -1,33 +1,54 @@
-//! The robot connector this browser drives: an HTTP endpoint that runs next to
-//! the arms and owns their hardware, recordings, and rollouts. The browser
-//! talks to it directly. Its address belongs to this browser — `localhost`
-//! means the machine the browser runs on — so it is kept here, not in Studio.
+//! The robot connector this workspace drives: an HTTP endpoint that runs next
+//! to the arms and owns their hardware, recordings, and rollouts. The browser
+//! talks to it directly, at the address the workspace keeps: `localhost` is
+//! each viewer's own machine, and a network address one robot connector
+//! everyone in the workspace shares.
 
 use std::future::Future;
 
 use dioxus::prelude::*;
 use serde::de::DeserializeOwned;
 use spiral_robotics_common::robot_connector::RobotConnectorHealth;
+use spiral_robotics_common::settings::{DataSettings, RobotConnectorSettings};
 
+use super::project::ProjectClient;
 use super::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use super::transport::{CommandError, HttpRequest};
+use crate::shell::workspace::WorkspaceSettings;
 
-const ADDRESS_KEY: &str = "spiral-studio.robot-connector";
-const DEFAULT_ADDRESS: &str = "http://localhost:7070";
 const UNREACHABLE: &str =
     "Could not reach the robot connector. Check that it is running and its address in Settings.";
 
 #[derive(Clone, Copy)]
 pub(crate) struct RobotConnector {
-    address: Signal<String>,
+    /// Empty until the workspace's settings are read.
+    address: Memo<String>,
     health: Signal<Option<Result<RobotConnectorHealth, CommandError>>>,
     refresh: QueryRefresh,
 }
 
 impl RobotConnector {
-    pub(crate) fn use_provider(refresh: QueryRefresh) -> Self {
-        let address = use_signal(RememberedAddress::read);
-        let health = use_signal(|| None);
+    pub(crate) fn use_provider(settings: WorkspaceSettings, refresh: QueryRefresh) -> Self {
+        let address = use_memo(move || {
+            settings
+                .loaded()
+                .map(|settings| settings.robot_connector().address().to_owned())
+                .unwrap_or_default()
+        });
+        let mut health = use_signal(|| None);
+        // Another address is another robot connector: nothing heard from the
+        // last one holds.
+        use_effect(move || {
+            let _ = address.read();
+            health.set(None);
+            refresh.invalidate(&[
+                QueryDomain::RobotConnector,
+                QueryDomain::RobotSetup,
+                QueryDomain::Telemetry,
+                QueryDomain::Recording,
+                QueryDomain::Rollout,
+            ]);
+        });
         use_context_provider(|| Self {
             address,
             health,
@@ -44,7 +65,7 @@ impl RobotConnector {
     /// a local network address.
     pub(crate) fn use_health(self, active: ReadSignal<bool>) {
         let response = QueryPolicy::new(QueryDomain::RobotConnector, 2_000).use_when(
-            move || *active.read(),
+            move || *active.read() && !self.address.read().is_empty(),
             move || self.request(HttpRequest::new("GET", "/api/health")),
         );
         let mut health = self.health;
@@ -63,22 +84,18 @@ impl RobotConnector {
         self.address.read().clone()
     }
 
-    /// Drive the robot connector at `address` from now on, in this browser.
-    pub(crate) fn set_address(mut self, address: &str) {
-        let address = address.trim().trim_end_matches('/').to_owned();
-        if *self.address.peek() == address {
-            return;
-        }
-        RememberedAddress::keep(&address);
-        self.address.set(address);
-        self.health.set(None);
-        self.refresh.invalidate(&[
-            QueryDomain::RobotConnector,
-            QueryDomain::RobotSetup,
-            QueryDomain::Telemetry,
-            QueryDomain::Recording,
-            QueryDomain::Rollout,
-        ]);
+    /// Drive the robot connector at `address` from now on, from every
+    /// browser in this workspace.
+    pub(crate) fn save_address(
+        self,
+        address: &str,
+    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
+        let saved = ProjectClient::current().mutate::<DataSettings>(
+            &[QueryDomain::Settings],
+            HttpRequest::new("PUT", "/api/settings/robot-connector")
+                .json(&RobotConnectorSettings::new(address.trim())),
+        );
+        async move { saved.await.map(|_| ()) }
     }
 
     /// Ask again now rather than at the next poll.
@@ -143,26 +160,5 @@ impl RobotConnector {
 
     fn addressed(self, request: HttpRequest) -> HttpRequest {
         request.at(&self.address.peek()).unreachable(UNREACHABLE)
-    }
-}
-
-/// The address this browser last chose, which survives reloads.
-struct RememberedAddress;
-
-impl RememberedAddress {
-    fn read() -> String {
-        Self::storage()
-            .and_then(|storage| storage.get_item(ADDRESS_KEY).ok().flatten())
-            .unwrap_or_else(|| DEFAULT_ADDRESS.to_owned())
-    }
-
-    fn keep(address: &str) {
-        if let Some(storage) = Self::storage() {
-            let _ = storage.set_item(ADDRESS_KEY, address);
-        }
-    }
-
-    fn storage() -> Option<web_sys::Storage> {
-        web_sys::window()?.local_storage().ok().flatten()
     }
 }

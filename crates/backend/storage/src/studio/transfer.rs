@@ -15,15 +15,6 @@ pub(crate) struct StudioSnapshot {
 }
 
 impl StudioSnapshot {
-    const TABLES: [&str; 6] = [
-        "dataset_robots",
-        "dataset_joint_roles",
-        "dataset_check_reports",
-        "curations",
-        "training_runs",
-        "studio_settings",
-    ];
-
     pub(crate) async fn capture(project: &StudioProject) -> Result<Self, String> {
         let file = NamedTempFile::new().map_err(|error| error.to_string())?;
         let destination =
@@ -61,7 +52,13 @@ impl StudioSnapshot {
             .execute_unprepared("DELETE FROM curated_views")
             .await
             .map_err(|error| error.to_string())?;
-        for table in Self::TABLES {
+        // Workspaces are this backend's names for projects; an import lands
+        // in whichever workspace receives it.
+        transaction
+            .execute_unprepared("DELETE FROM workspaces")
+            .await
+            .map_err(|error| error.to_string())?;
+        for table in StudioProject::RECORD_TABLES {
             transaction
                 .execute(Statement::from_sql_and_values(
                     DbBackend::Sqlite,
@@ -132,7 +129,7 @@ impl StudioSnapshot {
         {
             return Err("Studio snapshot must not contain Spiral sign-ins".into());
         }
-        for table in Self::TABLES {
+        for table in StudioProject::RECORD_TABLES {
             let row = snapshot
                 .database
                 .query_one(Statement::from_string(
@@ -235,9 +232,9 @@ impl StudioSnapshot {
             .await
             .map_err(|error| error.to_string())?
         {
-            let preferences: crate::StoredStudioPreferences =
-                serde_json::from_value(row.document).map_err(|error| error.to_string())?;
-            crate::StoredStudioPreferences::from_settings(preferences.training().endpoint())?;
+            serde_json::from_value::<crate::StoredStudioPreferences>(row.document)
+                .map_err(|error| error.to_string())?
+                .validated()?;
         }
         Ok(())
     }
@@ -255,16 +252,7 @@ impl StudioSnapshot {
             .map_err(|error| error.to_string())?;
         // The restore replaces every dataset, and with it the answers the
         // project's published views read.
-        for table in Self::TABLES.into_iter().chain(["curated_views"]) {
-            transaction
-                .execute(Statement::from_sql_and_values(
-                    DbBackend::Sqlite,
-                    format!("DELETE FROM {table} WHERE project = ?"),
-                    [project.key().into()],
-                ))
-                .await
-                .map_err(|error| error.to_string())?;
-        }
+        project.delete_records(&transaction).await?;
         for mut row in dataset_robots::Entity::find()
             .all(&self.database)
             .await

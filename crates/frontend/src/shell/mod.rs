@@ -7,6 +7,7 @@ pub(crate) mod project;
 pub(crate) mod routes;
 mod sign_in;
 pub(crate) mod state;
+pub(crate) mod workspace;
 
 use dioxus::prelude::*;
 use spiral_robotics_ui::UiStyles;

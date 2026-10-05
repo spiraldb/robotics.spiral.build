@@ -17,6 +17,11 @@ fn every_primary_screen_has_a_stable_route() {
         "/settings/robots"
     );
     assert_eq!(StudioRoute::RobotSettings {}.activity(), Activity::Settings);
+    assert_eq!(
+        StudioRoute::NewWorkspace {}.to_string(),
+        "/settings/workspaces/new"
+    );
+    assert_eq!(StudioRoute::NewWorkspace {}.activity(), Activity::Settings);
 }
 
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};

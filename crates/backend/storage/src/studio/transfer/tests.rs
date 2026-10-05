@@ -67,7 +67,11 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         .await
         .unwrap();
     StudioPreferencePersistence::new(&source)
-        .save(&crate::StoredStudioPreferences::from_settings("http://localhost:9000").unwrap())
+        .save(
+            &crate::StoredStudioPreferences::default()
+                .with_training_endpoint("http://localhost:9000")
+                .unwrap(),
+        )
         .await
         .unwrap();
     let snapshot = StudioSnapshot::capture(&source).await.unwrap();

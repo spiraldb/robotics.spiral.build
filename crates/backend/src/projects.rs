@@ -1,19 +1,21 @@
 //! Every project this process has opened, each for the browser session that
-//! opened it and keyed by the connection that reaches it. Requests name their
-//! project; nothing here is "current".
+//! opened it and keyed by the connection that reaches it, and the workspaces
+//! that name those projects. Requests name their project; nothing here is
+//! "current".
 
 pub(crate) mod context;
 pub(crate) mod http;
+mod workspaces;
 
 use std::sync::{Arc, Mutex};
 
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::settings::{
-    DataSettings, SettingsUpdate, SpiralSettings, TrainingRuntimeSettings,
+    DataSettings, RobotConnectorSettings, SettingsUpdate, SpiralSettings, TrainingRuntimeSettings,
 };
 use spiral_robotics_storage::{
     ProjectStore, ProviderKeys, SpiralAccess, SpiralConnection, SpiralConnectionSettings,
-    StorageManager, StoredStudioPreferences,
+    StorageManager, StoredStudioPreferences, WorkspaceStore,
 };
 
 use crate::OperationError;
@@ -52,6 +54,11 @@ pub(crate) struct ProjectFactory {
 impl ProjectFactory {
     pub(crate) fn new(data: ProjectDataAccess) -> Self {
         Self { data }
+    }
+
+    /// The workspaces kept beside these projects' Studio records.
+    fn workspaces(&self, endpoint: &str) -> WorkspaceStore {
+        WorkspaceStore::new(self.data.studio.clone(), endpoint)
     }
 
     /// A project that reaches Spiral with `access`.
@@ -107,27 +114,12 @@ impl OpenProject {
         &self.curation
     }
 
-    pub(crate) async fn settings(&self) -> Result<DataSettings, OperationError> {
-        let preferences = self
-            .storage()
+    async fn preferences(&self) -> Result<StoredStudioPreferences, OperationError> {
+        self.storage()
             .preferences()
             .load()
             .await
-            .map_err(OperationError::External)?;
-        Ok(DataSettings::new(
-            Self::present(&self.connection()),
-            TrainingRuntimeSettings::new(preferences.training().endpoint()),
-        ))
-    }
-
-    /// Reach Spiral with this connection before Studio switches to it.
-    async fn validate(&self) -> Result<(), OperationError> {
-        let (available, detail) = self.storage().database().test().await;
-        if available {
-            Ok(())
-        } else {
-            Err(OperationError::External(detail))
-        }
+            .map_err(OperationError::External)
     }
 
     /// Runs keep the runtime they started on, so the endpoint applies to the
@@ -136,15 +128,8 @@ impl OpenProject {
         &self,
         preferences: StoredStudioPreferences,
     ) -> Result<(), OperationError> {
-        let endpoint_changed = self
-            .storage()
-            .preferences()
-            .load()
-            .await
-            .map_err(OperationError::External)?
-            .training()
-            .endpoint()
-            != preferences.training().endpoint();
+        let endpoint_changed =
+            self.preferences().await?.training().endpoint() != preferences.training().endpoint();
         self.storage()
             .preferences()
             .save(&preferences)
@@ -174,38 +159,61 @@ struct SessionProject {
 
 /// Opens the projects requests name, each as the session that names it. A
 /// project stays open, with its running work, until its session ends or
-/// changes organization, or an import replaces its data.
+/// changes organization, its workspace is deleted, or an import replaces its
+/// data.
 pub(crate) struct ProjectRegistry {
     factory: ProjectFactory,
     /// The Spiral endpoints every project reaches, fixed while Studio runs.
     endpoints: SpiralConnectionSettings,
+    workspaces: WorkspaceStore,
     opened: Mutex<Vec<SessionProject>>,
 }
 
 impl ProjectRegistry {
     pub(crate) fn new(factory: ProjectFactory, endpoints: SpiralConnectionSettings) -> Arc<Self> {
         Arc::new(Self {
+            workspaces: factory.workspaces(endpoints.endpoint()),
             factory,
             endpoints: endpoints.without_project(),
             opened: Mutex::new(Vec::new()),
         })
     }
 
-    /// The endpoints, and the project `session`'s browser works on.
+    /// The endpoints, and the workspace `session`'s browser works in: the one
+    /// it chose while that still exists, else the oldest its user can open.
     pub(crate) async fn session_settings(
         &self,
         session: &SpiralSession,
     ) -> Result<SpiralSettings, OperationError> {
-        Ok(SpiralSettings::new(
+        let chosen = session.project_id().await?;
+        let project_id = if !chosen.is_empty() && self.find_workspace(&chosen).await?.is_some() {
+            chosen
+        } else {
+            let first = self
+                .first_workspace(session)
+                .await?
+                .map(|workspace| workspace.project_id().to_owned())
+                .unwrap_or_default();
+            if first != chosen {
+                session.choose_project(&first).await?;
+            }
+            first
+        };
+        Ok(self.present(&project_id))
+    }
+
+    fn present(&self, project_id: &str) -> SpiralSettings {
+        SpiralSettings::new(
             self.endpoints.endpoint(),
             self.endpoints.spfs_endpoint(),
-            session.project_id().await?,
-        ))
+            project_id,
+        )
     }
 
     /// The project `key` names, as `session`'s user, who must be allowed to
     /// open it. A key for another endpoint comes from a browser that has not
-    /// seen Studio restart on new endpoints.
+    /// seen Studio restart on new endpoints; a key whose workspace is gone,
+    /// from one that has not seen it deleted.
     pub(crate) async fn open(
         &self,
         session: &Arc<SpiralSession>,
@@ -228,6 +236,7 @@ impl ProjectRegistry {
             return Ok(project);
         }
         if let Some(project_id) = connection.project_id() {
+            self.workspace(project_id).await?;
             session.admit(project_id).await?;
         }
         let candidate = self.factory.create(connection, session.access())?;
@@ -243,36 +252,68 @@ impl ProjectRegistry {
             .collect()
     }
 
-    /// Preferences for the same project apply in place. Another project is
-    /// validated first; the session then works on it, and the preferences
-    /// belong to it.
+    /// The name and preferences of `project`'s workspace; an empty name
+    /// before a workspace is chosen.
+    pub(crate) async fn settings(
+        &self,
+        project: &OpenProject,
+    ) -> Result<DataSettings, OperationError> {
+        let connection = project.connection();
+        let name = match connection.project_id() {
+            Some(project_id) => self.workspace(project_id).await?.name().to_owned(),
+            None => String::new(),
+        };
+        let preferences = project.preferences().await?;
+        Ok(DataSettings::new(
+            OpenProject::present(&connection),
+            name,
+            TrainingRuntimeSettings::new(preferences.training().endpoint()),
+            RobotConnectorSettings::new(preferences.robot_connector().address()),
+        ))
+    }
+
+    /// Rename `project`'s workspace and set its training runtime.
     pub(crate) async fn update_settings(
         &self,
-        session: &Arc<SpiralSession>,
-        origin: &OpenProject,
+        project: &OpenProject,
         update: SettingsUpdate,
     ) -> Result<DataSettings, OperationError> {
-        let (project_id, training) = update.into_parts();
-        let connection = self
-            .endpoints
-            .clone()
-            .with_project(&project_id)
+        let (name, training) = update.into_parts();
+        let project_id = Self::chosen(project)?;
+        let preferences = project
+            .preferences()
+            .await?
+            .with_training_endpoint(training.endpoint())
             .map_err(OperationError::InvalidInput)?;
-        let preferences = StoredStudioPreferences::from_settings(training.endpoint())
+        self.rename_workspace(&project_id, &name).await?;
+        project.apply_preferences(preferences).await?;
+        self.settings(project).await
+    }
+
+    /// Drive the robot connector at `robot_connector` from every browser in
+    /// `project`'s workspace.
+    pub(crate) async fn set_robot_connector(
+        &self,
+        project: &OpenProject,
+        robot_connector: RobotConnectorSettings,
+    ) -> Result<DataSettings, OperationError> {
+        Self::chosen(project)?;
+        let preferences = project
+            .preferences()
+            .await?
+            .with_robot_connector(robot_connector.address())
             .map_err(OperationError::InvalidInput)?;
-        let project_id = connection.project_id().unwrap_or_default().to_owned();
-        if connection == origin.connection() {
-            origin.apply_preferences(preferences).await?;
-            session.choose_project(&project_id).await?;
-            return origin.settings().await;
-        }
-        session.admit(&project_id).await?;
-        let candidate = self.factory.create(connection, session.access())?;
-        candidate.validate().await?;
-        session.choose_project(&project_id).await?;
-        let target = self.adopt(session, candidate);
-        target.apply_preferences(preferences).await?;
-        target.settings().await
+        project.apply_preferences(preferences).await?;
+        self.settings(project).await
+    }
+
+    /// The project of `project`'s workspace; refused before one is chosen.
+    fn chosen(project: &OpenProject) -> Result<String, OperationError> {
+        project
+            .connection()
+            .project_id()
+            .map(str::to_owned)
+            .ok_or_else(|| OperationError::invalid_input("Choose a workspace first."))
     }
 
     /// Import into a freshly opened project, so no cache of the replaced data survives,
@@ -462,7 +503,32 @@ pub(crate) mod tests {
             )
         }
 
+        /// Make the existing project `project_id` a workspace named after it.
+        pub(crate) async fn workspace(&self, project_id: &str) {
+            let request = spiral_robotics_common::workspace::NewWorkspace::new(
+                project_id,
+                Some(project_id.to_owned()),
+            );
+            let session = self.session().await;
+            self.projects
+                .create_workspace(&session, &request)
+                .await
+                .unwrap();
+        }
+
+        /// Open `project_id`, made a workspace first; an empty ID opens the
+        /// endpoint before a workspace is chosen.
         pub(crate) async fn open(&self, project_id: &str) -> Arc<OpenProject> {
+            if !project_id.is_empty()
+                && self
+                    .projects
+                    .find_workspace(project_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            {
+                self.workspace(project_id).await;
+            }
             self.projects
                 .open(
                     &self.session().await,
@@ -487,6 +553,7 @@ pub(crate) mod tests {
     async fn each_session_opens_the_projects_it_names_and_may_see() {
         let fixture = ProjectFixture::new().await;
         let session = fixture.session().await;
+        fixture.workspace("project_a").await;
         let first = fixture
             .projects
             .open(&session, &ProjectKey::new(ENDPOINT, "project_a"))
@@ -507,12 +574,26 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(!Arc::ptr_eq(&theirs, &first));
+        // Someone who could open it made it a workspace; this user cannot.
+        let forbidden = spiral_robotics_common::workspace::Workspace::new("forbidden_arms", "Arms");
+        assert!(
+            fixture
+                .projects
+                .workspaces
+                .insert(&forbidden)
+                .await
+                .unwrap()
+        );
         for (key, refused) in [
             (
                 ProjectKey::new("https://other.spiraldb.dev", "project_a"),
                 "stale",
             ),
             (ProjectKey::new(ENDPOINT, "not/a/project"), "invalid"),
+            (
+                ProjectKey::new(ENDPOINT, "project_without_workspace"),
+                "stale",
+            ),
             (ProjectKey::new(ENDPOINT, "forbidden_arms"), "hidden"),
         ] {
             let result = fixture.projects.open(&session, &key).await;
@@ -555,11 +636,14 @@ pub(crate) mod tests {
     async fn training_endpoint_changes_apply_in_place() {
         let fixture = ProjectFixture::new().await;
         let project = fixture.open("").await;
-        let preferences = StoredStudioPreferences::from_settings("http://127.0.0.1:5050").unwrap();
+        let preferences = StoredStudioPreferences::default()
+            .with_training_endpoint("http://127.0.0.1:5050")
+            .unwrap();
         project.apply_preferences(preferences).await.unwrap();
         assert!(Arc::ptr_eq(&project, &fixture.open("").await));
-        let settings = project.settings().await.unwrap();
+        let settings = fixture.projects.settings(&project).await.unwrap();
         assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");
+        assert_eq!(settings.name(), "");
     }
 
     #[tokio::test]
@@ -572,26 +656,34 @@ pub(crate) mod tests {
         .unwrap()
         .with_project("configured_project")
         .unwrap();
+        fixture.workspace("configured_project").await;
         let project = fixture
             .projects
             .factory
             .create(connection, fixture.session().await.access())
             .unwrap();
-        let preferences = StoredStudioPreferences::from_settings("http://127.0.0.1:5050").unwrap();
+        let preferences = StoredStudioPreferences::default()
+            .with_training_endpoint("http://127.0.0.1:5050")
+            .unwrap();
         project
             .storage()
             .preferences()
             .save(&preferences)
             .await
             .unwrap();
-        let settings = project.settings().await.unwrap();
+        let settings = fixture.projects.settings(&project).await.unwrap();
         assert_eq!(settings.spiral().project_id(), "configured_project");
         assert_eq!(settings.spiral().endpoint(), "https://api.spiraldb.dev");
         assert_eq!(
             settings.spiral().spfs_endpoint(),
             "https://spfs.spiraldb.dev"
         );
+        assert_eq!(settings.name(), "configured_project");
         assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");
+        assert_eq!(
+            settings.robot_connector().address(),
+            RobotConnectorSettings::default().address()
+        );
     }
 }
 

@@ -30,6 +30,8 @@ pub(super) struct FakeRequests {
     /// Each code redeemed, with the verifier that proved it.
     pub(super) redeemed: Vec<(String, String)>,
     issued: usize,
+    /// Projects created through the fake, which it lists after its own.
+    created_projects: Vec<String>,
 }
 
 pub(crate) struct FakeSpiral {
@@ -50,7 +52,10 @@ impl FakeSpiral {
             .route("/user_management/authenticate", post(Self::authenticate))
             .route("/v1/organizations/me", get(Self::me))
             .route("/v1/organizations", get(Self::organizations))
-            .route("/v1/projects", get(Self::projects))
+            .route(
+                "/v1/projects",
+                get(Self::projects).post(Self::create_project),
+            )
             .route("/v1/projects/{project}", get(Self::project))
             .with_state(requests.clone());
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -141,11 +146,30 @@ impl FakeSpiral {
         ], "next_page_token": null}))
     }
 
-    async fn projects() -> Json<serde_json::Value> {
-        Json(json!({"items": [
-            {"id": "project_b", "org_id": "org_1", "description": null},
-            {"id": "project_a", "org_id": "org_1", "description": "Arms"}
-        ], "next_page_token": null}))
+    async fn projects(
+        State(requests): State<Arc<StdMutex<FakeRequests>>>,
+    ) -> Json<serde_json::Value> {
+        let mut items = vec![
+            json!({"id": "project_b", "org_id": "org_1", "description": null}),
+            json!({"id": "project_a", "org_id": "org_1", "description": "Arms"}),
+        ];
+        for id in &requests.lock().unwrap().created_projects {
+            items.push(json!({"id": id, "org_id": "org_1", "description": null}));
+        }
+        Json(json!({"items": items, "next_page_token": null}))
+    }
+
+    /// A project named by the requested prefix, or a made-up one, and
+    /// numbered like Spiral's.
+    async fn create_project(
+        State(requests): State<Arc<StdMutex<FakeRequests>>>,
+        Json(request): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let mut requests = requests.lock().unwrap();
+        let prefix = request["id_prefix"].as_str().unwrap_or("brave-otter");
+        let id = format!("{prefix}-{:06}", requests.created_projects.len() + 1);
+        requests.created_projects.push(id.clone());
+        Json(json!({"id": id, "org_id": "org_1", "description": request["description"]}))
     }
 
     async fn project(Path(project): Path<String>) -> Response {
