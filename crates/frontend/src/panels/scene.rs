@@ -158,6 +158,8 @@ pub(crate) fn Viewport(
     let on_select = use_callback(move |next| selection.set(next));
     let canvas_dom = use_hook(ViewportDom::new);
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
+    // Opening a graphics device is asynchronous; one attempt at a time.
+    let opening_bench = use_hook(|| Rc::new(std::cell::Cell::new(false)));
     let mut view_revision = use_signal(|| 0_u64);
     let mut dragging = use_signal(|| false);
     let mut trouble = use_signal(|| Option::<String>::None);
@@ -174,6 +176,25 @@ pub(crate) fn Viewport(
         SceneSource::Dataset { robot, .. } => Some(robot.clone()),
         _ => None,
     };
+    // Equal lists compare equal, so the 2 s robot poll fetches and parses
+    // nothing unless a robot or its model actually changed.
+    let configured = use_memo(move || {
+        telemetry
+            .map(|telemetry| {
+                telemetry
+                    .snapshot()
+                    .read()
+                    .robots()
+                    .iter()
+                    .filter_map(|robot| {
+                        let configuration = robot.config().visualization()?;
+                        Some((robot.id().to_owned(), configuration.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    let configured_models = ConfiguredModel::use_configured(configured);
     let models = use_memo(use_reactive(&dataset_robot, move |dataset_robot| {
         if let Some(robot) = dataset_robot {
             return ConfiguredModel::parse(robot.urdf(), robot.meshes()).map(|model| {
@@ -186,22 +207,10 @@ pub(crate) fn Viewport(
                 )])
             });
         }
-        telemetry
-            .map(|telemetry| {
-                telemetry
-                    .snapshot()
-                    .read()
-                    .robots()
-                    .iter()
-                    .filter_map(|robot| {
-                        let configuration = robot.config().visualization()?;
-                        Some(
-                            ConfiguredModel::new(configuration.clone())
-                                .map(|model| (robot.id().to_owned(), model)),
-                        )
-                    })
-                    .collect::<Result<BTreeMap<_, _>, String>>()
-            })
+        // Arms appear once their models arrive.
+        configured_models
+            .read()
+            .clone()
             .unwrap_or_else(|| Ok(BTreeMap::new()))
     }));
 
@@ -256,16 +265,22 @@ pub(crate) fn Viewport(
                 return;
             };
             let mut slot = draw_bench.borrow_mut();
-            if slot.is_none() {
-                match Bench::new(canvas) {
-                    Ok(ready) => *slot = Some(ready),
-                    Err(error) => {
-                        trouble.set(Some(error.to_string()));
-                        return;
-                    }
-                }
-            }
             let Some(bench) = slot.as_mut() else {
+                if !opening_bench.replace(true) {
+                    let (opened, opening) = (draw_bench.clone(), opening_bench.clone());
+                    spawn(async move {
+                        let result = Bench::new(canvas).await;
+                        opening.set(false);
+                        match result {
+                            // Draw now rather than at the next telemetry sample.
+                            Ok(ready) => {
+                                *opened.borrow_mut() = Some(ready);
+                                view_revision.bump();
+                            }
+                            Err(error) => trouble.set(Some(error.to_string())),
+                        }
+                    });
+                }
                 return;
             };
             let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
@@ -1075,7 +1090,7 @@ mod tests {
             BTreeMap::from([("hinge".to_owned(), Some(1.0))]),
         );
         let configuration = serde_json::from_value(
-            serde_json::json!({"urdf":"", "joints":{"hinge":{"input":"degrees", "scale":std::f64::consts::PI / 180.0, "offset":0.0, "rest":0.0}}}),
+            serde_json::json!({"model":"0".repeat(64), "joints":{"hinge":{"input":"degrees", "scale":std::f64::consts::PI / 180.0, "offset":0.0, "rest":0.0}}, "tool_link":null}),
         )
         .unwrap();
         assert!(sample.recorded_positions(&configuration).is_none());
@@ -1100,7 +1115,7 @@ mod dataset_tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     #[wasm_bindgen_test]
-    fn imported_robot_renders_and_moves_with_its_named_joint() {
+    async fn imported_robot_renders_and_moves_with_its_named_joint() {
         let document = web_sys::window().unwrap().document().unwrap();
         let element = document.create_element("canvas").unwrap();
         element
@@ -1108,12 +1123,6 @@ mod dataset_tests {
             .unwrap();
         document.body().unwrap().append_child(&element).unwrap();
         let canvas: web_sys::HtmlCanvasElement = element.clone().dyn_into().unwrap();
-        let gl: web_sys::WebGl2RenderingContext = canvas
-            .get_context("webgl2")
-            .unwrap()
-            .unwrap()
-            .dyn_into()
-            .unwrap();
         let urdf = r#"<robot name="test"><link name="base"/><link name="arm"><visual><origin xyz="0.25 0 0.1"/><geometry><box size="0.5 0.07 0.07"/></geometry><material name="test"><color rgba="0.8 0.1 0.1 1"/></material></visual></link><joint name="recorded_hinge" type="continuous"><parent link="base"/><child link="arm"/><axis xyz="0 0 1"/></joint></robot>"#;
         let robot =
             serde_json::from_value(serde_json::json!({"urdf":urdf,"bindings":[],"meshes":{}}))
@@ -1133,7 +1142,14 @@ mod dataset_tests {
             }
             _ => unreachable!(),
         };
-        let mut viewport = Bench::new(canvas).unwrap();
+        let mut viewport = Bench::new(canvas.clone()).await.unwrap();
+        // The context the bench opened, read back after each draw.
+        let gl: web_sys::WebGl2RenderingContext = canvas
+            .get_context("webgl2")
+            .unwrap()
+            .unwrap()
+            .dyn_into()
+            .unwrap();
         let mut pictures = Vec::new();
         for (angle, home) in [(0.0, false), (1.0, false), (0.0, true)] {
             let mut frame = Frame::new(true);

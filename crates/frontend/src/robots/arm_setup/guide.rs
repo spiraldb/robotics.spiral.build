@@ -9,6 +9,7 @@
 use dioxus::prelude::*;
 use spiral_robotics_common::robot_connector::RobotConnectorHealth;
 use spiral_robotics_common::robots::RobotSummary;
+use spiral_robotics_common::robots::config::MotorAccess;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, CheckIcon, TextInput};
 
 use super::calibration::CalibrationSection;
@@ -124,15 +125,15 @@ impl ArmRole {
     }
 }
 
-/// Whether an arm is set up: it has a port and a calibration. Being connected
-/// right now is the robot connector's business, not setup's.
+/// Whether an arm is set up: it has a motor bus and a calibration. Being
+/// connected right now is the robot connector's business, not setup's.
 trait ArmReadiness {
     fn ready_to_drive(&self) -> bool;
 }
 
 impl ArmReadiness for RobotSummary {
     fn ready_to_drive(&self) -> bool {
-        self.config().port().is_some() && self.config().calibrated()
+        self.config().motor_access().is_some() && self.config().calibrated()
     }
 }
 
@@ -374,15 +375,16 @@ fn NewArmForm(project: StudioProjectState, selection: RobotSelection, role: ArmR
     }
 }
 
-/// How a finished arm step reads: the arm and the port it settled on.
+/// How a finished arm step reads: the arm and the motor bus it settled on.
 trait ArmSummary {
     fn summary(&self) -> String;
 }
 
 impl ArmSummary for RobotSummary {
     fn summary(&self) -> String {
-        match self.config().port() {
-            Some(port) => format!("{} · {}", self.id(), port.path()),
+        match self.config().motor_access() {
+            Some(MotorAccess::Serial(port)) => format!("{} · {}", self.id(), port.path()),
+            Some(MotorAccess::Simulated(_)) => format!("{} · simulated", self.id()),
             None => self.id().to_owned(),
         }
     }

@@ -536,7 +536,7 @@ mod tests {
         VideoCapture {
             source: VideoCaptureSource {
                 episode_id: "episode_000001".to_owned(),
-                cameras: Arc::new(CameraManager::new()),
+                cameras: Arc::new(CameraManager::default()),
                 specs,
                 ffmpeg: "ffmpeg".to_owned(),
                 codec: "libx264".to_owned(),

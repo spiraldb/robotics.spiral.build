@@ -8,6 +8,9 @@ use std::sync::Arc;
 use crate::context::{RobotConnectorContext, RobotConnectorDevices};
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
+use crate::robots::models::RobotModelStore;
+use crate::robots::workspace::RobotWorkspace;
+use crate::simulation::{DemoBench, SimulatedWorld};
 use clap::Parser;
 use spiral_robotics_hardware::{
     CameraRuntime, ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS,
@@ -52,6 +55,12 @@ struct RobotConnectorArguments {
     /// Policy runtime that computes rollout actions.
     #[arg(long, default_value = DEFAULT_POLICY_RUNTIME, value_name = "URL")]
     policy_runtime: String,
+
+    /// Start with a simulated SO-101 leader and follower, filmed by simulated
+    /// cameras, instead of real arms. Keeps its own data directory unless
+    /// `--data-dir` names one, and looks for no physical cameras.
+    #[arg(long)]
+    demo: bool,
 
     #[command(flatten)]
     video: VideoArguments,
@@ -104,6 +113,7 @@ struct ServerStartup {
     bind: SocketAddr,
     data_dir: PathBuf,
     policy_runtime: String,
+    demo: bool,
     video: VideoArguments,
     camera_access_error: Option<String>,
     control_settings: ControlSettings,
@@ -134,11 +144,14 @@ impl RobotConnectorServer {
                 return ExitCode::FAILURE;
             }
         };
-        let Some(data_dir) = arguments.data_dir.or_else(ServerStartup::default_data_dir) else {
+        let Some(data_dir) = arguments
+            .data_dir
+            .or_else(|| ServerStartup::default_data_dir(arguments.demo))
+        else {
             eprintln!("error: cannot locate a data directory; pass --data-dir");
             return ExitCode::FAILURE;
         };
-        let camera_access_error = if arguments.video.no_cameras {
+        let camera_access_error = if arguments.video.no_cameras || arguments.demo {
             None
         } else {
             ServerStartup::request_camera_access()
@@ -159,6 +172,7 @@ impl RobotConnectorServer {
             bind: arguments.bind,
             data_dir,
             policy_runtime: arguments.policy_runtime,
+            demo: arguments.demo,
             video: arguments.video,
             camera_access_error,
             control_settings,
@@ -182,12 +196,14 @@ impl ServerStartup {
             .init();
     }
 
-    fn default_data_dir() -> Option<PathBuf> {
-        Some(
-            dirs::data_local_dir()?
-                .join("spiral-robotics")
-                .join("robot-connector"),
-        )
+    /// A demo keeps its simulated arms and takes apart from real ones.
+    fn default_data_dir(demo: bool) -> Option<PathBuf> {
+        let name = if demo {
+            "robot-connector-demo"
+        } else {
+            "robot-connector"
+        };
+        Some(dirs::data_local_dir()?.join("spiral-robotics").join(name))
     }
 
     /// On macOS this puts up the system camera prompt, which has to happen on
@@ -219,25 +235,37 @@ impl ServerStartup {
             bind,
             data_dir,
             policy_runtime,
+            demo,
             video,
             camera_access_error,
             control_settings,
         } = self;
         tracing::info!(path = %data_dir.display(), "robot connector data directory");
-        let cameras = Arc::new(CameraManager::new());
+        let hardware = Arc::new(HardwareHandle::spawn(control_settings));
+        let workspace = Arc::new(RobotWorkspace::open(
+            data_dir.join("robots.json"),
+            RobotModelStore::new(data_dir.join("models")),
+        )?);
+        if demo {
+            DemoBench::install(&workspace).await?;
+        }
+        let cameras = Arc::new(CameraManager::new(SimulatedWorld::new(
+            workspace.clone(),
+            hardware.clone(),
+        )));
         if let Some(error) = camera_access_error {
             cameras.note_issue(format!("camera previews will stay blank: {error}"));
         }
         let devices = RobotConnectorDevices::new(
-            Arc::new(HardwareHandle::spawn(control_settings)),
+            hardware,
             cameras.clone(),
             VideoEncoderSettings::new(video.ffmpeg, video.video_codec),
         );
-        let connector = RobotConnectorContext::open(devices, &data_dir, policy_runtime)?;
+        let connector = RobotConnectorContext::open(devices, workspace, &data_dir, policy_runtime);
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 
-        let discover_cameras = !video.no_cameras;
+        let discover_cameras = !video.no_cameras && !demo;
         let bootstrap = tokio::spawn({
             let connector = connector.clone();
             async move {

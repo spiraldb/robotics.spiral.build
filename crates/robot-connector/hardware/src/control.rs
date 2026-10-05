@@ -24,12 +24,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-use crate::bus::SimulatedBus;
 use crate::bus::{
     MotorBus, MotorFault as BusMotorFault, MotorFaults as BusMotorFaults, MotorSample,
 };
 use crate::feetech::FeetechBus;
+use crate::simulated::SimulatedBus;
 
 use crate::HardwareInputError;
 use crate::calibration::{Calibration, CalibrationError, EncoderCounts, MotorRangeTracker};
@@ -45,8 +44,8 @@ use spiral_robotics_common::recording::{
 use spiral_robotics_common::robots::{
     CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointDiagnostics,
     JointIdentity, JointKinematics, JointTelemetry, ModeSelection, ModeStatus,
-    MotorElectricalReadings, MotorFault, MotorLimits, PortSettings, RobotTelemetry, TelemetryFrame,
-    config::{MotorConfig, MotorRange, RobotConfig},
+    MotorElectricalReadings, MotorFault, MotorLimits, RobotTelemetry, TelemetryFrame,
+    config::{MotorAccess, MotorConfig, MotorRange, RobotConfig},
 };
 use tokio::sync::{oneshot, watch};
 
@@ -293,7 +292,7 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 
-/// Everything the control thread needs to open one arm: a configuration with a port.
+/// Everything the control thread needs to open one arm: a configuration with a motor bus.
 #[derive(Clone, Debug)]
 pub struct RobotSpec {
     config: RobotConfig,
@@ -305,7 +304,7 @@ impl TryFrom<RobotConfig> for RobotSpec {
     type Error = HardwareInputError;
 
     fn try_from(config: RobotConfig) -> Result<Self, HardwareInputError> {
-        if config.port().is_none() {
+        if config.motor_access().is_none() {
             return Err(HardwareInputError::new(format!(
                 "robot {:?} has no serial port assigned; set one before connecting",
                 config.id()
@@ -323,10 +322,18 @@ impl RobotSpec {
         self.config.id()
     }
 
-    fn port(&self) -> &PortSettings {
+    fn motor_access(&self) -> MotorAccess<'_> {
         self.config
-            .port()
-            .expect("a robot specification is only built with a port")
+            .motor_access()
+            .expect("a robot specification is only built with a motor bus")
+    }
+
+    /// Where this arm's motors are, as an operator would name them.
+    fn bus_name(&self) -> &str {
+        match self.motor_access() {
+            MotorAccess::Serial(port) => port.path(),
+            MotorAccess::Simulated(_) => "its simulated bus",
+        }
     }
 
     fn motors(&self) -> &BTreeMap<String, MotorConfig> {
@@ -1397,8 +1404,6 @@ struct Controller {
     /// an operator records *while* teleoperating, and a take of an idle arm
     /// being moved by hand is a legitimate take too.
     recording: Option<Recording>,
-    #[cfg(test)]
-    use_test_bus: bool,
 }
 
 /// Controller-owned values copied into each published hardware snapshot.
@@ -1424,16 +1429,7 @@ impl Controller {
             state,
             recording: None,
             recording_signals: Arc::new(RwLock::new(RecordingSignals::default())),
-            #[cfg(test)]
-            use_test_bus: false,
         }
-    }
-
-    #[cfg(test)]
-    fn new_for_test(settings: ControlSettings, state: watch::Sender<HardwareState>) -> Self {
-        let mut controller = Self::new(settings, state);
-        controller.use_test_bus = true;
-        controller
     }
 
     fn run(mut self, requests: &mpsc::Receiver<Command>) {
@@ -1839,26 +1835,30 @@ impl Controller {
             return Err(format!("robot {:?} is already connected", spec.id()));
         }
         // Two robots cannot share one physical serial port.
-        let holder = self
-            .robots
-            .values()
-            .find(|robot| robot.spec.port().path() == spec.port().path());
-        if let Some(holder) = holder {
+        if let MotorAccess::Serial(port) = spec.motor_access()
+            && let Some(holder) = self.robots.values().find(|robot| {
+                matches!(robot.spec.motor_access(), MotorAccess::Serial(held) if held.path() == port.path())
+            })
+        {
             return Err(format!(
                 "port {:?} is already open for robot {:?}",
-                spec.port().path(),
+                port.path(),
                 holder.spec.id()
             ));
         }
 
         let open = |spec: &RobotSpec| -> Result<Box<dyn MotorBus>, String> {
-            #[cfg(test)]
-            if self.use_test_bus {
-                return Ok(Box::new(SimulatedBus::new(spec.motors(), true)));
+            match spec.motor_access() {
+                MotorAccess::Serial(port) => {
+                    FeetechBus::connect(port.path(), port.baud_rate(), spec.motors())
+                        .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
+                        .map_err(|error| error.to_string())
+                }
+                MotorAccess::Simulated(simulated) => Ok(Box::new(SimulatedBus::new(
+                    spec.motors(),
+                    simulated.hand_guided(),
+                ))),
             }
-            FeetechBus::connect(spec.port().path(), spec.port().baud_rate(), spec.motors())
-                .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
-                .map_err(|error| error.to_string())
         };
 
         let mut bus = open(&spec).inspect_err(|error| {
@@ -1871,10 +1871,7 @@ impl Controller {
         // Reading once proves every configured motor is really on the bus
         // before the robot is presented as connected.
         let positions = bus.read_positions().map_err(|error| {
-            let message = format!(
-                "could not reach all motors on {}: {error}",
-                spec.port().path()
-            );
+            let message = format!("could not reach all motors on {}: {error}", spec.bus_name());
             self.published.connections.insert(
                 spec.id().to_owned(),
                 ConnectionStatus::new(false, Some(message.clone())),
@@ -1896,7 +1893,7 @@ impl Controller {
         bus.set_torque(false).map_err(|error| {
             let message = format!(
                 "could not establish released torque state on {}: {error}",
-                spec.port().path()
+                spec.bus_name()
             );
             self.published.connections.insert(
                 spec.id().to_owned(),
@@ -2561,10 +2558,12 @@ mod tests {
             .collect()
     }
 
+    /// A simulated SO-101 a hand sweeps whenever its torque is released.
     fn spec(id: &str, calibration: Option<BTreeMap<String, MotorRange>>) -> RobotSpec {
-        let config = RobotConfig::so101(id, "so101_follower")
-            .and_then(|config| config.with_port(PortSettings::new(format!("/dev/{id}"), 1_000_000)))
+        let mut document = serde_json::to_value(RobotConfig::so101(id, "so101_follower").unwrap())
             .expect("robot configuration");
+        document["simulated"] = serde_json::json!({"hand_guided": true});
+        let config: RobotConfig = serde_json::from_value(document).expect("robot configuration");
         let config = match calibration {
             Some(ranges) => config
                 .with_calibration(ranges)
@@ -2585,7 +2584,7 @@ mod tests {
 
     fn controller() -> Controller {
         let (state, _receiver) = watch::channel(HardwareState::default());
-        Controller::new_for_test(ControlSettings::default(), state)
+        Controller::new(ControlSettings::default(), state)
     }
 
     struct FailingEnableBus {

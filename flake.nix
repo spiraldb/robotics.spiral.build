@@ -254,6 +254,14 @@
               }
             );
           };
+          # Mesa's software Vulkan gives the viewport's off-screen render test a
+          # graphics adapter on a Linux runner without a GPU.
+          ciShell =
+            sharedShell
+            // lib.optionalAttrs hostPlatform.isLinux {
+              LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.vulkan-loader ];
+              VK_ICD_FILENAMES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${hostPlatform.parsed.cpu.name}.json";
+            };
           developmentShell = sharedShell // {
             packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
             # Studio's provider keys for local runs come from the checkout's
@@ -281,7 +289,7 @@
           };
 
           devShells.default = pkgs.mkShell developmentShell;
-          devShells.ci = pkgs.mkShell sharedShell;
+          devShells.ci = pkgs.mkShell ciShell;
 
           # Explicit validation environment until the public release includes
           # the upstream persistence fixes. No hand-written exports are needed.

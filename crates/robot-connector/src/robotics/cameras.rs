@@ -22,6 +22,7 @@ use spiral_robotics_hardware::{
 };
 use tokio::sync::watch;
 
+use crate::simulation::{SimulatedCamera, SimulatedWorld};
 use crate::sync::MutexRecovery;
 
 /// How long a stream runs with nobody watching before it releases the camera.
@@ -76,7 +77,7 @@ struct Stream {
 }
 
 impl Stream {
-    fn spawn(camera: DetectedCamera) -> Self {
+    fn spawn(id: &str, source: CameraSource) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         // Drop the initial receiver so `receiver_count` only counts real viewers.
         let (frames, initial) = watch::channel(None);
@@ -91,34 +92,30 @@ impl Stream {
         let thread = {
             let (stop, frames, status) = (stop.clone(), frames.clone(), status.clone());
             thread::Builder::new()
-                .name(format!("spiral-robotics-camera-{}", camera.identifier()))
+                .name(format!("spiral-robotics-camera-{id}"))
                 .spawn(move || {
                     let mut idle_since: Option<Instant> = None;
-                    let result = camera.stream_jpeg_frames(
-                        JpegStreamConfig::new(&stop, DEFAULT_JPEG_QUALITY),
-                        |frame| {
-                            let sequence = frame.sequence();
-                            frames.send_replace(Some(Arc::new(Frame {
-                                bytes: Bytes::from(frame.into_bytes()),
-                                sequence,
-                                captured_at: Instant::now(),
-                            })));
-                            status.recover_lock().frames = sequence;
+                    let result = source.stream(&stop, |bytes, sequence| {
+                        frames.send_replace(Some(Arc::new(Frame {
+                            bytes: Bytes::from(bytes),
+                            sequence,
+                            captured_at: Instant::now(),
+                        })));
+                        status.recover_lock().frames = sequence;
 
-                            if frames.receiver_count() == 0 {
-                                let since = *idle_since.get_or_insert_with(Instant::now);
-                                if since.elapsed() >= IDLE_TIMEOUT {
-                                    stop.store(true, Ordering::Relaxed);
-                                }
-                            } else {
-                                idle_since = None;
+                        if frames.receiver_count() == 0 {
+                            let since = *idle_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= IDLE_TIMEOUT {
+                                stop.store(true, Ordering::Relaxed);
                             }
-                        },
-                    );
+                        } else {
+                            idle_since = None;
+                        }
+                    });
 
                     let mut status = status.recover_lock();
                     status.running = false;
-                    status.error = result.err().map(|error| error.to_string());
+                    status.error = result.err();
                 })
                 .expect("a camera capture thread must start")
         };
@@ -156,6 +153,31 @@ impl Stream {
     }
 }
 
+/// Where a stream's frames come from: a device, or a drawn simulated camera.
+enum CameraSource {
+    Device(DetectedCamera),
+    Simulated(SimulatedCamera),
+}
+
+impl CameraSource {
+    /// Stream JPEG frames to `publish` until `stop` is set.
+    fn stream(
+        &self,
+        stop: &AtomicBool,
+        mut publish: impl FnMut(Vec<u8>, u64),
+    ) -> Result<(), String> {
+        match self {
+            Self::Device(camera) => camera
+                .stream_jpeg_frames(JpegStreamConfig::new(stop, DEFAULT_JPEG_QUALITY), |frame| {
+                    let sequence = frame.sequence();
+                    publish(frame.into_bytes(), sequence);
+                })
+                .map_err(|error| error.to_string()),
+            Self::Simulated(camera) => camera.stream_jpeg_frames(stop, publish),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ManagerState {
     discovered: BTreeMap<String, DetectedCamera>,
@@ -166,10 +188,11 @@ struct ManagerState {
     streams: BTreeMap<String, Stream>,
 }
 
-/// Discovers cameras and owns their capture threads.
+/// Discovers cameras, lists the simulated ones, and owns their capture threads.
 #[derive(Default)]
 pub(crate) struct CameraManager {
     state: Mutex<ManagerState>,
+    simulation: Option<SimulatedWorld>,
 }
 
 impl CameraManager {
@@ -183,9 +206,20 @@ impl CameraManager {
         Ok(self.statuses())
     }
 
-    /// Create an empty manager; call [`CameraManager::refresh_blocking`] to populate it.
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// A manager that films `simulation`'s mounted cameras beside the
+    /// devices [`CameraManager::refresh_blocking`] finds.
+    pub(crate) fn new(simulation: SimulatedWorld) -> Self {
+        Self {
+            state: Mutex::default(),
+            simulation: Some(simulation),
+        }
+    }
+
+    fn simulated_cameras(&self) -> Vec<SimulatedCamera> {
+        self.simulation
+            .as_ref()
+            .map(SimulatedWorld::cameras)
+            .unwrap_or_default()
     }
 
     /// Re-probe every camera the operating system reports.
@@ -223,13 +257,17 @@ impl CameraManager {
     /// Adopt the result of a discovery pass.
     fn apply_discovery(&self, discovered: BTreeMap<String, DetectedCamera>, issues: Vec<String>) {
         // Streams for cameras that vanished must not keep holding a device.
+        let simulated = self.simulated_cameras();
         let stale = {
             let mut state = self.state.recover_lock();
             state.issues = issues;
             let stale = state
                 .streams
                 .keys()
-                .filter(|id| !discovered.contains_key(*id))
+                .filter(|id| {
+                    !discovered.contains_key(*id)
+                        && !simulated.iter().any(|camera| camera.id() == id.as_str())
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             state.discovered = discovered;
@@ -240,27 +278,29 @@ impl CameraManager {
         }
     }
 
-    /// Cameras found by the last refresh, with their current stream state.
+    /// Cameras found by the last refresh and simulated ones, with their
+    /// current stream state.
     pub(crate) fn statuses(&self) -> Vec<CameraStatus> {
+        let simulated = self.simulated_cameras();
         let state = self.state.recover_lock();
-        state
-            .discovered
-            .values()
-            .map(|camera| {
-                let id = camera.identifier();
-                let (streaming, frames, error) = match state.streams.get(&id) {
-                    Some(stream) => {
-                        let status = stream.status.recover_lock();
-                        (status.running, status.frames, status.error.clone())
-                    }
-                    None => (false, 0, None),
-                };
-                CameraStatus::new(
-                    id,
-                    camera.name(),
-                    CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
-                )
-                .with_state(CameraStreamState::new(streaming, frames, error))
+        let devices = state.discovered.values().map(|camera| {
+            CameraStatus::new(
+                camera.identifier(),
+                camera.name(),
+                CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
+            )
+        });
+        devices
+            .chain(simulated.iter().map(SimulatedCamera::status))
+            .map(|status| {
+                let stream_state = state.streams.get(status.id()).map_or_else(
+                    CameraStreamState::default,
+                    |stream| {
+                        let stream = stream.status.recover_lock();
+                        CameraStreamState::new(stream.running, stream.frames, stream.error.clone())
+                    },
+                );
+                status.with_state(stream_state)
             })
             .collect()
     }
@@ -300,12 +340,16 @@ impl CameraManager {
             state.streams.remove(id);
         }
 
-        let camera = state
-            .discovered
-            .get(id)
-            .cloned()
-            .ok_or_else(|| format!("no camera with id {id:?}; refresh the camera list"))?;
-        let stream = Stream::spawn(camera);
+        let source = match state.discovered.get(id) {
+            Some(camera) => CameraSource::Device(camera.clone()),
+            None => self
+                .simulated_cameras()
+                .into_iter()
+                .find(|camera| camera.id() == id)
+                .map(CameraSource::Simulated)
+                .ok_or_else(|| format!("no camera with id {id:?}; refresh the camera list"))?,
+        };
+        let stream = Stream::spawn(id, source);
         let frames = stream.frames.subscribe();
         state.streams.insert(id.to_owned(), stream);
         Ok(frames)
@@ -357,7 +401,7 @@ mod tests {
 
     #[test]
     fn an_empty_manager_reports_nothing_and_refuses_unknown_cameras() {
-        let manager = CameraManager::new();
+        let manager = CameraManager::default();
 
         assert!(manager.statuses().is_empty());
         assert!(manager.issues().is_empty());
@@ -369,7 +413,7 @@ mod tests {
 
     #[test]
     fn noted_issues_survive_a_discovery_pass() {
-        let manager = CameraManager::new();
+        let manager = CameraManager::default();
         manager.note_issue("camera access was denied");
 
         // Discovery replaces what it found last time, but a permission failure
@@ -383,7 +427,7 @@ mod tests {
 
     #[test]
     fn closing_an_unknown_camera_is_harmless() {
-        let manager = CameraManager::new();
+        let manager = CameraManager::default();
         manager.close("/dev/video9");
         manager.shutdown();
     }

@@ -436,8 +436,10 @@ impl UrdfParser {
             let parent = index_of(&name, Self::required(Self::child(node, "parent")?, "link")?)?;
             let child_link = index_of(&name, Self::required(Self::child(node, "child")?, "link")?)?;
             // A zero axis would make `Mat4::from_axis_angle` produce garbage, and a
-            // description that omits the axis means the URDF default of +X.
+            // description that omits the axis means the URDF default of +X. A
+            // fixed joint never turns, so URDF ignores its axis and so does this.
             let axis = match Self::children(node, "axis").next() {
+                Some(_) if !kind.is_movable() => Vec3::X,
                 Some(node) => Self::vec3(node, "xyz")?
                     .try_normalize()
                     .ok_or_else(|| UrdfError::Xml(format!("Joint {name} has a zero axis")))?,
@@ -1030,5 +1032,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(urdf.joint("j").unwrap().axis, Vec3::X);
+    }
+
+    #[test]
+    fn a_fixed_joint_may_state_any_axis_but_a_moving_one_needs_a_direction() {
+        let joint = |kind: &str| {
+            Urdf::parse(&format!(
+                r#"<robot name="r">
+                     <link name="a"/><link name="b"/>
+                     <joint name="j" type="{kind}"><parent link="a"/><child link="b"/><axis xyz="0 0 0"/></joint>
+                   </robot>"#
+            ))
+        };
+        assert!(joint("fixed").is_ok());
+        assert!(joint("revolute").is_err());
     }
 }

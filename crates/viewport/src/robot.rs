@@ -14,6 +14,7 @@ use std::fmt;
 use crate::RobotModel;
 use crate::scene::{Condition, Entity, EntityKey, EntityShape, Interaction, Scene};
 use crate::urdf::{Geometry, Urdf};
+use glam::camera::rh::proj::directx;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use std::rc::Rc;
 
@@ -91,6 +92,34 @@ impl CameraPlacement {
                     Vec3::from_array(self.attachment.translation),
                 ),
         )
+    }
+}
+
+/// A mounted camera's place in the world and how wide it sees.
+///
+/// A mount follows the optical convention: the camera looks along its +Z,
+/// with +X to the right of the picture and +Y down it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CameraView {
+    world: Mat4,
+    horizontal_field_of_view: f32,
+}
+
+impl CameraView {
+    /// Near enough to see a gripper from a wrist camera.
+    const NEAR: f32 = 0.005;
+    const FAR: f32 = 20.0;
+
+    pub(crate) fn view_projection(&self, aspect_ratio: f32) -> Mat4 {
+        let aspect_ratio = aspect_ratio.max(0.01);
+        let vertical_field_of_view =
+            2.0 * ((self.horizontal_field_of_view * 0.5).tan() / aspect_ratio).atan();
+        // The optical frame looks down +Z with +Y down; a view space looks
+        // down -Z with +Y up.
+        let optical_to_view = Mat4::from_scale(Vec3::new(1.0, -1.0, -1.0));
+        directx::perspective(vertical_field_of_view, aspect_ratio, Self::NEAR, Self::FAR)
+            * optical_to_view
+            * self.world.inverse()
     }
 }
 
@@ -256,6 +285,24 @@ impl Frame {
                 (minimum + maximum) * 0.5,
                 (maximum - minimum).length().max(0.1) * 1.2,
             )
+        })
+    }
+
+    /// Where the camera mounted on `robot` as `role` stands and looks, in its
+    /// current pose.
+    pub(crate) fn camera_view(&self, robot: &str, role: &str) -> Option<CameraView> {
+        let index = self.placements.iter().position(|arm| arm.id == robot)?;
+        let placement = &self.placements[index];
+        let camera = placement
+            .cameras
+            .iter()
+            .find(|camera| camera.role == role)?;
+        let urdf = &placement.presentation.model.description;
+        let link_transforms = urdf.recorded_pose(&placement.presentation.positions);
+        let mount = camera.transform(urdf, &link_transforms)?;
+        Some(CameraView {
+            world: ArmPlacement::base_transform(index, self.placements.len()) * mount,
+            horizontal_field_of_view: camera.field_of_view_degrees.to_radians(),
         })
     }
 
@@ -545,8 +592,18 @@ impl RobotScene {
     }
 }
 
+/// Whether a composed scene draws the volume each mounted camera sees.
+///
+/// The operator's bench shows them; a picture taken by one of those cameras
+/// must not, or every camera would film the others' wireframes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Frustums {
+    Drawn,
+    Hidden,
+}
+
 impl RobotScene {
-    pub(crate) fn compose(frame: &Frame) -> Self {
+    pub(crate) fn compose(frame: &Frame, frustums: Frustums) -> Self {
         let mut entity_catalog = EntityCatalog::default();
         // The grid is a stable visual reference at the model's resting base;
         // recorded world coordinates and inter-arm transforms stay untouched.
@@ -600,7 +657,11 @@ impl RobotScene {
                 }
             }
 
-            for camera_mount in &placement.cameras {
+            let drawn_cameras = match frustums {
+                Frustums::Drawn => placement.cameras.as_slice(),
+                Frustums::Hidden => &[],
+            };
+            for camera_mount in drawn_cameras {
                 let Some(camera_transform) = camera_mount.transform(urdf, &link_transforms) else {
                     continue;
                 };
@@ -727,7 +788,14 @@ mod tests {
             );
             assert_eq!(frame.framing(Some("robot")), Some((target, distance)));
             assert!(frame.framing(Some("missing")).is_none());
-            assert!((RobotScene::compose(&frame).scene().grid_height() - 2.9).abs() < 1e-5);
+            assert!(
+                (RobotScene::compose(&frame, Frustums::Drawn)
+                    .scene()
+                    .grid_height()
+                    - 2.9)
+                    .abs()
+                    < 1e-5
+            );
         }
         assert!(Frame::default().framing(None).is_none());
     }
@@ -772,7 +840,7 @@ mod tests {
                 ),
             )
             .unwrap();
-        let scene = RobotScene::compose(&frame);
+        let scene = RobotScene::compose(&frame, Frustums::Drawn);
         for (robot, joint) in [("slider", "slide"), ("arm", "hinge")] {
             assert!(
                 scene
@@ -784,10 +852,59 @@ mod tests {
             );
         }
         assert!(
-            RobotScene::compose(&Frame::default())
+            RobotScene::compose(&Frame::default(), Frustums::Drawn)
                 .scene()
                 .entities()
                 .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_mounted_camera_sees_along_its_optical_axis_but_not_its_own_frustum() {
+        let mut frame = Frame::new(false);
+        frame.add_arm("arm", Fixture::presentation()).unwrap();
+        // Rolled half a turn, the camera hangs a metre up looking straight down.
+        let overhead = CameraAttachment::new(
+            None::<String>,
+            [0.0, 0.0, 1.0],
+            [std::f64::consts::PI, 0.0, 0.0],
+        );
+        frame
+            .mount_camera("arm", CameraMount::new("top", overhead, 60.0))
+            .unwrap();
+
+        let view = frame
+            .camera_view("arm", "top")
+            .unwrap()
+            .view_projection(1.0);
+        let project = |point: Vec3| view.project_point3(point);
+        let below = project(Vec3::ZERO);
+        assert!(below.x.abs() < 1e-5 && below.y.abs() < 1e-5);
+        assert!((0.0..1.0).contains(&below.z));
+        assert!(
+            project(Vec3::new(0.1, 0.0, 0.0)).x > 0.0,
+            "+X is right in the picture"
+        );
+        // The roll turned the camera's +Y to the world's -Y.
+        assert!(
+            project(Vec3::new(0.0, -0.1, 0.0)).y < 0.0,
+            "+Y is down the picture"
+        );
+        assert!(frame.camera_view("arm", "wrist").is_none());
+
+        let camera = Target::Camera {
+            robot: "arm".into(),
+            role: "top".into(),
+        };
+        assert!(
+            RobotScene::compose(&frame, Frustums::Drawn)
+                .key(&camera)
+                .is_some()
+        );
+        assert!(
+            RobotScene::compose(&frame, Frustums::Hidden)
+                .key(&camera)
                 .is_none()
         );
     }
@@ -886,7 +1003,7 @@ mod tests {
     fn every_composed_shape_resolves_to_a_semantic_target() {
         let mut frame = Frame::new(false);
         frame.add_arm("follower", Fixture::presentation()).unwrap();
-        let scene = RobotScene::compose(&frame);
+        let scene = RobotScene::compose(&frame, Frustums::Drawn);
 
         assert!(scene.scene().entities().next().is_some());
         for entity in scene.scene().entities() {

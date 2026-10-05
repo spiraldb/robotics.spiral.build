@@ -7,7 +7,6 @@ use std::sync::Arc;
 use spiral_robotics_hardware::HardwareHandle;
 use spiral_robotics_recording::RecordingBuffer;
 
-use crate::OperationError;
 use crate::policies::PolicyStore;
 use crate::recording::files::RecordingFiles;
 use crate::recording::session::RecordingSession;
@@ -57,14 +56,14 @@ struct ConnectorState {
 pub(crate) struct RobotConnectorContext(Arc<ConnectorState>);
 
 impl RobotConnectorContext {
-    /// Open the connector's saved state under `data_dir`, rolling policies out
-    /// on the runtime at `policy_runtime`.
+    /// Serve `workspace`'s robots and the takes and policies kept under
+    /// `data_dir`, rolling policies out on the runtime at `policy_runtime`.
     pub(crate) fn open(
         devices: RobotConnectorDevices,
+        workspace: Arc<RobotWorkspace>,
         data_dir: &Path,
         policy_runtime: String,
-    ) -> Result<Self, OperationError> {
-        let workspace = Arc::new(RobotWorkspace::open(data_dir.join("robots.json"))?);
+    ) -> Self {
         let policies = Arc::new(PolicyStore::new(data_dir.join("policies")));
         let rollout = RolloutManager::new(
             RolloutHardwareResources::new(
@@ -74,7 +73,7 @@ impl RobotConnectorContext {
             ),
             RolloutPolicies::new(policies.clone(), policy_runtime),
         );
-        Ok(Self(Arc::new(ConnectorState {
+        Self(Arc::new(ConnectorState {
             devices,
             workspace,
             takes: ConnectorTakes {
@@ -84,7 +83,7 @@ impl RobotConnectorContext {
             },
             policies,
             rollout,
-        })))
+        }))
     }
 
     pub(crate) fn hardware(&self) -> &Arc<HardwareHandle> {

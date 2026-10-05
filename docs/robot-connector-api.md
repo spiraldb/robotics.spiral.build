@@ -17,6 +17,7 @@ cargo run -p spiral-robotics-robot-connector -- --help
 | `--data-dir` | platform data dir`/spiral-robotics/robot-connector` | Saved robots, unsent takes, and policies; also `SPIRAL_ROBOTICS_ROBOT_CONNECTOR_DATA` |
 | `--policy-runtime` | `http://127.0.0.1:50051` | Python runtime that computes rollout actions |
 | `--no-cameras` | off | Skip camera discovery |
+| `--demo` | off | Start with the simulated demo bench below; its data directory defaults to `…/robot-connector-demo` and no physical camera is looked for |
 | `--ffmpeg`, `--video-codec` | `ffmpeg`, `libx264` | Camera recording encoder |
 | `--max-step`, `--teleop-max-step` | | Largest per-cycle joint change |
 
@@ -53,6 +54,14 @@ Robots, saved in the robot connector's `robots.json`:
   robot JSON object. `expected: null` creates a new robot; otherwise it is the
   revision the editor started from, and a later save fails with 409. Saving
   does not connect hardware.
+- `POST /robots/models`: a robot model, `{urdf, meshes}` with each mesh
+  base64-encoded under the filename the URDF uses, saved under its content
+  address. Answers that address, the SHA-256 of the model's JSON. A robot's
+  `visualization.model` names it, and saving a robot whose model is not here
+  fails with 404.
+- `GET /robots/models/{model}`: the model saved under that address. It never
+  changes, so the response may be cached forever; robot configurations stay a
+  few kilobytes however large their meshes.
 - `DELETE /robots/{id}`; `POST /robots/{id}/{connect,disconnect,hold,release,goal}`;
   `POST /robots/{id}/calibration/{start,finish,cancel}`; `PUT /mode`.
 - `POST /cameras/refresh`; `GET /cameras/stream.mjpeg?id=…`, a live MJPEG
@@ -88,3 +97,27 @@ Policies and rollout:
   `duration_seconds`) rolls out a written policy; loading it is what proves it
   is here. `GET /rollout` reads the current session; `POST /rollout/{id}/stop`
   stops it. A restarted robot connector starts idle and never resumes motion.
+
+## Simulated robots
+
+A robot saved with `"simulated": {}` in place of a `port` has motors the robot
+connector simulates. They report encoder counts and follow goals at a bounded
+speed, so calibration, the control loop, teleoperation, takes, and rollout
+treat the arm exactly like a real one. With `"simulated": {"hand_guided": true}`
+a simulated hand sweeps the arm through its calibrated travel whenever its
+torque is released, the way an operator moves a leader. There is no gravity or
+contact.
+
+Every mounted camera on a simulated robot with a model is a simulated camera:
+it appears in `GET /hardware/status` under its configured ID at 640×480 and
+30 fps, streams from `GET /cameras/stream.mjpeg` like a device, and records
+into takes. Its pictures draw every simulated robot with a model, posed from
+telemetry, with the renderer the browser's 3D view uses. A mount follows the
+optical convention: the camera looks along its +Z, with +X to the right of the
+picture and +Y down it.
+
+`--demo` saves two such robots over whatever its data directory held for them:
+`sim_leader`, hand-guided, and `sim_follower`, with `wrist` and `front`
+cameras. Both are calibrated to TheRobotStudio's SO-101 model, bundled in
+`crates/robot-connector/src/simulation/so101`, and connect at start, so a take
+can be recorded as soon as Studio reaches the robot connector.

@@ -8,14 +8,20 @@ use crate::http::delivery::{ApiJson, ApiPath};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
+    http::header,
+    response::IntoResponse,
     routing::{delete, get, post, put},
 };
 use spiral_robotics_common::robots::config::RobotConfigSave;
+use spiral_robotics_common::robots::visualization::{RobotModelFiles, RobotModelId};
 use spiral_robotics_common::robots::{
     CameraStatus, HardwareStatus, ModeSelection, RobotGoal, RobotSummary, SerialPortSummary,
     TelemetryFrame,
 };
+
+/// A robot model's meshes, base64-encoded, stay well inside this.
+const MAX_MODEL_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) struct RobotEndpoints;
 
@@ -26,11 +32,16 @@ impl RobotEndpoints {
             .route("/api/hardware/status", get(Self::fetch_hardware_status))
             .route("/api/robots/telemetry", get(Self::fetch_telemetry))
             .route("/api/robots", get(Self::list_robots))
+            .route("/api/robots/models/{model}", get(Self::fetch_model))
     }
     pub(crate) fn commands() -> Router<RobotConnectorContext> {
         Router::new()
             .route("/api/cameras/refresh", post(Self::refresh_cameras))
             .route("/api/robots/save", post(Self::save_robot))
+            .route(
+                "/api/robots/models",
+                post(Self::save_model).layer(DefaultBodyLimit::max(MAX_MODEL_BYTES)),
+            )
             .route("/api/robots/{id}", delete(Self::delete_robot))
             .route("/api/robots/{id}/connect", post(Self::connect_robot))
             .route("/api/robots/{id}/disconnect", post(Self::disconnect_robot))
@@ -84,6 +95,26 @@ impl RobotEndpoints {
         State(connector): State<RobotConnectorContext>,
     ) -> Result<Json<Vec<RobotSummary>>, OperationError> {
         Ok(Json(RobotOperations::new(&connector).list().await?))
+    }
+    /// A model never changes under its address, so the browser keeps it.
+    async fn fetch_model(
+        State(connector): State<RobotConnectorContext>,
+        ApiPath(model): ApiPath<RobotModelId>,
+    ) -> Result<impl IntoResponse, OperationError> {
+        let bytes = connector.workspace().models().bytes(&model)?;
+        Ok((
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            bytes,
+        ))
+    }
+    async fn save_model(
+        State(connector): State<RobotConnectorContext>,
+        ApiJson(model): ApiJson<RobotModelFiles>,
+    ) -> Result<Json<RobotModelId>, OperationError> {
+        Ok(Json(connector.workspace().models().save(&model)?))
     }
     async fn save_robot(
         State(connector): State<RobotConnectorContext>,

@@ -23,6 +23,9 @@ struct RobotConfigFields {
     robot_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     port: Option<PortSettings>,
+    /// Set instead of `port` for an arm the robot connector simulates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    simulated: Option<SimulatedMotors>,
     motors: BTreeMap<String, MotorConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     cameras: BTreeMap<String, CameraConfig>,
@@ -51,6 +54,9 @@ impl RobotConfigFields {
         }
         if let Some(port) = &self.port {
             port.validate()?;
+            if self.simulated.is_some() {
+                return Err("A simulated robot has no serial port".into());
+            }
         }
         if self.motors.is_empty() {
             return Err("A robot needs at least one motor".into());
@@ -107,6 +113,7 @@ impl RobotConfig {
             robot_id: id.trim().to_owned(),
             robot_type: Some(robot_type.to_owned()),
             port: None,
+            simulated: None,
             motors: MotorConfig::so101_arm(),
             cameras: BTreeMap::new(),
             visualization: None,
@@ -121,6 +128,14 @@ impl RobotConfig {
     }
     pub const fn port(&self) -> Option<&PortSettings> {
         self.0.port.as_ref()
+    }
+    /// How the robot connector reaches this arm's motors, once that is known.
+    pub const fn motor_access(&self) -> Option<MotorAccess<'_>> {
+        match (&self.0.port, self.0.simulated) {
+            (Some(port), _) => Some(MotorAccess::Serial(port)),
+            (None, Some(simulated)) => Some(MotorAccess::Simulated(simulated)),
+            (None, None) => None,
+        }
     }
     pub const fn motors(&self) -> &BTreeMap<String, MotorConfig> {
         &self.0.motors
@@ -201,7 +216,39 @@ impl RobotConfig {
 
     /// Whether saving `self` over `saved` changes what a connected motor bus uses.
     pub fn changes_control_configuration(&self, saved: &Self) -> bool {
-        self.0.port != saved.0.port || self.0.motors != saved.0.motors
+        self.motor_access() != saved.motor_access() || self.0.motors != saved.0.motors
+    }
+}
+
+/// Where a robot's motors are reached.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MotorAccess<'a> {
+    Serial(&'a PortSettings),
+    Simulated(SimulatedMotors),
+}
+
+/// Motors the robot connector simulates in place of a serial bus.
+///
+/// A simulated motor reports encoder counts and follows goals the way a real
+/// one does, so everything above the bus — calibration, the control loop,
+/// recording, rollout — runs unchanged.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimulatedMotors {
+    /// Whether a simulated hand moves the arm while its torque is released,
+    /// the way an operator moves a leader arm. Otherwise a released arm stays
+    /// where it was left.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hand_guided: bool,
+}
+
+impl SimulatedMotors {
+    pub const fn new(hand_guided: bool) -> Self {
+        Self { hand_guided }
+    }
+
+    pub const fn hand_guided(self) -> bool {
+        self.hand_guided
     }
 }
 
@@ -389,6 +436,8 @@ mod tests {
             json!({"robot_id": "arm", "motors": {"joint": {"id": 1, "direction": "sideways"}}}),
             json!({"robot_id": "arm", "motors": {"joint": {"id": 1, "calibration": {"range_min": 5, "center": 5, "range_max": 9}}}}),
             json!({"robot_id": "arm", "motors": motors, "port": {"path": "/dev/arm", "baud_rate": 0}}),
+            json!({"robot_id": "arm", "motors": motors, "port": {"path": "/dev/arm", "baud_rate": 1}, "simulated": {}}),
+            json!({"robot_id": "arm", "motors": motors, "simulated": {"physics": true}}),
             json!({"robot_id": "arm", "motors": motors, "cameras": {"bad role": {"id": "0"}}}),
             json!({"robot_id": "arm", "motors": motors, "extension": 42}),
         ] {
@@ -397,6 +446,31 @@ mod tests {
         let config = decode(json!({"robot_id": "arm", "motors": motors})).unwrap();
         assert!(!config.calibrated());
         assert_eq!(config.motors()["joint"].direction(), MotorDirection::Normal);
+        assert_eq!(config.motor_access(), None);
+    }
+
+    #[test]
+    fn a_simulated_robot_reaches_its_motors_without_a_port() {
+        let motors = json!({"joint": {"id": 1}});
+        let still = decode(json!({"robot_id": "arm", "motors": motors, "simulated": {}})).unwrap();
+        assert_eq!(
+            still.motor_access(),
+            Some(MotorAccess::Simulated(SimulatedMotors::new(false)))
+        );
+        assert_eq!(
+            serde_json::to_value(&still).unwrap()["simulated"],
+            json!({})
+        );
+        let guided = decode(
+            json!({"robot_id": "arm", "motors": motors, "simulated": {"hand_guided": true}}),
+        )
+        .unwrap();
+        assert!(guided.changes_control_configuration(&still));
+        assert!(
+            still
+                .with_port(PortSettings::new("/dev/arm", 1_000_000))
+                .is_err()
+        );
     }
 
     #[test]

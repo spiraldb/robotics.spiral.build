@@ -1,5 +1,6 @@
 //! Imported descriptions and their resolved meshes; no SO-101 conventions.
 use crate::urdf::{Geometry, Urdf};
+use base64::Engine as _;
 use glam::Vec3;
 use std::collections::BTreeMap;
 
@@ -11,6 +12,21 @@ pub struct RobotModel {
 }
 
 impl RobotModel {
+    /// Parse a description whose meshes arrive base64-encoded, as stored robot
+    /// models and datasets carry them.
+    pub fn parse_encoded(urdf: &str, meshes: &BTreeMap<String, String>) -> Result<Self, String> {
+        let assets = meshes
+            .iter()
+            .map(|(name, encoded)| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map(|bytes| (name.clone(), bytes))
+                    .map_err(|error| format!("Decoding robot mesh {name}: {error}"))
+            })
+            .collect::<Result<_, _>>()?;
+        Self::parse(urdf, &assets)
+    }
+
     pub fn parse(urdf: &str, assets: &BTreeMap<String, Vec<u8>>) -> Result<Self, String> {
         let description = Urdf::parse(urdf).map_err(|error| error.to_string())?;
         for link in description.links() {

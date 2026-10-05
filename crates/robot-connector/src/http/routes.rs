@@ -41,7 +41,8 @@ impl RobotConnectorApi {
             .merge(commands)
             .fallback(HttpFailure::not_found)
             .method_not_allowed_fallback(HttpFailure::method_not_allowed)
-            .layer(SetResponseHeaderLayer::overriding(
+            // Responses are live state unless an endpoint says otherwise.
+            .layer(SetResponseHeaderLayer::if_not_present(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("no-store"),
             ))

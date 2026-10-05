@@ -1,5 +1,6 @@
 use super::*;
 use spiral_robotics_common::robots::PortSettings;
+use spiral_robotics_common::robots::visualization::RobotModelFiles;
 
 struct DocumentFixture {
     workspace: RobotWorkspace,
@@ -9,12 +10,19 @@ impl DocumentFixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         Self {
-            workspace: RobotWorkspace::open(directory.path().join("robots.json")).unwrap(),
+            workspace: Self::open(directory.path()),
             directory,
         }
     }
     fn reopened(&self) -> RobotWorkspace {
-        RobotWorkspace::open(self.directory.path().join("robots.json")).unwrap()
+        Self::open(self.directory.path())
+    }
+    fn open(directory: &std::path::Path) -> RobotWorkspace {
+        RobotWorkspace::open(
+            directory.join("robots.json"),
+            RobotModelStore::new(directory.join("models")),
+        )
+        .unwrap()
     }
     fn config(port: &str) -> RobotConfig {
         RobotConfig::so101("arm", "so101_follower")
@@ -108,4 +116,26 @@ async fn saved_robots_survive_a_restart_until_deleted() {
         fixture.workspace.delete("arm").await,
         Err(WorkspaceError::NotFound(_))
     ));
+}
+
+#[tokio::test]
+async fn a_robot_is_drawn_only_with_a_model_saved_here() {
+    let fixture = DocumentFixture::new();
+    let model = RobotModelFiles::new(
+        "<robot name=\"arm\"/>".into(),
+        BTreeMap::from([("base.stl".into(), "AAAA".into())]),
+    )
+    .unwrap();
+    let mut document = serde_json::to_value(DocumentFixture::config("/dev/arm")).unwrap();
+    document["visualization"] =
+        serde_json::json!({"model": model.id(), "joints": {}, "tool_link": null});
+    let drawn: RobotConfig = serde_json::from_value(document).unwrap();
+
+    let refused = fixture.workspace.save(drawn.clone(), None).await;
+    assert!(matches!(refused, Err(WorkspaceError::ModelNotFound(_))));
+
+    let id = fixture.workspace.models().save(&model).unwrap();
+    assert_eq!(fixture.workspace.models().save(&model).unwrap(), id);
+    assert_eq!(fixture.workspace.models().load(&id).unwrap(), model);
+    fixture.workspace.save(drawn, None).await.unwrap();
 }

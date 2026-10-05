@@ -218,8 +218,9 @@ the entire `.studio/` directory is Git-ignored.
 `SPIRAL_ROBOTICS_STUDIO_DB` overrides the SQLite file path for development
 and deployment isolation.
 
-Studio currently has no product simulation mode. Start the robot connector
-with `--no-cameras` only when camera discovery is intentionally unavailable;
-configured robot connections remain physical. Settings may switch the SpiralDB
+Start the robot connector with `--demo` for a simulated SO-101 leader and
+follower filmed by simulated cameras, no hardware needed; see
+[the robot connector API](docs/robot-connector-api.md#simulated-robots). Start
+it with `--no-cameras` only when camera discovery is intentionally unavailable. Settings may switch the SpiralDB
 project only while training is stopped. Project preferences live in Studio's
 SQLite database.

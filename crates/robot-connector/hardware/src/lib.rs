@@ -24,6 +24,7 @@ mod control;
 mod control_policy;
 mod feetech;
 mod serial_ports;
+mod simulated;
 mod state;
 
 pub use calibration::{CalibrationError, NormalizedPosition};

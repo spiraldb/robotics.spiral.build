@@ -66,10 +66,12 @@ stay empty. Import failures leave the episodes available with a summary warning.
 Opening an episode only reads that saved result. Joint playback uses the
 message buffer's time lookup, with recorded units and mimic relations preserved.
 
-Studio robots carry their own `visualization` in the project's robot document:
-URDF, mesh assets, joint telemetry coordinates, and an optional tool link. Live
-and Studio-recorded poses use that configuration. No SO-ARM101 definition is
-kept in the repository or inserted into new robot configurations.
+Robots on the robot connector carry their own `visualization`: the content
+address of a model the robot connector stores (URDF and mesh assets), joint
+telemetry coordinates, and an optional tool link. The browser fetches each
+model once. Live and Studio-recorded poses use that configuration. The only
+SO-ARM101 definition in the repository is the robot connector's `--demo`
+bench; nothing inserts it into new robot configurations.
 
 Selecting fields loads a complete bounded time window, following every page.
 Changing the window or selection replaces that read. Playback uses the loaded

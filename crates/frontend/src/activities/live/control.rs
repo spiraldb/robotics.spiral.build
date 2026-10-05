@@ -111,12 +111,21 @@ impl ConnectedArm {
 #[component]
 fn ToolReadout(arm: ConnectedArm) -> Element {
     let robot = arm.robot().clone();
-    let configured = use_memo(use_reactive(&robot, |robot| {
+    let visualization = use_memo(use_reactive(&robot, |robot| {
         robot
             .config()
             .visualization()
-            .and_then(|configuration| ConfiguredModel::new(configuration.clone()).ok())
+            .map(|configuration| vec![(robot.id().to_owned(), configuration.clone())])
+            .unwrap_or_default()
     }));
+    let models = ConfiguredModel::use_configured(visualization);
+    let configured = use_memo(move || {
+        models
+            .read()
+            .as_ref()
+            .and_then(|models| models.as_ref().ok())
+            .and_then(|models| models.values().next().cloned())
+    });
     let telemetry = arm.telemetry();
     let pose = arm
         .robot()

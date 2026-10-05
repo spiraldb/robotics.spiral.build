@@ -8,39 +8,17 @@
 //! out of those two answers and nothing else.
 
 use glam::{Mat4, Vec3};
-use std::fmt;
 
-use crate::urdf::Geometry;
-use web_sys::HtmlCanvasElement;
-
-use crate::RobotModel;
 use crate::camera::Camera;
+use crate::canvas::CanvasOutput;
 use crate::gesture::{Command, Drag, DragUpdate};
-use crate::render::{RenderFrame, Renderer};
-use crate::robot::{Frame, RobotScene, Target};
-use std::rc::Rc;
-
-/// Why a canvas could not become a viewport.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ViewportError {
-    Rendering(String),
-}
-
-impl fmt::Display for ViewportError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Rendering(detail) => f.write_str(detail),
-        }
-    }
-}
-
-impl std::error::Error for ViewportError {}
+use crate::render::{RenderFrame, ViewportError};
+use crate::robot::{Frame, Frustums, RobotScene, Target};
+use crate::urdf::Geometry;
 
 /// A canvas, the renderer bound to it, and the geometry to read against it.
 pub struct Viewport {
-    canvas: HtmlCanvasElement,
-    renderer: Renderer,
-    models: Vec<(String, Rc<RobotModel>)>,
+    output: CanvasOutput,
     camera: Camera,
     frame: Frame,
     scene: RobotScene,
@@ -48,14 +26,10 @@ pub struct Viewport {
 }
 
 impl Viewport {
-    /// Bind to a canvas, compiling the shader program.
-    pub fn new(canvas: HtmlCanvasElement) -> Result<Self, ViewportError> {
-        let renderer = Renderer::new(&canvas).map_err(ViewportError::Rendering)?;
-
+    /// Bind to a canvas, opening a graphics device for it.
+    pub async fn new(canvas: web_sys::HtmlCanvasElement) -> Result<Self, ViewportError> {
         Ok(Self {
-            canvas,
-            renderer,
-            models: Vec::new(),
+            output: CanvasOutput::new(canvas).await?,
             camera: Camera::default(),
             frame: Frame::default(),
             scene: RobotScene::default(),
@@ -69,47 +43,21 @@ impl Viewport {
     /// overlay can never be calculated from a separately rebuilt pose.
     pub fn draw(&mut self, frame: &Frame, pixel_ratio: f64) -> Result<bool, ViewportError> {
         self.frame = frame.clone();
-        let models = frame
-            .models()
-            .map(|(id, model)| (id.to_owned(), model.clone()))
-            .collect::<Vec<_>>();
-        if models.len() != self.models.len()
-            || models
-                .iter()
-                .zip(&self.models)
-                .any(|((id, model), (old_id, old))| id != old_id || !Rc::ptr_eq(model, old))
-        {
-            self.renderer
-                .load_meshes(
-                    &models
-                        .iter()
-                        .flat_map(|(id, model)| {
-                            model
-                                .meshes
-                                .iter()
-                                .map(move |(name, values)| (format!("{id}/{name}"), values.clone()))
-                        })
-                        .collect(),
-                )
-                .map_err(ViewportError::Rendering)?;
+        if self.output.load_models(frame) {
             self.frame_robot(None);
-            self.models = models;
         }
-        self.scene = RobotScene::compose(frame);
-        if let Some(aspect_ratio) = self.renderer.resize(&self.canvas, pixel_ratio) {
-            self.renderer.draw(RenderFrame::new(
-                &self.camera,
-                aspect_ratio,
-                self.scene.scene(),
-            ));
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        self.scene = RobotScene::compose(frame, Frustums::Drawn);
+        let Some(aspect_ratio) = self.output.resize(pixel_ratio) else {
+            return Ok(false);
+        };
+        self.output.draw(RenderFrame::new(
+            self.camera.view_projection(aspect_ratio),
+            self.scene.scene(),
+        ))
     }
 
     fn height(&self) -> f32 {
-        self.canvas.client_height().max(1) as f32
+        self.output.canvas().client_height().max(1) as f32
     }
 
     /// Begin direct manipulation at a client-space pointer position.
@@ -155,7 +103,7 @@ impl Viewport {
         let Some((target, distance)) = self.frame.framing(robot) else {
             return false;
         };
-        let aspect = self.canvas.client_width().max(1) as f32 / self.height();
+        let aspect = self.output.canvas().client_width().max(1) as f32 / self.height();
         self.camera = Camera::framed_on(target, distance / aspect.min(1.0));
         true
     }
@@ -197,7 +145,7 @@ impl Viewport {
     pub fn anchor(&self, target: &Target) -> Option<(f64, f64)> {
         let key = self.scene.key(target)?;
         let world_position = self.scene.scene().anchor_point(key)?;
-        let rect = self.canvas.get_bounding_client_rect();
+        let rect = self.output.canvas().get_bounding_client_rect();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
         }
@@ -207,7 +155,7 @@ impl Viewport {
             return None;
         }
         let ndc = clip.truncate() / clip.w;
-        if !(-1.0..=1.0).contains(&ndc.z) {
+        if !(0.0..=1.0).contains(&ndc.z) {
             return None;
         }
         Some((
@@ -218,7 +166,7 @@ impl Viewport {
 
     /// The world-space ray through a client-space point.
     fn ray(&self, client_position: (f64, f64)) -> Option<(Vec3, Vec3)> {
-        let rect = self.canvas.get_bounding_client_rect();
+        let rect = self.output.canvas().get_bounding_client_rect();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
         }
@@ -227,7 +175,7 @@ impl Viewport {
         let aspect = (rect.width() / rect.height()) as f32;
         let inverse_projection: Mat4 = self.camera.view_projection(aspect).inverse();
         let ray_origin =
-            inverse_projection.project_point3(Vec3::new(normalized_x, normalized_y, -1.0));
+            inverse_projection.project_point3(Vec3::new(normalized_x, normalized_y, 0.0));
         let ray_end = inverse_projection.project_point3(Vec3::new(normalized_x, normalized_y, 1.0));
         Some((ray_origin, (ray_end - ray_origin).normalize_or(Vec3::X)))
     }

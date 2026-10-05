@@ -17,6 +17,7 @@ mod recording;
 mod robotics;
 mod robots;
 mod rollout;
+mod simulation;
 mod sync;
 
 pub(crate) use error::OperationError;

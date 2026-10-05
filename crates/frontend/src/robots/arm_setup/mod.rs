@@ -10,7 +10,7 @@
 //! configuration without mixing setup work into the operating surface.
 
 use dioxus::prelude::*;
-use spiral_robotics_common::robots::config::{RobotConfig, RobotConfigSave};
+use spiral_robotics_common::robots::config::{MotorAccess, RobotConfig, RobotConfigSave};
 use spiral_robotics_common::robots::{PortSettings, RobotSummary, SerialPortSummary};
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonVariant, ChevronIcon, Disclosure, FileButton, FileInput, Select,
@@ -95,11 +95,11 @@ fn RobotEntry(
     // calibrated has nothing to do here, so it starts folded; anything else
     // opens on the work. Only the initial state is derived — an arm becoming
     // ready while the operator is reading it must not fold itself away.
-    let ready = robot.config().port().is_some() && robot.config().calibrated();
+    let ready = robot.config().motor_access().is_some() && robot.config().calibrated();
     let mut open = use_signal(|| !ready || !robot.connection().connected());
     let id = robot.id().to_owned();
     let role = robot.config().robot_type().robot_role();
-    let state = if robot.config().port().is_none() {
+    let state = if robot.config().motor_access().is_none() {
         "Port needed"
     } else if !robot.config().calibrated() {
         "Calibration needed"
@@ -314,7 +314,7 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
                     .map_err(|error| error.to_string())?;
                 chosen.set(Some(Selection::Robot(robot.id().to_owned())));
                 project.report_success(format!("Imported {}.", robot.id()));
-                if robot.config().port().is_some() {
+                if robot.config().motor_access().is_some() {
                     RobotClient::current()
                         .connect_robot(robot.id().to_owned())
                         .await
@@ -380,13 +380,20 @@ fn RobotSetup(
             }
 
             div { class: "device-setup-section",
-                PortSection { project, telemetry,
-                    robot: robot.clone(),
-                    state: PortSectionState::new(
-                        port_catalog.scan(),
-                        progress.is_some(),
-                        move |()| port_catalog.rescan(),
-                    ),
+                if matches!(robot.config().motor_access(), Some(MotorAccess::Simulated(_))) {
+                    SimulatedBusSection { project, telemetry,
+                        robot: robot.clone(),
+                        sweeping: progress.is_some(),
+                    }
+                } else {
+                    PortSection { project, telemetry,
+                        robot: robot.clone(),
+                        state: PortSectionState::new(
+                            port_catalog.scan(),
+                            progress.is_some(),
+                            move |()| port_catalog.rescan(),
+                        ),
+                    }
                 }
             }
             div { class: "device-setup-section",
@@ -496,8 +503,8 @@ fn ConnectionAction(
     });
     // Disconnecting mid-sweep throws the sweep away, so make the operator
     // finish or cancel deliberately rather than lose it to one click.
-    let blocked = robot.config().port().is_none() || (connected && sweeping);
-    let reason = if robot.config().port().is_none() {
+    let blocked = robot.config().motor_access().is_none() || (connected && sweeping);
+    let reason = if robot.config().motor_access().is_none() {
         "Assign a serial port first"
     } else if connected && sweeping {
         "Finish or cancel calibration first"
@@ -663,6 +670,29 @@ fn PortSection(
                         HardwareCommands::new(project, telemetry).assign_port(PortAssignment::new(robot.clone(), path, baud))
                     }
                 },
+            }
+        }
+    }
+}
+
+/// A simulated arm's motor bus: there is no port to choose, only a bus to open.
+#[component]
+fn SimulatedBusSection(
+    project: StudioProjectState,
+    telemetry: HardwareViewState,
+    robot: RobotSummary,
+    sweeping: bool,
+) -> Element {
+    rsx! {
+        section { class: "device-section-content",
+            div { class: "device-section-head",
+                h3 { class: "label mb-0", "Motor bus" }
+            }
+            div { class: "device-port-row",
+                span { class: "min-w-0 flex-1 truncate text-[11px] text-ink-faint",
+                    "Simulated by the robot connector"
+                }
+                ConnectionAction { project, telemetry, robot, sweeping }
             }
         }
     }

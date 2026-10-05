@@ -3,5 +3,6 @@
 pub(crate) mod camera_preview;
 pub(crate) mod discovery;
 pub(crate) mod http;
+pub(crate) mod models;
 pub(crate) mod operations;
 pub(crate) mod workspace;

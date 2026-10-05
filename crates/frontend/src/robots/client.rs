@@ -4,6 +4,7 @@ use crate::client::queries::QueryDomain::*;
 use crate::client::robot_connector::RobotConnector;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::robots::config::RobotConfigSave;
+use spiral_robotics_common::robots::visualization::{RobotModelFiles, RobotModelId};
 use spiral_robotics_common::robots::{
     CameraStatus, ModeSelection, RobotGoal, RobotSummary, SerialPortSummary,
 };
@@ -32,6 +33,17 @@ impl RobotClient {
     ) -> impl Future<Output = Result<Vec<RobotSummary>, CommandError>> + use<> {
         self.connector
             .request(HttpRequest::new("GET", "/api/robots"))
+    }
+
+    /// A stored robot model, which never changes under its address.
+    pub(super) fn robot_model(
+        &self,
+        model: &RobotModelId,
+    ) -> impl Future<Output = Result<RobotModelFiles, CommandError>> + use<> {
+        self.connector.request(HttpRequest::new(
+            "GET",
+            format!("/api/robots/models/{model}"),
+        ))
     }
     pub(super) fn hardware_status(
         &self,

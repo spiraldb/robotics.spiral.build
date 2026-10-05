@@ -9,13 +9,16 @@ use std::sync::Mutex;
 use crate::OperationError;
 
 use spiral_robotics_common::robots::config::{MotorRange, RobotConfig};
+use spiral_robotics_common::robots::visualization::RobotModelId;
 use spiral_robotics_common::robots::{ConnectionStatus, RobotSummary};
 
+use super::models::RobotModelStore;
 use crate::sync::MutexRecovery;
 
 #[derive(Debug)]
 pub(crate) enum WorkspaceError {
     NotFound(String),
+    ModelNotFound(RobotModelId),
     Conflict(String),
     Invalid(String),
     Storage(String),
@@ -26,7 +29,9 @@ impl From<WorkspaceError> for OperationError {
         let message = error.to_string();
         match error {
             WorkspaceError::Invalid(_) => Self::InvalidInput(message),
-            WorkspaceError::NotFound(_) => Self::NotFound(message),
+            WorkspaceError::NotFound(_) | WorkspaceError::ModelNotFound(_) => {
+                Self::NotFound(message)
+            }
             WorkspaceError::Conflict(_) => Self::Conflict(message),
             WorkspaceError::Storage(_) => Self::Internal(message),
         }
@@ -37,6 +42,7 @@ impl fmt::Display for WorkspaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound(id) => write!(formatter, "no robot named {id:?}"),
+            Self::ModelNotFound(id) => write!(formatter, "no robot model {id} is saved here"),
             Self::Conflict(detail) | Self::Invalid(detail) | Self::Storage(detail) => {
                 formatter.write_str(detail)
             }
@@ -60,6 +66,10 @@ impl RobotRecord {
 
     pub(crate) const fn config(&self) -> &RobotConfig {
         &self.config
+    }
+
+    pub(crate) const fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub(crate) fn summary(&self, connection: ConnectionStatus) -> RobotSummary {
@@ -91,15 +101,17 @@ impl RobotRecord {
 }
 
 /// The robots saved on this connector, kept in one JSON file that every
-/// change rewrites whole.
+/// change rewrites whole, and the models they are drawn with.
 pub(crate) struct RobotWorkspace {
     file: PathBuf,
     saved: Mutex<BTreeMap<String, RobotRecord>>,
+    models: RobotModelStore,
 }
 
 impl RobotWorkspace {
-    /// The robots saved in `file`; none before the first save.
-    pub(crate) fn open(file: PathBuf) -> Result<Self, WorkspaceError> {
+    /// The robots saved in `file`, none before the first save, and the models
+    /// kept in `models`.
+    pub(crate) fn open(file: PathBuf, models: RobotModelStore) -> Result<Self, WorkspaceError> {
         let saved = match fs::read(&file) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
                 WorkspaceError::Storage(format!("reading {}: {error}", file.display()))
@@ -115,7 +127,12 @@ impl RobotWorkspace {
         Ok(Self {
             file,
             saved: Mutex::new(saved),
+            models,
         })
+    }
+
+    pub(crate) const fn models(&self) -> &RobotModelStore {
+        &self.models
     }
 
     pub(crate) async fn list(&self) -> Vec<RobotRecord> {
@@ -126,7 +143,12 @@ impl RobotWorkspace {
     }
 
     pub(crate) async fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
-        Ok(self.saved.recover_lock().values().cloned().collect())
+        Ok(self.records())
+    }
+
+    /// Every saved robot, in ID order, for a caller off the async runtime.
+    pub(crate) fn records(&self) -> Vec<RobotRecord> {
+        self.saved.recover_lock().values().cloned().collect()
     }
 
     pub(crate) async fn get(&self, id: &str) -> Result<RobotRecord, WorkspaceError> {
@@ -138,11 +160,16 @@ impl RobotWorkspace {
     }
 
     /// Save a complete configuration over the revision its editor started from.
-    pub(super) async fn save(
+    pub(crate) async fn save(
         &self,
         config: RobotConfig,
         expected_revision: Option<u64>,
     ) -> Result<RobotRecord, WorkspaceError> {
+        if let Some(visualization) = config.visualization()
+            && !self.models.contains(visualization.model())
+        {
+            return Err(WorkspaceError::ModelNotFound(visualization.model().clone()));
+        }
         let mut saved = self.saved.recover_lock();
         let current = saved.get(config.id()).map(|record| record.revision);
         if current != expected_revision {

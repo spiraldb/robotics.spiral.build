@@ -4,7 +4,7 @@
 //! makes dragging feel like turning the robot around instead of steering past
 //! it. Nothing here knows what is being looked at.
 
-use glam::camera::rh::proj::opengl;
+use glam::camera::rh::proj::directx;
 use glam::camera::rh::view::look_at_mat4;
 use glam::{Mat4, Vec3};
 
@@ -115,10 +115,10 @@ impl Camera {
     }
 
     pub(crate) fn view_projection(&self, aspect_ratio: f32) -> Mat4 {
-        // Right handed, with the depth range OpenGL and WebGL expect. Near and
-        // far bracket a tabletop scene: close enough to push the camera almost
-        // into a joint, far enough to pull back off the bench.
-        let projection = opengl::perspective(
+        // Right handed, with the zero-to-one depth range wgpu expects on every
+        // backend. Near and far bracket a tabletop scene: close enough to push
+        // the camera almost into a joint, far enough to pull back off the bench.
+        let projection = directx::perspective(
             FIELD_OF_VIEW,
             aspect_ratio.max(0.01),
             0.02 * self.scale,
