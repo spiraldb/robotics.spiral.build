@@ -42,10 +42,14 @@ the pinned release driver predates its query functions. See
 Start the studio from the workspace root with:
 
 ```console
-dx serve --fullstack --release --debug-symbols false \
+dx serve --fullstack --release --debug-symbols false --port 3000 \
   @client --package spiral-robotics-frontend \
   @server --package spiral-robotics-backend
 ```
+
+Open `http://localhost:3000`. Spiral's sign-in returns browsers only to
+registered addresses, and `http://localhost:3000/callback` is the local one, so
+a local Studio must be reached on port 3000.
 
 Studio renders entirely in the browser. The native server serves the built HTML,
 JavaScript, WASM, and assets alongside `/api`; it does not compile or render the
@@ -156,18 +160,20 @@ Both Studio and the policy runtime refuse non-loopback listeners by default.
 Use SSH forwarding for a remote worker. `--allow-remote-access` is reserved for
 deployments placed behind an authenticated TLS proxy.
 
-On first launch, Studio opens **Settings → SpiralDB**. Choose **Sign in with
-Spiral**, confirm the code on the Spiral sign-in page, then pick a project. Studio
-signs in the same way `spiraldb login` does and shares that session: if the CLI
-is already signed in, Studio starts signed in, and signing out of Studio signs
-the CLI out too. The backend holds the session and keeps its short-lived access
-token fresh; the browser never sees a token.
-The hosted services are the default endpoints; for the local stack use
-`http://127.0.0.1:4279` and `http://127.0.0.1:4295`. The backend remembers the
-endpoints and project in its private local SQLite database. Project-only switches
-apply immediately while Studio is idle. Service-endpoint changes also apply live
-while Studio is idle, after the old repository pool drains; signing out or
-switching organization closes the open projects.
+Every browser signs in to Spiral itself. Choose **Sign in with Spiral**: Studio
+sends the browser to Spiral's sign-in page, which returns it to Studio's
+`/callback`, then pick a project in **Settings → SpiralDB**. Each browser gets
+its own session. The backend keeps that user's tokens in its SQLite database,
+keeps the short-lived access token fresh, and opens every project as that user,
+who must be able to see it in Spiral. The browser holds only a session cookie and
+never sees a token. Sessions survive restarts; signing out or switching
+organization closes that browser's open projects.
+`SPIRAL_ROBOTICS_PUBLIC_URL` (or `--public-url`) sets the address browsers reach
+Studio at, `http://localhost:3000` by default; its `/callback` must be registered
+with Spiral's sign-in.
+The hosted services are the default endpoints; `SPIRAL__SERVER__URL` and
+`SPIRAL__SPFS__URL` choose others when the backend starts. The session remembers
+its project, and project switches apply immediately while Studio is idle.
 The SQLite file defaults to `.studio/studio.sqlite3` in this repository;
 the entire `.studio/` directory is Git-ignored.
 `SPIRAL_ROBOTICS_STUDIO_DB` overrides the SQLite file path for development

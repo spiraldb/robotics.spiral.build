@@ -1,16 +1,15 @@
-//! WorkOS, which signs users in to Spiral, through the same device-code flow
-//! and public client as `spiraldb login`. Spiral accepts only tokens issued to
-//! that client.
+//! WorkOS, which signs users in to Spiral. Studio uses the same public client
+//! as Spiral's own apps, because Spiral accepts only tokens issued to it; PKCE
+//! stands in for a client secret.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::login_file::LoginTokens;
+use super::tokens::SessionTokens;
 
 const SPIRAL_CLIENT_ID: &str = "client_01J1CRS9MGF103FKTKZDCNJVM3";
 const USER_MANAGEMENT: &str = "https://api.workos.com/user_management";
-pub(super) const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
 pub(super) struct WorkOs {
     http: reqwest::Client,
@@ -33,61 +32,49 @@ impl WorkOs {
         })
     }
 
-    /// Ask for a code the user confirms in their browser.
-    pub(super) async fn authorize_device(&self) -> Result<DeviceAuthorization, String> {
-        let response = self
-            .http
-            .post(format!("{}/authorize/device", self.user_management))
-            .form(&DeviceRequest {
-                client_id: SPIRAL_CLIENT_ID,
-                scope: "email profile",
-            })
-            .send()
-            .await
-            .map_err(|error| format!("Could not reach Spiral sign-in: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Spiral sign-in could not start ({})",
-                response.status()
-            ));
-        }
-        response
-            .json()
-            .await
-            .map_err(|error| format!("Reading Spiral sign-in: {error}"))
+    /// Spiral's sign-in page, which returns the browser to `redirect` with a
+    /// code for `challenge` and the `state` it was given.
+    pub(super) fn authorization_url(&self, redirect: &str, state: &str, challenge: &str) -> String {
+        let mut url = url::Url::parse(&format!("{}/authorize", self.user_management))
+            .expect("WorkOS address is a URL");
+        url.query_pairs_mut()
+            .append_pair("client_id", SPIRAL_CLIENT_ID)
+            .append_pair("redirect_uri", redirect)
+            .append_pair("response_type", "code")
+            .append_pair("provider", "authkit")
+            .append_pair("state", state)
+            .append_pair("code_challenge", challenge)
+            .append_pair("code_challenge_method", "S256");
+        url.into()
     }
 
-    /// Whether the user has confirmed `device` yet.
-    pub(super) async fn poll(&self, device: &DeviceAuthorization) -> Result<DevicePoll, String> {
+    /// The user's tokens for the `code` the sign-in page returned, proven by
+    /// the `verifier` behind its challenge.
+    pub(super) async fn redeem(&self, code: &str, verifier: &str) -> Result<SessionTokens, String> {
         let request = TokenRequest {
             client_id: SPIRAL_CLIENT_ID,
-            grant_type: DEVICE_CODE_GRANT,
-            device_code: Some(&device.device_code),
+            grant_type: "authorization_code",
+            code: Some(code),
+            code_verifier: Some(verifier),
             refresh_token: None,
             organization_id: None,
         };
-        Ok(match self.authenticate(&request).await? {
-            Ok(tokens) => DevicePoll::Confirmed(tokens),
-            Err(error) => match error.error.as_str() {
-                "authorization_pending" => DevicePoll::Pending,
-                "slow_down" => DevicePoll::SlowDown,
-                "access_denied" => DevicePoll::Denied,
-                "expired_token" => DevicePoll::Expired,
-                _ => return Err(error.describe()),
-            },
-        })
+        self.authenticate(&request)
+            .await?
+            .map_err(|error| format!("Spiral sign-in failed: {}", error.describe()))
     }
 
     /// Replace the session's tokens, acting in `organization` when one is named.
     pub(super) async fn refresh(
         &self,
-        tokens: &LoginTokens,
+        tokens: &SessionTokens,
         organization: Option<&str>,
-    ) -> Result<LoginTokens, RefreshFailure> {
+    ) -> Result<SessionTokens, RefreshFailure> {
         let request = TokenRequest {
             client_id: SPIRAL_CLIENT_ID,
             grant_type: "refresh_token",
-            device_code: None,
+            code: None,
+            code_verifier: None,
             refresh_token: Some(tokens.refresh_token()),
             organization_id: organization,
         };
@@ -104,7 +91,7 @@ impl WorkOs {
     async fn authenticate(
         &self,
         request: &TokenRequest<'_>,
-    ) -> Result<Result<LoginTokens, TokenError>, String> {
+    ) -> Result<Result<SessionTokens, TokenError>, String> {
         let response = self
             .http
             .post(format!("{}/authenticate", self.user_management))
@@ -128,17 +115,13 @@ impl WorkOs {
 }
 
 #[derive(Serialize)]
-struct DeviceRequest {
-    client_id: &'static str,
-    scope: &'static str,
-}
-
-#[derive(Serialize)]
 struct TokenRequest<'a> {
     client_id: &'static str,
     grant_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    device_code: Option<&'a str>,
+    code: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_verifier: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_token: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,41 +140,6 @@ impl TokenError {
             .clone()
             .unwrap_or_else(|| self.error.clone())
     }
-}
-
-/// One started sign-in. The device code stays on the backend; the browser only
-/// sees the page and the short code the user confirms.
-#[derive(Deserialize)]
-pub(super) struct DeviceAuthorization {
-    device_code: String,
-    user_code: String,
-    verification_uri_complete: String,
-    expires_in: u64,
-    interval: u64,
-}
-
-impl DeviceAuthorization {
-    pub(super) fn user_code(&self) -> &str {
-        &self.user_code
-    }
-    pub(super) fn verification_url(&self) -> &str {
-        &self.verification_uri_complete
-    }
-    pub(super) fn lifetime(&self) -> Duration {
-        Duration::from_secs(self.expires_in)
-    }
-    pub(super) fn interval(&self) -> Duration {
-        Duration::from_secs(self.interval.max(1))
-    }
-}
-
-pub(super) enum DevicePoll {
-    Pending,
-    /// WorkOS asks for a longer wait between polls.
-    SlowDown,
-    Confirmed(LoginTokens),
-    Denied,
-    Expired,
 }
 
 pub(super) enum RefreshFailure {

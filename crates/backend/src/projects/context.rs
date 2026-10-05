@@ -1,10 +1,11 @@
 //! What a request can reach: Studio-wide services, and the project it names.
-use crate::account::SpiralAccount;
+use crate::account::{SpiralSession, SpiralSessions};
 use crate::curation::manager::CurationManager;
-use crate::projects::{OpenProject, ProjectRegistry};
+use crate::projects::{OpenProject, ProjectOpening, ProjectRegistry};
 use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
+use crate::robots::operations::RobotOperations;
 use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::RolloutManager;
 use crate::training::manager::TrainingManager;
@@ -14,42 +15,61 @@ use spiral_robotics_storage::{ProviderKeyring, StorageManager, episodes::Recordi
 use std::sync::Arc;
 
 /// Services shared by every request: the open projects, the hardware they
-/// share, the Spiral account they reach Spiral as, and the provider keys.
+/// share, the browsers' Spiral sessions, and the provider keys.
 #[derive(Clone)]
 pub(crate) struct StudioContext {
     projects: Arc<ProjectRegistry>,
-    account: Arc<SpiralAccount>,
+    sessions: Arc<SpiralSessions>,
     keys: Arc<ProviderKeyring>,
 }
 
 impl StudioContext {
     pub(crate) fn new(
         projects: Arc<ProjectRegistry>,
-        account: Arc<SpiralAccount>,
+        sessions: Arc<SpiralSessions>,
         keys: Arc<ProviderKeyring>,
     ) -> Self {
         Self {
             projects,
-            account,
+            sessions,
             keys,
         }
     }
 
-    pub(crate) fn open(&self, key: &ProjectKey) -> Result<ProjectContext, crate::OperationError> {
-        Ok(self.with_project(self.projects.open(key)?))
+    /// The project `key` names, as `session`'s user. The first session to open
+    /// a project reconnects the robots saved in it.
+    pub(crate) async fn open(
+        &self,
+        session: &Arc<SpiralSession>,
+        key: &ProjectKey,
+    ) -> Result<ProjectContext, crate::OperationError> {
+        let opened = match self.projects.open(session, key).await? {
+            ProjectOpening::Opened(project) => self.with_project(session.clone(), project),
+            ProjectOpening::FirstInStudio(project) => {
+                let opened = self.with_project(session.clone(), project);
+                RobotOperations::spawn_auto_connect(opened.clone());
+                opened
+            }
+        };
+        Ok(opened)
     }
 
     pub(crate) fn opened(&self) -> Vec<ProjectContext> {
         self.projects
             .opened()
             .into_iter()
-            .map(|project| self.with_project(project))
+            .map(|(session, project)| self.with_project(session, project))
             .collect()
     }
 
-    fn with_project(&self, project: Arc<OpenProject>) -> ProjectContext {
+    fn with_project(
+        &self,
+        session: Arc<SpiralSession>,
+        project: Arc<OpenProject>,
+    ) -> ProjectContext {
         ProjectContext {
             project,
+            session,
             studio: self.clone(),
         }
     }
@@ -57,8 +77,8 @@ impl StudioContext {
     pub(crate) fn projects(&self) -> &Arc<ProjectRegistry> {
         &self.projects
     }
-    pub(crate) fn account(&self) -> &Arc<SpiralAccount> {
-        &self.account
+    pub(crate) fn sessions(&self) -> &Arc<SpiralSessions> {
+        &self.sessions
     }
     pub(crate) fn keys(&self) -> &ProviderKeyring {
         &self.keys
@@ -68,28 +88,33 @@ impl StudioContext {
     }
 }
 
-/// A request or task retains the project it named for its entire lifetime.
+/// A request or task retains the project it named, and the session that
+/// opened it, for its entire lifetime.
 #[derive(Clone)]
 pub(crate) struct ProjectContext {
     project: Arc<OpenProject>,
+    session: Arc<SpiralSession>,
     studio: StudioContext,
 }
 
 impl ProjectContext {
-    /// The same Studio services with another project, such as the one a
-    /// settings change just opened.
+    /// The same session and Studio services with another project, such as the
+    /// one a settings change just opened.
     pub(crate) fn with_project(&self, project: Arc<OpenProject>) -> Self {
-        self.studio.with_project(project)
+        self.studio.with_project(self.session.clone(), project)
     }
 
     pub(crate) fn project(&self) -> &Arc<OpenProject> {
         &self.project
     }
+    pub(crate) fn session(&self) -> &Arc<SpiralSession> {
+        &self.session
+    }
+    pub(crate) fn studio(&self) -> &StudioContext {
+        &self.studio
+    }
     pub(crate) fn projects(&self) -> &Arc<ProjectRegistry> {
         self.studio.projects()
-    }
-    pub(crate) fn account(&self) -> &Arc<SpiralAccount> {
-        self.studio.account()
     }
     pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
         self.project.workspace()

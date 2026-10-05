@@ -134,12 +134,6 @@ impl SpiralSettings {
         crate::project::ProjectKey::new(&self.endpoint, &self.project_id)
     }
 
-    pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {
-        self.endpoint = endpoint.into();
-    }
-    pub fn set_spfs_endpoint(&mut self, endpoint: impl Into<String>) {
-        self.spfs_endpoint = endpoint.into();
-    }
     pub fn set_project_id(&mut self, project_id: impl Into<String>) {
         self.project_id = project_id.into();
     }
@@ -166,46 +160,6 @@ impl VideoSettings {
     }
     pub const fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
-    }
-}
-
-/// Spiral connection changes from the settings screen.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SpiralConnectionUpdate {
-    spiral_endpoint: String,
-    spiral_spfs_endpoint: String,
-    project_id: String,
-}
-
-impl SpiralConnectionUpdate {
-    pub fn new(
-        spiral_endpoint: impl Into<String>,
-        spiral_spfs_endpoint: impl Into<String>,
-        project_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            spiral_endpoint: spiral_endpoint.into(),
-            spiral_spfs_endpoint: spiral_spfs_endpoint.into(),
-            project_id: project_id.into(),
-        }
-    }
-
-    pub fn into_parts(self) -> (String, String, String) {
-        (
-            self.spiral_endpoint,
-            self.spiral_spfs_endpoint,
-            self.project_id,
-        )
-    }
-}
-
-impl Default for SpiralConnectionUpdate {
-    fn default() -> Self {
-        Self::new(
-            SpiralSettings::default_endpoint(),
-            SpiralSettings::default_spfs_endpoint(),
-            String::new(),
-        )
     }
 }
 

@@ -1,11 +1,13 @@
 //! The project this browser works on. The browser chooses it, not the
-//! backend: the saved connection supplies the first one, and this browser's
-//! settings saves change it. Every project resource, draft, and request is
-//! mounted under it.
+//! backend: its session's saved project supplies the first one, and this
+//! browser's settings saves change it. Every project resource, draft, and
+//! request is mounted under it. A browser without a Spiral session works on
+//! no project until it signs in.
 use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use crate::client::{CommandError, transport::HttpRequest};
 use dioxus::prelude::*;
+use spiral_robotics_common::command_failure::CommandFailureCode;
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::settings::SpiralSettings;
 
@@ -13,6 +15,7 @@ use spiral_robotics_common::settings::SpiralSettings;
 pub(crate) struct ProjectSelection {
     selected: Signal<Option<ProjectKey>>,
     live: Signal<bool>,
+    signed_out: Signal<bool>,
     refresh: QueryRefresh,
 }
 impl ProjectSelection {
@@ -20,9 +23,11 @@ impl ProjectSelection {
         let refresh = QueryRefresh::use_provider();
         let selected = use_signal(|| None);
         let live = use_signal(|| false);
+        let signed_out = use_signal(|| false);
         use_context_provider(|| Self {
             selected,
             live,
+            signed_out,
             refresh,
         })
     }
@@ -35,6 +40,14 @@ impl ProjectSelection {
     /// Whether the last read of the saved connection reached Studio.
     pub(crate) fn live(self) -> bool {
         *self.live.read()
+    }
+    /// Whether Studio refused this browser for want of a Spiral session.
+    pub(crate) fn signed_out(self) -> bool {
+        *self.signed_out.read()
+    }
+    /// This browser just ended its session; only signing in again continues.
+    pub(crate) fn sign_out(mut self) {
+        self.signed_out.set(true);
     }
     /// Whether catalog features can run: Studio is reachable and a Spiral
     /// project is chosen.
@@ -55,13 +68,20 @@ impl ProjectSelection {
             self.selected.set(Some(project));
         }
     }
-    /// The saved connection proves Studio is reachable. It picks the project
-    /// only before one is chosen, or when its endpoint moved, because the
-    /// backend then refuses projects on the old endpoint.
+    /// The saved connection proves Studio is reachable and this browser
+    /// signed in. It picks the project only before one is chosen, or when its
+    /// endpoint moved, because the backend then refuses projects on the old
+    /// endpoint.
     fn accept(mut self, result: Result<SpiralSettings, CommandError>) {
         let live = result.is_ok();
         if *self.live.peek() != live {
             self.live.set(live);
+        }
+        let signed_out = result
+            .as_ref()
+            .is_err_and(|error| error.code() == CommandFailureCode::Unauthenticated);
+        if *self.signed_out.peek() != signed_out {
+            self.signed_out.set(signed_out);
         }
         let Ok(saved) = result else {
             return;
@@ -158,7 +178,7 @@ mod tests {
 
         fn unreachable(&self) {
             self.selection().accept(Err(CommandError::new(
-                spiral_robotics_common::command_failure::CommandFailureCode::Transport,
+                CommandFailureCode::Transport,
                 "connection lost",
             )));
         }
@@ -211,6 +231,27 @@ mod tests {
             observed.mounts[1].client.project().endpoint(),
             "https://moved.spiraldb.dev"
         );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn a_browser_without_a_session_is_signed_out_until_studio_accepts_it() {
+        let harness = SelectionHarness::default();
+        let mut dom = VirtualDom::new_with_props(SelectionHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        dom.in_runtime(|| {
+            harness.selection().accept(Err(CommandError::new(
+                CommandFailureCode::Unauthenticated,
+                "Sign in to Spiral to continue.",
+            )))
+        });
+        assert!(dom.in_runtime(|| harness.selection().signed_out()));
+        // Losing the connection says nothing about the session.
+        dom.in_runtime(|| harness.unreachable());
+        assert!(!dom.in_runtime(|| harness.selection().signed_out()));
+        dom.in_runtime(|| harness.saved(ENDPOINT, "first"));
+        assert!(!dom.in_runtime(|| harness.selection().signed_out()));
+        dom.in_runtime(|| harness.selection().sign_out());
+        assert!(dom.in_runtime(|| harness.selection().signed_out()));
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

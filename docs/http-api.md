@@ -93,20 +93,24 @@ bounded to approximately thirty minutes at 20 Hz.
 
 ## Examples
 
-Read the saved connection, then telemetry for its project:
+Every request carries a browser's session cookie, `studio_session`; sign in at
+`http://localhost:3000` and copy it from the browser's developer tools. Read
+the session's connection, then telemetry for its project:
 
 ```sh
-curl http://127.0.0.1:8080/api/settings/connection
-curl -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
-  http://127.0.0.1:8080/api/robots/telemetry
-curl -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
-  'http://127.0.0.1:8080/api/recording/signals?generation=0&offset=0'
+curl -b "studio_session=$STUDIO_SESSION" http://localhost:3000/api/settings/connection
+curl -b "studio_session=$STUDIO_SESSION" \
+  -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
+  http://localhost:3000/api/robots/telemetry
+curl -b "studio_session=$STUDIO_SESSION" \
+  -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
+  'http://localhost:3000/api/recording/signals?generation=0&offset=0'
 ```
 
 Submit a read-only SQL query with an explicit row bound:
 
 ```sh
-curl -X POST http://127.0.0.1:8080/api/queries \
+curl -X POST http://localhost:3000/api/queries -b "studio_session=$STUDIO_SESSION" \
   -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
   -H 'Content-Type: application/json' \
   --data '{"statement":"SELECT 1 AS example","max_rows":10}'
@@ -129,26 +133,36 @@ request and response types are in `crates/common`.
 
 ### Spiral account
 
-Studio reaches Spiral as a signed-in user, through the same WorkOS device-code
-sign-in and shared session file as `spiraldb login`. The backend holds the tokens;
-responses never include one.
+Every browser signs in to Spiral itself, on Spiral's WorkOS sign-in page, with
+an authorization code and PKCE. The backend keeps each session's tokens and
+names the session in an HttpOnly `studio_session` cookie; responses never
+include a token. Every `/api` request needs a live session and otherwise fails
+with `401` and the code `unauthenticated`. Opening a project asks Spiral
+whether the session's user may view it.
 
-- `GET /account` returns `SpiralAccountStatus`: `signed_out` (with an optional
-  `problem`), `signing_in` (`verification_url`, `user_code`), or `signed_in`
-  (`email`, `organization`).
-- `POST /account/sign-in` starts a sign-in the user confirms at `verification_url`;
-  it completes in the background. Starting again replaces an unconfirmed one.
+The sign-in pages are outside `/api`, because the browser navigates to them:
+
+- `GET /sign-in?return_to=<path>` sends the browser to Spiral's sign-in page.
+- `GET /callback` receives it back, starts the session, and returns the browser
+  to `return_to`, a path on this Studio.
+
+The account endpoints:
+
+- `GET /account` returns the `SpiralIdentity`: `email` and `organization`.
+- `GET /settings/connection` returns the Spiral endpoints and the project the
+  session works on, empty before one is chosen.
 - `GET /account/organizations` and `GET /account/projects` list the user's
   organizations and the projects they can open in the current one.
 - `POST /account/sign-out` and `PUT /account/organization`
-  (`{"organization_id": …}`) name the mounted project. They refuse while any
-  project is recording, rolling out, or training, then close every open project
-  and clear the saved project.
+  (`{"organization_id": …}`) name the mounted project. They refuse while any of
+  the session's projects is recording, rolling out, or training, then close the
+  session's open projects. Signing out ends the session and its cookie;
+  another organization forgets the session's project.
 
 ### External HTTP and credentials
 
 `GET /providers` and `GET` or `POST /proxy?url=…` are Studio-wide and work without
-the project headers. They do not select credentials or destinations based on a project.
+the project headers, though like every API request they need a session. They do not select credentials or destinations based on a project.
 
 `StudioProviders` contains an optional `llm` (`base_url`). Its key
 stays on the backend.

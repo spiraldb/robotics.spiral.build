@@ -11,6 +11,8 @@ mod migrations;
 #[allow(unreachable_pub)]
 pub(crate) mod robots;
 #[allow(unreachable_pub)]
+pub(crate) mod sessions;
+#[allow(unreachable_pub)]
 pub(crate) mod studio_settings;
 #[allow(unreachable_pub)]
 pub(crate) mod training_runs;

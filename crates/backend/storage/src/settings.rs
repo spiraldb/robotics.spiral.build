@@ -1,7 +1,7 @@
-//! Backend connection settings and project-owned Studio preferences in SQLite.
+//! Spiral destinations, the provider keys, and project-owned Studio
+//! preferences in SQLite.
 
 use serde::{Deserialize, Serialize};
-
 use spiral_robotics_common::settings::{DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT};
 use url::Url;
 
@@ -49,51 +49,12 @@ impl<'a> StudioPreferencePersistence<'a> {
     }
 }
 
-/// The connection Studio saved last, read once at startup.
-#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SavedConnection {
-    #[serde(default)]
-    project_id: String,
-    #[serde(default)]
-    spiral_endpoint: String,
-    #[serde(default)]
-    spiral_spfs_endpoint: String,
-}
-
-/// The backend settings document: the saved connection and the provider keys,
-/// side by side in one SQLite row that project bundles never contain.
-#[derive(Default, Deserialize, Serialize)]
-struct BackendSettingsDocument {
-    #[serde(flatten)]
-    connection: SavedConnection,
-    #[serde(flatten)]
-    keys: ProviderKeys,
-}
-
-impl SavedConnection {
-    pub fn project_id(&self) -> Option<String> {
-        Self::non_empty(&self.project_id)
-    }
-
-    pub fn spiral_endpoint(&self) -> Option<String> {
-        Self::non_empty(&self.spiral_endpoint)
-    }
-
-    pub fn spiral_spfs_endpoint(&self) -> Option<String> {
-        Self::non_empty(&self.spiral_spfs_endpoint)
-    }
-
-    fn non_empty(value: &str) -> Option<String> {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_owned())
-    }
-}
-
-/// Validated bootstrap destination for the one Spiral project connection.
+/// Validated destination of one Spiral project connection.
 ///
 /// Construction keeps endpoints and project identity together so callers
 /// cannot partially reconfigure a live store. The signed-in user's access is
-/// not part of the destination: every project reads it from [`crate::SpiralAccess`].
+/// not part of the destination: each project reads it from its session's
+/// [`crate::SpiralAccess`].
 #[derive(Clone, Eq, PartialEq)]
 pub struct SpiralConnectionSettings {
     endpoint: String,
@@ -202,7 +163,8 @@ impl ServiceEndpoint {
     }
 }
 
-/// Private connection settings persisted alongside project-owned Studio records.
+/// The backend settings document, one SQLite row that project bundles never
+/// contain. It holds the provider keys.
 pub struct BackendStateStore {
     studio: crate::StudioStore,
 }
@@ -220,32 +182,16 @@ impl BackendStateStore {
         &self.studio
     }
 
-    /// Open the database and read the saved connection and provider keys.
-    pub async fn initialize(&self) -> Result<(SavedConnection, ProviderKeys), String> {
+    /// Open the database and read the provider keys.
+    pub async fn initialize(&self) -> Result<ProviderKeys, String> {
         self.studio.initialize().await?;
-        let saved: BackendSettingsDocument = match self.studio.backend_settings().await? {
-            Some(document) => {
-                serde_json::from_value(document).map_err(|error| error.to_string())?
-            }
-            None => BackendSettingsDocument::default(),
-        };
-        Ok((saved.connection, saved.keys))
+        match self.studio.backend_settings().await? {
+            Some(document) => serde_json::from_value(document).map_err(|error| error.to_string()),
+            None => Ok(ProviderKeys::default()),
+        }
     }
 
-    /// Save the connection a browser starts on; without a project, the next
-    /// browser is asked to choose one. The saved keys stay as they are.
-    pub async fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
-        let next = SavedConnection {
-            project_id: settings.project_id().unwrap_or_default().to_owned(),
-            spiral_endpoint: settings.endpoint().to_owned(),
-            spiral_spfs_endpoint: settings.spfs_endpoint().to_owned(),
-        };
-        self.studio
-            .patch_backend_settings(serde_json::to_value(&next).map_err(|error| error.to_string())?)
-            .await
-    }
-
-    /// Save the provider keys. The saved connection stays as it is.
+    /// Save the provider keys.
     pub(crate) async fn save_keys(&self, keys: &ProviderKeys) -> Result<(), String> {
         self.studio.patch_backend_settings(keys.merge_patch()).await
     }
@@ -336,43 +282,19 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn backend_state_round_trips_only_the_spiral_bootstrap_pointers() {
+    async fn backend_state_round_trips_the_provider_keys_privately() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("studio.sqlite3");
         let store = BackendStateStore::new(crate::StudioStore::at(path.clone()));
-        let (empty, no_keys) = store.initialize().await.unwrap();
-        assert_eq!(empty.project_id(), None);
-        assert_eq!(empty.spiral_endpoint(), None);
-        assert_eq!(empty.spiral_spfs_endpoint(), None);
-        assert_eq!(no_keys, ProviderKeys::default());
-
-        let settings = SpiralConnectionSettings::new(
-            " http://127.0.0.1:4279/ ".to_owned(),
-            " http://127.0.0.1:4295/ ".to_owned(),
-        )
-        .unwrap()
-        .with_project(" project-123 ")
-        .unwrap();
+        assert_eq!(store.initialize().await.unwrap(), ProviderKeys::default());
         let keys = ProviderKeys::default().updated(
             &spiral_robotics_common::providers::ProviderKeysUpdate::default()
                 .with_llm_api_key(Some("sk-or-private".into()))
                 .with_huggingface_token(Some("hf_private".into())),
         );
         store.save_keys(&keys).await.unwrap();
-        // Saving the connection keeps the keys, and saving keys keeps the connection.
-        store.save_connection(&settings).await.unwrap();
         let reopen = || BackendStateStore::new(crate::StudioStore::at(path.clone()));
-        let (saved, saved_keys) = reopen().initialize().await.unwrap();
-        assert_eq!(saved.project_id().as_deref(), Some("project-123"));
-        assert_eq!(
-            saved.spiral_endpoint().as_deref(),
-            Some("http://127.0.0.1:4279")
-        );
-        assert_eq!(
-            saved.spiral_spfs_endpoint().as_deref(),
-            Some("http://127.0.0.1:4295")
-        );
-        assert_eq!(saved_keys, keys);
+        assert_eq!(reopen().initialize().await.unwrap(), keys);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -390,8 +312,7 @@ mod tests {
                 .with_huggingface_token(Some(String::new())),
         );
         store.save_keys(&without_token).await.unwrap();
-        let (saved, saved_keys) = reopen().initialize().await.unwrap();
-        assert_eq!(saved.project_id().as_deref(), Some("project-123"));
+        let saved_keys = reopen().initialize().await.unwrap();
         assert_eq!(saved_keys.huggingface_token(), None);
         assert_eq!(saved_keys.llm_api_key(), Some("sk-or-private"));
     }

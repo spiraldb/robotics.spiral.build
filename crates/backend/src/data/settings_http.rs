@@ -1,7 +1,7 @@
 //! HTTP endpoints for settings.
 
 use crate::OperationError;
-use crate::http::delivery::{ApiJson, Project};
+use crate::http::delivery::{ApiJson, Project, SignedIn};
 use crate::projects::context::StudioContext;
 use crate::robots::operations::RobotOperations;
 
@@ -27,9 +27,12 @@ impl SettingsEndpoints {
     pub(crate) fn commands() -> Router<StudioContext> {
         Router::new().route("/settings", put(Self::update_data_settings))
     }
-    /// The saved connection names the project a browser starts on.
-    async fn connection_settings(State(state): State<StudioContext>) -> Json<SpiralSettings> {
-        Json(state.projects().saved_settings())
+    /// The endpoints, and the project this browser's session works on.
+    async fn connection_settings(
+        State(state): State<StudioContext>,
+        SignedIn(session): SignedIn,
+    ) -> Result<Json<SpiralSettings>, OperationError> {
+        Ok(Json(state.projects().session_settings(&session).await?))
     }
     async fn data_settings(
         Project(project): Project,
@@ -42,7 +45,7 @@ impl SettingsEndpoints {
     ) -> Result<Json<DataSettings>, OperationError> {
         let (settings, switched_to) = project
             .projects()
-            .update_settings(project.project(), request)
+            .update_settings(project.session(), project.project(), request)
             .await?;
         if let Some(switched) = switched_to {
             RobotOperations::spawn_auto_connect(project.with_project(switched));

@@ -2,7 +2,8 @@
 
 The backend owns two persistence boundaries:
 
-- **SQLite / SeaORM:** connection settings and provider keys, robot documents
+- **SQLite / SeaORM:** each browser's Spiral session (its WorkOS tokens and
+  chosen project), provider keys, robot documents
   and calibration, project preferences, each dataset's robot model, joint roles
   and check report, saved curation recipes and the statements of the views
   they publish, and a record of each training run Studio started (its
@@ -28,6 +29,8 @@ New database files use mode 0600 and new parent directories use mode 0700 on Uni
 
 One database contains all local projects. A project's key is its normalized
 Spiral API endpoint plus project ID. Credentials and session IDs are excluded.
+The `sessions` table holds each browser's refresh token, so the database file
+is as sensitive as a signed-in session; project bundles never include it.
 Different backends have independent Studio records even when they use the same
 Spiral project. Records saved before selecting a project remain in the local
 unconfigured-project scope.

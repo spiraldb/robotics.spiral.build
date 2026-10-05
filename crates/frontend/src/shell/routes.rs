@@ -81,15 +81,18 @@ pub(super) fn StudioRouter() -> Element {
     rsx! { Router::<StudioRoute> {} }
 }
 
-/// Only the saved connection is read above the project mount.
+/// Only the saved connection is read above the project mount. A browser
+/// without a Spiral session mounts no project.
 #[component]
 fn StudioShell() -> Element {
     let selection = ProjectSelection::use_provider();
     selection.use_polling();
-    let project = selection.selected();
+    let project = selection.selected().filter(|_| !selection.signed_out());
     rsx! {
         document::Stylesheet { href: TAILWIND }
-        if project.is_none() {
+        if selection.signed_out() {
+            super::sign_in::SignInGate {}
+        } else if project.is_none() {
             div { class: "studio-shell studio-shell-v2",
                 div { class: "editor-empty", role: "status", "Connecting to Studio…" }
             }

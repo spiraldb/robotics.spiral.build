@@ -8,7 +8,8 @@ behind the same Cloudflare Access sign-in as `next.spiraldb.com`.
 - One Compute Engine VM in its own Google Cloud project, `spiraldb-robotics`, runs two containers with Docker Compose: Studio and `cloudflared`.
 - A Cloudflare Tunnel carries all traffic. The VM publishes no ports and admits only IAP SSH.
 - Cloudflare Access admits only Spiral team identities and provides HTTPS.
-- Studio keeps its state in one Docker volume: its SQLite database and its Spiral sign-in.
+- Every colleague signs in to Spiral in Studio too, and Studio reaches Spiral as them.
+- Studio keeps its state in one Docker volume: its SQLite database, which holds each browser's Spiral session.
 - Like SpiralDB's Cloud Run services, Terraform owns the spec and CI owns the image. Each release, a pushed `v*` tag, publishes the image as `latest`, and the VM pulls it within two minutes. CI has no access to the VM.
 - The heavy work runs elsewhere: data lives in SpiralDB, model calls go to OpenRouter, and Score progress runs on Modal. The VM needs no GPU.
 
@@ -21,12 +22,10 @@ behind the same Cloudflare Access sign-in as `next.spiraldb.com`.
 
 ## What colleagues share
 
-Studio was built for one person on one machine. Hosted, everyone who passes Access shares it.
+Each colleague signs in with their own Spiral account. They see the organizations and projects their account can open, and their queries, recordings and curation runs reach Spiral as them. They still share:
 
-- One Spiral sign-in. Everyone reads and writes SpiralDB as that account. **Sign out** or a new organization in Studio changes it for everyone.
-- One SpiralDB project. Switching it in **Settings → SpiralDB** switches it for everyone.
 - One set of provider keys and settings.
-- Curation drafts. When two people edit the same draft, the last save wins.
+- Studio's records of a project they can all open, such as curation drafts and published views. When two people edit the same draft, the last save wins.
 - Live and Setup show no robots or cameras. The VM has none.
 
 ## Image
@@ -117,7 +116,7 @@ Create a Cloudflare Access self-hosted application before the tunnel routes any 
 Attach the same allow policy that protects `next.spiraldb.com`.
 
 Do not route the hostname before this application exists.
-Studio has no sign-in of its own: anyone who reaches it uses the shared Spiral account.
+Behind Access, Studio asks every browser to sign in to Spiral as well.
 
 ### 3. Create the tunnel
 
@@ -163,17 +162,27 @@ The boot disk holds the only copy of Studio's drafts and settings.
 It is snapshotted daily at 08:00 UTC, and each snapshot is kept for 14 days.
 Terraform refuses to destroy the VM.
 
-### 5. Release
+### 5. Register Studio's sign-in callback
+
+Spiral's sign-in returns browsers only to addresses registered for its WorkOS client.
+A WorkOS administrator adds this redirect URI to Spiral's client, `client_01J1CRS9MGF103FKTKZDCNJVM3`, beside `https://app.spiraldb.com/callback`:
+
+```text
+https://robotics.spiraldb.com/callback
+```
+
+The image already tells Studio its address: it sets `SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com`.
+
+### 6. Release
 
 Release `v0.1.0` as **Operations** describes.
 The VM starts Studio within two minutes of the image.
 
-### 6. Sign in once
+### 7. Save the keys
 
-1. Open `https://robotics.spiraldb.com` and pass Access. Studio opens **Settings → SpiralDB**.
-2. Choose **Sign in with Spiral**. Confirm the code with the account everyone will share.
-3. Pick the project.
-4. In **Settings → Keys**, save the keys the team uses:
+1. Open `https://robotics.spiraldb.com`, pass Access, and choose **Sign in with Spiral**.
+2. Pick a project in **Settings → SpiralDB**.
+3. In **Settings → Keys**, save the keys the team uses:
 
 | Key | Used by |
 | --- | --- |
@@ -181,7 +190,7 @@ The VM starts Studio within two minutes of the image.
 | Modal base URL and Modal token | Score progress |
 | Hugging Face token | Downloads of models and datasets from Hugging Face |
 
-The volume keeps the sign-in and the keys across restarts and updates.
+The volume keeps every session and the keys across restarts and updates.
 
 ## Operations
 

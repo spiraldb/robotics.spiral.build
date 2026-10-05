@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::account::SpiralAccount;
+use crate::account::SpiralSessions;
+use crate::account::sign_in::PublicAddress;
 use crate::projects::context::StudioContext;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
@@ -16,7 +17,7 @@ use spiral_robotics_hardware::{
     HardwareHandle,
 };
 use spiral_robotics_storage::{
-    BackendStateStore, ProviderKeyring, ServiceEndpoint, SpiralConnectionSettings,
+    BackendStateStore, ProviderKeyring, ServiceEndpoint, SessionStore, SpiralConnectionSettings,
 };
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
@@ -29,6 +30,11 @@ const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_mill
 /// Motor and camera cleanup normally completes within one control/frame cycle;
 /// the final encoder segment and MCAP publication need time to finish.
 const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+/// Where a standalone Studio listens, and where browsers reach it: Spiral's
+/// sign-in returns only to `http://localhost:3000/callback` on a developer's
+/// machine.
+const DEFAULT_PORT: u16 = 3000;
+const DEFAULT_PUBLIC_URL: &str = "http://localhost:3000";
 const DEFAULT_FFMPEG: &str = "ffmpeg";
 const DEFAULT_VIDEO_CODEC: &str = "libx264";
 
@@ -54,9 +60,19 @@ struct ServerAccessArguments {
     #[arg(long, value_name = "ADDR:PORT")]
     bind: Option<SocketAddr>,
 
-    /// Permit the unauthenticated Studio control API to listen beyond loopback.
+    /// Permit the Studio API, which drives robots, to listen beyond loopback.
     #[arg(long, requires = "bind")]
     allow_remote_access: bool,
+
+    /// The origin browsers reach Studio at. Spiral's sign-in returns them to
+    /// its `/callback`, which must be registered with Spiral's sign-in.
+    #[arg(
+        long,
+        env = "SPIRAL_ROBOTICS_PUBLIC_URL",
+        default_value = DEFAULT_PUBLIC_URL,
+        value_name = "URL"
+    )]
+    public_url: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -103,6 +119,7 @@ impl MotionArguments {
 /// browser bundle and state, and its hardware settings.
 struct ServerStartup {
     bind: SocketAddr,
+    address: PublicAddress,
     video: VideoArguments,
     camera_access_error: Option<String>,
     backend_state: Arc<BackendStateStore>,
@@ -147,14 +164,24 @@ impl StudioServer {
         };
         // `dx serve` publishes its chosen address through the standard fullstack
         // environment. An explicit CLI value still wins for standalone launches.
-        let bind = arguments
-            .access
-            .bind
-            .unwrap_or_else(dioxus_cli_config::fullstack_address_or_localhost);
+        let bind = arguments.access.bind.unwrap_or_else(|| {
+            SocketAddr::new(
+                dioxus_cli_config::server_ip()
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+                dioxus_cli_config::server_port().unwrap_or(DEFAULT_PORT),
+            )
+        });
         if let Err(error) = arguments.access.validate_bind_address(bind) {
             eprintln!("error: {error}");
             return ExitCode::FAILURE;
         }
+        let address = match PublicAddress::parse(&arguments.access.public_url) {
+            Ok(address) => address,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
         let backend_state = match BackendStateStore::open_default() {
             Ok(state) => Arc::new(state),
             Err(error) => {
@@ -181,6 +208,7 @@ impl StudioServer {
 
         let startup = ServerStartup {
             bind,
+            address,
             video: arguments.video,
             camera_access_error,
             backend_state,
@@ -231,17 +259,18 @@ impl ServerStartup {
         served
     }
 
-    /// Open Studio's state, account, and hardware, and listen on its address.
+    /// Open Studio's state, sessions, and hardware, and listen on its address.
     async fn bind(self) -> Result<BoundServer> {
         let Self {
             bind,
+            address,
             video,
             camera_access_error,
             backend_state,
             control_settings,
             public,
         } = self;
-        let (saved, keys) = backend_state
+        let keys = backend_state
             .initialize()
             .await
             .map_err(std::io::Error::other)?;
@@ -249,30 +278,17 @@ impl ServerStartup {
         if let Some(path) = backend_state.studio().path() {
             tracing::info!(path = %path.display(), "Studio state is stored in SQLite");
         }
-        let spiral_endpoint = ServiceEndpoint::spiral(
-            &saved
-                .spiral_endpoint()
-                .unwrap_or_else(|| ServiceEndpoint::environment_spiral().into_string()),
+        let endpoints = SpiralConnectionSettings::new(
+            ServiceEndpoint::environment_spiral().into_string(),
+            ServiceEndpoint::environment_spiral_spfs().into_string(),
         )
-        .map_err(std::io::Error::other)?
-        .into_string();
-        let spiral_spfs_endpoint = ServiceEndpoint::spiral_spfs(
-            &saved
-                .spiral_spfs_endpoint()
-                .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string()),
+        .map_err(std::io::Error::other)?;
+        let sessions = SpiralSessions::new(
+            endpoints.endpoint().to_owned(),
+            SessionStore::new(backend_state.studio().clone()),
+            address,
         )
-        .map_err(std::io::Error::other)?
-        .into_string();
-        let mut connection = SpiralConnectionSettings::new(spiral_endpoint, spiral_spfs_endpoint)
-            .map_err(std::io::Error::other)?;
-        if let Some(project) = saved.project_id() {
-            connection = connection
-                .with_project(&project)
-                .map_err(std::io::Error::other)?;
-        }
-        let (account, spiral_access) = SpiralAccount::restore(connection.endpoint())
-            .await
-            .map_err(std::io::Error::other)?;
+        .map_err(std::io::Error::other)?;
         let hardware = Arc::new(HardwareHandle::spawn(control_settings));
         let cameras = Arc::new(CameraManager::new());
         if let Some(error) = camera_access_error {
@@ -280,27 +296,34 @@ impl ServerStartup {
         }
         let resources = crate::projects::ProjectHardware::new(
             hardware,
-            cameras,
+            cameras.clone(),
             VideoEncoderSettings::new(video.ffmpeg, video.video_codec),
         );
         let factory = crate::projects::ProjectFactory::new(
             resources,
             crate::projects::ProjectDataAccess::new(
                 backend_state.studio().clone(),
-                spiral_access,
                 keys.subscribe(),
             ),
         );
-        let projects = crate::projects::ProjectRegistry::new(factory, backend_state, connection);
-        let state = StudioContext::new(projects, account, keys);
+        let projects = crate::projects::ProjectRegistry::new(factory, endpoints);
+        let state = StudioContext::new(projects, Arc::new(sessions), keys);
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let address = listener.local_addr()?;
 
-        let bootstrap = tokio::spawn(
-            crate::projects::bootstrap::ProjectBootstrap::new(state.clone()).run(!video.no_cameras),
-        );
+        let discover_cameras = !video.no_cameras;
+        let bootstrap = tokio::spawn(async move {
+            if discover_cameras {
+                crate::projects::bootstrap::CameraDiscovery::new(cameras)
+                    .run()
+                    .await;
+            }
+        });
         let app = super::web_assets::StudioWebAssets::new(public)
-            .router(super::routes::StudioApi::router(state.clone()))
+            .router(
+                super::routes::StudioApi::router(state.clone()),
+                crate::account::sign_in::BrowserSignIn::routes().with_state(state.clone()),
+            )
             .layer(tower_http::trace::TraceLayer::new_for_http());
         Ok(BoundServer {
             listener,
@@ -409,7 +432,7 @@ impl ServerAccessArguments {
         Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
-                "refusing to expose the unauthenticated Studio control API on {bind}; use a loopback address or pass --allow-remote-access explicitly"
+                "refusing to expose the Studio API, which drives robots, on {bind}; use a loopback address or pass --allow-remote-access explicitly"
             ),
         )
         .into())
@@ -460,10 +483,12 @@ mod tests {
         let local_only = ServerAccessArguments {
             bind: None,
             allow_remote_access: false,
+            public_url: DEFAULT_PUBLIC_URL.to_owned(),
         };
         let remote_allowed = ServerAccessArguments {
             bind: None,
             allow_remote_access: true,
+            public_url: DEFAULT_PUBLIC_URL.to_owned(),
         };
 
         assert!(local_only.validate_bind_address(loopback).is_ok());

@@ -205,6 +205,8 @@
               Env = [
                 "HOME=${studioHome}"
                 "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
+                # Spiral's sign-in returns browsers to this address's /callback.
+                "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com"
                 "SPIRALDB_ADBC_DRIVER=${spiralAdbc}/lib/${adbcLibrary}"
                 "DIOXUS_PUBLIC_PATH=${studioWeb}"
               ];

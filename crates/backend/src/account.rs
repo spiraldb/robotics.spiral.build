@@ -1,343 +1,427 @@
-//! Studio's Spiral sign-in. The backend holds the user's session, keeps its
-//! short-lived access token fresh, and hands every token to each project's
-//! Spiral clients. The browser only ever learns who is signed in.
+//! Studio's Spiral sign-in, one session per browser. A browser signs in on
+//! Spiral's sign-in page; the backend keeps that user's tokens, keeps the
+//! short-lived access token fresh, and hands it to the Spiral clients of every
+//! project the browser opens. The browser holds only its session's ID, in a
+//! cookie, and only ever learns who is signed in.
 
 mod control_plane;
+#[cfg(test)]
+pub(crate) mod fake;
 pub(crate) mod http;
-mod login_file;
+pub(crate) mod sign_in;
 #[cfg(test)]
 mod tests;
+mod tokens;
 mod workos;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use spiral_robotics_common::account::{
-    SpiralAccountStatus, SpiralIdentity, SpiralOrganization, SpiralProject, SpiralSignIn,
-};
-use spiral_robotics_storage::{SpiralAccess, SpiralAccessPublisher};
-use tokio::sync::{Mutex, Notify};
+use base64::Engine as _;
+use spiral_robotics_common::account::{SpiralIdentity, SpiralOrganization, SpiralProject};
+use spiral_robotics_storage::{SessionStore, SpiralAccess, SpiralAccessPublisher};
+use tokio::sync::{Mutex, MutexGuard, Notify, OnceCell};
 
 use crate::OperationError;
+use crate::sync::MutexRecovery as _;
 use control_plane::SpiralControlPlane;
-use login_file::{LoginFile, LoginTokens};
-use workos::{DeviceAuthorization, DevicePoll, RefreshFailure, WorkOs};
+use sign_in::{PublicAddress, SignInAttempt};
+use tokens::SessionTokens;
+use workos::{RefreshFailure, WorkOs};
 
 /// Replace an access token this long before it expires.
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 /// Wait this long before retrying a refresh WorkOS could not answer.
 const REFRESH_RETRY: Duration = Duration::from_secs(15);
 
-pub(crate) struct SpiralAccount {
-    services: AccountServices,
-    session: Mutex<AccountSession>,
-    access: SpiralAccessPublisher,
-    /// Wakes the refresher when the session changes.
-    session_changed: Notify,
-}
-
-struct AccountServices {
-    login: LoginFile,
+/// How sessions reach Spiral's sign-in and API, and where they are saved.
+struct SessionServices {
     workos: WorkOs,
     control_plane: SpiralControlPlane,
+    store: SessionStore,
 }
 
-enum AccountSession {
-    SignedOut {
-        problem: Option<String>,
-    },
-    SigningIn(SpiralSignIn),
-    SignedIn {
-        tokens: LoginTokens,
-        identity: SpiralIdentity,
-    },
+/// Every browser's Spiral session. A session saved before a restart comes back
+/// on its browser's first request.
+pub(crate) struct SpiralSessions {
+    services: Arc<SessionServices>,
+    address: PublicAddress,
+    /// Sessions this process has restored or started, by ID. A session being
+    /// restored is restored once, however many requests wait for it.
+    live: StdMutex<HashMap<String, Arc<OnceCell<Arc<SpiralSession>>>>>,
 }
 
-impl From<&AccountSession> for SpiralAccountStatus {
-    fn from(session: &AccountSession) -> Self {
-        match session {
-            AccountSession::SignedOut { problem } => Self::SignedOut {
-                problem: problem.clone(),
-            },
-            AccountSession::SigningIn(sign_in) => Self::SigningIn(sign_in.clone()),
-            AccountSession::SignedIn { identity, .. } => Self::SignedIn(identity.clone()),
-        }
-    }
-}
-
-impl AccountSession {
-    fn problem(problem: impl Into<String>) -> Self {
-        Self::SignedOut {
-            problem: Some(problem.into()),
-        }
-    }
-
-    fn awaits(&self, device: &DeviceAuthorization) -> bool {
-        matches!(self, Self::SigningIn(pending) if pending.user_code() == device.user_code())
-    }
-}
-
-impl SpiralAccount {
-    /// Studio's account, signed in with this machine's `spiraldb login`
-    /// session while that session is good. `endpoint` is Spiral's API.
-    pub(crate) async fn restore(endpoint: &str) -> Result<(Arc<Self>, SpiralAccess), String> {
-        let services = AccountServices {
-            login: LoginFile::shared()?,
+impl SpiralSessions {
+    /// Sessions that sign in to Spiral at `spiral_api` from browsers that
+    /// reach Studio at `address`.
+    pub(crate) fn new(
+        spiral_api: String,
+        store: SessionStore,
+        address: PublicAddress,
+    ) -> Result<Self, String> {
+        let services = SessionServices {
             workos: WorkOs::production()?,
-            control_plane: SpiralControlPlane::new()?,
+            control_plane: SpiralControlPlane::new(spiral_api)?,
+            store,
         };
-        Ok(Self::restore_with(services, endpoint).await)
+        Ok(Self::with_services(services, address))
     }
 
-    async fn restore_with(services: AccountServices, endpoint: &str) -> (Arc<Self>, SpiralAccess) {
-        let (access, reader) = SpiralAccessPublisher::new();
-        let account = Arc::new(Self {
-            services,
-            session: Mutex::new(AccountSession::SignedOut { problem: None }),
-            access,
-            session_changed: Notify::new(),
-        });
-        let saved = account.saved_session(endpoint).await;
-        account.enter(&mut *account.session.lock().await, saved);
-        tokio::spawn(account.clone().keep_fresh());
-        (account, reader)
-    }
-
-    /// A signed-out account that never reaches WorkOS or Spiral, for tests of
-    /// other features.
-    #[cfg(test)]
-    pub(crate) fn offline() -> Arc<Self> {
-        let unreachable = "http://127.0.0.1:9".to_owned();
-        let (access, _reader) = SpiralAccessPublisher::new();
-        Arc::new(Self {
-            services: AccountServices {
-                login: LoginFile::at(
-                    std::env::temp_dir().join("spiral-robotics-offline-login.json"),
-                ),
-                workos: WorkOs::at(unreachable).unwrap(),
-                control_plane: SpiralControlPlane::new().unwrap(),
-            },
-            session: Mutex::new(AccountSession::SignedOut { problem: None }),
-            access,
-            session_changed: Notify::new(),
-        })
-    }
-
-    pub(crate) async fn status(&self) -> SpiralAccountStatus {
-        SpiralAccountStatus::from(&*self.session.lock().await)
-    }
-
-    /// Start a sign-in the user confirms in their browser. It completes in the
-    /// background; starting again replaces an unconfirmed one.
-    pub(crate) async fn sign_in(
-        self: &Arc<Self>,
-        endpoint: String,
-    ) -> Result<SpiralAccountStatus, OperationError> {
-        let mut session = self.session.lock().await;
-        if matches!(*session, AccountSession::SignedIn { .. }) {
-            return Err(OperationError::conflict(
-                "Sign out of Spiral before signing in again.",
-            ));
+    fn with_services(services: SessionServices, address: PublicAddress) -> Self {
+        Self {
+            services: Arc::new(services),
+            address,
+            live: StdMutex::new(HashMap::new()),
         }
-        let device = self
+    }
+
+    pub(crate) fn address(&self) -> &PublicAddress {
+        &self.address
+    }
+
+    /// The live session `id` names, restored from SQLite if this process has
+    /// not seen it yet.
+    pub(crate) async fn find(&self, id: &str) -> Result<Arc<SpiralSession>, OperationError> {
+        let cell = self
+            .live
+            .recover_lock()
+            .entry(id.to_owned())
+            .or_default()
+            .clone();
+        let found = cell.get_or_try_init(|| self.restore(id)).await.cloned();
+        match found {
+            Ok(session) if !session.ended() => Ok(session),
+            other => {
+                let mut live = self.live.recover_lock();
+                if live
+                    .get(id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &cell))
+                {
+                    live.remove(id);
+                }
+                Err(other.err().unwrap_or_else(SpiralSession::signed_out))
+            }
+        }
+    }
+
+    /// End `session` and forget it.
+    pub(crate) async fn sign_out(&self, session: &SpiralSession) -> Result<(), OperationError> {
+        session.end().await.map_err(OperationError::Internal)?;
+        self.live.recover_lock().remove(session.id());
+        Ok(())
+    }
+
+    /// Spiral's sign-in page for `attempt`, which returns the browser to this
+    /// Studio's callback.
+    fn authorization_url(&self, attempt: &SignInAttempt) -> String {
+        self.services.workos.authorization_url(
+            &self.address.callback(),
+            attempt.state(),
+            &attempt.challenge(),
+        )
+    }
+
+    /// Start the session `code` signs in, proven by `attempt`. Returns the new
+    /// session's ID.
+    async fn complete(
+        &self,
+        code: &str,
+        attempt: &SignInAttempt,
+    ) -> Result<String, OperationError> {
+        let tokens = self
             .services
             .workos
-            .authorize_device()
+            .redeem(code, attempt.verifier())
             .await
             .map_err(OperationError::External)?;
-        let sign_in = SpiralSignIn::new(
-            device.verification_url().to_owned(),
-            device.user_code().to_owned(),
-        );
-        self.enter(&mut session, AccountSession::SigningIn(sign_in));
-        tokio::spawn(self.clone().await_confirmation(endpoint, device));
-        Ok(SpiralAccountStatus::from(&*session))
-    }
-
-    /// Sign out of Spiral on this machine, like `spiraldb logout`.
-    pub(crate) async fn sign_out(&self) -> Result<SpiralAccountStatus, OperationError> {
-        let mut session = self.session.lock().await;
+        let identity = self
+            .services
+            .control_plane
+            .identity(tokens.access_token())
+            .await
+            .map_err(OperationError::External)?;
+        let id = Self::new_id()?;
+        let state = SessionState {
+            tokens,
+            identity,
+            project_id: String::new(),
+        };
         self.services
-            .login
-            .remove()
+            .store
+            .save(&id, &state.stored())
+            .await
             .map_err(OperationError::Internal)?;
-        self.enter(&mut session, AccountSession::SignedOut { problem: None });
-        Ok(SpiralAccountStatus::from(&*session))
+        let session = SpiralSession::start(id.clone(), self.services.clone(), state);
+        self.live
+            .recover_lock()
+            .insert(id.clone(), Arc::new(OnceCell::new_with(Some(session))));
+        Ok(id)
     }
 
-    /// Continue the session in another of the user's organizations.
+    /// The saved session `id`, its tokens refreshed when they lapsed.
+    async fn restore(&self, id: &str) -> Result<Arc<SpiralSession>, OperationError> {
+        let stored = self
+            .services
+            .store
+            .load(id)
+            .await
+            .map_err(OperationError::Internal)?
+            .ok_or_else(SpiralSession::signed_out)?;
+        let mut tokens = SessionTokens::saved(&stored);
+        if tokens.remaining() <= REFRESH_MARGIN {
+            tokens = match self.services.workos.refresh(&tokens, None).await {
+                Ok(tokens) => tokens,
+                Err(RefreshFailure::Ended(ended)) => {
+                    tracing::info!("a saved Spiral session ended: {ended}");
+                    self.services
+                        .store
+                        .remove(id)
+                        .await
+                        .map_err(OperationError::Internal)?;
+                    return Err(SpiralSession::signed_out());
+                }
+                Err(failure) => return Err(OperationError::External(failure.message().to_owned())),
+            };
+            self.services
+                .store
+                .save(id, &tokens.stored(stored.project_id()))
+                .await
+                .map_err(OperationError::Internal)?;
+        }
+        let identity = self
+            .services
+            .control_plane
+            .identity(tokens.access_token())
+            .await
+            .map_err(OperationError::External)?;
+        let state = SessionState {
+            tokens,
+            identity,
+            project_id: stored.project_id().to_owned(),
+        };
+        Ok(SpiralSession::start(
+            id.to_owned(),
+            self.services.clone(),
+            state,
+        ))
+    }
+
+    /// A session ID nobody can guess: 256 random bits.
+    fn new_id() -> Result<String, OperationError> {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| OperationError::Internal(format!("no randomness: {error}")))?;
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+    }
+}
+
+/// What a live session knows: its tokens, who they belong to, and the project
+/// its browser works on, empty before one is chosen.
+struct SessionState {
+    tokens: SessionTokens,
+    identity: SpiralIdentity,
+    project_id: String,
+}
+
+impl SessionState {
+    fn stored(&self) -> spiral_robotics_storage::StoredSession {
+        self.tokens.stored(&self.project_id)
+    }
+}
+
+/// One browser's Spiral sign-in.
+pub(crate) struct SpiralSession {
+    id: String,
+    services: Arc<SessionServices>,
+    /// Held across every token change, so each refresh token is used once.
+    state: Mutex<SessionState>,
+    access: SpiralAccessPublisher,
+    reader: SpiralAccess,
+    ended: AtomicBool,
+    /// Wakes the refresher when the tokens change or the session ends.
+    changed: Notify,
+}
+
+impl SpiralSession {
+    /// A live session, publishing its access token and keeping it fresh.
+    fn start(id: String, services: Arc<SessionServices>, state: SessionState) -> Arc<Self> {
+        let (access, reader) = SpiralAccessPublisher::new();
+        access.publish(Some(state.tokens.access_token().to_owned()));
+        let session = Arc::new(Self {
+            id,
+            services,
+            state: Mutex::new(state),
+            access,
+            reader,
+            ended: AtomicBool::new(false),
+            changed: Notify::new(),
+        });
+        tokio::spawn(session.clone().keep_fresh());
+        session
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Whether the session is over: signed out, or ended by Spiral.
+    pub(crate) fn ended(&self) -> bool {
+        self.ended.load(Ordering::Acquire)
+    }
+
+    /// The session's current access token, as its projects' Spiral clients read it.
+    pub(crate) fn access(&self) -> SpiralAccess {
+        self.reader.clone()
+    }
+
+    pub(crate) async fn identity(&self) -> Result<SpiralIdentity, OperationError> {
+        Ok(self.active().await?.identity.clone())
+    }
+
+    /// The project this session's browser works on; empty before one is chosen.
+    pub(crate) async fn project_id(&self) -> Result<String, OperationError> {
+        Ok(self.active().await?.project_id.clone())
+    }
+
+    /// Work on `project_id` from now on, across restarts.
+    pub(crate) async fn choose_project(&self, project_id: &str) -> Result<(), OperationError> {
+        let mut state = self.active().await?;
+        if state.project_id != project_id {
+            state.project_id = project_id.to_owned();
+            self.save(&state).await.map_err(OperationError::Internal)?;
+        }
+        Ok(())
+    }
+
+    /// Whether Spiral lets this user open `project_id`. Studio keeps its own
+    /// records of every project, so it asks before showing them.
+    pub(crate) async fn admit(&self, project_id: &str) -> Result<(), OperationError> {
+        let token = self.access_token().await?;
+        match self.services.control_plane.admits(&token, project_id).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(OperationError::NotFound(format!(
+                "Your Spiral account cannot open the project {project_id}."
+            ))),
+            Err(problem) => Err(OperationError::External(problem)),
+        }
+    }
+
+    pub(crate) async fn organizations(&self) -> Result<Vec<SpiralOrganization>, OperationError> {
+        let token = self.access_token().await?;
+        self.services
+            .control_plane
+            .organizations(&token)
+            .await
+            .map_err(OperationError::External)
+    }
+
+    pub(crate) async fn projects(&self) -> Result<Vec<SpiralProject>, OperationError> {
+        let token = self.access_token().await?;
+        self.services
+            .control_plane
+            .projects(&token)
+            .await
+            .map_err(OperationError::External)
+    }
+
+    /// Continue in another of the user's organizations, whose projects are
+    /// others: the chosen project is forgotten.
     pub(crate) async fn switch_organization(
         &self,
-        endpoint: &str,
         organization: &str,
-    ) -> Result<SpiralAccountStatus, OperationError> {
-        let mut session = self.session.lock().await;
-        let AccountSession::SignedIn { tokens, .. } = &*session else {
-            return Err(Self::sign_in_first());
-        };
+    ) -> Result<SpiralIdentity, OperationError> {
+        let mut state = self.active().await?;
         let tokens = match self
             .services
             .workos
-            .refresh(tokens, Some(organization))
+            .refresh(&state.tokens, Some(organization))
             .await
         {
             Ok(tokens) => tokens,
             Err(RefreshFailure::Ended(ended)) => {
-                self.enter(&mut session, AccountSession::problem(Self::ended(&ended)));
-                return Err(OperationError::External(Self::ended(&ended)));
+                self.mark_ended();
+                self.forget().await;
+                return Err(OperationError::Unauthenticated(format!(
+                    "Your Spiral session ended ({ended}). Sign in again."
+                )));
             }
             Err(failure) => return Err(OperationError::External(failure.message().to_owned())),
         };
-        let next = self.saved(self.signed_in(endpoint, tokens).await);
-        self.enter(&mut session, next);
-        match &*session {
-            AccountSession::SignedOut {
-                problem: Some(problem),
-            } => Err(OperationError::External(problem.clone())),
-            session => Ok(SpiralAccountStatus::from(session)),
+        state.tokens = tokens;
+        state.project_id.clear();
+        self.access
+            .publish(Some(state.tokens.access_token().to_owned()));
+        self.changed.notify_one();
+        let saved = self.save(&state).await;
+        state.identity = self
+            .services
+            .control_plane
+            .identity(state.tokens.access_token())
+            .await
+            .map_err(OperationError::External)?;
+        saved.map_err(OperationError::Internal)?;
+        Ok(state.identity.clone())
+    }
+
+    /// The failure a request without a live session gets.
+    fn signed_out() -> OperationError {
+        OperationError::Unauthenticated("Sign in to Spiral to continue.".to_owned())
+    }
+
+    async fn active(&self) -> Result<MutexGuard<'_, SessionState>, OperationError> {
+        let state = self.state.lock().await;
+        if self.ended() {
+            return Err(Self::signed_out());
         }
-    }
-
-    pub(crate) async fn organizations(
-        &self,
-        endpoint: &str,
-    ) -> Result<Vec<SpiralOrganization>, OperationError> {
-        let token = self.access_token().await?;
-        self.services
-            .control_plane
-            .organizations(endpoint, &token)
-            .await
-            .map_err(OperationError::External)
-    }
-
-    pub(crate) async fn projects(
-        &self,
-        endpoint: &str,
-    ) -> Result<Vec<SpiralProject>, OperationError> {
-        let token = self.access_token().await?;
-        self.services
-            .control_plane
-            .projects(endpoint, &token)
-            .await
-            .map_err(OperationError::External)
+        Ok(state)
     }
 
     async fn access_token(&self) -> Result<String, OperationError> {
-        match &*self.session.lock().await {
-            AccountSession::SignedIn { tokens, .. } => Ok(tokens.access_token().to_owned()),
-            _ => Err(Self::sign_in_first()),
+        Ok(self.active().await?.tokens.access_token().to_owned())
+    }
+
+    async fn save(&self, state: &SessionState) -> Result<(), String> {
+        self.services.store.save(&self.id, &state.stored()).await
+    }
+
+    /// Sign out: no Spiral client of this session reaches Spiral again.
+    async fn end(&self) -> Result<(), String> {
+        let _state = self.state.lock().await;
+        self.mark_ended();
+        self.services.store.remove(&self.id).await
+    }
+
+    fn mark_ended(&self) {
+        self.ended.store(true, Ordering::Release);
+        self.access.publish(None);
+        self.changed.notify_one();
+    }
+
+    /// Forget a session Spiral ended. Its browser signs in again.
+    async fn forget(&self) {
+        if let Err(problem) = self.services.store.remove(&self.id).await {
+            tracing::warn!("could not forget an ended Spiral session: {problem}");
         }
     }
 
-    fn sign_in_first() -> OperationError {
-        OperationError::invalid_input("Sign in to Spiral first.")
-    }
-
-    fn ended(detail: &str) -> String {
-        format!("Your Spiral session ended ({detail}). Sign in again.")
-    }
-
-    /// Change the session, and give every Spiral client its access token.
-    fn enter(&self, session: &mut AccountSession, next: AccountSession) {
-        self.access.publish(match &next {
-            AccountSession::SignedIn { tokens, .. } => Some(tokens.access_token().to_owned()),
-            _ => None,
-        });
-        *session = next;
-        self.session_changed.notify_one();
-    }
-
-    /// The session `spiraldb login` saved, refreshed when its token lapsed.
-    async fn saved_session(&self, endpoint: &str) -> AccountSession {
-        let tokens = match self.services.login.read() {
-            Ok(Some(tokens)) => tokens,
-            Ok(None) => return AccountSession::SignedOut { problem: None },
-            Err(problem) => return AccountSession::problem(problem),
-        };
-        if tokens.remaining() > REFRESH_MARGIN {
-            return self.signed_in(endpoint, tokens).await;
-        }
-        match self.services.workos.refresh(&tokens, None).await {
-            Ok(tokens) => self.saved(self.signed_in(endpoint, tokens).await),
-            Err(failure) => AccountSession::problem(Self::ended(failure.message())),
-        }
-    }
-
-    /// Who `tokens` belong to, as Spiral sees them.
-    async fn signed_in(&self, endpoint: &str, tokens: LoginTokens) -> AccountSession {
-        match self
-            .services
-            .control_plane
-            .identity(endpoint, tokens.access_token())
-            .await
-        {
-            Ok(identity) => AccountSession::SignedIn { tokens, identity },
-            Err(problem) => AccountSession::problem(problem),
-        }
-    }
-
-    /// Share a new session with the machine's other Spiral apps.
-    fn saved(&self, session: AccountSession) -> AccountSession {
-        if let AccountSession::SignedIn { tokens, .. } = &session
-            && let Err(problem) = self.services.login.write(tokens)
-        {
-            return AccountSession::problem(problem);
-        }
-        session
-    }
-
-    async fn await_confirmation(self: Arc<Self>, endpoint: String, device: DeviceAuthorization) {
-        let expires = tokio::time::Instant::now() + device.lifetime();
-        let mut interval = device.interval();
-        let expired = "The sign-in code expired. Sign in again.";
-        let next = loop {
-            tokio::time::sleep(interval).await;
-            if !self.session.lock().await.awaits(&device) {
-                return;
-            }
-            if tokio::time::Instant::now() >= expires {
-                break AccountSession::problem(expired);
-            }
-            match self.services.workos.poll(&device).await {
-                Ok(DevicePoll::Pending) => {}
-                Ok(DevicePoll::SlowDown) => interval += Duration::from_secs(5),
-                Ok(DevicePoll::Confirmed(tokens)) => {
-                    break self.saved(self.signed_in(&endpoint, tokens).await);
-                }
-                Ok(DevicePoll::Denied) => {
-                    break AccountSession::problem("Sign-in was declined in the browser.");
-                }
-                Ok(DevicePoll::Expired) => break AccountSession::problem(expired),
-                // The code stays valid through a failed poll; keep trying until it expires.
-                Err(error) => tracing::warn!("polling Spiral sign-in: {error}"),
-            }
-        };
-        let mut session = self.session.lock().await;
-        if session.awaits(&device) {
-            self.enter(&mut session, next);
-        }
-    }
-
-    /// Replace each access token shortly before it expires, for as long as
-    /// the process runs.
+    /// Replace each access token shortly before it expires, until the session ends.
     async fn keep_fresh(self: Arc<Self>) {
-        loop {
-            let changed = self.session_changed.notified();
-            let due = match &*self.session.lock().await {
-                AccountSession::SignedIn { tokens, .. } => {
-                    Some(tokens.remaining().saturating_sub(REFRESH_MARGIN))
-                }
-                _ => None,
-            };
-            let Some(due) = due else {
-                changed.await;
-                continue;
-            };
+        while !self.ended() {
+            let changed = self.changed.notified();
+            let due = self
+                .state
+                .lock()
+                .await
+                .tokens
+                .remaining()
+                .saturating_sub(REFRESH_MARGIN);
             tokio::select! {
                 () = changed => {}
                 () = tokio::time::sleep(due) => {
                     if let Err(error) = self.replace_token().await {
-                        tracing::warn!("could not refresh the Spiral session: {error}");
+                        tracing::warn!("could not refresh a Spiral session: {error}");
                         tokio::time::sleep(REFRESH_RETRY).await;
                     }
                 }
@@ -346,58 +430,27 @@ impl SpiralAccount {
     }
 
     async fn replace_token(&self) -> Result<(), String> {
-        let mut session = self.session.lock().await;
-        let AccountSession::SignedIn { tokens, identity } = &*session else {
+        let mut state = self.state.lock().await;
+        if self.ended() {
             return Ok(());
-        };
-        let next = match self.services.workos.refresh(tokens, None).await {
-            Ok(next) => next,
-            Err(RefreshFailure::Ended(ended)) => {
-                match self.shared_successor(tokens, identity).await {
-                    Some(next) => next,
-                    None => {
-                        self.enter(&mut session, AccountSession::problem(Self::ended(&ended)));
-                        return Ok(());
-                    }
+        }
+        match self.services.workos.refresh(&state.tokens, None).await {
+            Ok(tokens) => {
+                state.tokens = tokens;
+                self.access
+                    .publish(Some(state.tokens.access_token().to_owned()));
+                if let Err(problem) = self.save(&state).await {
+                    tracing::warn!("could not save a refreshed Spiral session: {problem}");
                 }
+                Ok(())
             }
-            Err(failure) => return Err(failure.message().to_owned()),
-        };
-        if let Err(problem) = self.services.login.write(&next) {
-            tracing::warn!("could not share the refreshed Spiral session: {problem}");
+            Err(RefreshFailure::Ended(ended)) => {
+                tracing::info!("a Spiral session ended: {ended}");
+                self.mark_ended();
+                self.forget().await;
+                Ok(())
+            }
+            Err(failure) => Err(failure.message().to_owned()),
         }
-        let identity = identity.clone();
-        self.enter(
-            &mut session,
-            AccountSession::SignedIn {
-                tokens: next,
-                identity,
-            },
-        );
-        Ok(())
-    }
-
-    /// Another Spiral app on this machine may have refreshed the shared
-    /// session first, retiring Studio's refresh token. Continue from the file
-    /// when it still holds this organization's session.
-    async fn shared_successor(
-        &self,
-        tokens: &LoginTokens,
-        identity: &SpiralIdentity,
-    ) -> Option<LoginTokens> {
-        let saved = self
-            .services
-            .login
-            .read()
-            .ok()
-            .flatten()
-            .filter(|saved| saved.refresh_token() != tokens.refresh_token())?;
-        if saved.organization_id().as_deref() != Some(identity.organization().id()) {
-            return None;
-        }
-        if saved.remaining() > REFRESH_MARGIN {
-            return Some(saved);
-        }
-        self.services.workos.refresh(&saved, None).await.ok()
     }
 }

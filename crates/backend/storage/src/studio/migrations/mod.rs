@@ -14,6 +14,10 @@ impl MigratorTrait for Migrator {
                 "m20261001_000001_curated_views",
                 include_str!("m20261001_000001_curated_views.sql"),
             )),
+            Box::new(SqlMigration::new(
+                "m20261005_000001_sessions",
+                include_str!("m20261005_000001_sessions.sql"),
+            )),
         ]
     }
 }

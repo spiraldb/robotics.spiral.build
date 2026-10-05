@@ -21,10 +21,15 @@ impl StudioWebAssets {
         Self { public }
     }
 
-    pub(super) fn router(self, api: Router) -> Router {
+    /// The API under `/api`, the backend's own browser `pages`, and the
+    /// browser bundle for every other path.
+    pub(super) fn router(self, api: Router, pages: Router) -> Router {
         let index = self.public.join("index.html");
         let files = ServeDir::new(self.public).fallback(get(Self::navigation).with_state(index));
-        Router::new().nest("/api", api).fallback_service(files)
+        Router::new()
+            .nest("/api", api)
+            .merge(pages)
+            .fallback_service(files)
     }
 
     /// Only HTML navigation falls back to the application entrypoint. Missing
@@ -76,7 +81,7 @@ mod tests {
                 .route("/status", get(|| async { "ready" }))
                 .fallback(|| async { StatusCode::NOT_FOUND });
             Self {
-                router: StudioWebAssets::new(public.path().to_owned()).router(api),
+                router: StudioWebAssets::new(public.path().to_owned()).router(api, Router::new()),
                 _public: public,
             }
         }

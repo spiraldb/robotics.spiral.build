@@ -3,7 +3,7 @@
 use crate::activities::settings::SettingsClient;
 use dioxus::dioxus_core::CapturedError;
 use dioxus::prelude::*;
-use spiral_robotics_common::settings::{DataSettings, SpiralConnectionUpdate};
+use spiral_robotics_common::settings::DataSettings;
 use spiral_robotics_ui::{
     ActionPurpose, BlockingConfirmation, BrowserFocus, Button, ButtonVariant, ConfirmationCopy,
     ConfirmationDismissal, ConfirmationResponse, Field, FileButton, FileInput, LinkButton,
@@ -184,17 +184,13 @@ fn SettingsPanel(
         save_error.set(None);
         saving.set(true);
         let submitted = current();
-        let connection = SpiralConnectionUpdate::new(
-            current().spiral().endpoint(),
-            current().spiral().spfs_endpoint(),
-            current().spiral().project_id(),
-        );
+        let project_id = current().spiral().project_id().to_owned();
         let training = current().training().to_owned();
         let video = current().video().to_owned();
         crate::client::project::ProjectClient::current().spawn(async move {
             let result = SettingsClient::current()
                 .update_data_settings(spiral_robotics_common::settings::SettingsUpdate::new(
-                    connection, training, video,
+                    project_id, training, video,
                 ))
                 .await
                 .map(|settings| settings.spiral().project());
@@ -308,22 +304,8 @@ fn SettingsPanel(
                                 on_project: move |project_id| current.write().spiral_mut().set_project_id(project_id),
                                 disabled: saving() || import_project.pending(),
                             }
-                            div { class: "settings-field-row",
-                                SettingsField {
-                                    label: "API endpoint",
-                                    value: current().spiral().endpoint(),
-                                    placeholder: "https://api.spiraldb.dev",
-                                    oninput: move |value| current.write().spiral_mut().set_endpoint(value),
-                                }
-                                SettingsField {
-                                    label: "SpFS endpoint",
-                                    value: current().spiral().spfs_endpoint(),
-                                    placeholder: "https://spfs.spiraldb.dev",
-                                    oninput: move |value| current.write().spiral_mut().set_spfs_endpoint(value),
-                                }
-                            }
                             p { class: "settings-help",
-                                "The endpoints and the chosen project apply when you save."
+                                "The chosen project applies when you save."
                             }
                             Button {
                                 purpose: ActionPurpose::Apply,

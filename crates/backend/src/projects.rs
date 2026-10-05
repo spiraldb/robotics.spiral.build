@@ -1,5 +1,6 @@
-//! Every project this process has opened, each keyed by the connection that
-//! reaches it. Requests name their project; nothing here is "current".
+//! Every project this process has opened, each for the browser session that
+//! opened it and keyed by the connection that reaches it. Requests name their
+//! project; nothing here is "current".
 
 pub(crate) mod bootstrap;
 pub(crate) mod context;
@@ -10,19 +11,19 @@ use std::sync::{Arc, Mutex};
 
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::settings::{
-    DataSettings, SettingsUpdate, SpiralConnectionUpdate, SpiralSettings, TrainingRuntimeSettings,
-    VideoSettings,
+    DataSettings, SettingsUpdate, SpiralSettings, TrainingRuntimeSettings, VideoSettings,
 };
 use spiral_robotics_hardware::{
     HardwareHandle, HardwareState, ModeSelection as HardwareModeSelection,
 };
 use spiral_robotics_storage::episodes::RecordingBuffer;
 use spiral_robotics_storage::{
-    BackendStateStore, ProjectStore, ProviderKeys, SpiralAccess, SpiralConnection,
-    SpiralConnectionSettings, StorageManager, StoredStudioPreferences,
+    ProjectStore, ProviderKeys, SpiralAccess, SpiralConnection, SpiralConnectionSettings,
+    StorageManager, StoredStudioPreferences,
 };
 
 use crate::OperationError;
+use crate::account::SpiralSession;
 use crate::curation::manager::CurationManager;
 use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
@@ -71,25 +72,19 @@ impl ProjectHardware {
     }
 }
 
-/// How every project reaches its data: Studio's local store, the signed-in
-/// user's Spiral access, and the provider keys the driver works with.
+/// How every project reaches its data: Studio's local store and the provider
+/// keys the driver works with. Each project reaches Spiral as its session's user.
 pub(crate) struct ProjectDataAccess {
     studio: spiral_robotics_storage::StudioStore,
-    spiral: SpiralAccess,
     keys: tokio::sync::watch::Receiver<ProviderKeys>,
 }
 
 impl ProjectDataAccess {
     pub(crate) fn new(
         studio: spiral_robotics_storage::StudioStore,
-        spiral: SpiralAccess,
         keys: tokio::sync::watch::Receiver<ProviderKeys>,
     ) -> Self {
-        Self {
-            studio,
-            spiral,
-            keys,
-        }
+        Self { studio, keys }
     }
 }
 
@@ -103,11 +98,13 @@ impl ProjectFactory {
         Self { hardware, data }
     }
 
+    /// A project that reaches Spiral with `access`.
     fn create(
         &self,
         settings: SpiralConnectionSettings,
+        access: SpiralAccess,
     ) -> Result<Arc<OpenProject>, OperationError> {
-        let connection = SpiralConnection::new(settings, self.data.spiral.clone());
+        let connection = SpiralConnection::new(settings, access);
         let database = Arc::new(
             spiral_robotics_storage::AdbcDatabase::new(connection.clone())
                 .with_provider_keys(self.data.keys.clone()),
@@ -152,15 +149,6 @@ impl ProjectFactory {
 }
 
 impl OpenProject {
-    fn resolve_connection_update(
-        update: SpiralConnectionUpdate,
-    ) -> Result<SpiralConnectionSettings, OperationError> {
-        let (endpoint, spfs, project) = update.into_parts();
-        SpiralConnectionSettings::new(endpoint, spfs)
-            .and_then(|settings| settings.with_project(&project))
-            .map_err(OperationError::InvalidInput)
-    }
-
     /// Present a connection to the browser without its secrets.
     fn present(connection: &SpiralConnectionSettings) -> SpiralSettings {
         SpiralSettings::new(
@@ -258,34 +246,43 @@ impl OpenProject {
     }
 }
 
-/// The connection Studio starts with, and every project opened through it.
-struct OpenedProjects {
-    saved: SpiralConnectionSettings,
-    projects: Vec<Arc<OpenProject>>,
+/// A project one browser session opened.
+struct SessionProject {
+    session: Arc<SpiralSession>,
+    project: Arc<OpenProject>,
 }
 
-/// Opens the projects requests name, and saves the connection Studio starts
-/// with. A project stays open, with its running work, until the Spiral account
-/// changes or an import replaces its data.
+/// A project a request reached: one its session had open, or one no session
+/// had open before.
+pub(crate) enum ProjectOpening {
+    Opened(Arc<OpenProject>),
+    FirstInStudio(Arc<OpenProject>),
+}
+
+impl ProjectOpening {
+    fn into_project(self) -> Arc<OpenProject> {
+        match self {
+            Self::Opened(project) | Self::FirstInStudio(project) => project,
+        }
+    }
+}
+
+/// Opens the projects requests name, each as the session that names it. A
+/// project stays open, with its running work, until its session ends or
+/// changes organization, or an import replaces its data.
 pub(crate) struct ProjectRegistry {
     factory: ProjectFactory,
-    backend_state: Arc<BackendStateStore>,
-    opened: Mutex<OpenedProjects>,
+    /// The Spiral endpoints every project reaches, fixed while Studio runs.
+    endpoints: SpiralConnectionSettings,
+    opened: Mutex<Vec<SessionProject>>,
 }
 
 impl ProjectRegistry {
-    pub(crate) fn new(
-        factory: ProjectFactory,
-        backend_state: Arc<BackendStateStore>,
-        saved: SpiralConnectionSettings,
-    ) -> Arc<Self> {
+    pub(crate) fn new(factory: ProjectFactory, endpoints: SpiralConnectionSettings) -> Arc<Self> {
         Arc::new(Self {
             factory,
-            backend_state,
-            opened: Mutex::new(OpenedProjects {
-                saved,
-                projects: Vec::new(),
-            }),
+            endpoints: endpoints.without_project(),
+            opened: Mutex::new(Vec::new()),
         })
     }
 
@@ -299,69 +296,88 @@ impl ProjectRegistry {
         &self.factory.hardware.video_encoder
     }
 
-    /// The saved connection, which names the project a browser starts on.
-    pub(crate) fn saved_connection(&self) -> SpiralConnectionSettings {
-        self.opened.recover_lock().saved.clone()
+    /// The endpoints, and the project `session`'s browser works on.
+    pub(crate) async fn session_settings(
+        &self,
+        session: &SpiralSession,
+    ) -> Result<SpiralSettings, OperationError> {
+        Ok(SpiralSettings::new(
+            self.endpoints.endpoint(),
+            self.endpoints.spfs_endpoint(),
+            session.project_id().await?,
+        ))
     }
 
-    pub(crate) fn saved_settings(&self) -> SpiralSettings {
-        OpenProject::present(&self.saved_connection())
-    }
-
-    /// The project `key` names, reached with the saved credentials. A key for
-    /// another endpoint comes from a browser that has not seen a later save.
-    pub(crate) fn open(&self, key: &ProjectKey) -> Result<Arc<OpenProject>, OperationError> {
-        let mut opened = self.opened.recover_lock();
-        if key.endpoint() != opened.saved.endpoint() {
+    /// The project `key` names, as `session`'s user, who must be allowed to
+    /// open it. A key for another endpoint comes from a browser that has not
+    /// seen Studio restart on new endpoints.
+    pub(crate) async fn open(
+        &self,
+        session: &Arc<SpiralSession>,
+        key: &ProjectKey,
+    ) -> Result<ProjectOpening, OperationError> {
+        if key.endpoint() != self.endpoints.endpoint() {
             return Err(OperationError::StaleProject(
                 "Studio now uses another Spiral endpoint. Reload to continue.".to_owned(),
             ));
         }
         let connection = if key.is_chosen() {
-            opened
-                .saved
+            self.endpoints
                 .clone()
                 .with_project(key.project_id())
                 .map_err(OperationError::InvalidInput)?
         } else {
-            opened.saved.clone().without_project()
+            self.endpoints.clone()
         };
-        if let Some(project) = opened
-            .projects
-            .iter()
-            .find(|project| project.connection() == connection)
-        {
-            return Ok(project.clone());
+        if let Some(project) = self.find(session, &connection) {
+            return Ok(ProjectOpening::Opened(project));
         }
-        let project = self.factory.create(connection)?;
-        opened.projects.push(project.clone());
-        Ok(project)
+        if let Some(project_id) = connection.project_id() {
+            session.admit(project_id).await?;
+        }
+        let candidate = self.factory.create(connection, session.access())?;
+        Ok(self.adopt(session, candidate))
     }
 
-    pub(crate) fn opened(&self) -> Vec<Arc<OpenProject>> {
-        self.opened.recover_lock().projects.clone()
+    /// Every open project, with the session that opened it.
+    pub(crate) fn opened(&self) -> Vec<(Arc<SpiralSession>, Arc<OpenProject>)> {
+        self.opened
+            .recover_lock()
+            .iter()
+            .map(|opened| (opened.session.clone(), opened.project.clone()))
+            .collect()
     }
 
-    /// Preferences for the same connection apply in place. A new connection is
-    /// validated and saved first; the preferences then belong to its project,
-    /// which comes back beside the saved settings.
+    /// Preferences for the same project apply in place. Another project is
+    /// validated first; the session then works on it, and the preferences
+    /// belong to it. It comes back beside the saved settings.
     pub(crate) async fn update_settings(
         &self,
+        session: &Arc<SpiralSession>,
         origin: &OpenProject,
         update: SettingsUpdate,
     ) -> Result<(DataSettings, Option<Arc<OpenProject>>), OperationError> {
-        let (connection, training, video) = update.into_parts();
-        let connection = OpenProject::resolve_connection_update(connection)?;
+        let (project_id, training, video) = update.into_parts();
+        let connection = self
+            .endpoints
+            .clone()
+            .with_project(&project_id)
+            .map_err(OperationError::InvalidInput)?;
         let preferences =
             StoredStudioPreferences::from_settings(training.endpoint(), video.enabled())
                 .map_err(OperationError::InvalidInput)?;
+        let project_id = connection.project_id().unwrap_or_default().to_owned();
         if connection == origin.connection() {
             origin.apply_preferences(preferences).await?;
+            session.choose_project(&project_id).await?;
             return Ok((origin.settings().await?, None));
         }
-        let candidate = self.factory.create(connection)?;
+        session.admit(&project_id).await?;
+        let candidate = self.factory.create(connection, session.access())?;
         candidate.validate().await?;
-        let target = self.switch(origin, candidate).await?;
+        self.release_robots(origin).await?;
+        session.choose_project(&project_id).await?;
+        let target = self.adopt(session, candidate).into_project();
         target.apply_preferences(preferences).await?;
         Ok((target.settings().await?, Some(target)))
     }
@@ -370,6 +386,7 @@ impl ProjectRegistry {
     /// and put it in place of `origin`.
     pub(crate) async fn import(
         &self,
+        session: &Arc<SpiralSession>,
         origin: &Arc<OpenProject>,
         document: &[u8],
     ) -> Result<
@@ -397,7 +414,7 @@ impl ProjectRegistry {
                     .map_err(OperationError::External)?;
             }
         }
-        let candidate = self.factory.create(origin.connection())?;
+        let candidate = self.factory.create(origin.connection(), session.access())?;
         let summary = candidate
             .storage()
             .transfer()
@@ -407,92 +424,99 @@ impl ProjectRegistry {
         if let Some(slot) = self
             .opened
             .recover_lock()
-            .projects
             .iter_mut()
-            .find(|project| Arc::ptr_eq(project, origin))
+            .find(|opened| Arc::ptr_eq(&opened.project, origin))
         {
-            *slot = candidate.clone();
+            slot.project = candidate.clone();
         }
         let replaced = origin.clone();
         tokio::spawn(async move { replaced.shutdown().await });
         Ok((summary, candidate))
     }
 
-    /// Save `candidate`'s connection as the one Studio starts with and open its
-    /// project. Work in other projects keeps running unless the Spiral account
-    /// itself changes, which retires every open project.
-    async fn switch(
-        &self,
-        origin: &OpenProject,
-        candidate: Arc<OpenProject>,
-    ) -> Result<Arc<OpenProject>, OperationError> {
-        let connection = candidate.connection();
-        if connection != origin.connection() {
-            self.release_robots(origin).await?;
-        }
-        let account = connection.clone().without_project();
-        if self.saved_connection().without_project() != account {
-            self.refuse_while_busy("changing the Spiral connection")
-                .await?;
-        }
-        self.backend_state
-            .save_connection(&connection)
-            .await
-            .map_err(OperationError::Internal)?;
-        let (project, retired) = {
-            let mut opened = self.opened.recover_lock();
-            let retired = if opened.saved.clone().without_project() == account {
-                Vec::new()
-            } else {
-                std::mem::take(&mut opened.projects)
-            };
-            opened.saved = connection.clone();
-            let existing = opened
-                .projects
-                .iter()
-                .find(|project| project.connection() == connection)
-                .cloned();
-            let project = existing.unwrap_or_else(|| {
-                opened.projects.push(candidate.clone());
-                candidate
-            });
-            (project, retired)
-        };
-        for retired_project in retired {
-            tokio::spawn(async move { retired_project.shutdown().await });
-        }
-        Ok(project)
-    }
-
-    /// Run `change` to the signed-in Spiral account, then close every project
-    /// opened as the previous user and forget the saved project, which was theirs.
+    /// Run `change` to `session`'s Spiral account, such as signing out or
+    /// another organization, then close every project the session opened as
+    /// it was before.
     pub(crate) async fn change_account<T>(
         &self,
+        session: &Arc<SpiralSession>,
         origin: &OpenProject,
         change: impl Future<Output = Result<T, OperationError>>,
     ) -> Result<T, OperationError> {
         self.release_robots(origin).await?;
-        self.refuse_while_busy("changing the Spiral account")
+        self.refuse_while_busy(session, "changing the Spiral account")
             .await?;
         let changed = change.await?;
-        let saved = self.saved_connection().without_project();
-        self.backend_state
-            .save_connection(&saved)
-            .await
-            .map_err(OperationError::Internal)?;
-        let retired = {
-            let mut opened = self.opened.recover_lock();
-            opened.saved = saved;
-            std::mem::take(&mut opened.projects)
-        };
-        for retired_project in retired {
-            tokio::spawn(async move { retired_project.shutdown().await });
-        }
+        Self::shut_down(self.retire(|opened| Arc::ptr_eq(&opened.session, session)));
         Ok(changed)
     }
 
-    async fn refuse_while_busy(&self, action: &str) -> Result<(), OperationError> {
-        for project in self.opened() {
+    /// `session`'s project for `connection`, if it has it open.
+    fn find(
+        &self,
+        session: &Arc<SpiralSession>,
+        connection: &SpiralConnectionSettings,
+    ) -> Option<Arc<OpenProject>> {
+        self.opened
+            .recover_lock()
+            .iter()
+            .find(|opened| {
+                Arc::ptr_eq(&opened.session, session) && opened.project.connection() == *connection
+            })
+            .map(|opened| opened.project.clone())
+    }
+
+    /// Keep `candidate` open for `session`, unless a concurrent request opened
+    /// the same project first. Projects of sessions that ended close here.
+    fn adopt(&self, session: &Arc<SpiralSession>, candidate: Arc<OpenProject>) -> ProjectOpening {
+        Self::shut_down(self.retire(|opened| opened.session.ended()));
+        let connection = candidate.connection();
+        let mut opened = self.opened.recover_lock();
+        if let Some(existing) = opened.iter().find(|opened| {
+            Arc::ptr_eq(&opened.session, session) && opened.project.connection() == connection
+        }) {
+            return ProjectOpening::Opened(existing.project.clone());
+        }
+        let first = opened
+            .iter()
+            .all(|opened| opened.project.connection() != connection);
+        opened.push(SessionProject {
+            session: session.clone(),
+            project: candidate.clone(),
+        });
+        if first {
+            ProjectOpening::FirstInStudio(candidate)
+        } else {
+            ProjectOpening::Opened(candidate)
+        }
+    }
+
+    /// Stop tracking the projects `retired` selects, and return them.
+    fn retire(&self, retired: impl Fn(&SessionProject) -> bool) -> Vec<Arc<OpenProject>> {
+        self.opened
+            .recover_lock()
+            .extract_if(.., |opened| retired(opened))
+            .map(|opened| opened.project)
+            .collect()
+    }
+
+    fn shut_down(projects: Vec<Arc<OpenProject>>) {
+        for project in projects {
+            tokio::spawn(async move { project.shutdown().await });
+        }
+    }
+
+    async fn refuse_while_busy(
+        &self,
+        session: &Arc<SpiralSession>,
+        action: &str,
+    ) -> Result<(), OperationError> {
+        let projects: Vec<_> = self
+            .opened()
+            .into_iter()
+            .filter(|(owner, _)| Arc::ptr_eq(owner, session))
+            .collect();
+        for (_, project) in projects {
             if project.busy().await? {
                 return Err(OperationError::conflict(format!(
                     "Stop recording, rollout, and training before {action}."
@@ -530,8 +554,7 @@ impl ProjectRegistry {
     }
 
     pub(crate) async fn shutdown(&self) {
-        let projects = std::mem::take(&mut self.opened.recover_lock().projects);
-        for project in projects {
+        for project in self.retire(|_| true) {
             project.shutdown().await;
         }
     }
@@ -605,18 +628,25 @@ impl DestinationChangeContext {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::account::fake::FakeSpiral;
 
     pub(crate) const ENDPOINT: &str = "https://api.spiraldb.dev";
 
+    /// Projects opened by a browser signed in to a fake Spiral.
     pub(crate) struct ProjectFixture {
         pub(crate) projects: Arc<ProjectRegistry>,
-        /// Holds the backend database's directory for the fixture's lifetime.
-        _directory: tempfile::TempDir,
+        sessions: Arc<crate::account::SpiralSessions>,
+        session_id: String,
+        spiral: FakeSpiral,
     }
 
     impl ProjectFixture {
-        pub(crate) fn new() -> Self {
-            let directory = tempfile::tempdir().unwrap();
+        pub(crate) async fn new() -> Self {
+            let spiral = FakeSpiral::start().await;
+            let sessions = Arc::new(spiral.sessions(spiral_robotics_storage::SessionStore::new(
+                spiral_robotics_storage::StudioStore::in_memory(),
+            )));
+            let session_id = FakeSpiral::sign_in(&sessions).await;
             let hardware = ProjectHardware::new(
                 Arc::new(HardwareHandle::spawn(Default::default())),
                 Arc::new(CameraManager::new()),
@@ -626,81 +656,159 @@ pub(crate) mod tests {
                 hardware,
                 ProjectDataAccess::new(
                     spiral_robotics_storage::StudioStore::in_memory(),
-                    spiral_robotics_storage::SpiralAccessPublisher::new().1,
                     tokio::sync::watch::channel(ProviderKeys::default()).1,
                 ),
             );
-            let backend_state = Arc::new(BackendStateStore::new(
-                spiral_robotics_storage::StudioStore::at(directory.path().join("studio.sqlite3")),
-            ));
-            let connection = SpiralConnectionSettings::new(
+            let endpoints = SpiralConnectionSettings::new(
                 ENDPOINT.to_owned(),
                 "https://spfs.spiraldb.dev".to_owned(),
             )
             .unwrap();
             Self {
-                projects: ProjectRegistry::new(factory, backend_state, connection),
-                _directory: directory,
+                projects: ProjectRegistry::new(factory, endpoints),
+                sessions,
+                session_id,
+                spiral,
             }
         }
 
-        pub(crate) fn open(&self, project_id: &str) -> Arc<OpenProject> {
-            self.projects
-                .open(&ProjectKey::new(ENDPOINT, project_id))
-                .unwrap()
+        /// The Spiral its sessions sign in to.
+        pub(crate) fn spiral(&self) -> &FakeSpiral {
+            &self.spiral
         }
 
-        /// What a request reaches: these projects, signed out, with keys
+        /// The fixture's signed-in browser session.
+        pub(crate) async fn session(&self) -> Arc<SpiralSession> {
+            self.sessions.find(&self.session_id).await.unwrap()
+        }
+
+        /// Another browser, signed in as the same user.
+        pub(crate) async fn another_session(&self) -> Arc<SpiralSession> {
+            let id = FakeSpiral::sign_in(&self.sessions).await;
+            self.sessions.find(&id).await.unwrap()
+        }
+
+        /// The cookie the fixture's browser sends with every request.
+        pub(crate) fn cookie(&self) -> String {
+            format!(
+                "{}={}",
+                crate::account::sign_in::BrowserCookies::SESSION,
+                self.session_id
+            )
+        }
+
+        pub(crate) async fn open(&self, project_id: &str) -> Arc<OpenProject> {
+            self.projects
+                .open(
+                    &self.session().await,
+                    &ProjectKey::new(ENDPOINT, project_id),
+                )
+                .await
+                .unwrap()
+                .into_project()
+        }
+
+        /// What a request reaches: these projects and sessions, with keys
         /// saved in memory.
         pub(crate) fn context(&self) -> crate::projects::context::StudioContext {
             let keys = spiral_robotics_storage::ProviderKeyring::new(
-                Arc::new(BackendStateStore::new(
+                Arc::new(spiral_robotics_storage::BackendStateStore::new(
                     spiral_robotics_storage::StudioStore::in_memory(),
                 )),
                 ProviderKeys::default(),
             );
             crate::projects::context::StudioContext::new(
                 self.projects.clone(),
-                crate::account::SpiralAccount::offline(),
+                self.sessions.clone(),
                 Arc::new(keys),
             )
         }
     }
 
     #[tokio::test]
-    async fn requests_reach_the_project_they_name_and_share_it() {
-        let fixture = ProjectFixture::new();
-        let first = fixture.open("project_a");
-        assert!(Arc::ptr_eq(&first, &fixture.open("project_a")));
-        let second = fixture.open("project_b");
+    async fn each_session_opens_the_projects_it_names_and_may_see() {
+        let fixture = ProjectFixture::new().await;
+        let session = fixture.session().await;
+        let first = match fixture
+            .projects
+            .open(&session, &ProjectKey::new(ENDPOINT, "project_a"))
+            .await
+            .unwrap()
+        {
+            ProjectOpening::FirstInStudio(project) => project,
+            ProjectOpening::Opened(_) => panic!("project_a was not open yet"),
+        };
+        assert!(Arc::ptr_eq(&first, &fixture.open("project_a").await));
+        let second = fixture.open("project_b").await;
         assert!(!Arc::ptr_eq(&first, &second));
         assert_eq!(first.connection().project_id(), Some("project_a"));
         assert_eq!(second.connection().project_id(), Some("project_b"));
-        assert_eq!(fixture.open("").connection().project_id(), None);
+        assert_eq!(fixture.open("").await.connection().project_id(), None);
         assert_eq!(fixture.projects.opened().len(), 3);
-        assert!(matches!(
-            fixture
-                .projects
-                .open(&ProjectKey::new("https://other.spiraldb.dev", "project_a")),
-            Err(OperationError::StaleProject(_))
-        ));
-        assert!(matches!(
-            fixture
-                .projects
-                .open(&ProjectKey::new(ENDPOINT, "not/a/project")),
-            Err(OperationError::InvalidInput(_))
-        ));
+        // Another browser reaches Spiral with its own token, so it opens its own.
+        let elsewhere = fixture.another_session().await;
+        let theirs = fixture
+            .projects
+            .open(&elsewhere, &ProjectKey::new(ENDPOINT, "project_a"))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&theirs, ProjectOpening::Opened(project) if !Arc::ptr_eq(project, &first))
+        );
+        for (key, refused) in [
+            (
+                ProjectKey::new("https://other.spiraldb.dev", "project_a"),
+                "stale",
+            ),
+            (ProjectKey::new(ENDPOINT, "not/a/project"), "invalid"),
+            (ProjectKey::new(ENDPOINT, "forbidden_arms"), "hidden"),
+        ] {
+            let result = fixture.projects.open(&session, &key).await;
+            assert!(
+                matches!(
+                    (refused, &result),
+                    ("stale", Err(OperationError::StaleProject(_)))
+                        | ("invalid", Err(OperationError::InvalidInput(_)))
+                        | ("hidden", Err(OperationError::NotFound(_)))
+                ),
+                "{refused}"
+            );
+        }
+        assert_eq!(fixture.projects.opened().len(), 4);
+        fixture.projects.hardware().shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn changing_the_account_closes_only_that_sessions_projects() {
+        let fixture = ProjectFixture::new().await;
+        let session = fixture.session().await;
+        let mine = fixture.open("project_a").await;
+        let elsewhere = fixture.another_session().await;
+        fixture
+            .projects
+            .open(&elsewhere, &ProjectKey::new(ENDPOINT, "project_a"))
+            .await
+            .unwrap();
+        let identity = fixture
+            .projects
+            .change_account(&session, &mine, session.switch_organization("org_2"))
+            .await
+            .unwrap();
+        assert_eq!(identity.organization().id(), "org_2");
+        let remaining = fixture.projects.opened();
+        assert_eq!(remaining.len(), 1);
+        assert!(Arc::ptr_eq(&remaining[0].0, &elsewhere));
         fixture.projects.hardware().shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn training_endpoint_changes_apply_in_place() {
-        let fixture = ProjectFixture::new();
-        let project = fixture.open("");
+        let fixture = ProjectFixture::new().await;
+        let project = fixture.open("").await;
         let preferences =
             StoredStudioPreferences::from_settings("http://127.0.0.1:5050", false).unwrap();
         project.apply_preferences(preferences).await.unwrap();
-        assert!(Arc::ptr_eq(&project, &fixture.open("")));
+        assert!(Arc::ptr_eq(&project, &fixture.open("").await));
         let settings = project.settings().await.unwrap();
         assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");
         assert!(!settings.video().enabled());
@@ -709,7 +817,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn settings_present_the_project_connection_and_preferences() {
-        let fixture = ProjectFixture::new();
+        let fixture = ProjectFixture::new().await;
         let connection = SpiralConnectionSettings::new(
             ENDPOINT.to_owned(),
             "https://spfs.spiraldb.dev".to_owned(),
@@ -717,7 +825,11 @@ pub(crate) mod tests {
         .unwrap()
         .with_project("configured_project")
         .unwrap();
-        let project = fixture.projects.factory.create(connection).unwrap();
+        let project = fixture
+            .projects
+            .factory
+            .create(connection, fixture.session().await.access())
+            .unwrap();
         let preferences =
             StoredStudioPreferences::from_settings("http://127.0.0.1:5050", false).unwrap();
         project

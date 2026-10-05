@@ -6,6 +6,7 @@ use spiral_robotics_common::command_failure::{CommandFailure, CommandFailureCode
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OperationError {
     InvalidInput(String),
+    Unauthenticated(String),
     NotFound(String),
     Conflict(String),
     StaleProject(String),
@@ -25,6 +26,7 @@ impl OperationError {
     pub(crate) fn message(&self) -> &str {
         match self {
             Self::InvalidInput(message)
+            | Self::Unauthenticated(message)
             | Self::NotFound(message)
             | Self::Conflict(message)
             | Self::StaleProject(message)
@@ -36,6 +38,7 @@ impl OperationError {
     pub(crate) const fn code(&self) -> CommandFailureCode {
         match self {
             Self::InvalidInput(_) => CommandFailureCode::InvalidInput,
+            Self::Unauthenticated(_) => CommandFailureCode::Unauthenticated,
             Self::NotFound(_) => CommandFailureCode::NotFound,
             Self::Conflict(_) => CommandFailureCode::Conflict,
             Self::StaleProject(_) => CommandFailureCode::StaleProject,

@@ -20,10 +20,16 @@ async fn command_status(fixture: &ProjectFixture, uri: &str, body: String) -> St
         .header(ProjectKey::ENDPOINT_HEADER, ENDPOINT)
         .header(ProjectKey::PROJECT_HEADER, "curation_project")
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, fixture.cookie())
         .body(Body::from(body))
         .unwrap();
+    let studio = fixture.context();
     CurationEndpoints::commands()
-        .with_state(fixture.context())
+        .layer(axum::middleware::from_fn_with_state(
+            studio.clone(),
+            crate::account::http::AccountEndpoints::require_session,
+        ))
+        .with_state(studio)
         .oneshot(request)
         .await
         .unwrap()
@@ -32,7 +38,7 @@ async fn command_status(fixture: &ProjectFixture, uri: &str, body: String) -> St
 
 #[tokio::test]
 async fn a_save_may_exceed_the_default_json_bound_but_not_its_own() {
-    let fixture = ProjectFixture::new();
+    let fixture = ProjectFixture::new().await;
     let document =
         CurationDocument::new("folding", "Cloth folding", 1, "x".repeat(4 * 1024 * 1024));
     assert_eq!(
@@ -48,7 +54,7 @@ async fn a_save_may_exceed_the_default_json_bound_but_not_its_own() {
 
 #[tokio::test]
 async fn publishing_is_a_command_that_refuses_a_name_that_is_not_an_identifier() {
-    let fixture = ProjectFixture::new();
+    let fixture = ProjectFixture::new().await;
     let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
     let publishing = FillRequest::new(dataset, Vec::new())
         .publishing(vec![PublishedView::new("2folds", "SELECT 1")]);

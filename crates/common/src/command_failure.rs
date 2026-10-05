@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum CommandFailureCode {
     InvalidInput,
+    /// The request carries no live Spiral sign-in.
+    Unauthenticated,
     NotFound,
     Conflict,
     StaleProject,
@@ -18,6 +20,7 @@ impl CommandFailureCode {
     pub const fn http_status(self) -> u16 {
         match self {
             Self::InvalidInput => 400,
+            Self::Unauthenticated => 401,
             Self::NotFound => 404,
             Self::Conflict | Self::StaleProject => 409,
             Self::Transport => 503,

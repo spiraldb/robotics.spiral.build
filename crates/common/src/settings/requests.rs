@@ -1,34 +1,29 @@
 //! Explicit request messages shared by HTTP clients and the backend.
 use super::*;
 
-/// Updates project connection and compute/video preferences together.
+/// Updates the browser's project and its compute/video preferences together.
+/// The Spiral endpoints are the backend's own; no browser changes them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsUpdate {
-    connection: SpiralConnectionUpdate,
+    project_id: String,
     training: TrainingRuntimeSettings,
     video: VideoSettings,
 }
 impl SettingsUpdate {
     pub fn new(
-        connection: SpiralConnectionUpdate,
+        project_id: impl Into<String>,
         training: TrainingRuntimeSettings,
         video: VideoSettings,
     ) -> Self {
         Self {
-            connection,
+            project_id: project_id.into(),
             training,
             video,
         }
     }
-    pub fn into_parts(
-        self,
-    ) -> (
-        SpiralConnectionUpdate,
-        TrainingRuntimeSettings,
-        VideoSettings,
-    ) {
-        (self.connection, self.training, self.video)
+    pub fn into_parts(self) -> (String, TrainingRuntimeSettings, VideoSettings) {
+        (self.project_id, self.training, self.video)
     }
 }
 

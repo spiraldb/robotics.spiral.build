@@ -1,5 +1,6 @@
 //! Browser-native project bundle download.
 
+use crate::http::delivery::SignedIn;
 use crate::projects::context::StudioContext;
 use axum::{
     Router,
@@ -21,10 +22,12 @@ impl ProjectDownload {
 
     async fn export_project(
         State(state): State<StudioContext>,
+        SignedIn(session): SignedIn,
         Query(project): Query<ProjectKey>,
     ) -> Result<Response, (StatusCode, String)> {
         let project = state
-            .open(&project)
+            .open(&session, &project)
+            .await
             .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
         let bytes = project
             .storage()

@@ -5,6 +5,7 @@ pub(crate) mod frame;
 pub(crate) mod notifications;
 pub(crate) mod project;
 pub(crate) mod routes;
+mod sign_in;
 pub(crate) mod state;
 
 use dioxus::prelude::*;

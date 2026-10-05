@@ -1,23 +1,21 @@
-//! Signing this Studio in to Spiral, and choosing the project it works on.
+//! Who this browser is signed in to Spiral as, and the project it works on.
 //! The backend holds the session; this page only learns who is signed in.
 
 use std::future::Future;
 
 use dioxus::prelude::*;
 use spiral_robotics_common::account::{
-    OrganizationSwitch, SpiralAccountStatus, SpiralOrganization, SpiralProject, SpiralSignIn,
+    OrganizationSwitch, SpiralIdentity, SpiralOrganization, SpiralProject,
 };
 use spiral_robotics_common::project::ProjectKey;
-use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, Field, LinkButton, Notice, NoticeTone, Select,
-};
+use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, Field, Notice, NoticeTone, Select};
 
 use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::client::transport::{CommandError, HttpRequest};
 use crate::shell::project::ProjectSelection;
 
-/// Account requests. Leaving the account closes the backend's open projects,
+/// Account requests. Leaving the account closes this browser's open projects,
 /// so those commands name the mounted project like every project command.
 struct AccountClient {
     project: ProjectClient,
@@ -30,7 +28,7 @@ impl AccountClient {
         }
     }
 
-    fn status(&self) -> impl Future<Output = Result<SpiralAccountStatus, CommandError>> + use<> {
+    fn identity(&self) -> impl Future<Output = Result<SpiralIdentity, CommandError>> + use<> {
         self.project
             .request(HttpRequest::new("GET", "/api/account"))
     }
@@ -47,14 +45,7 @@ impl AccountClient {
             .request(HttpRequest::new("GET", "/api/account/projects"))
     }
 
-    fn sign_in(&self) -> impl Future<Output = Result<SpiralAccountStatus, CommandError>> + use<> {
-        self.project.mutate(
-            &[QueryDomain::Settings],
-            HttpRequest::new("POST", "/api/account/sign-in"),
-        )
-    }
-
-    fn sign_out(&self) -> impl Future<Output = Result<SpiralAccountStatus, CommandError>> + use<> {
+    fn sign_out(&self) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
             &[QueryDomain::Project, QueryDomain::Settings],
             HttpRequest::new("POST", "/api/account/sign-out"),
@@ -64,13 +55,22 @@ impl AccountClient {
     fn switch_organization(
         &self,
         organization: String,
-    ) -> impl Future<Output = Result<SpiralAccountStatus, CommandError>> + use<> {
+    ) -> impl Future<Output = Result<SpiralIdentity, CommandError>> + use<> {
         self.project.mutate(
             &[QueryDomain::Project, QueryDomain::Settings],
             HttpRequest::new("PUT", "/api/account/organization")
                 .json(&OrganizationSwitch::new(organization)),
         )
     }
+}
+
+/// Where this browser goes once an account command succeeds.
+#[derive(Clone, Copy)]
+enum AccountChange {
+    /// Another organization's projects are others: start over without one.
+    LeavesProject,
+    /// Only signing in again continues.
+    SignsOut,
 }
 
 /// One account command at a time, and what the last one reported.
@@ -90,12 +90,11 @@ impl AccountActions {
         }
     }
 
-    /// Run `command`. Leaving the account closes its projects, so this browser
-    /// then starts over without one.
-    fn run(
+    /// Run `command`, which closes this browser's projects.
+    fn run<T: 'static>(
         mut self,
-        command: impl Future<Output = Result<SpiralAccountStatus, CommandError>> + 'static,
-        leaves_project: bool,
+        command: impl Future<Output = Result<T, CommandError>> + 'static,
+        change: AccountChange,
     ) {
         if *self.pending.peek() {
             return;
@@ -107,16 +106,18 @@ impl AccountActions {
         client.spawn(async move {
             let result = command.await;
             self.pending.set(false);
-            match result {
-                Ok(_) if leaves_project => self.selection.select(ProjectKey::new(endpoint, "")),
-                Ok(_) => {}
-                Err(error) => self.failure.set(Some(error)),
+            match (result, change) {
+                (Ok(_), AccountChange::LeavesProject) => {
+                    self.selection.select(ProjectKey::new(endpoint, ""));
+                }
+                (Ok(_), AccountChange::SignsOut) => self.selection.sign_out(),
+                (Err(error), _) => self.failure.set(Some(error)),
             }
         });
     }
 }
 
-/// Who this Studio reaches Spiral as, and the project it works on. Choosing a
+/// Who this browser reaches Spiral as, and the project it works on. Choosing a
 /// project edits the settings draft; saving applies it.
 #[component]
 pub(super) fn SpiralAccountSection(
@@ -124,46 +125,26 @@ pub(super) fn SpiralAccountSection(
     on_project: EventHandler<String>,
     disabled: bool,
 ) -> Element {
-    let status = QueryPolicy::new(QueryDomain::Settings, 1_000)
-        .use_resource(|| AccountClient::current().status());
-    let identity = use_memo(move || match &*status.read() {
-        Some(Ok(SpiralAccountStatus::SignedIn(identity))) => Some(identity.clone()),
-        _ => None,
-    });
+    let identity = QueryPolicy::new(QueryDomain::Settings, 1_000)
+        .use_resource(|| AccountClient::current().identity());
+    let signed_in = use_memo(move || matches!(&*identity.read(), Some(Ok(_))));
     let organizations = QueryPolicy::on_demand(QueryDomain::Settings).use_when(
-        move || identity().is_some(),
+        move || *signed_in.read(),
         || AccountClient::current().organizations(),
     );
     let projects = QueryPolicy::on_demand(QueryDomain::Settings).use_when(
-        move || identity().is_some(),
+        move || *signed_in.read(),
         || AccountClient::current().projects(),
     );
     let actions = AccountActions::use_actions();
     let disabled = disabled || (actions.pending)();
-    let current = status.read().clone();
+    let current = identity.read().clone();
     rsx! {
         div { class: "settings-account",
         match current {
             None => rsx! { p { class: "settings-help", role: "status", "Checking your Spiral sign-in…" } },
             Some(Err(error)) => rsx! { Notice { tone: NoticeTone::Caution, "{error}" } },
-            Some(Ok(SpiralAccountStatus::SignedOut { problem })) => rsx! {
-                if let Some(problem) = problem {
-                    Notice { tone: NoticeTone::Caution, "{problem}" }
-                }
-                p { class: "settings-help", "Sign in with your Spiral account to choose a project." }
-                Button {
-                    purpose: ActionPurpose::Connect,
-                    variant: ButtonVariant::Solid,
-                    disabled,
-                    aria_busy: (actions.pending)(),
-                    onclick: move |_| actions.run(AccountClient::current().sign_in(), false),
-                    "Sign in with Spiral"
-                }
-            },
-            Some(Ok(SpiralAccountStatus::SigningIn(sign_in))) => rsx! {
-                PendingSignIn { sign_in, on_restart: move |_| actions.run(AccountClient::current().sign_in(), false), disabled }
-            },
-            Some(Ok(SpiralAccountStatus::SignedIn(identity))) => rsx! {
+            Some(Ok(identity)) => rsx! {
                 div { class: "settings-account-identity",
                     p { class: "settings-help",
                         "Signed in as "
@@ -176,8 +157,8 @@ pub(super) fn SpiralAccountSection(
                         purpose: ActionPurpose::Disconnect,
                         variant: ButtonVariant::Link,
                         disabled,
-                        title: "Signs out of Spiral on this computer, including the spiraldb CLI",
-                        onclick: move |_| actions.run(AccountClient::current().sign_out(), true),
+                        title: "Signs this browser out of Studio",
+                        onclick: move |_| actions.run(AccountClient::current().sign_out(), AccountChange::SignsOut),
                         "Sign out"
                     }
                 }
@@ -185,7 +166,7 @@ pub(super) fn SpiralAccountSection(
                     current: identity.organization().clone(),
                     organizations: organizations.read().as_ref().and_then(|result| result.as_ref().ok()).cloned().unwrap_or_default(),
                     choice: AccountChoice::new(
-                        EventHandler::new(move |organization| actions.run(AccountClient::current().switch_organization(organization), true)),
+                        EventHandler::new(move |organization| actions.run(AccountClient::current().switch_organization(organization), AccountChange::LeavesProject)),
                         disabled,
                     ),
                 }
@@ -199,33 +180,6 @@ pub(super) fn SpiralAccountSection(
         if let Some(error) = (actions.failure)() {
             Notice { tone: NoticeTone::Danger, "{error} {error.recovery_guidance()}" }
         }
-        }
-    }
-}
-
-#[component]
-fn PendingSignIn(sign_in: SpiralSignIn, on_restart: EventHandler<()>, disabled: bool) -> Element {
-    rsx! {
-        p { class: "settings-help",
-            "Confirm the code "
-            code { "{sign_in.user_code()}" }
-            " on the Spiral sign-in page. Studio continues once you do."
-        }
-        div { class: "settings-transfer-actions",
-            LinkButton {
-                purpose: ActionPurpose::Navigate,
-                variant: ButtonVariant::Solid,
-                href: sign_in.verification_url(),
-                new_tab: true,
-                "Open Spiral sign-in"
-            }
-            Button {
-                purpose: ActionPurpose::Retry,
-                variant: ButtonVariant::Link,
-                disabled,
-                onclick: move |_| on_restart.call(()),
-                "Start over"
-            }
         }
     }
 }

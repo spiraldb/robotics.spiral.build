@@ -1,226 +1,206 @@
-use std::collections::HashMap;
-use std::sync::Mutex as StdMutex;
-
 use axum::{
-    Form, Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse as _, Response},
-    routing::{get, post},
+    Router,
+    body::Body,
+    http::{Request, StatusCode, header},
 };
-use base64::Engine as _;
-use serde_json::json;
-use tokio::task::JoinHandle;
+use spiral_robotics_storage::{StoredSession, StudioStore};
+use tower::ServiceExt as _;
 
+use super::fake::FakeSpiral;
 use super::*;
+use crate::projects::tests::ProjectFixture;
 
-#[derive(Default)]
-struct FakeState {
-    pending_polls: usize,
-    /// The organization each refresh asked for.
-    refreshes: Vec<Option<String>>,
-    issued: usize,
-}
-
-/// WorkOS and Spiral's API as the account sees them.
-struct FakeSpiral {
-    base: String,
-    state: Arc<StdMutex<FakeState>>,
-    task: JoinHandle<()>,
-    directory: tempfile::TempDir,
-}
-
-impl FakeSpiral {
-    async fn start(pending_polls: usize) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let state = Arc::new(StdMutex::new(FakeState {
-            pending_polls,
-            ..FakeState::default()
-        }));
-        let app = Router::new()
-            .route("/user_management/authorize/device", post(Self::authorize))
-            .route("/user_management/authenticate", post(Self::authenticate))
-            .route("/v1/organizations/me", get(Self::me))
-            .route("/v1/projects", get(Self::projects))
-            .with_state(state.clone());
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        Self {
-            base,
-            state,
-            task,
-            directory: tempfile::tempdir().unwrap(),
-        }
-    }
-
-    fn login(&self) -> LoginFile {
-        LoginFile::at(self.directory.path().join("auth.json"))
-    }
-
-    async fn account(&self) -> Arc<SpiralAccount> {
-        let services = AccountServices {
-            login: self.login(),
-            workos: WorkOs::at(format!("{}/user_management", self.base)).unwrap(),
-            control_plane: SpiralControlPlane::new().unwrap(),
-        };
-        SpiralAccount::restore_with(services, &self.base).await.0
-    }
-
-    async fn authorize() -> Json<serde_json::Value> {
-        Json(json!({
-            "device_code": "device", "user_code": "ABCD-EFGH",
-            "verification_uri_complete": "https://signin.test/device?code=ABCD-EFGH",
-            "expires_in": 60, "interval": 1
-        }))
-    }
-
-    async fn authenticate(
-        State(state): State<Arc<StdMutex<FakeState>>>,
-        Form(form): Form<HashMap<String, String>>,
-    ) -> Response {
-        let mut state = state.lock().unwrap();
-        let organization = match form["grant_type"].as_str() {
-            workos::DEVICE_CODE_GRANT if state.pending_polls > 0 => {
-                state.pending_polls -= 1;
-                let pending = json!({"error": "authorization_pending"});
-                return (StatusCode::BAD_REQUEST, Json(pending)).into_response();
-            }
-            "refresh_token" if form["refresh_token"] == "revoked" => {
-                let ended = json!({"error": "invalid_grant", "error_description": "revoked"});
-                return (StatusCode::BAD_REQUEST, Json(ended)).into_response();
-            }
-            "refresh_token" => {
-                let organization = form.get("organization_id").cloned();
-                state.refreshes.push(organization.clone());
-                organization.unwrap_or_else(|| "org_1".to_owned())
-            }
-            _ => "org_1".to_owned(),
-        };
-        state.issued += 1;
-        let refresh = format!("refresh-{}", state.issued);
-        Json(LoginTokens::for_test(
-            &organization,
-            Duration::from_secs(300),
-            &refresh,
-        ))
-        .into_response()
-    }
-
-    async fn me(headers: HeaderMap) -> Json<serde_json::Value> {
-        let token = headers["authorization"].to_str().unwrap();
-        let payload = token.split('.').nth(1).unwrap();
-        let claims: serde_json::Value = serde_json::from_slice(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(payload)
-                .unwrap(),
-        )
-        .unwrap();
-        Json(json!({
-            "user_id": "user_1", "org_id": claims["org_id"], "org_name": "Robots Inc",
-            "role": "member", "email": "operator@example.test", "first_name": "",
-            "last_name": "", "email_verified": true
-        }))
-    }
-
-    async fn projects() -> Json<serde_json::Value> {
-        Json(json!({"items": [
-            {"id": "project_b", "org_id": "org_1", "description": null},
-            {"id": "project_a", "org_id": "org_1", "description": "Arms"}
-        ], "next_page_token": null}))
-    }
-}
-
-impl Drop for FakeSpiral {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn signed_in(account: &SpiralAccount) -> SpiralIdentity {
-    for _ in 0..100 {
-        if let SpiralAccountStatus::SignedIn(identity) = account.status().await {
-            return identity;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("still {:?}", account.status().await);
+fn store() -> SessionStore {
+    SessionStore::new(StudioStore::in_memory())
 }
 
 #[tokio::test]
-async fn sign_in_completes_in_the_background_and_shares_the_session() {
-    let spiral = FakeSpiral::start(1).await;
-    let account = spiral.account().await;
-    assert_eq!(
-        account.status().await,
-        SpiralAccountStatus::SignedOut { problem: None }
-    );
-    let SpiralAccountStatus::SigningIn(pending) =
-        account.sign_in(spiral.base.clone()).await.unwrap()
-    else {
-        panic!("sign-in did not start");
-    };
-    assert_eq!(pending.user_code(), "ABCD-EFGH");
-    let identity = signed_in(&account).await;
+async fn a_browser_session_survives_a_restart_with_its_project() {
+    let spiral = FakeSpiral::start().await;
+    let store = store();
+    let sessions = spiral.sessions(store.clone());
+    let id = FakeSpiral::sign_in(&sessions).await;
+    let session = sessions.find(&id).await.unwrap();
+    let identity = session.identity().await.unwrap();
     assert_eq!(identity.email(), "operator@example.test");
     assert_eq!(identity.organization().id(), "org_1");
-    assert_eq!(
-        spiral.login().read().unwrap().unwrap().access_token(),
-        account.access_token().await.unwrap()
-    );
-    let projects = account.projects(&spiral.base).await.unwrap();
+    session.choose_project("arms").await.unwrap();
+    assert!(Arc::ptr_eq(&session, &sessions.find(&id).await.unwrap()));
+
+    let restarted = spiral.sessions(store);
+    let restored = restarted.find(&id).await.unwrap();
+    assert!(!Arc::ptr_eq(&session, &restored));
+    assert_eq!(restored.identity().await.unwrap(), identity);
+    assert_eq!(restored.project_id().await.unwrap(), "arms");
+    // The saved access token was still fresh, so nothing was refreshed.
+    assert!(spiral.requests().refreshes.is_empty());
+    assert!(matches!(
+        restarted.find("not-a-session").await,
+        Err(OperationError::Unauthenticated(_))
+    ));
+}
+
+#[tokio::test]
+async fn restoring_refreshes_a_lapsed_session_and_forgets_an_ended_one() {
+    let spiral = FakeSpiral::start().await;
+    let store = store();
+    let lapsed = SessionTokens::for_test("org_1", Duration::ZERO, "saved");
+    store.save("lapsed", &lapsed.stored("arms")).await.unwrap();
+    let revoked = SessionTokens::for_test("org_1", Duration::ZERO, "revoked");
+    store.save("revoked", &revoked.stored("")).await.unwrap();
+    let sessions = spiral.sessions(store.clone());
+
+    let session = sessions.find("lapsed").await.unwrap();
+    assert_eq!(session.project_id().await.unwrap(), "arms");
+    assert_eq!(spiral.requests().refreshes, [None]);
+    let saved = store.load("lapsed").await.unwrap().unwrap();
+    assert_eq!(saved.refresh_token(), "refresh-1");
+    assert_eq!(saved.project_id(), "arms");
+
+    assert!(matches!(
+        sessions.find("revoked").await,
+        Err(OperationError::Unauthenticated(_))
+    ));
+    assert!(store.load("revoked").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_session_asks_spiral_which_projects_it_may_open() {
+    let spiral = FakeSpiral::start().await;
+    let sessions = spiral.sessions(store());
+    let session = sessions
+        .find(&FakeSpiral::sign_in(&sessions).await)
+        .await
+        .unwrap();
+    session.admit("arms").await.unwrap();
+    assert!(matches!(
+        session.admit("forbidden_arms").await,
+        Err(OperationError::NotFound(_))
+    ));
+    let projects = session.projects().await.unwrap();
     assert_eq!(
         projects.iter().map(SpiralProject::id).collect::<Vec<_>>(),
         ["project_a", "project_b"]
     );
-
-    let SpiralAccountStatus::SignedIn(switched) = account
-        .switch_organization(&spiral.base, "org_2")
-        .await
-        .unwrap()
-    else {
-        panic!("switching left the session");
-    };
-    assert_eq!(switched.organization().id(), "org_2");
-    assert_eq!(
-        spiral.state.lock().unwrap().refreshes,
-        [Some("org_2".to_owned())]
-    );
-    assert_eq!(
-        spiral
-            .login()
-            .read()
-            .unwrap()
-            .unwrap()
-            .organization_id()
-            .as_deref(),
-        Some("org_2")
-    );
-
-    account.sign_out().await.unwrap();
-    assert!(spiral.login().read().unwrap().is_none());
-    assert!(account.access_token().await.is_err());
+    assert_eq!(session.organizations().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn restoring_refreshes_a_lapsed_saved_session_and_reports_an_ended_one() {
-    let spiral = FakeSpiral::start(0).await;
-    let lapsed = LoginTokens::for_test("org_1", Duration::ZERO, "saved");
-    spiral.login().write(&lapsed).unwrap();
-    let account = spiral.account().await;
-    assert_eq!(signed_in(&account).await.organization().id(), "org_1");
-    assert_eq!(spiral.state.lock().unwrap().refreshes, [None]);
+async fn switching_organization_forgets_the_project_and_signing_out_ends_the_session() {
+    let spiral = FakeSpiral::start().await;
+    let store = store();
+    let sessions = spiral.sessions(store.clone());
+    let id = FakeSpiral::sign_in(&sessions).await;
+    let session = sessions.find(&id).await.unwrap();
+    session.choose_project("arms").await.unwrap();
+
+    let switched = session.switch_organization("org_2").await.unwrap();
+    assert_eq!(switched.organization().id(), "org_2");
+    assert_eq!(session.project_id().await.unwrap(), "");
+    assert_eq!(spiral.requests().refreshes, [Some("org_2".to_owned())]);
+    let saved = store.load(&id).await.unwrap().unwrap();
+    assert_eq!(saved.refresh_token(), "refresh-2");
+
+    sessions.sign_out(&session).await.unwrap();
+    assert!(session.ended());
+    assert!(store.load(&id).await.unwrap().is_none());
+    assert!(matches!(
+        session.identity().await,
+        Err(OperationError::Unauthenticated(_))
+    ));
+    assert!(matches!(
+        sessions.find(&id).await,
+        Err(OperationError::Unauthenticated(_))
+    ));
+}
+
+/// The browser's whole path: start at `/sign-in`, confirm on Spiral's page,
+/// return to `/callback`, and reach the API with the session cookie.
+#[tokio::test]
+async fn a_browser_signs_in_on_spirals_page_and_reaches_the_api_with_its_cookie() {
+    let fixture = ProjectFixture::new().await;
+    let studio = fixture.context();
+    let app = Router::new()
+        .nest(
+            "/api",
+            crate::http::routes::StudioApi::router(studio.clone()),
+        )
+        .merge(sign_in::BrowserSignIn::routes().with_state(studio));
+    let send = |request: Request<Body>| app.clone().oneshot(request);
+
+    let identity = Request::get("/api/account").body(Body::empty()).unwrap();
     assert_eq!(
-        spiral.login().read().unwrap().unwrap().refresh_token(),
-        "refresh-1"
+        send(identity).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
     );
 
-    let revoked = LoginTokens::for_test("org_1", Duration::ZERO, "revoked");
-    spiral.login().write(&revoked).unwrap();
-    let SpiralAccountStatus::SignedOut {
-        problem: Some(problem),
-    } = spiral.account().await.status().await
-    else {
-        panic!("a revoked session stayed signed in");
+    let started = send(
+        Request::get("/sign-in?return_to=%2Fcuration")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(started.status(), StatusCode::SEE_OTHER);
+    let spiral_page =
+        url::Url::parse(started.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+    let query: HashMap<_, _> = spiral_page.query_pairs().into_owned().collect();
+    assert_eq!(query["redirect_uri"], "http://localhost:3000/callback");
+    assert_eq!(query["code_challenge_method"], "S256");
+    let attempt = started.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert!(attempt.starts_with("studio_sign_in="));
+
+    let callback = |state: &str| {
+        Request::get(format!("/callback?code=granted&state={state}"))
+            .header(header::COOKIE, &attempt)
+            .body(Body::empty())
+            .unwrap()
     };
-    assert!(problem.contains("Sign in again"));
+    let forged = send(callback("forged")).await.unwrap();
+    assert_eq!(forged.status(), StatusCode::BAD_REQUEST);
+
+    let finished = send(callback(&query["state"])).await.unwrap();
+    assert_eq!(finished.status(), StatusCode::SEE_OTHER);
+    assert_eq!(finished.headers()[header::LOCATION], "/curation");
+    let cookies: Vec<_> = finished
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap().to_owned())
+        .collect();
+    let session = cookies
+        .iter()
+        .find(|cookie| cookie.starts_with("studio_session="))
+        .unwrap();
+    assert!(session.contains("HttpOnly") && session.contains("SameSite=Lax"));
+    let session = session.split(';').next().unwrap();
+    // The code was redeemed with the verifier behind the page's challenge.
+    let verifier = attempt.split('.').nth(1).unwrap();
+    assert!(
+        fixture
+            .spiral()
+            .requests()
+            .redeemed
+            .contains(&("granted".to_owned(), verifier.to_owned()))
+    );
+
+    let identity = Request::get("/api/account")
+        .header(header::COOKIE, session)
+        .body(Body::empty())
+        .unwrap();
+    let response = send(identity).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    fixture.projects.hardware().shutdown().await.unwrap();
+}
+
+#[test]
+fn saved_sessions_keep_their_tokens_out_of_debug_output() {
+    let stored = StoredSession::new("access".into(), "refresh-secret".into(), String::new());
+    assert!(!format!("{stored:?}").contains("refresh-secret"));
 }

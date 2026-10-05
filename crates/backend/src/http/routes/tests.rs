@@ -38,8 +38,8 @@ struct HttpFixture {
     router: Router,
 }
 impl HttpFixture {
-    fn new() -> Self {
-        let project = ProjectFixture::new();
+    async fn new() -> Self {
+        let project = ProjectFixture::new().await;
         let router = StudioApi::router(project.context());
         Self { project, router }
     }
@@ -49,7 +49,14 @@ impl HttpFixture {
             .header(ProjectKey::ENDPOINT_HEADER, ENDPOINT)
             .header(ProjectKey::PROJECT_HEADER, "http_project")
     }
-    async fn send(&self, request: Request<Body>) -> (StatusCode, Value) {
+    /// Send `request` from the fixture's signed-in browser.
+    async fn send(&self, mut request: Request<Body>) -> (StatusCode, Value) {
+        request
+            .headers_mut()
+            .insert(header::COOKIE, self.project.cookie().parse().unwrap());
+        self.send_anonymously(request).await
+    }
+    async fn send_anonymously(&self, request: Request<Body>) -> (StatusCode, Value) {
         let response = self.router.clone().oneshot(request).await.unwrap();
         let status = response.status();
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
@@ -75,8 +82,36 @@ impl HttpFixture {
 }
 
 #[tokio::test]
+async fn every_route_requires_a_live_session() {
+    let fixture = HttpFixture::new().await;
+    for cookie in [None, Some("studio_session=forged")] {
+        for (method, path) in [
+            ("GET", "/settings/connection"),
+            ("GET", "/keys"),
+            ("PUT", "/keys"),
+            (
+                "GET",
+                "/proxy?url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1%2Fmodels",
+            ),
+            ("GET", "/no/such/endpoint"),
+        ] {
+            let mut request = HttpFixture::scoped(Request::builder().method(method).uri(path));
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, cookie);
+            }
+            let (status, failure) = fixture
+                .send_anonymously(request.body(Body::empty()).unwrap())
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+            assert_eq!(failure["code"], "unauthenticated");
+        }
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn scoped_routes_reject_a_missing_or_stale_project_before_reading_the_body() {
-    let fixture = HttpFixture::new();
+    let fixture = HttpFixture::new().await;
     for (method, path) in [("GET", "/robots"), ("POST", "/recording")] {
         for endpoint in [None, Some("https://stale.spiraldb.dev")] {
             let mut request = Request::builder().method(method).uri(path);
@@ -99,7 +134,7 @@ async fn scoped_routes_reject_a_missing_or_stale_project_before_reading_the_body
 
 #[tokio::test]
 async fn snapshots_are_plain_gets_of_the_project_a_request_names() {
-    let fixture = HttpFixture::new();
+    let fixture = HttpFixture::new().await;
     let (status, saved) = fixture
         .send(
             Request::builder()
@@ -132,7 +167,7 @@ async fn snapshots_are_plain_gets_of_the_project_a_request_names() {
 
 #[tokio::test]
 async fn saved_keys_reach_the_providers_and_only_their_presence_reaches_the_browser() {
-    let fixture = HttpFixture::new();
+    let fixture = HttpFixture::new().await;
     let get = |path: &str| Request::builder().uri(path).body(Body::empty()).unwrap();
     let (status, providers) = fixture.send(get("/providers")).await;
     assert_eq!(status, StatusCode::OK);
@@ -174,7 +209,7 @@ async fn saved_keys_reach_the_providers_and_only_their_presence_reaches_the_brow
 
 #[tokio::test]
 async fn malformed_requests_and_unknown_routes_have_structured_failures() {
-    let fixture = HttpFixture::new();
+    let fixture = HttpFixture::new().await;
     for (method, path, body, content_type, expected) in [
         (
             "POST",
@@ -247,7 +282,7 @@ async fn malformed_requests_and_unknown_routes_have_structured_failures() {
 
 #[tokio::test]
 async fn rejected_scope_does_not_consume_an_upload() {
-    let fixture = HttpFixture::new();
+    let fixture = HttpFixture::new().await;
     let stream = futures_util::stream::poll_fn(
         |_| -> std::task::Poll<Option<Result<bytes::Bytes, std::io::Error>>> {
             panic!("upload must not be polled before project scope is checked")

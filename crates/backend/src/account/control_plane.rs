@@ -1,4 +1,4 @@
-//! What Spiral's API says about the signed-in user: who they are, their
+//! What Spiral's API says about a signed-in user: who they are, their
 //! organizations, and the projects they can open.
 
 use std::time::Duration;
@@ -7,25 +7,23 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use spiral_robotics_common::account::{SpiralIdentity, SpiralOrganization, SpiralProject};
 
+/// Spiral's API at one endpoint.
 pub(super) struct SpiralControlPlane {
     http: reqwest::Client,
+    endpoint: String,
 }
 
 impl SpiralControlPlane {
-    pub(super) fn new() -> Result<Self, String> {
+    pub(super) fn new(endpoint: String) -> Result<Self, String> {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()
-            .map(|http| Self { http })
+            .map(|http| Self { http, endpoint })
             .map_err(|error| error.to_string())
     }
 
-    pub(super) async fn identity(
-        &self,
-        endpoint: &str,
-        token: &str,
-    ) -> Result<SpiralIdentity, String> {
-        let me: WhoAmI = self.get(endpoint, token, "/v1/organizations/me").await?;
+    pub(super) async fn identity(&self, token: &str) -> Result<SpiralIdentity, String> {
+        let me: WhoAmI = self.get(token, "/v1/organizations/me").await?;
         Ok(SpiralIdentity::new(
             me.email,
             SpiralOrganization::new(me.org_id, me.org_name),
@@ -34,10 +32,9 @@ impl SpiralControlPlane {
 
     pub(super) async fn organizations(
         &self,
-        endpoint: &str,
         token: &str,
     ) -> Result<Vec<SpiralOrganization>, String> {
-        let page: Page<Membership> = self.get(endpoint, token, "/v1/organizations").await?;
+        let page: Page<Membership> = self.get(token, "/v1/organizations").await?;
         Ok(page
             .items
             .into_iter()
@@ -46,12 +43,8 @@ impl SpiralControlPlane {
     }
 
     /// Projects the user holds a grant on in the session's organization.
-    pub(super) async fn projects(
-        &self,
-        endpoint: &str,
-        token: &str,
-    ) -> Result<Vec<SpiralProject>, String> {
-        let page: Page<Project> = self.get(endpoint, token, "/v1/projects").await?;
+    pub(super) async fn projects(&self, token: &str) -> Result<Vec<SpiralProject>, String> {
+        let page: Page<Project> = self.get(token, "/v1/projects").await?;
         let mut projects: Vec<_> = page
             .items
             .into_iter()
@@ -61,19 +54,20 @@ impl SpiralControlPlane {
         Ok(projects)
     }
 
-    async fn get<T: DeserializeOwned>(
-        &self,
-        endpoint: &str,
-        token: &str,
-        path: &str,
-    ) -> Result<T, String> {
-        let response = self
-            .http
-            .get(format!("{}{path}", endpoint.trim_end_matches('/')))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|error| format!("Could not reach Spiral at {endpoint}: {error}"))?;
+    /// Whether the user may view `project`: `Ok(false)` when Spiral refuses,
+    /// an error when Spiral cannot say.
+    pub(super) async fn admits(&self, token: &str, project: &str) -> Result<bool, String> {
+        let path = format!("/v1/projects/{project}");
+        let response = self.send(token, &path).await?;
+        match response.status() {
+            status if status.is_success() => Ok(true),
+            reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND => Ok(false),
+            status => Err(format!("Spiral refused {path} ({status})")),
+        }
+    }
+
+    async fn get<T: DeserializeOwned>(&self, token: &str, path: &str) -> Result<T, String> {
+        let response = self.send(token, path).await?;
         if !response.status().is_success() {
             return Err(format!("Spiral refused {path} ({})", response.status()));
         }
@@ -81,6 +75,15 @@ impl SpiralControlPlane {
             .json()
             .await
             .map_err(|error| format!("Reading Spiral {path}: {error}"))
+    }
+
+    async fn send(&self, token: &str, path: &str) -> Result<reqwest::Response, String> {
+        self.http
+            .get(format!("{}{path}", self.endpoint.trim_end_matches('/')))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("Could not reach Spiral at {}: {error}", self.endpoint))
     }
 }
 

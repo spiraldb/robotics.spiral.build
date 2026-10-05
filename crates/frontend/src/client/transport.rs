@@ -20,6 +20,7 @@ impl CommandError {
             CommandFailureCode::StaleProject => {
                 "Studio's saved connection changed. Reload this view to continue."
             }
+            CommandFailureCode::Unauthenticated => "Sign in to Spiral to continue.",
             CommandFailureCode::InvalidInput => "Check the supplied values and try again.",
             CommandFailureCode::NotFound => "Reload this view to check what is still available.",
             CommandFailureCode::Conflict => "Finish the conflicting operation, then retry.",

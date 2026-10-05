@@ -1,41 +1,37 @@
-//! The Spiral account this Studio is signed in to, as the settings screen shows
-//! it. Tokens never cross this boundary; the backend holds the session.
+//! The Spiral user a browser is signed in as, as the settings screen shows
+//! it. Tokens never cross this boundary; the backend holds each session.
 
 use serde::{Deserialize, Serialize};
 
-/// Whether this Studio can reach Spiral as a user.
+/// A browser's request to sign in to Spiral, and the page of this Studio it
+/// returns to afterwards.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum SpiralAccountStatus {
-    /// `problem` explains why the last sign-in or session ended, if one did.
-    SignedOut {
-        problem: Option<String>,
-    },
-    /// Waiting for the user to confirm `user_code` at the verification page.
-    SigningIn(SpiralSignIn),
-    SignedIn(SpiralIdentity),
+pub struct SignInRequest {
+    #[serde(default)]
+    return_to: String,
 }
 
-/// A pending browser confirmation of this Studio's sign-in.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SpiralSignIn {
-    verification_url: String,
-    user_code: String,
-}
+impl SignInRequest {
+    /// The backend page that starts a sign-in.
+    pub const PATH: &str = "/sign-in";
+    /// The backend page Spiral's sign-in returns to.
+    pub const CALLBACK_PATH: &str = "/callback";
 
-impl SpiralSignIn {
-    pub fn new(verification_url: String, user_code: String) -> Self {
+    pub fn new(return_to: impl Into<String>) -> Self {
         Self {
-            verification_url,
-            user_code,
+            return_to: return_to.into(),
         }
     }
-    /// The page that confirms this sign-in; it already carries the code.
-    pub fn verification_url(&self) -> &str {
-        &self.verification_url
-    }
-    pub fn user_code(&self) -> &str {
-        &self.user_code
+
+    /// Where the browser lands once signed in: the requested page when it is
+    /// one of this Studio's own, else the start page.
+    pub fn return_to(&self) -> &str {
+        let path = self.return_to.as_str();
+        let local = path.starts_with('/')
+            && !path.starts_with("//")
+            && !path.contains('\\')
+            && !path.chars().any(char::is_control);
+        if local { path } else { "/" }
     }
 }
 
@@ -120,18 +116,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_names_its_state_beside_the_details() {
-        let status = SpiralAccountStatus::SigningIn(SpiralSignIn::new(
-            "https://example.test/verify?code=ABCD".into(),
-            "ABCD".into(),
-        ));
-        let json = serde_json::to_value(&status).unwrap();
-        assert_eq!(json["state"], "signing_in");
-        assert_eq!(json["user_code"], "ABCD");
-        assert_eq!(
-            serde_json::from_value::<SpiralAccountStatus>(json).unwrap(),
-            status
-        );
+    fn a_sign_in_returns_only_to_this_studios_pages() {
+        for (requested, landing) in [
+            ("/curation?draft=folding", "/curation?draft=folding"),
+            ("", "/"),
+            ("https://elsewhere.test/", "/"),
+            ("//elsewhere.test/", "/"),
+            ("/\\elsewhere.test", "/"),
+            ("/\nSet-Cookie: x", "/"),
+        ] {
+            assert_eq!(SignInRequest::new(requested).return_to(), landing);
+        }
         let unnamed = SpiralOrganization::new("org_1".into(), None);
         assert_eq!(unnamed.label(), "org_1");
     }

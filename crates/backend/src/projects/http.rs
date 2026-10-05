@@ -31,7 +31,7 @@ impl ProjectEndpoints {
         }
         let (summary, imported) = project
             .projects()
-            .import(project.project(), &bundle)
+            .import(project.session(), project.project(), &bundle)
             .await?;
         RobotOperations::spawn_auto_connect(project.with_project(imported));
         Ok(Json(summary))

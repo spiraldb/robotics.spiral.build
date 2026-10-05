@@ -38,6 +38,17 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         .patch_backend_settings(serde_json::json!({"secret":"excluded-backend-secret-456789"}))
         .await
         .unwrap();
+    crate::SessionStore::new(store.clone())
+        .save(
+            "browser",
+            &crate::StoredSession::new(
+                "access".into(),
+                "excluded-refresh-token-456789".into(),
+                "source".into(),
+            ),
+        )
+        .await
+        .unwrap();
     for (project, id) in [(&source, "arm"), (&other, "excluded-other-robot-456789")] {
         project
             .save_robot_config(&Fixture::robot(id), None)
@@ -74,6 +85,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
     let bytes = snapshot.bytes().unwrap();
     for excluded in [
         "excluded-backend-secret-456789",
+        "excluded-refresh-token-456789",
         "excluded-other-robot-456789",
     ] {
         assert!(
@@ -133,6 +145,7 @@ async fn imported_sqlite_rejects_extra_schema_secrets_and_invalid_documents() {
     for corruption in [
         "CREATE TRIGGER injected AFTER INSERT ON robots BEGIN SELECT 1; END",
         "INSERT INTO backend_settings VALUES (1, '{}')",
+        "INSERT INTO sessions VALUES ('browser', 'access', 'refresh', '')",
         "INSERT INTO robots VALUES ('', 'arm', '{}', 1)",
         "INSERT INTO robots VALUES ('other', 'arm', '{}', 1)",
         "INSERT INTO curations VALUES ('', 'folding', '   ', 1, 1, '{}', 0)",

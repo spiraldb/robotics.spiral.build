@@ -24,8 +24,8 @@ struct LoadingFixture {
     spiral_calls: Arc<AtomicUsize>,
 }
 impl LoadingFixture {
-    fn new() -> Self {
-        let project = tests::ProjectFixture::new();
+    async fn new() -> Self {
+        let project = tests::ProjectFixture::new().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let connection = SpiralConnectionSettings::new(
             tests::ENDPOINT.to_owned(),
@@ -59,7 +59,7 @@ impl LoadingFixture {
 
 #[tokio::test]
 async fn studio_loads_and_saves_without_opening_spiral() {
-    let fixture = LoadingFixture::new();
+    let fixture = LoadingFixture::new().await;
     let preferences = spiral_robotics_storage::StoredStudioPreferences::from_settings(
         "http://127.0.0.1:9",
         false,
@@ -122,8 +122,8 @@ async fn studio_loads_and_saves_without_opening_spiral() {
 
 #[tokio::test]
 async fn studio_features_work_before_a_project_is_chosen() {
-    let fixture = tests::ProjectFixture::new();
-    let session = fixture.open("");
+    let fixture = tests::ProjectFixture::new().await;
+    let session = fixture.open("").await;
     assert!(session.workspace().try_list().await.unwrap().is_empty());
     assert!(
         session

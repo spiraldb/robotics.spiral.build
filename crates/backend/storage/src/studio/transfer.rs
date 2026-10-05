@@ -52,10 +52,13 @@ impl StudioSnapshot {
             .begin()
             .await
             .map_err(|error| error.to_string())?;
-        transaction
-            .execute_unprepared("DELETE FROM backend_settings")
-            .await
-            .map_err(|error| error.to_string())?;
+        // Neither the keys nor any browser's Spiral sign-in leaves this backend.
+        for table in ["backend_settings", "sessions"] {
+            transaction
+                .execute_unprepared(&format!("DELETE FROM {table}"))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         // A bundle carries no model answers, so no view that reads them.
         transaction
             .execute_unprepared("DELETE FROM curated_views")
@@ -116,21 +119,26 @@ impl StudioSnapshot {
         {
             return Err("Studio snapshot failed SQLite integrity checking".into());
         }
-        let count = snapshot
-            .database
-            .query_one(Statement::from_string(
-                DbBackend::Sqlite,
-                "SELECT count(*) AS count FROM backend_settings",
-            ))
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or("Missing backend settings count")?;
-        if count
-            .try_get::<i64>("", "count")
-            .map_err(|error| error.to_string())?
-            != 0
-        {
-            return Err("Studio snapshot must not contain backend settings".into());
+        for (table, contents) in [
+            ("backend_settings", "backend settings"),
+            ("sessions", "Spiral sign-ins"),
+        ] {
+            let count = snapshot
+                .database
+                .query_one(Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!("SELECT count(*) AS count FROM {table}"),
+                ))
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Missing {contents} count"))?;
+            if count
+                .try_get::<i64>("", "count")
+                .map_err(|error| error.to_string())?
+                != 0
+            {
+                return Err(format!("Studio snapshot must not contain {contents}"));
+            }
         }
         for table in Self::TABLES {
             let row = snapshot

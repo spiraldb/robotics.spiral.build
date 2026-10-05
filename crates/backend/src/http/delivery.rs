@@ -1,5 +1,6 @@
 //! HTTP extraction and failure framing. Application policy stays in feature owners.
 use crate::OperationError;
+use crate::account::SpiralSession;
 use crate::projects::context::{ProjectContext, StudioContext};
 use axum::{
     Json,
@@ -11,6 +12,7 @@ use axum::{
 use serde::{Serialize, de::DeserializeOwned};
 use spiral_robotics_common::command_failure::{CommandFailure, CommandFailureCode};
 use spiral_robotics_common::project::ProjectKey;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct HttpFailure {
@@ -65,9 +67,25 @@ impl IntoResponse for OperationError {
     }
 }
 
-/// Open the project a request names before reading its body. The endpoint
-/// header is required; a missing or empty project header names the endpoint
-/// before a project is chosen.
+/// The browser session a request carries, which the API's session gate found.
+pub(crate) struct SignedIn(pub(crate) Arc<SpiralSession>);
+impl<S: Send + Sync> FromRequestParts<S> for SignedIn {
+    type Rejection = HttpFailure;
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Arc<SpiralSession>>()
+            .cloned()
+            .map(Self)
+            .ok_or_else(|| {
+                OperationError::Unauthenticated("Sign in to Spiral to continue.".to_owned()).into()
+            })
+    }
+}
+
+/// Open the project a request names, as its session's user, before reading
+/// its body. The endpoint header is required; a missing or empty project
+/// header names the endpoint before a project is chosen.
 pub(crate) struct Project(pub(crate) ProjectContext);
 impl FromRequestParts<StudioContext> for Project {
     type Rejection = HttpFailure;
@@ -75,13 +93,15 @@ impl FromRequestParts<StudioContext> for Project {
         parts: &mut Parts,
         state: &StudioContext,
     ) -> Result<Self, Self::Rejection> {
+        let SignedIn(session) = SignedIn::from_request_parts(parts, state).await?;
         let endpoint = Self::header(parts, ProjectKey::ENDPOINT_HEADER)?
             .filter(|endpoint| !endpoint.is_empty())
             .ok_or_else(|| {
                 HttpFailure::invalid(format!("{} is required", ProjectKey::ENDPOINT_HEADER))
             })?;
         let project = Self::header(parts, ProjectKey::PROJECT_HEADER)?.unwrap_or_default();
-        Ok(Self(state.open(&ProjectKey::new(endpoint, project))?))
+        let key = ProjectKey::new(endpoint, project);
+        Ok(Self(state.open(&session, &key).await?))
     }
 }
 impl Project {
