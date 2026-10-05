@@ -1,4 +1,4 @@
-//! Settings screen for robots, SpiralDB, training, video, and provider keys.
+//! Settings screen for robots, SpiralDB, and training.
 
 use crate::activities::settings::SettingsClient;
 use dioxus::dioxus_core::CapturedError;
@@ -7,10 +7,11 @@ use spiral_robotics_common::settings::DataSettings;
 use spiral_robotics_ui::{
     ActionPurpose, BlockingConfirmation, BrowserFocus, Button, ButtonVariant, ConfirmationCopy,
     ConfirmationDismissal, ConfirmationResponse, Field, FileButton, FileInput, LinkButton,
-    TextInput, Toggle,
+    TextInput,
 };
 
 use crate::activities::settings::robots::RobotPanel;
+use crate::client::robot_connector::RobotConnector;
 use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::notifications::MessageSource;
 use crate::shell::{project::ProjectSelection, state::StudioProjectState};
@@ -20,8 +21,6 @@ enum SettingsSection {
     Robots,
     Spiral,
     Training,
-    Video,
-    Keys,
 }
 
 #[derive(Clone, Copy)]
@@ -186,11 +185,10 @@ fn SettingsPanel(
         let submitted = current();
         let project_id = current().spiral().project_id().to_owned();
         let training = current().training().to_owned();
-        let video = current().video().to_owned();
         crate::client::project::ProjectClient::current().spawn(async move {
             let result = SettingsClient::current()
                 .update_data_settings(spiral_robotics_common::settings::SettingsUpdate::new(
-                    project_id, training, video,
+                    project_id, training,
                 ))
                 .await
                 .map(|settings| settings.spiral().project());
@@ -213,9 +211,7 @@ fn SettingsPanel(
                             SettingsSection::Training => {
                                 SettingsClient::current().test_training_runtime().await
                             }
-                            SettingsSection::Robots
-                            | SettingsSection::Video
-                            | SettingsSection::Keys => unreachable!(
+                            SettingsSection::Robots => unreachable!(
                                 "only connection-backed settings sections can request a test"
                             ),
                         };
@@ -278,18 +274,13 @@ fn SettingsPanel(
                     SettingsSectionAction { label: "Robots", active: section() == SettingsSection::Robots, onclick: move |_| { section.set(SettingsSection::Robots); test_result.set(None); save_error.set(None); } }
                     SettingsSectionAction { label: "SpiralDB", active: section() == SettingsSection::Spiral, onclick: move |_| { section.set(SettingsSection::Spiral); test_result.set(None); save_error.set(None); } }
                     SettingsSectionAction { label: "Training", active: section() == SettingsSection::Training, onclick: move |_| { section.set(SettingsSection::Training); test_result.set(None); save_error.set(None); } }
-                    SettingsSectionAction { label: "Video", active: section() == SettingsSection::Video, onclick: move |_| { section.set(SettingsSection::Video); test_result.set(None); save_error.set(None); } }
-                    SettingsSectionAction { label: "Keys", active: section() == SettingsSection::Keys, onclick: move |_| { section.set(SettingsSection::Keys); test_result.set(None); save_error.set(None); } }
                 }
                 div { class: "settings-content",
                     match section() {
                         SettingsSection::Robots => rsx! {
                             ProviderHeading { title: "Robot setup", description: "Configure ports, camera assignments, and calibration for each arm." }
+                            RobotConnectorAddress {}
                             div { class: "robot-settings-panel", RobotPanel { project, telemetry, selection } }
-                        },
-                        SettingsSection::Keys => rsx! {
-                            ProviderHeading { title: "Keys", description: "Studio attaches these to its model and Hugging Face requests." }
-                            super::keys::ProviderKeysSection { project }
                         },
                         _ if !settings_loaded => rsx! {
                             div { class: "settings-loading", role: "status",
@@ -364,7 +355,7 @@ fn SettingsPanel(
                             }
                         },
                         SettingsSection::Training => rsx! {
-                            ProviderHeading { title: "Policy compute runtime", description: "Run training and rollout inference in a remote PyTorch process." }
+                            ProviderHeading { title: "Training runtime", description: "Run training in a remote PyTorch process." }
                             SettingsField {
                                 label: "Runtime endpoint",
                                 value: current().training().endpoint(),
@@ -372,14 +363,10 @@ fn SettingsPanel(
                                 oninput: move |value| current.write().training_mut().set_endpoint(value),
                             }
                             p { class: "settings-help",
-                                "Studio uses Arrow IPC over HTTP. The selected endpoint applies to new training and rollout sessions; an active session keeps its current connection."
+                                "The selected endpoint applies to new training runs; an active run keeps its current connection. Rollouts run on the robot connector."
                             }
                             Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Outline, disabled: saving() || testing() || import_project.pending(), aria_busy: testing(), onclick: move |_| save(Some(SettingsSection::Training)), if testing() { "Connecting…" } else { "Save and connect" } }
                             {connection_result}
-                        },
-                        SettingsSection::Video => rsx! {
-                            ProviderHeading { title: "Video", description: "Include assigned cameras in new episodes." }
-                            Toggle { label: "Record video", checked: current().video().enabled(), onchange: move |value| current.write().video_mut().set_enabled(value) }
                         },
                     }
                 }
@@ -404,9 +391,7 @@ fn SettingsPanel(
             }
             footer { class: "settings-footer",
                 if section() == SettingsSection::Robots {
-                    span { "Robot changes are saved immediately." }
-                } else if section() == SettingsSection::Keys {
-                    span { "Keys are saved on this backend. The browser never sees them." }
+                    span { "Robot changes are saved on the robot connector immediately." }
                 } else {
                     span {
                         "Applies to this Studio."
@@ -422,7 +407,7 @@ fn SettingsPanel(
             BlockingConfirmation {
                 id: "project-import-confirmation",
                 title: format!("Replace project {}?", current().spiral().project_id()),
-                consequence: "This project’s Studio records and managed data will be replaced, including robots, recordings, preferences, curations, training history, checkpoints, and rollouts. Connected robots will disconnect first; imported robots will then connect automatically.".to_owned(),
+                consequence: "This project’s Studio records and managed data will be replaced, including recordings, preferences, curations, training history, and checkpoints. Robots stay on the robot connector.".to_owned(),
                 copy: ConfirmationCopy::new(
                     format!("Import {} into the active project.", file.name()),
                     if import_project.pending() { "Restoring…" } else { "Import and replace project" },
@@ -434,6 +419,48 @@ fn SettingsPanel(
                 dismissal: ConfirmationDismissal::new("project-import-input")
                     .with_pending(import_project.pending()),
             }
+        }
+    }
+}
+
+/// The robot connector this browser drives, and whether it answers.
+#[component]
+fn RobotConnectorAddress() -> Element {
+    let connector = RobotConnector::current();
+    let mut draft = use_signal(|| connector.address());
+    let status = match connector.health() {
+        None => rsx! { p { class: "connection-test", role: "status", "Connecting…" } },
+        Some(Ok(health)) => rsx! {
+            p { class: "connection-test connection-test-ok", role: "status",
+                "Connected to robot connector {health.version()}."
+            }
+        },
+        Some(Err(error)) => rsx! {
+            p { class: "connection-test connection-test-failed", role: "status",
+                "{error} Start it next to the arms with `cargo run -p spiral-robotics-robot-connector`."
+            }
+        },
+    };
+    rsx! {
+        div { class: "robot-connector-address",
+            Field { label: "Robot connector", class: "settings-field",
+                TextInput {
+                    value: draft(),
+                    placeholder: "http://localhost:7070",
+                    oninput: move |value| draft.set(value),
+                }
+            }
+            Button {
+                purpose: ActionPurpose::Apply,
+                variant: ButtonVariant::Outline,
+                disabled: draft.read().trim().trim_end_matches('/') == connector.address(),
+                onclick: move |_| connector.set_address(&draft.peek()),
+                "Connect"
+            }
+            p { class: "settings-help",
+                "The arms, cameras, recordings, and rollouts live on the robot connector. This browser talks to it directly, so the address is kept in this browser."
+            }
+            {status}
         }
     }
 }

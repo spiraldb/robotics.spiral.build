@@ -141,7 +141,7 @@ never depends on anything above the node. Studio's packets carry presentation
 times counted from the episode's first message, so a subtask's log time is
 that message's time plus its own. The text judgments are asked of
 `typesafe/jev-1.13`, named in the statement so every answer names the model
-that gave it. Every model function is paid for with Studio's OpenRouter key,
+that gave it. Every model function is paid for with the deployment's OpenRouter key,
 which the backend passes to the driver as `spiral.openrouter_api_key` (see
 [the database boundary](database-boundary.md)). Literals go through
 `SqlLiteral`; a function parameter that must be a constant, such as

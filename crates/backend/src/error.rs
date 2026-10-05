@@ -62,19 +62,6 @@ impl std::fmt::Display for OperationError {
 
 impl std::error::Error for OperationError {}
 
-impl From<spiral_robotics_storage::episodes::EpisodeError> for OperationError {
-    fn from(error: spiral_robotics_storage::episodes::EpisodeError) -> Self {
-        let message = error.to_string();
-        match error {
-            spiral_robotics_storage::episodes::EpisodeError::InvalidId(_)
-            | spiral_robotics_storage::episodes::EpisodeError::Invalid(_) => {
-                Self::InvalidInput(message)
-            }
-            spiral_robotics_storage::episodes::EpisodeError::NotFound(_) => Self::NotFound(message),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

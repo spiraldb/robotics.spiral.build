@@ -1,4 +1,5 @@
-//! Robot setup and hardware observations owned by a mounted hardware view.
+//! Robot setup and hardware observations owned by a mounted hardware view,
+//! read from the robot connector.
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
@@ -17,8 +18,9 @@ pub(crate) struct HardwareViewState {
 impl HardwareViewState {
     pub(crate) fn use_state(project: StudioProjectState, is_active: ReadSignal<bool>) -> Self {
         let setup = super::RobotSetupState::use_state(is_active);
-        let selection = crate::shell::project::ProjectSelection::current();
-        let connected = use_memo(move || selection.live());
+        let connector = crate::client::robot_connector::RobotConnector::current();
+        connector.use_health(is_active);
+        let connected = use_memo(move || connector.reachable());
         let telemetry = use_hook(|| Self {
             setup,
             telemetry: Signal::new(TelemetryFrame::default()),

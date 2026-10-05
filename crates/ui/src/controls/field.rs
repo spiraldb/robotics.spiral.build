@@ -54,7 +54,6 @@ pub enum TextInputKind {
     #[default]
     Text,
     Search,
-    Password,
     /// The browser's numeric control, with `min`, `max`, and `step` forwarded.
     Number,
 }
@@ -64,7 +63,6 @@ impl TextInputKind {
         match self {
             Self::Text => "text",
             Self::Search => "search",
-            Self::Password => "password",
             Self::Number => "number",
         }
     }
@@ -72,7 +70,7 @@ impl TextInputKind {
     fn class_name(self) -> &'static str {
         match self {
             Self::Number => "ui-input ui-input--numeric",
-            Self::Text | Self::Search | Self::Password => "ui-input",
+            Self::Text | Self::Search => "ui-input",
         }
     }
 }

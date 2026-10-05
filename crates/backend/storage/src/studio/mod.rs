@@ -2,14 +2,10 @@
 
 // SeaORM's derives require public fields/types; entities stay private to storage.
 #[allow(unreachable_pub)]
-mod backend_settings;
-#[allow(unreachable_pub)]
 pub(crate) mod curated_views;
 #[allow(unreachable_pub)]
 pub(crate) mod curations;
 mod migrations;
-#[allow(unreachable_pub)]
-pub(crate) mod robots;
 #[allow(unreachable_pub)]
 pub(crate) mod sessions;
 #[allow(unreachable_pub)]
@@ -24,12 +20,8 @@ mod dataset_check_reports;
 mod dataset_joint_roles;
 #[allow(unreachable_pub)]
 mod dataset_robots;
-mod robot_configs;
 
-use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, EntityTrait,
-    Statement, TransactionTrait,
-};
+use sea_orm::{ConnectOptions, Database, DatabaseConnection, TransactionTrait};
 use sea_orm_migration::MigratorTrait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,7 +47,7 @@ impl StudioStore {
         }
     }
 
-    pub(super) fn open_default() -> Result<Self, String> {
+    pub fn open_default() -> Result<Self, String> {
         let path = match std::env::var_os("SPIRAL_ROBOTICS_STUDIO_DB") {
             Some(path) => PathBuf::from(path),
             // Resolve against the source repository, independent of the launch
@@ -86,7 +78,7 @@ impl StudioStore {
         }
     }
 
-    pub(super) async fn initialize(&self) -> Result<(), String> {
+    pub async fn initialize(&self) -> Result<(), String> {
         self.connection().await.map(|_| ())
     }
 
@@ -166,35 +158,6 @@ impl StudioStore {
             store: self.clone(),
             key,
         }
-    }
-
-    pub(crate) async fn backend_settings(&self) -> Result<Option<serde_json::Value>, String> {
-        backend_settings::Entity::find_by_id(1)
-            .one(self.connection().await?)
-            .await
-            .map(|row| row.map(|row| row.document))
-            .map_err(|error| error.to_string())
-    }
-
-    /// Merge `patch` into the backend settings document (RFC 7396): the
-    /// fields it names are replaced, a `null` removes one, and every other
-    /// field stays as saved.
-    pub(crate) async fn patch_backend_settings(
-        &self,
-        patch: serde_json::Value,
-    ) -> Result<(), String> {
-        let patch = patch.to_string();
-        self.connection()
-            .await?
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "INSERT INTO backend_settings (id, document) VALUES (1, json_patch('{}', ?)) \
-                 ON CONFLICT (id) DO UPDATE SET document = json_patch(document, ?)",
-                [patch.clone().into(), patch.into()],
-            ))
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(())
     }
 }
 

@@ -1,0 +1,28 @@
+[package]
+name = "spiral-robotics-recording"
+version.workspace = true
+edition.workspace = true
+description = "Episode capture and the MCAP recording format Studio datasets ingest"
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+base64.workspace = true
+mcap = "0.25"
+prost = "0.14"
+prost-reflect = "0.16"
+spiral-robotics-common.workspace = true
+spiral-robotics-hardware.workspace = true
+tokio = { version = "1", features = ["sync"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[build-dependencies]
+serde_json.workspace = true

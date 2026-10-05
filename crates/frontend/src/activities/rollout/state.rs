@@ -1,7 +1,7 @@
 //! Durable browser-side choices for the Rollout screen.
 //!
-//! The backend will own activation, inference, and motion. These signals only
-//! preserve the operator's checkpoint and execution draft while they move
+//! The robot connector owns activation, inference, and motion. These signals
+//! only preserve the operator's checkpoint and execution draft while they move
 //! between Studio activities.
 
 use dioxus::prelude::*;
@@ -21,13 +21,13 @@ pub(crate) struct RolloutController {
 impl RolloutController {
     pub(super) fn use_controller(is_active: ReadSignal<bool>) -> Self {
         let controller = Self::use_state();
-        let selection = crate::shell::project::ProjectSelection::current();
+        let connector = crate::client::robot_connector::RobotConnector::current();
         let request = crate::client::queries::QueryPolicy::new(
             crate::client::queries::QueryDomain::Rollout,
             500,
         )
         .use_when(
-            move || *is_active.read() && selection.live(),
+            move || *is_active.read() && connector.reachable(),
             || async { super::RolloutClient::current().session().await },
         );
         controller.use_response(request);

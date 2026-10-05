@@ -77,6 +77,27 @@ impl<'a> McapFile<'a> {
     }
 }
 impl StorageManager {
+    /// Store one take the robot connector recorded as `episode`'s file in the
+    /// MCAP dataset `dataset`, creating the dataset with its first take. The
+    /// same take stored again only refreshes the dataset.
+    pub async fn store_recording(
+        &self,
+        dataset: &str,
+        episode: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if episode.is_empty()
+            || episode.len() > 64
+            || !episode
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("episode ID must use 1–64 letters, numbers, '_' or '-' characters".into());
+        }
+        self.append_mcap_file(McapFile::new(dataset, &format!("{episode}.mcap"), bytes))
+            .await
+    }
+
     pub(crate) async fn append_mcap_file(&self, file: McapFile<'_>) -> Result<(), String> {
         let exists = self.validate_mcap_destination(file.dataset_name).await?;
         let mut connection = self.project_store().connect_exclusive().await?;
@@ -575,7 +596,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SPIRAL_MCAP_TEST_PROJECT and SPIRAL_ACCESS_TOKEN (endpoints from SPIRAL__SERVER__URL and SPIRAL__SPFS__URL); creates and removes a uniquely named dataset"]
     async fn mcap_files_share_publication_and_dataset_reads() {
-        use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
+        use spiral_robotics_recording::{CameraRecording, EpisodeFixture, McapRecording};
         let (store, storage) = crate::datasets::HostedProject::storage();
         let name = format!("source_probe_{}", uuid::Uuid::new_v4().simple());
         let other_name = format!("{name}_other");
@@ -615,7 +636,7 @@ mod tests {
                     )])
                     .with_timing(1_700_000_000_000, 500.0)
                     .with_samples((0..120).map(|index| {
-                        let sample = crate::episodes::Sample::new(index as f64 * 0.002, vec![vec![if index == 60 { None } else { Some(index as f64 / 120.0) }]], vec![vec![index]]);
+                        let sample = spiral_robotics_recording::Sample::new(index as f64 * 0.002, vec![vec![if index == 60 { None } else { Some(index as f64 / 120.0) }]], vec![vec![index]]);
                         if camera_count > 0 { sample.with_action(vec![Some(vec![Some(0.5)])]) } else { sample }
                     }).collect())
                     .with_duration_seconds(0.3)

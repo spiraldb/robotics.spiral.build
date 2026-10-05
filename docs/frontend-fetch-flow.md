@@ -23,8 +23,9 @@ to their controllers. Activity components own their state; there is no generic
 retained-state registry. Hidden workspaces preserve drafts and results while
 suspending reads and playback that require visibility.
 
-The project shell owns the selected project, backend liveness, saved setup and settings,
-notifications, and cross-activity navigation. Live owns capture state; Data owns
+The project shell owns the selected project, backend liveness, the robot
+connector's address, saved setup and settings, notifications, and
+cross-activity navigation. Live owns capture state; Data owns
 its resource selection and queries; Curation owns its graph draft and preview;
 Training owns configuration and selected history; Rollout owns checkpoint and
 robot selection; Settings owns its unsaved configuration and calibration state.
@@ -35,6 +36,11 @@ robot selection; Settings owns its unsaved configuration and calibration state.
 project on every request and rejects responses that arrive after another project
 was selected. Catalog-dependent reads wait until Studio is reachable and a Spiral
 project is chosen.
+[`client/robot_connector.rs`](../crates/frontend/src/client/robot_connector.rs)
+sends robot, recording, and rollout requests to the robot connector at the
+address this browser saved, and asks whether it answers only while a hardware
+view is active, so a browser that never opens one never reaches for a local
+network address.
 
 [`client/queries.rs`](../crates/frontend/src/client/queries.rs) owns query-domain
 invalidation, cancellation, deadlines, and completion-based polling using Dioxus
@@ -60,9 +66,12 @@ Robot setup joins saved robot documents and native hardware observations locally
 Port identification compares two ordinary scans in the browser. Port/camera edits
 preserve unknown configuration fields locally and submit the complete document
 with its baseline. `RobotDraft` owns creation, import, edits, and validation;
-`RobotClient` only transports resources and invalidates queries. The backend
-performs transactional comparison and persistence.
+`RobotClient` only transports resources and invalidates queries. The robot
+connector performs the comparison and persistence.
 Recording requests include the frontend-selected leader/follower identities.
+After a take stops, the browser carries its MCAP file from the robot connector
+to Studio and then has the robot connector forget it; Live lists takes still
+waiting and stores them on request.
 
 Training reads the run catalog and fetches bounded details by ID; selected tabs
 never appear in backend requests. Rollout observes and stops executions by ID.

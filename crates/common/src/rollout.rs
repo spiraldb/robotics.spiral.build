@@ -42,6 +42,37 @@ impl RolloutConfig {
     }
 }
 
+/// The media type of a policy envelope: a checkpoint as Studio serves it, the
+/// robot connector stores it, and the policy runtime loads it.
+pub const POLICY_ENVELOPE_MEDIA_TYPE: &str = "application/vnd.spiral.policy-artifact";
+
+/// A checkpoint Studio wrote to the robot connector, which rollouts load.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredPolicy {
+    run_id: String,
+    checkpoint_step: u64,
+    bytes: u64,
+}
+
+impl StoredPolicy {
+    pub fn new(run_id: impl Into<String>, checkpoint_step: u64, bytes: u64) -> Self {
+        Self {
+            run_id: run_id.into(),
+            checkpoint_step,
+            bytes,
+        }
+    }
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub const fn checkpoint_step(&self) -> u64 {
+        self.checkpoint_step
+    }
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
 /// Authoritative lifecycle of the native inference and motor-control task.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

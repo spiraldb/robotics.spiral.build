@@ -1,24 +1,27 @@
 //! Explicit request messages shared by HTTP clients and the backend.
 use super::*;
 
-/// Selects the dataset for a new recording.
+/// Selects the dataset for a new recording, the arms it teleoperates, and
+/// whether their cameras are recorded too.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingStart {
     dataset_id: String,
     leader: String,
     follower: String,
+    video: bool,
 }
 impl RecordingStart {
-    pub fn new(dataset_id: String, pair: (String, String)) -> Self {
+    pub fn new(dataset_id: String, pair: (String, String), video: bool) -> Self {
         Self {
             dataset_id,
             leader: pair.0,
             follower: pair.1,
+            video,
         }
     }
-    pub fn into_parts(self) -> (String, (String, String)) {
-        (self.dataset_id, (self.leader, self.follower))
+    pub fn into_parts(self) -> (String, (String, String), bool) {
+        (self.dataset_id, (self.leader, self.follower), self.video)
     }
 }
 

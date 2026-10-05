@@ -1,12 +1,12 @@
 //! URLs for media and download surfaces.
 
 pub(crate) trait CameraApiPath {
-    /// URL of this camera's live MJPEG stream.
-    fn camera_stream_url(&self) -> String;
+    /// Path of this camera's live MJPEG stream on the robot connector.
+    fn camera_stream_path(&self) -> String;
 }
 
 impl CameraApiPath for str {
-    fn camera_stream_url(&self) -> String {
+    fn camera_stream_path(&self) -> String {
         format!("/api/cameras/stream.mjpeg?id={}", self.url_component())
     }
 }
@@ -42,7 +42,7 @@ mod tests {
     fn device_paths_survive_the_query_string() {
         assert_eq!("/dev/video0".url_component(), "%2Fdev%2Fvideo0");
         assert_eq!(
-            "/dev/video0".camera_stream_url(),
+            "/dev/video0".camera_stream_path(),
             "/api/cameras/stream.mjpeg?id=%2Fdev%2Fvideo0"
         );
         // macOS reports opaque identifiers that may contain anything at all.

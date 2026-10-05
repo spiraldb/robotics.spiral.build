@@ -7,11 +7,13 @@ use spiral_robotics_common::robots::ModeSelection;
 use spiral_robotics_ui::{
     ActionPurpose, BlockingConfirmation, Button, ButtonVariant, ConfirmationCopy,
     ConfirmationDismissal, ConfirmationResponse, Field, FieldLayout, ModeButton, ModeGroup,
-    TextInput,
+    TextInput, Toggle,
 };
 
 use crate::activities::live::actions::LiveAction;
+use crate::activities::live::client::RecordingTransfer;
 use crate::activities::live::control::JointPanel;
+use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::components::dataset_catalog::DatasetCatalog;
 use crate::robots::Selection;
 use crate::robots::{HardwareViewState, RobotSelection};
@@ -33,6 +35,7 @@ pub(super) fn LiveWorkbench(
         div { class: "studio-workbench-scroll live-workbench",
             ControlSection { project, hardware, selection, on_action }
             CaptureSection { capture, recording: hardware.recording() }
+            WaitingTakes { project }
 
             section { class: "workbench-section live-properties",
                 header { class: "workbench-section-heading",
@@ -53,7 +56,7 @@ pub(super) fn LiveWorkbench(
     }
 }
 
-/// Where new episodes are saved.
+/// Where new episodes are saved, and whether they record the arms' cameras.
 ///
 /// Not a choice from the catalog: recording into a dataset that does not exist
 /// yet is how most datasets start, so the operator types a name and the
@@ -61,6 +64,7 @@ pub(super) fn LiveWorkbench(
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct CaptureDestination {
     chosen: Signal<String>,
+    video: Signal<bool>,
     catalog: DatasetCatalog,
 }
 
@@ -68,6 +72,7 @@ impl CaptureDestination {
     pub(super) fn use_destination() -> Self {
         Self {
             chosen: use_signal(|| "default".to_owned()),
+            video: use_signal(|| true),
             catalog: DatasetCatalog::use_catalog(),
         }
     }
@@ -75,6 +80,11 @@ impl CaptureDestination {
     /// The dataset name new episodes are recorded into.
     pub(super) const fn chosen(self) -> Signal<String> {
         self.chosen
+    }
+
+    /// Whether new episodes record the cameras bound to their arms.
+    pub(super) const fn video(self) -> Signal<bool> {
+        self.video
     }
 
     /// The catalog's dataset names, plus whatever is currently typed.
@@ -97,6 +107,7 @@ impl CaptureDestination {
 #[component]
 fn CaptureSection(capture: CaptureDestination, recording: Option<RecordingProgress>) -> Element {
     let mut selected_dataset = capture.chosen;
+    let mut video = capture.video;
     let dataset_ids = capture.suggestions();
     let catalog = capture.catalog;
 
@@ -122,6 +133,12 @@ fn CaptureSection(capture: CaptureDestination, recording: Option<RecordingProgre
             datalist { id: "live-dataset-options",
                 for id in dataset_ids { option { value: "{id}" } }
             }
+            Toggle {
+                label: "Record video",
+                checked: video(),
+                disabled: recording.is_some(),
+                onchange: move |value| video.set(value),
+            }
             if let Some(problem) = catalog.problem() {
                 div { class: "min-w-0 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "status",
                     strong { class: "block font-medium", "Could not load datasets" }
@@ -145,6 +162,55 @@ fn CaptureSection(capture: CaptureDestination, recording: Option<RecordingProgre
                 } else {
                     "New episodes are saved to this dataset."
                 }
+            }
+        }
+    }
+}
+
+/// Finished takes the robot connector still holds because carrying them to
+/// Studio failed, with a way to try again.
+#[component]
+fn WaitingTakes(project: StudioProjectState) -> Element {
+    let waiting = QueryPolicy::on_demand(QueryDomain::Recording)
+        .use_resource(|| RecordingTransfer::current().waiting());
+    let mut carrying = use_signal(|| false);
+    let takes = match &*waiting.read() {
+        Some(Ok(takes)) if !takes.is_empty() => takes.clone(),
+        _ => return rsx! {},
+    };
+    let count = takes.len();
+    rsx! {
+        section { class: "workbench-section waiting-takes", role: "status",
+            p {
+                if count == 1 {
+                    "1 take is waiting on the robot connector."
+                } else {
+                    "{count} takes are waiting on the robot connector."
+                }
+            }
+            Button {
+                purpose: ActionPurpose::Retry,
+                variant: ButtonVariant::Outline,
+                disabled: carrying(),
+                aria_busy: carrying(),
+                onclick: move |_| {
+                    carrying.set(true);
+                    let takes = takes.clone();
+                    let transfer = RecordingTransfer::current();
+                    spawn(async move {
+                        for take in &takes {
+                            if let Err(error) = transfer.carry(take.dataset_id(), take.episode_id()).await {
+                                project.report_from(
+                                    crate::shell::notifications::MessageSource::Live,
+                                    format!("Could not store take {} in Studio: {error}", take.episode_id()),
+                                );
+                                break;
+                            }
+                        }
+                        carrying.set(false);
+                    });
+                },
+                if carrying() { "Storing…" } else { "Store in Studio" }
             }
         }
     }

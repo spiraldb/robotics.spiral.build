@@ -29,7 +29,7 @@ use spiral_robotics_storage::answers::{ColumnAnswers, EpisodeAnswer};
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 /// How many episodes a statement column asks Spiral about at once.
@@ -45,13 +45,13 @@ const PUBLISHING: &str = "Publishing";
 /// The fill runs one project has started.
 pub(crate) struct FillRuns {
     storage: Arc<StorageManager>,
-    keys: watch::Receiver<ProviderKeys>,
+    keys: Arc<ProviderKeys>,
     scorings: Arc<Semaphore>,
     runs: HeldRuns<FillRun>,
 }
 
 impl FillRuns {
-    pub(crate) fn new(storage: Arc<StorageManager>, keys: watch::Receiver<ProviderKeys>) -> Self {
+    pub(crate) fn new(storage: Arc<StorageManager>, keys: Arc<ProviderKeys>) -> Self {
         Self {
             storage,
             keys,
@@ -61,8 +61,8 @@ impl FillRuns {
     }
 
     /// `request`, admitted as a run: every statement read-only, every view
-    /// named as a view, and the Modal service's settings saved when a
-    /// column needs it.
+    /// named as a view, and the Modal service configured when a column
+    /// needs it.
     pub(super) fn admit(&self, request: FillRequest) -> Result<AdmittedFill, OperationError> {
         let invalid = OperationError::InvalidInput;
         if request.columns().is_empty() && request.views().is_empty() {
@@ -82,8 +82,7 @@ impl FillRuns {
                 AnswerSource::Statement { statement } => Self::read_only(statement)?,
                 AnswerSource::ProgressService { .. } if service.is_none() => {
                     service = Some(
-                        ProgressService::of(&self.keys.borrow(), self.scorings.clone())
-                            .map_err(invalid)?,
+                        ProgressService::of(&self.keys, self.scorings.clone()).map_err(invalid)?,
                     );
                 }
                 AnswerSource::ProgressService { .. } => {}

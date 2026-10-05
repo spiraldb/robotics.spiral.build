@@ -310,8 +310,15 @@ async fn export_writes_what_decode_reads() {
 async fn format_four_is_a_manifest_sqlite_and_one_arrow_stream_per_relation() {
     let store = crate::StudioStore::in_memory();
     let source = store.project(&Fixture::connection());
-    store
-        .patch_backend_settings(serde_json::json!({"secret":"private-credential-123456"}))
+    crate::SessionStore::new(store.clone())
+        .save(
+            "browser",
+            &crate::StoredSession::new(
+                "access".into(),
+                "private-credential-123456".into(),
+                "source".into(),
+            ),
+        )
         .await
         .unwrap();
     let snapshot = StudioSnapshot::capture(&source).await.unwrap();
@@ -475,10 +482,13 @@ async fn spiral_failure_rolls_back_staged_sqlite_replacements() {
         &snapshot.bytes().unwrap(),
         Fixture::empty_relations(),
     );
-    let original =
-        spiral_robotics_common::robots::config::RobotConfig::so101("keep", "so101_follower")
-            .unwrap();
-    project.save_robot_config(&original, None).await.unwrap();
+    let original = spiral_robotics_common::curation::CurationDocument::new("keep", "Keep", 1, "{}");
+    assert!(
+        crate::curations::CurationPersistence::new(&project)
+            .save(&original)
+            .await
+            .unwrap()
+    );
     let source = ProjectBundleImport::new(&project, &bytes).unwrap();
     let database = Arc::new(FailingSpiral::default());
     let spiral = crate::ProjectStore::new(
@@ -498,7 +508,10 @@ async fn spiral_failure_rolls_back_staged_sqlite_replacements() {
             .load(std::sync::atomic::Ordering::SeqCst)
     );
     assert_eq!(
-        project.robot_config("keep").await.unwrap(),
-        Some((original, 1))
+        crate::curations::CurationPersistence::new(&project)
+            .load("keep")
+            .await
+            .unwrap(),
+        Some(original.with_revision(1))
     );
 }

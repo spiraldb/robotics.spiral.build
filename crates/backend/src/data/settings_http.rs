@@ -3,7 +3,6 @@
 use crate::OperationError;
 use crate::http::delivery::{ApiJson, Project, SignedIn};
 use crate::projects::context::StudioContext;
-use crate::robots::operations::RobotOperations;
 
 use axum::{
     Json, Router,
@@ -43,14 +42,12 @@ impl SettingsEndpoints {
         Project(project): Project,
         ApiJson(request): ApiJson<SettingsUpdate>,
     ) -> Result<Json<DataSettings>, OperationError> {
-        let (settings, switched_to) = project
-            .projects()
-            .update_settings(project.session(), project.project(), request)
-            .await?;
-        if let Some(switched) = switched_to {
-            RobotOperations::spawn_auto_connect(project.with_project(switched));
-        }
-        Ok(Json(settings))
+        Ok(Json(
+            project
+                .projects()
+                .update_settings(project.session(), project.project(), request)
+                .await?,
+        ))
     }
     async fn test_spiral_connection(Project(project): Project) -> Json<ConnectionTest> {
         Json(ConnectionTest::from(

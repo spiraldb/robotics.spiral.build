@@ -5,9 +5,9 @@ Hugging Face import both produce those files; they are not different dataset
 kinds, and readers never ask which one produced an episode.
 
 ```text
-Live capture → complete MCAP bytes ─┐
-                                   ├→ dataset_files_<name> → dataset_<name> → Data, Curation
-Hugging Face → pinned Blob URIs ───┘
+Live capture on the robot connector → browser → complete MCAP bytes ─┐
+                                                                    ├→ dataset_files_<name> → dataset_<name> → Data, Curation
+Hugging Face → pinned Blob URIs ────────────────────────────────────┘
 ```
 
 ## Catalog layout
@@ -45,11 +45,15 @@ to an arbitrary external dataset.
 A completed Live recording becomes one immutable `.mcap` file: the recording
 header, stream metadata, joint observations and actions, and H.264 camera
 access units. Camera messages use `foxglove.CompressedVideo`; joint and
-metadata messages use the `studio.recording` Protobuf schemas. On final stop,
-Studio saves and syncs the file under the platform local-data folder, at
-`spiral-robotics/recordings/<project-hash>/<dataset>/<episode-id>.mcap`, then
-publishes it as above. If publication fails, the error names the saved file;
-nothing retries it yet. A stop with `keep: false` discards the take instead.
+metadata messages use the `studio.recording` Protobuf schemas
+(`crates/robot-connector/recording`). On final stop, the robot connector saves
+and syncs the file in its data directory, at
+`recordings/<dataset>/<episode-id>.mcap`. The browser then reads it, has Studio
+publish it as above through `POST /datasets/{dataset}/recordings/{episode}`,
+and only then has the robot connector delete it. A take that fails to reach
+Studio stays on the robot connector; Live lists waiting takes and stores them on
+request. A stop with `keep: false` marks the take discarded; it is stored the
+same way.
 
 Pausing ends the current encoder segment without publishing an incomplete
 member; resuming keeps the episode's elapsed clock, excluding the pause. Frame
@@ -58,7 +62,8 @@ decoder parameters, so seeking starts from the preceding keyframe. Calibration
 changes affect future recordings only: a recording keeps the normalized values
 captured with it, and angles in degrees need a calibration snapshot.
 
-Live reviews the current take from its session, never from files.
+Live reviews the current take from the robot connector's session, never from
+files.
 `RecordingBuffer` holds only the current session's capture and review, and
 camera preview keeps that session's encoded packets, at most 18,000 packets and
 64 MiB per camera, until a new capture starts. `RecordingSession` holds the one
@@ -66,8 +71,8 @@ open take and the last one kept for review: an operation that changes the take
 (start, pause, stop, or closing a take the control loop ended) holds it
 throughout, operations never interleave, and a cancelled one leaves the take
 as it was. These routes live under `/recording/takes/{id}`, whose IDs name
-session captures, not dataset members. Once the session is replaced or Studio
-restarts, the take is read through Data like any other episode.
+session captures, not dataset members. Once the session is replaced or the
+robot connector restarts, the take is read through Data like any other episode.
 
 Automated tests never move hardware; physical capture still needs a smoke
 test with a real robot and camera.

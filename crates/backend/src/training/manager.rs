@@ -10,7 +10,9 @@ use spiral_robotics_common::training::{
     TrainingCheckpoint, TrainingConfig, TrainingReadiness, TrainingRun, TrainingRunIdentity,
     TrainingRunStatus, TrainingRuntimeInfo, TrainingSnapshot,
 };
+use spiral_robotics_inference::ModelArtifact;
 use spiral_robotics_storage::StorageManager;
+use spiral_robotics_storage::checkpoints::CheckpointKey;
 use spiral_robotics_storage::training_runs::TrainingRunRecord;
 use spiral_robotics_training::{
     SpiralJobConnection, SpiralServiceEndpoints, TrainingBackendInfo, TrainingJobRequest,
@@ -96,6 +98,25 @@ impl TrainingManager {
     }
 
     /// Every checkpoint any run committed to Spiral.
+    /// Checkpoint `step` of `run_id` as a policy, for the robot connector to
+    /// roll out. Loading it is what proves it exists.
+    pub(super) async fn policy(
+        &self,
+        run_id: &str,
+        step: u64,
+    ) -> Result<ModelArtifact, OperationError> {
+        let (config, weights) = self
+            .inner
+            .storage
+            .training_checkpoints()
+            .load(CheckpointKey::new(run_id.to_owned(), step))
+            .await
+            .map_err(OperationError::External)?
+            .into_parts();
+        ModelArtifact::from_bytes(config, weights)
+            .map_err(|error| OperationError::Internal(error.to_string()))
+    }
+
     pub(super) async fn checkpoints(&self) -> Result<Vec<TrainingCheckpoint>, OperationError> {
         self.inner
             .storage
@@ -160,12 +181,8 @@ impl TrainingManager {
 
     /// Remove checkpoints before the record, so a failed checkpoint deletion
     /// leaves the run visible and retryable instead of orphaning its models.
-    pub(super) async fn delete(
-        &self,
-        run_id: &str,
-        active_rollout: Option<&str>,
-    ) -> Result<(), OperationError> {
-        let run_id = Self::admitted_deletion(&self.runs().await?, active_rollout, run_id)?;
+    pub(super) async fn delete(&self, run_id: &str) -> Result<(), OperationError> {
+        let run_id = Self::admitted_deletion(&self.runs().await?, run_id)?;
         self.inner
             .storage
             .training_checkpoints()

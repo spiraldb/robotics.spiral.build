@@ -109,7 +109,7 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
     // Safari can fire image lifecycle events repeatedly for an MJPEG resource.
     // Mutating component state from those events made Dioxus patch the same
     // live image element while WebKit was painting it, which presented as a flash. The
-    // backend camera status is already authoritative and lets the image node
+    // robot connector's camera status is already authoritative and lets the image node
     // remain completely stable for the life of this panel.
     // A camera can fail without reporting an error string: denied OS permission
     // leaves the device listed, `error: null`, and `streaming: false` forever.
@@ -146,7 +146,8 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
             if workspace.is_active() && panel.geometry().visible() {
             img {
                 class: "camera-stream-image",
-                src: device.camera_stream_url(),
+                src: crate::client::robot_connector::RobotConnector::current()
+                    .url(&device.camera_stream_path()),
                 alt: "Live view from the {role} camera on {robot}",
                 loading: "eager",
                 decoding: "sync",

@@ -17,7 +17,6 @@ use spiral_robotics_ui::{
 
 use crate::panels::scene::ScenePalette;
 use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection, Selection};
-use crate::shell::project::ProjectSelection;
 use crate::shell::state::StudioProjectState;
 
 mod calibration;
@@ -41,9 +40,9 @@ pub(super) fn RobotPanel(
 ) -> Element {
     let robots = telemetry.snapshot().read().robots().to_owned();
     let focused = selection.focused(&robots);
-    let project_selection = ProjectSelection::current();
+    let connector = crate::client::robot_connector::RobotConnector::current();
     let mut ports = use_resource(move || {
-        let available = project_selection.live();
+        let available = connector.reachable();
         async move {
             if !available {
                 return std::future::pending().await;
@@ -902,7 +901,8 @@ fn CameraSection(
                         class: "aspect-video w-full bg-camera object-contain",
                         src: {
                             use crate::client::http::CameraApiPath;
-                            camera.id().camera_stream_url()
+                            crate::client::robot_connector::RobotConnector::current()
+                                .url(&camera.id().camera_stream_path())
                         },
                         alt: "Live preview from {camera.name()}",
                     }

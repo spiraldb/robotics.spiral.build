@@ -19,7 +19,6 @@ impl Database for UnavailableSpiral {
     }
 }
 struct LoadingFixture {
-    project: tests::ProjectFixture,
     session: Arc<OpenProject>,
     spiral_calls: Arc<AtomicUsize>,
 }
@@ -46,25 +45,21 @@ impl LoadingFixture {
         );
         let session = project.projects.factory.create_from_store(store);
         Self {
-            project,
             session,
             spiral_calls: calls,
         }
     }
     async fn shutdown(self) {
         self.session.shutdown().await;
-        self.project.projects.hardware().shutdown().await.unwrap();
     }
 }
 
 #[tokio::test]
 async fn studio_loads_and_saves_without_opening_spiral() {
     let fixture = LoadingFixture::new().await;
-    let preferences = spiral_robotics_storage::StoredStudioPreferences::from_settings(
-        "http://127.0.0.1:9",
-        false,
-    )
-    .unwrap();
+    let preferences =
+        spiral_robotics_storage::StoredStudioPreferences::from_settings("http://127.0.0.1:9")
+            .unwrap();
     fixture
         .session
         .storage()
@@ -83,15 +78,6 @@ async fn studio_loads_and_saves_without_opening_spiral() {
             .training()
             .endpoint(),
         "http://127.0.0.1:9"
-    );
-    assert!(
-        fixture
-            .session
-            .workspace()
-            .try_list()
-            .await
-            .unwrap()
-            .is_empty()
     );
     assert!(
         fixture
@@ -124,7 +110,6 @@ async fn studio_loads_and_saves_without_opening_spiral() {
 async fn studio_features_work_before_a_project_is_chosen() {
     let fixture = tests::ProjectFixture::new().await;
     let session = fixture.open("").await;
-    assert!(session.workspace().try_list().await.unwrap().is_empty());
     assert!(
         session
             .storage()
@@ -134,5 +119,4 @@ async fn studio_features_work_before_a_project_is_chosen() {
             .unwrap()
             .is_empty()
     );
-    fixture.projects.hardware().shutdown().await.unwrap();
 }

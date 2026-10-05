@@ -79,9 +79,7 @@ impl AccountEndpoints {
         let sessions = project.studio().sessions().clone();
         project
             .projects()
-            .change_account(&session, project.project(), async {
-                sessions.sign_out(&session).await
-            })
+            .change_account(&session, async { sessions.sign_out(&session).await })
             .await?;
         Ok((
             AppendHeaders([(
@@ -103,7 +101,6 @@ impl AccountEndpoints {
             .projects()
             .change_account(
                 &session,
-                project.project(),
                 session.switch_organization(request.organization_id()),
             )
             .await?;

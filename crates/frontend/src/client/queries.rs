@@ -7,6 +7,7 @@ use std::future::Future;
 #[derive(Clone, Copy)]
 pub(crate) enum QueryDomain {
     Project,
+    RobotConnector,
     RobotSetup,
     Telemetry,
     Recording,
@@ -18,7 +19,7 @@ pub(crate) enum QueryDomain {
 
 #[derive(Clone, Copy)]
 pub(crate) struct QueryRefresh {
-    revisions: [Signal<u64>; 8],
+    revisions: [Signal<u64>; 9],
 }
 impl QueryRefresh {
     pub(crate) fn use_provider() -> Self {

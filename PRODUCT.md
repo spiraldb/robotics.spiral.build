@@ -25,13 +25,14 @@ That engineer arrives in one of two postures, and both are first-class:
   the Studio on how quickly a pile of files becomes a browsable, queryable,
   curatable dataset.
 - **With arms on the bench.** They work with a pair of SO-ARM101 arms — one
-  leader and one follower — wired to the Spiral Robotics backend, with one or
+  leader and one follower — wired to a Spiral Robotics robot connector, with one or
   more cameras observing the workspace. They judge the Studio on how quickly
   and reliably "arms on the bench" becomes synchronized, queryable episodes,
   and on whether the system stays predictable once physical motion begins.
 
-The browser may be on the same machine as the backend or elsewhere on the
-network.
+Studio may run on `robotics.spiraldb.com` or on the engineer's machine; the
+robot connector runs on the machine wired to the arms, and the browser driving
+them is usually on that machine too.
 
 Secondary, and not yet a design target: other SO-101 owners and external
 dataset owners who will arrive when the project is opened. See
@@ -91,8 +92,9 @@ writing glue code or operating a second data stack.
   persistence without linking the Studio server to
   LibTorch.
 - **One arm is one robot instance.** Serial port, cameras, motors, and
-  calibration live in one revisioned robot document in Studio's SQLite. JSON
-  is an explicit per-robot transfer format, not live storage.
+  calibration live in one revisioned robot document on the robot connector
+  that drives the arm. JSON is an explicit per-robot transfer format, not live
+  storage.
 - **Episode data keeps its natural streams and one clock.** Joint state,
   commanded action, camera media, and recording gaps are separate synchronized
   streams rather than one wide table of duplicated or resampled values. The
@@ -105,11 +107,12 @@ writing glue code or operating a second data stack.
   robot's contract. Ingested episodes without a
   matching robot remain full citizens of the catalog.
 - **SpiralDB owns the queryable data.** Datasets, published curations, and
-  checkpoints live in Spiral; robots, settings, curations, and training run
-  records live in Studio's local SQLite. Each completed Live episode is first saved and synced as one
-  immutable local MCAP file, then imported as a native Blob into the selected
-  Dataset. A failed import reports the retained file path; restart recovery
-  and a local-file retry UI are not yet available. Backend bootstrap pointers
+  checkpoints live in Spiral; settings, curations, and training run records
+  live in Studio's local SQLite. Each completed Live episode is first saved as
+  one immutable MCAP file on the robot connector; the browser then carries it
+  to Studio, which imports it as a native Blob into the selected Dataset, and
+  only then has the robot connector forget it. Live lists takes still waiting
+  and stores them on request. Backend bootstrap pointers
   select the API endpoint, SpFS endpoint, and project, saved in the private
   local SQLite database; never cached Spiral rows. Studio reaches Spiral as the
   signed-in user, sharing the `spiraldb login` session.
@@ -122,32 +125,33 @@ writing glue code or operating a second data stack.
 The deployment boundary is deliberately simple:
 
 ```text
-Browser frontend
-      │ HTTP commands + frontend-initiated reads
-      ▼
-Spiral Robotics backend
-      ├── robot connections and safety
-      ├── MCAP recording and H.264 encoding
-      ├── SpiralDB persistence and read-only queries
-      ├── curation view publication
-      ├── model-provider relay
-      │        └── HTTPS ──► configured OpenAI-compatible provider
-      ├── policy-training supervision and checkpoint persistence
-      ├── episode validation and bounded follower control
-      └── Arrow IPC / HTTP ──► selected compute runtime
-                               ├── in-memory model and optimizer session
-                               └── in-memory rollout policy session
+Browser frontend ─────────────────────────────┐
+      │ HTTP commands + frontend reads          │ HTTP commands, reads, MJPEG
+      ▼                                         ▼
+Studio backend                          Robot connector (next to the arms)
+      ├── SpiralDB persistence and          ├── robot connections and safety
+      │   read-only queries                 ├── MCAP recording and H.264 encoding
+      ├── recording import                  ├── saved robots and calibration
+      ├── curation view publication         ├── bounded follower control
+      ├── model-provider relay              └── Arrow IPC / HTTP ──► policy runtime
+      │     └── HTTPS ──► provider                                  └── rollout session
+      └── policy-training supervision
+            └── HTTP ──► training runtime ──► model and optimizer session
 ```
 
-- **The browser can run anywhere.** It renders the interface, WebGL scene,
-  charts, tables, and native video. It connects only to the Spiral Robotics
-  backend and does not connect directly to robots or SpiralDB.
-- **The backend is the one consequential system.** It normally runs near the
-  arms and owns all hardware connections, the control loop, safety decisions,
-  camera capture, video encoding, and SpiralDB credentials and persistence.
-  As ingestion arrives, it also owns external-source
-  credentials and ingestion jobs, and model-provider configuration; the
-  browser composes provider requests and never sees the credential.
+- **The browser carries data between the two.** It renders the interface,
+  WebGL scene, charts, tables, and native video. It talks to Studio and to the
+  robot connector it is set to, carries each finished take from the robot
+  connector to Studio, and writes the checkpoints Studio trained to the robot
+  connector. It never connects to SpiralDB; Studio never connects to the robot
+  connector.
+- **Studio owns data; the robot connector owns hardware.** Studio owns
+  SpiralDB credentials and persistence, external-source credentials and
+  ingestion jobs, and model-provider configuration; the browser composes
+  provider requests and never sees the credential. The robot connector runs
+  near the arms and owns all hardware connections, the control loop, safety
+  decisions, camera capture, video encoding, and rollout; it never reaches
+  Spiral.
 - **The wire API is a product boundary.** The Dioxus browser is the current
   client, not a privileged bypass. Hardware and safety behavior must remain
   correct for any client that uses the API.
@@ -155,20 +159,21 @@ Spiral Robotics backend
   telemetry, and unavailable services must suspend or block consequential
   actions without pretending the physical system is safe merely because the
   browser lost contact.
-- **Service settings are backend-scoped.** Secrets are stored and used by the
-  backend: the Spiral session, the Hugging Face token, and the model provider
-  key, which the relay attaches. The browser receives configuration state and
-  who is signed in, never a token.
+- **Service settings are backend-scoped.** Secrets are held and used by the
+  backend: each browser's Spiral session, and the deployment's provider keys
+  (the model provider key, the Hugging Face token, and the Modal token), which
+  the relay attaches. The browser receives configuration state and who is
+  signed in, never a token.
 
 The physical scene matters: an operator may have one hand supporting an arm
 during calibration or teleoperation. Releasing torque lets an arm fall under
 its own weight, so controls and consequences must remain reachable and stable.
 
-Studio policy control is backend-owned while tensor execution is remote.
+Policy control is owned by the robot connector while tensor execution is remote.
 Existing training checkpoints preserve the native ACT graph and normalization
 contract as SafeTensors; rollout requires an exact schema match and sends that artifact and Arrow IPC observations to the
 selected compute runtime, then admits returned actions to one session-scoped,
-bounded motor control thread. The backend stops the session on stale inputs,
+bounded motor control thread. The robot connector stops the session on stale inputs,
 motor faults, mode changes, inference failures, or excessive
 observation-to-action latency. The browser selects and monitors a rollout but
 never becomes the motor-control runtime.
@@ -211,9 +216,10 @@ never becomes the motor-control runtime.
     action-chunk and control-rate settings, the live 3D scene, every follower
     camera recorded for the policy, authoritative start/stop lifecycle, and
     measured native inference evidence.
-  - **Settings** owns robot setup (ports, camera assignment, calibration,
-    add/import/delete), backend data destinations, and complete-project
-    backup/restore. Setup is not mixed into the live operating flow.
+  - **Settings** owns robot setup (the robot connector's address, ports,
+    camera assignment, calibration, add/import/delete), backend data
+    destinations, and complete-project backup/restore. Setup is not mixed into
+    the live operating flow.
 - The external [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) crate supplies
   tabbed tiles, horizontal and vertical splits, drag docking with five-zone
   previews, split resizing, keyboard equivalents, session-state panel
@@ -223,7 +229,7 @@ never becomes the motor-control runtime.
   to a 21% Datasets rail beside one subject panel; an open episode's
   inspection nests its own workbench of cameras, Scene, Plots, and Timeline,
   arranged for the room it is given.
-- Four backend motion modes: **Idle**, **Manual**, **Teleoperation**, and
+- Four robot connector motion modes: **Idle**, **Manual**, **Teleoperation**, and
   **Policy**. The Studio presents their operator-facing form as **Hold**
   (torque engaged and joints writable), **Release** (torque off and telemetry
   read-only), and **Teleop** (leader mapped to follower).
@@ -305,8 +311,9 @@ today, and nothing below may be presented as existing behavior:
   checkpoints. MCAP dataset training jobs remain unavailable pending native
   Spiral image decoding. Studio owns queries, run history, checkpoint ingest,
   and bounded hardware control.
-- **Backend-scoped model provider.** The operator enters the OpenRouter key in
-  Settings → Keys, and the trusted backend saves it in its SQLite settings.
+- **Deployment-provided model provider.** The deployment sets the OpenRouter
+  key as `OPENROUTER_API_KEY` in the backend's environment; for now Spiral
+  pays for every colleague's model calls, and no user sees or sets the key.
   `LLM_BASE_URL` is an optional process-environment developer override; with
   only the key, requests go to OpenRouter's OpenAI-compatible endpoint. A
   custom endpoint must use HTTPS, except localhost may use HTTP. The key is
@@ -322,7 +329,7 @@ today, and nothing below may be presented as existing behavior:
   lints and packages the Python worker without syncing its CUDA stack.
   Hosted-SpiralDB and compute-runtime tests belong in separate integration
   lanes.
-- **Safety is enforced by the server.** Enabling torque first copies measured
+- **Safety is enforced by the robot connector.** Enabling torque first copies measured
   position into the goal so an arm cannot snap to stale state. Uncalibrated
   arms cannot accept normalized position commands. Manual, teleoperation, and
   policy motion use bounded ramps. A non-responsive motor
@@ -331,11 +338,10 @@ today, and nothing below may be presented as existing behavior:
 - **Camera identity is not stable.** The OS-reported identifier may change
   after a replug or reboot. On macOS, missing camera permission is reported
   explicitly instead of presenting a permanently blank preview.
-- **The current browser bundle is served by the backend by default** on
-  `127.0.0.1:8080`, with `--bind` for another address. The architectural
-  contract permits a separately hosted browser, but authentication, TLS, and
-  explicit allowed origins are required before exposing the backend beyond a
-  trusted network.
+- **The browser bundle is served by the Studio backend**, on
+  `localhost:3000` locally and at `robotics.spiraldb.com` when hosted. The
+  robot connector listens on `127.0.0.1:7070` by default and accepts any
+  origin.
 - **The Spiral ADBC driver is trusted native backend code.** Studio loads
   Spiral's standalone shared library through the ADBC driver manager;
   `flake.nix` pins the published archive, and the `local-driver` shell selects
@@ -372,11 +378,12 @@ rollout, export), *ingestion*
 
 Real, in-repo:
 
-- `crates/backend/storage/src/episodes/mcap_recording.rs` and
-  `recording_file.rs` — immutable MCAP packaging and local publication.
+- `crates/robot-connector/recording/src/mcap_recording.rs` and
+  `crates/robot-connector/src/recording/files.rs` — immutable MCAP packaging
+  and the files kept until Studio stores them.
 - `crates/backend/storage/src/datasets/sources.rs` — native Blob import,
   Dataset refresh, and idempotent recording retries.
-- `crates/backend/src/robotics/video.rs` — server-owned H.264 capture with
+- `crates/robot-connector/src/robotics/video.rs` — H.264 capture with
   capture-time timestamps and parameter-bearing keyframes.
 - `docs/datasets.md` — recording, catalog layout, calibration, backup, and
   training limits; physical robot/camera capture still needs a smoke test.
@@ -391,16 +398,17 @@ testimonials, case studies, published benchmarks, performance guarantees,
 pricing, or deployment/endorsement claims**. The project has not been released.
 Ingestion beyond public Hugging Face MCAP repositories is a committed
 direction, not a shipped capability. No provider credential is shipped as a distributable
-product fixture; an operator enters one in Settings → Keys.
+product fixture; the deployment sets them in the backend's environment.
 
 ## Product Principles
 
 1. **Data is the center of gravity.** Producers put episodes in; consumers
    take datasets out. Hardware collection is one producer, never the front
    door the rest of the product hides behind.
-2. **The browser observes and requests; the backend owns consequences.**
-   Hardware, safety, recording, ingestion, credentials, and data persistence
-   remain backend responsibilities regardless of which client is connected.
+2. **The browser observes and requests; the servers own consequences.**
+   Hardware, safety, and recording remain the robot connector's
+   responsibilities, and ingestion, credentials, and data persistence Studio's,
+   regardless of which client is connected.
 3. **The wire API is the product boundary.** The current Dioxus UI is one
    client, so correctness cannot depend on browser-local state or component
    behavior.

@@ -1,11 +1,8 @@
-//! Spiral destinations, the provider keys, and project-owned Studio
-//! preferences in SQLite.
+//! Spiral destinations and project-owned Studio preferences in SQLite.
 
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::settings::{DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT};
 use url::Url;
-
-use crate::ProviderKeys;
 
 /// Project-owned Studio preference persistence.
 pub struct StudioPreferencePersistence<'a> {
@@ -163,40 +160,6 @@ impl ServiceEndpoint {
     }
 }
 
-/// The backend settings document, one SQLite row that project bundles never
-/// contain. It holds the provider keys.
-pub struct BackendStateStore {
-    studio: crate::StudioStore,
-}
-
-impl BackendStateStore {
-    pub fn open_default() -> Result<Self, String> {
-        Ok(Self::new(crate::StudioStore::open_default()?))
-    }
-
-    pub fn new(studio: crate::StudioStore) -> Self {
-        Self { studio }
-    }
-
-    pub fn studio(&self) -> &crate::StudioStore {
-        &self.studio
-    }
-
-    /// Open the database and read the provider keys.
-    pub async fn initialize(&self) -> Result<ProviderKeys, String> {
-        self.studio.initialize().await?;
-        match self.studio.backend_settings().await? {
-            Some(document) => serde_json::from_value(document).map_err(|error| error.to_string()),
-            None => Ok(ProviderKeys::default()),
-        }
-    }
-
-    /// Save the provider keys.
-    pub(crate) async fn save_keys(&self, keys: &ProviderKeys) -> Result<(), String> {
-        self.studio.patch_backend_settings(keys.merge_patch()).await
-    }
-}
-
 /// Storage-owned persisted form of the Studio preferences document.
 ///
 /// These field names are the durable `value_json` format for
@@ -204,38 +167,26 @@ impl BackendStateStore {
 /// of the wire crate's settings types, so a contract rename can never change
 /// what an existing project's preferences mean; a test pins the serialized
 /// shape and another pins the defaults to the wire defaults.
+///
+/// Documents written before cameras moved to the robot connector also hold a
+/// `video` preference; reads ignore it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StoredStudioPreferences {
     #[serde(default)]
     training: StoredTrainingRuntimePreference,
-    #[serde(default)]
-    video: StoredVideoPreference,
 }
 
 impl StoredStudioPreferences {
     /// Validate raw preference edits into the persisted form.
-    pub fn from_settings(
-        training_endpoint: &str,
-        video_enabled: bool,
-    ) -> Result<StoredStudioPreferences, String> {
+    pub fn from_settings(training_endpoint: &str) -> Result<StoredStudioPreferences, String> {
         let endpoint = ServiceEndpoint::training_runtime(training_endpoint.trim())?.into_string();
-        Ok(StoredStudioPreferences::new(
-            StoredTrainingRuntimePreference { endpoint },
-            StoredVideoPreference {
-                enabled: video_enabled,
-            },
-        ))
-    }
-
-    const fn new(training: StoredTrainingRuntimePreference, video: StoredVideoPreference) -> Self {
-        Self { training, video }
+        Ok(StoredStudioPreferences {
+            training: StoredTrainingRuntimePreference { endpoint },
+        })
     }
 
     pub const fn training(&self) -> &StoredTrainingRuntimePreference {
         &self.training
-    }
-    pub const fn video(&self) -> &StoredVideoPreference {
-        &self.video
     }
 }
 
@@ -259,63 +210,9 @@ impl StoredTrainingRuntimePreference {
     }
 }
 
-/// Persisted camera-capture preference.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct StoredVideoPreference {
-    enabled: bool,
-}
-
-impl Default for StoredVideoPreference {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-impl StoredVideoPreference {
-    pub const fn enabled(&self) -> bool {
-        self.enabled
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn backend_state_round_trips_the_provider_keys_privately() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("studio.sqlite3");
-        let store = BackendStateStore::new(crate::StudioStore::at(path.clone()));
-        assert_eq!(store.initialize().await.unwrap(), ProviderKeys::default());
-        let keys = ProviderKeys::default().updated(
-            &spiral_robotics_common::providers::ProviderKeysUpdate::default()
-                .with_llm_api_key(Some("sk-or-private".into()))
-                .with_huggingface_token(Some("hf_private".into())),
-        );
-        store.save_keys(&keys).await.unwrap();
-        let reopen = || BackendStateStore::new(crate::StudioStore::at(path.clone()));
-        assert_eq!(reopen().initialize().await.unwrap(), keys);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(
-                std::fs::metadata(store.studio().path().unwrap())
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-        let without_token = keys.updated(
-            &spiral_robotics_common::providers::ProviderKeysUpdate::default()
-                .with_huggingface_token(Some(String::new())),
-        );
-        store.save_keys(&without_token).await.unwrap();
-        let saved_keys = reopen().initialize().await.unwrap();
-        assert_eq!(saved_keys.huggingface_token(), None);
-        assert_eq!(saved_keys.llm_api_key(), Some("sk-or-private"));
-    }
 
     #[test]
     fn spiral_endpoint_rejects_non_http_and_embedded_credentials() {
@@ -329,16 +226,14 @@ mod tests {
     #[test]
     fn training_runtime_requires_an_http_or_https_endpoint() {
         assert!(
-            StoredStudioPreferences::from_settings("ftp://runtime.example", true)
+            StoredStudioPreferences::from_settings("ftp://runtime.example")
                 .unwrap_err()
                 .contains("http:// or https://")
         );
 
-        let staged =
-            StoredStudioPreferences::from_settings(" http://runtime.example:50051 ", false)
-                .expect("HTTP runtime endpoint is accepted");
+        let staged = StoredStudioPreferences::from_settings(" http://runtime.example:50051 ")
+            .expect("HTTP runtime endpoint is accepted");
         assert_eq!(staged.training().endpoint(), "http://runtime.example:50051");
-        assert!(!staged.video().enabled());
     }
 
     /// The persisted document format is storage's, not the wire crate's: these
@@ -348,22 +243,23 @@ mod tests {
         let json = serde_json::to_string(&StoredStudioPreferences::default()).unwrap();
         assert_eq!(
             json,
-            r#"{"training":{"endpoint":"http://127.0.0.1:50051"},"video":{"enabled":true}}"#
+            r#"{"training":{"endpoint":"http://127.0.0.1:50051"}}"#
         );
+        let earlier: StoredStudioPreferences = serde_json::from_str(
+            r#"{"training":{"endpoint":"http://runtime.example"},"video":{"enabled":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(earlier.training().endpoint(), "http://runtime.example");
     }
 
     /// A fresh project and a fresh browser session must agree on defaults.
     #[test]
     fn stored_preference_defaults_match_the_wire_defaults() {
-        use spiral_robotics_common::settings::{TrainingRuntimeSettings, VideoSettings};
+        use spiral_robotics_common::settings::TrainingRuntimeSettings;
 
         assert_eq!(
             StoredTrainingRuntimePreference::default().endpoint(),
             TrainingRuntimeSettings::default().endpoint()
-        );
-        assert_eq!(
-            StoredVideoPreference::default().enabled(),
-            VideoSettings::default().enabled()
         );
     }
 }

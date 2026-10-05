@@ -12,6 +12,7 @@ behind the same Cloudflare Access sign-in as `next.spiraldb.com`.
 - Studio keeps its state in one Docker volume: its SQLite database, which holds each browser's Spiral session.
 - Like SpiralDB's Cloud Run services, Terraform owns the spec and CI owns the image. Each release, a pushed `v*` tag, publishes the image as `latest`, and the VM pulls it within two minutes. CI has no access to the VM.
 - The heavy work runs elsewhere: data lives in SpiralDB, model calls go to OpenRouter, and Score progress runs on Modal. The VM needs no GPU.
+- The provider keys are deployment secrets in Secret Manager. Studio reads them from its environment; no colleague sees or sets them.
 
 | Path | Purpose |
 | --- | --- |
@@ -24,9 +25,10 @@ behind the same Cloudflare Access sign-in as `next.spiraldb.com`.
 
 Each colleague signs in with their own Spiral account. They see the organizations and projects their account can open, and their queries, recordings and curation runs reach Spiral as them. They still share:
 
-- One set of provider keys and settings.
+- The deployment's provider keys. For now Spiral pays for everyone's model calls and Score progress runs.
 - Studio's records of a project they can all open, such as curation drafts and published views. When two people edit the same draft, the last save wins.
-- Live and Setup show no robots or cameras. The VM has none.
+
+Robots are not part of the hosted Studio. Live, Rollout and robot setup talk to the robot connector each colleague runs next to their own arms, at the address saved in their browser.
 
 ## Image
 
@@ -146,7 +148,31 @@ gcloud secrets add-iam-policy-binding cloudflare-tunnel-token --project=spiraldb
   --role=roles/secretmanager.secretAccessor
 ```
 
-### 4. Create the VM (`spiraldb/infra`)
+### 4. Store the provider keys
+
+| Secret | Studio variable | Used by |
+| --- | --- | --- |
+| `openrouter-api-key` | `OPENROUTER_API_KEY` | Break down, Classify, Find similar |
+| `huggingface-token` | `HF_TOKEN` | Downloads of models and datasets from Hugging Face |
+| `warp-progress-token` | `WARP_PROGRESS_TOKEN` | Score progress, on the Modal service the image names in `WARP_PROGRESS_URL` |
+
+Create each secret, paste its value at the silent prompt, and let the VM's account read it:
+
+```bash
+for SECRET in openrouter-api-key huggingface-token warp-progress-token; do
+  gcloud secrets create "$SECRET" --project=spiraldb-robotics --replication-policy=automatic
+  printf '%s: ' "$SECRET" && read -rs VALUE && echo && printf '%s' "$VALUE" \
+    | gcloud secrets versions add "$SECRET" --project=spiraldb-robotics --data-file=- \
+    && unset VALUE
+  gcloud secrets add-iam-policy-binding "$SECRET" --project=spiraldb-robotics \
+    --member=serviceAccount:spiral-robotics-studio@spiraldb-robotics.iam.gserviceaccount.com \
+    --role=roles/secretmanager.secretAccessor
+done
+```
+
+Studio's startup log names the keys it found, never their values.
+
+### 5. Create the VM (`spiraldb/infra`)
 
 `robotics.tf` in `spiraldb/infra` owns the VPC, the IAP SSH firewall rule, the VM, its snapshot schedule and its read access to `spiral-docker`.
 `config/robotics-studio/` beside it holds the Compose spec and the startup script.
@@ -156,13 +182,13 @@ Change them there through a pull request; CI applies it after approval.
 - `us-east4` is SpiralDB's US region. Every Studio query makes several round trips to SpiralDB.
 - An external IP serves egress. The VPC admits nothing but IAP SSH.
 - On every boot, the startup script installs Docker and Compose from Debian and the `studio-update` timer.
-- Every two minutes, `studio-update` writes the Compose spec from instance metadata and the tunnel token from Secret Manager. Then it pulls `latest` and runs `docker compose up`.
+- Every two minutes, `studio-update` writes the Compose spec from instance metadata, and the tunnel token and provider keys from Secret Manager into `.env`. Then it pulls `latest` and runs `docker compose up`.
 
 The boot disk holds the only copy of Studio's drafts and settings.
 It is snapshotted daily at 08:00 UTC, and each snapshot is kept for 14 days.
 Terraform refuses to destroy the VM.
 
-### 5. Register Studio's sign-in callback
+### 6. Register Studio's sign-in callback
 
 Spiral's sign-in returns browsers only to addresses registered for its WorkOS client.
 A WorkOS administrator adds this redirect URI to Spiral's client, `client_01J1CRS9MGF103FKTKZDCNJVM3`, beside `https://app.spiraldb.com/callback`:
@@ -173,24 +199,10 @@ https://robotics.spiraldb.com/callback
 
 The image already tells Studio its address: it sets `SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com`.
 
-### 6. Release
+### 7. Release
 
 Release `v0.1.0` as **Operations** describes.
 The VM starts Studio within two minutes of the image.
-
-### 7. Save the keys
-
-1. Open `https://robotics.spiraldb.com`, pass Access, and choose **Sign in with Spiral**.
-2. Pick a project in **Settings → SpiralDB**.
-3. In **Settings → Keys**, save the keys the team uses:
-
-| Key | Used by |
-| --- | --- |
-| OpenRouter API key | Break down, Classify, Find similar |
-| Modal base URL and Modal token | Score progress |
-| Hugging Face token | Downloads of models and datasets from Hugging Face |
-
-The volume keeps every session and the keys across restarts and updates.
 
 ## Operations
 
@@ -212,7 +224,7 @@ IMAGE=us-docker.pkg.dev/pyspiral-dev/spiral-docker/spiral-robotics-studio
 gcloud artifacts docker tags add "$IMAGE:v0.1.0" "$IMAGE:latest"
 ```
 
-To rotate the tunnel token, add a secret version. The next update picks it up.
+To rotate the tunnel token or a provider key, add a secret version. The next update picks it up; a new provider key restarts Studio.
 To change the Compose spec, edit `config/robotics-studio/compose.yaml` in `spiraldb/infra`.
 
 Connect to the VM:

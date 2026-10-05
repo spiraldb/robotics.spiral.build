@@ -1,14 +1,12 @@
-//! Framework-neutral training and policy-rollout capability actions.
+//! Framework-neutral training capability actions.
 
 use std::collections::BTreeSet;
 
 use spiral_robotics_common::identity::DatasetId;
-use spiral_robotics_common::rollout::{MAX_ROLLOUT_DURATION_SECONDS, RolloutConfig};
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
 use spiral_robotics_common::training::{TrainingConfig, TrainingRun};
 
 use crate::OperationError;
-use crate::rollout::service::{MIN_ROLLOUT_DURATION_SECONDS, RolloutDuration};
 use crate::training::manager::TrainingManager;
 
 /// One image batch expanded to f32 model inputs must leave enough memory for
@@ -46,16 +44,8 @@ impl ActTrainingResourceEstimate {
 }
 
 impl TrainingManager {
-    pub(crate) async fn admit_rollout(
-        &self,
-        command: RolloutConfig,
-    ) -> Result<RolloutConfig, OperationError> {
-        Self::admitted_rollout(&self.runs().await?, command)
-    }
-
     pub(super) fn admitted_deletion(
         runs: &[TrainingRun],
-        active_rollout: Option<&str>,
         run_id: &str,
     ) -> Result<String, OperationError> {
         let run_id = run_id.trim().to_owned();
@@ -77,58 +67,7 @@ impl TrainingManager {
                 "training run {run_id:?} is still active; stop it before deleting it"
             )));
         }
-        if active_rollout == Some(run_id.as_str()) {
-            return Err(OperationError::Conflict(format!(
-                "training run {run_id:?} is in use by Rollout; stop Rollout before deleting it"
-            )));
-        }
         Ok(run_id)
-    }
-
-    /// Loading the checkpoint is what proves it exists; admission only
-    /// refuses a run that is gone or still training.
-    fn admitted_rollout(
-        runs: &[TrainingRun],
-        command: RolloutConfig,
-    ) -> Result<RolloutConfig, OperationError> {
-        let command = Self::validated_rollout(command)?;
-        let Some(run) = runs.iter().find(|run| run.id() == command.run_id()) else {
-            return Err(OperationError::invalid_input(
-                "the selected training run is no longer available",
-            ));
-        };
-        if run.phase().active() {
-            return Err(OperationError::invalid_input(
-                "stop or finish training before starting a rollout",
-            ));
-        }
-        Ok(command)
-    }
-
-    fn validated_rollout(command: RolloutConfig) -> Result<RolloutConfig, OperationError> {
-        let command = RolloutConfig::new(
-            command.run_id().trim().to_owned(),
-            command.checkpoint_step(),
-            command.robot().trim().to_owned(),
-        )
-        .with_duration(command.duration_seconds());
-        if command.run_id().is_empty() || command.robot().is_empty() {
-            return Err(OperationError::invalid_input(
-                "rollout requires a training run and target robot",
-            ));
-        }
-        if command.checkpoint_step() == 0 {
-            return Err(OperationError::invalid_input(
-                "checkpoint step must be greater than zero",
-            ));
-        }
-        if RolloutDuration::new(command.duration_seconds()).is_none() {
-            return Err(OperationError::invalid_input(format!(
-                "rollout duration_seconds must be between {} and {}",
-                MIN_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS,
-            )));
-        }
-        Ok(command)
     }
 }
 
@@ -397,10 +336,6 @@ mod tests {
         TrainingRunIdentity, TrainingRunPhase, TrainingRunStatus,
     };
 
-    fn rollout_command() -> RolloutConfig {
-        RolloutConfig::new("run-1", 20_000, "follower").with_duration(30)
-    }
-
     fn training_command() -> TrainingConfig {
         let mut config =
             TrainingConfig::for_dataset(" act-run ", " demo ", "SELECT state, action FROM samples");
@@ -560,22 +495,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn malformed_rollout_is_rejected_before_training_lookup() {
-        let runs = run(false);
-        for command in [
-            RolloutConfig::new(String::new(), 20_000, "follower").with_duration(30),
-            RolloutConfig::new("run-1", 0, "follower").with_duration(30),
-            RolloutConfig::new("run-1", 20_000, "follower")
-                .with_duration(MAX_ROLLOUT_DURATION_SECONDS + 1),
-        ] {
-            assert!(matches!(
-                TrainingManager::admitted_rollout(&runs, command),
-                Err(OperationError::InvalidInput(_))
-            ));
-        }
-    }
-
     fn run(active: bool) -> Vec<TrainingRun> {
         let phase = if active {
             TrainingRunPhase::Running
@@ -589,42 +508,17 @@ mod tests {
     }
 
     #[test]
-    fn rollout_rejects_missing_or_active_training() {
-        for (runs, expected) in [
-            (Vec::new(), "no longer available"),
-            (run(true), "stop or finish"),
-        ] {
-            let error = TrainingManager::admitted_rollout(&runs, rollout_command()).unwrap_err();
-            assert!(error.message().contains(expected));
-        }
-    }
-
-    #[test]
-    fn ready_rollout_returns_the_exact_admitted_command() {
-        let command = rollout_command();
-
-        assert_eq!(
-            TrainingManager::admitted_rollout(&run(false), command.clone()),
-            Ok(command)
-        );
-    }
-
-    #[test]
-    fn deleting_a_run_rejects_training_and_rollout_activity() {
-        let error = TrainingManager::admitted_deletion(&run(true), None, "run-1").unwrap_err();
-        assert!(matches!(error, OperationError::Conflict(_)));
-
-        let error =
-            TrainingManager::admitted_deletion(&run(false), Some("run-1"), "run-1").unwrap_err();
+    fn deleting_a_run_rejects_training_activity() {
+        let error = TrainingManager::admitted_deletion(&run(true), "run-1").unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
     }
 
     #[test]
     fn deleting_a_missing_run_is_not_found_and_an_idle_run_is_admitted() {
-        let error = TrainingManager::admitted_deletion(&[], None, "run-1").unwrap_err();
+        let error = TrainingManager::admitted_deletion(&[], "run-1").unwrap_err();
         assert!(matches!(error, OperationError::NotFound(_)));
 
-        let run_id = TrainingManager::admitted_deletion(&run(false), None, "run-1").unwrap();
+        let run_id = TrainingManager::admitted_deletion(&run(false), "run-1").unwrap();
         assert_eq!(run_id, "run-1");
     }
 }

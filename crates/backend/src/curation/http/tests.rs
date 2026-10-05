@@ -49,7 +49,6 @@ async fn a_save_may_exceed_the_default_json_bound_but_not_its_own() {
         save_status(&fixture, " ".repeat(MAX_SAVE_BODY_BYTES + 1)).await,
         StatusCode::PAYLOAD_TOO_LARGE
     );
-    fixture.projects.hardware().shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -74,5 +73,4 @@ async fn publishing_is_a_command_that_refuses_a_name_that_is_not_an_identifier()
             "{uri}"
         );
     }
-    fixture.projects.hardware().shutdown().await.unwrap();
 }

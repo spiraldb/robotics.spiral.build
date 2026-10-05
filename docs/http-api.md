@@ -3,7 +3,8 @@
 The backend owns the HTTP API. Its only client is the Dioxus frontend, which has no
 backend crate dependency or server-function bindings; the two share request and
 response types through `crates/common` and ship together. There is no generated
-schema or versioned contract.
+schema or versioned contract. Robot hardware, recording, and rollout are served
+by the robot connector instead; see [robot connector API](robot-connector-api.md).
 
 ## Request and response conventions
 
@@ -11,7 +12,7 @@ schema or versioned contract.
    `project_id` name the project Studio starts with.
 2. Send `X-Spiral-Endpoint: <endpoint>` and `X-Spiral-Project: <project_id>` on
    project reads and commands. Omit the project header before a project is chosen;
-   Studio-only features such as robot setup still work. Studio-wide `/providers`,
+   Studio-wide features still work. Studio-wide `/providers`,
    `/keys`, `/proxy`, `/account` reads, `GET /settings/connection`, and
    `POST /datasets/hugging-face/inspect` need neither header.
 3. The backend keeps no current project. A request may name any project on the
@@ -30,8 +31,8 @@ objects themselves; there is no Dioxus envelope or outer `config`, `request`, or
 the query string, never in a request body. All API responses have
 `Cache-Control: no-store`.
 
-Successful JSON calls return 200, except creating a training run and starting a
-recording return 201. Commands with no result return JSON
+Successful JSON calls return 200, except creating a training run returns 201.
+Commands with no result return JSON
 `null`. A successful start/stop request describes acceptance or the state reached
 by that command; clients fetch state to observe background work reaching its
 terminal phase. Jobs are not kept alive by the polling connection.
@@ -81,30 +82,17 @@ The named project is opened before JSON or upload bodies are consumed. A request
 keeps that project until its work completes; saving another project never
 redirects it.
 
-The hardware loop and safety remain backend-owned. Telemetry is a sampled display
-snapshot, not the robot control clock. Its `sequence` advances with hardware
-publication; repeated HTTP success does not make an unchanged sample fresh.
-Recording signals retain their own samples. Read `/recording/signals` with
-`generation` and `offset` (initially both zero). Responses contain at most 1,000
-samples. The next offset is the returned offset plus the number of returned
-`times`; adopt the returned generation. A generation change or offset gap means
-replace the local window. Fetch again to catch up; the retained live window is
-bounded to approximately thirty minutes at 20 Hz.
-
 ## Examples
 
 Every request carries a browser's session cookie, `studio_session`; sign in at
 `http://localhost:3000` and copy it from the browser's developer tools. Read
-the session's connection, then telemetry for its project:
+the session's connection, then its project's training runs:
 
 ```sh
 curl -b "studio_session=$STUDIO_SESSION" http://localhost:3000/api/settings/connection
 curl -b "studio_session=$STUDIO_SESSION" \
   -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
-  http://localhost:3000/api/robots/telemetry
-curl -b "studio_session=$STUDIO_SESSION" \
-  -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
-  'http://localhost:3000/api/recording/signals?generation=0&offset=0'
+  http://localhost:3000/api/training/runs
 ```
 
 Submit a read-only SQL query with an explicit row bound:
@@ -115,10 +103,6 @@ curl -X POST http://localhost:3000/api/queries -b "studio_session=$STUDIO_SESSIO
   -H 'Content-Type: application/json' \
   --data '{"statement":"SELECT 1 AS example","max_rows":10}'
 ```
-
-A recording start body is `{"dataset_id":"example"}`. A pause update is
-`{"paused":true}`. A recording stop body is `{"keep":true}`. All remain subject
-to backend hardware and activity validation.
 
 `GET /training/runs` lists the runs; `GET /training/runs/{id}` adds one run's
 metrics and log tail. The frontend builds model requests for the provider
@@ -155,7 +139,7 @@ The account endpoints:
   organizations and the projects they can open in the current one.
 - `POST /account/sign-out` and `PUT /account/organization`
   (`{"organization_id": …}`) name the mounted project. They refuse while any of
-  the session's projects is recording, rolling out, or training, then close the
+  the session's projects is training, then close the
   session's open projects. Signing out ends the session and its cookie;
   another organization forgets the session's project.
 
@@ -167,23 +151,16 @@ the project headers, though like every API request they need a session. They do 
 `StudioProviders` contains an optional `llm` (`base_url`). Its key
 stays on the backend.
 
-`GET /keys` returns `ProviderKeysStatus`: `llm_api_key_configured`,
-`huggingface_token_configured`, `modal_base_url_configured`, and
-`modal_token_configured`, never the keys. `PUT /keys` takes
-`ProviderKeysUpdate`, whose `llm_api_key`, `huggingface_token`,
-`modal_base_url`, and `modal_token` are write-only: omitted or `null` keeps the
-saved key, a non-empty string replaces it, and an empty string removes it. It
-returns the new status. The backend keeps the keys in its SQLite settings; the
-next relayed request, the next database connection, and the next fill run use
-them, and open projects keep running. The Modal base URL and token reach only
-the Modal service that scores progress, never the relay or the driver. Project
-exports never contain them.
+The provider keys are the deployment's: the backend reads them from its
+environment at startup, and no endpoint reads or writes them. The Modal base
+URL and token reach only the Modal service that scores progress, never the
+relay or the driver.
 
 Percent-encode the upstream URL in the `url` query parameter. Use `GET` or
 `POST`, the upstream content headers, and the original request body, including
 binary or multipart content. There is no JSON or metadata envelope. The relay attaches the
 key Studio holds for the destination's origin: the LLM key for the configured
-provider, and the saved Hugging Face token for `https://huggingface.co`. It
+provider, and the Hugging Face token for `https://huggingface.co`. It
 refuses requests from other sites (`Sec-Fetch-Site` other than `same-origin`, or
 a foreign `Origin`), removes Studio cookies, project and browser-origin headers,
 and manages HTTP framing and connection headers.
@@ -200,18 +177,20 @@ their existing project APIs.
 Both are parked: starting a training run fails until Spiral decodes MCAP video
 into training images, so Rollout has only existing checkpoints to run.
 Training selection and assembly of catalog/detail responses are frontend state.
-Rollout IDs are execution `session_id` values, distinct from their training `run_id`.
-Rollout keeps only its current session, in memory; a restarted Studio starts idle
-and never resumes motion. Stop targets an exact ID.
+Rollouts run on the robot connector. `GET /training/runs/{id}/checkpoints/{step}/policy`
+answers that checkpoint as a policy envelope
+(`application/vnd.spiral.policy-artifact`), which the browser writes to the robot
+connector unchanged before starting a rollout of it.
 
-### Recording sessions
+### Recordings
 
-RecordingStart contains `dataset_id`, `leader`, and `follower`. The browser picks
-the pair; the backend revalidates hardware admission before recording begins.
-
-Take IDs refer to the current recording session. Published dataset content
-uses `/datasets/episode-topics` and episode queries with explicit
-dataset/member identities; no recording-header fallback exists.
+Takes are recorded on the robot connector. The browser carries each finished
+one to Studio: `POST /datasets/{dataset}/recordings/{episode}` takes the take's
+MCAP bytes (at most 256 MiB, one Spiral row) and stores them as
+`{episode}.mcap` in the MCAP dataset `dataset`, creating it with its first
+take. Storing the same take again only refreshes the dataset. Published
+dataset content uses `/datasets/episode-topics` and episode queries with
+explicit dataset/member identities; no recording-header fallback exists.
 
 ### Hugging Face import
 
@@ -273,26 +252,20 @@ the view, and answers `null`; its stored answers stay. See
   backend credentials) and the project's MCAP sources and checkpoint artifacts.
   Import accepts only this version and also bounds total uncompressed contents
   to 256 MiB. See [project transfer](studio-sqlite.md#project-transfer).
-- `POST /robots/save`: `{document, expected}`. `document` is the complete portable
-  robot JSON object. `expected: null` creates a new robot; otherwise it is the
-  editor baseline, compared inside the save transaction. Conflicts return 409.
-  Save does not connect hardware; the frontend invokes Connect explicitly.
-- `GET /cameras/stream.mjpeg?id=...`: backend-global camera stream. Camera IDs may
-  contain device-path separators and must be percent-encoded.
-
+- `POST /datasets/{dataset}/recordings/{episode}`: one take's MCAP bytes, carried
+  from the robot connector; see [Recordings](#recordings).
+- `GET /training/runs/{id}/checkpoints/{step}/policy`: one checkpoint as a policy
+  envelope, for the robot connector.
 
 Existing media/download error responses can contain plain text; JSON commands,
-reads, and uploads consistently use the structured failure above. Camera
-streaming is separate from browser state polling.
+reads, and uploads consistently use the structured failure above.
 There is no browser event stream or `/api/events` endpoint.
 
 ## Maintaining the boundary
 
 Each backend feature owns its HTTP adapter, `http.rs`, beside the code it calls:
-a manager for features with runtime state (training, rollout, curation), or
-an operations type over the request's
-`ProjectContext` (`robots/operations.rs`, `recording/take.rs`,
-`recording/catalog.rs`). Handlers extract the request, call that owner, and
+a manager for features with runtime state (training, curation), or the
+request's `ProjectContext`. Handlers extract the request, call that owner, and
 return its result; `OperationError` is the failure response. `Project` opens the
 project a request names, before its body is read.
 
@@ -300,18 +273,20 @@ Each adapter returns two plain Axum routers, `reads()` and `commands()`.
 `http/routes.rs` merges them and applies the one lifetime rule: commands run to
 completion in their own task, reads stay in the request. `Created<T>` declares a
 201 JSON response. A route that needs its own request bound sets it with Axum's
-`DefaultBodyLimit` layer, as `/curations/save` and `/project/import` do.
+`DefaultBodyLimit` layer, as `/curations/save`, `/project/import`, and recording
+uploads do.
 
 Shared message types live in the corresponding features of `crates/common`.
 Named responses stay named through application operations and UI presentation.
 Router tests send ordinary HTTP requests through the real router.
 
 The frontend's feature clients live beside their consuming features, for example
-`activities/training/client.rs` and `settings/robots/client.rs`. Each owns request
+`activities/training/client.rs` and `robots/client.rs`. Each owns request
 construction and the query domains its mutations invalidate. `ProjectClient`
 owns session identity, request/response guards, and mounted task lifetime;
-`HttpRequest` owns serialization, failure decoding, and fetch cancellation. Neither
-central component knows the set of feature operations.
+`RobotConnector` owns the robot connector's address and reachability;
+`HttpRequest` owns serialization, failure decoding, and fetch cancellation. None
+of them knows the set of feature operations.
 
 Dioxus renders the UI and serves the application shell; it does not define or
 implement the wire protocol.

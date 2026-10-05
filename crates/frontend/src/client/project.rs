@@ -53,13 +53,33 @@ impl ProjectClient {
             client.observe(response)
         }
     }
+    /// An Arrow IPC response's bytes.
     pub(crate) fn request_bytes(
         &self,
         request: HttpRequest,
     ) -> impl Future<Output = Result<Vec<u8>, CommandError>> + use<> {
         let client = self.clone();
         async move {
-            let response = request.for_project(client.project.clone()).bytes().await;
+            let response = request
+                .for_project(client.project.clone())
+                .bytes("application/vnd.apache.arrow.stream")
+                .await;
+            client.observe(response)
+        }
+    }
+
+    /// A binary response of `media_type`, kept as a browser blob.
+    pub(crate) fn request_blob(
+        &self,
+        request: HttpRequest,
+        media_type: &'static str,
+    ) -> impl Future<Output = Result<web_sys::Blob, CommandError>> + use<> {
+        let client = self.clone();
+        async move {
+            let response = request
+                .for_project(client.project.clone())
+                .blob_response(media_type)
+                .await;
             client.observe(response)
         }
     }

@@ -2,7 +2,7 @@
 //! camera packets from Spiral, posts them, and reads the scores back as the
 //! answer the Score progress node consumes, `spql.ai.warp_rm`'s shape.
 //!
-//! `POST {base_url}/score_progress`, with the saved token as a bearer, takes
+//! `POST {base_url}/score_progress`, with the deployment's token as a bearer, takes
 //! one Arrow IPC record batch: a row per packet in decode order — `payload`,
 //! the Annex-B access unit as recorded; `decode_index`; `pts_ns` from the
 //! episode's first message — with the codec, framing, and checkpoint in its
@@ -36,7 +36,7 @@ pub(super) enum ProgressScores {
     Rejected(String),
 }
 
-/// The Modal service as the saved keys reach it, sharing the project's
+/// The Modal service as the provider keys reach it, sharing the project's
 /// permits so no more than a few requests are in flight across its runs.
 pub(super) struct ProgressService {
     client: reqwest::Client,
@@ -46,28 +46,28 @@ pub(super) struct ProgressService {
 }
 
 impl ProgressService {
-    /// The service the saved keys name; missing or malformed settings are
-    /// said plainly.
+    /// The service the provider keys name; a missing or malformed one is said
+    /// plainly.
     pub(super) fn of(keys: &ProviderKeys, permits: Arc<Semaphore>) -> Result<Self, String> {
         let (Some(base_url), Some(token)) = (keys.modal_base_url(), keys.modal_token()) else {
             return Err(
-                "Score progress needs the Modal service: add its base URL and token in Settings → Keys."
+                "Score progress needs the Modal service, which this Studio was started without: set WARP_PROGRESS_URL and WARP_PROGRESS_TOKEN."
                     .into(),
             );
         };
         let base = Url::parse(base_url)
-            .map_err(|error| format!("The Modal base URL is invalid: {error}"))?;
+            .map_err(|error| format!("WARP_PROGRESS_URL is invalid: {error}"))?;
         let local = matches!(base.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
         if base.scheme() != "https" && !(base.scheme() == "http" && local) {
             return Err(
-                "The Modal base URL must use HTTPS (HTTP is allowed only for localhost).".into(),
+                "WARP_PROGRESS_URL must use HTTPS (HTTP is allowed only for localhost).".into(),
             );
         }
         let scoring = Url::parse(&format!(
             "{}/score_progress",
             base.as_str().trim_end_matches('/')
         ))
-        .map_err(|error| format!("The Modal base URL is invalid: {error}"))?;
+        .map_err(|error| format!("WARP_PROGRESS_URL is invalid: {error}"))?;
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
@@ -149,9 +149,7 @@ impl ProgressService {
                     ));
                 }
                 StatusCode::UNAUTHORIZED => {
-                    return Err(
-                        "The Modal service refused the token; check it in Settings → Keys.".into(),
-                    );
+                    return Err("The Modal service refused WARP_PROGRESS_TOKEN.".into());
                 }
                 status if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() => {
                     last_failure = format!("the service answered {status}");

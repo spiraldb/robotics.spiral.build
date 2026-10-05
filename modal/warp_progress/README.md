@@ -32,7 +32,7 @@ uv run pytest
 uv run python parity.py            # MPS when available; --device cpu for CPU
 ```
 
-`parity.py` reads the pyspiral login, Studio's settings and Studio's release ADBC driver. It expects the
+`parity.py` reads the pyspiral login, `HF_TOKEN` and Studio's release ADBC driver. It expects the
 weights in `~/.cache/warp-progress/artifacts`. To fetch them, run
 `HF_TOKEN=… uv run python -c 'from pathlib import Path; from warp_progress.artifacts import Artifacts; Artifacts(Path.home() / ".cache/warp-progress/artifacts").download()'`.
 

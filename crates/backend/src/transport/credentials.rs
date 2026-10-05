@@ -14,7 +14,7 @@ pub(super) struct ProviderCredentials {
 }
 
 impl ProviderCredentials {
-    /// The saved keys, and the provider endpoint the environment may override.
+    /// The provider keys, and the provider endpoint the environment may override.
     pub(super) fn load(keys: &ProviderKeys) -> Self {
         Self {
             llm: Self::llm(keys.llm_api_key(), |name| std::env::var(name).ok()),
@@ -42,8 +42,8 @@ impl ProviderCredentials {
             .filter(|_| same_origin(HUGGING_FACE))
     }
 
-    /// The model provider for the saved key. `LLM_BASE_URL` remains a
-    /// developer override of the endpoint.
+    /// The model provider for the key. `LLM_BASE_URL` remains a developer
+    /// override of the endpoint.
     fn llm(
         api_key: Option<&str>,
         lookup: impl Fn(&str) -> Option<String>,
@@ -82,19 +82,18 @@ struct LlmCredentials {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::providers::ProviderKeysUpdate;
     use std::collections::BTreeMap;
 
     fn keys(llm_api_key: Option<&str>, huggingface_token: Option<&str>) -> ProviderKeys {
-        ProviderKeys::default().updated(
-            &ProviderKeysUpdate::default()
-                .with_llm_api_key(llm_api_key.map(str::to_owned))
-                .with_huggingface_token(huggingface_token.map(str::to_owned)),
-        )
+        ProviderKeys::from_variables(|name| match name {
+            "OPENROUTER_API_KEY" => llm_api_key.map(str::to_owned),
+            "HF_TOKEN" => huggingface_token.map(str::to_owned),
+            _ => None,
+        })
     }
 
     #[test]
-    fn the_saved_key_uses_defaults_unless_the_environment_overrides_them() {
+    fn the_key_uses_defaults_unless_the_environment_overrides_them() {
         let saved = keys(Some("saved-secret"), None);
         let config = ProviderCredentials::llm(saved.llm_api_key(), |_| None)
             .unwrap()

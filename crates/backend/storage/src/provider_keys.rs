@@ -1,32 +1,45 @@
-//! The keys Studio holds for its providers: the model provider's API key,
-//! the Hugging Face token, and the Modal service's base URL and token. The
-//! backend saves them in its SQLite settings, attaches them to its own
-//! requests, and hands the first two to every database it opens; the browser
-//! only learns which are saved.
+//! The keys Studio's deployment gives it for its providers: the OpenRouter
+//! key, the Hugging Face token, and the Modal service's address and token.
+//! They come from the process environment, so no user sees or sets them. The
+//! backend attaches them to its own requests and hands the first two to every
+//! database it opens.
 
-use std::sync::Arc;
-
-use serde::{Deserialize, Serialize};
-use spiral_robotics_common::providers::{ProviderKeysStatus, ProviderKeysUpdate};
-use tokio::sync::{Mutex, watch};
-
-use crate::settings::BackendStateStore;
-
-/// The saved provider keys. The field names are their durable form in the
-/// backend settings document.
-#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+/// The provider keys the process started with.
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct ProviderKeys {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     llm_api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     huggingface_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     modal_base_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     modal_token: Option<String>,
 }
 
 impl ProviderKeys {
+    const LLM_API_KEY: &str = "OPENROUTER_API_KEY";
+    const HUGGINGFACE_TOKEN: &str = "HF_TOKEN";
+    const MODAL_BASE_URL: &str = "WARP_PROGRESS_URL";
+    const MODAL_TOKEN: &str = "WARP_PROGRESS_TOKEN";
+
+    /// The keys in this process's environment.
+    pub fn from_environment() -> Self {
+        Self::from_variables(|name| std::env::var(name).ok())
+    }
+
+    /// The keys `variable` gives for their environment variables; a blank
+    /// variable is no key.
+    pub fn from_variables(variable: impl Fn(&str) -> Option<String>) -> Self {
+        let key = |name: &str| {
+            variable(name)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        Self {
+            llm_api_key: key(Self::LLM_API_KEY),
+            huggingface_token: key(Self::HUGGINGFACE_TOKEN),
+            modal_base_url: key(Self::MODAL_BASE_URL),
+            modal_token: key(Self::MODAL_TOKEN),
+        }
+    }
+
     pub fn llm_api_key(&self) -> Option<&str> {
         self.llm_api_key.as_deref()
     }
@@ -43,112 +56,44 @@ impl ProviderKeys {
     pub fn modal_token(&self) -> Option<&str> {
         self.modal_token.as_deref()
     }
-
-    pub fn status(&self) -> ProviderKeysStatus {
-        ProviderKeysStatus::new(self.llm_api_key.is_some(), self.huggingface_token.is_some())
-            .with_modal(self.modal_base_url.is_some(), self.modal_token.is_some())
-    }
-
-    /// These keys with `update` applied: an omitted key is kept and an empty
-    /// one removed.
-    pub fn updated(&self, update: &ProviderKeysUpdate) -> Self {
-        let apply = |saved: &Option<String>, change: Option<&str>| match change {
-            None => saved.clone(),
-            Some(change) => Some(change.trim().to_owned()).filter(|key| !key.is_empty()),
-        };
-        Self {
-            llm_api_key: apply(&self.llm_api_key, update.llm_api_key()),
-            huggingface_token: apply(&self.huggingface_token, update.huggingface_token()),
-            modal_base_url: apply(&self.modal_base_url, update.modal_base_url()),
-            modal_token: apply(&self.modal_token, update.modal_token()),
-        }
-    }
-
-    /// A merge patch that replaces every saved key, removing the absent ones.
-    pub(crate) fn merge_patch(&self) -> serde_json::Value {
-        serde_json::json!({
-            "llm_api_key": self.llm_api_key,
-            "huggingface_token": self.huggingface_token,
-            "modal_base_url": self.modal_base_url,
-            "modal_token": self.modal_token,
-        })
-    }
 }
 
+/// Which keys are set, never the keys.
 impl std::fmt::Debug for ProviderKeys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ProviderKeys").field(&self.status()).finish()
-    }
-}
-
-/// The keys Studio uses now. A saved change reaches every database's next
-/// connection and the relay's next request, without reopening projects.
-pub struct ProviderKeyring {
-    store: Arc<BackendStateStore>,
-    keys: watch::Sender<ProviderKeys>,
-    /// One save at a time, so the saved and the published keys agree.
-    saving: Mutex<()>,
-}
-
-impl ProviderKeyring {
-    pub fn new(store: Arc<BackendStateStore>, saved: ProviderKeys) -> Self {
-        let (keys, _) = watch::channel(saved);
-        Self {
-            store,
-            keys,
-            saving: Mutex::new(()),
-        }
-    }
-
-    pub fn current(&self) -> ProviderKeys {
-        self.keys.borrow().clone()
-    }
-
-    /// Follow the keys, as a database does to open each connection with the
-    /// current ones.
-    pub fn subscribe(&self) -> watch::Receiver<ProviderKeys> {
-        self.keys.subscribe()
-    }
-
-    pub async fn update(&self, update: &ProviderKeysUpdate) -> Result<ProviderKeys, String> {
-        let _saving = self.saving.lock().await;
-        let next = self.current().updated(update);
-        self.store.save_keys(&next).await?;
-        self.keys.send_replace(next.clone());
-        Ok(next)
+        f.debug_struct("ProviderKeys")
+            .field(Self::LLM_API_KEY, &self.llm_api_key.is_some())
+            .field(Self::HUGGINGFACE_TOKEN, &self.huggingface_token.is_some())
+            .field(Self::MODAL_BASE_URL, &self.modal_base_url.is_some())
+            .field(Self::MODAL_TOKEN, &self.modal_token.is_some())
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
-    fn updates_keep_omitted_keys_and_remove_empty_ones() {
-        let saved = ProviderKeys::default().updated(
-            &ProviderKeysUpdate::default()
-                .with_llm_api_key(Some(" sk-or-first ".into()))
-                .with_huggingface_token(Some("hf_first".into())),
-        );
-        assert_eq!(saved.llm_api_key(), Some("sk-or-first"));
-        let kept = saved.updated(&ProviderKeysUpdate::default());
-        assert_eq!(kept, saved);
-        let removed =
-            saved.updated(&ProviderKeysUpdate::default().with_huggingface_token(Some("  ".into())));
-        assert_eq!(removed.huggingface_token(), None);
-        assert_eq!(removed.llm_api_key(), Some("sk-or-first"));
-        assert_eq!(removed.status(), ProviderKeysStatus::new(true, false));
-        assert!(!format!("{saved:?}").contains("sk-or-first"));
-        let modal = removed.updated(
-            &ProviderKeysUpdate::default()
-                .with_modal_base_url(Some(" https://scores.modal.run ".into()))
-                .with_modal_token(Some("modal-secret".into())),
-        );
-        assert_eq!(modal.modal_base_url(), Some("https://scores.modal.run"));
+    fn keys_come_from_their_variables_and_blank_ones_are_unset() {
+        let variables = BTreeMap::from([
+            ("OPENROUTER_API_KEY", " sk-or-private "),
+            ("HF_TOKEN", "  "),
+            ("WARP_PROGRESS_URL", "https://scores.modal.run"),
+            ("WARP_PROGRESS_TOKEN", "modal-private"),
+        ]);
+        let keys =
+            ProviderKeys::from_variables(|name| variables.get(name).map(ToString::to_string));
+        assert_eq!(keys.llm_api_key(), Some("sk-or-private"));
+        assert_eq!(keys.huggingface_token(), None);
+        assert_eq!(keys.modal_base_url(), Some("https://scores.modal.run"));
+        assert_eq!(keys.modal_token(), Some("modal-private"));
+        let debug = format!("{keys:?}");
+        assert!(!debug.contains("sk-or-private") && !debug.contains("modal-private"));
         assert_eq!(
-            modal.status(),
-            ProviderKeysStatus::new(true, false).with_modal(true, true)
+            ProviderKeys::from_variables(|_| None),
+            ProviderKeys::default()
         );
-        assert!(!format!("{modal:?}").contains("modal-secret"));
     }
 }

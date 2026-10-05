@@ -2,16 +2,14 @@ use super::*;
 use crate::curation::progress_service::tests::MockService;
 use spiral_robotics_common::curation::{AnswerColumn, PublishedView};
 use spiral_robotics_common::datasets::DatasetSelection;
-use spiral_robotics_common::providers::ProviderKeysUpdate;
 use spiral_robotics_storage::{ProjectStore, StudioStore};
 
-fn keys(base_url: Option<&str>) -> watch::Receiver<ProviderKeys> {
-    let keys = ProviderKeys::default().updated(
-        &ProviderKeysUpdate::default()
-            .with_modal_base_url(base_url.map(str::to_owned))
-            .with_modal_token(Some("good".into())),
-    );
-    watch::channel(keys).1
+fn keys(base_url: Option<&str>) -> Arc<ProviderKeys> {
+    Arc::new(ProviderKeys::from_variables(|name| match name {
+        "WARP_PROGRESS_URL" => base_url.map(str::to_owned),
+        "WARP_PROGRESS_TOKEN" => Some("good".into()),
+        _ => None,
+    }))
 }
 
 fn dataset(name: &str) -> DatasetSelection {

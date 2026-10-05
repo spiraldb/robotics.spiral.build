@@ -25,13 +25,11 @@ Endpoints and the signed-in user's access token are passed as database options,
 without changing process environment variables. The driver never refreshes the
 token: Studio replaces `spiral.access_token` on every open database whenever it
 refreshes the session, which requires a driver with that option.
-Studio's provider keys, saved in Settings → Keys, are passed as write-only
-options: the OpenRouter key as `spiral.openrouter_api_key`, which the
-`spql.ai` model functions read, and the Hugging Face token as
-`spiral.huggingface_token`. The driver takes them only when a database is
-created, so `AdbcDatabase` reads the current keys on every new connection and
-reopens the database when they have changed; connections already open keep
-the database they started on.
+Studio's provider keys, which the backend reads from its environment at
+startup, are passed as write-only options: the OpenRouter key as
+`spiral.openrouter_api_key`, which the `spql.ai` model functions read, and the
+Hugging Face token as `spiral.huggingface_token`. The driver takes them when a
+database is created.
 
 `flake.nix` pins the official version and SHA-256 archive digests in
 `adbcVersion` and `adbcArchiveHashes`.
@@ -158,19 +156,20 @@ report connection failures at use time. Saving another project and Settings →
 SpiralDB → Test connection validate and provision the model-artifact relation
 only; Studio control tables are never created in Spiral. See the SQLite guide for persistence and project transfer.
 
-Robot configuration is read by the project-scoped robot workspace when needed by
-the hardware views, robot commands, and saved-device auto-connect. Auto-connect
-runs for the saved project at startup and for a project once a settings save
-switches to it.
-Rollout keeps only its current session, in memory; a restarted Studio starts
-idle and motion is never resumed. The Rollout view owns loading/error feedback
-and retains its last successful snapshot if polling fails. Its execution
-remains owned by the backend after navigating away.
+Robot configuration, hardware, and rollout live on the robot connector, which
+reconnects its saved robots when it starts; see
+[robot connector API](robot-connector-api.md). Its rollout keeps only its
+current session, in memory; a restarted robot connector starts idle and motion
+is never resumed. The Rollout view owns loading/error feedback and retains its
+last successful snapshot if polling fails. Its execution remains owned by the
+robot connector after navigating away.
 
-The shell owns only the selected project, backend liveness, its clock, and
-notifications. `/robots`, `/hardware/status`, and hardware telemetry are polled by the active
-Live, Rollout, or Settings view; each view retains its own last successful
-configuration, loading state, and errors until the project scope is disposed.
+The shell owns only the selected project, backend liveness, the robot
+connector's address, its clock, and notifications. The robot connector's
+`/robots`, `/hardware/status`, `/health`, and hardware telemetry are polled by
+the active Live, Rollout, or Settings view; each view retains its own last
+successful configuration, loading state, and errors until the project scope is
+disposed.
 Reactivating a hardware view requires fresh setup and telemetry before controls
 are enabled.
 The shell never fetches robot setup, and non-hardware views do not display cached

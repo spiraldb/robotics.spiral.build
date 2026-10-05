@@ -18,6 +18,14 @@ impl MigratorTrait for Migrator {
                 "m20261005_000001_sessions",
                 include_str!("m20261005_000001_sessions.sql"),
             )),
+            Box::new(SqlMigration::new(
+                "m20261005_000002_provider_keys",
+                include_str!("m20261005_000002_provider_keys.sql"),
+            )),
+            Box::new(SqlMigration::new(
+                "m20261005_000003_robot_connector",
+                include_str!("m20261005_000003_robot_connector.sql"),
+            )),
         ]
     }
 }

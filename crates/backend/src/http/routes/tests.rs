@@ -1,7 +1,6 @@
 //! Exercise the actual router with ordinary HTTP requests.
 use super::StudioApi;
 use crate::projects::tests::{ENDPOINT, ProjectFixture};
-use crate::robotics::cameras::Frame;
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -15,23 +14,6 @@ use spiral_robotics_storage::bundle::ProjectBundle;
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tower::ServiceExt;
-
-#[test]
-fn multipart_parts_carry_an_accurate_length() {
-    let frame = Frame::new(
-        Bytes::from_static(&[0xff, 0xd8, 0x00, 0xff, 0xd9]),
-        1,
-        std::time::Instant::now(),
-    );
-
-    let part = frame.multipart_part();
-    let text = String::from_utf8_lossy(&part);
-
-    assert!(text.starts_with("--spiral-robotics-frame\r\nContent-Type: image/jpeg\r\n"));
-    assert!(text.contains("Content-Length: 5\r\n\r\n"));
-    assert!(part.ends_with(b"\r\n"));
-    assert_eq!(part.len(), 5 + part.len() - 5);
-}
 
 struct HttpFixture {
     project: ProjectFixture,
@@ -76,9 +58,6 @@ impl HttpFixture {
             .unwrap_or_else(|_| panic!("Invalid JSON: {}", String::from_utf8_lossy(&bytes)));
         (status, json)
     }
-    async fn shutdown(self) {
-        self.project.projects.hardware().shutdown().await.unwrap();
-    }
 }
 
 #[tokio::test]
@@ -87,8 +66,8 @@ async fn every_route_requires_a_live_session() {
     for cookie in [None, Some("studio_session=forged")] {
         for (method, path) in [
             ("GET", "/settings/connection"),
-            ("GET", "/keys"),
-            ("PUT", "/keys"),
+            ("GET", "/providers"),
+            ("PUT", "/settings"),
             (
                 "GET",
                 "/proxy?url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1%2Fmodels",
@@ -106,13 +85,15 @@ async fn every_route_requires_a_live_session() {
             assert_eq!(failure["code"], "unauthenticated");
         }
     }
-    fixture.shutdown().await;
 }
 
 #[tokio::test]
 async fn scoped_routes_reject_a_missing_or_stale_project_before_reading_the_body() {
     let fixture = HttpFixture::new().await;
-    for (method, path) in [("GET", "/robots"), ("POST", "/recording")] {
+    for (method, path) in [
+        ("GET", "/training/runs"),
+        ("POST", "/datasets/demo/recordings/take-1"),
+    ] {
         for endpoint in [None, Some("https://stale.spiraldb.dev")] {
             let mut request = Request::builder().method(method).uri(path);
             if let Some(endpoint) = endpoint {
@@ -129,7 +110,6 @@ async fn scoped_routes_reject_a_missing_or_stale_project_before_reading_the_body
             assert_eq!(failure["code"], expected_code);
         }
     }
-    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -145,12 +125,7 @@ async fn snapshots_are_plain_gets_of_the_project_a_request_names() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["endpoint"], ENDPOINT);
-    for path in [
-        "/robots/telemetry",
-        "/recording/signals?generation=0&offset=0",
-        "/training/runs",
-        "/rollout",
-    ] {
+    for path in ["/settings", "/training/runs"] {
         let (status, value) = fixture
             .send(
                 HttpFixture::scoped(Request::builder().uri(path))
@@ -162,49 +137,18 @@ async fn snapshots_are_plain_gets_of_the_project_a_request_names() {
         assert!(value.is_object() || value.is_array());
     }
     assert_eq!(fixture.project.projects.opened().len(), 1);
-    fixture.shutdown().await;
 }
 
 #[tokio::test]
-async fn saved_keys_reach_the_providers_and_only_their_presence_reaches_the_browser() {
+async fn the_browser_learns_of_no_model_provider_without_its_key() {
     let fixture = HttpFixture::new().await;
-    let get = |path: &str| Request::builder().uri(path).body(Body::empty()).unwrap();
-    let (status, providers) = fixture.send(get("/providers")).await;
+    let request = Request::builder()
+        .uri("/providers")
+        .body(Body::empty())
+        .unwrap();
+    let (status, providers) = fixture.send(request).await;
     assert_eq!(status, StatusCode::OK);
     assert!(providers["llm"].is_null());
-    let save = |body: &str| {
-        Request::builder()
-            .method("PUT")
-            .uri("/keys")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_owned()))
-            .unwrap()
-    };
-    let (status, saved) = fixture
-        .send(save(
-            r#"{"llm_api_key":"sk-or-private","huggingface_token":"hf_private","modal_token":"modal_private"}"#,
-        ))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(
-        saved,
-        serde_json::json!({"llm_api_key_configured": true, "huggingface_token_configured": true,
-            "modal_base_url_configured": false, "modal_token_configured": true})
-    );
-    let (_, providers) = fixture.send(get("/providers")).await;
-    assert!(providers["llm"]["base_url"].is_string());
-    assert!(!providers.to_string().contains("sk-or-private"));
-    assert!(!providers.to_string().contains("modal_private"));
-    // An omitted key stays saved; an empty one is removed.
-    let (_, saved) = fixture.send(save(r#"{"huggingface_token":""}"#)).await;
-    assert_eq!(
-        saved,
-        serde_json::json!({"llm_api_key_configured": true, "huggingface_token_configured": false,
-            "modal_base_url_configured": false, "modal_token_configured": true})
-    );
-    let (_, status) = fixture.send(get("/keys")).await;
-    assert_eq!(status, saved);
-    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -212,44 +156,37 @@ async fn malformed_requests_and_unknown_routes_have_structured_failures() {
     let fixture = HttpFixture::new().await;
     for (method, path, body, content_type, expected) in [
         (
-            "POST",
-            "/recording",
+            "PUT",
+            "/settings",
             "{",
             Some("application/json"),
             StatusCode::BAD_REQUEST,
         ),
         (
-            "POST",
-            "/recording",
+            "PUT",
+            "/settings",
             "{}",
             Some("application/json"),
             StatusCode::UNPROCESSABLE_ENTITY,
         ),
         (
-            "POST",
-            "/recording",
-            r#"{"dataset_id":"example","typo":true}"#,
+            "PUT",
+            "/settings",
+            r#"{"project_id":"example","typo":true}"#,
             Some("application/json"),
             StatusCode::UNPROCESSABLE_ENTITY,
         ),
         (
-            "POST",
-            "/recording",
+            "PUT",
+            "/settings",
             "{}",
             None,
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
         ),
-        (
-            "GET",
-            "/recording/signals?generation=bad&offset=0",
-            "",
-            None,
-            StatusCode::BAD_REQUEST,
-        ),
         ("GET", "/unknown", "", None, StatusCode::NOT_FOUND),
         (
-            "POST",
-            "/robots/telemetry",
+            "PUT",
+            "/training/runs",
             "",
             None,
             StatusCode::METHOD_NOT_ALLOWED,
@@ -277,7 +214,6 @@ async fn malformed_requests_and_unknown_routes_have_structured_failures() {
         fixture.send(oversized).await.0,
         StatusCode::PAYLOAD_TOO_LARGE
     );
-    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -295,7 +231,6 @@ async fn rejected_scope_does_not_consume_an_upload() {
         .body(Body::from_stream(stream))
         .unwrap();
     assert_eq!(fixture.send(request).await.0, StatusCode::BAD_REQUEST);
-    fixture.shutdown().await;
 }
 
 /// Work that parks until released, and reports when it starts, finishes, or

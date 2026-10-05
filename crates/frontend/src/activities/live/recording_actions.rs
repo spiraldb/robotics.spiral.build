@@ -1,9 +1,10 @@
-//! Consequential Studio command gateway built on the HTTP API.
+//! Consequential recording commands built on the robot connector's HTTP API.
 //!
 //! Components emit semantic or Timeline intent. The activity controller uses
 //! this module to translate consequential intent into admitted commands. The
-//! backend remains authoritative for recording, hardware, and safety.
+//! robot connector remains authoritative for recording, hardware, and safety.
 
+use super::client::RecordingTransfer;
 use crate::activities::live::RecordingClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::EpisodeInfo;
@@ -46,10 +47,11 @@ impl LiveSession {
             return;
         };
         let dataset_id = self.capture().chosen().read().trim().to_owned();
+        let video = *self.capture().video().read();
         self.commands().run("", async move {
             RecordingClient::current()
                 .start_recording(spiral_robotics_common::recording::RecordingStart::new(
-                    dataset_id, pair,
+                    dataset_id, pair, video,
                 ))
                 .await
                 .map_err(|error| error.to_string())
@@ -112,8 +114,15 @@ impl LiveSession {
                     "Recording discarded. Teleoperation stopped.",
                 );
             }
+            let (dataset, episode) = (summary.dataset_id().to_owned(), summary.id().to_owned());
             (completion.on_completed)(summary);
-            Ok(())
+            // A discarded take is stored too, marked as discarded.
+            RecordingTransfer::current()
+                .carry(&dataset, &episode)
+                .await
+                .map_err(|error| {
+                    format!("The take stays on the robot connector until Studio stores it: {error}")
+                })
         });
     }
 }

@@ -23,6 +23,8 @@ jobs:
         -p spiral-robotics-frontend
         -p spiral-robotics-hardware
         -p spiral-robotics-inference
+        -p spiral-robotics-recording
+        -p spiral-robotics-robot-connector
         -p spiral-robotics-training
         -p spiral-robotics-viewport
 

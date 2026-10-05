@@ -1,6 +1,6 @@
 //! Native SQLite snapshots contain one project's records and no backend secrets.
 use super::{
-    StudioProject, curations, dataset_check_reports, dataset_joint_roles, dataset_robots, robots,
+    StudioProject, curations, dataset_check_reports, dataset_joint_roles, dataset_robots,
     studio_settings, training_runs,
 };
 use sea_orm::{
@@ -15,11 +15,10 @@ pub(crate) struct StudioSnapshot {
 }
 
 impl StudioSnapshot {
-    const TABLES: [&str; 7] = [
+    const TABLES: [&str; 6] = [
         "dataset_robots",
         "dataset_joint_roles",
         "dataset_check_reports",
-        "robots",
         "curations",
         "training_runs",
         "studio_settings",
@@ -52,13 +51,11 @@ impl StudioSnapshot {
             .begin()
             .await
             .map_err(|error| error.to_string())?;
-        // Neither the keys nor any browser's Spiral sign-in leaves this backend.
-        for table in ["backend_settings", "sessions"] {
-            transaction
-                .execute_unprepared(&format!("DELETE FROM {table}"))
-                .await
-                .map_err(|error| error.to_string())?;
-        }
+        // No browser's Spiral sign-in leaves this backend.
+        transaction
+            .execute_unprepared("DELETE FROM sessions")
+            .await
+            .map_err(|error| error.to_string())?;
         // A bundle carries no model answers, so no view that reads them.
         transaction
             .execute_unprepared("DELETE FROM curated_views")
@@ -119,26 +116,21 @@ impl StudioSnapshot {
         {
             return Err("Studio snapshot failed SQLite integrity checking".into());
         }
-        for (table, contents) in [
-            ("backend_settings", "backend settings"),
-            ("sessions", "Spiral sign-ins"),
-        ] {
-            let count = snapshot
-                .database
-                .query_one(Statement::from_string(
-                    DbBackend::Sqlite,
-                    format!("SELECT count(*) AS count FROM {table}"),
-                ))
-                .await
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("Missing {contents} count"))?;
-            if count
-                .try_get::<i64>("", "count")
-                .map_err(|error| error.to_string())?
-                != 0
-            {
-                return Err(format!("Studio snapshot must not contain {contents}"));
-            }
+        let sessions = snapshot
+            .database
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT count(*) AS count FROM sessions",
+            ))
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("Missing Spiral sign-ins count")?;
+        if sessions
+            .try_get::<i64>("", "count")
+            .map_err(|error| error.to_string())?
+            != 0
+        {
+            return Err("Studio snapshot must not contain Spiral sign-ins".into());
         }
         for table in Self::TABLES {
             let row = snapshot
@@ -224,13 +216,6 @@ impl StudioSnapshot {
         {
             row.roles()?;
         }
-        for row in robots::Entity::find()
-            .all(&self.database)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            row.into_config()?;
-        }
         for row in curations::Entity::find()
             .all(&self.database)
             .await
@@ -252,10 +237,7 @@ impl StudioSnapshot {
         {
             let preferences: crate::StoredStudioPreferences =
                 serde_json::from_value(row.document).map_err(|error| error.to_string())?;
-            crate::StoredStudioPreferences::from_settings(
-                preferences.training().endpoint(),
-                preferences.video().enabled(),
-            )?;
+            crate::StoredStudioPreferences::from_settings(preferences.training().endpoint())?;
         }
         Ok(())
     }
@@ -306,17 +288,6 @@ impl StudioSnapshot {
                 .map_err(|error| error.to_string())?;
         }
         for mut row in dataset_check_reports::Entity::find()
-            .all(&self.database)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            row.project = project.key().to_owned();
-            row.into_active_model()
-                .insert(&transaction)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        for mut row in robots::Entity::find()
             .all(&self.database)
             .await
             .map_err(|error| error.to_string())?

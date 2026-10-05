@@ -51,12 +51,19 @@ pub(crate) struct HttpRequest {
     project: Option<spiral_robotics_common::project::ProjectKey>,
     body: Result<Option<RequestBody>, CommandError>,
     headers: Vec<(String, String)>,
+    delivery: RequestDelivery,
+}
+
+/// How long a request may take, and what a failure to reach its server says.
+struct RequestDelivery {
     timeout_ms: Option<u32>,
+    unreachable: &'static str,
 }
 
 enum RequestBody {
     Json(String),
     Raw(Vec<u8>),
+    Blob(web_sys::Blob),
     Upload(dioxus::html::FileData),
 }
 
@@ -68,8 +75,30 @@ impl HttpRequest {
             project: None,
             body: Ok(None),
             headers: Vec::new(),
-            timeout_ms: None,
+            delivery: RequestDelivery {
+                timeout_ms: None,
+                unreachable: "Could not reach Studio. Check the server connection and retry.",
+            },
         }
+    }
+
+    /// Send this request to the server at `origin` rather than to Studio.
+    pub(crate) fn at(mut self, origin: &str) -> Self {
+        self.url = self.url.map(|path| format!("{origin}{path}"));
+        self
+    }
+
+    /// What a failure to reach this request's server tells the operator.
+    pub(crate) fn unreachable(mut self, message: &'static str) -> Self {
+        self.delivery.unreachable = message;
+        self
+    }
+
+    /// Send a body the browser already holds, without copying it into
+    /// WebAssembly memory.
+    pub(crate) fn blob(mut self, body: web_sys::Blob) -> Self {
+        self.body = Ok(Some(RequestBody::Blob(body)));
+        self
     }
 
     pub(crate) fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
@@ -83,7 +112,7 @@ impl HttpRequest {
     }
 
     pub(crate) fn timeout(mut self, milliseconds: u32) -> Self {
-        self.timeout_ms = Some(milliseconds);
+        self.delivery.timeout_ms = Some(milliseconds);
         self
     }
 
@@ -127,19 +156,43 @@ impl HttpRequest {
         CommandError::decode_response(status, &body)
     }
 
-    pub(super) async fn bytes(self) -> Result<Vec<u8>, CommandError> {
-        let (response, _abort) = self.response("application/vnd.apache.arrow.stream").await?;
+    pub(super) async fn bytes(self, media_type: &str) -> Result<Vec<u8>, CommandError> {
+        let (response, _abort) = self.binary_response(media_type).await?;
+        response.binary().await.map_err(CommandError::transport)
+    }
+
+    /// The response body as a browser blob, which stays out of WebAssembly
+    /// memory until something reads it.
+    pub(crate) async fn blob_response(
+        self,
+        media_type: &str,
+    ) -> Result<web_sys::Blob, CommandError> {
+        let (response, _abort) = self.binary_response(media_type).await?;
+        let blob = web_sys::Response::from(response)
+            .blob()
+            .map_err(CommandError::transport_js)?;
+        wasm_bindgen_futures::JsFuture::from(blob)
+            .await
+            .map(Into::into)
+            .map_err(CommandError::transport_js)
+    }
+
+    async fn binary_response(
+        self,
+        media_type: &str,
+    ) -> Result<(gloo_net::http::Response, RequestCancellation), CommandError> {
+        let (response, abort) = self.response(media_type).await?;
         if !(200..300).contains(&response.status()) {
             let status = response.status();
             let body = response.text().await.map_err(CommandError::transport)?;
-            return CommandError::decode_response(status, &body);
+            return Err(CommandError::decode_failure(status, &body));
         }
-        if response.headers().get("Content-Type").as_deref()
-            != Some("application/vnd.apache.arrow.stream")
-        {
-            return Err(CommandError::transport("Expected Arrow IPC response"));
+        if response.headers().get("Content-Type").as_deref() != Some(media_type) {
+            return Err(CommandError::transport(format!(
+                "Expected a {media_type} response"
+            )));
         }
-        response.binary().await.map_err(CommandError::transport)
+        Ok((response, abort))
     }
 
     pub(crate) async fn response(
@@ -147,7 +200,7 @@ impl HttpRequest {
         accept: &str,
     ) -> Result<(gloo_net::http::Response, RequestCancellation), CommandError> {
         use gloo_net::http::{Method, RequestBuilder};
-        let abort = RequestCancellation::new(self.timeout_ms)?;
+        let abort = RequestCancellation::new(self.delivery.timeout_ms)?;
         let mut request = RequestBuilder::new(&self.url?)
             .method(self.method.parse::<Method>().expect("declared HTTP method"))
             .header("Accept", accept)
@@ -166,6 +219,7 @@ impl HttpRequest {
                 .header("Content-Type", "application/json")
                 .body(body),
             Some(RequestBody::Raw(body)) => request.body(js_sys::Uint8Array::from(body.as_slice())),
+            Some(RequestBody::Blob(body)) => request.body(body),
             Some(RequestBody::Upload(document)) => {
                 // Hand the browser its native File. It streams the upload without
                 // allocating another project-sized buffer in WebAssembly.
@@ -185,11 +239,11 @@ impl HttpRequest {
             None => request.build(),
         }
         .map_err(CommandError::transport)?;
-        let response = request.send().await.map_err(|error| {
-            CommandError::transport(format!(
-                "Could not reach Studio. Check the server connection and retry. ({error})"
-            ))
-        })?;
+        let unreachable = self.delivery.unreachable;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| CommandError::transport(format!("{unreachable} ({error})")))?;
         Ok((response, abort))
     }
 }
@@ -197,6 +251,14 @@ impl HttpRequest {
 impl CommandError {
     pub(crate) fn transport(error: impl std::fmt::Display) -> Self {
         Self::new(CommandFailureCode::Transport, error.to_string())
+    }
+
+    fn transport_js(error: wasm_bindgen::JsValue) -> Self {
+        Self::transport(
+            error
+                .as_string()
+                .unwrap_or_else(|| "The browser could not read the response.".to_owned()),
+        )
     }
 
     fn decode_response<T: serde::de::DeserializeOwned>(status: u16, body: &str) -> Result<T, Self> {
@@ -208,13 +270,17 @@ impl CommandError {
                 )
             })
         } else {
-            Err(serde_json::from_str::<Self>(body).unwrap_or_else(|_| {
-                Self::new(
-                    CommandFailureCode::Transport,
-                    format!("The backend returned HTTP {status}."),
-                )
-            }))
+            Err(Self::decode_failure(status, body))
         }
+    }
+
+    fn decode_failure(status: u16, body: &str) -> Self {
+        serde_json::from_str::<Self>(body).unwrap_or_else(|_| {
+            Self::new(
+                CommandFailureCode::Transport,
+                format!("The backend returned HTTP {status}."),
+            )
+        })
     }
 }
 

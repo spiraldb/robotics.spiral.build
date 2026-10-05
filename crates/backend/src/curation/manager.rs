@@ -16,7 +16,6 @@ use spiral_robotics_common::curation::{
 };
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::sync::Arc;
-use tokio::sync::watch;
 
 /// The one message a losing save shows; reopening reloads the stored revision.
 const SAVED_ELSEWHERE: &str = "This curation was saved elsewhere. Reopen it before saving.";
@@ -32,7 +31,7 @@ pub(crate) struct CurationManager {
 
 impl CurationManager {
     /// `keys` reach the Modal service that scores progress.
-    pub(crate) fn new(storage: Arc<StorageManager>, keys: watch::Receiver<ProviderKeys>) -> Self {
+    pub(crate) fn new(storage: Arc<StorageManager>, keys: Arc<ProviderKeys>) -> Self {
         Self {
             previews: PreviewRuns::new(storage.clone()),
             fills: FillRuns::new(storage.clone(), keys),

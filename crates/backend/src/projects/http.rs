@@ -3,7 +3,6 @@
 use crate::OperationError;
 use crate::http::delivery::{ApiBytes, Project};
 use crate::projects::context::StudioContext;
-use crate::robots::operations::RobotOperations;
 
 use axum::{Json, Router, extract::DefaultBodyLimit, routing::post};
 use spiral_robotics_common::datasets::ProjectImportSummary;
@@ -29,11 +28,10 @@ impl ProjectEndpoints {
                 "choose a .spiral-project file to import",
             ));
         }
-        let (summary, imported) = project
+        let summary = project
             .projects()
             .import(project.session(), project.project(), &bundle)
             .await?;
-        RobotOperations::spawn_auto_connect(project.with_project(imported));
         Ok(Json(summary))
     }
 }

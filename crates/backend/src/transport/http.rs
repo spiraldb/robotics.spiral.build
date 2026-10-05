@@ -6,12 +6,12 @@ use axum::{
     extract::{FromRequest, State},
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, put},
+    routing::get,
 };
 use futures_util::TryStreamExt as _;
 use http_body::Body as _;
 use reqwest::Url;
-use spiral_robotics_common::providers::{ProviderKeysStatus, ProviderKeysUpdate, StudioProviders};
+use spiral_robotics_common::providers::StudioProviders;
 use std::{str::FromStr, time::Duration};
 
 use super::credentials::ProviderCredentials;
@@ -22,18 +22,13 @@ impl TransportEndpoints {
     pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
             .route("/providers", get(Self::providers))
-            .route("/keys", get(Self::keys))
             .route("/proxy", get(Self::proxy).post(Self::proxy))
-    }
-
-    pub(crate) fn commands() -> Router<StudioContext> {
-        Router::new().route("/keys", put(Self::update_keys))
     }
 
     async fn providers(
         State(state): State<StudioContext>,
     ) -> Result<Json<StudioProviders>, HttpFailure> {
-        ProviderCredentials::load(&state.keys().current())
+        ProviderCredentials::load(state.keys())
             .providers()
             .map(Json)
             .map_err(|error| crate::OperationError::External(error).into())
@@ -45,28 +40,9 @@ impl TransportEndpoints {
         State(state): State<StudioContext>,
         request: ProxyRequest,
     ) -> Result<ProxyResponse, HttpFailure> {
-        let credentials = ProviderCredentials::load(&state.keys().current());
+        let credentials = ProviderCredentials::load(state.keys());
         let bearer = credentials.bearer_for(&request.url);
         ProxyRelay::new()?.send(request.with_bearer(bearer)).await
-    }
-
-    /// Which keys are saved, never the keys.
-    async fn keys(State(state): State<StudioContext>) -> Json<ProviderKeysStatus> {
-        Json(state.keys().current().status())
-    }
-
-    /// Save new keys. Requests and database connections made after the save
-    /// use them; open projects keep running.
-    async fn update_keys(
-        State(state): State<StudioContext>,
-        Json(update): Json<ProviderKeysUpdate>,
-    ) -> Result<Json<ProviderKeysStatus>, HttpFailure> {
-        state
-            .keys()
-            .update(&update)
-            .await
-            .map(|keys| Json(keys.status()))
-            .map_err(|error| crate::OperationError::Internal(error).into())
     }
 }
 

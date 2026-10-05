@@ -10,20 +10,11 @@ pub const DEFAULT_SPIRAL_SPFS_ENDPOINT: &str = "https://spfs.spiraldb.dev";
 pub struct DataSettings {
     spiral: SpiralSettings,
     training: TrainingRuntimeSettings,
-    video: VideoSettings,
 }
 
 impl DataSettings {
-    pub fn new(
-        spiral: SpiralSettings,
-        training: TrainingRuntimeSettings,
-        video: VideoSettings,
-    ) -> Self {
-        Self {
-            spiral,
-            training,
-            video,
-        }
+    pub fn new(spiral: SpiralSettings, training: TrainingRuntimeSettings) -> Self {
+        Self { spiral, training }
     }
 
     pub const fn spiral(&self) -> &SpiralSettings {
@@ -34,17 +25,11 @@ impl DataSettings {
         &self.training
     }
 
-    pub const fn video(&self) -> &VideoSettings {
-        &self.video
-    }
     pub fn spiral_mut(&mut self) -> &mut SpiralSettings {
         &mut self.spiral
     }
     pub fn training_mut(&mut self) -> &mut TrainingRuntimeSettings {
         &mut self.training
-    }
-    pub fn video_mut(&mut self) -> &mut VideoSettings {
-        &mut self.video
     }
 }
 
@@ -136,30 +121,6 @@ impl SpiralSettings {
 
     pub fn set_project_id(&mut self, project_id: impl Into<String>) {
         self.project_id = project_id.into();
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct VideoSettings {
-    enabled: bool,
-}
-
-impl Default for VideoSettings {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-impl VideoSettings {
-    pub const fn new(enabled: bool) -> Self {
-        Self { enabled }
-    }
-
-    pub const fn enabled(&self) -> bool {
-        self.enabled
-    }
-    pub const fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
     }
 }
 

@@ -9,6 +9,15 @@ safely executes trained policies through the follower's bounded rollout path.
 Training and Rollout are parked until Spiral decodes MCAP video into training
 images: Studio refuses to start a run, and Rollout runs existing checkpoints.
 
+It runs as two programs. **Studio** (`crates/backend` and `crates/frontend`)
+serves the browser app, keeps Studio state, and reaches SpiralDB; it runs at
+`robotics.spiraldb.com` or on `localhost`. The **robot connector**
+(`crates/robot-connector`) runs next to the arms: it owns their serial buses,
+cameras, calibration, and control loop, records takes, and rolls out policies.
+The browser talks to the robot connector directly — Studio never reaches it —
+carries each finished take from it to Studio, and writes the checkpoints Studio
+trained to it.
+
 Studio stores its control-plane state in persistent backend-local SQLite
 (SeaORM and versioned migrations). SpiralDB stores datasets and model artifacts.
 Settings can transfer project data and local Studio state as one `.spiral-project`
@@ -39,6 +48,19 @@ The MCAP dataset inspector currently requires the `local-driver` shell;
 the pinned release driver predates its query functions. See
 [datasets and recordings](docs/datasets.md).
 
+Start the robot connector next to the arms, from the workspace root in the
+Nix shell (which supplies FFmpeg for camera recording):
+
+```console
+cargo run -p spiral-robotics-robot-connector
+```
+
+It listens on `http://127.0.0.1:7070` and keeps its robots, unsent takes, and
+policies under the platform's local data directory (`--data-dir` chooses
+another). In Studio, **Settings → Robots → Robot connector** sets the address
+this browser drives; it is kept in the browser, since `localhost` means the
+machine the browser runs on.
+
 Start the studio from the workspace root with:
 
 ```console
@@ -64,7 +86,8 @@ selection in the browser. Curation's per-row model work runs in Spiral, as the
 model provider is configured; it constructs provider requests and interprets
 responses. `/api/proxy` relays external HTTP requests, attaches the key Studio
 holds for the destination's origin, and streams the responses back.
-Native data operations, robot validation, and persistence remain on the backend.
+Native data operations and persistence remain on the backend; hardware
+remains on the robot connector.
 Browser orchestration ends when its owning task is disposed; this does not undo
 completed data operations.
 
@@ -121,16 +144,31 @@ fresh clone, build it once in the Nix shell:
 tailwindcss -i crates/frontend/tailwind.css -o crates/frontend/assets/tailwind.css
 ```
 
-Enter the OpenRouter API key and the Hugging Face token in **Settings → Keys**.
-The backend saves them in its SQLite database, beside the saved connection, and
-the browser only learns which ones are saved. The relay attaches each key to
-requests bound for its provider's origin, and Studio passes both to the Spiral
-driver: the OpenRouter key as `spiral.openrouter_api_key` for the `spql.ai`
-model functions Curation compiles to, and the token as
-`spiral.huggingface_token`. A saved key takes effect on the next request and
-the next database connection; open projects keep running. Keys belong to
-Studio, independently of the selected project, and project exports never
-contain them.
+Studio's provider keys belong to its deployment, not to its users: the backend
+reads them from its environment at startup, and no page shows or sets them.
+
+| Variable | Used for |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Model calls: Break down, Classify, Find similar, robot discovery |
+| `HF_TOKEN` | Downloads of models and datasets from Hugging Face |
+| `WARP_PROGRESS_URL`, `WARP_PROGRESS_TOKEN` | Score progress, on the Modal service in `modal/warp_progress` |
+
+The Nix development shells export the checkout's untracked `.env.local`, so a
+local Studio started from them gets the keys without further setup:
+
+```sh
+OPENROUTER_API_KEY='sk-or-…'
+HF_TOKEN='hf_…'
+WARP_PROGRESS_URL='https://…modal.run'
+WARP_PROGRESS_TOKEN='…'
+```
+
+An unset key turns off only what needs it. The relay attaches each key to
+requests bound for its provider's origin, and Studio passes the first two to
+the Spiral driver: the OpenRouter key as `spiral.openrouter_api_key` for the
+`spql.ai` model functions Curation compiles to, and the token as
+`spiral.huggingface_token`. The startup log says which keys are set, never
+their values. To change a key, restart the backend.
 
 Robot discovery calls `openai/gpt-5.6-terra` through OpenRouter, with `medium`
 reasoning effort and fast mode requested using `service_tier: "priority"`.
@@ -139,8 +177,9 @@ determines the actual served tier. The process environment's `LLM_BASE_URL`
 remains an optional developer override of the endpoint.
 
 Start the Python policy compute runtime separately (on the same machine or a
-remote compute host). It owns PyTorch for rollout inference and, once training
-is unparked, for training:
+remote compute host). It owns PyTorch for rollout inference, which the robot
+connector calls (`--policy-runtime`, `http://127.0.0.1:50051` by default),
+and, once training is unparked, for training, which Studio starts:
 
 ```console
 cd training
@@ -153,11 +192,11 @@ For a fresh Lambda Stack machine, clone the repository and run
 for the runtime and Lambda workflow.
 
 In Studio, open **Settings → Training**, enter the runtime's `http://` endpoint,
-and choose **Save and connect**. New training and rollout sessions use that
-endpoint; an active session keeps its existing connection.
+and choose **Save and connect**. New training runs use that endpoint; an active
+run keeps its existing connection.
 
-Both Studio and the policy runtime refuse non-loopback listeners by default.
-Use SSH forwarding for a remote worker. `--allow-remote-access` is reserved for
+The policy runtime refuses non-loopback listeners by default. Use SSH
+forwarding for a remote worker. Its `--allow-remote-access` is reserved for
 deployments placed behind an authenticated TLS proxy.
 
 Every browser signs in to Spiral itself. Choose **Sign in with Spiral**: Studio
@@ -179,8 +218,8 @@ the entire `.studio/` directory is Git-ignored.
 `SPIRAL_ROBOTICS_STUDIO_DB` overrides the SQLite file path for development
 and deployment isolation.
 
-Studio currently has no product simulation mode. Use `--no-cameras` only when
-camera discovery is intentionally unavailable; configured robot connections
-remain physical. Settings may switch the SpiralDB project only while robots and
-project activity are stopped. Project preferences live in Studio's SQLite
-database.
+Studio currently has no product simulation mode. Start the robot connector
+with `--no-cameras` only when camera discovery is intentionally unavailable;
+configured robot connections remain physical. Settings may switch the SpiralDB
+project only while training is stopped. Project preferences live in Studio's
+SQLite database.

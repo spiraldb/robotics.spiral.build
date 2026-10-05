@@ -11,7 +11,7 @@ use adbc_core::options::OptionConnection;
 use adbc_core::{Connection as _, Optionable as _, Statement as _};
 use arrow_schema::Schema;
 use futures::FutureExt as _;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use super::database::{
     BatchIngestion, Database, DatabaseConnection, DatabaseError, DatabaseFuture, DatabaseResult,
@@ -22,18 +22,10 @@ use crate::{ProviderKeys, SpiralConnection};
 use driver::{DriverConfiguration, LoadedDatabase};
 use worker::ConnectionWorker;
 
-/// The driver database a new connection opens on, and the provider keys it
-/// was created with.
-struct OpenedDatabase {
-    keys: ProviderKeys,
-    database: Arc<LoadedDatabase>,
-}
-
 /// Lazily loads a standalone Spiral ADBC library. No driver work runs in `new`.
 pub struct AdbcDatabase {
     configuration: DriverConfiguration,
-    keys: Option<watch::Receiver<ProviderKeys>>,
-    opened: Mutex<Option<OpenedDatabase>>,
+    loaded: OnceCell<Arc<LoadedDatabase>>,
 }
 
 impl AdbcDatabase {
@@ -44,41 +36,27 @@ impl AdbcDatabase {
     fn of(configuration: DriverConfiguration) -> Self {
         Self {
             configuration,
-            keys: None,
-            opened: Mutex::new(None),
+            loaded: OnceCell::new(),
         }
     }
 
-    /// The same database, handing the driver the provider keys `keys` holds.
-    /// The driver takes them only when a database is created, so every new
-    /// connection reads the current keys.
-    pub fn with_provider_keys(mut self, keys: watch::Receiver<ProviderKeys>) -> Self {
-        self.keys = Some(keys);
+    /// The same database, handing the driver Studio's provider keys.
+    pub fn with_provider_keys(mut self, keys: &ProviderKeys) -> Self {
+        self.configuration = self.configuration.with_provider_keys(keys);
         self
     }
 
-    /// The driver database for a new connection: the open one while the keys
-    /// are the ones it was created with, else a new one. Connections already
-    /// open keep the database they opened on until they close.
+    /// The driver database every connection opens on, loaded by the first.
     async fn current(&self) -> DatabaseResult<Arc<LoadedDatabase>> {
-        let keys = self
-            .keys
-            .as_ref()
-            .map(|keys| keys.borrow().clone())
-            .unwrap_or_default();
-        let mut opened = self.opened.lock().await;
-        if let Some(open) = opened.as_ref().filter(|open| open.keys == keys) {
-            return Ok(open.database.clone());
-        }
-        let configuration = self.configuration.clone().with_provider_keys(&keys);
-        let database = tokio::task::spawn_blocking(move || configuration.load())
+        self.loaded
+            .get_or_try_init(|| async {
+                let configuration = self.configuration.clone();
+                tokio::task::spawn_blocking(move || configuration.load())
+                    .await
+                    .map_err(DatabaseError::from_worker)?
+            })
             .await
-            .map_err(DatabaseError::from_worker)??;
-        *opened = Some(OpenedDatabase {
-            keys,
-            database: database.clone(),
-        });
-        Ok(database)
+            .cloned()
     }
 }
 

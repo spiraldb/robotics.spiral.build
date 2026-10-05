@@ -143,8 +143,6 @@
               "--package"
               "spiral-robotics-backend"
             ];
-            # bindgen generates the Linux camera bindings.
-            nativeBuildInputs = lib.optionals hostPlatform.isLinux [ rustPlatform.bindgenHook ];
             doCheck = false;
             meta.mainProgram = "spiral-robotics-backend";
           };
@@ -199,20 +197,21 @@
                 (lib.getExe studioServer)
                 "--bind"
                 "0.0.0.0:8080"
-                "--allow-remote-access"
-                "--no-cameras"
               ];
               Env = [
                 "HOME=${studioHome}"
                 "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
                 # Spiral's sign-in returns browsers to this address's /callback.
                 "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com"
+                # The Modal service Score progress runs on; its token is a
+                # deployment secret.
+                "WARP_PROGRESS_URL=https://xiangpeng--warp-progress-warpprogress-web.modal.run"
                 "SPIRALDB_ADBC_DRIVER=${spiralAdbc}/lib/${adbcLibrary}"
                 "DIOXUS_PUBLIC_PATH=${studioWeb}"
               ];
               Volumes.${studioHome} = { };
               ExposedPorts."8080/tcp" = { };
-              # Studio drains and releases its resources on Ctrl+C.
+              # Studio drains and stops its running work on Ctrl+C.
               StopSignal = "SIGINT";
               Labels = {
                 "org.opencontainers.image.revision" = self.rev or self.dirtyRev;
@@ -257,6 +256,17 @@
           };
           developmentShell = sharedShell // {
             packages = sharedShell.packages ++ [ pkgs.ffmpeg ] ++ webBuildInputs;
+            # Studio's provider keys for local runs come from the checkout's
+            # untracked .env.local, in the variables the hosted image is given.
+            shellHook = ''
+              if studio_env=$(git rev-parse --show-toplevel 2>/dev/null)/.env.local \
+                && [ -f "$studio_env" ]; then
+                set -a
+                . "$studio_env"
+                set +a
+              fi
+              unset studio_env
+            '';
           };
         in
         {
@@ -279,7 +289,7 @@
             developmentShell
             // {
               SPIRALDB_ADBC_DRIVER = "";
-              shellHook = ''
+              shellHook = developmentShell.shellHook + ''
                 if ! studio_root=$(git rev-parse --show-toplevel); then
                   echo "Enter the local-driver shell from the Studio checkout." >&2
                   return 1

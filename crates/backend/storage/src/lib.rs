@@ -3,7 +3,6 @@
 pub mod curations;
 mod datasets;
 mod db;
-pub mod episodes;
 mod manager;
 mod provider_keys;
 mod sessions;
@@ -56,10 +55,10 @@ pub use db::{
 };
 pub use db::{SCHEMA_VERSION, STUDIO_TABLE_PREFIX};
 pub use manager::StorageManager;
-pub use provider_keys::{ProviderKeyring, ProviderKeys};
+pub use provider_keys::ProviderKeys;
 pub use sessions::{SessionStore, StoredSession};
 pub use settings::{
-    BackendStateStore, ServiceEndpoint, SpiralConnectionSettings, StoredStudioPreferences,
-    StoredTrainingRuntimePreference, StoredVideoPreference,
+    ServiceEndpoint, SpiralConnectionSettings, StoredStudioPreferences,
+    StoredTrainingRuntimePreference,
 };
 pub use spiral_access::{SpiralAccess, SpiralAccessPublisher, SpiralConnection};

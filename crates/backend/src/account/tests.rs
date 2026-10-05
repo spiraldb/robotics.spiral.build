@@ -196,7 +196,6 @@ async fn a_browser_signs_in_on_spirals_page_and_reaches_the_api_with_its_cookie(
         .unwrap();
     let response = send(identity).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    fixture.projects.hardware().shutdown().await.unwrap();
 }
 
 #[test]

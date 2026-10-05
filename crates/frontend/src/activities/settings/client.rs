@@ -4,7 +4,6 @@ use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
 use dioxus::html::FileData;
 use spiral_robotics_common::datasets::ProjectImportSummary;
-use spiral_robotics_common::providers::{ProviderKeysStatus, ProviderKeysUpdate};
 use spiral_robotics_common::settings::{ConnectionTest, DataSettings, SettingsUpdate};
 use std::future::Future;
 
@@ -31,23 +30,6 @@ impl SettingsClient {
         self.project.mutate(
             &[Project, Settings, RobotSetup, Training, Catalog],
             HttpRequest::new("PUT", "/api/settings").json(&update),
-        )
-    }
-
-    /// Which provider keys the backend holds; the keys never reach the browser.
-    pub(super) fn provider_keys(
-        &self,
-    ) -> impl Future<Output = Result<ProviderKeysStatus, CommandError>> + use<> {
-        self.project.request(HttpRequest::new("GET", "/api/keys"))
-    }
-
-    pub(super) fn update_provider_keys(
-        &self,
-        update: ProviderKeysUpdate,
-    ) -> impl Future<Output = Result<ProviderKeysStatus, CommandError>> + use<> {
-        self.project.mutate(
-            &[Settings],
-            HttpRequest::new("PUT", "/api/keys").json(&update),
         )
     }
 

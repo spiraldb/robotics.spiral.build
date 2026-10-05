@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-test-support = []
+test-support = ["dep:spiral-robotics-recording"]
 
 [dependencies]
 adbc_core.workspace = true
@@ -17,7 +17,7 @@ adbc_driver_manager.workspace = true
 arrow-buffer = "58.4.0"
 arrow-data = "58.4.0"
 spiral-robotics-common.workspace = true
-spiral-robotics-hardware.workspace = true
+spiral-robotics-recording = { workspace = true, features = ["test-support"], optional = true }
 arrow-array = "58.4.0"
 arrow-schema = { version = "58.4.0", features = ["canonical_extension_types"] }
 arrow-ipc = { version = "58.4.0", features = ["zstd"] }
@@ -25,7 +25,6 @@ arrow-json = "58.4.0"
 arrow-cast = "58.4.0"
 arrow-select = "58.4.0"
 base64.workspace = true
-dirs = "6"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 image.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -49,6 +48,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 futures = { version = "0.3", features = ["async-await"] }
 tokio = { version = "1", features = ["macros", "time"] }
 spiral-robotics-common = { workspace = true, features = ["test-support"] }
+spiral-robotics-recording = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
 serde_json.workspace = true

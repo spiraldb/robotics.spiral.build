@@ -434,7 +434,7 @@ impl StorageManager {
     /// creating it with the first: eight frames of `/camera/top/video`, 33 ms
     /// apart.
     pub async fn record_probe_episode(&self, dataset: &str, episode: &str) -> Result<(), String> {
-        use crate::episodes::{CameraRecording, EpisodeFixture, McapRecording};
+        use spiral_robotics_recording::{CameraRecording, EpisodeFixture, McapRecording};
         let camera = CameraRecording::from_annex_b(
             "top".into(),
             (32, 32, 30),

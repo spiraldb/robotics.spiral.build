@@ -2,14 +2,14 @@
 
 Each episode's packets go through the service's own FastAPI app in-process, exactly as Studio sends
 them; the Rust reference runs locally through Studio's release ADBC driver. Credentials are read at
-runtime from the pyspiral login and Studio's settings, and never printed.
+runtime from the pyspiral login and `HF_TOKEN`, and never printed.
 
     uv run python parity.py [--device mps] [EPISODE_ID ...]
 """
 
 import argparse
 import json
-import sqlite3
+import os
 import time
 import uuid
 from pathlib import Path
@@ -54,8 +54,6 @@ class SpiralProject:
 
     def __init__(self):
         tokens = json.loads((Path.home() / "Library/Application Support/pyspiral/auth.json").read_text())
-        settings = sqlite3.connect(STUDIO / ".studio/studio.sqlite3")
-        (document,) = settings.execute("SELECT document FROM backend_settings").fetchone()
         self._connection = dbapi.connect(
             driver=str(STUDIO / "target/release/libadbc_driver_spiraldb.dylib"),
             entrypoint="AdbcDriverSpiraldbInit",
@@ -65,7 +63,7 @@ class SpiralProject:
                 "spiral.spfs_url": "https://spfs.spiraldb.dev",
                 "spiral.local_cache": "true",
                 "spiral.access_token": tokens["tokens"]["access_token"],
-                "spiral.huggingface_token": json.loads(document)["huggingface_token"],
+                "spiral.huggingface_token": os.environ["HF_TOKEN"],
             },
         )
 

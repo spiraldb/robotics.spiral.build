@@ -13,7 +13,7 @@ impl CurationFixture {
         Self {
             manager: CurationManager::new(
                 Arc::new(StorageManager::new(store, studio)),
-                watch::channel(ProviderKeys::default()).1,
+                Arc::new(ProviderKeys::default()),
             ),
         }
     }

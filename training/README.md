@@ -109,12 +109,12 @@ always spans the whole run. Retained terminal jobs are bounded; Studio shows a
 job the worker no longer holds as unavailable, and lists its checkpoints from
 Spiral.
 
-Rollout data plane:
+Rollout data plane, called by the robot connector rather than Studio:
 
 - `POST /v1/policies/{id}/infer`
 
 Inference bodies contain one `application/vnd.apache.arrow.stream` record
-batch. Tensor columns are non-null `FixedSizeList` arrays. Studio writes Arrow
+batch. Tensor columns are non-null `FixedSizeList` arrays. The robot connector writes Arrow
 IPC metadata V5 with lossless Zstandard buffer compression; PyArrow
 decompresses those buffers transparently and exposes their child buffers as
 zero-copy NumPy views. State children are `Float32`; image children are packed

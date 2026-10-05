@@ -327,8 +327,9 @@ pub(super) fn RolloutWorkbench(
                                     robot.id(),
                                 )
                                 .with_duration(duration_seconds);
+                                let client = RolloutClient::current();
                                 spawn(async move {
-                                    let result = RolloutClient::current().start_rollout(config)
+                                    let result = client.start_rollout(config)
                                         .await
                                         .map_err(|error| error.to_string());
                                     if let Err(error) = result {

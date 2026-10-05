@@ -409,33 +409,3 @@ async fn query_reader_errors_are_terminal_and_release_the_connection() {
         .unwrap();
     assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
 }
-
-#[tokio::test]
-async fn changed_provider_keys_reopen_the_database_for_new_connections() {
-    let keys_with = |key: Option<&str>| {
-        crate::ProviderKeys::default().updated(
-            &spiral_robotics_common::providers::ProviderKeysUpdate::default()
-                .with_llm_api_key(key.map(str::to_owned)),
-        )
-    };
-    let (keys, follower) = tokio::sync::watch::channel(keys_with(Some("first")));
-    let database = AdbcDatabase::memory().with_provider_keys(follower);
-    let first = database.current().await.unwrap();
-    // The same key keeps the database it opened.
-    assert!(Arc::ptr_eq(&first, &database.current().await.unwrap()));
-    let mut open = database.connect().await.unwrap();
-    keys.send_replace(keys_with(Some("second")));
-    let second = database.current().await.unwrap();
-    assert!(!Arc::ptr_eq(&first, &second));
-    // A connection opened before the change still answers.
-    let rows = open
-        .query(SqlStatement::from("SELECT 1 AS one"))
-        .await
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(rows.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-    keys.send_replace(keys_with(None));
-    assert!(!Arc::ptr_eq(&second, &database.current().await.unwrap()));
-}

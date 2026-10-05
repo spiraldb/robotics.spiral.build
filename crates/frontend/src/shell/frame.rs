@@ -384,6 +384,15 @@ impl StatusFacts {
         let snapshot = hardware.snapshot().read().clone();
         let telemetry = hardware.frame().read().clone();
         let mut facts = Vec::new();
+        if matches!(
+            crate::client::robot_connector::RobotConnector::current().health(),
+            Some(Err(_))
+        ) {
+            facts.push(
+                StatusFact::new("Robot connector unreachable", StatusTone::Caution)
+                    .opening_settings(),
+            );
+        }
         if let Some(recording) = telemetry.recording().as_ref() {
             facts.push(StatusFact::new(
                 format!(

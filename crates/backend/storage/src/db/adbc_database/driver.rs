@@ -239,11 +239,11 @@ mod tests {
 
     #[tokio::test]
     async fn provider_keys_reach_the_native_driver_as_write_only_options() {
-        let keys = ProviderKeys::default().updated(
-            &spiral_robotics_common::providers::ProviderKeysUpdate::default()
-                .with_llm_api_key(Some("sk-or-test-only".into()))
-                .with_huggingface_token(Some("hf_test_only".into())),
-        );
+        let keys = ProviderKeys::from_variables(|name| match name {
+            "OPENROUTER_API_KEY" => Some("sk-or-test-only".into()),
+            "HF_TOKEN" => Some("hf_test_only".into()),
+            _ => None,
+        });
         let connection = SpiralConnection::new(settings(), SpiralAccess::fixed("token".into()));
         let database = DriverConfiguration::hosted(connection)
             .with_provider_keys(&keys)

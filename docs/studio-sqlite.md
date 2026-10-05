@@ -3,14 +3,16 @@
 The backend owns two persistence boundaries:
 
 - **SQLite / SeaORM:** each browser's Spiral session (its WorkOS tokens and
-  chosen project), provider keys, robot documents
-  and calibration, project preferences, each dataset's robot model, joint roles
+  chosen project), project preferences, each dataset's robot model, joint roles
   and check report, saved curation recipes and the statements of the views
   they publish, and a record of each training run Studio started (its
   configuration and worker endpoint).
 - **Spiral / ADBC:** datasets, their MCAP sources and model answers, and model
   checkpoint artifacts. The training worker publishes
   checkpoints directly to Spiral and owns each run's metrics and logs.
+
+Robot documents and calibration are not Studio state: the robot connector that
+drives the arms saves them, in its own data directory.
 
 ## Location and lifetime
 
@@ -43,8 +45,8 @@ stopped backend's database can be copied after its connections have closed.
 ## Schema changes
 
 SeaORM entities live in `crates/backend/storage/src/studio`. Product-facing
-methods stay with their feature; callers do not receive ORM models. Robot and
-curation edits use conditional writes to preserve conflict detection. A
+methods stay with their feature; callers do not receive ORM models. Curation
+edits use conditional writes to preserve conflict detection. A
 training run is stored as its ID beside the JSON of what Studio asked its
 worker to do.
 
@@ -88,7 +90,7 @@ Version **4** `.spiral-project` bundles are ZIP archives containing:
 
 - `studio.sqlite3`: a native SQLite snapshot of the selected project's Studio
   records. SQLite's `VACUUM INTO` captures committed state, including WAL data.
-  The export removes backend settings, credentials, published curation views
+  The export removes Spiral sessions, published curation views
   (a bundle carries no model answers for them to read), and other projects,
   then vacuums again to remove their deleted bytes. Project keys are neutralized so
   the snapshot can be restored into another project.
@@ -125,10 +127,9 @@ cache of the replaced data survives.
 ## Availability and verification
 
 Studio features are independent of a chosen or reachable Spiral project.
-Robot setup, preferences, curations, and training run records load locally. Data queries,
-recording publication, training data access, and artifact reads still require
-Spiral and report their own connection errors. Restart recovery never resumes
-interrupted robot motion.
+Preferences, curations, and training run records load locally. Data queries,
+recording storage, training data access, and artifact reads still require
+Spiral and report their own connection errors.
 
 Run the storage and backend tests with the configured local ADBC driver:
 

@@ -5102,22 +5102,17 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "http-body",
- "image",
  "reqwest",
- "safetensors",
  "serde",
  "serde_json",
  "serde_urlencoded",
- "serialport",
  "sha2",
  "spiral-robotics-common",
- "spiral-robotics-hardware",
  "spiral-robotics-inference",
  "spiral-robotics-storage",
  "spiral-robotics-training",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tower",
  "tower-http 0.7.0",
  "tracing",
@@ -5194,6 +5189,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "spiral-robotics-recording"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "mcap",
+ "prost",
+ "prost-reflect",
+ "serde_json",
+ "sha2",
+ "spiral-robotics-common",
+ "spiral-robotics-hardware",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "spiral-robotics-robot-connector"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
+ "axum",
+ "bytes",
+ "clap",
+ "dirs",
+ "futures-util",
+ "image",
+ "reqwest",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "serialport",
+ "spiral-robotics-common",
+ "spiral-robotics-hardware",
+ "spiral-robotics-inference",
+ "spiral-robotics-recording",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "spiral-robotics-storage"
 version = "0.1.0"
 dependencies = [
@@ -5209,7 +5250,6 @@ dependencies = [
  "arrow-select",
  "axum",
  "base64",
- "dirs",
  "futures",
  "image",
  "mcap",
@@ -5222,7 +5262,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "spiral-robotics-common",
- "spiral-robotics-hardware",
+ "spiral-robotics-recording",
  "tempfile",
  "tokio",
  "tracing",

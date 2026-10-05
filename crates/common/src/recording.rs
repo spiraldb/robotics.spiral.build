@@ -56,6 +56,37 @@ impl EpisodeInfo {
     }
 }
 
+/// A finished take the connector keeps as an MCAP file until Studio has
+/// stored it in its dataset.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SavedRecording {
+    dataset_id: String,
+    episode_id: String,
+    bytes: u64,
+}
+
+impl SavedRecording {
+    pub fn new(dataset_id: impl Into<String>, episode_id: impl Into<String>, bytes: u64) -> Self {
+        Self {
+            dataset_id: dataset_id.into(),
+            episode_id: episode_id.into(),
+            bytes,
+        }
+    }
+
+    pub fn dataset_id(&self) -> &str {
+        &self.dataset_id
+    }
+
+    pub fn episode_id(&self) -> &str {
+        &self.episode_id
+    }
+
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
 /// Current-session take review; published datasets use topic messages and member identities.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionSnapshot {
