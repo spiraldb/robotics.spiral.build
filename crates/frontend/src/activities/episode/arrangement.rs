@@ -9,7 +9,10 @@
 //!
 //! The cameras take the width their pictures can use at the band's height,
 //! in whichever grid leaves the smallest picture largest and spends the least
-//! on camera mat; the Scene takes the rest. A camera is never shrunk below a
+//! on camera mat; the Scene takes the rest. Once the grid is chosen its
+//! column gives way to a little over half the room while every picture stays
+//! readable, since the robot and its plots matter more than pixel-perfect
+//! pictures and a plot's time axis needs the width. A camera is never shrunk below a
 //! readable size to make it fit: when the room runs out, the cameras that do
 //! not fit join the last camera's tile as tabs, still full size one click
 //! away. A room too narrow for a column beside the cameras sends the Scene
@@ -34,6 +37,11 @@ const TIMELINE_CHROME: f64 = 40.0 + 36.0 + 24.0;
 /// The least width the column beside the cameras is worth: the Scene's view
 /// controls and a plot's time axis still read.
 const LEAST_SIDE_WIDTH: f64 = 280.0;
+/// The share of the room's width the column beside the cameras keeps when
+/// the cameras' pictures stay readable without it, however large the band
+/// would let them grow. A whole number of steps, so a room at the limit does
+/// not flip between two shares.
+const FAIR_SIDE_SHARE: f64 = 0.46;
 /// Shares move in steps of this size, so a small change of room is no change.
 const SHARE_STEP: f64 = 0.02;
 /// The narrowest picture a camera is drawn at: about 160 × 120, where an arm,
@@ -180,7 +188,7 @@ impl EpisodeArrangement {
             Size::new(widest, band.height),
             TieBreak::LeastWidth,
         );
-        let width = plan.width_to_fill(band.height).min(widest);
+        let width = plan.width_beside_side(room.width, band.height, cameras.len());
         Self::rows(
             band_share,
             LayoutNode::split(
@@ -352,6 +360,20 @@ impl ViewPlan {
     }
     fn width_to_fill(self, height: f64) -> f64 {
         self.grid.width_to_fill(self.shown, height)
+    }
+    /// The width the grid takes of a room `room` wide beside the Scene and
+    /// Plots: what its pictures can use at `height`, leaving the column its
+    /// least width, and no more than leaves it its fair share as long as each
+    /// of the `count` cameras is still drawn readable.
+    fn width_beside_side(self, room: f64, height: f64, count: usize) -> f64 {
+        let wanted = self.width_to_fill(height).min(room - LEAST_SIDE_WIDTH);
+        let fair = room * (1.0 - FAIR_SIDE_SHARE);
+        let readable_at_fair = self.tiles(fair, count).iter().all(|tile| tile.readable());
+        if wanted > fair && readable_at_fair {
+            fair
+        } else {
+            wanted
+        }
     }
     /// The views as tiles; the last tile also holds the views that did not
     /// fit, and `extra`, as tabs.
@@ -573,6 +595,33 @@ mod tests {
                 "the other two share the second row in {room:?}: {splits:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_scene_and_plots_keep_near_half_the_room_beside_large_pictures() {
+        // A curation node's evidence in a tall window: the pictures could
+        // take three fifths of the width, and the plots' time axis would be
+        // left a strip. The cameras keep their one-over-two grid and give
+        // way, their pictures still readable.
+        let room = Size::new(700.0, 632.0);
+        let layout = EpisodeArrangement::new(views(3)).layout(room);
+        let LayoutNode::Split { first, .. } = &layout.root else {
+            panic!("the recording over the timeline")
+        };
+        let LayoutNode::Split { ratio, .. } = first.as_ref() else {
+            panic!("the cameras beside the plots")
+        };
+        assert!(
+            (ratio - (1.0 - FAIR_SIDE_SHARE)).abs() < 1e-9,
+            "the cameras take {ratio} of the width"
+        );
+        assert_eq!(tiles_of(&layout, &views(3)).len(), 3);
+        assert!(
+            layout
+                .split_ids()
+                .iter()
+                .any(|id| id.as_str() == "episode-row-1-2")
+        );
     }
 
     #[test]

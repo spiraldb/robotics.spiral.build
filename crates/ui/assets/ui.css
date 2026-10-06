@@ -25,6 +25,7 @@
   --ui-accent-wash: var(--tone-accent-wash, #f2f8d6);
   --ui-accent-line: var(--tone-accent-line, #d6e595);
   --ui-accent-ink: var(--tone-accent-ink, #4a5610);
+  --ui-accent-strong: var(--tone-accent-strong, #a3bc2a);
   --ui-selected: var(--tone-selected, #eef5cf);
   --ui-focus: var(--tone-focus, #5971fd);
   --ui-danger: var(--tone-danger, #c4302b);
@@ -1170,7 +1171,87 @@
   }
 }
 
+/* Two columns parted by a line the operator drags. The line draws nothing
+   at rest — the columns' own edge is the hairline — and a band around it
+   takes the pointer; it lights while hovered, focused or moved, as the
+   workbench's splitters do. */
+.ui-split {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns:
+    clamp(var(--ui-split-least), var(--ui-split-lead, 50%), calc(100% - var(--ui-split-least)))
+    0 minmax(0, 1fr);
+}
+
+.ui-split-lead,
+.ui-split-rest {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.ui-split-lead > *,
+.ui-split-rest > * {
+  min-height: 0;
+  flex: 1;
+}
+
+.ui-split-line {
+  position: relative;
+  z-index: 3;
+  outline: none;
+}
+
+.ui-split-line::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: -4px;
+  width: 8px;
+  cursor: col-resize;
+}
+
+.ui-split-line::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: -1px;
+  width: 1px;
+  background: transparent;
+  pointer-events: none;
+  transition: background-color 100ms ease-out;
+}
+
+.ui-split-line:hover::after,
+.ui-split[data-dragging="true"] > .ui-split-line::after {
+  background: var(--ui-accent-strong);
+}
+
+.ui-split-line:focus-visible::after {
+  left: -1.5px;
+  width: 2px;
+  background: var(--ui-focus);
+}
+
+.ui-split[data-dragging="true"] {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.ui-split-drag {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  cursor: col-resize;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .ui-split-line::after {
+    transition: none;
+  }
+
   .ui-input,
   .ui-select,
   .ui-tree-row,

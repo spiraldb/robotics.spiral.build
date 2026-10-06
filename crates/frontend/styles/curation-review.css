@@ -94,10 +94,8 @@
      row of every index leads with a thumbnail, so every node's index is one
      width and the divider holds still as the operator moves between nodes. */
   .curation-review {
-    display: grid;
-    min-height: 0;
+    --ui-split-lead: clamp(18rem, 36%, 28rem);
     flex: 1;
-    grid-template-columns: clamp(18rem, 36%, 28rem) minmax(0, 1fr);
   }
 
   /* The episodes a row opens, as tabs beside the index. */

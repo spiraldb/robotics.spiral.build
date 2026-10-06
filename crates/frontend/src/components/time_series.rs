@@ -261,13 +261,14 @@ impl TimelineChartStyle {
             .split_line(SplitLine::new().show(false))
     }
 
-    /// A quiet value axis: small faint labels and hairline guides, no spine.
+    /// A quiet value axis: a few small faint labels and hairline guides, no
+    /// spine. Two divisions keep a lane's labels clear of the next lane's.
     fn labelled_value_axis(grid_index: f64) -> Axis {
         Axis::new()
             .type_(AxisType::Value)
             .grid_index(grid_index)
             .scale(true)
-            .split_number(3.0)
+            .split_number(2.0)
             .axis_line(AxisLine::new().show(false))
             .axis_tick(AxisTick::new().show(false))
             .axis_label(AxisLabel::new().show(true).font_size(9.0).color("#71706c"))

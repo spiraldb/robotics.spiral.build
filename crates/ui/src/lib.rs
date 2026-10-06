@@ -21,8 +21,8 @@ mod display;
 mod foundation;
 
 pub use containers::{
-    Disclosure, DisclosureProps, Menu, MenuProps, Tree, TreeBranch, TreeItem, TreeItemProps,
-    TreeProps,
+    Disclosure, DisclosureProps, Menu, MenuProps, SplitColumns, SplitColumnsProps, Tree,
+    TreeBranch, TreeItem, TreeItemProps, TreeProps,
 };
 pub use controls::{
     ActionPurpose, BlockingConfirmation, BlockingConfirmationProps, Button,

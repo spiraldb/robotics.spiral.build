@@ -25,7 +25,9 @@ use std::rc::Rc;
 
 const LANE_HEIGHT: f64 = 96.0;
 const LANE_GAP: f64 = 12.0;
-const PLOT_MARGIN_LEFT: f64 = 56.0;
+/// Room for a lane's value labels, which are small and few: the rest of the
+/// width is the plot's. `--data-plot-left` in the stylesheet says the same.
+const PLOT_MARGIN_LEFT: f64 = 40.0;
 /// None: a plot ends where the timeline's tracks end, so the two share one
 /// time axis edge to edge.
 const PLOT_MARGIN_RIGHT: f64 = 0.0;

@@ -3133,7 +3133,7 @@ button.studio-status-connection[aria-expanded="true"] {
   .episode-inspection {
     --data-name-w: 16rem;
     --data-readout-w: 11.5rem;
-    --data-plot-left: 56px;
+    --data-plot-left: 40px;
     --data-plot-right: 0px;
   }
 
@@ -3676,8 +3676,12 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply shrink-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[11px] font-medium;
   }
 
+  /* A lane with more traces than its height lists the rest on scroll, and
+     its last row fades to say so. */
   .data-plot-traces {
     @apply mt-0.5 min-h-0 flex-1 overflow-y-auto;
+    scrollbar-width: none;
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 14px), transparent);
   }
 
   /* A legend row keeps its index whole and its value at the right edge;
@@ -3830,6 +3834,12 @@ button.studio-status-connection[aria-expanded="true"] {
   --data-name-w: clamp(10rem, 28cqw, 16rem);
   --data-readout-w: calc(var(--data-name-w) - var(--data-plot-left));
 }
+/* Plots in the column beside the cameras are narrower than any timeline, and
+   their readouts give way so the plot keeps most of the column: an index and
+   its value still fit, the exact reading in its tooltip. The two columns
+   differ only below 36rem, and a plot that narrow sits beside the cameras,
+   not over the timeline's tracks. */
+.episode-plots-dock .data-plots { --data-name-w: clamp(8.5rem, 28cqw, 16rem); }
 /* A ruler narrower than its eight round divisions labels every other one,
    so no two readings print over each other. */
 @container (max-width: 44rem) {

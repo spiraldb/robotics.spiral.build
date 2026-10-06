@@ -23,7 +23,7 @@ use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonSize, ButtonVariant, Notice, NoticeTone, Place,
+    ActionPurpose, Button, ButtonSize, ButtonVariant, Notice, NoticeTone, Place, SplitColumns,
 };
 use std::fmt::{Display, Formatter, Result as FormatResult};
 
@@ -545,15 +545,52 @@ pub(super) fn SliceEntry(
 }
 
 /// The index beside the recording. The caller fills both halves; this owns
-/// only which one scrolls.
+/// which one scrolls, and the line between them the operator drags to share
+/// the width.
 #[component]
 pub(super) fn SubtaskReview(index: Element, evidence: Element) -> Element {
     IndexFocus::use_page_keys();
+    let mut width = use_signal(IndexWidth::kept);
     rsx! {
-        div { class: "curation-review",
-            div { class: "curation-review-index", {index} }
-            aside { class: "curation-review-evidence", "aria-label": "Selected subtask", {evidence} }
+        SplitColumns { class: "curation-review", lead_width: width(), least: IndexWidth::LEAST,
+            label: "Resize the index",
+            on_resize: move |moved: f64| {
+                width.set(Some(moved));
+                IndexWidth::keep(moved);
+            },
+            lead: rsx! { div { class: "curation-review-index", {index} } },
+            rest: rsx! { aside { class: "curation-review-evidence", "aria-label": "Selected subtask", {evidence} } },
         }
+    }
+}
+
+/// The index width the operator dragged the line to, kept in this browser:
+/// every node's index is one width, so moving between nodes — or reloading —
+/// leaves the line where it was put. A browser that keeps no storage starts
+/// at the designed width each time.
+struct IndexWidth;
+
+impl IndexWidth {
+    const KEY: &str = "spiral-studio.curation-index-width";
+    /// The narrowest the index or the recording beside it may be.
+    const LEAST: f64 = 280.0;
+
+    fn kept() -> Option<f64> {
+        Self::storage()?
+            .get_item(Self::KEY)
+            .ok()
+            .flatten()?
+            .parse::<f64>()
+            .ok()
+            .filter(|width| width.is_finite())
+    }
+    fn keep(width: f64) {
+        if let Some(storage) = Self::storage() {
+            let _ = storage.set_item(Self::KEY, &width.round().to_string());
+        }
+    }
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok().flatten()
     }
 }
 
