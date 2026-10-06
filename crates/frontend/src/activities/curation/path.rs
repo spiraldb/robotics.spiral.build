@@ -319,7 +319,11 @@ impl<'a> CurationPath<'a> {
     pub(super) fn statement(&self) -> Result<String, PathError> {
         let compiled = self.compile()?;
         let published = compiled.relation.published.iter().map(String::as_str);
-        Ok(Self::select(&compiled.entries, &compiled.relation, published))
+        Ok(Self::select(
+            &compiled.entries,
+            &compiled.relation,
+            published,
+        ))
     }
 
     /// The last node's step alone, over `input`, without its rule: the

@@ -99,24 +99,30 @@ impl CanvasHarness {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test]
-async fn the_canvas_lists_saved_curations_and_grows_the_graph_from_a_nodes_menu() {
+async fn the_canvas_opens_the_latest_curation_and_grows_the_graph_from_a_nodes_menu() {
     let fetch = CurationFetch::install();
     let harness = CanvasHarness::default();
     let mut dom = VirtualDom::new_with_props(CanvasHarness::render, harness.clone());
     dom.rebuild_in_place();
     let controller = harness.controller();
-    dom.in_scope(ScopeId::ROOT, || controller.refresh_documents());
+    dom.in_scope(ScopeId::ROOT, || controller.open_latest());
     harness.settle(&mut dom).await;
 
+    // The list, then the most recently saved curation on it.
+    let opened = [
+        "/api/curations".to_owned(),
+        "/api/curations/curation-1".to_owned(),
+    ];
     assert_eq!(
         fetch
             .requests()
             .iter()
             .map(|request| request["path"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>(),
-        ["/api/curations"]
+        opened
     );
     assert_eq!(controller.documents()[0].name(), "Cloth folding curation");
+    assert!(!controller.unsaved_changes(), "an opened curation is saved");
 
     // What the + on the dataset node offers, and what choosing the first entry does.
     let dataset = controller
@@ -162,7 +168,11 @@ async fn the_canvas_lists_saved_curations_and_grows_the_graph_from_a_nodes_menu(
             .is_err()
     );
     controller.with_payload(|payload| assert_eq!(payload.nodes().len(), 2));
-    assert_eq!(fetch.requests().len(), 1, "growing the graph saves nothing");
+    assert_eq!(
+        fetch.requests().len(),
+        opened.len(),
+        "growing the graph saves nothing"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test]
@@ -172,7 +182,7 @@ async fn publishing_saves_what_is_drawn_before_it_records_a_view() {
     let mut dom = VirtualDom::new_with_props(CanvasHarness::render, harness.clone());
     dom.rebuild_in_place();
     let controller = harness.controller();
-    dom.in_scope(ScopeId::ROOT, || controller.refresh_documents());
+    dom.in_scope(ScopeId::ROOT, || controller.open_latest());
     harness.settle(&mut dom).await;
     dom.in_scope(ScopeId::ROOT, || {
         controller.edit(|payload| {

@@ -172,12 +172,16 @@ impl LoadedDatabase {
 impl Drop for LoadedDatabase {
     fn drop(&mut self) {
         let database = self.database.take();
-        // The last Arrow buffer may be released outside a Tokio runtime.
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn_blocking(move || drop(database));
-        } else {
-            drop(database);
-        }
+        // Releasing the driver's database blocks, so it gets a thread of its
+        // own rather than the runtime's blocking pool. The last reference is
+        // often dropped by a connection's cleanup, a blocking task; a runtime
+        // shutting down cancels such tasks while holding its pool's lock, and
+        // a release queued on that pool from inside one waits for the lock
+        // forever. A thread that cannot be started drops the closure, and
+        // with it the database, right here.
+        let _ = std::thread::Builder::new()
+            .name("spiral-release".into())
+            .spawn(move || drop(database));
     }
 }
 
