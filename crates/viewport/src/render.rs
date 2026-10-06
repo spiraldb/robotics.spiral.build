@@ -281,10 +281,10 @@ impl MeshLibrary {
                     None => continue,
                 },
             };
-            let (topology, shaded) = if entity.is_wireframe() {
-                (Topology::LineStrip, false)
+            let (mesh, topology, shaded) = if entity.is_frustum() {
+                (&self.primitives.frustum, Topology::Lines, false)
             } else {
-                (Topology::Triangles, true)
+                (mesh, Topology::Triangles, true)
             };
             calls.push(DrawCall::new(
                 mesh,
@@ -340,7 +340,6 @@ impl RobotMeshes {
 enum Topology {
     Triangles,
     Lines,
-    LineStrip,
 }
 
 /// One mesh to draw, and the uniforms it is drawn with.
@@ -490,12 +489,11 @@ impl DrawUniforms {
     }
 }
 
-/// The three pipelines that differ only in how vertices become primitives.
+/// The two pipelines that differ only in how vertices become primitives.
 struct Pipelines {
     format: wgpu::TextureFormat,
     triangles: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
-    line_strip: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
@@ -560,7 +558,6 @@ impl Pipelines {
             format,
             triangles: pipeline(wgpu::PrimitiveTopology::TriangleList),
             lines: pipeline(wgpu::PrimitiveTopology::LineList),
-            line_strip: pipeline(wgpu::PrimitiveTopology::LineStrip),
         }
     }
 
@@ -568,7 +565,6 @@ impl Pipelines {
         match topology {
             Topology::Triangles => &self.triangles,
             Topology::Lines => &self.lines,
-            Topology::LineStrip => &self.line_strip,
         }
     }
 }
@@ -617,6 +613,7 @@ struct PrimitiveMeshes {
     cube: GpuMesh,
     cylinder: GpuMesh,
     sphere: GpuMesh,
+    frustum: GpuMesh,
 }
 
 struct BenchMeshes {
@@ -634,6 +631,7 @@ impl PrimitiveMeshes {
             cube: upload(MeshVertices::cube()),
             cylinder: upload(MeshVertices::cylinder(28)),
             sphere: upload(MeshVertices::sphere(12, 18)),
+            frustum: upload(MeshVertices::frustum()),
         }
     }
 }
@@ -768,6 +766,27 @@ impl MeshVertices {
                     vertices.push(corners[corner_index], corners[corner_index]);
                 }
             }
+        }
+        vertices
+    }
+
+    /// A camera's view pyramid in the unit cube, as line pairs: the apex at
+    /// the centre of the -Z face, four edges out to the corners of the +Z
+    /// face, and that face's rectangle.
+    fn frustum() -> Self {
+        let mut vertices = Self::with_capacity(16 * 6);
+        let apex = Vec3::new(0.0, 0.0, -0.5);
+        let corners = [
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, 0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+        ];
+        for (index, corner) in corners.iter().enumerate() {
+            vertices.push(apex, Vec3::Z);
+            vertices.push(*corner, Vec3::Z);
+            vertices.push(*corner, Vec3::Z);
+            vertices.push(corners[(index + 1) % corners.len()], Vec3::Z);
         }
         vertices
     }

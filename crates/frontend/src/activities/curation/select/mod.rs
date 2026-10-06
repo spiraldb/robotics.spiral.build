@@ -270,15 +270,17 @@ impl RuleView {
             tabs.open(&episode, interval);
         }
     }
-    /// What an empty side of the rule says in place of its list.
+    /// What an empty side of the rule says in place of its list: the fact
+    /// alone, since the strip that changes it is right above and Run is on
+    /// the bar.
     fn empty_side(&self, listed_kept: bool) -> &'static str {
         match listed_kept {
             _ if self.input.len() == 0 => match self.measure.kind() {
-                CurationNodeKind::ScoreProgress(_) => "No episode is scored yet. Run scores them.",
+                CurationNodeKind::ScoreProgress(_) => "No episode is scored yet.",
                 _ => "Nothing reaches this rule yet.",
             },
-            true => "Nothing passes this rule. Loosen it above to keep something.",
-            false => "Nothing is left out: everything that reaches this rule passes it.",
+            true => "Nothing passes this rule.",
+            false => "Nothing is left out.",
         }
     }
 }
@@ -326,8 +328,8 @@ impl MapSegments {
     }
 }
 
-/// The workspace shown for a selected Select node: what it keeps by on the
-/// node's bar, its conditions, and the review of both sides.
+/// The workspace shown for a selected Select node: what it keeps on the
+/// node's bar, its conditions under it, and the review of both sides.
 #[component]
 pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> Element {
     let Some(view) = RuleView::of(controller, &node) else {
@@ -345,12 +347,9 @@ pub(super) fn SelectWorkspace(controller: CurationController, node: String) -> E
     let strips = view.strips();
     rsx! {
         section { class: "curation-select-workspace", "aria-label": "Select",
+            // The conditions under the bar say what the rule keeps by, so
+            // the bar holds only what it keeps.
             NodeBar {
-                lead: rsx! {
-                    p { class: "curation-node-bar-reads",
-                        "Keeps the episodes whose recorded facts meet every condition"
-                    }
-                },
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 // The bar ends with what the rule gives training.
                 actions: rsx! {

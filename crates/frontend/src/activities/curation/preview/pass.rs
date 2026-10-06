@@ -2,6 +2,8 @@
 //! stored answers for the episodes it previews, then reads each episode's
 //! step, one query per episode built from the rows its parent's preview
 //! holds, on a run the backend holds, and the pass holds what comes back.
+//! A curation opened restores its previews the same way without the fill,
+//! reading only the episodes whose answers are already stored.
 use super::held_run::HeldRun;
 use super::input::{EpisodeRows, PreviewInput};
 use super::reads::{PreviewRows, ReadInput};
@@ -13,7 +15,7 @@ use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::score_progress::{MAX_MOMENTS, Moment};
 use crate::activities::curation::state::{CurationController, RunHandle};
 use spiral_robotics_common::curation::{
-    ColumnFill, FillRequest, FillState, PreviewQuery, PreviewQueryState,
+    ColumnFill, FillRequest, FillState, FilledEpisodesRequest, PreviewQuery, PreviewQueryState,
 };
 use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
@@ -207,7 +209,7 @@ impl EpisodeQueries<'_> {
 /// lands. Stop ends the run at once: the backend starts nothing more and
 /// drops the queries in flight, whose episodes stay unread for the next Run;
 /// what the fill answered by then stays stored. A failed query never stops
-/// the rest.
+/// the rest. A restore is the same pass without the fill.
 pub(in crate::activities::curation) struct PreviewPass {
     controller: CurationController,
     run: RunHandle,
@@ -228,13 +230,43 @@ impl PreviewPass {
     }
 
     pub(in crate::activities::curation) async fn run(self) {
-        let plan = &self.plan;
-        let verb = plan.doing();
-        let total = plan.jobs.len();
+        let verb = self.plan.doing();
+        let total = self.plan.jobs.len();
         self.run.report(format!("{verb} 0 of {total} episodes"));
         let Some(jobs) = self.filled(verb).await else {
             return;
         };
+        self.read_all(jobs, verb, total).await;
+    }
+
+    /// Read back what the node's stored answers hold, asking no model: of
+    /// the episodes the plan previews, those its column already holds. A
+    /// column that cannot be listed restores nothing, and the node stays
+    /// unread for its next Run.
+    pub(in crate::activities::curation) async fn restore(self) {
+        let request = FilledEpisodesRequest::new(
+            self.plan.sample.dataset().clone(),
+            self.plan.fill.column().clone(),
+        );
+        let Ok(filled) = CurationClient::current().filled(&request).await else {
+            return;
+        };
+        let jobs = self
+            .plan
+            .jobs
+            .iter()
+            .filter(|job| filled.contains(job.episode()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let total = jobs.len();
+        self.read_all(jobs, "Reading", total).await;
+    }
+
+    /// Read `jobs` on one run the backend holds, and hold each answer as it
+    /// lands; the pass reports on `total` episodes, every one not among
+    /// `jobs` already settled.
+    async fn read_all(&self, jobs: Vec<PreviewJob>, verb: &str, total: usize) {
+        let plan = &self.plan;
         let mut done = total - jobs.len();
         self.run
             .report(format!("{verb} {done} of {total} episodes"));

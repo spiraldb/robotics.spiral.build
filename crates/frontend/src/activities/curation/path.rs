@@ -318,12 +318,15 @@ impl<'a> CurationPath<'a> {
     /// publishes.
     pub(super) fn statement(&self) -> Result<String, PathError> {
         let compiled = self.compile()?;
-        Ok(Self::select(&compiled.entries, &compiled.relation))
+        let published = compiled.relation.published.iter().map(String::as_str);
+        Ok(Self::select(&compiled.entries, &compiled.relation, published))
     }
 
     /// The last node's step alone, over `input`, without its rule: the
     /// statement its preview runs on the rows its parent's preview holds,
-    /// with the node's own episode row beside them.
+    /// with the node's own episode row beside them. It answers every
+    /// property, not only those the view shows, since the next node's
+    /// preview is handed them all.
     pub(super) fn preview(&self, input: StepInput) -> Result<String, PathError> {
         let depth = self.nodes.len() - 1;
         let dataset = self.dataset()?;
@@ -349,7 +352,8 @@ impl<'a> CurationPath<'a> {
             column,
         })?;
         entries.extend(written.entries);
-        Ok(Self::select(&entries, &written.relation))
+        let properties = written.relation.properties().map(|(column, _)| column);
+        Ok(Self::select(&entries, &written.relation, properties))
     }
 
     /// The relation the last node hands on in the published view.
@@ -429,11 +433,16 @@ impl<'a> CurationPath<'a> {
         format!("{}_{depth}", self.nodes[depth].kind().key())
     }
 
-    fn select(entries: &[String], relation: &Relation) -> String {
+    /// The interval and `columns` of every row of `relation`.
+    fn select<'c>(
+        entries: &[String],
+        relation: &Relation,
+        columns: impl Iterator<Item = &'c str>,
+    ) -> String {
         format!(
             "WITH\n  {}\nSELECT {} FROM {}",
             entries.join(",\n  "),
-            Relation::interval_and(relation.published.iter().map(String::as_str)),
+            Relation::interval_and(columns),
             relation.name
         )
     }

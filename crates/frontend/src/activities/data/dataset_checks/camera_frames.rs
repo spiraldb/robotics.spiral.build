@@ -2,7 +2,7 @@
 //! logged over an episode at its usual frame interval, how many it did, its
 //! longest gap, and the frames logged late and caught up on — a long gap
 //! followed by a short one, which drops no frame.
-use super::report_view::{CheckRow, Evidence, EvidenceChips, StreamName, Verdict};
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, StreamName, Verdict};
 use super::stream_reads::CheckedStreams;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -134,13 +134,13 @@ impl CameraFrames {
         } else {
             0.0
         };
-        let longest = format!("longest gap {:.0} ms", worst as f64 / 1e6);
-        let summary = if self.cameras.is_empty() {
-            "The dataset records no camera".to_owned()
+        let longest = format!("{:.0} ms", worst as f64 / 1e6);
+        let finding = if self.cameras.is_empty() {
+            Finding::why("No camera recorded")
         } else if missing == 0.0 {
-            format!("No frame missing; {longest}")
+            Finding::of_count(0, "frame", "missing,").and(longest, "longest gap")
         } else {
-            format!("{} of frames missing; {longest}", Percent::of(share))
+            Finding::of(Percent::of(share), "of frames missing,").and(longest, "longest gap")
         };
         let verdict = match (self.cameras.is_empty(), flagged) {
             (true, _) => Verdict::Unavailable,
@@ -161,7 +161,7 @@ impl CameraFrames {
                 })
             })
             .collect::<Vec<_>>();
-        CheckRow::new("Camera frames", verdict, summary).flagging(flagged_evidence).with_details(rsx! {
+        CheckRow::new("Camera frames", verdict, finding).flagging(flagged_evidence).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "Camera frames",
                 thead { tr {
                     th { "Camera" } th { class: "is-number", "Interval" } th { class: "is-number", "Missing" }

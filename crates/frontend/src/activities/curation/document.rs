@@ -1,7 +1,8 @@
 //! The curation payload: the graph, per-node configuration, and the outputs
 //! published as catalog views, encoded as JSON text in
 //! `CurationDocument::payload`. It is the recipe only: what a node reads is a
-//! preview held for the session (see `preview`). Node positions are not
+//! preview held for the session, restored from the answers stored with the
+//! dataset when the curation opens (see `preview`). Node positions are not
 //! stored; the canvas lays the graph out from its edges every time.
 //!
 //! The graph's grammar lives here too. Every node hands on a population of
@@ -693,6 +694,22 @@ impl CurationGraph {
             }
         }
         None
+    }
+    /// The measurements whose previews read what `node` hands on, through
+    /// any Select between, in graph order.
+    pub(crate) fn measures_below(&self, node: &str) -> Vec<&CurationNode> {
+        self.nodes
+            .iter()
+            .filter(|below| match below.kind() {
+                CurationNodeKind::Dataset | CurationNodeKind::Select => false,
+                CurationNodeKind::BreakDownSubtasks(_)
+                | CurationNodeKind::FindSimilarSubtasks(_)
+                | CurationNodeKind::GroupSimilarSubtasks(_)
+                | CurationNodeKind::ScoreProgress(_) => self
+                    .measure_above(below.id())
+                    .is_some_and(|above| above.id() == node),
+            })
+            .collect()
     }
     /// The curation's outputs, in graph order, whatever follows them: each is
     /// one selection of the data to train on, and may be published as a view.

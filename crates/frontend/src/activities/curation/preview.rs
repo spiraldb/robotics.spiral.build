@@ -5,10 +5,11 @@
 //! to Spiral as `VALUES` (`input`). Nothing above it is run again, so a
 //! search or a grouping makes only its own text calls. What each episode
 //! answered, or why it failed, is held for the session with what went into
-//! it, and never saved (`reads`). `pass` runs one node's preview as the
-//! curation's run, on a run the backend holds (`held_run`), and `progress`
-//! says where it stands: an episode read from
-//! rows that have changed since, or below a node that has, is stale.
+//! it (`reads`). `pass` runs one node's preview as the curation's run, on a
+//! run the backend holds (`held_run`), and restores it from the answers
+//! stored with the dataset when the curation opens; `progress` says where it
+//! stands: an episode read from rows that have changed since, or below a
+//! node that has, is stale.
 mod held_run;
 mod input;
 mod pass;

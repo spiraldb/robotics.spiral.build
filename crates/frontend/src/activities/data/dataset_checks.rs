@@ -94,11 +94,9 @@ impl CheckedDataset {
             ],
         );
         let joints = match &self.joints {
-            JointChecks::Unidentified => {
-                CheckSection::new("Joints", Vec::new()).about(SectionAbout::new(
-                    "No stream records joint positions, so only the recording checks ran".into(),
-                ))
-            }
+            JointChecks::Unidentified => CheckSection::new("Joints", Vec::new()).about(
+                SectionAbout::new("No stream records joint positions".into()),
+            ),
             JointChecks::Checked(arms) => CheckSection::new(
                 "Joints",
                 vec![
@@ -374,14 +372,10 @@ pub(super) fn DatasetCheckReport(
             p { class: "data-checks-status", role: "status", "{CheckStep::Reading.label()}…" }
         },
         // The first look at a dataset version reads every episode, which
-        // takes a minute; the steps say how far it has got, and that it is
-        // the only wait.
+        // takes a minute; the steps say how far it has got.
         Some(CheckState::Checking(step)) => rsx! {
             div { class: "data-checks-progress", role: "status", "aria-live": "polite",
-                p { class: "data-checks-progress-lede",
-                    strong { "Checking every episode" }
-                    span { "Once per dataset version; later visits open the kept report." }
-                }
+                p { class: "data-checks-progress-lede", "Checking every episode" }
                 ol { class: "data-checks-steps", "aria-label": "Steps",
                     for each in CheckStep::ALL.into_iter().skip(1) {
                         li { key: "{each.label()}", "data-step": each.progress(step),

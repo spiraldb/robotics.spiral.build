@@ -3,8 +3,8 @@
 //! distance between each command and the measured position that many samples
 //! later; the shift with the least is the lag, and that distance is how
 //! closely the arm tracks its commands.
-use super::recording_rate::{Median, Plural};
-use super::report_view::{CheckRow, Evidence, EvidenceChips, Verdict};
+use super::recording_rate::Median;
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -157,7 +157,7 @@ impl StateActionLag {
             return CheckRow::new(
                 NAME,
                 Verdict::Unavailable,
-                "No arm records its commanded positions".into(),
+                Finding::why("No arm records its commands"),
             );
         }
         let settled = self
@@ -170,21 +170,29 @@ impl StateActionLag {
             .iter()
             .map(|episode| episode.samples as f64 * episode.step_ms);
         let flagged = self.arms.iter().any(|arm| !arm.flagged().is_empty());
-        let summary = match (samples.clone().min(), samples.max()) {
-            (Some(fewest), Some(most)) => format!(
-                "Positions follow commands by {} ({}); tracking error {}",
-                Span::of(fewest as f64, most as f64, "samples", 0),
+        // How far positions trail their commands, in time and in samples,
+        // and how far apart the two are there.
+        let finding = match (samples.clone().min(), samples.max()) {
+            (Some(fewest), Some(most)) => Finding::of(
                 Span::of(
                     delays.clone().fold(f64::INFINITY, f64::min),
                     delays.fold(f64::NEG_INFINITY, f64::max),
                     "ms",
-                    0
+                    0,
                 ),
+                "lag, or",
+            )
+            .and(
+                Span::of(fewest as f64, most as f64, "samples", 0),
+                "; tracking error",
+            )
+            .and(
                 Radians::milli(
-                    Median::of(settled.iter().map(|episode| episode.tracking)).unwrap_or_default()
+                    Median::of(settled.iter().map(|episode| episode.tracking)).unwrap_or_default(),
                 ),
+                "",
             ),
-            _ => "No episode logs commands and positions together".into(),
+            _ => Finding::why("No episode logs commands and positions together"),
         };
         let arms = self.arms.clone();
         let flagged_evidence = self
@@ -192,7 +200,7 @@ impl StateActionLag {
             .iter()
             .flat_map(ArmLag::flagged)
             .collect::<Vec<_>>();
-        CheckRow::new(NAME, if flagged { Verdict::Flagged } else { Verdict::Clean }, summary).flagging(flagged_evidence).with_details(rsx! {
+        CheckRow::new(NAME, if flagged { Verdict::Flagged } else { Verdict::Clean }, finding).flagging(flagged_evidence).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "State–action lag by arm",
                 thead { tr {
                     th { "Arm" } th { class: "is-number", "Lag" } th { class: "is-number", "Tracking error" }

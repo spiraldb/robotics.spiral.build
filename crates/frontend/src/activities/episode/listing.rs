@@ -1,7 +1,7 @@
 //! How an episode is listed: the row it gets in Data's rail and in every
 //! Curation index — its still, what it is called, the facts under its name,
-//! and its length against the longest listed — worded and drawn the same
-//! wherever a list of recordings is read.
+//! its length against the longest listed, and how long it runs at the row's
+//! end — worded and drawn the same wherever a list of recordings is read.
 use super::identity::{Episode, EpisodeFactsPresentation as _, EpisodeLabels, SourceLabel};
 use crate::format::{ClockPresentation as _, WallClockPresentation as _};
 use dioxus::prelude::*;
@@ -15,6 +15,10 @@ pub(in crate::activities) struct EpisodeRows {
 }
 
 impl EpisodeRows {
+    /// What an episode's length measure is called — as a Select's duration
+    /// condition calls the same reading, so a row judged by one says it once.
+    const LENGTH: &'static str = "Duration";
+
     pub(in crate::activities) fn of<'a>(episodes: impl IntoIterator<Item = &'a Episode>) -> Self {
         let episodes = episodes.into_iter().collect::<Vec<_>>();
         Self {
@@ -31,9 +35,9 @@ impl EpisodeRows {
     }
     /// `episode`'s row: its label when its path gives one, with its id among
     /// the facts, else its id; the day it was recorded when its clock knows;
-    /// how long it runs; and its length against the longest listed, on a
-    /// square-root scale so one runaway take does not flatten every other bar
-    /// into a dot.
+    /// its length against the longest listed, on a square-root scale so one
+    /// runaway take does not flatten every other bar into a dot; and how long
+    /// it runs as its measure, the number a list of takes is told apart by.
     pub(in crate::activities) fn face(&self, episode: &Episode) -> RowFace {
         let facts = episode.facts();
         let id = Episode::listed_name_of(episode.id());
@@ -47,20 +51,19 @@ impl EpisodeRows {
         {
             listed.push(facts.recorded_date_label());
         }
-        listed.extend(
-            facts
-                .duration_seconds()
-                .map(|seconds| seconds.clock_label()),
-        );
         let share = facts
             .duration_seconds()
             .filter(|_| self.longest > 0.0)
             .map_or(0.0, |seconds| (seconds / self.longest).sqrt());
-        RowFace {
+        let face = RowFace {
             title,
             facts: listed,
             drawing: Some(RowDrawing::Length(share)),
             measures: Vec::new(),
+        };
+        match facts.duration_seconds() {
+            Some(seconds) => face.measured(seconds.clock_label(), Self::LENGTH),
+            None => face,
         }
     }
 }
@@ -142,9 +145,17 @@ impl RowFace {
             ..stretch
         }
     }
-    /// Replace the facts line's words, keeping its drawing.
-    pub(in crate::activities) fn saying(mut self, facts: Vec<String>) -> Self {
-        self.facts = facts;
+    /// Move the episode's length under every other measure, so the readings
+    /// a list is about, such as the facts a rule judges, lead the row.
+    pub(in crate::activities) fn length_last(mut self) -> Self {
+        if let Some(index) = self
+            .measures
+            .iter()
+            .position(|measure| measure.meaning == EpisodeRows::LENGTH)
+        {
+            let length = self.measures.remove(index);
+            self.measures.push(length);
+        }
         self
     }
     /// One more measure, under the ones before it.
@@ -156,18 +167,27 @@ impl RowFace {
         self.judged(reading, meaning, false)
     }
     /// One more measure, `failing` when it is what leaves the row out of a
-    /// rule.
+    /// rule. A row says each measure once: a reading of what it already
+    /// measures, such as a rule judging its length, takes that one's place.
     pub(in crate::activities) fn judged(
         mut self,
         reading: String,
         meaning: impl Into<String>,
         failing: bool,
     ) -> Self {
-        self.measures.push(RowMeasure {
+        let measure = RowMeasure {
             reading,
             meaning: meaning.into(),
             failing,
-        });
+        };
+        match self
+            .measures
+            .iter_mut()
+            .find(|kept| kept.meaning == measure.meaning)
+        {
+            Some(kept) => *kept = measure,
+            None => self.measures.push(measure),
+        }
         self
     }
 }

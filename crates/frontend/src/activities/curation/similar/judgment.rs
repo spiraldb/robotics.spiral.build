@@ -3,9 +3,9 @@
 //!
 //! Find similar asks `spql.ai.similarity` against its query, and Group
 //! similar `spql.ai.classify` over its categories, written into the
-//! statement as a literal list. A fill judges the whole list of subtasks the
-//! Break down above stored for an episode in one call, which answers with a
-//! list aligned with them; the published view and the preview read each
+//! statement as a literal list. A fill judges each subtask the Break down
+//! above stored for an episode and collects the answers into one list
+//! aligned with them; the published view and the preview read each
 //! subtask's judgment at its place in that list. The node's own rule keeps
 //! part of them.
 use crate::activities::curation::annotate::SubtaskRow;
@@ -30,8 +30,8 @@ trait SubtaskJudgment {
     /// Everything besides the subtasks that changes the answer, or why the
     /// node cannot ask yet.
     fn arguments(&self) -> Result<serde_json::Value, PathError>;
-    /// The call judging every subtask in `subtasks`, a stored Break down.
-    fn call(&self, subtasks: &str) -> Result<String, PathError>;
+    /// The call judging one subtask's `description`.
+    fn call(&self, description: &str) -> Result<String, PathError>;
 
     /// The column the judgments are stored in: its function, its model, what
     /// it asks, and the Break down column whose subtasks it judges.
@@ -86,8 +86,8 @@ impl<J: SubtaskJudgment> PathFragment for J {
     }
 }
 
-/// A fill judges, for the episode bound as `$1`, every subtask the Break
-/// down above stored, in one call.
+/// A fill judges, for the episode bound as `$1`, each subtask the Break
+/// down above stored, collected in their order.
 impl<J: SubtaskJudgment> StoredAnswers for J {
     fn answer_column(&self, subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
         self.column(subtasks)
@@ -99,10 +99,14 @@ impl<J: SubtaskJudgment> StoredAnswers for J {
         (_, subtasks): (&AnswerColumn, Option<&AnswerColumn>),
     ) -> Result<AnswerSource, PathError> {
         let table = AnswerTable::of(dataset).map_err(PathError::new)?;
-        let call = self.call(&format!("a.{}.value", J::judged(subtasks)?))?;
+        let call = self.call("s.listed.description")?;
         Ok(AnswerSource::Statement {
             statement: format!(
-                "SELECT a.episode_id, {call} AS answer FROM {} a WHERE a.episode_id = $1",
+                "WITH e AS (SELECT a.episode_id, a.{}.value AS subtasks FROM {} a WHERE a.episode_id = $1), \
+                 s AS (SELECT e.episode_id, spql.list.get(e.subtasks, g._) AS listed \
+                 FROM e CROSS JOIN LATERAL spql.range(CAST(spql.list.len(e.subtasks) AS BIGINT)) g) \
+                 SELECT s.episode_id, spql.list.collect({call}) AS answer FROM s GROUP BY s.episode_id",
+                J::judged(subtasks)?,
                 table.quoted()
             ),
         })
@@ -122,10 +126,10 @@ impl SubtaskJudgment for SubtaskSearch {
         Ok(serde_json::json!([query]))
     }
 
-    fn call(&self, subtasks: &str) -> Result<String, PathError> {
+    fn call(&self, description: &str) -> Result<String, PathError> {
         self.arguments()?;
         Ok(format!(
-            "spql.ai.similarity({subtasks}, {}, model => {})",
+            "spql.ai.similarity({description}, {}, model => {})",
             SqlLiteral::text(self.query().trim()),
             SqlLiteral::text(JUDGMENT_MODEL)
         ))
@@ -150,7 +154,7 @@ impl SubtaskJudgment for SubtaskGrouping {
             .collect())
     }
 
-    fn call(&self, subtasks: &str) -> Result<String, PathError> {
+    fn call(&self, description: &str) -> Result<String, PathError> {
         self.arguments()?;
         let categories = self
             .categories()
@@ -165,7 +169,7 @@ impl SubtaskJudgment for SubtaskGrouping {
             .collect::<Vec<_>>()
             .join(", ");
         Ok(format!(
-            "spql.ai.classify({subtasks}, [{categories}], model => {})",
+            "spql.ai.classify({description}, [{categories}], model => {})",
             SqlLiteral::text(JUDGMENT_MODEL)
         ))
     }

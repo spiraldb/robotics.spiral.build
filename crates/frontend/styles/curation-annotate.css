@@ -87,25 +87,14 @@
     justify-content: flex-end;
   }
 
+  /* Why the episodes could not be read, on the danger wash across the
+     workspace, with the retry at its far end. */
   .curation-annotate-failure {
     display: flex;
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 6px;
-    margin: 8px 12px;
-    padding: 8px;
-    border: 1px solid var(--tone-danger);
-    @apply rounded-sm;
-    background: var(--tone-danger-soft);
-  }
-
-  .curation-annotate-empty {
-    margin: 12px;
-    padding: 12px;
-    border: 1px dashed var(--tone-line);
-    @apply rounded-sm;
-    color: var(--tone-ink-soft);
-    text-align: center;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid var(--tone-line);
   }
 
   /* Under reduce the popover is simply there. */

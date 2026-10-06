@@ -81,15 +81,25 @@ impl DocumentCommand {
 
 /// A browser-minted curation id: the moment, and enough randomness that two
 /// curations made in the same millisecond are still distinct.
-struct DocumentIdentity;
+pub(super) struct DocumentIdentity;
 
 impl DocumentIdentity {
+    const PREFIX: &'static str = "curation-";
+
     fn mint() -> String {
         format!(
-            "curation-{}-{:x}",
+            "{}{}-{:x}",
+            Self::PREFIX,
             js_sys::Date::now() as u64,
             (js_sys::Math::random() * u64::MAX as f64) as u64
         )
+    }
+    /// The moment `mint` made `id`, in Unix milliseconds: the one fact the
+    /// saved list carries besides the name. An id minted anywhere else
+    /// carries none.
+    pub(super) fn minted_at(id: &str) -> Option<f64> {
+        let (millis, _) = id.strip_prefix(Self::PREFIX)?.split_once('-')?;
+        millis.parse::<u64>().ok().map(|millis| millis as f64)
     }
 }
 
@@ -361,5 +371,20 @@ impl DocumentSession {
         }
         let baseline = self.baseline.peek().clone();
         self.install(baseline, on_install);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DocumentIdentity;
+
+    #[test]
+    fn an_id_says_when_it_was_minted_and_a_foreign_one_says_nothing() {
+        assert_eq!(
+            DocumentIdentity::minted_at("curation-1759500000000-3fa9c2"),
+            Some(1_759_500_000_000.0)
+        );
+        assert_eq!(DocumentIdentity::minted_at("curation-1"), None);
+        assert_eq!(DocumentIdentity::minted_at("cloth-folding"), None);
     }
 }

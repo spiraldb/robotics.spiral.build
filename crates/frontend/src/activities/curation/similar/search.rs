@@ -340,7 +340,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     let stale = source
         .progress()
         .is_stale()
-        .then(|| "Out of date: the subtasks that reach this node changed since it ran".to_owned());
+        .then(|| "Out of date: its subtasks changed".to_owned());
     let pending = source.progress().pending().len();
     // An empty box asks nothing, and a question every episode has answered
     // is already on screen.
@@ -500,8 +500,18 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                 }
             }
             if listed.is_empty() && about.is_none() {
+                // Search reads what Break down described, so the way out is
+                // there.
                 EmptyState { title: "No subtasks to search",
-                    p { "Run Break down subtasks on this dataset first; search asks about the subtasks its preview read." }
+                    Button {
+                        purpose: ActionPurpose::Navigate,
+                        variant: ButtonVariant::Outline,
+                        onclick: {
+                            let annotation = annotation.clone();
+                            move |_| controller.select_node(Some(annotation.clone()))
+                        },
+                        "Open Break down subtasks"
+                    }
                 }
             } else {
                 SubtaskReview {
@@ -549,7 +559,6 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                     evidence: rsx! {
                         EpisodeTabs {
                             open: tabs,
-                            empty: "Choose a result to watch it play.".to_owned(),
                             render: move |tab: OpenEpisode| {
                                 let Some(row) = rows
                                     .iter()

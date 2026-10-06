@@ -276,8 +276,7 @@ pub(super) fn SubtaskIndex(
         .flatten();
     if output.rows() == 0 && output.failures.is_empty() {
         return rsx! {
-            p { class: "curation-annotate-empty", role: "status",
-                "No subtasks yet. Run Break down to preview them." }
+            p { class: "curation-review-note", role: "status", "No subtasks yet." }
         };
     }
     rsx! {
@@ -288,8 +287,7 @@ pub(super) fn SubtaskIndex(
             on_filter: move |text| wanted.set(text),
         }
         if entries.is_empty() {
-            p { class: "curation-annotate-empty", role: "status",
-                "No subtask says “{filter}”." }
+            p { class: "curation-review-note", role: "status", "No subtask says “{filter}”." }
         }
         ol { class: "curation-entries curation-entries-grouped", "aria-label": "Annotated subtasks by episode",
             // The key sits on the loop's own item, so an episode that lands
@@ -527,7 +525,7 @@ mod tests {
     /// the only thing that can move it is the ask itself. Taking the ask
     /// registered no subscription, so the player heard it once at mount and
     /// the transport sat at 0:00 through four clicks. Each ask carries the
-    /// row's own start, where playing picks up.
+    /// row's own span, which plays to its end.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn every_row_of_the_episode_already_open_moves_the_playhead() {
@@ -549,7 +547,7 @@ mod tests {
             // Once for the view to read the ask, once for the effect it wakes.
             dom.render_immediate_to_vec();
             dom.render_immediate_to_vec();
-            expected.push(PlayRequest::after(expected.last().copied(), start));
+            expected.push(PlayRequest::span((start, end)).after(expected.last().copied()));
         }
         assert_eq!(*harness.asked.borrow(), expected);
 

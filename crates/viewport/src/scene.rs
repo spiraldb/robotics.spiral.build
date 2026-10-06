@@ -67,7 +67,9 @@ struct EntityState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EntityRendering {
     Solid,
-    Wireframe,
+    /// A camera's view: the edges of the pyramid its picture sees, filling
+    /// the shape's box with the apex at the box's -Z face.
+    Frustum,
 }
 
 impl Entity {
@@ -119,8 +121,8 @@ impl Entity {
         true
     }
 
-    pub(crate) fn is_wireframe(&self) -> bool {
-        self.shape.rendering == EntityRendering::Wireframe
+    pub(crate) fn is_frustum(&self) -> bool {
+        self.shape.rendering == EntityRendering::Frustum
     }
 }
 
@@ -143,12 +145,15 @@ impl EntityShape {
         }
     }
 
-    pub(crate) fn wireframe(geometry: Geometry, transform: Mat4, color: [f32; 4]) -> Self {
+    /// A camera's view pyramid, `size` across its picture at `size.z` deep,
+    /// placed so `transform` centres the pyramid's box: its apex, the camera,
+    /// sits on the box's -Z face. The box is also what picking tests.
+    pub(crate) fn frustum(size: Vec3, transform: Mat4, color: [f32; 4]) -> Self {
         Self {
-            geometry,
+            geometry: Geometry::Box { size },
             transform,
             color,
-            rendering: EntityRendering::Wireframe,
+            rendering: EntityRendering::Frustum,
         }
     }
 }

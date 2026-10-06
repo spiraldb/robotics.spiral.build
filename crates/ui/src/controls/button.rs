@@ -134,8 +134,12 @@ pub struct ButtonProps {
     size: ButtonSize,
     #[props(extends = GlobalAttributes, extends = button)]
     attributes: Vec<Attribute>,
+    /// A handler that does nothing by default rather than an `Option`:
+    /// Dioxus 0.7 frees an optional handler that a re-render adds to a
+    /// mounted component (one diffed in place from a button without one),
+    /// and the next render after that panics on it.
     #[props(default)]
-    onclick: Option<EventHandler<MouseEvent>>,
+    onclick: EventHandler<MouseEvent>,
     #[props(default)]
     auxiliary_handlers: ButtonAuxiliaryHandlers,
 }
@@ -171,7 +175,7 @@ pub fn Button(props: ButtonProps) -> Element {
             r#type: "button",
             class: class,
             "data-action": props.purpose.as_str(),
-            onclick: move |event| if let Some(handler) = onclick { handler.call(event) },
+            onclick: move |event| onclick.call(event),
             onfocus: move |event| if let Some(handler) = handlers.onfocus { handler.call(event) },
             onblur: move |event| if let Some(handler) = handlers.onblur { handler.call(event) },
             ..attributes,
@@ -313,8 +317,9 @@ pub struct ModeButtonProps {
     purpose: ActionPurpose,
     #[props(extends = GlobalAttributes, extends = button)]
     attributes: Vec<Attribute>,
+    /// Not an `Option`, for the reason [`ButtonProps`]' is not.
     #[props(default)]
-    onclick: Option<EventHandler<MouseEvent>>,
+    onclick: EventHandler<MouseEvent>,
 }
 
 /// A mutually exclusive mode control with native radio semantics.
@@ -331,7 +336,7 @@ pub fn ModeButton(props: ModeButtonProps) -> Element {
             role: "radio",
             "aria-checked": props.checked,
             tabindex: if props.checked { "0" } else { "-1" },
-            onclick: move |event| if let Some(handler) = onclick { handler.call(event) },
+            onclick: move |event| onclick.call(event),
             ..attributes,
             {props.children}
         }
@@ -374,7 +379,46 @@ pub fn Toggle(props: ToggleProps) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionPurpose, ButtonSize, ButtonVariant};
+    use super::{ActionPurpose, Button, ButtonSize, ButtonVariant};
+    use dioxus::prelude::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A form's Search button that becomes Stop while it runs, as one
+    /// button diffed in place.
+    #[derive(Clone, Default)]
+    struct SearchOrStop {
+        running: Rc<RefCell<Option<Signal<u32>>>>,
+    }
+
+    impl SearchOrStop {
+        fn render(self) -> Element {
+            let running = use_signal(|| 0_u32);
+            *self.running.borrow_mut() = Some(running);
+            rsx! {
+                if running() > 0 {
+                    Button { purpose: ActionPurpose::Stop, onclick: move |_| {}, "Stop" }
+                } else {
+                    Button { purpose: ActionPurpose::Start, r#type: "submit", "Search" }
+                }
+            }
+        }
+    }
+
+    /// The regression for the panic that froze Find similar: a button that
+    /// gained a click handler on one render lost it to Dioxus, and the next
+    /// render panicked on the freed handler.
+    #[test]
+    fn a_button_that_gains_a_handler_keeps_it_through_later_renders() {
+        let harness = SearchOrStop::default();
+        let mut dom = VirtualDom::new_with_props(SearchOrStop::render, harness.clone());
+        dom.rebuild_in_place();
+        let mut running = harness.running.borrow().expect("the harness rendered");
+        for step in 1..=3 {
+            dom.in_scope(ScopeId::ROOT, || running.set(step));
+            dom.render_immediate_to_vec();
+        }
+    }
 
     #[test]
     fn action_vocabulary_is_stable() {

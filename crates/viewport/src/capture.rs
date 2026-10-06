@@ -154,13 +154,14 @@ impl Picture {
             .map_err(|error| failed(error.to_string()))?;
 
         let row = (self.width * Self::BYTES_PER_PIXEL) as usize;
-        let pixels = slice
+        let mapped = slice
             .get_mapped_range()
-            .map_err(|error| failed(error.to_string()))?
-            .chunks(padded_row as usize)
-            .flat_map(|padded| &padded[..row])
-            .copied()
-            .collect();
+            .map_err(|error| failed(error.to_string()))?;
+        let mut pixels = Vec::with_capacity(row * self.height as usize);
+        for padded in mapped.chunks(padded_row as usize) {
+            pixels.extend_from_slice(&padded[..row]);
+        }
+        drop(mapped);
         self.readback.unmap();
         Ok(pixels)
     }

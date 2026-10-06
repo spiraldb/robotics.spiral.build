@@ -415,6 +415,10 @@ pub(super) fn SubtaskEntry(
         li {
             class: "curation-entry-item",
             "data-findable": on_find_similar.is_some().then_some("true"),
+            // A row that names its episode has two facts, which wrap to a
+            // second line in a narrow index, so every row of its index is
+            // drawn that tall.
+            "data-names-episode": episode.is_some().then_some("true"),
             onmounted: move |event: Event<MountedData>| {
                 item.set(event.data().downcast::<web_sys::Element>().cloned());
             },
@@ -499,9 +503,9 @@ impl SliceFace {
             thumbnail: ThumbnailMoment::of_stretch(episode, span),
         }
     }
-    /// Replace the facts line's words, keeping its drawing.
-    pub(super) fn saying(mut self, facts: Vec<String>) -> Self {
-        self.face = self.face.saying(facts);
+    /// The episode's length under the measures the list is about.
+    pub(super) fn length_last(mut self) -> Self {
+        self.face = self.face.length_last();
         self
     }
     pub(super) fn measured(mut self, reading: String, meaning: impl Into<String>) -> Self {
@@ -799,20 +803,28 @@ impl NodeReach {
 }
 
 /// How many episodes reach a node, beside the way to let the rest through.
+/// With a way the count is its value alone ("0 of 100 episodes · Break down
+/// the rest"), so the bar keeps one line beside a query; the sentence it
+/// stands for is its title.
 #[component]
 pub(super) fn ReachNote(controller: CurationController, reach: NodeReach) -> Element {
+    let count = format!("{} of {}", reach.reached, Counted::episodes(reach.sampled));
+    let sentence = format!("{count} reach this node");
     rsx! {
         p { class: "curation-node-bar-reach",
-            "{reach.reached} of {Counted::episodes(reach.sampled)} reach this node"
-            if let Some((node, verb)) = reach.unfinished.clone() {
-                Button {
-                    purpose: ActionPurpose::Navigate,
-                    variant: ButtonVariant::Link,
-                    size: ButtonSize::Compact,
-                    title: "Open the measurement the other episodes are waiting on",
-                    onclick: move |_| controller.select_node(Some(node.clone())),
-                    "{verb}"
-                }
+            match reach.unfinished.clone() {
+                Some((node, verb)) => rsx! {
+                    span { title: "{sentence}", "{count}" }
+                    Button {
+                        purpose: ActionPurpose::Navigate,
+                        variant: ButtonVariant::Link,
+                        size: ButtonSize::Compact,
+                        title: "Open the measurement the other episodes are waiting on",
+                        onclick: move |_| controller.select_node(Some(node.clone())),
+                        "{verb}"
+                    }
+                },
+                None => rsx! { "{sentence}" },
             }
         }
     }

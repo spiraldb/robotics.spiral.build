@@ -1,10 +1,14 @@
 //! Inspect a pinned MCAP source before publishing a dataset.
 use super::DatasetClient;
+use crate::format::ByteCountPresentation as _;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
     HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetSource,
 };
-use spiral_robotics_ui::{Field, Notice, NoticeTone, TextInput};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonSize, ButtonVariant, Fact, FactList, Field, Notice, NoticeTone,
+    TextInput,
+};
 
 #[derive(Clone, Copy, PartialEq)]
 struct ImportDraft {
@@ -48,28 +52,38 @@ pub(super) fn ImportDataset(on_done: EventHandler<String>) -> Element {
     let mut problem = use_signal(|| None::<String>);
     let mut receipt = use_signal(|| None::<ImportReceipt>);
     rsx! { section { class: "data-import-pane", "aria-label": "Import MCAP dataset",
-        header { h2 { "Import MCAP dataset" } p { "Create a Spiral dataset from MCAP files in a public Hugging Face repository." } }
+        // What is accepted is the repository field's to say: the title names
+        // the files, the label where they come from.
+        header { h2 { "Import MCAP dataset" } }
         if let Some(result) = receipt() {
             p { role: "status", "{result.message}" }
-            button { class: "data-import-action", onclick: move |_| { receipt.set(None); inspection.set(None); draft.name.set(String::new()); on_done.call(result.dataset.clone()); }, "Open dataset" }
+            footer {
+                Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
+                    onclick: move |_| { receipt.set(None); inspection.set(None); draft.name.set(String::new()); on_done.call(result.dataset.clone()); }, "Open dataset" }
+            }
         } else {
             fieldset { disabled: busy(),
                 Field { label: "Dataset name", TextInput { value: (draft.name)(), placeholder: "bench-recordings", oninput: move |value| { draft.name.set(value); inspection.set(None); } } }
-                Field { label: "Hugging Face repository", TextInput { value: (draft.repository)(), placeholder: "owner/repository", oninput: move |value| { draft.repository.set(value); inspection.set(None); } } }
+                Field { label: "Public Hugging Face repository", TextInput { value: (draft.repository)(), placeholder: "owner/repository", oninput: move |value| { draft.repository.set(value); inspection.set(None); } } }
                 Field { label: "Revision", TextInput { value: (draft.revision)(), oninput: move |value| { draft.revision.set(value); inspection.set(None); } } }
             }
             if let Some(error) = problem() { Notice { tone: NoticeTone::Danger, class: "data-import-error", "{error}" } }
+            // What the source holds and what importing it creates, as
+            // readings under the fields that found them.
             if let Some(detail) = inspection() {
-                div { class: "data-import-review",
-                    strong { "{detail.files().len()} MCAP files · {detail.total_bytes()} bytes" }
-                    p { "Revision: {detail.resolved_revision()}" }
-                    p { "Spiral will create:" }
-                    ul { for name in detail.planned_relations() { li { code { "{name}" } } } }
-                    for warning in detail.warnings() { p { "{warning}" } }
+                FactList { class: "data-import-review", mono: true,
+                    Fact { label: "MCAP files", "{detail.files().len()}" }
+                    Fact { label: "Size", "{detail.total_bytes().byte_label()}" }
+                    Fact { label: "Revision", "{detail.resolved_revision()}" }
+                    Fact { label: "Creates",
+                        for name in detail.planned_relations() { span { class: "data-import-relation", "{name}" } }
+                    }
                 }
+                for warning in detail.warnings() { Notice { tone: NoticeTone::Caution, class: "data-import-warning", "{warning}" } }
             }
             footer {
-                button { class: "data-import-action", disabled: busy() || draft.name.read().trim().is_empty() || draft.repository.read().trim().is_empty(), onclick: move |_| {
+                Button { purpose: ActionPurpose::Import, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
+                    disabled: busy() || draft.name.read().trim().is_empty() || draft.repository.read().trim().is_empty(), onclick: move |_| {
                     if let Some(detail) = inspection() {
                         let source = HuggingFaceDatasetSource::new(detail.dataset_id(), detail.repository()).with_revision(detail.resolved_revision());
                         busy.set(true); problem.set(None);
@@ -105,7 +119,8 @@ pub(super) fn ImportDataset(on_done: EventHandler<String>) -> Element {
                         });
                     }
                 }, if busy() { "Working…" } else if inspection.read().is_some() { "Import dataset" } else { "Inspect source" } }
-                button { class: "data-text-action", disabled: busy(), onclick: move |_| panel.request_close(), "Close" }
+                Button { purpose: ActionPurpose::Close, variant: ButtonVariant::Link, size: ButtonSize::Compact,
+                    disabled: busy(), onclick: move |_| panel.request_close(), "Close" }
             }
         }
     } }

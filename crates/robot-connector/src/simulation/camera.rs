@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use image::ExtendedColorType;
+use image::RgbaImage;
 use image::codecs::jpeg::JpegEncoder;
 use spiral_robotics_common::robots::{CameraStatus, CameraStreamFormat};
 use spiral_robotics_hardware::DEFAULT_JPEG_QUALITY;
@@ -67,7 +67,7 @@ impl SimulatedCamera {
                 .capture(&frame, &self.robot, &self.role)
                 .map_err(|error| error.to_string())?;
             sequence += 1;
-            publish(Self::encode(&pixels)?, sequence);
+            publish(Self::encode(pixels)?, sequence);
 
             // An absolute schedule, like the control loop's: a late frame is
             // not followed by a burst of catch-up frames.
@@ -80,17 +80,13 @@ impl SimulatedCamera {
         Ok(())
     }
 
-    fn encode(rgba: &[u8]) -> Result<Vec<u8>, String> {
-        let rgb = rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|pixel| &pixel[..3])
-            .copied()
-            .collect::<Vec<_>>();
+    /// The encoder drops alpha itself, so the picture goes in as drawn.
+    fn encode(rgba: Vec<u8>) -> Result<Vec<u8>, String> {
+        let picture = RgbaImage::from_raw(WIDTH, HEIGHT, rgba)
+            .ok_or("a camera picture has the wrong size")?;
         let mut jpeg = Vec::new();
         JpegEncoder::new_with_quality(&mut jpeg, DEFAULT_JPEG_QUALITY)
-            .encode(&rgb, WIDTH, HEIGHT, ExtendedColorType::Rgb8)
+            .encode_image(&picture)
             .map_err(|error| error.to_string())?;
         Ok(jpeg)
     }

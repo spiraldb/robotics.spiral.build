@@ -34,23 +34,22 @@ impl DatasetFacts {
             SqlLiteral::text(&dataset.sql_name())
         )
     }
-    fn episodes_label(&self) -> String {
-        self.episodes
-            .map_or_else(|| "—".into(), GroupedCountPresentation::grouped_label)
+    fn episodes_label(&self) -> Option<String> {
+        self.episodes.map(GroupedCountPresentation::grouped_label)
     }
-    fn recorded_label(&self) -> String {
-        self.duration_ns.map_or_else(
-            || "—".into(),
-            |duration| (duration as f64 / 1e9).long_duration_label(),
-        )
+    fn recorded_label(&self) -> Option<String> {
+        self.duration_ns
+            .map(|duration| (duration as f64 / 1e9).long_duration_label())
     }
     fn average_seconds(&self) -> Option<f64> {
         let (total, episodes) = (self.duration_ns?, self.episodes.filter(|count| *count > 0)?);
         Some(total as f64 / episodes as f64 / 1e9)
     }
-    fn size_label(&self) -> String {
-        self.bytes
-            .map_or_else(|| "—".into(), ByteCountPresentation::byte_label)
+    fn average_label(&self) -> Option<String> {
+        self.average_seconds().map(ClockPresentation::clock_label)
+    }
+    fn size_label(&self) -> Option<String> {
+        self.bytes.map(ByteCountPresentation::byte_label)
     }
     /// The days the recordings span, when their clock is a calendar's; a
     /// simulator counting from zero has no span worth a cell.
@@ -145,11 +144,14 @@ pub(in crate::activities) fn DatasetOverview(
                 }
                 match &facts {
                     Some(Err(error)) => rsx! { p { class: "data-overview-alert", role: "alert", "{error}" } },
-                    Some(Ok(facts)) => rsx! {
-                        FactList { class: "data-overview-facts", layout: FactLayout::Strip,
-                            Fact { label: "Episodes", "{facts.episodes_label()}" }
-                            Fact { label: "Recorded", "{facts.recorded_label()}" }
-                            Fact { label: "Size", "{facts.size_label()}" }
+                    Some(Ok(facts)) => {
+                        let shown = |label: Option<String>| label.unwrap_or_else(|| "—".to_owned());
+                        rsx! {
+                            FactList { class: "data-overview-facts", layout: FactLayout::Strip,
+                                Fact { label: "Episodes", {shown(facts.episodes_label())} }
+                                Fact { label: "Recorded", {shown(facts.recorded_label())} }
+                                Fact { label: "Size", {shown(facts.size_label())} }
+                            }
                         }
                     },
                     None => rsx! { p { class: "data-overview-alert", role: "status", "Counting recordings…" } },
@@ -175,12 +177,10 @@ pub(super) fn DatasetsAtAGlance(
         section { class: "data-glance", "aria-label": "Datasets",
             header { class: "data-glance-head",
                 h2 { "Datasets" }
-                p {
-                    if datasets.is_empty() {
-                        "A dataset is a folder of MCAP recordings; each file is one episode."
-                    } else {
-                        "Choose a dataset to see its episodes and streams."
-                    }
+                // An empty project says once what a dataset is; a listed one
+                // shows it.
+                if datasets.is_empty() {
+                    p { "A dataset is a folder of MCAP recordings; each file is one episode." }
                 }
             }
             if datasets.is_empty() {
@@ -250,8 +250,8 @@ fn DatasetRow(
         .clone()
         .flatten()
         .or_else(|| memory.facts(&dataset));
-    let cell =
-        |read: fn(&DatasetFacts) -> String| facts.as_ref().map_or_else(|| "…".to_owned(), read);
+    let read = facts.is_some();
+    let cell = |label: fn(&DatasetFacts) -> Option<String>| facts.as_ref().and_then(label);
     let chosen = dataset.clone();
     let open = dataset.clone();
     rsx! {
@@ -263,16 +263,24 @@ fn DatasetRow(
                     span { "{dataset.display_name()}" }
                 }
             }
-            td { class: "is-number", {cell(DatasetFacts::episodes_label)} }
-            td { class: "is-number", {cell(DatasetFacts::recorded_label)} }
-            td { class: "is-number",
-                {facts.as_ref().map_or_else(|| "…".to_owned(), |facts| facts.average_seconds().map_or_else(|| "—".into(), ClockPresentation::clock_label))}
-            }
-            td { class: "is-number", {cell(DatasetFacts::size_label)} }
-            td { class: "data-glance-span",
-                {facts.as_ref().map_or_else(|| "…".to_owned(), |facts| facts.span_label().unwrap_or_else(|| "—".into()))}
-            }
+            LedgerCell { class: "is-number", reading: cell(DatasetFacts::episodes_label), read }
+            LedgerCell { class: "is-number", reading: cell(DatasetFacts::recorded_label), read }
+            LedgerCell { class: "is-number", reading: cell(DatasetFacts::average_label), read }
+            LedgerCell { class: "is-number", reading: cell(DatasetFacts::size_label), read }
+            LedgerCell { class: "data-glance-span", reading: cell(DatasetFacts::span_label), read }
         }
+    }
+}
+
+/// One reading of a dataset's ledger row. Until the totals are `read` it is
+/// an ellipsis, and a total the dataset has none of — a span without a wall
+/// clock — is a dash; both rest in faint ink so the values stand out.
+#[component]
+fn LedgerCell(class: &'static str, reading: Option<String>, read: bool) -> Element {
+    let quiet = reading.is_none();
+    let shown = reading.unwrap_or_else(|| if read { "—" } else { "…" }.to_owned());
+    rsx! {
+        td { class, "data-quiet": quiet.then_some("true"), "{shown}" }
     }
 }
 
@@ -286,9 +294,10 @@ mod tests {
             "first_start": 1_743_701_335_734_982_912_u64, "last_end": 1_776_208_497_899_157_760_u64
         }))
         .unwrap();
-        assert_eq!(facts.episodes_label(), "40");
-        assert_eq!(facts.recorded_label(), "59 min 10 s");
-        assert_eq!(facts.size_label(), "3.3 GiB");
+        assert_eq!(facts.episodes_label().as_deref(), Some("40"));
+        assert_eq!(facts.recorded_label().as_deref(), Some("59 min 10 s"));
+        assert_eq!(facts.size_label().as_deref(), Some("3.3 GiB"));
+        assert_eq!(facts.average_label().as_deref(), Some("1:28.7"));
         assert_eq!(
             facts.span_label().as_deref(),
             Some("2025-04-03 → 2026-04-14")
@@ -297,6 +306,7 @@ mod tests {
         let sparse: DatasetFacts =
             serde_json::from_value(serde_json::json!({"episodes": 0})).unwrap();
         assert_eq!(sparse.span_label(), None);
+        assert_eq!(sparse.average_label(), None);
         let simulated: DatasetFacts =
             serde_json::from_value(serde_json::json!({"first_start": 5, "last_end": 9})).unwrap();
         assert_eq!(simulated.span_label(), None);

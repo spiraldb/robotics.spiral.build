@@ -145,12 +145,9 @@ fn RobotEntry(
                         strong { "{robot.id()}" }
                         span { "{role}" }
                     }
+                    // The state is the row's one word about health: faint while
+                    // the arm is fine, on its caution wash when it needs work.
                     span { class: if ready && robot.connection().error().is_none() { "device-state" } else { "device-state device-state-needed" }, "{state}" }
-                    span {
-                        class: "device-connection-dot",
-                        style: if robot.connection().connected() { "background: var(--tone-good)" } else { "background: var(--tone-line)" },
-                        title: if robot.connection().connected() { "Connected" } else { "Not connected" },
-                    }
                 }
             }
             if open() {

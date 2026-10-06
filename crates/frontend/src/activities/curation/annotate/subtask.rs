@@ -71,6 +71,9 @@ pub(in crate::activities::curation) struct SubtaskRow {
     start_time: f64,
     end_time: f64,
     description: String,
+    /// Its place in the Break down answer it came from, where each stored
+    /// judgment of it is read; known once a preview has read it.
+    index: Option<u64>,
     /// In path order, so the last of a kind is the nearest node's.
     judgments: Vec<Judgment>,
 }
@@ -111,6 +114,7 @@ impl SubtaskRow {
             start_time,
             end_time,
             description: description.into().trim().to_owned(),
+            index: None,
             judgments: Vec::new(),
         };
         if !start_time.is_finite()
@@ -126,6 +130,11 @@ impl SubtaskRow {
             return Err("A subtask description is empty.".into());
         }
         Ok(row)
+    }
+    /// The same subtask, at `index` in the Break down answer it came from.
+    pub(in crate::activities::curation) fn placed_at(mut self, index: u64) -> Self {
+        self.index = Some(index);
+        self
     }
     /// The same subtask with one more judgment, written to `column`.
     pub(in crate::activities::curation) fn judged(
@@ -202,8 +211,8 @@ impl SubtaskRow {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SubtaskColumn {
     Description,
-    /// The subtask's place in its Break down answer. Only a stored judgment
-    /// reads it, and a preview judges inline, so a preview hands on NULL.
+    /// The subtask's place in its Break down answer, where every stored
+    /// judgment of it is read.
     Index,
     Similarity,
     Category,
@@ -284,7 +293,10 @@ impl SubtaskColumns {
         for (column, kind) in &self.0 {
             let cell = row.get(column).unwrap_or(&Value::Null);
             described = Some(match (kind, described) {
-                (SubtaskColumn::Index, Some(row)) => row,
+                (SubtaskColumn::Index, Some(row)) => row.placed_at(
+                    cell.as_u64()
+                        .ok_or("A subtask of the preview has no place in its Break down.")?,
+                ),
                 (SubtaskColumn::Description, None) => SubtaskRow::new(
                     episode.clone(),
                     (start, end),
@@ -360,8 +372,8 @@ impl SubtaskColumns {
         columns
     }
 
-    /// One subtask as a `VALUES` row, its episode spelled as text: a judgment
-    /// reads the id through and never compares it with the dataset's.
+    /// One subtask as a `VALUES` row of the episode bound as `$1`, the id its
+    /// stored judgments are joined to.
     pub(in crate::activities::curation) fn values(
         &self,
         row: &SubtaskRow,
@@ -381,14 +393,18 @@ impl SubtaskColumns {
                 .ok_or_else(|| format!("A judgment of {value} is not between 0 and 1."))
         };
         let mut values = vec![
-            SqlLiteral::text(row.episode.as_str()),
+            "$1".to_owned(),
             nanos(row.start_time),
             nanos(row.end_time),
         ];
         for (column, kind) in &self.0 {
             match (kind, row.judgment(column)) {
                 (SubtaskColumn::Description, _) => values.push(SqlLiteral::text(&row.description)),
-                (SubtaskColumn::Index, _) => values.push("CAST(NULL AS BIGINT)".to_owned()),
+                (SubtaskColumn::Index, _) => values.push(format!(
+                    "CAST({} AS BIGINT)",
+                    row.index
+                        .ok_or("A subtask has no place in its Break down to hand on.")?
+                )),
                 (SubtaskColumn::Similarity, Some(JudgmentValue::Similarity(similarity))) => {
                     values.push(match similarity {
                         Some(similarity) => unit(*similarity)?,
@@ -461,9 +477,9 @@ mod tests {
             .read(
                 &answer(vec![
                     json!({"episode_id": id, "start_ns": start + 4_000_000_000_i64, "end_ns": start + 9_000_000_000_i64,
-                           "subtask": "fold the skirt", "subtask_category": {"category": "fold", "probability": 0.8}, "similarity": 0.9}),
+                           "subtask": "fold the skirt", "subtask_index": 1, "subtask_category": {"category": "fold", "probability": 0.8}, "similarity": 0.9}),
                     json!({"episode_id": id, "start_ns": start, "end_ns": start + 4_000_000_000_i64,
-                           "subtask": " grasp the hem ", "subtask_category": null, "similarity": null}),
+                           "subtask": " grasp the hem ", "subtask_index": 0, "subtask_category": null, "similarity": null}),
                 ]),
                 &sample(),
             )
@@ -473,6 +489,7 @@ mod tests {
         assert_eq!(rows[0].category(), None, "a row the model could not place");
         assert_eq!(rows[1].category(), Some("fold"));
         assert_eq!(rows[1].similarity(), Some(0.9));
+        assert_eq!((rows[0].index, rows[1].index), (Some(0), Some(1)));
         assert!(
             columns()
                 .read(&answer(vec![json!({"episode_id": EpisodeId::fixture(2).to_string(), "start_ns": 0, "end_ns": 1, "subtask": "x"})]), &sample())
@@ -485,17 +502,17 @@ mod tests {
     fn a_subtask_is_handed_on_as_literals_and_put_back_together() {
         let row = SubtaskRow::new(EpisodeId::fixture(1), (0.5, 4.0), "fold the towel's edge")
             .unwrap()
+            .placed_at(3)
             .judged(
                 "subtask_category",
                 JudgmentValue::Category(Some(CategoryPlacement::new("fold", 0.75).unwrap())),
             )
             .judged("similarity", JudgmentValue::Similarity(None));
+        // Its episode is the one the statement is bound to, and its place
+        // is where its stored judgments are read.
         assert_eq!(
             columns().values(&row, 1_000_000_000).unwrap(),
-            format!(
-                "('{}', CAST(1500000000 AS BIGINT), CAST(5000000000 AS BIGINT), 'fold the towel''s edge', CAST(NULL AS BIGINT), 'fold', CAST(0.75 AS DOUBLE), CAST(NULL AS DOUBLE))",
-                EpisodeId::fixture(1)
-            )
+            "($1, CAST(1500000000 AS BIGINT), CAST(5000000000 AS BIGINT), 'fold the towel''s edge', CAST(3 AS BIGINT), 'fold', CAST(0.75 AS DOUBLE), CAST(NULL AS DOUBLE))"
         );
         assert_eq!(
             columns().value_names(),
@@ -514,8 +531,15 @@ mod tests {
             columns().rebuilt()[5],
             "CASE WHEN subtask_category_category IS NULL THEN NULL ELSE STRUCT_PACK(category := subtask_category_category, probability := subtask_category_probability) END AS subtask_category"
         );
-        // A subtask read before a judgment was made has none to hand on.
+        // A subtask read before a judgment was made has none to hand on, and
+        // one never read from a preview has no place to.
         let described = SubtaskRow::new(EpisodeId::fixture(1), (0.0, 1.0), "grasp").unwrap();
-        assert!(columns().values(&described, 0).is_err());
+        assert!(columns().values(&described.clone().placed_at(0), 0).is_err());
+        assert!(
+            columns()
+                .values(&described, 0)
+                .unwrap_err()
+                .contains("no place")
+        );
     }
 }

@@ -1,7 +1,6 @@
 //! Spikes: a measured joint that moves faster than 3 rad/s into one sample
 //! and just as fast back out of it — one bad reading rather than motion.
-use super::recording_rate::Plural;
-use super::report_view::{CheckRow, Evidence, EvidenceChips, Verdict};
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::stream_reads::{CheckedStreams, ValueColumns};
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -108,11 +107,12 @@ impl JointSpikes {
             .collect::<std::collections::BTreeSet<_>>()
             .len();
         let speed = Self::SPEED;
+        let jump = format!("{speed:.0} rad/s");
         if spikes == 0 {
             return CheckRow::new(
                 "Spikes",
                 Verdict::Clean,
-                format!("No joint jumps past {speed:.0} rad/s and straight back"),
+                Finding::of_count(0, "spike", "past").and(jump, "and straight back"),
             );
         }
         let arms = self.arms.clone();
@@ -131,11 +131,9 @@ impl JointSpikes {
         CheckRow::new(
             "Spikes",
             Verdict::Flagged,
-            format!(
-                "{} in {}: a joint past {speed:.0} rad/s and straight back",
-                Plural::of(spikes as usize, "spike"),
-                Plural::of(episodes, "episode")
-            ),
+            Finding::of_count(spikes as usize, "spike", "past")
+                .and(jump, "and straight back in")
+                .and_count(episodes, "episode", ""),
         )
         .flagging(flagged)
         .with_details(rsx! {

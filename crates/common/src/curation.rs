@@ -11,12 +11,13 @@
 //! the dataset's stored model answers (`answers`); the backend fills the
 //! answers the statement reads and then publishes it under a plain name at
 //! the catalog root, as one polled run (`fill`). A node's preview queries run
-//! on the backend as one polled run too (`preview`).
+//! on the backend as one polled run too (`preview`), and a curation opened
+//! asks which episodes each of its columns already holds, to read them back.
 mod answers;
 mod fill;
 mod preview;
 
-pub use answers::{AnswerColumn, AnswerTable};
+pub use answers::{AnswerColumn, AnswerTable, FilledEpisodesRequest};
 pub use fill::{
     AnswerSource, ColumnFill, EpisodeFailure, FillEpisodes, FillRequest, FillState, FillStatus,
     FillStep,

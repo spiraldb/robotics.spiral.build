@@ -367,6 +367,43 @@ fn removing_a_node_takes_its_subtree_with_it() {
 }
 
 #[test]
+fn the_measures_below_a_node_read_it_through_any_select_between() {
+    let mut payload = CurationGraph::new(None);
+    let select = payload
+        .add_child(DATASET_NODE_ID, CurationNodeKind::Select)
+        .unwrap();
+    let annotate = payload
+        .add_child(
+            &select,
+            CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
+        )
+        .unwrap();
+    let score = payload
+        .add_child(
+            DATASET_NODE_ID,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        )
+        .unwrap();
+    let search = payload
+        .add_child(
+            &annotate,
+            CurationNodeKind::FindSimilarSubtasks(SubtaskSearch::default()),
+        )
+        .unwrap();
+    let ids = |node: &str| {
+        payload
+            .measures_below(node)
+            .into_iter()
+            .map(|below| below.id().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(DATASET_NODE_ID), [annotate.clone(), score]);
+    assert_eq!(ids(&annotate), std::slice::from_ref(&search));
+    assert!(ids(&select).is_empty());
+    assert!(ids(&search).is_empty());
+}
+
+#[test]
 fn encoding_round_trips_and_rejects_other_versions_and_broken_graphs() {
     let (mut payload, annotate) = annotated_graph();
     if let CurationNodeKind::BreakDownSubtasks(annotation) =

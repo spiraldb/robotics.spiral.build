@@ -2,7 +2,7 @@
 //! that log a stream at another rate than the dataset's other episodes do.
 //! The same read says when each stream's first and last message were
 //! logged, which is how the clock check tells which streams share a clock.
-use super::report_view::{CheckRow, Evidence, EvidenceChips, StreamName, Verdict};
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, StreamName, Verdict};
 use super::stream_reads::CheckedStreams;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -141,21 +141,15 @@ impl RecordingRate {
             .iter()
             .filter(|stream| !stream.departures().is_empty())
             .count();
-        let (verdict, summary) = match departing.len() {
+        let (verdict, finding) = match departing.len() {
             0 => (
                 Verdict::Clean,
-                format!(
-                    "Every episode logs each of {} streams at one rate",
-                    self.streams.len()
-                ),
+                Finding::of_count(self.streams.len(), "stream", "at one rate in every episode"),
             ),
             episodes => (
                 Verdict::Flagged,
-                format!(
-                    "{} log {} at another rate than the rest",
-                    Plural::of(episodes, "episode"),
-                    Plural::of(streams, "stream")
-                ),
+                Finding::of_count(streams, "stream", "at another rate in")
+                    .and_count(episodes, "episode", ""),
             ),
         };
         // The streams that depart lead the ledger, then cameras, then the rest.
@@ -167,7 +161,7 @@ impl RecordingRate {
             .flat_map(StreamRate::departures)
             .map(|rate| Evidence::whole(rate.episode.clone(), format!("{:.1} Hz", rate.hz)))
             .collect::<Vec<_>>();
-        CheckRow::new("Recording rate", verdict, summary).flagging(flagged).with_details(rsx! {
+        CheckRow::new("Recording rate", verdict, finding).flagging(flagged).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "Stream rates",
                 thead { tr { th { "Stream" } th { class: "is-number", "Rate" } th { "Episodes at another rate" } } }
                 tbody {
@@ -232,19 +226,6 @@ impl Median {
     }
 }
 
-/// A count and the noun it counts, agreeing.
-pub(super) struct Plural;
-
-impl Plural {
-    pub(super) fn of(count: usize, noun: &str) -> String {
-        if count == 1 {
-            format!("1 {noun}")
-        } else {
-            format!("{count} {noun}s")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +272,5 @@ mod tests {
         };
         assert_eq!(timing.hz(), Some(30.0));
         assert_eq!(Median::of([3.0, 1.0, 2.0, 10.0]), Some(2.5));
-        assert_eq!(Plural::of(1, "episode"), "1 episode");
     }
 }

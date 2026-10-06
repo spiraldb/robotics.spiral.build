@@ -151,6 +151,11 @@ impl CameraPlacementAttachment {
 /// and no longer.
 const FRUSTUM_DEPTH: f32 = 0.28;
 
+/// Width over height of a drawn frustum's far rectangle. A mount states only
+/// its horizontal field of view, so the drawing takes the 4:3 picture most
+/// arm cameras send.
+const FRUSTUM_ASPECT: f32 = 4.0 / 3.0;
+
 /// One arm, ready to be turned into shapes.
 #[derive(Clone, Debug)]
 struct ArmPlacement {
@@ -671,20 +676,22 @@ impl RobotScene {
                 };
                 let key = entity_catalog.key_for(target);
                 let state = frame.state_for(entity_catalog.target(key));
-                let frustum_radius =
-                    (camera_mount.field_of_view_degrees.to_radians() * 0.5).tan() * FRUSTUM_DEPTH;
+                let width = 2.0
+                    * (camera_mount.field_of_view_degrees.to_radians() * 0.5).tan()
+                    * FRUSTUM_DEPTH;
 
                 scene.push(Entity::new(
                     key,
-                    EntityShape::wireframe(
-                        // A cone standing in for the volume the camera can see. Drawn
-                        // as lines, because what matters is where it points, and a
-                        // solid wedge would be an obstacle through the middle of the
-                        // bench rather than a note about coverage.
-                        Geometry::Cylinder {
-                            radius: frustum_radius.max(0.01),
-                            length: FRUSTUM_DEPTH,
-                        },
+                    EntityShape::frustum(
+                        // The pyramid the camera sees, drawn as its eight edges:
+                        // what matters is where it points, and a solid wedge
+                        // would be an obstacle through the middle of the bench
+                        // rather than a note about coverage.
+                        Vec3::new(
+                            width.max(0.01),
+                            (width / FRUSTUM_ASPECT).max(0.01),
+                            FRUSTUM_DEPTH,
+                        ),
                         base_transform
                             * camera_transform
                             * Mat4::from_translation(Vec3::new(0.0, 0.0, FRUSTUM_DEPTH * 0.5)),

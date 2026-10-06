@@ -24,8 +24,10 @@ use crate::components::icons::{
 /// A node's size, so the layout can place it before it mounts: the graph
 /// pane is a fifth of the window, two branches side by side have to stay
 /// readable in it, and a long name takes a second line rather than the card taking more width.
+/// The height holds the title, two lines of what the node holds, and the
+/// footer line an output's state sits on.
 const NODE_WIDTH: f64 = 192.0;
-const NODE_HEIGHT: f64 = 100.0;
+const NODE_HEIGHT: f64 = 92.0;
 /// How far under a card's bottom edge its popovers hang, clear of the +.
 const MENU_DROP: f64 = 18.0;
 
@@ -332,9 +334,10 @@ impl CardStop {
     }
 }
 
-/// The + that opens a node's child menu: a hairline cross, never a label.
+/// The + of every add in Curation: alone on a node's edge, where it opens
+/// the child menu, and before the words of Add condition.
 #[component]
-fn AddGlyph() -> Element {
+pub(in crate::activities::curation) fn AddGlyph() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M8 4.5v7M4.5 8h7" }
@@ -380,33 +383,6 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
                 "aria-current": ctx.node.selected.then_some("true"),
                 onclick: move |_| hand.select(activated.clone()),
             }
-            // An output wears its flag on the card's edge rather than in the
-            // heading, so the name keeps the heading's width and the flag
-            // never sits under the card's remove control.
-            match card.output() {
-                Some(OutputFlag::Unpublished) => rsx! {
-                    span {
-                        class: "curation-canvas-output",
-                        title: "One of this curation's outputs: publish it from its workspace",
-                        "Output"
-                    }
-                },
-                Some(OutputFlag::Published(published)) if published.is_current(hand.controller.saved_revision()) => rsx! {
-                    span {
-                        class: "curation-canvas-output",
-                        title: "Published as the catalog view {published.view()}",
-                        "Published"
-                    }
-                },
-                Some(OutputFlag::Published(published)) => rsx! {
-                    span {
-                        class: "curation-canvas-output is-stale",
-                        title: "The saved curation has changed since {published.view()} was published; publish it again from its workspace",
-                        "Out of date"
-                    }
-                },
-                None => rsx! {},
-            }
             div { class: "curation-canvas-heading",
                 span { class: "curation-canvas-mark", "aria-hidden": "true",
                     NodeGlyph { face: card.face() }
@@ -422,6 +398,33 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
                 }
             } else {
                 p { class: "curation-canvas-summary", "{card.summary()}" }
+            }
+            // An output's state ends the card's last line, inside its
+            // outline: clear of the title and of the trash in the corner
+            // above, and of the + centred under it.
+            match card.output() {
+                Some(OutputFlag::Unpublished) => rsx! {
+                    span {
+                        class: "curation-canvas-output",
+                        title: "One of this curation's outputs: publish it from the document bar",
+                        "Output"
+                    }
+                },
+                Some(OutputFlag::Published(published)) if published.is_current(hand.controller.saved_revision()) => rsx! {
+                    span {
+                        class: "curation-canvas-output is-published",
+                        title: "Published as the catalog view {published.view()}",
+                        "Published"
+                    }
+                },
+                Some(OutputFlag::Published(published)) => rsx! {
+                    span {
+                        class: "curation-canvas-output is-stale",
+                        title: "The saved curation has changed since {published.view()} was published; publish it again from the document bar",
+                        "Out of date"
+                    }
+                },
+                None => rsx! {},
             }
             if card.removable() {
                 Handle { id: "parent".to_owned(), kind: HandleKind::Target, position: Side::Top }

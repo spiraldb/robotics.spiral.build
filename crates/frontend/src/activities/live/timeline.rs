@@ -28,17 +28,13 @@ const TIMELINE_CHART_ID: &str = "studio-timeline-signal-chart";
 /// The semantic subject of the canonical Timeline.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TimelineSubject {
-    Empty { reason: String },
+    /// No take on the clock. The transport's own "No episode" and Record say
+    /// so; a resting Timeline adds no sentence of its own.
+    Empty,
     Recording(RecordingProgress),
 }
 
 impl TimelineSubject {
-    pub(super) fn empty(reason: impl Into<String>) -> Self {
-        Self::Empty {
-            reason: reason.into(),
-        }
-    }
-
     /// The take on the clock; its identity is stable across pause and resume.
     pub(super) fn episode_id(&self) -> Option<&str> {
         self.recording().map(RecordingProgress::episode)
@@ -57,15 +53,13 @@ impl TimelineSubject {
     pub(super) fn recording(&self) -> Option<&RecordingProgress> {
         match self {
             Self::Recording(progress) => Some(progress),
-            Self::Empty { .. } => None,
+            Self::Empty => None,
         }
     }
 
-    pub(super) fn problem(&self) -> Option<&str> {
-        match self {
-            Self::Empty { reason, .. } => Some(reason),
-            Self::Recording(progress) => progress.error(),
-        }
+    /// What went wrong with the take on the clock, if anything did.
+    fn problem(&self) -> Option<&str> {
+        self.recording().and_then(RecordingProgress::error)
     }
 
     /// Why the recorded frames cannot be previewed or scrubbed, if they cannot.
@@ -277,24 +271,11 @@ fn TimelineIdentity(subject: TimelineSubject) -> Element {
     }
 }
 
-/// Why this Timeline is empty, in trouble, or drawing nothing.
+/// Why this Timeline is in trouble or drawing nothing.
 #[component]
 fn TimelineNotice(transport: LiveTransport, source: SignalSource) -> Element {
-    let subject = transport.subject();
-    let empty_reason = match subject {
-        TimelineSubject::Empty { reason, .. } => Some(reason.clone()),
-        _ => None,
-    };
-    let problem = subject
-        .recording()
-        .and_then(|_| subject.problem())
-        .map(str::to_owned);
+    let problem = transport.subject().problem().map(str::to_owned);
     rsx! {
-        if let Some(reason) = empty_reason {
-            p { class: "m-0 border-b border-line bg-sunken px-2 py-1 text-[11px] text-ink-soft", role: "status",
-                "{reason}"
-            }
-        }
         if let Some(problem) = problem {
             p { class: "m-0 border-b border-line bg-danger-soft px-2 py-1 text-[11px] text-danger", role: "alert",
                 "{problem}"
@@ -424,11 +405,11 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn an_empty_timeline_has_nothing_to_preview() {
-        let subject = TimelineSubject::empty("Select a recording.");
+        let subject = TimelineSubject::Empty;
         assert!(subject.episode_id().is_none());
         assert!(subject.recorded_episode().is_none());
         assert!(subject.preview_blocker().is_some());
-        assert_eq!(subject.problem(), Some("Select a recording."));
+        assert_eq!(subject.problem(), None);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

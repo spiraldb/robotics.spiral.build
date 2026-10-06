@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AnswerSource {
     /// A statement over the episode bound as `$1`, answering `episode_id`
-    /// and `answer`: in one row, or as a list of one row per `position`.
+    /// and `answer` in one row.
     Statement { statement: String },
     /// The progress service's scores of the episode's video on `camera`,
     /// from the checkpoint `model`, as the service `revision` computes them.

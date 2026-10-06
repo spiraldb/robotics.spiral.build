@@ -4,11 +4,11 @@
 use crate::activities::settings::SettingsClient;
 use dioxus::dioxus_core::CapturedError;
 use dioxus::prelude::*;
-use spiral_robotics_common::settings::DataSettings;
+use spiral_robotics_common::settings::{ConnectionTest, DataSettings};
 use spiral_robotics_ui::{
     ActionPurpose, BlockingConfirmation, BrowserFocus, Button, ButtonVariant, ConfirmationCopy,
-    ConfirmationDismissal, ConfirmationResponse, Field, FileButton, FileInput, LinkButton,
-    TextInput,
+    ConfirmationDismissal, ConfirmationResponse, Fact, FactList, Field, FieldLayout, FileButton,
+    FileInput, LinkButton, TextInput,
 };
 
 use crate::client::robot_connector::RobotConnector;
@@ -25,6 +25,27 @@ enum SettingsSection {
     Robots,
     Training,
     Account,
+}
+
+/// A connection a section can test against its saved settings. Testing
+/// saves nothing; the footer's Save is the one way a draft is kept.
+#[derive(Clone, Copy)]
+enum ConnectionCheck {
+    SpiralProject,
+    TrainingRuntime,
+}
+
+impl ConnectionCheck {
+    async fn run(self) -> ConnectionTest {
+        let client = SettingsClient::current();
+        let result = match self {
+            Self::SpiralProject => client.test_spiral_connection().await,
+            Self::TrainingRuntime => client.test_training_runtime().await,
+        };
+        result.unwrap_or_else(|error| {
+            ConnectionTest::new(false, format!("{error} {}", error.recovery_guidance()))
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -44,7 +65,7 @@ struct SettingsDraftSignals {
 struct SettingsOperationSignals {
     saving: Signal<bool>,
     testing: Signal<bool>,
-    test_result: Signal<Option<spiral_robotics_common::settings::ConnectionTest>>,
+    test_result: Signal<Option<ConnectionTest>>,
     save_error: Signal<Option<crate::client::CommandError>>,
     project_transfer: ProjectTransferSignals,
 }
@@ -187,7 +208,7 @@ fn SettingsPanel(
         }
     }));
 
-    let mut save = move |connection_test: Option<SettingsSection>| {
+    let mut save = move || {
         if saving() || import_project.pending() || !settings_loaded {
             return;
         }
@@ -203,45 +224,34 @@ fn SettingsPanel(
                 Ok(_) => {
                     saved.set(Some(submitted));
                     on_saved();
-                    if let Some(connection_test) = connection_test {
-                        testing.set(true);
-                        test_result.set(None);
-                        let result = match connection_test {
-                            SettingsSection::Workspace => {
-                                SettingsClient::current().test_spiral_connection().await
-                            }
-                            SettingsSection::Training => {
-                                SettingsClient::current().test_training_runtime().await
-                            }
-                            SettingsSection::Robots | SettingsSection::Account => unreachable!(
-                                "only connection-backed settings sections can request a test"
-                            ),
-                        };
-                        match result {
-                            Ok(response) => test_result.set(Some(response)),
-                            Err(error) => test_result.set(Some(
-                                spiral_robotics_common::settings::ConnectionTest::new(
-                                    false,
-                                    format!("{error} {}", error.recovery_guidance()),
-                                ),
-                            )),
-                        }
-                        testing.set(false);
-                    } else {
-                        project.report_success_from(
-                            MessageSource::Settings,
-                            "Settings saved and applied.",
-                        );
-                    }
+                    project.report_success_from(
+                        MessageSource::Settings,
+                        "Settings saved and applied.",
+                    );
                 }
                 Err(error) => save_error.set(Some(error)),
             }
             saving.set(false);
         });
     };
+    let mut test_connection = move |check: ConnectionCheck| {
+        if testing() {
+            return;
+        }
+        testing.set(true);
+        test_result.set(None);
+        crate::client::project::ProjectClient::current().spawn(async move {
+            test_result.set(Some(check.run().await));
+            testing.set(false);
+        });
+    };
+    let test_disabled = saving() || testing() || import_project.pending();
+    // The runtime is tested where the backend reaches it, which is the saved
+    // endpoint; an edited one has to be saved before it can be tested.
+    let endpoint_unsaved = current().training() != base().training();
     let connection_result = test_result().map(|response| rsx! {
         p {
-            class: if response.connected() { "connection-test connection-test-ok" } else { "connection-test connection-test-failed" },
+            class: if response.connected() { "connection-test connection-test-ok settings-control-column" } else { "connection-test connection-test-failed settings-control-column" },
             role: "status",
             "{response.message()}"
         }
@@ -288,18 +298,18 @@ fn SettingsPanel(
                 div { class: "settings-content",
                     match section() {
                         SettingsSection::Robots => rsx! {
-                            ProviderHeading { title: "Robot setup", description: "The arms, cameras, and calibration on the robot connector this workspace drives. Everyone in the workspace uses its address." }
+                            SettingsHeading { title: "Robot setup" }
                             RobotConnectorSetup {}
                             if RobotConnector::current().reachable() {
                                 div { class: "robot-settings-panel", RobotPanel { project, telemetry, selection } }
                             }
                         },
                         SettingsSection::Account => rsx! {
-                            ProviderHeading { title: "Spiral account", description: "Who this browser reaches Spiral as. It sees the workspaces whose projects this account can open." }
+                            SettingsHeading { title: "Spiral account" }
                             super::account::SpiralAccountSection { disabled: saving() || import_project.pending() }
                         },
                         SettingsSection::Workspace if creating => rsx! {
-                            ProviderHeading { title: "New workspace", description: "A Spiral project under a name, with its own datasets, curations, robot connector, and training runtime. Everyone who can open the project sees it." }
+                            SettingsHeading { title: "New workspace" }
                             super::workspace::NewWorkspaceForm { cancellable: chosen }
                         },
                         _ if !settings_loaded => rsx! {
@@ -309,35 +319,31 @@ fn SettingsPanel(
                             }
                         },
                         SettingsSection::Workspace => rsx! {
-                            ProviderHeading { title: "Workspace", description: "Everyone who can open its Spiral project shares its datasets, curations, robot connector, and training runtime." }
+                            SettingsHeading { title: "Workspace" }
                             SettingsField {
                                 label: "Name",
                                 value: current().name(),
                                 placeholder: "Lab arms",
                                 oninput: move |value| current.write().set_name(value),
                             }
-                            p { class: "settings-help",
-                                "Works on the Spiral project "
-                                code { "{project_id}" }
-                                "."
-                            }
-                            Button {
-                                purpose: ActionPurpose::Apply,
-                                variant: ButtonVariant::Outline,
-                                disabled: saving() || testing() || import_project.pending(),
-                                aria_busy: testing(),
-                                onclick: move |_| save(Some(SettingsSection::Workspace)),
-                                if testing() { "Testing…" } else { "Save and test connection" }
+                            FactList { class: "settings-facts",
+                                Fact { label: "Spiral project",
+                                    code { "{project_id}" }
+                                    Button {
+                                        purpose: ActionPurpose::Refresh,
+                                        variant: ButtonVariant::Link,
+                                        disabled: test_disabled,
+                                        aria_busy: testing(),
+                                        title: "Check that Studio can reach this Spiral project",
+                                        onclick: move |_| test_connection(ConnectionCheck::SpiralProject),
+                                        if testing() { "Testing…" } else { "Test connection" }
+                                    }
+                                }
                             }
                             {connection_result.clone()}
-                            section { class: "settings-project-transfer", "aria-labelledby": "project-transfer-title",
-                                div { class: "provider-heading",
-                                    h3 { id: "project-transfer-title", "Workspace backup" }
-                                    p { "Transfer the workspace’s data and Studio records as one portable file." }
-                                }
-                                p { class: "settings-help",
-                                    "The file contains its datasets, episodes, streams, video, curations, preferences, training runs and metrics, and checkpoints. Import replaces this workspace’s data and Studio records."
-                                }
+                            section { class: "settings-group", "aria-labelledby": "project-transfer-title",
+                                SettingsHeading { title: "Workspace backup", id: "project-transfer-title" }
+                                p { class: "settings-help", "Import replaces this workspace’s data and Studio records." }
                                 div { class: "settings-transfer-actions",
                                     FileButton {
                                         purpose: ActionPurpose::Import,
@@ -379,18 +385,28 @@ fn SettingsPanel(
                             super::workspace::DeleteWorkspace { name: workspace_name.clone(), project_id: project_id.clone() }
                         },
                         SettingsSection::Training => rsx! {
-                            ProviderHeading { title: "Training runtime", description: "Run training in a remote PyTorch process." }
-                            SettingsField {
-                                label: "Runtime endpoint",
-                                value: current().training().endpoint(),
-                                placeholder: "http://127.0.0.1:50051",
-                                oninput: move |value| current.write().training_mut().set_endpoint(value),
+                            SettingsHeading { title: "Training runtime" }
+                            div { class: "settings-row",
+                                SettingsField {
+                                    label: "Endpoint",
+                                    value: current().training().endpoint(),
+                                    placeholder: "http://127.0.0.1:50051",
+                                    oninput: move |value| current.write().training_mut().set_endpoint(value),
+                                }
+                                Button {
+                                    purpose: ActionPurpose::Refresh,
+                                    variant: ButtonVariant::Link,
+                                    disabled: test_disabled || endpoint_unsaved,
+                                    aria_busy: testing(),
+                                    title: if endpoint_unsaved { "Save the endpoint to test it" } else { "Check that Studio can reach this runtime" },
+                                    onclick: move |_| test_connection(ConnectionCheck::TrainingRuntime),
+                                    if testing() { "Testing…" } else { "Test connection" }
+                                }
                             }
-                            p { class: "settings-help",
-                                "The selected endpoint applies to new training runs; an active run keeps its current connection. Rollouts run on the robot connector."
-                            }
-                            Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Outline, disabled: saving() || testing() || import_project.pending(), aria_busy: testing(), onclick: move |_| save(Some(SettingsSection::Training)), if testing() { "Connecting…" } else { "Save and connect" } }
                             {connection_result}
+                            p { class: "settings-help settings-control-column",
+                                "New runs use the saved endpoint; an active run keeps its connection."
+                            }
                         },
                     }
                 }
@@ -415,15 +431,8 @@ fn SettingsPanel(
             }
             if shows_draft {
                 footer { class: "settings-footer",
-                    span { "Applies to everyone in this workspace." }
-                    div {
-                        Button { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); save_error.set(None); test_result.set(None); }, "Discard changes" }
-                        Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Solid, disabled: saving() || import_project.pending() || !settings_loaded || !chosen, aria_busy: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
-                    }
-                }
-            } else if section() == SettingsSection::Robots {
-                footer { class: "settings-footer",
-                    span { "Robot changes are saved on the robot connector immediately." }
+                    Button { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); save_error.set(None); test_result.set(None); }, "Discard changes" }
+                    Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Solid, disabled: saving() || import_project.pending() || !settings_loaded || !chosen, aria_busy: saving(), onclick: move |_| save(), if saving() { "Saving…" } else { "Save settings" } }
                 }
             }
         }
@@ -460,11 +469,17 @@ fn SettingsSectionAction(label: &'static str, active: bool, onclick: EventHandle
     }
 }
 
+/// The name of a section or of a group inside one. What a section holds is
+/// said by its fields and facts, not by a sentence under its name.
 #[component]
-fn ProviderHeading(title: &'static str, description: &'static str) -> Element {
-    rsx! { div { class: "provider-heading", h3 { "{title}" } p { "{description}" } } }
+pub(super) fn SettingsHeading(
+    title: &'static str,
+    #[props(default)] id: Option<&'static str>,
+) -> Element {
+    rsx! { div { class: "provider-heading", h3 { id, "{title}" } } }
 }
 
+/// A text setting on the section's label column.
 #[component]
 fn SettingsField(
     label: &'static str,
@@ -473,7 +488,7 @@ fn SettingsField(
     oninput: EventHandler<String>,
 ) -> Element {
     rsx! {
-        Field { label, class: "settings-field",
+        Field { label, layout: FieldLayout::Inline, class: "settings-field",
             TextInput { value, placeholder, oninput }
         }
     }

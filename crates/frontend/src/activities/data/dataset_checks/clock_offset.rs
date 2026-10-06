@@ -5,8 +5,8 @@
 //! over its first five seconds, which tells a constant offset from a drift.
 //! Streams logged at the same instants read alike, so they are measured once.
 use super::camera_frames::CameraFrames;
-use super::recording_rate::{Median, Plural, StreamTimings};
-use super::report_view::{CheckRow, Evidence, EvidenceChips, StreamName, Verdict};
+use super::recording_rate::{Median, StreamTimings};
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, StreamName, Verdict};
 use super::stream_reads::CheckedStreams;
 use crate::activities::episode::StreamCatalog;
 use dioxus::prelude::*;
@@ -169,14 +169,14 @@ impl ClockOffset {
             return CheckRow::new(
                 NAME,
                 Verdict::Unavailable,
-                "The dataset records no camera to pair".into(),
+                Finding::why("No camera to pair"),
             );
         };
         let Some(first) = self.pairings.first() else {
             return CheckRow::new(
                 NAME,
                 Verdict::Unavailable,
-                format!("No stream logs one message per {camera} frame, so none pairs with it"),
+                Finding::why(format!("No stream logs one message per {camera} frame")),
             );
         };
         let flagged = self
@@ -188,20 +188,16 @@ impl ClockOffset {
             .iter()
             .map(|pairing| pairing.streams.len())
             .sum::<usize>();
-        let streams = Plural::of(others, "stream");
-        let summary = if first.median_ms.abs() < 0.5 {
-            format!("{camera} frames share their timestamps with the {streams} logged with them")
-        } else {
-            format!(
-                "{camera} frames are stamped {} {} the {streams} logged with them",
-                Milliseconds::magnitude(first.median_ms),
-                if first.median_ms < 0.0 {
-                    "before"
-                } else {
-                    "after"
-                },
-            )
+        // How far apart the camera's frames and the streams logged with them
+        // are stamped, and which comes first when they are apart at all.
+        let (offset, order) = match first.median_ms {
+            ms if ms.abs() < 0.5 => ("0 ms".to_owned(), ""),
+            ms if ms < 0.0 => (Milliseconds::magnitude(ms), ", frames first"),
+            ms => (Milliseconds::magnitude(ms), ", frames last"),
         };
+        let finding = Finding::of(offset, "between")
+            .and(camera.clone(), "and")
+            .and_count(others, "stream", &format!("logged with it{order}"));
         let apart = self
             .pairings
             .iter()
@@ -211,7 +207,7 @@ impl ClockOffset {
         let pairings = self.pairings.clone();
         let period = self.period_ms;
         let camera = camera.clone();
-        CheckRow::new(NAME, if flagged { Verdict::Flagged } else { Verdict::Clean }, summary).flagging(apart).with_details(rsx! {
+        CheckRow::new(NAME, if flagged { Verdict::Flagged } else { Verdict::Clean }, finding).flagging(apart).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "Clock offsets",
                 thead { tr {
                     th { "Streams" } th { class: "is-number", "Offset" } th { class: "is-number", "Range" }

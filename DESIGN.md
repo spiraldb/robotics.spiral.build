@@ -271,12 +271,11 @@ components:
   ledger-card:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
-    rounded: "{rounded.card}"
   ledger-header:
-    backgroundColor: "{colors.sunken}"
+    backgroundColor: "{colors.surface}"
     textColor: "{colors.ink-faint}"
     typography: "{typography.label}"
-    padding: "8px 12px"
+    padding: "6px 12px"
   stage-card:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
@@ -374,6 +373,9 @@ unfolds under a changing value.
   one 16px mono elapsed readout as the visual maximum.
 - Instrument strips: small upper-case labels over mono values between
   hairlines, used for stat strips, ledger headers, and readouts.
+- Built to be scanned, not read: content locks to shared edges, values
+  replace sentences, resting states stay quiet, and nothing is boxed twice
+  (see **Scanning** below).
 - Letter kind marks (D dataset, E episode) and outlined stage glyphs name what
   a thing is before its name is read.
 - Gently rounded forms on a 4/5/6/8/10px ladder; soft blurred shadows only on
@@ -381,6 +383,39 @@ unfolds under a changing value.
 - One easing (expo out) for every entrance; reduced motion keeps only fades.
 - Desktop-only at 1024 CSS pixels and wider; the persisted split tree is
   always the rendered workspace.
+
+### Scanning
+
+Nobody reads a Studio screen; the operator arrives with one question and
+hunts for its answer. Every surface is built for that hunt.
+
+**The Receipt Rule.** Words sit hard left, measurements hard right, on the
+same rows. Every element rests on at least two shared edges (a column, a row
+line, the panel's content edge); a thing that floats gets an edge made for
+it (a row, a column) rather than padding or a menu. Nothing runs the full
+width of a wide panel: fields stop near 28rem, prose near 60ch, and strips
+hug their readings.
+
+**The Differentiate Rule.** Density is welcome; undifferentiated density is
+not. Rows that would look alike carry the fact that tells them apart (a
+still, a date, a duration, what a graph does), and long lists group by what
+the operator hunts by.
+
+**The Show-Don't-Explain Rule.** A value, glyph, chip, or small drawing beats
+a sentence. Headings do not sit over sentences restating them; an empty
+state is a title, at most one short line, and the action that ends it. A
+sentence stays only when it carries a fact the operator must act on that
+nothing else on screen shows, and consequence text for hardware and
+destructive actions always stays (the Consequence-On-The-Page Rule).
+
+**The Quiet-Defaults Rule.** Emphasis is contrast with neighbours. A resting,
+default, clean, or connected state is faint ink with no hue and no fill, so
+the exception is what finds the eye; nothing announces that all is well.
+
+**The No-Cards-On-Cards Rule.** Lists are rows between soft hairlines on the
+panel, not stacks of bordered boxes; a group inside a panel is a heading and
+space, not a card. Only things that float (popovers, dialogs, toasts) and
+objects on the graph bench are boxed.
 
 ## Colors
 
@@ -421,8 +456,11 @@ line colour.
   failure: simulation, degraded rates, robot setup loading or unavailable, a
   stream missing from some episodes in the streams ledger, stale results.
 - **Good Olive** (`{colors.good}`, dot `{colors.good-dot}`, wash
-  `{colors.good-soft}`): Connected, saved, complete. It paints small dots and
-  the good chip (which shares the lime wash); it never fills a control.
+  `{colors.good-soft}`): Connected, saved, complete, where that is news (a
+  connection test that passed, a save). It paints small dots and the good
+  chip (which shares the lime wash); it never fills a control, and a resting
+  good state (a clean check, a completed run, a connected arm) stays faint
+  ink under the Quiet-Defaults Rule.
 
 ### Tertiary
 
@@ -573,7 +611,10 @@ project id, or "Reconnecting" in danger), then the active activity's facts
 sorted danger, caution, then plain. When the bar narrows, the least important
 facts fall to the hidden second line whole rather than truncating. A fact
 that names something to fix is a button that opens the activity that fixes
-it.
+it. Resting facts never appear: arms speak only when fewer than all are
+connected ("1 of 2 arms connected"), the control loop only below 90% of its
+target rate, and Training only while a run is active (its phase and step).
+The workspace name shows whole up to 36 characters.
 
 Panel tab bars are 34px on the sidebar tone; splitters render as a 1px
 hairline with an 8px pointer target. Tiles meet at the hairline, so adjacent
@@ -601,9 +642,13 @@ of MCAP files and each file is one episode. The canonical layout at
   refresh, and an outlined Import; then the dataset tree. A dataset row is a
   D kind mark, the display name, and its episode count in mono. Expanded, it
   lists chronological episodes in the Episode Row every Curation index uses
-  (see Episode Rows): a 64×36 still on the dataset's overview camera, the
-  task label (or the distinguishing id when unlabelled) over a mono line of
-  length bar, id, date, and duration. Filter and Refresh reach the episodes
+  (see Episode Rows): a 64×36 still spanning both lines on the dataset's
+  overview camera, the task label (or the distinguishing id when unlabelled)
+  on one line, and under it a mono line of length bar, id, and date with the
+  duration on the rail's right edge, where the dataset counts sit. Facts that
+  do not fit drop whole, the date first (the row's tooltip keeps the
+  recorded time), so every rail row is one height. Section headings and
+  top-level notes sit on the filter field's edge. Filter and Refresh reach the episodes
   too: the filter matches id and source path, as Curation's does, and
   Refresh reads the open pages and counts again. The rail marks what is in
   front: the front episode tab's row, else the Overview's dataset.
@@ -612,14 +657,20 @@ of MCAP files and each file is one episode. The canonical layout at
   episode tab on through the dataset rather than opening another; Esc brings
   the dataset forward in Overview. Closing the front tab brings the newest
   remaining episode forward. Import opens as a peer tab in the same tile.
-- **Datasets home** (Overview with no dataset): the 19px "Datasets" title and
-  one sentence, then the datasets ledger: name with D mark, episodes,
-  recorded, average length, size, and date span, rows entering 40ms apart.
-- **Dataset overview:** a 30px D mark beside the 19px name, a stat strip
-  (Episodes, Recorded, Average length, Size, Streams) between soft hairlines,
-  the "Episode lengths" distribution (104px of bars with a dashed average
-  marker and a mono axis), the "Streams" ledger, and a sidebar-toned footer
-  naming the source in mono (`spql.mcap.episodes('dataset_…')`).
+- **Datasets home** (Overview with no dataset): the 19px "Datasets" title,
+  then the datasets ledger stopping on the 60rem edge: name with D mark,
+  episodes, recorded, average length, size, and date span, rows entering
+  40ms apart. A value still being read ("…") or absent ("—") is faint. Only
+  an empty project gets a sentence.
+- **Dataset overview:** a 30px D mark beside the 19px name, the stat strip
+  (Episodes, Recorded, Size) between soft hairlines, then the dataset checks
+  report, both ending on one 60rem edge. The report opens with a tally in
+  which only "to look at" is ink, then groups (Recording, Joints) of rows:
+  check name, a finding that leads with its values in mono (capped at 38rem),
+  and a small drawing where one helps. A clean or measured row is quiet
+  (soft name, faint finding, faint check mark); not checked is faint
+  throughout; a flagged row is ink at 560. While checks run, the steps list
+  without explanation.
 - **Episode subject:** the Episode Heading every inspection is headed by
   (`activities/episode/heading.rs`), here at 40px and led by the way back:
   the D mark and dataset, "/", the "Episode …id" subject at 13px/560, the
@@ -725,12 +776,16 @@ the shared document bar, of 192px stage cards on the dotted bench (Dataset,
 then the measurements and Selects it feeds, joined by edges that carry
 populations), beside the node's Workspace. A card says what the node holds, or while it
 runs what it is doing; every output (Score progress, Find similar, Group
-similar, Select) wears the Output flag (Published once it is a catalog view,
-Out of date in caution once the saved curation has moved past it), and Score
+similar, Select) ends its last line with one word hard right, inside the
+outline: Output in faint ink, Published in the output hue once it is a
+catalog view, Out of date in caution once the saved curation has moved past
+it. Score
 progress says the recording it keeps ("keeps 1:53.9 of 2:26.9") because that
 is the training budget. Publish ends the document bar and opens a panel of
-every output, each with a checkbox, its card's line, and its view's name. Every count below the Dataset is over the first 100
-episodes the curation reads.
+every output, each with a checkbox, its card's line, one state word, and its
+view's name in the field under it, all hanging from the checkbox label's
+text edge. Every count below the Dataset is over the first 100 episodes the
+curation reads.
 
 Every node's workspace has the same anatomy, top to bottom:
 
@@ -744,19 +799,21 @@ Every node's workspace has the same anatomy, top to bottom:
 ```
 
 - **Node bar:** the node's input or configuration on the left — Find
-  similar's query and Search, a rule as one sentence with its threshold read
-  out (Score progress's "Keep moments progressing at least 0.20× the expert
-  rate"; a Select's "Keeps the episodes whose recorded facts meet every
-  condition", its conditions in the band below), Break down's camera in words ("Watches the top camera") as the
-  button that opens its settings (camera and sampling; the model is the
-  backend's and never shown), what Group and the Dataset read ("Every node
-  reads these 100 episodes"). Topic paths, model ids, and sampling rates
-  stay off the bar. At the far end, in one group: a caution
-  note for what needs attention (a missing setting, failed episodes), a
-  quiet line for how many episodes reach the node when fewer than all do,
-  with a link to the measurement they wait on ("Score the rest"), and the
-  node's actions (Run N left, Retry failed, Stop, Regenerate) after a rule's
-  tally ("Keeps 1:53.9 of 2:26.9", "Keeps 2 of 42 subtasks").
+  similar's query (up to 28rem) and Search, Score progress's rule as one
+  sentence with its threshold read out ("Keep moments progressing at least
+  0.20× the expert rate"), Break down's camera in words ("Watches the top
+  camera") as the button that opens its settings (camera and sampling; the
+  model is the backend's and never shown). A Select's conditions live in the
+  band below and its bar explains nothing; Group similar's speaks only of a
+  proposal or run. Topic paths, model ids, and sampling rates stay off the
+  bar. At the far end, in one group: the Dataset's reach as a value ("100
+  episodes · 50:34.2", "First 100 episodes · …"), a caution note for what
+  needs attention (a missing setting, failed episodes), a quiet count of the
+  episodes that reach the node when fewer than all do, with a link to the
+  measurement they wait on ("0 of 100 episodes · Break down the rest"), and
+  the node's actions (Run N left, Retry failed, Stop, Regenerate) after a
+  rule's tally ("Keeps 1:53.9 of 2:26.9", "Keeps 2 of 42 subtasks"). When the
+  bar is too narrow the far group drops to a second line; nothing is clipped.
 - **Overview band:** a rule's threshold strip — every judged value as a dot,
   the threshold as a line running into the handle of a real slider under
   them (a 4px track filled in ink on the side the rule keeps, a 16px round
@@ -768,19 +825,23 @@ Every node's workspace has the same anatomy, top to bottom:
   chips once one is open (the open one lime, each with its hue as a dot).
   A Select's band is its conditions, one row each in shared columns: the
   fact and the comparison as selects, the value in mono, that condition's
-  strip, "leaves out 4", and × while another remains; Add condition under
-  the last. Its dots fade where that condition leaves an episode out and
+  strip (up to 28rem), "leaves out 4", and × while another remains; a quiet
+  "+ Add condition" under the last, on the fact column's edge. Threshold
+  strips stop at 40rem. Its dots fade where that condition leaves an episode out and
   are rings where it passes one another condition leaves out. It draws no
   map: a whole episode is kept end to end or not at all.
 - **Keeping categories:** Group similar is an output of the categories it
   keeps. A checkbox before each category's name, on its card and on its
   chip, keeps it or leaves it out without asking the model again; a new
   proposal keeps every category, a renamed one keeps its standing, a merged
-  one joins the other's. A left-out card sits on the sunken wash with its
-  words and share at half strength and its checkbox at full, and with no
-  category open the map fades the left-out categories' rows.
+  one joins the other's. Categories are borderless columns, each topped by
+  its share bar as a rule; a left-out one keeps its words and share at half
+  strength and its checkbox at full, and with no category open the map fades
+  the left-out categories' rows.
 - **Index:** one width for every node (`clamp(18rem, 36%, 28rem)`), so the
-  divider holds still between nodes. Its 34px bar holds its filter, its
+  divider holds still between nodes, and one gutter shared by its bar, rows,
+  headings, dividers, and notes. Rows are one height in an index: 62px, or
+  70px where rows name their episode on a second facts line. Its 34px bar holds its filter, its
   Kept / Left out segments, or a caption naming its order ("6 episodes ·
   slowest first", "32 subtasks · closest first"). An index of a measurement
   lists by that measurement: Find similar closest first with a divider at
@@ -823,12 +884,17 @@ Every node's workspace has the same anatomy, top to bottom:
   above it, and the card draws the focus ring while that button has focus.
   The canvas draws an edit in the frame it happens.
 - **A graph without a dataset** asks for one as Data's home offers them:
-  "Choose a dataset", one sentence, and the datasets ledger
-  (`DatasetLedger`), a row pressed to choose it.
+  "Choose a dataset" and the datasets ledger (`DatasetLedger`), a row
+  pressed to choose it.
+- **Empty indexes** say what is missing and hold the step that ends it
+  ("No subtasks to search" with Open Break down subtasks), never a sentence
+  about how the graph works; the evidence column with nothing open says
+  "Nothing open".
 - **Keys:** J and K step the episode tab in front through the node's index,
   as they step Data's episodes, and `/` goes to the index's filter.
-- **Saving:** the chip says "Saved" only for a graph Studio has stored;
-  a new, untouched one is "Not saved yet". Previews live in the tab, so a
+- **Saving:** only unsaved changes show, as a caution dot leading Discard
+  and Save; a saved or new, untouched graph shows nothing (its "Saved" or
+  "Not saved yet" stays in the tooltip and for screen readers). Previews live in the tab, so a
   reload asks first ("Leave site?") while unsaved edits, preview reads, or a
   run would go with it.
 
@@ -1192,6 +1258,12 @@ verb first; visual presentation never changes the verb.
   pill with a paper ring, 9px mono.
 - **Shortcut sheet:** A 40rem dialog grouping keys by where they work
   (Anywhere, Data, Episode playback, Live).
+- **Signed out:** The canvas holds only a 34px Spiral mark, the 19px
+  "spiral robotics studio" wordmark in the brand's two weights, and the one
+  solid "Sign in with Spiral", as one upright stack slightly above centre.
+- **Notifications:** An info message names its severity in faint ink; only
+  success and error earn a wash. An empty list says "No notifications" and
+  nothing else.
 
 ### Panel Tabs, Tiles, and Splits
 
@@ -1230,15 +1302,17 @@ parent.
 
 ### Instrument Strips and Ledgers
 
-- **Stat strip:** `FactList` in its strip layout: equal columns between soft
-  hairlines, a 10.5px upper-case label over a mono value, divided by
-  hairlines. Fact tiles use the same label over value inside a 6px hairline
+- **Stat strip:** `FactList` in its strip layout hugs its readings:
+  max-content columns 20px apart, divided by soft hairlines, a 10.5px
+  upper-case label over a 13px mono value. It never stretches across a wide
+  panel. Fact tiles use the same label over value inside a 6px hairline
   grid.
-- **Ledger:** An 8px hairline card holding a table with a sticky recessed
-  header row of 10.5px upper-case mono labels; 12.5px cells with 7px/12px
-  padding on soft hairlines; numbers right-aligned in soft-ink mono; rows
-  wash to the sidebar tone on hover. The datasets home and the streams ledger
-  share it; the streams ledger leads with cameras (camera glyph in its kind
+- **Ledger:** A table laid on the panel, not boxed: a sticky paper header
+  row of 10.5px upper-case mono labels over a hairline; 12.5px cells with
+  7px/12px padding on soft hairlines; numbers right-aligned in soft-ink mono;
+  rows wash to the sidebar tone on hover. The table reaches 12px past the
+  text on both sides, so its first and last columns sit on the heading's
+  edges. The datasets home and the streams ledger share it; the streams ledger leads with cameras (camera glyph in its kind
   hue) and prints schema names in faint mono.
 - **Distribution:** The episode-length histogram: 104px of bars at ink 20%
   with 2px top corners and 3px gaps, a hovered bar in solid ink, a dashed
@@ -1281,13 +1355,14 @@ parent.
   chevron after it that opens the 320px switcher popover (saved documents,
   each row ending in a trash that shows on hover or focus and asks Keep /
   Delete in the row itself, saying the graph and every view it publishes go
-  with it, then New),
-  then at right the state chip
-  (Saved · good dot, Unsaved changes · caution, Changed in another session ·
-  danger), Discard while dirty, and outlined Save. A longer state grows
-  leftwards without moving Save.
-- **Stage card:** 192×100 paper, hairline, 8px radius, resting bench lift: an
-  18px outlined stage mark beside a semibold title and a one-line summary.
+  with it, then New; every row ends hard right with its creation date in
+  faint mono, so graphs sharing a name stay apart), then at right the
+  actions: a caution dot while unsaved (danger when changed in another
+  session), Discard while dirty, outlined Save, and Publish. The bar is 40px
+  on the node bar's hairline, its name on a 12px gutter.
+- **Stage card:** 192×92 paper, hairline, 8px radius, resting bench lift: an
+  18px outlined stage mark beside a semibold title and a one-line summary,
+  an output's state word ending the last line.
   Hover firms the hairline and lifts 1px with the float shadow; selection is
   the lime halo. Cards enter in reading order, 320ms each and 45ms apart.
 - **Graph canvas:** The pale bench with a dot grid; zoom in, zoom out, and fit
@@ -1311,14 +1386,19 @@ between its parts ("…daa7587d, 0:14.4").
   shared by every row that shows it, so coming back to a node, deleting one,
   or opening Data after Curation paints from what was already decoded.
   Waiting is a shimmer on the recess; failure says why on the mat.
-- **Name:** a subtask's words, clamped to two lines; a recording's label
-  when its path gives one; otherwise its id tail ("…206c08ff") in mono.
+- **Name:** a subtask's words, clamped to two lines in a Curation index and
+  one line in the rail; a recording's label, starting with a capital as its
+  tab does, when its path gives one; otherwise its id tail ("…206c08ff") in
+  mono.
 - **Facts line:** 11px mono, with one small drawing before the facts: an
   episode's length against the longest listed (square-root scale, as Data's
   rail), where a stretch sits in its episode, or an episode's pace across
   its recording against a dashed 1× line.
 - **Measure:** whole percentages for probabilities ("97%"), pace as "0.90×",
-  a recorded fact in its own unit. Its tooltip says what the number is.
+  a recorded fact in its own unit, and an episode's duration, which always
+  rides this right-hand column rather than the facts line. A measure of the
+  same meaning replaces another rather than stacking beside it. Its tooltip
+  says what the number is.
 - **Chosen:** the selected wash; its place bar turns ink. One row is a tab
   stop — the chosen one, else the first — and the arrows move between rows.
 - **Folded:** what an index counts but does not list says so once after its
@@ -1344,7 +1424,10 @@ row, and the playing span's words in the timeline's readout.
   crosses ruler and rows.
 - **Plots:** One section per plotted stream, one lane per field with a
   labelled value axis and one trace per array index; the readout column
-  doubles as the legend (swatch, index, value at the playhead or cursor).
+  doubles as the legend (swatch, index, value at the playhead or cursor),
+  the index kept whole and the value narrowing first. Plots draw no ruler of
+  their own and their header no message count: the Timeline below owns
+  time and counts, and its playhead crosses every lane.
 - **Evidence tracks:** A surface's own rows lead the stream rows: a value
   track (Curation's pace, 168px tall, read out as "0.72×" against a 1×
   expert-pace reference line, with a Select's cutoff dashed and the
@@ -1379,19 +1462,45 @@ row, and the playing span's words in the timeline's readout.
   Teleop as a mode group; Hold and Teleop read in their checked state,
   Release in the danger treatment, with the inline Release confirmation.
   Setup lives in Settings → Robots.
-- **Training:** A curve-first run desk. Setup keeps its one solid Run
-  training beneath the scrolling form; Runs is a newest-first ledger; every
-  opened run is a sibling tab with its loss curve, data path, throughput,
-  events, and logs keyed to optimizer step. No synthetic telemetry.
-- **Rollout:** Checkpoint picker, one compact fixed-follower line, action
-  steps and control rate, and the single solid Run policy with one specific
-  blocker beside it. The Inference lane reads Latency, Model, and Misses as
-  label-left, mono-value-right metrics that stay em dashes until the backend
-  measures them.
+- **Live motors:** The arms are plain rows over the motors (identity dot,
+  name, role in faint mono), the chosen one in the selection wash; a ready
+  arm shows nothing more, an arm that cannot be driven names why in caution.
+  The arm's readouts (Reach, Height, Gripper "% open", Follow Δ; Hottest,
+  Rise, Supply, Load) are one instrument of hairline-divided cells, label
+  over a 13px mono value, the first cell of each row on the section's edge;
+  out of range tints the reading, not the cell. A chosen joint's motor
+  detail is a section under a hairline, never a card. Takes the connector
+  still holds are one caution row: the count left, Store in Studio right.
+  An empty Live Timeline adds no sentence: "No episode" and Record say it.
+  The 3D scene's gesture key appears only while the pointer or keyboard is
+  in the scene. A mounted camera is drawn as the eight edges of its view
+  pyramid (28 cm deep, 4:3, its arm's colour), never as a solid.
+- **Training:** A curve-first run desk. A blocker is one caution line
+  ("Training unavailable · Spiral can't decode MCAP video yet."). Setup is
+  inline label/control rows on one 4.5rem label column (Dataset, Cameras,
+  Runtime, Device, Run name, Steps) above its one solid Run training; Runs is
+  a newest-first ledger; every opened run is a sibling tab with its loss
+  curve, data path, throughput, events, and logs keyed to optimizer step. A
+  running phase and its progress bar are blue (work in progress), a
+  completed one a quiet word, a failed one its danger wash. No synthetic
+  telemetry.
+- **Rollout:** Checkpoint picker, one fixed-follower line (a ready follower
+  shows only its camera count; otherwise only its problems, in caution),
+  action steps and control rate as a receipt, and the single solid Run policy
+  with one specific blocker beside it. An idle bench names no phase; the
+  safety sentence stays as one quiet line. The Inference lane is one hugging
+  strip (Latency, Mean, Max, Model, Misses, Chunks, Commands) that reads em
+  dashes until the backend measures them, Misses above zero in caution.
 - **Settings:** Replaces the activity workspace while the top bar stays: a
   sidebar-toned section nav (5px rows; the current section is solid lime,
-  ink at 560) beside ordinary forms. Robots is the default, then SpiralDB,
-  Training, Video, and Keys. Restore alone uses the blocking dialog.
+  ink at 560) beside ordinary forms: Workspace, Robots, Training, Account.
+  Sections are a heading and space with no description; labels share one
+  8rem column and fields stop at 26rem; read-only facts ("Spiral project",
+  "Signed in as") sit on the same column. The footer's Save settings is the
+  only save; a section's Test connection only tests the saved value. Arms
+  are rows between hairlines whose one state word is faint while the arm is
+  fine and on its caution wash when it needs work; an opened arm's setup
+  hangs under its name. Restore alone uses the blocking dialog.
 
 **The Fixed-Follower Rule.** Rollout never asks the operator to choose a
 motion target. It commands only the configured follower, and backend

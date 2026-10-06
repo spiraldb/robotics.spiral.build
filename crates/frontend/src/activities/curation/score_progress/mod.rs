@@ -146,7 +146,7 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
     let stale = input
         .preview
         .is_stale()
-        .then(|| "Out of date: what reaches this node changed since it ran".to_owned());
+        .then(|| "Out of date: its input changed".to_owned());
     let failures = FailedEpisodes::note(failed.len()).map(|note| match input.failure() {
         Some(reason) => format!("{note}: {reason}"),
         None => note,

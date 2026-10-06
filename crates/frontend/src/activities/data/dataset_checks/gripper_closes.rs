@@ -2,8 +2,7 @@
 //! than half a second, how far it actually closed — all the way, onto
 //! nothing, or stopped on something it holds. Openings read on one scale for
 //! every dataset: 0 closed, 1 open.
-use super::recording_rate::Plural;
-use super::report_view::{CheckRow, Evidence, EvidenceChips, Verdict};
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::state_action_lag::Pairing;
 use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
@@ -153,21 +152,18 @@ impl GripperCloses {
             return CheckRow::new(
                 NAME,
                 Verdict::Unavailable,
-                "No gripper with a recorded command and known open and closed ends".into(),
+                Finding::why("No gripper with a recorded command and known ends"),
             );
         }
         let total = self.arms.iter().fold(CloseCounts::default(), |total, arm| {
             total.plus(&arm.counts())
         });
-        let summary = format!(
-            "{}: {} all the way, {} nearly, {} on something",
-            Plural::of(total.all() as usize, "close"),
-            total.shut,
-            total.nearly,
-            total.holding
-        );
+        let finding = Finding::of_count(total.all() as usize, "close", ":")
+            .and(total.shut.to_string(), "all the way,")
+            .and(total.nearly.to_string(), "nearly,")
+            .and(total.holding.to_string(), "on something");
         let arms = self.arms.clone();
-        CheckRow::new(NAME, Verdict::Measured, summary).with_details(rsx! {
+        CheckRow::new(NAME, Verdict::Measured, finding).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "Gripper closes by arm",
                 thead { tr {
                     th { "Arm" } th { "Closes" } th { "Most closed all the way" }

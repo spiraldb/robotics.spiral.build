@@ -47,8 +47,8 @@ pub(super) enum PreviewInput {
     /// one episode bound as `$1` at a time. Below Score progress these are
     /// the stretches its rule joins the kept moments into, as its step does.
     Intervals,
-    /// Every column of the subtasks that reach a text judgment, many
-    /// episodes at once.
+    /// Every column of the subtasks that reach a text judgment, one episode
+    /// bound as `$1` at a time.
     Subtasks {
         relation: Relation,
         columns: SubtaskColumns,

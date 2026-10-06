@@ -5,13 +5,16 @@ use spiral_robotics_common::account::SpiralProject;
 use spiral_robotics_common::workspace::NewWorkspace;
 use spiral_robotics_ui::{
     ActionPurpose, BlockingConfirmation, Button, ButtonVariant, ConfirmationCopy,
-    ConfirmationDismissal, ConfirmationResponse, Field, Notice, NoticeTone, Select, TextInput,
+    ConfirmationDismissal, ConfirmationResponse, Field, FieldLayout, Notice, NoticeTone, Select,
+    TextInput,
 };
 
 use crate::client::CommandError;
 use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::shell::routes::StudioRoute;
+
+use super::panel::SettingsHeading;
 use crate::shell::workspace::{WorkspaceClient, WorkspaceSwitch};
 
 /// A name, and the Spiral project the workspace works on: a new one, or one
@@ -58,7 +61,7 @@ pub(super) fn NewWorkspaceForm(cancellable: bool) -> Element {
     };
     rsx! {
         div { class: "settings-new-workspace",
-            Field { label: "Name", class: "settings-field",
+            Field { label: "Name", layout: FieldLayout::Inline, class: "settings-field",
                 TextInput {
                     value: name(),
                     placeholder: "Lab arms",
@@ -71,7 +74,7 @@ pub(super) fn NewWorkspaceForm(cancellable: bool) -> Element {
                     },
                 }
             }
-            Field { label: "Spiral project", class: "settings-field",
+            Field { label: "Spiral project", layout: FieldLayout::Inline, class: "settings-field",
                 Select {
                     value: project(),
                     disabled: pending(),
@@ -80,10 +83,10 @@ pub(super) fn NewWorkspaceForm(cancellable: bool) -> Element {
                     ProjectOptions { projects: projects.read().clone(), chosen: project() }
                 }
             }
-            p { class: "settings-help",
-                "A new project is made in your current Spiral organization. An existing one keeps its datasets."
+            p { class: "settings-help settings-control-column",
+                "A new project goes in your current organization. An existing one keeps its datasets, and its members see this workspace."
             }
-            div { class: "settings-transfer-actions",
+            div { class: "settings-transfer-actions settings-control-column",
                 Button {
                     purpose: ActionPurpose::Create,
                     variant: ButtonVariant::Solid,
@@ -155,10 +158,10 @@ pub(super) fn DeleteWorkspace(name: String, project_id: String) -> Element {
         });
     };
     rsx! {
-        section { class: "settings-project-transfer", "aria-labelledby": "workspace-delete-title",
-            div { class: "provider-heading",
-                h3 { id: "workspace-delete-title", "Delete workspace" }
-                p { "Removes it for everyone, with the curations, preferences, and training history Studio keeps for it. The Spiral project and its datasets stay." }
+        section { class: "settings-group", "aria-labelledby": "workspace-delete-title",
+            SettingsHeading { title: "Delete workspace", id: "workspace-delete-title" }
+            p { class: "settings-help",
+                "Removes it for everyone, with its curations, preferences, and training history. The Spiral project and its datasets stay."
             }
             div { class: "settings-transfer-actions",
                 Button {

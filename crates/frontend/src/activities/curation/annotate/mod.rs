@@ -33,8 +33,8 @@ use output::{
 };
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::{
-    ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Field, FieldLayout, Place,
-    Select, TextInput, TextInputKind,
+    ActionPurpose, BrowserFocus, Button, ButtonVariant, ChevronIcon, Field, FieldLayout, Notice,
+    NoticeTone, Place, Select, TextInput, TextInputKind,
 };
 
 /// Which episodes one run covers.
@@ -256,7 +256,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
         .collect::<Vec<_>>();
     let stale = progress
         .is_stale()
-        .then(|| "Out of date: what reaches this node changed since it ran".to_owned());
+        .then(|| "Out of date: its input changed".to_owned());
     let rows = annotation.rows();
     let groups = EpisodeSubtasks::group(rows.clone().into_iter());
     let context = SubtaskContext::new(
@@ -365,8 +365,8 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                 },
             }
             if let Some(error) = controller.sample_error() {
-                div { class: "curation-annotate-failure", role: "alert",
-                    p { "{error}" }
+                Notice { tone: NoticeTone::Danger, class: "curation-annotate-failure",
+                    span { "{error}" }
                     Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
                         onclick: move |_| controller.reload_sample(), "Retry" }
                 }
@@ -414,7 +414,6 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                 evidence: rsx! {
                     EpisodeTabs {
                         open: chosen.tabs(),
-                        empty: "Choose a subtask to watch it play.".to_owned(),
                         render: move |tab: OpenEpisode| {
                             let (listed, groups, context) = &evidence;
                             let Some(episode) = listed.iter().find(|episode| episode.id() == tab.episode()).cloned() else {

@@ -2,7 +2,8 @@
 //!
 //! Each plotted stream loads its selected fields once and draws one lane per
 //! field, one coloured trace per array index. Lanes share the visible span
-//! with the Timeline; the playhead and the hover cursor cross every lane.
+//! with the Timeline, whose ruler is the one that reads time; the playhead
+//! and the hover cursor cross every lane.
 use super::{
     choices::StreamChoices,
     inspection::LoadedEpisode,
@@ -58,18 +59,9 @@ pub(super) fn PlotsPanel(loaded: LoadedEpisode) -> Element {
     if plotted.is_empty() {
         return rsx! { PlotsEmpty { catalog, choices } };
     }
-    let view = transport.view();
-    let playhead = view.percent(transport.seconds()) / 100.0;
+    let playhead = transport.view().percent(transport.seconds()) / 100.0;
     rsx! {
         section { class: "data-plots", "aria-label": "Plots", style: "--playhead: {playhead:.6}",
-            div { class: "data-plots-ruler", "aria-hidden": "true",
-                for tick in view.ticks() {
-                    div { key: "{tick.seconds()}", class: "data-plots-tick", style: "--x: {tick.position() / 100.0:.6}",
-                        "data-edge": if tick.position() > 90.0 { "end" } else { "start" },
-                        span { "{tick.label()}" }
-                    }
-                }
-            }
             div { class: "data-plots-scroll",
                 for key in plotted {
                     if let Some(stream) = catalog.get(&key) {
@@ -101,7 +93,6 @@ fn PlotsEmpty(catalog: StreamCatalog, mut choices: StreamChoices) -> Element {
     rsx! {
         div { class: "data-plots-empty",
             strong { "Nothing plotted" }
-            p { "Tick a stream in the Timeline to draw its numeric fields." }
             if !candidates.is_empty() {
                 ul { class: "data-plots-quick", "aria-label": "Plot a stream",
                     for stream in candidates {
@@ -197,13 +188,11 @@ fn StreamPlot(
             header { class: "data-plot-head",
                 SignalStreamIcon {}
                 strong { class: "truncate", title: stream.name(), "{stream.label()}" }
+                // The stream's message count is its Timeline row's; the head
+                // says only what is out of the ordinary.
                 span { class: "data-plot-meta",
-                    match &*data.read() {
-                        Some(Ok(Some(plotted))) => rsx! {
-                            "{(plotted.buffer.rows() as u64).grouped_label()} messages"
-                            if load_span() == LoadSpan::Visible { " · visible span only" }
-                        },
-                        _ => rsx! {},
+                    if matches!(&*data.read(), Some(Ok(Some(_)))) && load_span() == LoadSpan::Visible {
+                        "Visible span only"
                     }
                     if pending { span { class: "data-plot-loading", role: "status", "Loading…" } }
                 }
@@ -283,7 +272,8 @@ impl CompactReadout for str {
 }
 
 trait TraceNamePresentation {
-    /// The part of a trace name that its lane title does not already say.
+    /// The part of a trace name that its lane title does not already say:
+    /// an array trace's index, and nothing for a lane's one scalar trace.
     fn trace_short_name(&self, lane: &str) -> String;
 }
 
@@ -291,8 +281,8 @@ impl TraceNamePresentation for str {
     fn trace_short_name(&self, lane: &str) -> String {
         let stem = lane.trim_end_matches("[]");
         match self.strip_prefix(stem) {
-            Some(rest) if !rest.is_empty() => rest.to_owned(),
-            _ => self.to_owned(),
+            Some(rest) => rest.to_owned(),
+            None => self.to_owned(),
         }
     }
 }
@@ -477,7 +467,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn trace_names_drop_what_their_lane_already_says() {
         assert_eq!("position[3]".trace_short_name("position[]"), "[3]");
-        assert_eq!("temperature".trace_short_name("temperature"), "temperature");
+        assert_eq!("temperature".trace_short_name("temperature"), "");
         assert_eq!("other".trace_short_name("position[]"), "other");
     }
 

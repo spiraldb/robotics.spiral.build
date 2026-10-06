@@ -2,8 +2,7 @@
 //! a limit its robot model sets, and how far past a limit any joint went.
 //! Limits come only from the robot model's URDF, through the bindings that
 //! name each measured joint; a dataset without a model has none to check.
-use super::recording_rate::Plural;
-use super::report_view::{CheckRow, Evidence, EvidenceChips, Verdict};
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Verdict};
 use super::state_action_lag::Span;
 use super::stream_reads::{CheckedStreams, ValueColumns};
 use dioxus::prelude::*;
@@ -181,14 +180,14 @@ impl JointLimits {
                 return CheckRow::new(
                     NAME,
                     Verdict::Unavailable,
-                    "Limits need a robot model; this dataset has none".into(),
+                    Finding::why("No robot model to read limits from"),
                 );
             }
             Self::Unbound => {
                 return CheckRow::new(
                     NAME,
                     Verdict::Unavailable,
-                    "The robot model sets no limit on a measured arm joint".into(),
+                    Finding::why("The robot model limits no measured joint"),
                 );
             }
             Self::Checked { arms } => arms.clone(),
@@ -204,21 +203,22 @@ impl JointLimits {
             .map(|episode| &episode.episode)
             .collect::<std::collections::BTreeSet<_>>()
             .len();
-        let summary = if near.is_empty() && beyond == 0 {
-            format!("No joint comes within {} rad of a limit", Self::MARGIN)
+        let margin = format!("{} rad", Self::MARGIN);
+        let finding = if near.is_empty() && beyond == 0 {
+            Finding::of_count(0, "episode", "within").and(margin, "of a limit")
         } else {
             let longest = near.iter().map(|episode| episode.near_s);
-            format!(
-                "{} spend {} within {} rad of a limit",
-                Plural::of(episodes, "episode"),
-                Span::of(
-                    longest.clone().fold(f64::INFINITY, f64::min),
-                    longest.fold(f64::NEG_INFINITY, f64::max),
-                    "s",
-                    1
-                ),
-                Self::MARGIN
-            )
+            Finding::of_count(episodes, "episode", "within")
+                .and(margin, "of a limit for")
+                .and(
+                    Span::of(
+                        longest.clone().fold(f64::INFINITY, f64::min),
+                        longest.fold(f64::NEG_INFINITY, f64::max),
+                        "s",
+                        1,
+                    ),
+                    "",
+                )
         };
         let verdict = if near.is_empty() && beyond == 0 {
             Verdict::Clean
@@ -226,7 +226,7 @@ impl JointLimits {
             Verdict::Flagged
         };
         let flagged = arms.iter().flat_map(ArmLimits::near).collect::<Vec<_>>();
-        CheckRow::new(NAME, verdict, summary)
+        CheckRow::new(NAME, verdict, finding)
             .flagging(flagged)
             .with_details(rsx! {
                 table { class: "data-ledger data-checks-table", "aria-label": "Joint limits by arm",

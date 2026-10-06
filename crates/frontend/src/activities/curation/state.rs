@@ -176,11 +176,13 @@ impl CurationDraft for CurationDocument {
 }
 
 /// What every node is interpreted over: the sample of episodes, read once per
-/// dataset, and what the preview has read over it this session.
+/// dataset; what the preview has read over it this session; and whether the
+/// curation just opened has yet to read back what its stored answers hold.
 #[derive(Clone, Copy, PartialEq)]
 struct Interpretation {
     sample: Resource<Result<Option<EpisodeSample>, String>>,
     reads: Signal<PreviewReads>,
+    unrestored: Signal<bool>,
 }
 
 /// Where a curation asks the annotation view to look: one episode of one
@@ -254,10 +256,54 @@ impl CurationController {
             interpretation: Interpretation {
                 sample,
                 reads: Signal::new(PreviewReads::default()),
+                unrestored: Signal::new(false),
             },
         });
         controller.use_stored_publications();
+        controller.use_restored_previews();
         controller
+    }
+
+    /// Once the sample of the curation just opened is read, restore what its
+    /// previews read before: their answers are stored with the dataset, not
+    /// in the document.
+    fn use_restored_previews(self) {
+        let mut unrestored = self.interpretation.unrestored;
+        use_effect(move || {
+            if !unrestored() || self.sample().is_none() {
+                return;
+            }
+            unrestored.set(false);
+            self.restore_below(DATASET_NODE_ID);
+        });
+    }
+
+    /// Restore the previews of the measurements reading what `above` hands
+    /// on, each as its own run reading what its stored answers hold, then
+    /// those below each one: a preview reads from its parent's, so a chain
+    /// restores from the top down while branches restore side by side.
+    fn restore_below(self, above: &str) {
+        let plans = self.with_reading(|graph, reader| {
+            let Some(reader) = reader else {
+                return Vec::new();
+            };
+            graph
+                .measures_below(above)
+                .into_iter()
+                .filter_map(|node| {
+                    let pending = PreviewProgress::of(reader, node.id()).pending();
+                    let plan = PreviewPlan::of(reader, node.id(), &pending).ok()?;
+                    Some((node.id().to_owned(), plan))
+                })
+                .collect::<Vec<_>>()
+        });
+        for (node, plan) in plans {
+            let restored = node.clone();
+            self.start_run(&node, move |run| async move {
+                PreviewPass::new(self, run, plan).restore().await;
+                self.restore_below(&restored);
+            });
+        }
     }
 
     /// Keep the open curation's publications with what Studio stores, which
@@ -473,14 +519,12 @@ impl CurationController {
     pub(crate) fn unsaved_changes(&self) -> bool {
         self.session.unsaved_changes()
     }
-    /// Whether a reload would lose work: edits not saved, what the preview
-    /// has read this session — it is held in the tab, not in the saved
-    /// graph — or a run still reading. Read without subscribing, for the
-    /// moment the page is about to unload.
+    /// Whether a reload would lose work: edits not saved, or a run still
+    /// reading. What the preview has read is not: its answers are stored, and
+    /// read back when the curation opens again. Read without subscribing, for
+    /// the moment the page is about to unload.
     pub(crate) fn holds_unkept_work(&self) -> bool {
-        self.session.peek_unsaved_changes()
-            || !self.interpretation.reads.peek().is_empty()
-            || !self.runs.owned.peek().is_empty()
+        self.session.peek_unsaved_changes() || !self.runs.owned.peek().is_empty()
     }
     /// Whether this graph has ever been stored.
     pub(crate) fn is_stored(&self) -> bool {
@@ -606,12 +650,14 @@ impl CurationController {
         }
         self.session.open(id, move |opened| self.adopt(opened));
     }
-    /// Take the document's graph as the one on screen. A payload this Studio
-    /// cannot read refuses the document rather than emptying the canvas.
+    /// Take the document's graph as the one on screen, and restore its
+    /// previews once its sample is read. A payload this Studio cannot read
+    /// refuses the document rather than emptying the canvas.
     fn adopt(mut self, document: &CurationDocument) -> Result<(), String> {
         let graph = Self::graph_of(document)?;
         self.runs.cancel_all();
         self.interpretation.reads.set(PreviewReads::default());
+        self.interpretation.unrestored.set(true);
         self.payload.set(graph);
         self.selected_node.set(Some(DATASET_NODE_ID.to_owned()));
         self.focus.set(None);

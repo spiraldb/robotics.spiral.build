@@ -778,9 +778,12 @@
   background: var(--ui-line-soft);
 }
 
+/* A strip hugs its readings: values sit beside each other at reading
+   distance rather than spread across whatever width the panel has. */
 .ui-facts--strip {
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: max-content;
+  justify-content: start;
 }
 
 .ui-facts--tiles > .ui-fact,
@@ -819,8 +822,12 @@
 }
 
 .ui-facts--strip > .ui-fact {
-  padding-inline: 14px;
+  padding-inline: 20px;
   border-right: 1px solid var(--ui-line-soft);
+}
+
+.ui-facts--strip dd {
+  font-size: 13px;
 }
 
 .ui-facts--strip > .ui-fact:first-child {

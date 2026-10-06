@@ -576,7 +576,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     let stale = source
         .progress()
         .is_stale()
-        .then(|| "Out of date: the subtasks that reach this node changed since it ran".to_owned());
+        .then(|| "Out of date: its subtasks changed".to_owned());
     let pending = source.progress().pending().len();
     let open = opened.read().clone();
     let open_card = open
@@ -711,17 +711,14 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             },
             div { class: "curation-flights", "aria-hidden": "true" }
             if !cards.is_empty() {
-                // What the grouping reads — the annotation's words, not its
-                // pictures — or how far a run has got, and the ways to run it.
-                // The categories are the chips below and their count is on
+                // How far a proposal or a run has got, and the ways to run
+                // it; at rest the bar holds only what the grouping keeps.
+                // The categories are the band below and their count is on
                 // the card.
                 NodeBar {
                     lead: rsx! {
                         p { class: "curation-node-bar-reads", role: "status",
-                            match status.clone() {
-                                Some(status) => rsx! { "{status}" },
-                                None => rsx! { "Groups the words of {Counted::subtasks(reaching)} by what the robot does" },
-                            }
+                            if let Some(status) = status.clone() { "{status}" }
                         }
                     },
                     note: NodeNotes::join([stale, FailedEpisodes::note(failed)]),
@@ -778,19 +775,30 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                     EpisodeMap { lanes, paint, summary, on_select: jump }
                 }
             }
-            if cards.is_empty() {
-                EmptyState { title: "No categories yet",
-                    p {
-                        if grouping.subtasks_arriving() {
-                            "{Counted::subtasks(reaching)} so far; the categories are proposed from all of them once the nodes above finish."
-                        } else if reaching == 0 {
-                            "Run Break down subtasks first; the categories are proposed from the subtasks it describes."
-                        } else {
-                            "One model pass reads the {reaching} descriptions and proposes four to eight categories, then every subtask is put in one of them."
-                        }
+            // Before it has categories a grouping says only what it waits on,
+            // with the action that ends the wait when there is one.
+            if cards.is_empty() && reaching == 0 && !grouping.subtasks_arriving() {
+                EmptyState { title: "No subtasks to group",
+                    Button {
+                        purpose: ActionPurpose::Navigate,
+                        variant: ButtonVariant::Outline,
+                        onclick: {
+                            let annotation = annotation.clone();
+                            move |_| controller.select_node(Some(annotation.clone()))
+                        },
+                        "Open Break down subtasks"
                     }
-                    if let Some(status) = status.clone() {
-                        p { class: "curation-similar-note", role: "status", "{status}" }
+                }
+            } else if cards.is_empty() {
+                EmptyState { title: "No categories yet",
+                    p { role: "status",
+                        match status.clone() {
+                            Some(status) => rsx! { "{status}" },
+                            None if grouping.subtasks_arriving() => rsx! {
+                                "{Counted::subtasks(reaching)} so far, proposed once the steps above finish"
+                            },
+                            None => rsx! {},
+                        }
                     }
                     if problem().is_some() && !busy {
                         Button {
@@ -893,7 +901,6 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                     evidence: rsx! {
                         EpisodeTabs {
                             open: tabs,
-                            empty: "Choose a member to watch it play, most typical first.".to_owned(),
                             // How the open category differs from the rest, a tab
                             // beside its members' recordings rather than a wall
                             // above the members themselves.

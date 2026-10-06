@@ -1,6 +1,5 @@
 //! The browser's own "Leave site?" question, asked only while leaving would
-//! lose work nothing else keeps: edits not yet saved, or what a run has read
-//! into this tab.
+//! lose work nothing else keeps: edits not yet saved, or a run still reading.
 use dioxus::prelude::*;
 use std::rc::Rc;
 use wasm_bindgen::{JsCast as _, closure::Closure};

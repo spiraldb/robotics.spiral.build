@@ -68,12 +68,12 @@ pub(in crate::activities) fn EpisodeCamera(
     let pending = *video.state().read() == UseResourceState::Pending;
     rsx! {
         div { class: "episode-camera-panel",
-            if pending { p { class: "episode-camera-message", role: "status", "Loading recorded camera…" } }
+            if pending { p { class: "episode-camera-message", role: "status", "Loading…" } }
             else { match &*video.read() {
                 Some(Ok(camera)) => rsx! { CameraFrames { camera: camera.clone(), transport, request: request.clone() } },
                 Some(Err(error)) => rsx! { div { class: "episode-camera-message", role: "alert",
                     p { "The recorded camera could not be read: {error}" }
-                    button { class: "data-text-action", onclick: move |_| video.restart(), "Retry camera" }
+                    button { class: "data-text-action", onclick: move |_| video.restart(), "Retry" }
                 } },
                 None => rsx! {},
             } }
@@ -199,11 +199,11 @@ fn CameraFrames(
             }
             if let Some(error) = failure() { div { class: "episode-camera-message", role: "alert",
                 p { "The recorded camera could not be decoded: {error}" }
-                button { class: "data-text-action", onclick: move |_| { failure.set(None); covered.set(false); playback.set(retry_playback()); }, "Retry decoding" }
+                button { class: "data-text-action", onclick: move |_| { failure.set(None); covered.set(false); playback.set(retry_playback()); }, "Retry" }
             } }
             else if uncovered {
                 p { class: "episode-camera-message", role: "status",
-                    if frame_available { "Decoding recorded camera…" } else { "No frame at this time" }
+                    if frame_available { "Decoding…" } else { "No frame at this time" }
                 }
             }
         }

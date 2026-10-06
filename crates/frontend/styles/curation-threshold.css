@@ -13,8 +13,9 @@
      it, and the slider's thumb at the foot of the line. The track is inset
      by half the thumb at either end, as a range input insets its own, so a
      dot and the thumb set to its value stand at the same pixel. */
+  /* A strip stops at a measure a reader can sweep, however wide the pane. */
   .curation-threshold-strip {
-    @apply relative flex shrink-0 flex-col;
+    @apply relative flex w-full max-w-[40rem] shrink-0 flex-col;
     --thumb: 16px;
   }
   .curation-threshold-strip-track {

@@ -156,13 +156,6 @@ fn CaptureSection(capture: CaptureDestination, recording: Option<RecordingProgre
             } else if catalog.reading() {
                 div { class: "text-[11px] text-ink-faint", role: "status", "Loading datasets…" }
             }
-            p {
-                if recording.is_some() {
-                    "Dataset assignment is locked until this episode finishes."
-                } else {
-                    "New episodes are saved to this dataset."
-                }
-            }
         }
     }
 }
@@ -183,9 +176,9 @@ fn WaitingTakes(project: StudioProjectState) -> Element {
         section { class: "workbench-section waiting-takes", role: "status",
             p {
                 if count == 1 {
-                    "1 take is waiting on the robot connector."
+                    "1 take not stored yet"
                 } else {
-                    "{count} takes are waiting on the robot connector."
+                    "{count} takes not stored yet"
                 }
             }
             Button {
@@ -272,9 +265,10 @@ fn RobotRoster(
                                 strong { "{robot.id()}" }
                                 if show_role { small { "{role}" } }
                             }
-                            span {
-                                class: if ready { "live-robot-state live-robot-state-ready" } else { "live-robot-state" },
-                                "aria-hidden": "true",
+                            // A ready arm says nothing; one that cannot be driven
+                            // names why, so the exception is what finds the eye.
+                            if !ready {
+                                span { class: "live-robot-problem", "aria-hidden": "true", "{state}" }
                             }
                         }
                     }

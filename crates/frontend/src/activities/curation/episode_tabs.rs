@@ -55,8 +55,8 @@ pub(super) struct OpenEpisode {
     episode: EpisodeId,
     /// The chosen stretch; `None` for the episode whole.
     interval: Option<(f64, f64)>,
-    /// Each ask to play from `interval`'s start, counted, so choosing it
-    /// again replays it.
+    /// Each ask to play `interval`, counted, so choosing it again replays
+    /// it.
     play: Option<PlayRequest>,
 }
 
@@ -115,7 +115,7 @@ impl OpenEpisodes {
         self.stepping.set(true);
     }
     /// Open `episode` in a tab of its own, or bring its tab forward, and play
-    /// on from `interval`'s start when one is given. After `step_next`, an
+    /// `interval` when one is given. After `step_next`, an
     /// episode not yet open takes the place of the one in front instead.
     pub(super) fn open(mut self, episode: &EpisodeId, interval: Option<(f64, f64)>) {
         let stepping = std::mem::take(&mut *self.stepping.write());
@@ -129,13 +129,13 @@ impl OpenEpisodes {
             match open.iter_mut().find(|tab| &tab.episode == episode) {
                 Some(tab) => {
                     tab.interval = interval;
-                    tab.play = interval.map(|(start, _)| PlayRequest::after(tab.play, start));
+                    tab.play = interval.map(|span| PlayRequest::span(span).after(tab.play));
                 }
                 None => {
                     let tab = OpenEpisode {
                         episode: episode.clone(),
                         interval,
-                        play: interval.map(|(start, _)| PlayRequest::new(start)),
+                        play: interval.map(PlayRequest::span),
                     };
                     match in_front.filter(|_| stepping) {
                         Some(position) => open[position] = tab,
@@ -230,15 +230,14 @@ pub(super) fn EpisodeTabs(
     open: OpenEpisodes,
     render: Callback<OpenEpisode, Element>,
     #[props(default)] leading: Option<LeadingTab>,
-    /// What an empty column says when nothing is open and there is no
-    /// leading tab to show instead.
-    empty: String,
 ) -> Element {
     let tabs = open.open.read().clone();
+    // Every index opens its first row by itself, so this is a column whose
+    // tabs were all closed; the rows beside it are the way back.
     if tabs.is_empty() && leading.is_none() {
         return rsx! {
             div { class: "curation-episode-tabs-empty",
-                EmptyState { title: "Nothing open", p { "{empty}" } }
+                EmptyState { title: "Nothing open" }
             }
         };
     }

@@ -3,6 +3,7 @@
 //! slides on, and Score progress's progress rate.
 use super::{RuleKnob, RuleStrip, RuleView};
 use crate::activities::curation::document::{Comparison, EpisodeCondition, EpisodeFact, Selection};
+use crate::activities::curation::graph::AddGlyph;
 use crate::activities::curation::threshold::{Threshold, ThresholdStrip};
 use dioxus::prelude::*;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant, CloseIcon, Select};
@@ -65,13 +66,16 @@ pub(super) fn EpisodeConditions(
                     pick: StripPick { chosen, on_select },
                 }
             }
+            // A row of its own under the last condition, its box on the
+            // fact column's edge.
             div { class: "curation-select-condition-add",
                 Button {
                     purpose: ActionPurpose::Create,
-                    variant: ButtonVariant::Link,
+                    variant: ButtonVariant::Quiet,
                     size: ButtonSize::Compact,
                     title: "Keep only episodes that also meet another condition",
                     onclick: move |_| adding.set(added.clone()),
+                    AddGlyph {}
                     "Add condition"
                 }
             }

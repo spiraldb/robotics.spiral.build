@@ -2,8 +2,7 @@
 //! joint moving faster than 0.05 rad/s. One arm waiting while the other
 //! works is how two arms share a task, so only stillness of all of them
 //! counts. Arms are compared at the instants they were logged together.
-use super::recording_rate::Plural;
-use super::report_view::{CheckRow, Evidence, EvidenceChips, Verdict};
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Verdict};
 use super::stream_reads::{CheckedStreams, Greatest, ValueColumns};
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -138,30 +137,30 @@ impl Pauses {
             .map(|episode| episode.long)
             .sum::<u64>();
         let who = match self.arms {
-            1 => "The arm is",
-            2 => "Both arms are",
-            _ => "Every arm is",
+            1 => "the arm",
+            2 => "both arms",
+            _ => "every arm",
         };
         let share = if measured > 0.0 {
             still / measured
         } else {
             0.0
         };
-        let summary = format!(
-            "{who} still {:.0}% of the time; longest pause {:.1} s{}",
-            share * 100.0,
-            longest
-                .and_then(|episode| episode.longest_s)
-                .unwrap_or_default(),
-            match long {
-                0 => format!(", none over {:.0} s", Self::LONG),
-                pauses => format!(
-                    ", {} over {:.0} s",
-                    Plural::of(pauses as usize, "pause"),
-                    Self::LONG
-                ),
-            }
-        );
+        let finding = Finding::of(
+            format!("{:.0}%", share * 100.0),
+            &format!("of the time {who} still,"),
+        )
+        .and(
+            format!(
+                "{:.1} s",
+                longest
+                    .and_then(|episode| episode.longest_s)
+                    .unwrap_or_default()
+            ),
+            "longest pause,",
+        )
+        .and_count(long as usize, "pause", "over")
+        .and(format!("{:.0} s", Self::LONG), "");
         let verdict = if long > 0 {
             Verdict::Flagged
         } else {
@@ -191,7 +190,7 @@ impl Pauses {
             .iter()
             .map(|episode| Evidence::whole(episode.clone(), String::new()))
             .collect::<Vec<_>>();
-        CheckRow::new("Pauses", verdict, summary).flagging(long_evidence.clone()).with_details(rsx! {
+        CheckRow::new("Pauses", verdict, finding).flagging(long_evidence.clone()).with_details(rsx! {
             dl { class: "data-checks-facts",
                 div { dt { "Longest pause" } dd { EvidenceChips { evidence: longest_evidence } } }
                 div { dt { "Pauses over {Pauses::LONG:.0} s" } dd { EvidenceChips { evidence: long_evidence } } }

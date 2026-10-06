@@ -398,9 +398,10 @@ impl EpisodeLabels {
     }
 }
 
-/// The distinguishing directory, in words. A recording whose path says
-/// nothing an operator would recognize has no label at all, and is known by
-/// its id alone.
+/// The distinguishing directory, in words that begin as a sentence does, so
+/// a tab and a row read it alike. A recording whose path says nothing an
+/// operator would recognize has no label at all, and is known by its id
+/// alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::activities) struct SourceLabel {
     head: Option<String>,
@@ -421,7 +422,11 @@ impl SourceLabel {
                 .filter(|start| start.has_wall_clock())
                 .map(|start| format!("Recorded {}", start.utc_time_label()))
         } else {
-            Some(head.replace('_', " "))
+            let words = head.replace('_', " ");
+            let mut letters = words.chars();
+            letters
+                .next()
+                .map(|first| first.to_uppercase().chain(letters).collect())
         };
         Self { head }
     }
@@ -494,8 +499,8 @@ mod tests {
             ),
         ]);
         let [first, second] = labels(&listed).try_into().unwrap();
-        assert_eq!(first.head(), Some("fold skirts"));
-        assert_eq!(second.head(), Some("place fruit"));
+        assert_eq!(first.head(), Some("Fold skirts"));
+        assert_eq!(second.head(), Some("Place fruit"));
         let episode = &listed[0];
         assert_eq!(
             episode.facts().facts_label(),
@@ -537,7 +542,7 @@ mod tests {
     #[test]
     fn a_single_file_is_labelled_by_its_name() {
         let listed = episodes(&[("file:///runs/take-7.mcap", 0)]);
-        assert_eq!(labels(&listed)[0].head(), Some("take-7.mcap"));
+        assert_eq!(labels(&listed)[0].head(), Some("Take-7.mcap"));
         assert!(!SourceLabel::is_identifier("fold_and_stack_the_skirts"));
         assert!(SourceLabel::is_identifier(
             "01a0b638-099b-7740-a44b-ef08485546ed.bin"

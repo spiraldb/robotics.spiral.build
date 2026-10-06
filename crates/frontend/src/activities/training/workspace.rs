@@ -20,7 +20,7 @@ use spiral_robotics_common::training::{
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
     ConfirmationResponse, DeleteIcon, Disclosure, EmptyState, Fact, FactLayout, FactList, Field,
-    InlineConfirmation, Select, TextInput, TextInputKind,
+    FieldLayout, InlineConfirmation, Notice, NoticeTone, Select, TextInput, TextInputKind,
 };
 
 use crate::components::charts::{CharmingChart, ChartColor, ChartPoints, MONO_FONT, StudioTooltip};
@@ -89,9 +89,7 @@ fn TrainingPanels(
                 "Run",
                 "training-runs",
                 rsx! {
-                    EmptyState { icon: rsx! { TrainingIcon {} }, title: "No run open",
-                        p { "Choose a run from Runs, or start one from Setup, to follow its learning curve, resources, and checkpoints here." }
-                    }
+                    EmptyState { icon: rsx! { TrainingIcon {} }, title: "No run open" }
                 },
             )
             .with_class("training-run-editor"),
@@ -219,11 +217,10 @@ fn TrainingRunControl(
         }
     });
     let (readiness_summary, readiness_recovery) = readiness.guidance();
-    let runtime_summary = readiness
+    let runtime_name = readiness
         .runtime()
         .as_ref()
-        .map(|runtime| format!("{} · {}", runtime.display_name(), runtime.runtime()))
-        .unwrap_or_else(|| "Runtime unavailable".to_owned());
+        .map(|runtime| format!("{} · {}", runtime.display_name(), runtime.runtime()));
     let mut runtime_devices = vec![("auto".to_owned(), "Auto".to_owned())];
     if let Some(runtime) = &readiness.runtime() {
         for label in runtime.devices() {
@@ -256,20 +253,16 @@ fn TrainingRunControl(
     rsx! {
         div { class: "training-control",
             div { class: "training-control-scroll",
-            if let Some(reason) = training_blocker {
-                div { class: "training-inline-state training-inline-state-caution", role: "status",
-                    div { class: "training-inline-copy",
-                        strong { "MCAP training is not available yet" }
-                        span { "{reason}" }
-                        p { "You can record episodes and play them back in Data. Existing training history and checkpoints remain available." }
-                    }
+            if training_blocker.is_some() {
+                Notice { tone: NoticeTone::Caution, class: "training-blocker",
+                    strong { "Training unavailable" }
+                    " · Spiral can’t decode MCAP video yet."
                 }
             } else if !readiness.ready() {
-                div { class: "training-inline-state training-inline-state-caution",
-                    div { class: "training-inline-copy",
-                        strong { "Training is not ready" }
-                        span { "{readiness_summary}" }
-                        p { "{readiness_recovery}" }
+                Notice { tone: NoticeTone::Caution, class: "training-blocker",
+                    strong { "{readiness_summary}" }
+                    " {readiness_recovery}"
+                    if readiness.summary() != readiness_summary {
                         Disclosure { summary: rsx! { "Technical details" },
                             code { "{readiness.summary()}" }
                         }
@@ -319,11 +312,11 @@ fn TrainingRunControl(
                 }
             }
 
-            section { class: "training-form-section training-source-section",
+            section { class: "training-form-section",
                 header { class: "training-form-heading",
                     h3 { "Training data" }
                 }
-                Field { label: "Dataset", class: "training-field-wide",
+                Field { label: "Dataset", layout: FieldLayout::Inline,
                     Select {
                         value: dataset_id.clone(),
                         disabled: active_run.is_some(),
@@ -338,49 +331,39 @@ fn TrainingRunControl(
                     }
                 }
                 if let Some(problem) = catalog.problem() {
-                    div { class: "training-inline-state training-inline-state-caution", role: "status",
-                        div { class: "training-inline-copy",
-                            strong { "Could not load datasets" }
-                            span { "{problem}" }
-                            p { "{problem.recovery_guidance()}" }
-                            Button {
-                                purpose: ActionPurpose::Retry,
-                                variant: ButtonVariant::Outline,
-                                aria_label: "Retry loading datasets",
-                                onclick: move |_| catalog.reread(),
-                                "Retry"
-                            }
+                    div { class: "training-setup-note training-setup-problem", role: "status",
+                        span { "Could not load datasets. {problem} {problem.recovery_guidance()}" }
+                        Button {
+                            purpose: ActionPurpose::Retry,
+                            variant: ButtonVariant::Link,
+                            aria_label: "Retry loading datasets",
+                            onclick: move |_| catalog.reread(),
+                            "Retry"
                         }
                     }
                 } else if catalog.reading() {
-                    p { class: "text-[11px] text-ink-faint", role: "status", "Loading datasets…" }
+                    p { class: "training-setup-note", role: "status", "Loading datasets…" }
                 }
-                FactList { mono: true, class: "training-source-meta",
+                FactList { mono: true, class: "training-setup-facts",
                     Fact { label: "Cameras", "{camera_summary}" }
                 }
             }
 
-            section { class: "training-form-section training-runtime-section",
+            section { class: "training-form-section",
                 header { class: "training-form-heading",
                     h3 { "Compute" }
                 }
-                div { class: "training-runtime-summary",
-                    span {
-                        class: if readiness.runtime().is_some() { "training-runtime-dot training-runtime-dot-ready" } else { "training-runtime-dot" },
-                        "aria-hidden": "true"
-                    }
-                    div {
-                        strong { "{runtime_summary}" }
-                        span {
-                            if readiness.runtime().is_some() {
-                                "Connected through Arrow IPC over HTTP"
-                            } else {
-                                "Connect a runtime in Settings"
-                            }
+                FactList { class: "training-setup-facts",
+                    Fact { label: "Runtime",
+                        if let Some(name) = runtime_name {
+                            "{name}"
+                        } else {
+                            span { class: "training-runtime-missing", "Not connected" }
+                            " · connect one in Settings"
                         }
                     }
                 }
-                Field { label: "Device", class: "training-field-wide",
+                Field { label: "Device", layout: FieldLayout::Inline,
                     Select {
                         value: config.device().to_owned(),
                         disabled: active_run.is_some() || readiness.runtime().is_none(),
@@ -398,25 +381,23 @@ fn TrainingRunControl(
                 header { class: "training-form-heading",
                     h3 { "Run" }
                 }
-                div { class: "training-form-grid training-primary-grid",
-                    Field { label: "Run name",
-                        TextInput {
-                            value: config.run_name().to_owned(),
-                            disabled: active_run.is_some(),
-                            oninput: move |value| {
-                                controller.set_run_name(value);
-                            },
-                        }
+                Field { label: "Run name", layout: FieldLayout::Inline,
+                    TextInput {
+                        value: config.run_name().to_owned(),
+                        disabled: active_run.is_some(),
+                        oninput: move |value| {
+                            controller.set_run_name(value);
+                        },
                     }
-                    Field { label: "Steps",
-                        TextInput {
-                            kind: TextInputKind::Number, min: "1", step: "100",
-                            value: "{config.steps()}",
-                            disabled: active_run.is_some(),
-                            oninput: move |value: String| if let Ok(value) = value.parse() {
-                                controller.edit_config(move |config| config.set_steps(value));
-                            },
-                        }
+                }
+                Field { label: "Steps", layout: FieldLayout::Inline,
+                    TextInput {
+                        kind: TextInputKind::Number, min: "1", step: "100",
+                        value: "{config.steps()}",
+                        disabled: active_run.is_some(),
+                        oninput: move |value: String| if let Ok(value) = value.parse() {
+                            controller.edit_config(move |config| config.set_steps(value));
+                        },
                     }
                 }
             }
@@ -581,9 +562,7 @@ fn TrainingHistory(
                 header { class: "training-form-heading training-history-heading", h3 { "Runs" } }
             }
             if history.is_empty() {
-                EmptyState { title: "No runs yet",
-                    p { "Every training run lands here with its curve and checkpoints." }
-                }
+                EmptyState { title: "No runs yet" }
             }
             for run in history {
                 TrainingHistoryRow {
@@ -1091,8 +1070,11 @@ impl TrainingPresentation for TrainingRun {
             TrainingRunPhase::Starting | TrainingRunPhase::Running | TrainingRunPhase::Stopping => {
                 "training-phase training-phase-active"
             }
-            TrainingRunPhase::Completed => "training-phase training-phase-complete",
-            TrainingRunPhase::Stopped | TrainingRunPhase::Unavailable => "training-phase",
+            // A finished run is the resting state; only work in progress and
+            // failure are marked.
+            TrainingRunPhase::Completed
+            | TrainingRunPhase::Stopped
+            | TrainingRunPhase::Unavailable => "training-phase",
             TrainingRunPhase::Failed => "training-phase training-phase-failed",
         }
     }

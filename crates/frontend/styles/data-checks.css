@@ -3,28 +3,34 @@
    checks, Recording and Joints. A row's form says how its check came out:
    a check mark when clean, a caution diamond when flagged, a ring for a
    measurement, a dashed ring when the dataset lacks what the check reads.
-   A flagged row lights its episodes on a strip of the dataset's episodes,
-   oldest first; its streams, arms and episodes open on demand.
+   Clean, measured and unchecked rows rest in faint ink; only a flagged row
+   is set in ink, and it lights its episodes on a strip of the dataset's
+   episodes, oldest first, at the row's end. Its streams, arms and episodes
+   open on demand.
    Prefix every class with `data-checks-`. Use @layer components like
    tailwind.css. */
 
 @layer components {
+  /* The rows' hairlines stop where a wide pane would carry the eye too far
+     from a check's name to the episodes it lights. */
   .data-checks-report {
     display: flex;
+    max-width: 60rem;
     flex-direction: column;
     gap: 28px;
     container-type: inline-size;
   }
 
   /* The bottom line: a count per way the checks came out, each with its
-     mark, so it doubles as the key to the marks below. */
+     mark, so it doubles as the key to the marks below. Only what there is to
+     look at is set in ink. */
   .data-checks-tally {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 6px 20px;
     margin: 0;
-    color: var(--tone-ink-soft);
+    color: var(--tone-ink-faint);
     font-size: 13px;
   }
 
@@ -35,15 +41,14 @@
   }
 
   .data-checks-tally-count {
-    color: var(--tone-ink);
+    color: var(--tone-ink-soft);
     font-family: var(--font-mono);
     font-size: 12.5px;
     font-variant-numeric: tabular-nums;
-    font-weight: 560;
   }
 
   .data-checks-tally-part[data-verdict="flagged"],
-  .data-checks-tally-lead {
+  .data-checks-tally-part[data-verdict="flagged"] .data-checks-tally-count {
     color: var(--tone-ink);
     font-weight: 560;
   }
@@ -141,8 +146,8 @@
   }
 
   /* Mark, name, what it found, and where it holds, in columns every row
-     shares; a narrow report (Curation's Dataset tab) moves where it holds
-     under what it found. */
+     shares, where it holds at the row's end; a narrow report (Curation's
+     Dataset tab) moves where it holds under what it found. */
   .data-checks-row > .ui-disclosure-summary > .ui-disclosure-title,
   .data-checks-row.is-plain {
     display: grid;
@@ -186,7 +191,7 @@
   }
 
   .data-checks-mark[data-verdict="clean"] {
-    color: var(--tone-good);
+    color: var(--tone-ink-faint);
   }
 
   .data-checks-mark[data-verdict="flagged"]::before {
@@ -213,15 +218,38 @@
 
   .data-checks-name {
     min-width: 0;
+    color: var(--tone-ink-soft);
+  }
+
+  /* What it found reads at a measure that fits one line beside the strip,
+     its values leading in mono. */
+  .data-checks-summary {
+    min-width: 0;
+    max-width: 38rem;
+    color: var(--tone-ink-faint);
+    overflow-wrap: anywhere;
+  }
+
+  .data-checks-value {
+    color: var(--tone-ink-soft);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .data-checks-item[data-verdict="flagged"] .data-checks-name,
+  .data-checks-item[data-verdict="flagged"] .data-checks-value {
     color: var(--tone-ink);
     font-weight: 560;
   }
 
-  .data-checks-summary {
-    min-width: 0;
-    color: var(--tone-ink-soft);
-    font-variant-numeric: tabular-nums;
-    overflow-wrap: anywhere;
+  .data-checks-item[data-verdict="flagged"] .data-checks-summary {
+    color: var(--tone-ink);
+  }
+
+  .data-checks-item[data-verdict="unavailable"] .data-checks-name,
+  .data-checks-item[data-verdict="unavailable"] .data-checks-value {
+    color: var(--tone-ink-faint);
   }
 
   /* Where a flagged finding holds: one cell per episode, oldest first,
@@ -280,15 +308,6 @@
     }
   }
 
-  .data-checks-item[data-verdict="flagged"] .data-checks-summary {
-    color: var(--tone-ink);
-  }
-
-  .data-checks-item[data-verdict="unavailable"] .data-checks-name,
-  .data-checks-item[data-verdict="unavailable"] .data-checks-summary {
-    color: var(--tone-ink-faint);
-  }
-
   /* The detail behind a row, under its name. */
   .data-checks-details {
     display: flex;
@@ -297,9 +316,11 @@
     padding: 2px 8px 16px 58px;
   }
 
+  /* A detail's table lies on the report rather than in a box of its own,
+     hugging its columns, its first column's words on the name's edge. */
   .data-checks-details > .data-checks-table {
-    border: 1px solid var(--tone-line);
-    border-radius: 8px;
+    width: auto;
+    margin-left: -12px;
   }
 
   .data-checks-table th:first-child,
@@ -496,21 +517,10 @@
   }
 
   .data-checks-progress-lede {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
     margin: 0;
-    font-size: 13px;
-  }
-
-  .data-checks-progress-lede strong {
     color: var(--tone-ink);
+    font-size: 13px;
     font-weight: 600;
-  }
-
-  .data-checks-progress-lede span {
-    color: var(--tone-ink-faint);
-    font-size: 12.5px;
   }
 
   .data-checks-steps {

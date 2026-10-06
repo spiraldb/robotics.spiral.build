@@ -400,9 +400,6 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                             close();
                         }
                     },
-                    p { class: "curation-publish-intro",
-                        "Each output you choose becomes a view of what it keeps across the dataset. Its models answer each episode once, in the background, and the view reads what they stored."
-                    }
                     ul { class: "curation-publish-outputs",
                         for output in outputs.clone() {
                             PublishRow {
@@ -475,8 +472,9 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
     }
 }
 
-/// One output in the panel: whether to publish it, its card's words, the name
-/// of its view, and where that view stands.
+/// One output in the panel: whether to publish it and where its view stands,
+/// then — hanging from the checkbox's label — its card's words and the name of
+/// its view.
 #[component]
 fn PublishRow(
     output: PublishableOutput,
@@ -504,18 +502,18 @@ fn PublishRow(
                     title: unwritten.clone().unwrap_or_else(|| format!("Publish this {}", output.label)),
                     onchange: move |chosen| on_choose.call(chosen),
                 }
+                // The view's name is the field under the row, so the state
+                // is one word at the row's end, as the card says it.
                 if let Some(published) = output.published.clone() {
                     if published.is_current(current) {
-                        p { class: "curation-publish-status", role: "status",
-                            title: "The view {published.view()} is what the saved curation keeps here",
-                            "Published as "
-                            code { "{published.view()}" }
+                        p { class: "curation-publish-status is-published", role: "status",
+                            title: "Published as {published.view()}: the view is what the saved curation keeps here",
+                            "Published"
                         }
                     } else {
                         p { class: "curation-publish-status is-stale", role: "status",
                             title: "The saved curation has changed since {published.view()} was published; publish it again to update the view",
-                            code { "{published.view()}" }
-                            " is out of date"
+                            "Out of date"
                         }
                     }
                     Button {

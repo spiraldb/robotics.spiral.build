@@ -24,6 +24,7 @@ use crate::activities::data::{CheckedEpisode, DatasetLedger, DatasetOverview};
 use crate::activities::episode::{Episode, EpisodeRows, FeaturedCamera};
 use crate::components::dataset_catalog::DatasetCatalog;
 use crate::components::icons::SpinnerIcon;
+use crate::format::ClockPresentation as _;
 
 /// Every episode of the dataset, each as one whole interval from its first
 /// message to its last, with the facts Spiral records for it. Only the
@@ -99,7 +100,6 @@ fn DatasetChoice(controller: CurationController) -> Element {
         section { class: "data-glance curation-canvas-dataset-choice", "aria-label": "Choose a dataset",
             header { class: "data-glance-head",
                 h2 { "Choose a dataset" }
-                p { "Every step of this curation reads one dataset's recordings." }
             }
             if let Some(problem) = problem() {
                 Notice { tone: NoticeTone::Danger, class: "inline-error", "{problem}" }
@@ -111,7 +111,7 @@ fn DatasetChoice(controller: CurationController) -> Element {
             } else if datasets.is_empty() && catalog.reading() {
                 EmptyState { icon: rsx! { SpinnerIcon {} }, p { "Loading datasets…" } }
             } else if datasets.is_empty() {
-                p { class: "data-rail-note", "This project has no datasets yet. Import recordings in Data first." }
+                p { class: "curation-canvas-dataset-none", "No datasets yet. Import recordings in Data." }
             } else {
                 DatasetLedger { datasets, on_select: choose }
             }
@@ -178,23 +178,28 @@ fn DatasetEpisodeList(
     let thumbnails = Thumbnails::use_camera(controller, None);
     let front = tabs.front().map(|tab| tab.episode().clone());
     let chosen = faces.iter().position(|(id, _)| front.as_ref() == Some(id));
-    // Every count below the Dataset card is over these episodes, so the bar
-    // says which they are.
+    // The card names the dataset and its episodes; the bar ends with what
+    // they hold, the recording every node's tally is a share of.
+    let recorded = episodes
+        .iter()
+        .filter_map(|episode| episode.facts().duration_seconds())
+        .sum::<f64>()
+        .clock_label();
     let reads = if partial {
-        format!(
-            "Every node reads the first {} of this dataset",
-            Counted::episodes(episodes.len())
-        )
+        format!("First {} · {recorded}", Counted::episodes(episodes.len()))
     } else {
-        format!(
-            "Every node reads these {}",
-            Counted::episodes(episodes.len())
-        )
+        format!("{} · {recorded}", Counted::episodes(episodes.len()))
     };
     let opened = episodes.clone();
     rsx! {
         NodeBar {
-            lead: rsx! { p { class: "curation-node-bar-reads", "{reads}" } },
+            actions: rsx! {
+                p {
+                    class: "curation-threshold-tally",
+                    title: "The episodes every node reads, and the recording they hold",
+                    "{reads}"
+                }
+            },
         }
         SubtaskReview {
             index: rsx! {
@@ -233,7 +238,6 @@ fn DatasetEpisodeList(
             evidence: rsx! {
                 EpisodeTabs {
                     open: tabs,
-                    empty: "Choose an episode to watch it.".to_owned(),
                     leading: LeadingTab::dataset(rsx! {
                         DatasetOverview { dataset: dataset.clone(),
                             on_open: move |checked: CheckedEpisode| {

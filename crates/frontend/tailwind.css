@@ -440,7 +440,7 @@ button.studio-status-connection[aria-expanded="true"] {
 }
 
 .studio-status-workspace {
-  max-width: 22ch;
+  max-width: 36ch;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -621,6 +621,42 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 }
 
+/* Signed out: the mark, the product's name in the brand's two weights, and
+   the one way in, set as a small upright stack on the canvas. */
+.sign-in-gate {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding-bottom: 8vh;
+  background: var(--tone-canvas);
+}
+
+.sign-in-gate .spiral-mark {
+  width: 34px;
+  height: 34px;
+}
+
+.sign-in-gate h1 {
+  margin: 0 0 6px;
+  color: var(--tone-ink-faint);
+  font-size: 19px;
+  font-weight: 400;
+  letter-spacing: -0.03em;
+}
+
+.sign-in-gate .sign-in-brand {
+  color: var(--tone-ink);
+  font-weight: 560;
+}
+
+.sign-in-gate .ui-button {
+  min-height: 34px;
+  padding-inline: 16px;
+}
+
 /* Every shortcut, grouped by where it works. */
 .shortcut-sheet {
   position: fixed;
@@ -750,8 +786,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   /* The last label of a span sits inside the ruler, not clipped off its edge. */
-  .data-time-tick[data-edge="end"] span,
-  .data-plots-tick[data-edge="end"] span {
+  .data-time-tick[data-edge="end"] span {
     @apply left-auto right-1;
   }
 
@@ -798,30 +833,56 @@ button.studio-status-connection[aria-expanded="true"] {
     container-type: inline-size;
   }
 
+  /* The arm's two readout rows are one instrument: cells divided by
+     hairlines, the first cell of each row on the section's left edge, the
+     two rows separated by one rule. */
   .live-summary-readouts {
+    display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin: 0 14px;
+    padding-block: 8px;
+  }
+
+  .live-summary-readouts + .live-summary-readouts {
+    border-top: 1px solid var(--tone-line-soft);
+  }
+
+  .live-summary-readouts > .readout:nth-child(4n + 1) {
+    padding-left: 0;
+    border-left: 0;
   }
 
   @container live-workbench (max-width: 20rem) {
     .live-summary-readouts {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+      row-gap: 8px;
+    }
+
+    .live-summary-readouts > .readout:nth-child(2n + 1) {
+      padding-left: 0;
+      border-left: 0;
     }
   }
 
+  /* The arms as tabs over the motors below: plain rows on the panel, the
+     chosen one in the selection wash. No box per arm; the row's edges are
+     the section's. */
   .live-robot-roster {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-    @apply gap-1.5 border-b bg-surface px-3.5 pb-3.5;
-    border-color: var(--tone-line-soft);
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    @apply gap-1 bg-surface px-2 pb-1;
   }
 
   .live-robot-row {
-    @apply flex min-h-9 min-w-0 items-center gap-2.5 rounded-md border px-3 text-left;
-    border-color: var(--tone-line);
+    @apply flex min-h-8 min-w-0 items-center gap-2 rounded-[5px] px-1.5 text-left;
   }
 
   .live-robot-row[aria-selected="true"] {
-    border-color: var(--tone-accent-line);
+    background: var(--tone-selected);
+  }
+
+  .live-robot-row[aria-selected="true"] .live-robot-copy small {
+    color: var(--tone-accent-ink);
   }
 
   .live-robot-accent {
@@ -841,13 +902,8 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply font-mono text-[10.5px] text-ink-faint;
   }
 
-  .live-robot-state {
-    @apply h-1.5 w-1.5 shrink-0 rounded-full;
-    background: var(--tone-caution);
-  }
-
-  .live-robot-state-ready {
-    background: var(--tone-good-dot);
+  .live-robot-problem {
+    @apply shrink-0 text-[11px] text-caution;
   }
 
   .workbench-empty {
@@ -855,9 +911,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .live-setup-card {
-    @apply mx-3.5 my-3 flex flex-col items-start gap-1 rounded-lg border px-3.5 py-3;
-    border-color: var(--tone-line);
-    background: var(--tone-sidebar);
+    @apply mx-3.5 my-3 flex flex-col items-start gap-1;
   }
 
   .live-setup-card strong {
@@ -907,13 +961,20 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply -mx-3.5 mb-1;
   }
 
+  /* Takes the robot connector still holds: the count on the left edge, the
+     way to store them on the right. */
+  .waiting-takes {
+    @apply flex items-center gap-3 px-3.5 py-2.5;
+  }
+
+  .waiting-takes p {
+    @apply min-w-0 flex-1 text-[12px] text-caution;
+  }
+
   .capture-dataset-field .ui-input {
     @apply font-mono text-[12.5px];
   }
 
-  .capture-destination > p {
-    @apply mt-2 text-[11.5px] leading-4 text-ink-faint;
-  }
 
   .camera-editor-content {
     @apply flex min-h-0 flex-1 flex-col bg-surface;
@@ -1077,10 +1138,16 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply ml-auto font-mono text-ink-faint tabular-nums;
   }
 
+  /* A message at rest names its severity in faint ink; only success and
+     error earn a wash, so they find the eye in a long list. */
   .notification-severity {
-    @apply rounded px-1.5 py-px font-mono text-[10px];
-    border: 1px solid var(--tone-line);
-    color: var(--tone-ink-soft);
+    @apply rounded py-px font-mono text-[10px];
+    border: 1px solid transparent;
+    color: var(--tone-ink-faint);
+  }
+
+  .notification-item:is(.message-success, .message-error) .notification-severity {
+    @apply px-1.5;
   }
 
   .notification-item.message-success .notification-severity {
@@ -1118,9 +1185,6 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply text-[13px] font-semibold text-ink;
   }
 
-  .notification-center-empty span {
-    @apply max-w-[32ch] text-[12px] leading-[18px];
-  }
 
   /* Training ------------------------------------------------------------
      A curve-first instrument inside the same compact panel grammar. Panels
@@ -1147,55 +1211,28 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply min-h-0 flex-1 overflow-y-auto bg-surface;
   }
 
+  /* A run's phase is a quiet word; work in progress takes the blue it
+     always takes, and only a failure takes a wash. */
   .training-phase {
-    @apply inline-flex min-h-5 shrink-0 items-center rounded px-1.5 text-[10px] font-medium;
-    background: var(--tone-hover);
-    color: var(--tone-ink-soft);
+    @apply inline-flex min-h-5 shrink-0 items-center text-[10px] font-medium text-ink-faint;
   }
 
   .training-phase-active {
-    background: var(--tone-selected);
-    color: var(--tone-accent-ink);
-  }
-
-  .training-phase-complete {
-    background: var(--tone-good-soft);
-    color: var(--tone-good);
+    color: var(--tone-info-ink);
   }
 
   .training-phase-failed {
+    @apply rounded px-1.5;
     background: var(--tone-danger-soft);
     color: var(--tone-danger);
   }
 
-  .training-inline-state {
-    @apply mx-3 mt-3 flex min-w-0 items-start gap-2 rounded px-2.5 py-2 text-[11px];
-  }
-
-  .training-inline-copy {
-    @apply flex min-w-0 flex-1 flex-col gap-0.5;
-  }
-
-  .training-inline-copy strong {
+  .training-blocker strong {
     @apply font-semibold;
   }
 
-  .training-inline-copy span {
-    @apply text-[10px] leading-4;
-    overflow-wrap: anywhere;
-  }
-
-  .training-inline-copy p {
-    @apply text-[10px] leading-4 text-ink-soft;
-  }
-
-  .training-inline-state-caution {
-    background: var(--tone-caution-soft);
-    color: var(--tone-caution);
-  }
-
   .training-active-run {
-    @apply border-b border-line px-3 py-3;
+    @apply border-b border-line px-3.5 py-3;
     background: var(--tone-sunken);
   }
 
@@ -1224,9 +1261,10 @@ button.studio-status-connection[aria-expanded="true"] {
     background: var(--tone-line);
   }
 
+  /* Training is work in progress, so its bar is blue; lime is selection. */
   .training-progress-fill {
     @apply h-full rounded-full;
-    background: var(--tone-accent-strong);
+    background: var(--tone-info);
   }
 
   .training-active-run > p {
@@ -1243,40 +1281,42 @@ button.studio-status-connection[aria-expanded="true"] {
     border-color: var(--tone-line-soft);
   }
 
-  .training-source-section {
-    @apply pt-3;
+  .training-form-section {
+    @apply flex flex-col gap-2;
   }
 
-  .training-source-meta {
-    @apply mt-2 grid gap-1 border-t border-line pt-2;
+  /* Setup rows read label-left, value-right on one label column: the kit's
+     inline field holds its label at 4.5rem and 10px from the control, and
+     the facts between the fields take the same measure. */
+  .training-control .ui-field-label,
+  .training-setup-facts dt {
+    color: var(--tone-ink-faint);
   }
 
-  .training-runtime-summary {
-    @apply mb-2 flex min-w-0 items-start gap-2 border-b border-line pb-2;
+  .training-setup-facts {
+    grid-template-columns: 4.5rem minmax(0, 1fr);
+    grid-auto-rows: minmax(26px, auto);
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 8px;
   }
 
-  .training-runtime-summary > div {
-    @apply flex min-w-0 flex-col gap-0.5;
+  .training-runtime-missing {
+    color: var(--tone-caution);
   }
 
-  .training-runtime-summary strong {
-    @apply truncate text-[12.5px] font-medium text-ink;
+  .training-setup-note {
+    @apply flex flex-wrap items-baseline gap-x-2 text-[11.5px] leading-4 text-ink-faint;
+    margin-left: calc(4.5rem + 10px);
+    overflow-wrap: anywhere;
   }
 
-  .training-runtime-summary span:not(.training-runtime-dot) {
-    @apply text-[11.5px] text-ink-faint;
-  }
-
-  .training-runtime-dot {
-    @apply mt-1.5 block size-1.5 shrink-0 rounded-full bg-ink-faint;
-  }
-
-  .training-runtime-dot-ready {
-    background: var(--tone-good-dot);
+  .training-setup-problem {
+    color: var(--tone-caution);
   }
 
   .training-form-heading {
-    @apply mb-2 flex min-w-0 items-center gap-2;
+    @apply flex min-w-0 items-center gap-2;
   }
 
   .training-form-heading h3,
@@ -1285,20 +1325,8 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply min-w-0 flex-1 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-ink-faint;
   }
 
-  .training-form-heading span {
-    @apply truncate font-mono text-[11px] text-ink-faint;
-  }
-
   .training-form-grid {
     @apply mt-2 grid grid-cols-2 gap-x-2 gap-y-2;
-  }
-
-  .training-primary-grid {
-    grid-template-columns: minmax(0, 1fr) 6.5rem;
-  }
-
-  .rollout-field {
-    @apply flex min-w-0 flex-col gap-1 text-[11.5px] text-ink-soft;
   }
 
   .training-field-wide {
@@ -1331,8 +1359,8 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .training-start-action {
-    @apply mx-3 my-3 shrink-0;
-    width: calc(100% - 1.5rem);
+    @apply mx-3.5 my-3 shrink-0;
+    width: calc(100% - 1.75rem);
   }
 
   .training-history-panel {
@@ -1410,7 +1438,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .training-run-facts {
-    @apply grid shrink-0 grid-cols-3 divide-x divide-line;
+    @apply shrink-0;
   }
 
   .training-run-message {
@@ -1568,12 +1596,18 @@ button.studio-status-connection[aria-expanded="true"] {
     background: var(--tone-danger);
   }
 
+  /* Tiles laid on the panel as two columns of hairline rows, not a boxed
+     tile set inside the region. */
   .training-input-facts {
-    @apply grid min-h-0 flex-1 content-start grid-cols-2 overflow-y-auto px-3 py-2;
+    @apply grid min-h-0 flex-1 content-start grid-cols-2 gap-x-4 gap-y-0 overflow-y-auto px-3 py-2;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
   }
 
   .training-input-facts > .ui-fact {
-    @apply min-w-0 border-b border-line py-2 last:border-b-0;
+    @apply min-w-0 border-b px-0 py-2 last:border-b-0;
+    border-color: var(--tone-line-soft);
   }
 
   .training-input-facts > .ui-fact:nth-last-child(2) {
@@ -1589,11 +1623,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .training-phase-timings {
-    @apply grid shrink-0 grid-cols-5 border-b border-line;
-  }
-
-  .training-phase-timings > .ui-fact {
-    @apply min-w-0 border-r border-line px-3 py-1.5 last:border-r-0;
+    @apply shrink-0 border-b border-line px-3 py-1.5;
   }
 
   .training-resource-lane {
@@ -1687,14 +1717,6 @@ button.studio-status-connection[aria-expanded="true"] {
       @apply flex-col gap-2;
     }
 
-    .training-run-facts {
-      @apply w-full;
-    }
-
-    .training-run-facts > .ui-fact {
-      @apply flex-1;
-    }
-
     .training-run-evidence {
       grid-template-rows: minmax(18rem, 1fr) minmax(15rem, auto) minmax(35rem, auto);
     }
@@ -1713,10 +1735,12 @@ button.studio-status-connection[aria-expanded="true"] {
   /* The bar sits above the pane's content so its popovers clear the graph's
      own layers (node and edge tiles are z-indexed). The popovers hang from
      the bar itself rather than the control that opens them, so they stay
-     inside a narrow pane. */
+     inside a narrow pane. It is the node bar's 40px, with the same hairline,
+     so the two panes' first lines meet across the divider; the name's words
+     and Publish's edge sit on the 12px gutter every pane keeps. */
   .document-bar {
-    @apply relative z-30 flex shrink-0 flex-wrap items-center gap-x-1 gap-y-1.5 border-b bg-surface py-2 pl-2 pr-2;
-    border-color: var(--tone-line-soft);
+    @apply relative z-30 flex min-h-10 shrink-0 flex-wrap items-center gap-x-1 gap-y-1.5 border-b bg-surface px-3 py-1;
+    border-color: var(--tone-line);
   }
 
   .document-identity {
@@ -1725,8 +1749,10 @@ button.studio-status-connection[aria-expanded="true"] {
 
   /* The name reads as the bar's title and is an input all along: a hairline
      box on hover says it can be typed into, and focus draws the field. */
+  /* The words sit on the bar's edge; the box that hover and focus draw
+     reaches into the gutter, past its padding and hairline. */
   .document-name-field {
-    @apply min-w-0 max-w-[40rem] rounded-md border border-transparent bg-transparent px-2 py-0.5 text-[13px] font-semibold tracking-[-0.015em] text-ink;
+    @apply -ml-[9px] min-w-0 max-w-[40rem] rounded-md border border-transparent bg-transparent px-2 py-0.5 text-[13px] font-semibold tracking-[-0.015em] text-ink;
     field-sizing: content;
     min-inline-size: 6ch;
     text-overflow: ellipsis;
@@ -1763,15 +1789,16 @@ button.studio-status-connection[aria-expanded="true"] {
     rotate: -90deg;
   }
 
-  /* Green is saved; red is anything Studio does not hold yet. */
+  /* Unsaved changes are the exception, a caution dot before Discard and
+     Save; saved and untouched are the rest state and draw nothing, though
+     the status region stays for screen readers. */
   .document-state {
-    @apply mx-1.5 size-2 shrink-0 rounded-full;
-    background: var(--tone-danger);
-    transition: background-color 160ms ease-out;
+    @apply size-0 shrink-0 rounded-full;
   }
 
-  .document-state.is-saved {
-    background: var(--tone-good-dot);
+  .document-state.is-draft {
+    @apply mx-1.5 size-2;
+    background: var(--tone-caution);
   }
 
   .document-actions {
@@ -1810,6 +1837,8 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply relative flex items-center;
   }
 
+  /* Name, then when it was made at the row's end, then the open one's
+     check in a slot every row keeps, so the dates share one edge. */
   .document-switcher-option {
     @apply w-full gap-2 pr-9 text-[12px];
   }
@@ -1833,12 +1862,20 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply m-0.5 w-full;
   }
 
-  .document-switcher-option .ui-icon {
-    @apply ml-auto size-3.5 shrink-0;
+  .document-switcher-name {
+    @apply min-w-0 flex-1 truncate;
   }
 
-  .document-switcher-name {
-    @apply min-w-0 truncate;
+  .document-switcher-made {
+    @apply shrink-0 font-mono text-[11px] font-normal tabular-nums text-ink-faint;
+  }
+
+  .document-switcher-current {
+    @apply flex size-3.5 shrink-0;
+  }
+
+  .document-switcher-current .ui-icon {
+    @apply size-3.5;
   }
 
   .document-switcher-empty,
@@ -1866,7 +1903,6 @@ button.studio-status-connection[aria-expanded="true"] {
       animation: none;
     }
 
-    .document-state,
     .document-switch .ui-icon {
       transition: none;
     }
@@ -1895,41 +1931,41 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply mb-2 flex min-h-5 items-center gap-2;
   }
 
-  .rollout-state {
-    @apply inline-flex min-h-5 items-center rounded border px-1.5 font-mono text-[10.5px] font-medium;
-    border-color: var(--tone-caution-line);
-    background: var(--tone-caution-soft);
-    color: var(--tone-caution);
+  /* Execution reads as a receipt: words hard-left, values hard-right, and
+     the one entry on the same right edge. */
+  .rollout-receipt {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 4px;
   }
 
-  .rollout-state-ready {
-    border-color: var(--tone-accent-line);
-    background: var(--tone-accent-wash);
-    color: var(--tone-accent-ink);
-  }
-
-  .rollout-field-grid {
-    @apply grid grid-cols-2 gap-2;
+  .rollout-receipt dd {
+    text-align: right;
   }
 
   .rollout-duration-field {
-    grid-column: 1 / -1;
+    @apply mt-2;
   }
 
-  .rollout-duration-control {
-    @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2;
+  /* Labels are quieter than the values and controls they name. */
+  .rollout-workbench .ui-field-label {
+    color: var(--tone-ink-faint);
   }
 
-  .rollout-duration-control small {
-    @apply whitespace-nowrap text-[10px] text-ink-faint;
+  .rollout-duration-field > .ui-input {
+    flex: 0 0 4.5rem;
+    margin-left: auto;
   }
 
-  .rollout-duration-control .rollout-duration-error {
+  .rollout-duration-field small {
+    @apply whitespace-nowrap text-[11px] text-ink-faint;
+  }
+
+  .rollout-duration-field .rollout-duration-error {
     color: var(--tone-danger);
   }
 
   .rollout-checkpoint-meta {
-    @apply mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-ink-faint;
+    @apply mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-faint;
   }
 
   .rollout-checkpoint-meta span:not(:first-child) {
@@ -1937,35 +1973,39 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .rollout-empty-copy {
-    @apply mt-2 text-[10px] leading-4 text-ink-faint;
+    @apply mt-2 text-[12px] leading-4 text-ink-faint;
   }
 
+  /* The follower on one line: its mark and name left, what it offers the
+     policy right. Only a problem takes colour. */
   .rollout-target-row {
-    @apply flex min-h-8 items-center gap-2;
+    @apply flex min-h-7 flex-wrap items-baseline gap-x-2;
   }
 
-  .rollout-target-row > div {
-    @apply flex min-w-0 flex-1 flex-col;
+  .rollout-target-row .live-robot-accent {
+    align-self: center;
   }
 
   .rollout-target-row strong {
-    @apply truncate text-[11px] font-semibold;
+    @apply min-w-0 truncate text-[12px] font-semibold;
   }
 
   .rollout-target-row small {
-    @apply truncate text-[10px] text-ink-faint;
+    @apply ml-auto text-right font-mono text-[11px] text-ink-faint;
+    overflow-wrap: anywhere;
+  }
+
+  .rollout-target-row .rollout-target-problem,
+  .rollout-empty-copy.rollout-target-problem {
+    color: var(--tone-caution);
   }
 
   .rollout-action-area {
-    @apply sticky bottom-0 mt-auto border-t border-line bg-surface px-3 py-3;
+    @apply sticky bottom-0 mt-auto border-t border-line bg-surface px-3.5 py-3;
   }
 
   .rollout-runtime-note {
-    @apply mb-3 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2 text-[12px];
-  }
-
-  .rollout-runtime-note > div {
-    @apply flex min-w-0 flex-col gap-0.5;
+    @apply mb-3 flex min-w-0 flex-col gap-0.5 text-[12px];
   }
 
   /*
@@ -1985,7 +2025,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .rollout-runtime-note small {
-    @apply min-w-0 text-ink-faint;
+    @apply min-w-0 text-[12px] text-ink-faint;
     overflow-wrap: anywhere;
   }
 
@@ -1995,7 +2035,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .rollout-runtime-dot {
-    @apply h-1.5 w-1.5 rounded-full;
+    @apply h-1.5 w-1.5 shrink-0 self-center rounded-full;
     background: var(--tone-caution);
   }
 
@@ -2040,20 +2080,22 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply flex h-full min-h-0 flex-col bg-surface;
   }
 
+  /* The kit strip, hugging its readings. Each value reserves its widest
+     reading so a growing latency never shifts the readings after it. */
   .rollout-metric-strip {
-    @apply grid shrink-0 grid-cols-3 border-b border-line px-3.5;
+    @apply shrink-0 overflow-x-auto border-b border-line px-3.5 py-2;
   }
 
-  .rollout-inference-empty {
-    @apply relative flex min-h-32 flex-1 flex-col items-center justify-center px-4 text-center;
+  .rollout-metric-strip dd {
+    min-width: 8ch;
   }
 
-  .rollout-inference-empty strong {
-    @apply relative text-[13px] font-semibold;
+  .rollout-metric-strip dd small {
+    @apply ml-0.5 text-[11px] font-normal text-ink-faint;
   }
 
-  .rollout-inference-empty p {
-    @apply relative mt-1 max-w-[34rem] text-[12px] leading-[18px] text-ink-faint;
+  .rollout-metric-missed dd {
+    color: var(--tone-caution);
   }
 }
 
@@ -2069,32 +2111,17 @@ button.studio-status-connection[aria-expanded="true"] {
 }
 
 .settings-header h2 {
-  font-size: 1.125rem;
+  font-size: 19px;
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.025em;
 }
 
-.settings-header p,
-.provider-heading p,
-.settings-help {
-  margin-top: 0.125rem;
-  color: var(--tone-ink-faint);
-  font-size: 0.8125rem;
-}
-
-.settings-footer > div {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-.settings-field-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.5rem;
-}
-
+/* Every settings row puts its label in one column and its control or value
+   on the next edge, so a section reads label-left, value-right like a
+   receipt. Fields and facts both measure off this column. */
 .data-settings-panel {
+  --settings-label-column: 8rem;
+  --settings-label-gap: 10px;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -2153,33 +2180,87 @@ button.studio-status-connection[aria-expanded="true"] {
 }
 
 .provider-heading {
-  margin-bottom: 1.25rem;
+  margin-bottom: 0.875rem;
 }
 
 .provider-heading h3 {
-  font-size: 0.9375rem;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.01em;
 }
 
+/* A text setting: the kit's inline field on the section's label column,
+   its control held to a readable width rather than the panel's. */
 .settings-field {
-  margin-bottom: 0.75rem;
+  gap: var(--settings-label-gap);
+  margin-bottom: 0.625rem;
+}
+
+.settings-field > .ui-field-label {
+  flex-basis: var(--settings-label-column);
+  color: var(--tone-ink-faint);
+}
+
+.settings-field > :is(.ui-input, .ui-select) {
+  flex: 0 1 26rem;
+}
+
+/* A field with the action that tests it, on one line. */
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.625rem;
+}
+
+.settings-row > .settings-field {
+  margin-bottom: 0;
+}
+
+/* Read-only settings on the same columns as the fields above them. */
+.settings-facts {
+  grid-template-columns: var(--settings-label-column) minmax(0, 1fr);
+  column-gap: var(--settings-label-gap);
+  row-gap: 0.625rem;
+  margin-bottom: 0.625rem;
+}
+
+.settings-facts dt {
+  align-self: center;
+}
+
+.settings-facts dd {
+  display: flex;
+  min-height: 26px;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 0.75rem;
+}
+
+.settings-facts dd > .ui-select {
+  flex: 0 1 26rem;
+}
+
+.settings-facts code {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
 }
 
 .settings-help {
-  max-width: 65ch;
-  margin: -0.25rem 0 0.75rem;
+  max-width: 60ch;
+  margin: 0 0 0.75rem;
+  color: var(--tone-ink-faint);
+  font-size: 0.75rem;
   line-height: 1.45;
 }
 
-.settings-project-transfer {
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--tone-line);
+/* Groups inside a section are set apart by space and their name. */
+.settings-group {
+  margin-top: 2rem;
 }
 
-.settings-project-transfer .provider-heading {
-  margin-bottom: 0.75rem;
+.settings-group .provider-heading {
+  margin-bottom: 0.375rem;
 }
 
 .settings-transfer-actions {
@@ -2188,28 +2269,23 @@ button.studio-status-connection[aria-expanded="true"] {
   gap: 0.5rem;
 }
 
-.settings-account {
-  margin-bottom: 1rem;
-}
-
-.settings-account-identity {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.5rem;
-}
-
 .connection-test {
-  margin-top: 0.75rem;
-  padding: 0.5rem 0.625rem;
-  border-radius: 0.375rem;
-  background: var(--tone-sunken);
-  font-size: 0.6875rem;
+  max-width: 60ch;
+  margin: 0 0 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .connection-test-ok { color: var(--tone-good); }
 
-.connection-test-failed { color: var(--tone-danger); background: var(--tone-danger-soft); }
+.connection-test-failed { color: var(--tone-danger); }
+
+/* Starts on the control column, under the row it belongs to. Set after the
+   notes it indents, whose margin shorthand would otherwise reset it. */
+.settings-control-column {
+  margin-left: calc(var(--settings-label-column) + var(--settings-label-gap));
+}
 
 .settings-save-error {
   display: flex;
@@ -2245,12 +2321,10 @@ button.studio-status-connection[aria-expanded="true"] {
   min-height: 3rem;
   flex: 0 0 auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
+  justify-content: flex-end;
+  gap: 0.25rem;
   padding: 0.5rem 0.75rem;
   border-top: 1px solid var(--tone-line);
-  color: var(--tone-ink-faint);
-  font-size: 0.6875rem;
 }
 
 .settings-loading {
@@ -2389,24 +2463,19 @@ button.studio-status-connection[aria-expanded="true"] {
     than the three beside it and left the whole strip ragged.
   */
   .readout {
-    @apply flex min-w-0 flex-col rounded-md border bg-surface px-2 py-1;
-    border-color: var(--tone-line-soft);
+    @apply flex min-w-0 flex-col gap-0.5 px-2.5;
+    border-left: 1px solid var(--tone-line-soft);
   }
 
-  .live-workbench .readout {
-    @apply px-2 py-1;
-  }
-
-  .readout-caution {
-    @apply bg-caution-soft;
-  }
+  /* Out of range tints the reading, not its cell: the number is the thing
+     that changed. */
 
   .readout-label {
     @apply truncate text-[10px] font-medium uppercase leading-tight tracking-[0.04em] text-ink-faint;
   }
 
   .readout-value {
-    @apply mt-0.5 flex items-baseline gap-0.5 font-mono text-[12px] font-medium leading-tight whitespace-nowrap;
+    @apply flex items-baseline gap-0.5 font-mono text-[13px] font-medium leading-tight whitespace-nowrap;
     font-variant-numeric: tabular-nums;
   }
 
@@ -2557,7 +2626,19 @@ button.studio-status-connection[aria-expanded="true"] {
      camera property card already uses, for the same reason — a card on the
      inspector is white with a hairline. */
   .motor-detail {
-    @apply mx-3.5 mb-3 flex flex-col gap-2 rounded-lg border border-line bg-surface px-3 py-2.5;
+    @apply mx-3.5 mb-3 flex flex-col gap-1.5 border-t pt-2;
+    border-color: var(--tone-line-soft);
+  }
+
+  .motor-detail-readouts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 8px;
+  }
+
+  .motor-detail-readouts > .readout:nth-child(3n + 1) {
+    padding-left: 0;
+    border-left: 0;
   }
 
   .motor-detail-head {
@@ -2624,8 +2705,16 @@ button.studio-status-connection[aria-expanded="true"] {
      before the cube starts. Left unbounded it ran underneath it and lost its
      last gesture behind a solid panel — the reader could not tell whether the
      sentence had ended or been covered. */
+  /* The gesture key is for the moment of use: it appears while the pointer
+     or keyboard is in the scene and leaves the resting bench clean. */
   .viewport-help {
     @apply pointer-events-none absolute bottom-1.5 left-2 right-24 truncate text-[10px] text-ink-faint;
+    opacity: 0;
+    transition: opacity 160ms ease-out;
+  }
+
+  :is(:hover, :focus-within) > .viewport-help {
+    opacity: 1;
   }
 
   .scene-source-note {
@@ -2721,11 +2810,15 @@ button.studio-status-connection[aria-expanded="true"] {
 @layer components {
   /* Device hierarchy: identity and readiness first, setup details second, file
      maintenance last. */
-  /* One arm is one card: identity and readiness on its first line, setup
-     sections under it. */
+  /* One arm is one row between hairlines: identity and readiness on its
+     line, setup sections under it when opened. No box per arm. */
   .device-entry {
-    @apply mb-3 overflow-hidden rounded-[10px] border border-line bg-surface;
-    box-shadow: 0 1px 2px rgb(16 16 16 / 0.04);
+    @apply border-t bg-surface;
+    border-color: var(--tone-line-soft);
+  }
+
+  .device-entry:last-of-type {
+    @apply mb-3 border-b;
   }
 
   /* Adding an arm and importing one are the same kind of thing and now share a
@@ -2748,7 +2841,7 @@ button.studio-status-connection[aria-expanded="true"] {
     below the fold.
   */
   .device-entry-row {
-    @apply flex min-h-12 items-center gap-1.5 pl-2 pr-3.5;
+    @apply -ml-2 flex min-h-10 items-center gap-1.5;
   }
 
   .device-chevron {
@@ -2767,13 +2860,12 @@ button.studio-status-connection[aria-expanded="true"] {
     color: inherit;
   }
 
-  .device-accent,
-  .device-connection-dot {
+  .device-accent {
     @apply h-1.5 w-1.5 shrink-0 self-center rounded-full;
   }
 
   .device-copy strong {
-    @apply shrink-0 truncate text-[14px] font-semibold tracking-[-0.01em] text-ink;
+    @apply shrink-0 truncate text-[13px] font-[560] text-ink;
   }
 
   /* The role gives way first: the arm's own name usually says it, and the state
@@ -2783,7 +2875,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .device-state {
-    @apply shrink-0 font-mono text-[11px] text-ink-soft;
+    @apply shrink-0 font-mono text-[11px] text-ink-faint;
   }
 
   /* A state that needs the operator is a word on its own wash. */
@@ -2793,8 +2885,9 @@ button.studio-status-connection[aria-expanded="true"] {
     background: var(--tone-caution-soft);
   }
 
+  /* An opened arm's setup hangs under its name, past the chevron. */
   .device-setup {
-    @apply flex flex-col border-t px-4 pb-1;
+    @apply flex flex-col border-t pb-1 pl-7;
     border-color: var(--tone-line-soft);
   }
 
@@ -2846,9 +2939,8 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .device-camera-row {
-    @apply flex min-h-8 items-center gap-2 rounded-md border px-2.5 pr-1 text-[12.5px];
+    @apply flex min-h-8 items-center gap-2 border-b pr-1 text-[12.5px];
     border-color: var(--tone-line-soft);
-    background: var(--tone-sidebar);
   }
 
   /* Same bargain the episode card strikes: the row's own labels keep the full
@@ -2908,15 +3000,16 @@ button.studio-status-connection[aria-expanded="true"] {
 .data-text-action:hover { text-decoration: underline; }
 .data-text-action:disabled { color: var(--tone-ink-faint); opacity: 0.65; text-decoration: none; cursor: default; }
 
-.data-import-action { padding: 6px 10px; border: 1px solid var(--tone-line); border-radius: 6px; font-size: 12.5px; background: var(--tone-surface); white-space: nowrap; }
-.data-import-action:disabled { opacity: .5; cursor: default; }
 .data-import-pane { overflow: auto; padding: 24px; max-width: 640px; width: 100%; animation: data-subject-enter 260ms var(--ease-out-expo) both; }
 .data-import-pane h2 { font-size: 19px; font-weight: 600; letter-spacing: -0.025em; }
 .data-import-pane p { font-size: 13px; color: var(--tone-ink-soft); line-height: 1.6; margin-top: 8px; overflow-wrap: anywhere; }
 .data-import-pane fieldset { display: flex; flex-direction: column; gap: 16px; margin: 24px 0; }
-.data-import-pane footer { display: flex; gap: 16px; margin-top: 20px; }
-.data-import-review { border: 1px solid var(--tone-line); border-radius: 10px; padding: 14px 16px; font-size: 12.5px; background: var(--tone-sidebar); }
-.data-import-review code { overflow-wrap: anywhere; }
+.data-import-pane footer { display: flex; align-items: center; gap: 16px; margin-top: 20px; }
+/* What an inspected source holds, read off under the fields as label and
+   value on the pane itself; each dataset it creates on a line of its own. */
+.data-import-review { margin-bottom: 16px; }
+.data-import-relation { display: block; }
+.data-import-warning { margin-top: 8px; }
 
 /* Recorded camera frames keep the dark camera mat inside light panel chrome.
    Loading, decoding and failure are told on that same mat, so a camera never
@@ -2971,10 +3064,19 @@ button.studio-status-connection[aria-expanded="true"] {
 .data-dataset-count { flex: 0 0 auto; color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
 .data-dataset[data-selected="true"] > .ui-tree-row .data-dataset-count { color: var(--tone-accent-ink); }
 
-/* An episode row is the row Curation's index lists it with (styles/episode-row.css):
-   a still, its name over its facts. The rail is narrower, so its still is too. */
-.data-episode .ui-tree-label { gap: 8px; padding-block: 4px; }
-.data-episode .episode-still { width: 64px; height: 36px; }
+/* An episode row is the row Curation's index lists it with (styles/episode-row.css),
+   set as a receipt for the rail's width: the still on the D mark's edge, the
+   name on one line across the row, and under it the facts at left and the
+   length at right, on the edge the dataset counts keep. Facts that do not fit
+   drop whole, the date before the id, so every row keeps one height and no
+   reading is cut. */
+.data-episode > .ui-tree-row { padding-left: 22px; }
+.data-episode .ui-tree-label { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 8px; padding-block: 4px; padding-right: 0; }
+.data-episode .episode-still { grid-row: 1 / 3; width: 64px; height: 36px; }
+.data-episode .episode-row-words { display: contents; }
+.data-episode .episode-row-title { display: block; grid-column: 2 / 4; white-space: nowrap; text-overflow: ellipsis; }
+.data-episode .episode-row-facts { grid-column: 2; height: 18px; flex-wrap: wrap; }
+.data-episode .episode-row-measures { grid-column: 3; grid-row: 2; min-width: 0; }
 .data-episode .episode-row-extent { width: 32px; }
 .data-episode > .ui-tree-row:hover .episode-row-extent i { background: color-mix(in srgb, var(--tone-ink) 55%, transparent); }
 .data-episode[data-selected="true"] .episode-row-facts { color: var(--tone-accent-ink); }
@@ -2985,42 +3087,41 @@ button.studio-status-connection[aria-expanded="true"] {
 .episode-heading .data-subject-dataset .ui-kind-mark { width: 14px; height: 14px; flex-basis: 14px; border-width: 1.25px; font-size: 8.5px; }
 
 .data-overview-head .data-overview-mark { width: 30px; height: 30px; flex-basis: 30px; border-width: 1.75px; border-radius: 8px; font-size: 14px; }
-.data-overview .data-overview-facts { margin: 0 24px; padding: 12px 0; border-top: 1px solid var(--tone-line-soft); border-bottom: 1px solid var(--tone-line-soft); }
-.data-overview .data-overview-facts { grid-auto-columns: minmax(max-content, 1fr); }
+/* The strip's hairlines end where the check report's rows do. */
+.data-overview .data-overview-facts { max-width: 60rem; margin: 0 24px; padding: 12px 0; border-top: 1px solid var(--tone-line-soft); border-bottom: 1px solid var(--tone-line-soft); }
 
-.data-glance-name { display: inline-flex; align-items: center; gap: 10px; border: 0; padding: 4px 0; background: transparent; color: var(--tone-ink); font: inherit; font-size: 13.5px; font-weight: 560; cursor: pointer; }
+.data-glance-name { display: inline-flex; align-items: center; gap: 10px; border: 0; padding: 4px 0; background: transparent; color: var(--tone-ink); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
 .data-glance-name:focus-visible { outline: 2px solid var(--tone-focus); outline-offset: 2px; border-radius: 4px; }
 .data-glance-row:hover .data-glance-name span { text-decoration: underline; text-decoration-color: var(--tone-line-strong); text-underline-offset: 3px; }
 .data-glance-span { color: var(--tone-ink-soft); font-family: var(--font-mono); font-size: 12px; white-space: nowrap; }
+/* The datasets ledger stops on the overview's 60rem edge rather than
+   spreading its columns across a wide panel; the cap counts the 12px the
+   table reaches past the text on either side. */
+.data-glance .data-ledger-card { max-width: calc(60rem + 24px); }
 
 .calibration-joint-check { display: inline-flex; width: 14px; flex: 0 0 14px; justify-content: center; color: var(--tone-line-strong); }
 .calibration-joint-check[data-ready="true"] { color: var(--tone-good); }
 .calibration-joint-check .ui-icon { width: 12px; height: 12px; }
 
-/* Ledgers: mono measures on hairlines. */
-/* A narrow pane scrolls a ledger sideways rather than cutting its last column. */
-.data-ledger-card { overflow-x: auto; border: 1px solid var(--tone-line); border-radius: 8px; }
+/* Ledgers: mono measures on hairlines, laid on the panel rather than boxed
+   in a card. The rows reach 12px past the text on either side, so the first
+   column's words and the last column's figures sit on the same edges as the
+   heading above while a hovered row still has room around them. A narrow
+   pane scrolls a ledger sideways rather than cutting its last column. */
+.data-ledger-card { overflow-x: auto; margin-inline: -12px; }
 .data-ledger { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12.5px; }
-.data-ledger th { position: sticky; top: 0; z-index: 1; padding: 8px 12px; border-bottom: 1px solid var(--tone-line); background: var(--tone-sunken); color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.03em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.data-ledger th { position: sticky; top: 0; z-index: 1; padding: 6px 12px; border-bottom: 1px solid var(--tone-line); background: var(--tone-surface); color: var(--tone-ink-faint); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.03em; text-align: left; text-transform: uppercase; white-space: nowrap; }
 .data-ledger td { padding: 7px 12px; border-bottom: 1px solid var(--tone-line-soft); vertical-align: middle; }
 .data-ledger tbody tr:last-child td { border-bottom: 0; }
 .data-ledger tbody tr { transition: background-color 120ms ease-out; }
 .data-ledger tbody tr:hover { background: var(--tone-sidebar); }
 .data-ledger .is-number { text-align: right; }
 .data-ledger td.is-number { color: var(--tone-ink-soft); font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* A reading still being read, or one a row has none of, rests in faint ink. */
+.data-ledger td[data-quiet="true"] { color: var(--tone-ink-faint); }
 .data-ledger-stream { display: flex; align-items: center; gap: 8px; color: var(--tone-ink); font-family: var(--font-mono); font-size: 12px; }
 .data-ledger-glyph { display: inline-flex; color: var(--tone-ink-faint); }
 .data-ledger-glyph.is-camera { color: var(--tone-kind-camera); }
-
-/* Inference metrics read label-left, value-right in one 48px row; the kit's
-   strip stacks a fact, so the row form is restated here at the same layer. */
-.rollout-metric-strip > .rollout-metric { min-width: 0; min-height: 3rem; flex-direction: row; align-items: center; gap: 8px; padding-inline: 14px; }
-.rollout-metric-strip > .rollout-metric:first-child { padding-left: 0; }
-.rollout-metric-strip > .rollout-metric:last-child { padding-right: 0; }
-.rollout-metric dt { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rollout-metric dd { display: flex; flex-shrink: 0; align-items: baseline; gap: 4px; }
-.rollout-metric dd span { font-family: var(--font-mono); font-size: 13px; font-weight: 560; }
-.rollout-metric dd small { font-family: var(--font-mono); font-size: 11px; color: var(--tone-ink-faint); }
 
 /* Data activity ---------------------------------------------------------
    Datasets and episodes in a rail beside one subject: a dataset at a glance,
@@ -3079,12 +3180,22 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply text-danger;
   }
 
+  /* The rail's notes keep its edges: the filter field's for the catalog's,
+     the stills' for a dataset's episodes. */
+  .data-rail .data-rail-note {
+    padding-inline: 10px;
+  }
+
+  .data-rail .ui-tree-group > .data-rail-note {
+    padding-left: 32px;
+  }
+
   .data-stream-count {
     @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
   }
 
   .data-rail-more {
-    @apply px-4 py-1.5;
+    @apply py-1.5 pl-8 pr-2.5;
   }
 
   /* Welcome and dataset overview ---------------------------------------- */
@@ -3488,10 +3599,6 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply block text-[12px] font-semibold text-ink;
   }
 
-  .data-plots-empty p {
-    @apply mt-1 leading-relaxed;
-  }
-
   .data-plots-quick {
     @apply mt-4 grid list-none gap-1 p-0;
     grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
@@ -3511,21 +3618,6 @@ button.studio-status-connection[aria-expanded="true"] {
 
   .data-plots-quick-count {
     @apply ml-auto font-mono text-[10px] tabular-nums text-ink-faint;
-  }
-
-  .data-plots-ruler {
-    @apply relative h-7 shrink-0 overflow-hidden border-b border-line;
-    background: var(--tone-sidebar);
-  }
-
-  .data-plots-tick {
-    @apply pointer-events-none absolute inset-y-0 border-l;
-    border-color: var(--tone-line-soft);
-    left: calc(var(--data-readout-w) + var(--data-plot-left) + (100% - var(--data-readout-w) - var(--data-plot-left) - var(--data-plot-right)) * var(--x, 0));
-  }
-
-  .data-plots-tick span {
-    @apply absolute left-1.5 top-1.5 whitespace-nowrap font-mono text-[10.5px] tabular-nums text-ink-faint;
   }
 
   .data-plots-scroll {
@@ -3577,7 +3669,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .data-plot-readout {
-    @apply flex min-w-0 flex-col overflow-hidden px-3 pt-1.5;
+    @apply flex min-w-0 flex-col overflow-hidden px-2 pt-1.5;
   }
 
   .data-plot-readout-title {
@@ -3588,9 +3680,12 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply mt-0.5 min-h-0 flex-1 overflow-y-auto;
   }
 
+  /* A legend row keeps its index whole and its value at the right edge;
+     in a narrow tile the value gives way first, the exact reading in its
+     tooltip. */
   .data-plot-trace {
-    @apply grid h-4 w-full items-center gap-1.5 rounded-[3px] px-0.5 text-left text-[10.5px] leading-4;
-    grid-template-columns: 0.625rem minmax(0, 1fr) auto;
+    @apply grid h-4 w-full items-center gap-1 rounded-[3px] px-0.5 text-left text-[10.5px] leading-4;
+    grid-template-columns: 0.5rem fit-content(60%) minmax(0, 1fr);
   }
 
   .data-plot-trace:hover {
@@ -3602,7 +3697,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .data-plot-swatch {
-    @apply h-[3px] w-2.5 shrink-0 rounded-full;
+    @apply h-[3px] w-2 shrink-0 rounded-full;
   }
 
   .data-plot-trace-name {
@@ -3610,7 +3705,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .data-plot-trace-value {
-    @apply max-w-[6.5rem] overflow-hidden text-ellipsis whitespace-nowrap text-right font-mono tabular-nums text-ink;
+    @apply overflow-hidden text-ellipsis whitespace-nowrap text-right font-mono tabular-nums text-ink;
   }
 
   .data-plot-canvas {
@@ -3717,7 +3812,6 @@ button.studio-status-connection[aria-expanded="true"] {
 /* A ruler narrower than its eight round divisions labels every other one,
    so no two readings print over each other. */
 @container (max-width: 44rem) {
-  .data-time-tick:nth-child(even) span,
-  .data-plots-tick:nth-child(even) span { visibility: hidden; }
+  .data-time-tick:nth-child(even) span { visibility: hidden; }
 }
 

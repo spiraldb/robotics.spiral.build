@@ -51,8 +51,11 @@ fn record_current(
     reads.record(graph.node(node).unwrap(), (episode, input), Ok(rows));
 }
 
+/// The one subtask an episode's Break down found.
 fn subtask(episode: u32, (start, end): (f64, f64), description: &str) -> SubtaskRow {
-    SubtaskRow::new(EpisodeId::fixture(episode), (start, end), description).unwrap()
+    SubtaskRow::new(EpisodeId::fixture(episode), (start, end), description)
+        .unwrap()
+        .placed_at(0)
 }
 
 #[test]
@@ -278,7 +281,10 @@ fn every_measurement_previews_what_it_has_the_backend_answer_and_store_first() {
         match fill.source() {
             AnswerSource::ProgressService { .. } => assert_eq!(node, &score),
             AnswerSource::Statement { statement } if node == &group => {
-                assert!(statement.contains("spql.ai.classify(a."), "{statement}")
+                assert!(
+                    statement.contains("spql.ai.classify(s.listed.description"),
+                    "{statement}"
+                )
             }
             AnswerSource::Statement { statement } => {
                 assert!(statement.contains("spql.ai.breakdown_task("), "{statement}")

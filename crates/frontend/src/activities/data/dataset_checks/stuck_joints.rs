@@ -1,8 +1,7 @@
 //! Stuck joints: samples where every measured joint of an arm holds exactly
 //! still while one of its commands moves more than 0.01 rad — an arm that
 //! did not follow, or a position stream that stopped updating.
-use super::recording_rate::Plural;
-use super::report_view::{CheckRow, Evidence, EvidenceChips, Verdict};
+use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::state_action_lag::Pairing;
 use super::stream_reads::{CheckedStreams, Greatest, PairedColumns};
 use dioxus::prelude::*;
@@ -118,7 +117,7 @@ impl StuckJoints {
             return CheckRow::new(
                 NAME,
                 Verdict::Unavailable,
-                "No arm records its commanded positions".into(),
+                Finding::why("No arm records its commands"),
             );
         }
         let most = self
@@ -129,19 +128,13 @@ impl StuckJoints {
             .max()
             .unwrap_or_default();
         let flagged = self.arms.iter().flat_map(ArmStuck::flagged).count();
-        let summary = if most == 0 {
-            "No arm holds still while commanded to move".to_owned()
-        } else if flagged == 0 {
-            format!(
-                "At most {} per episode hold still while commanded to move",
-                Plural::of(most as usize, "sample")
-            )
-        } else {
-            format!(
-                "{} hold an arm still for over {} s while commanded to move",
-                Plural::of(flagged, "episode"),
-                Self::FLAGGED
-            )
+        // What stuck means — held still while a command moves — is the
+        // detail's note.
+        let finding = match (most, flagged) {
+            (0, _) => Finding::of_count(0, "stuck sample", ""),
+            (_, 0) => Finding::of_count(most as usize, "stuck sample", "per episode at most"),
+            _ => Finding::of_count(flagged, "episode", "with an arm stuck over")
+                .and(format!("{} s", Self::FLAGGED), ""),
         };
         let arms = self.arms.clone();
         let flagged_evidence = self
@@ -149,7 +142,7 @@ impl StuckJoints {
             .iter()
             .flat_map(ArmStuck::flagged)
             .collect::<Vec<_>>();
-        CheckRow::new(NAME, if flagged == 0 { Verdict::Clean } else { Verdict::Flagged }, summary).flagging(flagged_evidence).with_details(rsx! {
+        CheckRow::new(NAME, if flagged == 0 { Verdict::Clean } else { Verdict::Flagged }, finding).flagging(flagged_evidence).with_details(rsx! {
             table { class: "data-ledger data-checks-table", "aria-label": "Stuck joints by arm",
                 thead { tr { th { "Arm" } th { class: "is-number", "Most per episode" } th { "Stuck over {StuckJoints::FLAGGED} s" } } }
                 tbody {

@@ -5,7 +5,9 @@ use std::future::Future;
 
 use dioxus::prelude::*;
 use spiral_robotics_common::account::{OrganizationSwitch, SpiralIdentity, SpiralOrganization};
-use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, Field, Notice, NoticeTone, Select};
+use spiral_robotics_ui::{
+    ActionPurpose, Button, ButtonVariant, Fact, FactList, Notice, NoticeTone, Select,
+};
 
 use crate::client::project::ProjectClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
@@ -121,41 +123,37 @@ pub(super) fn SpiralAccountSection(disabled: bool) -> Element {
     let disabled = disabled || (actions.pending)();
     let current = identity.read().clone();
     rsx! {
-        div { class: "settings-account",
         match current {
             None => rsx! { p { class: "settings-help", role: "status", "Checking your Spiral sign-in…" } },
             Some(Err(error)) => rsx! { Notice { tone: NoticeTone::Caution, "{error}" } },
             Some(Ok(identity)) => rsx! {
-                div { class: "settings-account-identity",
-                    p { class: "settings-help",
-                        "Signed in as "
-                        strong { "{identity.email()}" }
-                        " in "
-                        strong { "{identity.organization().label()}" }
-                        "."
+                FactList { class: "settings-facts",
+                    Fact { label: "Signed in as",
+                        span { "{identity.email()}" }
+                        Button {
+                            purpose: ActionPurpose::Disconnect,
+                            variant: ButtonVariant::Link,
+                            disabled,
+                            title: "Signs this browser out of Studio",
+                            onclick: move |_| actions.run(AccountClient::current().sign_out(), AccountChange::SignsOut),
+                            "Sign out"
+                        }
                     }
-                    Button {
-                        purpose: ActionPurpose::Disconnect,
-                        variant: ButtonVariant::Link,
-                        disabled,
-                        title: "Signs this browser out of Studio",
-                        onclick: move |_| actions.run(AccountClient::current().sign_out(), AccountChange::SignsOut),
-                        "Sign out"
+                    Fact { label: "Organization",
+                        OrganizationChoice {
+                            current: identity.organization().clone(),
+                            organizations: organizations.read().as_ref().and_then(|result| result.as_ref().ok()).cloned().unwrap_or_default(),
+                            choice: AccountChoice::new(
+                                EventHandler::new(move |organization| actions.run(AccountClient::current().switch_organization(organization), AccountChange::LeavesProject)),
+                                disabled,
+                            ),
+                        }
                     }
-                }
-                OrganizationChoice {
-                    current: identity.organization().clone(),
-                    organizations: organizations.read().as_ref().and_then(|result| result.as_ref().ok()).cloned().unwrap_or_default(),
-                    choice: AccountChoice::new(
-                        EventHandler::new(move |organization| actions.run(AccountClient::current().switch_organization(organization), AccountChange::LeavesProject)),
-                        disabled,
-                    ),
                 }
             },
         }
         if let Some(error) = (actions.failure)() {
             Notice { tone: NoticeTone::Danger, "{error} {error.recovery_guidance()}" }
-        }
         }
     }
 }
@@ -176,7 +174,8 @@ impl AccountChoice {
     }
 }
 
-/// Switching organization only appears for a user in more than one.
+/// The organization this browser works in, which a user in more than one
+/// can switch here.
 #[component]
 fn OrganizationChoice(
     current: SpiralOrganization,
@@ -184,22 +183,21 @@ fn OrganizationChoice(
     choice: AccountChoice,
 ) -> Element {
     if organizations.len() < 2 {
-        return rsx! {};
+        return rsx! { "{current.label()}" };
     }
     let on_organization = choice.on_choose;
     rsx! {
-        Field { label: "Organization", class: "settings-field",
-            Select {
-                value: current.id().to_owned(),
-                disabled: choice.disabled,
-                onchange: move |chosen| on_organization.call(chosen),
-                for organization in organizations.iter() {
-                    option {
-                        key: "{organization.id()}",
-                        value: "{organization.id()}",
-                        selected: organization.id() == current.id(),
-                        "{organization.label()}"
-                    }
+        Select {
+            value: current.id().to_owned(),
+            disabled: choice.disabled,
+            aria_label: "Organization",
+            onchange: move |chosen| on_organization.call(chosen),
+            for organization in organizations.iter() {
+                option {
+                    key: "{organization.id()}",
+                    value: "{organization.id()}",
+                    selected: organization.id() == current.id(),
+                    "{organization.label()}"
                 }
             }
         }

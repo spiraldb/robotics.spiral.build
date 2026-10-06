@@ -4,6 +4,7 @@
 //! reads the same playhead and the same visible span. Nothing here fetches
 //! data; the transport only says *when* the operator is looking.
 use super::identity::Episode;
+use super::inspection::PlayRequest;
 use crate::components::page_keys::PageKeys;
 use crate::components::timeline::{
     KeyboardFocus, PlaybackClock, TimelineAction, TimelineEvent, TimelineInteraction,
@@ -72,11 +73,11 @@ impl EpisodeTransport {
     pub(super) fn use_episode(episode: &Episode) -> Self {
         Self::use_range(episode.range().unwrap_or(EpisodeTimeRange::EMPTY))
     }
-    /// Play from `start`, exactly there — the playhead lands inside the
-    /// highlight that marks the same interval — and on past its end, so the
-    /// operator sees what came next rather than a clip cut off.
-    pub(super) fn play_from(&mut self, start: f64) {
-        self.clock.write().play_from(start);
+    /// Play `request` from its start, exactly there — the playhead lands
+    /// inside the highlight that marks the same interval — to the end of its
+    /// interval, or on from an instant.
+    pub(super) fn play(&mut self, request: PlayRequest) {
+        request.play(&mut self.clock.write());
     }
     fn use_range(initial: EpisodeTimeRange) -> Self {
         let clock = use_signal(|| PlaybackClock::new(initial.duration()));
@@ -190,7 +191,9 @@ impl EpisodeTransport {
             TimelineAction::SetSpeed(speed) => self.set_speed(speed),
             TimelineAction::SetLooping(looping) => self.clock.write().set_looping(looping),
             TimelineAction::SetWindow(window) => self.view.set(window),
-            TimelineAction::ActivateInterval(interval) => self.play_from(interval.span().0),
+            TimelineAction::ActivateInterval(interval) => {
+                self.play(PlayRequest::span(interval.span()));
+            }
         }
     }
     fn buffering(&self) -> bool {

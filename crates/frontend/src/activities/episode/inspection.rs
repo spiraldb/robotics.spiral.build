@@ -20,7 +20,7 @@ use super::{
     transport::EpisodeTransport,
 };
 use crate::components::icons::CameraStreamIcon;
-use crate::components::timeline::KeyboardFocus;
+use crate::components::timeline::{KeyboardFocus, PlaybackClock};
 use dioxus::prelude::*;
 use dioxus_workbench::{Panel, PanelId, PanelLayout, PanelWorkspace};
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant, Remount};
@@ -61,31 +61,49 @@ impl FeaturedCamera {
     }
 }
 
-/// One ask to play from an instant, and which ask it is.
+/// One ask to play an interval to its end, or on from an instant, and which
+/// ask it is.
 ///
-/// The count is what makes two asks different values. An instant alone made
+/// The count is what makes two asks different values. The span alone made
 /// asking for the same one twice indistinguishable from asking once, and the
 /// view — which reacts only to a change — sat still the second time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::activities) struct PlayRequest {
     start: f64,
+    end: Option<f64>,
     asked: usize,
 }
 
 impl PlayRequest {
-    pub(in crate::activities) fn new(start: f64) -> Self {
-        Self { start, asked: 0 }
-    }
-    /// The instant to play from.
-    pub(in crate::activities) fn start(&self) -> f64 {
-        self.start
-    }
-    /// The ask after `previous`, which differs from it even for the same
-    /// instant.
-    pub(in crate::activities) fn after(previous: Option<Self>, start: f64) -> Self {
+    /// Play from `start` and stop at `end`; an interval of no length is an
+    /// instant, played on from.
+    pub(in crate::activities) fn span((start, end): (f64, f64)) -> Self {
         Self {
             start,
+            end: (end > start).then_some(end),
+            asked: 0,
+        }
+    }
+    /// Play on from `start`.
+    pub(in crate::activities) fn instant(start: f64) -> Self {
+        Self {
+            start,
+            end: None,
+            asked: 0,
+        }
+    }
+    /// This ask made after `previous`, which differs from it even when it
+    /// asks the same.
+    pub(in crate::activities) fn after(self, previous: Option<Self>) -> Self {
+        Self {
             asked: previous.map_or(0, |previous| previous.asked + 1),
+            ..self
+        }
+    }
+    pub(super) fn play(self, clock: &mut PlaybackClock) {
+        match self.end {
+            Some(end) => clock.play_span(self.start, end),
+            None => clock.play_from(self.start),
         }
     }
 }
@@ -101,8 +119,8 @@ pub(in crate::activities) fn EpisodeInspection(
     /// takes what its rows need.
     #[props(default = true)]
     tracks_lead: bool,
-    /// Where to play from, such as the start of the row the operator chose.
-    /// Each new ask plays from there on; `None` leaves the playhead where the
+    /// What to play, such as the row the operator chose, which plays to its
+    /// end. Each new ask plays it; `None` leaves the playhead where the
     /// operator put it.
     #[props(default)]
     focus: Option<PlayRequest>,
@@ -175,7 +193,7 @@ fn InspectedEpisode(
     let mut asked = transport.clone();
     use_effect(use_reactive(&focus, move |focus| {
         if let Some(focus) = focus {
-            asked.play_from(focus.start);
+            asked.play(focus);
         }
     }));
     let selection = episode.selection();
@@ -404,10 +422,11 @@ mod tests {
     }
 
     #[test]
-    fn asking_for_the_same_instant_again_is_a_new_ask() {
-        let first = PlayRequest::after(None, 8.0);
-        let again = PlayRequest::after(Some(first), 8.0);
+    fn asking_for_the_same_span_again_is_a_new_ask() {
+        let first = PlayRequest::span((8.0, 12.0)).after(None);
+        let again = PlayRequest::span((8.0, 12.0)).after(Some(first));
         assert_ne!(first, again);
-        assert_eq!(first.start, again.start);
+        assert_eq!((first.start, first.end), (again.start, again.end));
+        assert_eq!(PlayRequest::span((8.0, 8.0)), PlayRequest::instant(8.0));
     }
 }

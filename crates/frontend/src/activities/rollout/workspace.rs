@@ -8,8 +8,8 @@ use spiral_robotics_common::rollout::{
 };
 use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonSize, ButtonVariant, Fact, FactLayout, FactList, Field, Select,
-    TextInput, TextInputKind,
+    ActionPurpose, Button, ButtonSize, ButtonVariant, EmptyState, Fact, FactLayout, FactList,
+    Field, FieldLayout, Select, TextInput, TextInputKind,
 };
 
 use crate::format::{GroupedCountPresentation, LossPresentation};
@@ -108,18 +108,20 @@ pub(super) fn RolloutWorkbench(
         snapshot.cameras(),
     );
     let follower_ready = arm_ready && camera_summary.ready;
+    // A ready follower says only which cameras the policy sees; anything
+    // else lists what stands in the way.
     let follower_detail = follower.as_ref().map(|robot| {
-        let connection = if robot.connection().connected() {
-            "connected"
-        } else {
-            "disconnected"
-        };
-        let calibration = if robot.config().calibrated() {
-            "calibrated"
-        } else {
-            "needs calibration"
-        };
-        format!("{connection} · {calibration} · {}", camera_summary.detail)
+        if follower_ready {
+            return camera_summary.detail.clone();
+        }
+        let connection = (!robot.connection().connected()).then_some("disconnected");
+        let calibration = (!robot.config().calibrated()).then_some("needs calibration");
+        let cameras = (!camera_summary.ready).then_some(camera_summary.detail.as_str());
+        [connection, calibration, cameras]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
     });
     let precondition_blocker = RolloutPreconditions {
         checkpoint: selected,
@@ -146,6 +148,20 @@ pub(super) fn RolloutWorkbench(
     let load_issue = load_error
         .clone()
         .or_else(|| (!controller.loaded()).then(|| "Loading rollout…".to_owned()));
+    // The runtime line names a phase only when there is one to name; an idle
+    // bench says just what protects the follower.
+    let runtime_title = if load_error.is_some() {
+        Some("Rollout status unavailable")
+    } else if controller.loaded() {
+        rollout.runtime_title()
+    } else {
+        None
+    };
+    let runtime_note_class = if load_error.is_some() {
+        "rollout-runtime-note rollout-runtime-note-failed"
+    } else {
+        rollout.runtime_note_class()
+    };
     let blocker = load_issue
         .clone()
         .or(precondition_blocker.clone())
@@ -154,7 +170,9 @@ pub(super) fn RolloutWorkbench(
                 "Set a whole-number duration from 1 to {MAX_ROLLOUT_DURATION_SECONDS} seconds."
             ))
         });
-    let action_steps = selected.map_or(0, |choice| choice.policy.action_steps);
+    let action_steps = selected
+        .map(|choice| choice.policy.action_steps.to_string())
+        .unwrap_or_else(|| "—".to_owned());
     let control_rate = selected
         .and_then(|choice| choice.policy.sample_hz)
         .map(|hz| format!("{hz:.1} Hz"))
@@ -186,81 +204,63 @@ pub(super) fn RolloutWorkbench(
                         }
                     }
                 }
-                if let Some(choice) = selected {
+                if selected.is_some() {
                     div { class: "rollout-checkpoint-meta",
                         span { "ACT · vision" }
                         span { "Validation {validation_loss}" }
-                        span {
-                            class: if choice.identity.run_active { "rollout-state" } else { "rollout-state rollout-state-ready" },
-                            if choice.identity.run_active { "Training" } else { "Ready" }
-                        }
                     }
                 } else if let Some(run) = training.active_run() {
                     p { class: "rollout-empty-copy",
                         "Checkpoints appear every {run.config().checkpoint_every().grouped_label()} steps."
                     }
-                } else {
-                    p { class: "rollout-empty-copy", "Train a policy to create a checkpoint." }
                 }
             }
 
             section { class: "rollout-section",
-                header { class: "rollout-section-heading",
-                    h3 { "Follower" }
-                    span { class: if follower_ready { "rollout-state rollout-state-ready" } else { "rollout-state" },
-                        if follower_ready { "Ready" } else { "Unavailable" }
-                    }
-                }
+                header { class: "rollout-section-heading", h3 { "Follower" } }
                 if let Some(robot) = follower.as_ref() {
                     div { class: "rollout-target-row",
                         span {
                             class: "live-robot-accent",
                             style: "background: {crate::panels::scene::ScenePalette::accent_css(crate::panels::scene::ScenePalette::robot_index(robot))}",
                         }
-                        div {
-                            strong { "{robot.id()}" }
-                            small { "{follower_detail.clone().unwrap_or_default()}" }
+                        strong { "{robot.id()}" }
+                        small {
+                            class: if follower_ready { "" } else { "rollout-target-problem" },
+                            "{follower_detail.clone().unwrap_or_default()}"
                         }
                     }
                 } else {
-                    p { class: "rollout-empty-copy", "Configure a follower in Settings." }
+                    p { class: "rollout-empty-copy rollout-target-problem", "No follower configured" }
                 }
             }
 
             section { class: "rollout-section",
                 header { class: "rollout-section-heading", h3 { "Execution" } }
-                div { class: "rollout-field-grid",
-                    div { class: "rollout-field",
-                        span { "Action steps" }
-                        strong { "{action_steps}" }
+                FactList { mono: true, class: "rollout-receipt",
+                    Fact { label: "Action steps", "{action_steps}" }
+                    Fact { label: "Control rate", "{control_rate}" }
+                }
+                Field { label: "Duration", layout: FieldLayout::Inline, class: "rollout-duration-field",
+                    TextInput {
+                        kind: TextInputKind::Number,
+                        min: "1",
+                        max: "{MAX_ROLLOUT_DURATION_SECONDS}",
+                        step: "1",
+                        value: "{duration_draft}",
+                        disabled: active || pending.is_some(),
+                        title: "Policy control time; loading and warm-up are excluded",
+                        aria_describedby: "rollout-duration-help",
+                        aria_invalid: if duration_valid { "false" } else { "true" },
+                        oninput: move |value| controller.set_duration_draft(value),
                     }
-                    div { class: "rollout-field",
-                        span { "Control rate" }
-                        strong { "{control_rate}" }
-                    }
-                    Field { label: "Duration", class: "rollout-duration-field",
-                        div { class: "rollout-duration-control",
-                            TextInput {
-                                kind: TextInputKind::Number,
-                                min: "1",
-                                max: "{MAX_ROLLOUT_DURATION_SECONDS}",
-                                step: "1",
-                                value: "{duration_draft}",
-                                disabled: active || pending.is_some(),
-                                title: "Policy control time; loading and warm-up are excluded",
-                                aria_describedby: "rollout-duration-help",
-                                aria_invalid: if duration_valid { "false" } else { "true" },
-                                oninput: move |value| controller.set_duration_draft(value),
-                            }
-                            small {
-                                id: "rollout-duration-help",
-                                class: if duration_valid { "" } else { "rollout-duration-error" },
-                                if duration_valid {
-                                    "seconds · then hold"
-                                } else {
-                                    "Enter 1–{MAX_ROLLOUT_DURATION_SECONDS} s"
-                                }
-                            }
+                    small {
+                        id: "rollout-duration-help",
+                        class: if duration_valid { "" } else { "rollout-duration-error" },
+                        if duration_valid {
+                            "s · then hold"
+                        } else {
+                            "Enter 1–{MAX_ROLLOUT_DURATION_SECONDS} s"
                         }
                     }
                 }
@@ -268,32 +268,24 @@ pub(super) fn RolloutWorkbench(
 
             div { class: "rollout-action-area",
                 div {
-                    class: if load_error.is_some() {
-                        "rollout-runtime-note rollout-runtime-note-failed"
-                    } else {
-                        rollout.runtime_note_class()
-                    },
+                    class: runtime_note_class,
                     role: if load_error.is_some() { "alert" } else { "status" },
-                    span { class: "rollout-runtime-dot", "aria-hidden": "true" }
-                    div {
-                        div { class: "rollout-runtime-summary",
-                            strong {
-                                if load_error.is_some() { "Rollout status unavailable" }
-                                else if !controller.loaded() { "Loading rollout" }
-                                else { "{rollout.runtime_title(blocker.as_deref())}" }
-                            }
-                            small { "{load_issue.clone().unwrap_or_else(|| rollout.runtime_detail())}" }
+                    div { class: "rollout-runtime-summary",
+                        if let Some(title) = runtime_title {
+                            span { class: "rollout-runtime-dot", "aria-hidden": "true" }
+                            strong { "{title}" }
                         }
-                        if load_error.is_some() {
-                            Button {
-                                purpose: ActionPurpose::Retry,
-                                onclick: move |_| controller.retry(),
-                                "Retry rollout status"
-                            }
+                        small { "{load_issue.clone().unwrap_or_else(|| rollout.runtime_detail())}" }
+                    }
+                    if load_error.is_some() {
+                        Button {
+                            purpose: ActionPurpose::Retry,
+                            onclick: move |_| controller.retry(),
+                            "Retry rollout status"
                         }
-                        if let Some(warning) = rollout.warning().as_ref() {
-                            small { class: "rollout-runtime-warning", "{warning}" }
-                        }
+                    }
+                    if let Some(warning) = rollout.warning().as_ref() {
+                        small { class: "rollout-runtime-warning", "{warning}" }
                     }
                 }
                 div { class: "rollout-actions",
@@ -428,48 +420,59 @@ impl RolloutCameraSummary {
             })
             .count();
         let ready = available == total;
+        // Every camera answering is the resting state, said as a count; a
+        // missing one is said as the gap.
         let detail = match (total, available) {
-            (1, 1) => format!("{} available", camera_roles[0]),
+            (1, 1) => format!("{} camera", camera_roles[0]),
             (1, _) => format!("{} unavailable", camera_roles[0]),
-            (_, available) if ready => format!("{available} cameras available"),
+            (_, available) if ready => format!("{available} cameras"),
             _ => format!("{available} of {total} cameras available"),
         };
         Self { ready, detail }
     }
 }
 
+/// Every measured value of the policy loop on one strip, em dashes until
+/// the policy reports its first action.
 #[component]
 pub(super) fn InferencePanel(controller: super::state::RolloutController) -> Element {
     let rollout = controller.snapshot().read().to_owned();
     let metrics = rollout.metrics().to_owned();
+    let measured = metrics.inference_count() > 0;
+    let count = |value: u64| {
+        if measured {
+            value.grouped_label()
+        } else {
+            "—".to_owned()
+        }
+    };
+    let missed = metrics.missed_deadlines();
     rsx! {
         section { class: "rollout-inference",
             FactList { layout: FactLayout::Strip, mono: true, class: "rollout-metric-strip",
-                InferenceMetric { label: "Latency", value: rollout.latency_label(RolloutLatency::Last), unit: "ms" }
-                InferenceMetric { label: "Model", value: rollout.latency_label(RolloutLatency::Model), unit: "ms" }
-                InferenceMetric { label: "Misses", value: metrics.missed_deadlines().to_string(), unit: "" }
+                LatencyMetric { label: "Latency", value: rollout.latency_label(RolloutLatency::Last) }
+                LatencyMetric { label: "Mean", value: rollout.latency_label(RolloutLatency::Mean) }
+                LatencyMetric { label: "Max", value: rollout.latency_label(RolloutLatency::Peak) }
+                LatencyMetric { label: "Model", value: rollout.latency_label(RolloutLatency::Model) }
+                Fact { label: "Misses", class: if missed > 0 { "rollout-metric-missed" } else { "" },
+                    span { {count(missed)} }
+                }
+                Fact { label: "Chunks", span { {count(metrics.inference_count())} } }
+                Fact { label: "Commands", span { {count(metrics.command_count())} } }
             }
-            if metrics.inference_count() == 0 {
-                div { class: "rollout-inference-empty",
-                    strong { "No measurements yet" }
-                    p { "Starts when the policy sends its first action." }
-                }
-            } else {
-                div { class: "rollout-inference-empty",
-                    strong { "{metrics.command_count().grouped_label()} commands" }
-                    p { "{rollout.inference_summary()}" }
-                }
+            if !measured {
+                EmptyState { p { "No measurements yet" } }
             }
         }
     }
 }
 
 #[component]
-fn InferenceMetric(label: &'static str, value: String, unit: &'static str) -> Element {
+fn LatencyMetric(label: &'static str, value: String) -> Element {
     rsx! {
-        Fact { label, class: "rollout-metric",
+        Fact { label,
             span { "{value}" }
-            if !unit.is_empty() { small { "{unit}" } }
+            small { "ms" }
         }
     }
 }
@@ -552,8 +555,10 @@ struct RolloutPreconditions<'a> {
 
 impl RolloutPreconditions<'_> {
     fn blocker(&self) -> Option<String> {
+        // The newest checkpoint is chosen by default, so none chosen means
+        // none exist.
         let Some(checkpoint) = self.checkpoint else {
-            return Some("Select a checkpoint.".to_owned());
+            return Some("Train a policy to create a checkpoint.".to_owned());
         };
         if checkpoint.identity.run_active {
             return Some("Stop or finish training before running this checkpoint.".to_owned());
@@ -582,14 +587,14 @@ impl RolloutPreconditions<'_> {
 /// `crates/common`, so this is an extension trait rather than an inherent impl;
 /// it is one trait for one subject, not one per method.
 trait RolloutPresentation {
-    fn runtime_title(&self, blocker: Option<&str>) -> &'static str;
+    /// The phase worth naming, if any: an idle bench that has not run is the
+    /// resting state and names nothing, and its blocker sits beside Run.
+    fn runtime_title(&self) -> Option<&'static str>;
     fn runtime_detail(&self) -> String;
     fn runtime_note_class(&self) -> &'static str;
     /// A latency in milliseconds to one decimal, or an em dash when the policy
     /// has not reported one. The unit is printed beside the figure, not in it.
     fn latency_label(&self, measure: RolloutLatency) -> String;
-    /// "{chunks} chunks · mean {…} ms · max {…} ms".
-    fn inference_summary(&self) -> String;
 }
 
 /// Which of the four latencies the inference strip is asking for.
@@ -602,16 +607,15 @@ enum RolloutLatency {
 }
 
 impl RolloutPresentation for RolloutSnapshot {
-    fn runtime_title(&self, blocker: Option<&str>) -> &'static str {
+    fn runtime_title(&self) -> Option<&'static str> {
         match self.phase() {
-            RolloutPhase::Idle if self.finished_ms().is_some() => "Policy stopped",
-            RolloutPhase::Idle if blocker.is_some() => "Rollout unavailable",
-            RolloutPhase::Idle => "Ready",
-            RolloutPhase::Loading => "Loading checkpoint",
-            RolloutPhase::WarmingUp => "Preparing policy",
-            RolloutPhase::Running => "Policy active",
-            RolloutPhase::Stopping => "Stopping policy",
-            RolloutPhase::Failed => "Rollout stopped",
+            RolloutPhase::Idle if self.finished_ms().is_some() => Some("Policy stopped"),
+            RolloutPhase::Idle => None,
+            RolloutPhase::Loading => Some("Loading checkpoint"),
+            RolloutPhase::WarmingUp => Some("Preparing policy"),
+            RolloutPhase::Running => Some("Policy active"),
+            RolloutPhase::Stopping => Some("Stopping policy"),
+            RolloutPhase::Failed => Some("Rollout stopped"),
         }
     }
 
@@ -643,15 +647,6 @@ impl RolloutPresentation for RolloutSnapshot {
         .filter(|value| value.is_finite())
         .map(|value| format!("{value:.1}"))
         .unwrap_or_else(|| "—".to_owned())
-    }
-
-    fn inference_summary(&self) -> String {
-        format!(
-            "{} chunks · mean {} ms · max {} ms",
-            self.metrics().inference_count().grouped_label(),
-            self.latency_label(RolloutLatency::Mean),
-            self.latency_label(RolloutLatency::Peak),
-        )
     }
 }
 
@@ -700,14 +695,17 @@ mod tests {
         );
     }
 
+    /// Idle is the resting state: the runtime line names no phase, so it can
+    /// never claim a blocked bench is ready.
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn blocked_idle_rollout_never_claims_to_be_ready() {
-        let rollout = RolloutSnapshot::default();
+    fn idle_rollout_names_no_phase() {
+        assert_eq!(RolloutSnapshot::default().runtime_title(), None);
         assert_eq!(
-            rollout.runtime_title(Some("Select a checkpoint.")),
-            "Rollout unavailable"
+            RolloutSnapshot::default()
+                .with_lifecycle(RolloutPhase::Running, None)
+                .runtime_title(),
+            Some("Policy active")
         );
-        assert_eq!(rollout.runtime_title(None), "Ready");
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -742,7 +740,7 @@ mod tests {
             ),
             RolloutCameraSummary {
                 ready: true,
-                detail: "2 cameras available".to_owned(),
+                detail: "2 cameras".to_owned(),
             }
         );
         assert_eq!(

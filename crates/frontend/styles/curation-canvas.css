@@ -11,10 +11,10 @@
     container-type: inline-size;
   }
 
-  /* Zoom and fit share one hairline group at the bottom left; the canvas
-     above them is nothing but nodes. */
+  /* Zoom and fit share one hairline group at the bottom left, on the pane's
+     12px gutter; the canvas above them is nothing but nodes. */
   .curation-canvas-controls {
-    @apply absolute bottom-2.5 left-2.5 z-[5] flex items-center gap-px bg-surface p-0.5;
+    @apply absolute bottom-3 left-3 z-[5] flex items-center gap-px bg-surface p-0.5;
     border-radius: 8px;
     box-shadow: var(--shadow-float);
   }
@@ -33,7 +33,7 @@
     @apply relative flex flex-col gap-1 border border-line bg-surface px-3 pb-2 pt-2.5 text-left text-ink;
     box-sizing: border-box;
     width: 192px;
-    height: 100px;
+    height: 92px;
     border-radius: 8px;
     box-shadow: 0 1px 2px rgb(16 16 16 / 0.05);
     cursor: pointer;
@@ -105,20 +105,20 @@
     @apply font-mono;
   }
 
-  /* An output is identity, not selection, so it wears the output stage's
-     hue rather than the lime that means "you are here", as a flag on the
-     card's top edge, like a tab. */
+  /* An output's state ends the card, hard right on its last line, in the
+     card's one outline. Being an output is the rest state, in faint ink;
+     published wears the output stage's hue — identity, not the lime that
+     means "you are here" — and out of date is caution. */
   .curation-canvas-output {
-    @apply absolute rounded px-1 font-medium;
-    top: -9px;
-    right: 10px;
-    z-index: 1;
-    border: 1px solid color-mix(in srgb, var(--tone-stage-output) 35%, var(--tone-surface));
+    @apply mt-auto self-end font-mono text-[11px] leading-[14px] tabular-nums text-ink-faint;
+  }
+
+  .curation-canvas-output.is-published {
     color: var(--tone-stage-output);
-    background: var(--tone-surface);
-    line-height: 16px;
-    font-family: var(--font-mono);
-    font-size: 10px;
+  }
+
+  .curation-canvas-output.is-stale {
+    color: var(--tone-caution);
   }
 
   .curation-canvas-notice {
@@ -247,6 +247,11 @@
     background: var(--tone-surface);
   }
 
+  /* In the ledger's place, on the heading's edge. */
+  .curation-canvas-dataset-none {
+    @apply m-0 text-[12px] text-ink-faint;
+  }
+
 
   /* The graph is the document, so the document bar heads its pane. */
   .curation-graph-pane {
@@ -309,12 +314,6 @@
 
 .curation-canvas-node:is(:hover, .is-selected) .df-handle {
   border-color: var(--tone-accent-strong);
-}
-
-/* A published view the saved curation has moved past. */
-.curation-canvas-node .curation-canvas-output.is-stale {
-  border-color: color-mix(in srgb, var(--tone-caution) 45%, var(--tone-surface));
-  color: var(--tone-caution);
 }
 
 /* Selecting a node is the way into every workspace, so a button covers the

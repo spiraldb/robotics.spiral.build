@@ -289,9 +289,10 @@ impl ViewReading {
                 TimelineInterval::labeled(row.span.0, row.span.1, label)
             })
             .collect();
-        let chosen = chosen.map(|row| row.span.0);
+        let chosen = chosen.map(|row| row.span);
         ViewSpans {
-            track: IntervalTrack::new("curated-view", view, spans).with_chosen(chosen),
+            track: IntervalTrack::new("curated-view", view, spans)
+                .with_chosen(chosen.map(|(start, _)| start)),
             chosen,
         }
     }
@@ -302,16 +303,15 @@ impl ViewReading {
 #[derive(Clone, PartialEq)]
 pub(super) struct ViewSpans {
     track: IntervalTrack,
-    chosen: Option<f64>,
+    chosen: Option<(f64, f64)>,
 }
 
 impl ViewSpans {
     pub(super) fn track(&self) -> IntervalTrack {
         self.track.clone()
     }
-    /// Where the chosen interval starts, if one was chosen rather than the
-    /// whole episode.
-    pub(super) fn chosen(&self) -> Option<f64> {
+    /// The chosen interval, if one was chosen rather than the whole episode.
+    pub(super) fn chosen(&self) -> Option<(f64, f64)> {
         self.chosen
     }
 }
@@ -601,7 +601,7 @@ mod tests {
             "Subtask category"
         );
         let spans = reading.spans("pick_and_place", &second, Some(groups[1].1[0]));
-        assert_eq!(spans.chosen(), Some(1.0));
+        assert_eq!(spans.chosen(), Some((1.0, 3.5)));
     }
 
     #[test]

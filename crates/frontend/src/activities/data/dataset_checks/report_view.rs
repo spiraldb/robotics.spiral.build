@@ -1,10 +1,10 @@
 //! How the report reads: its bottom line first — how many checks came out
 //! each way, which also says what each mark means — then the checks in two
 //! sections, the recording's streams and the arms' joints. Each check is one
-//! row whose form says how it came out, a sentence of what it found, where
-//! among the dataset's episodes it holds, and on demand the detail behind
-//! it: the streams, arms and episodes it names. An episode it names opens
-//! where the finding is, through the surface's own episode tabs.
+//! row whose form says how it came out, the readings it found, where among
+//! the dataset's episodes it holds, and on demand the detail behind it: the
+//! streams, arms and episodes it names. An episode it names opens where the
+//! finding is, through the surface's own episode tabs.
 use crate::activities::episode::{Episode, SourceLabel};
 use crate::components::icons::{CameraStreamIcon, SignalStreamIcon};
 use crate::format::ClockPresentation as _;
@@ -45,23 +45,126 @@ impl Verdict {
     }
 }
 
+/// What a check found, as its row says it: each reading a value, set as the
+/// measurement it is, and the few words after it that say what it measures,
+/// read on as one line — or, when there was nothing to measure, why.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Finding {
+    readings: Vec<Reading>,
+    reason: Option<String>,
+}
+
+impl Finding {
+    /// A finding that leads with `value`, `words` saying what it is.
+    pub(super) fn of(value: impl Into<String>, words: &str) -> Self {
+        Self::led_by(Reading::new(value.into(), words))
+    }
+    /// A finding that leads with how many of `noun` there are, the noun
+    /// agreeing with the count and `words` after it.
+    pub(super) fn of_count(count: usize, noun: &str, words: &str) -> Self {
+        Self::led_by(Reading::counted(count, noun, words))
+    }
+    /// Why the check measured nothing.
+    pub(super) fn why(reason: impl Into<String>) -> Self {
+        Self {
+            readings: Vec::new(),
+            reason: Some(reason.into()),
+        }
+    }
+    /// One more reading after the ones before it.
+    pub(super) fn and(mut self, value: impl Into<String>, words: &str) -> Self {
+        self.readings.push(Reading::new(value.into(), words));
+        self
+    }
+    /// One more count after the readings before it.
+    pub(super) fn and_count(mut self, count: usize, noun: &str, words: &str) -> Self {
+        self.readings.push(Reading::counted(count, noun, words));
+        self
+    }
+    fn led_by(reading: Reading) -> Self {
+        Self {
+            readings: vec![reading],
+            reason: None,
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn text(&self) -> String {
+        self.reason.clone().unwrap_or_else(|| {
+            self.readings
+                .iter()
+                .map(|reading| format!("{}{}", reading.value, reading.tail))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+}
+
+/// One value a check read, and the words after it.
+#[derive(Clone, Debug, PartialEq)]
+struct Reading {
+    value: String,
+    tail: String,
+}
+
+impl Reading {
+    fn new(value: String, words: &str) -> Self {
+        Self {
+            value,
+            tail: Self::after(words),
+        }
+    }
+    /// `count`, then `noun` agreeing with it, then `words`.
+    fn counted(count: usize, noun: &str, words: &str) -> Self {
+        Self {
+            value: count.to_string(),
+            tail: format!(" {}{}", Plural::noun(count, noun), Self::after(words)),
+        }
+    }
+    /// `words` as they follow what comes before them: after a space, unless
+    /// they open with punctuation that belongs against it.
+    fn after(words: &str) -> String {
+        match words {
+            "" => String::new(),
+            words if words.starts_with([',', ';', ':']) => words.to_owned(),
+            words => format!(" {words}"),
+        }
+    }
+}
+
+/// A noun agreeing with its count.
+pub(super) struct Plural;
+
+impl Plural {
+    /// `count` and its noun: "1 episode", "3 episodes".
+    pub(super) fn of(count: usize, noun: &str) -> String {
+        format!("{count} {}", Self::noun(count, noun))
+    }
+    fn noun(count: usize, noun: &str) -> String {
+        if count == 1 {
+            noun.to_owned()
+        } else {
+            format!("{noun}s")
+        }
+    }
+}
+
 /// One check as the report lists it.
 #[derive(Clone, PartialEq)]
 pub(super) struct CheckRow {
     name: &'static str,
     verdict: Verdict,
-    summary: String,
+    finding: Finding,
     details: Option<Element>,
     /// The episodes the finding holds for, each where it holds.
     flagged: Vec<Evidence>,
 }
 
 impl CheckRow {
-    pub(super) fn new(name: &'static str, verdict: Verdict, summary: String) -> Self {
+    pub(super) fn new(name: &'static str, verdict: Verdict, finding: Finding) -> Self {
         Self {
             name,
             verdict,
-            summary,
+            finding,
             details: None,
             flagged: Vec::new(),
         }
@@ -263,7 +366,8 @@ pub(super) fn CheckReport(sections: Vec<CheckSection>) -> Element {
 }
 
 /// How many checks came out each way: the report's bottom line, drawn with
-/// the marks the rows wear, so it also says what each mark means.
+/// the marks the rows wear, so it also says what each mark means. Only what
+/// there is to look at is set in ink; the rest rests.
 #[component]
 fn CheckTally(verdicts: Vec<Verdict>) -> Element {
     let count = |verdict: Verdict| verdicts.iter().filter(|each| **each == verdict).count();
@@ -277,12 +381,8 @@ fn CheckTally(verdicts: Vec<Verdict>) -> Element {
     .map(|(verdict, words)| (verdict, count(verdict), words))
     .filter(|(_, count, _)| *count > 0)
     .collect::<Vec<_>>();
-    let clear = count(Verdict::Flagged) == 0;
     rsx! {
         p { class: "data-checks-tally",
-            if clear {
-                span { class: "data-checks-tally-lead", "Nothing to look at" }
-            }
             for (verdict, count, words) in parts {
                 span { key: "{verdict.key()}", class: "data-checks-tally-part", "data-verdict": verdict.key(),
                     VerdictMark { verdict }
@@ -319,7 +419,7 @@ fn SectionHead(name: &'static str, about: Option<SectionAbout>, order: usize) ->
 #[component]
 fn CheckItem(row: CheckRow, order: usize) -> Element {
     let summary = rsx! {
-        CheckSummary { name: row.name, verdict: row.verdict, summary: row.summary.clone(),
+        CheckSummary { name: row.name, verdict: row.verdict, finding: row.finding.clone(),
             flagged: if row.verdict == Verdict::Flagged { row.flagged.clone() } else { Vec::new() } }
     };
     rsx! {
@@ -353,13 +453,25 @@ pub(super) fn VerdictMark(verdict: Verdict) -> Element {
 fn CheckSummary(
     name: &'static str,
     verdict: Verdict,
-    summary: String,
+    finding: Finding,
     flagged: Vec<Evidence>,
 ) -> Element {
     rsx! {
         VerdictMark { verdict }
         span { class: "data-checks-name", "{name}" }
-        span { class: "data-checks-summary", "{summary}" }
+        span { class: "data-checks-summary",
+            match finding.reason {
+                Some(reason) => rsx! { "{reason}" },
+                None => rsx! {
+                    // A value never breaks from its unit.
+                    for (index, reading) in finding.readings.into_iter().enumerate() {
+                        if index > 0 { " " }
+                        span { class: "data-checks-value", {reading.value.replace(' ', "\u{a0}")} }
+                        "{reading.tail}"
+                    }
+                },
+            }
+        }
         if !flagged.is_empty() {
             EpisodeStrip { flagged }
         }
@@ -478,5 +590,29 @@ pub(super) fn StreamName(topic: String, camera: bool) -> Element {
             }
             span { "{topic}" }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_finding_leads_with_its_values_and_its_nouns_agree() {
+        let gaps = Finding::of_count(0, "frame", "missing,").and("33 ms", "longest gap");
+        assert_eq!(gaps.text(), "0 frames missing, 33 ms longest gap");
+        let closes = Finding::of_count(1, "close", ":").and("1", "all the way");
+        assert_eq!(closes.text(), "1 close: 1 all the way");
+        assert_eq!(
+            Finding::of_count(2, "stream", "at another rate in")
+                .and_count(3, "episode", "")
+                .text(),
+            "2 streams at another rate in 3 episodes"
+        );
+        assert_eq!(
+            Finding::why("No camera to pair").text(),
+            "No camera to pair"
+        );
+        assert_eq!(Plural::of(1, "episode"), "1 episode");
     }
 }

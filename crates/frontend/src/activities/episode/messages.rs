@@ -291,7 +291,7 @@ impl MessageBuffer {
             .map(MessageField::root)
             .map_err(|e| e.to_string())
     }
-    pub(in crate::activities) fn rows(&self) -> usize {
+    fn rows(&self) -> usize {
         self.batches.iter().map(RecordBatch::num_rows).sum()
     }
     fn time(batch: &RecordBatch, row: usize) -> Result<u64, String> {

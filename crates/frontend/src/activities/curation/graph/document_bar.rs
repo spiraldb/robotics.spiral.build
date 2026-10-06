@@ -1,9 +1,10 @@
 //! The document bar: which curation is open, whether it is saved, and what
 //! may be done to it. It heads the graph pane, because the graph is the
-//! document: the saved state as a dot, the name, which is edited where it
-//! stands, the chevron that opens the switcher — saved curations, each with
-//! its own delete, and New — then Discard, Save, and Publish. There is no
-//! Run, because each node runs from its own workspace.
+//! document: the name, which is edited where it stands, and the chevron that
+//! opens the switcher — saved curations, each with when it was made and its
+//! own delete, and New — then, at the far end, unsaved changes as a dot
+//! before Discard, Save, and Publish. There is no Run, because each node runs
+//! from its own workspace.
 use dioxus::prelude::*;
 use spiral_robotics_ui::{
     ActionPurpose, BrowserFocus, Button, ButtonSize, ButtonVariant, CheckIcon, ChevronIcon,
@@ -11,7 +12,7 @@ use spiral_robotics_ui::{
 };
 use wasm_bindgen::JsCast as _;
 
-use super::super::session::{DocumentCommand, DocumentState};
+use super::super::session::{DocumentCommand, DocumentIdentity, DocumentState};
 use super::super::state::CurationController;
 use super::publish::CurationPublish;
 use crate::shell::state::StudioProjectState;
@@ -42,7 +43,6 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
     rsx! {
         header { class: "document-bar",
             div { class: "document-identity",
-                DocumentStateDot { state }
                 DocumentName {
                     name: controller.name(),
                     refused: busy.clone(),
@@ -69,7 +69,10 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
                     }
                 }
             }
+            // The state leads the actions that settle it, so the dot, Discard,
+            // Save, and Publish read as one group.
             div { class: "document-actions",
+                DocumentStateDot { state }
                 if state == DocumentState::Draft {
                     Button { purpose: ActionPurpose::Discard, variant: ButtonVariant::Link,
                         class: "document-discard-action",
@@ -90,11 +93,11 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
     }
 }
 
-/// Whether the curation is saved, as one dot before its name: green when
-/// Studio holds what is on screen, red when it does not. The words are for
-/// the hover and screen readers. The status region stays mounted, because a
-/// live region inserted afresh is not reliably announced, while new words
-/// inside a standing one are.
+/// Whether the curation is saved, as one dot before Save: drawn only while
+/// there are unsaved changes, since a saved or untouched graph is the resting
+/// state. The words are for the hover and screen readers. The status region
+/// stays mounted, because a live region inserted afresh is not reliably
+/// announced, while new words inside a standing one are.
 #[component]
 fn DocumentStateDot(state: DocumentState) -> Element {
     rsx! {
@@ -177,9 +180,42 @@ impl DocumentNameFocus {
     }
 }
 
-/// The popover behind the chevron: every saved curation, each with a delete
-/// at its end that asks in its own row first, then New. A transparent
-/// backdrop closes it.
+/// When a saved curation was made, read back from its id: the receipt at the
+/// end of its switcher row. A new curation takes its dataset's name, so three
+/// curations of one dataset are three rows of one name, told apart by this.
+struct CreationStamp(js_sys::Date);
+
+impl CreationStamp {
+    const MONTHS: [&'static str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    fn of(id: &str) -> Option<Self> {
+        let made = js_sys::Date::new(&DocumentIdentity::minted_at(id)?.into());
+        (!made.get_time().is_nan()).then_some(Self(made))
+    }
+}
+
+/// "Oct 3 14:22", on the operator's own clock.
+impl std::fmt::Display for CreationStamp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let month = Self::MONTHS
+            .get(self.0.get_month() as usize)
+            .copied()
+            .unwrap_or_default();
+        write!(
+            formatter,
+            "{month} {} {:02}:{:02}",
+            self.0.get_date(),
+            self.0.get_hours(),
+            self.0.get_minutes()
+        )
+    }
+}
+
+/// The popover behind the chevron: every saved curation, each with when it
+/// was made and a delete at its end that asks in its own row first, then New.
+/// A transparent backdrop closes it.
 #[component]
 fn DocumentSwitcher(
     controller: CurationController,
@@ -281,7 +317,12 @@ fn DocumentSwitcher(
                                                 }
                                             },
                                             span { class: "document-switcher-name", "{name}" }
-                                            if open { CheckIcon {} }
+                                            if let Some(made) = CreationStamp::of(item.id()) {
+                                                span { class: "document-switcher-made", title: "Created {made}", "{made}" }
+                                            }
+                                            span { class: "document-switcher-current",
+                                                if open { CheckIcon {} }
+                                            }
                                         }
                                         // Beside the row rather than in it: a button
                                         // inside a button is one nobody can reach.

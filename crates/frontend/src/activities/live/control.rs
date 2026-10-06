@@ -153,7 +153,7 @@ fn ToolReadout(arm: ConnectedArm) -> Element {
     let lagging = telemetry.tracking_lagging();
 
     rsx! {
-        dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-1 pt-2",
+        dl { class: "live-summary-readouts",
             Readout {
                 label: "Reach",
                 value: tip.map(|[x, y, _]| format!("{:.0}", x.hypot(y))),
@@ -166,13 +166,13 @@ fn ToolReadout(arm: ConnectedArm) -> Element {
             }
             // A bare percentage does not say which end is which, and reading it
             // backwards is exactly the mistake this readout used to invite — so
-            // "open" moved into the label, where it names the direction without
-            // wrapping the value onto a second line and knocking the four cells
-            // out of alignment with each other.
+            // the unit names the direction. It rides the value's line, which
+            // never wraps, rather than the label, which a 75px cell cuts to
+            // "GRIPPER …".
             Readout {
-                label: "Gripper open",
+                label: "Gripper",
                 value: pose.and_then(|(_, opening)| opening).map(|opening| format!("{:.0}", opening * 100.0)),
-                details: ReadoutDetails::new("%"),
+                details: ReadoutDetails::new("% open"),
             }
             // One name for one number, in every mode. This is the same quantity
             // the session timeline records for a whole take; calling it
@@ -244,7 +244,7 @@ fn ConditionReadout(arm: ConnectedArm) -> Element {
     let strained = hardest.is_some_and(|joint| joint.condition() != MotorCondition::Nominal);
 
     rsx! {
-        dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-2 pt-0.5",
+        dl { class: "live-summary-readouts",
             Readout {
                 label: "Hottest",
                 value: hottest
@@ -345,7 +345,7 @@ fn MotorDetail(selection: Signal<Option<Selection>>, arm: ConnectedArm) -> Eleme
                     }
                 }
             }
-            dl { class: "grid grid-cols-3 gap-1.5",
+            dl { class: "motor-detail-readouts",
                 Readout {
                     label: "Temp",
                     value: joint.temperature_celsius().map(|celsius| format!("{celsius:.0}")),

@@ -10,22 +10,17 @@
     background: var(--tone-surface);
   }
 
-  /* The query is the search node's bar: the field takes the width, its
-     action keeps its own, so a long query never squeezes Search out. */
+  /* The query is the search node's bar: the field takes the width up to a
+     field's measure and its action keeps its own, so a long query never
+     squeezes Search out. The lead never gives less than both need, so the
+     bar's far end moves under it whole rather than running off the pane. */
   .curation-node-bar-lead:has(> .curation-similar-query) {
-    @apply flex-1;
+    flex: 1 1 auto;
+    min-width: auto;
   }
 
   .curation-similar-query {
-    @apply flex min-w-0 flex-1 items-center gap-2;
-  }
-
-  .curation-similar-query-input {
-    @apply min-w-48 flex-1;
-  }
-
-  .curation-similar-note {
-    @apply m-0 px-3 py-1 text-[11px] text-ink-soft;
+    @apply flex flex-1 items-center gap-2;
   }
 
   /* The dataset at a glance, between the question and the rows: the episode
@@ -179,26 +174,20 @@
     will-change: transform, opacity;
   }
 
-  /* Six cards at most, so they sit in one band above the members rather than a
-     grid that reflows as the pane resizes. */
+  /* Eight categories at most, as columns of one band above the members: no
+     box each, the share bar under each name is its column's top rule, and
+     the columns are told apart by the space between them. */
   .curation-similar-categories {
-    @apply grid gap-2 border-b border-line p-3;
+    @apply grid gap-x-6 gap-y-4 border-b border-line px-3 py-3;
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
   }
 
   .curation-similar-category {
-    @apply flex flex-col items-stretch gap-1 rounded border border-line bg-surface p-2 text-left;
-    transition:
-      background-color 100ms ease-out,
-      border-color 100ms ease-out;
+    @apply flex min-w-0 flex-col items-stretch gap-1 text-left;
   }
 
   /* A category the grouping leaves out steps back: its words and its share
      fade, and only its checkbox keeps full strength, to bring it back. */
-  .curation-similar-category[data-kept="false"] {
-    background: var(--tone-sunken);
-  }
-
   .curation-similar-category[data-kept="false"] > :not(.curation-similar-category-head),
   .curation-similar-category[data-kept="false"] .curation-similar-category-open {
     opacity: 0.5;
@@ -308,7 +297,8 @@
      members is the reason you opened it. It holds the top of the index while
      the members scroll under it, so the strip stays where it was clicked. */
   .curation-similar-open {
-    @apply sticky top-0 z-[1] flex flex-col gap-1 border-b border-line bg-surface px-3 py-2;
+    @apply sticky top-0 z-[1] flex flex-col gap-1 border-b border-line bg-surface py-2;
+    padding-inline: var(--curation-index-gutter, 12px);
   }
 
   .curation-similar-open-name {
@@ -491,9 +481,10 @@
   }
 
   /* A definition is a sentence, so it gets a row of its own rather than a
-     149px box showing twenty of its hundred characters. */
+     149px box showing twenty of its hundred characters. The fields sit on
+     the header's own paper, under the disclosure that opened them. */
   .curation-similar-editor {
-    @apply grid items-end gap-2 rounded border border-line bg-sunken p-2;
+    @apply grid max-w-[36rem] items-end gap-2 pt-1.5;
     grid-template-columns: minmax(8rem, 1fr) auto auto;
   }
 
@@ -507,7 +498,6 @@
     .curation-map-segment,
     .curation-map-lanes:is([data-reveal="ripple"], [data-reveal="pour"]) .curation-map-segment,
     .curation-map-lanes[data-reveal="reading"] .curation-map-segment[data-source="true"],
-    .curation-similar-category,
     .curation-similar-chip,
     .curation-profile,
     .curation-profile-dot,
@@ -520,4 +510,12 @@
       animation: none;
     }
   }
+}
+
+/* Unlayered, over the kit's own input, which allows any width: the query
+   keeps room for a question and stops at a field's measure. */
+.curation-similar-query .curation-similar-query-input {
+  min-width: 10rem;
+  max-width: 28rem;
+  flex: 1 1 auto;
 }

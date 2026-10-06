@@ -423,8 +423,8 @@ fn a_grouping_publishes_the_subtasks_of_the_categories_it_keeps() {
         "\nSELECT episode_id, start_ns, end_ns, subtask, subtask_category FROM group_similar_subtasks_2_kept"
     ));
     assert!(!published.contains("spql.ai."));
-    // Its fill classifies every subtask the Break down stored for the
-    // episode bound as `$1`, in one call.
+    // Its fill classifies each subtask the Break down stored for the
+    // episode bound as `$1`, collected in their order.
     let fills = CurationPath::to(&graph, &group).unwrap().fills().unwrap();
     let AnswerSource::Statement { statement } = fills[1].source() else {
         panic!("a judgment is filled by a statement")
@@ -432,7 +432,11 @@ fn a_grouping_publishes_the_subtasks_of_the_categories_it_keeps() {
     assert_eq!(
         statement,
         &format!(
-            "SELECT a.episode_id, spql.ai.classify(a.{subtasks}.value, [STRUCT_PACK(name := 'fold', definition := 'The robot folds the cloth.'), STRUCT_PACK(name := 'flatten', definition := 'The robot flattens the cloth.')], model => 'typesafe/jev-1.13') AS answer FROM {ANSWERS} a WHERE a.episode_id = $1"
+            "WITH e AS (SELECT a.episode_id, a.{subtasks}.value AS subtasks FROM {ANSWERS} a WHERE a.episode_id = $1), \
+             s AS (SELECT e.episode_id, spql.list.get(e.subtasks, g._) AS listed \
+             FROM e CROSS JOIN LATERAL spql.range(CAST(spql.list.len(e.subtasks) AS BIGINT)) g) \
+             SELECT s.episode_id, spql.list.collect(spql.ai.classify(s.listed.description, [STRUCT_PACK(name := 'fold', definition := 'The robot folds the cloth.'), STRUCT_PACK(name := 'flatten', definition := 'The robot flattens the cloth.')], model => 'typesafe/jev-1.13')) AS answer \
+             FROM s GROUP BY s.episode_id"
         )
     );
     // The preview reads the stored categories of the rows Break down's
@@ -472,9 +476,12 @@ fn a_search_publishes_the_subtasks_its_cutoff_keeps_and_a_repeat_writes_its_own_
         panic!("a judgment is filled by a statement")
     };
     assert!(statement.contains(&format!(
-        "spql.ai.similarity(a.{}.value, 'fold the towel''s edge', model => 'typesafe/jev-1.13') AS answer",
+        "a.{}.value AS subtasks",
         column(&graph, &annotate)
     )));
+    assert!(statement.contains(
+        "spql.list.collect(spql.ai.similarity(s.listed.description, 'fold the towel''s edge', model => 'typesafe/jev-1.13')) AS answer"
+    ));
     let asking = preview(&graph, &search, rows_of(&graph, &annotate));
     assert!(asking.contains(&format!(
         "spql.list.get({similarities}, subtask_index) AS similarity"

@@ -23,14 +23,15 @@
   /* A Select's conditions, one row each: what it reads and which side it
      keeps, the value, the strip the value slides on, and how many episodes
      it leaves out. The columns line up across rows, so several conditions
-     read as one table of the rule. */
+     read as one table of the rule, and the strip stops at a strip's measure
+     rather than carrying "leaves out" to the far side of a wide pane. */
   .curation-select-conditions {
     @apply flex shrink-0 flex-col border-b border-line px-3 pb-1.5;
   }
   .curation-select-condition {
     @apply grid items-center gap-x-2 border-b py-1.5;
     border-bottom-color: var(--tone-line-soft);
-    grid-template-columns: 9rem 6rem 5.5rem minmax(10rem, 1fr) 6.5rem 1.5rem;
+    grid-template-columns: 9rem 6rem 5.5rem minmax(10rem, 28rem) 6.5rem 1.5rem;
   }
   .curation-select-condition-fact,
   .curation-select-condition-comparison {
@@ -46,8 +47,13 @@
   .curation-select-condition-remove .ui-icon {
     @apply size-3;
   }
+  /* Add condition starts the row under the last condition: its box on the
+     fact column's edge and its + where the fact's words begin. */
   .curation-select-condition-add {
-    @apply flex pt-1;
+    @apply flex pt-1.5;
+  }
+  .curation-select-condition-add .ui-icon {
+    @apply size-3.5;
   }
 
   /* The strips over the episode map: where each threshold falls among the

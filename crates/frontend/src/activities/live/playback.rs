@@ -30,9 +30,7 @@ impl LiveTimeline {
             .telemetry()
             .recording()
             .map(TimelineSubject::Recording)
-            .unwrap_or_else(|| {
-                TimelineSubject::empty("Record an episode to begin using the shared clock.")
-            });
+            .unwrap_or(TimelineSubject::Empty);
         preview.use_source_identity(&subject);
         let source = preview.source(&subject);
         let signals = TimelineSignals::new(

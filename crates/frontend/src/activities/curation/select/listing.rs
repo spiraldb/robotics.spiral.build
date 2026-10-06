@@ -187,7 +187,6 @@ pub(super) fn EpisodeListing(
             evidence: rsx! {
                 EpisodeTabs {
                     open: tabs,
-                    empty: "Choose an episode to watch it.".to_owned(),
                     render: move |tab: OpenEpisode| {
                         let Some(episode) = sample.episode(tab.episode()).cloned() else {
                             return rsx! {};
@@ -202,9 +201,9 @@ pub(super) fn EpisodeListing(
 
 impl RuleView {
     /// An episode's row under a Select: its measures are the facts the
-    /// conditions read, each once, and a fact the episode fails a condition
-    /// on is marked, so the Left out side says why each row is there. A fact
-    /// that is a measure is not said again in the facts line.
+    /// conditions read, each once, then the episode's length unless a
+    /// condition reads it; a fact the episode fails a condition on is
+    /// marked, so the Left out side says why each row is there.
     fn episode_face(&self, rows: &EpisodeRows, episode: &Episode) -> SliceFace {
         let conditions = match &self.selection {
             Selection::Episodes { conditions } => conditions.as_slice(),
@@ -217,15 +216,6 @@ impl RuleView {
             }
         }
         let mut face = SliceFace::episode(rows, episode);
-        if facts.contains(&EpisodeFact::DurationSeconds) {
-            face = face.saying(
-                rows.label(episode)
-                    .head()
-                    .map(|_| Episode::listed_name_of(episode.id()))
-                    .into_iter()
-                    .collect(),
-            );
-        }
         for fact in facts {
             let Some(reading) = fact.reading(episode) else {
                 continue;
@@ -235,7 +225,7 @@ impl RuleView {
                 .any(|condition| condition.fact() == fact && !condition.holds(episode));
             face = face.judged(reading, fact.name(), failing);
         }
-        face
+        face.length_last()
     }
 }
 
@@ -418,7 +408,6 @@ pub(super) fn MomentListing(
             evidence: rsx! {
                 EpisodeTabs {
                     open: tabs,
-                    empty: "Choose a stretch to watch it.".to_owned(),
                     render: move |tab: OpenEpisode| {
                         let Some(episode) = evidence.sample.episode(tab.episode()).cloned() else {
                             return rsx! {};

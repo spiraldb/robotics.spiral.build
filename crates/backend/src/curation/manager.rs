@@ -11,10 +11,12 @@ use super::fill::FillRuns;
 use super::preview::PreviewRuns;
 use crate::OperationError;
 use spiral_robotics_common::curation::{
-    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus, PublishedView,
-    UnpublishRequest, ViewName,
+    AnswerTable, CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+    FilledEpisodesRequest, PublishedView, UnpublishRequest, ViewName,
 };
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// The one message a losing save shows; reopening reloads the stored revision.
@@ -127,6 +129,20 @@ impl CurationManager {
     pub(super) fn fill(&self, request: FillRequest) -> Result<FillStatus, OperationError> {
         let admitted = self.fills.admit(request)?;
         Ok(self.fills.start(admitted))
+    }
+
+    /// The episodes `request`'s column holds an answer for, failed ones
+    /// included; none before the column is first written.
+    pub(super) async fn filled(
+        &self,
+        request: FilledEpisodesRequest,
+    ) -> Result<BTreeSet<EpisodeId>, OperationError> {
+        let table = AnswerTable::of(request.dataset()).map_err(OperationError::InvalidInput)?;
+        self.storage
+            .dataset_answers(table)
+            .filled(request.column())
+            .await
+            .map_err(OperationError::External)
     }
 
     /// Every view the project's curations published.

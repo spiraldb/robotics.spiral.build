@@ -1,5 +1,6 @@
 //! The saved curations: list them, load one by id, store one back, delete one;
-//! and the fill runs that store their model answers and publish their views.
+//! the fill runs that store their model answers and publish their views; and
+//! which episodes a column of those answers already holds.
 //!
 //! Build one inside the task that awaits it, as every other Studio client is
 //! built, so the request names the mounting scope's project.
@@ -8,8 +9,11 @@ use crate::client::http::UrlComponent;
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::curation::{
-    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus, PublishedView,
+    CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
+    FilledEpisodesRequest, PublishedView,
 };
+use spiral_robotics_common::datasets::EpisodeId;
+use std::collections::BTreeSet;
 
 pub(super) struct CurationClient(ProjectClient);
 
@@ -84,6 +88,17 @@ impl CurationClient {
                 "POST",
                 format!("/api/curation-fills/{}/stop", id.url_component()),
             ))
+            .await
+    }
+
+    /// The episodes `request`'s column holds an answer for, failed ones
+    /// included.
+    pub(super) async fn filled(
+        &self,
+        request: &FilledEpisodesRequest,
+    ) -> Result<BTreeSet<EpisodeId>, CommandError> {
+        self.0
+            .request(HttpRequest::new("POST", "/api/curation-answers/filled").json(request))
             .await
     }
 

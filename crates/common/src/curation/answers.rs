@@ -79,6 +79,27 @@ impl AnswerColumn {
     }
 }
 
+/// Which episodes of `dataset` one answers column holds an answer for,
+/// failed ones included: what a curation opened reads back.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilledEpisodesRequest {
+    dataset: DatasetSelection,
+    column: AnswerColumn,
+}
+
+impl FilledEpisodesRequest {
+    pub fn new(dataset: DatasetSelection, column: AnswerColumn) -> Self {
+        Self { dataset, column }
+    }
+    pub fn dataset(&self) -> &DatasetSelection {
+        &self.dataset
+    }
+    pub fn column(&self) -> &AnswerColumn {
+        &self.column
+    }
+}
+
 impl TryFrom<String> for AnswerColumn {
     type Error = String;
 

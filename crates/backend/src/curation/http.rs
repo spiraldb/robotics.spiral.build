@@ -1,8 +1,9 @@
 //! Saved curations: list, load by identity, and a revision-guarded save and
 //! delete; the fill runs that write the answers a view reads and then
 //! publish it, which Publish and a Score progress preview start and poll;
-//! the published views and dropping one; and the preview runs a node's Run
-//! starts, polls, stops, and reads answers from.
+//! which episodes a column of answers already holds; the published views and
+//! dropping one; and the preview runs a node's Run starts, polls, stops, and
+//! reads answers from.
 use super::preview::PreviewAnswer;
 use crate::OperationError;
 use crate::http::delivery::{ApiJson, ApiPath, ArrowResponse, Project};
@@ -15,8 +16,11 @@ use axum::{
 };
 use spiral_robotics_common::curation::{
     CurationDeletion, CurationDocument, CurationSummary, FillRequest, FillStatus,
-    MAX_CURATION_PAYLOAD_BYTES, PreviewQuery, PreviewRunStatus, PublishedView, UnpublishRequest,
+    FilledEpisodesRequest, MAX_CURATION_PAYLOAD_BYTES, PreviewQuery, PreviewRunStatus,
+    PublishedView, UnpublishRequest,
 };
+use spiral_robotics_common::datasets::EpisodeId;
+use std::collections::BTreeSet;
 
 /// The body carries the payload as a JSON string, so escaping and the
 /// surrounding fields both add bytes to it. Bounding the request at twice the
@@ -31,6 +35,7 @@ impl CurationEndpoints {
             .route("/curations", get(Self::list))
             .route("/curations/{id}", get(Self::load))
             .route("/curated-views", get(Self::published))
+            .route("/curation-answers/filled", post(Self::filled))
             .route("/curation-fills", get(Self::publications))
             .route("/curation-fills/{id}", get(Self::fill_status))
             .route("/curation-previews/{id}", get(Self::preview_status))
@@ -80,6 +85,12 @@ impl CurationEndpoints {
         ApiJson(request): ApiJson<FillRequest>,
     ) -> Result<Json<FillStatus>, OperationError> {
         Ok(Json(project.curation().fill(request)?))
+    }
+    async fn filled(
+        Project(project): Project,
+        ApiJson(request): ApiJson<FilledEpisodesRequest>,
+    ) -> Result<Json<BTreeSet<EpisodeId>>, OperationError> {
+        Ok(Json(project.curation().filled(request).await?))
     }
     async fn published(
         Project(project): Project,

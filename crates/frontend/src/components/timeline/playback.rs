@@ -11,6 +11,8 @@ pub(crate) struct PlaybackClock {
     duration: f64,
     speed: f64,
     looping: bool,
+    /// Where an interval being played ends, which stops playback there.
+    stop_at: Option<f64>,
 }
 impl PlaybackClock {
     pub(crate) fn new(duration: f64) -> Self {
@@ -20,21 +22,34 @@ impl PlaybackClock {
             duration: duration.max(0.0),
             speed: 1.0,
             looping: false,
+            stop_at: None,
         }
     }
+    /// Move the playhead to `seconds`, which lets an interval being played
+    /// run on past its end.
     pub(crate) fn seek(&mut self, seconds: f64) {
         if seconds.is_finite() {
+            self.stop_at = None;
             self.seconds = seconds.clamp(0.0, self.duration);
         }
     }
     /// Seek to `start` and play on from there, as far as the operator lets it
-    /// run: an interval is where to start watching, not where to stop.
+    /// run.
     pub(crate) fn play_from(&mut self, start: f64) {
         if !start.is_finite() {
             return;
         }
         self.seek(start);
         self.playing = self.seconds < self.duration;
+    }
+    /// Play the interval from `start` to `end` and stop at its end; played
+    /// again from there, the recording runs on.
+    pub(crate) fn play_span(&mut self, start: f64, end: f64) {
+        if !start.is_finite() || !end.is_finite() {
+            return;
+        }
+        self.play_from(start);
+        self.stop_at = (end > self.seconds).then(|| end.min(self.duration));
     }
     fn toggle(&mut self) {
         if self.duration <= 0.0 {
@@ -48,7 +63,11 @@ impl PlaybackClock {
     pub(crate) fn advance(&mut self, elapsed: f64) {
         let step = elapsed.clamp(0.0, 0.25).min(self.duration) * self.speed;
         let next = self.seconds + step;
-        if next >= self.duration {
+        if let Some(end) = self.stop_at.filter(|end| next >= *end) {
+            self.seconds = end;
+            self.playing = false;
+            self.stop_at = None;
+        } else if next >= self.duration {
             if self.looping && self.duration > 0.0 {
                 self.seconds = next % self.duration;
             } else {
@@ -252,6 +271,34 @@ mod tests {
         assert!(!clock.playing);
         clock.play_from(f64::NAN);
         assert_eq!(clock.seconds, 30.0);
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn playing_an_interval_stops_at_its_end_until_played_or_sought_again() {
+        let mut clock = PlaybackClock::new(30.0);
+        clock.looping = true;
+        clock.play_span(23.9, 24.0);
+        clock.advance(0.2);
+        assert_eq!(clock.seconds, 24.0);
+        assert!(!clock.playing);
+        // Played again from its end, the recording runs on.
+        clock.set_playing(true);
+        clock.advance(0.2);
+        assert!(clock.playing);
+        assert!(clock.seconds > 24.0);
+        // Pausing inside it keeps its end; seeking away drops it.
+        clock.play_span(10.0, 12.0);
+        clock.set_playing(false);
+        clock.set_playing(true);
+        while clock.playing {
+            clock.advance(0.25);
+        }
+        assert_eq!(clock.seconds, 12.0);
+        assert!(!clock.playing);
+        clock.play_span(10.0, 12.0);
+        clock.seek(11.9);
+        clock.advance(0.2);
+        assert!(clock.playing);
+        assert!(clock.seconds > 12.0);
     }
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn one_clock_clamps_seeks_loops_and_honours_speed() {

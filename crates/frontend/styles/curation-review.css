@@ -36,20 +36,11 @@
     display: none;
   }
 
-  /* What a node reads, in words, with the topic it reads in mono — the
-     part an operator pastes into a bug report, so it selects. */
+  /* What a node is doing while it works, in the bar's quiet voice. */
   .curation-node-bar-reads {
     margin: 0;
     color: var(--tone-ink-soft);
     user-select: text;
-  }
-
-  .curation-node-bar-reads code,
-  .curation-node-bar-settings code {
-    color: var(--tone-ink);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
   }
 
   /* Why the actions beside it will not run, or what the node cannot see, on
@@ -62,7 +53,8 @@
   }
 
   /* The bar's far end: what the node's state is, then what can be done
-     about it. */
+     about it. Beside a lead that will not give more width it moves under it
+     whole rather than running off the pane. */
   .curation-node-bar-end {
     display: flex;
     min-width: 0;
@@ -82,6 +74,7 @@
     gap: 8px;
     color: var(--tone-ink-soft);
     font-size: 11.5px;
+    white-space: nowrap;
   }
 
   .curation-node-bar-actions {
@@ -160,7 +153,9 @@
   /* The bar over an index: its filter, its sides. It sits above the
      scroll, so it stays reachable at row 280, and it is the height of the
      evidence heading and of the workbench tab bar — whichever tops the
-     column beside it — so the two columns' hairlines meet. */
+     column beside it — so the two columns' hairlines meet. Its controls,
+     the rows, their headings and every note in the index share one left
+     edge, the index's gutter. */
   .curation-index-bar {
     position: sticky;
     top: 0;
@@ -170,7 +165,7 @@
     flex-shrink: 0;
     align-items: center;
     gap: 6px;
-    padding: 0 12px;
+    padding: 0 var(--curation-index-gutter, 12px);
     border-bottom: 1px solid var(--tone-line);
     background: var(--tone-surface);
   }
@@ -193,7 +188,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 12px 4px;
+    padding: 10px var(--curation-index-gutter, 12px) 4px;
     color: var(--tone-ink-soft);
     font-family: var(--font-mono);
     font-size: 10.5px;
@@ -244,7 +239,7 @@
 
   .curation-review-note {
     margin: 0;
-    padding: 8px 12px;
+    padding: 8px var(--curation-index-gutter, 12px);
     color: var(--tone-ink-soft);
     font-size: 11px;
   }
@@ -272,6 +267,17 @@
     position: relative;
     contain-intrinsic-size: 0 63px;
     content-visibility: auto;
+  }
+
+  /* An index across episodes names each row's episode before its span, two
+     facts that take two lines in a narrow index; every row of it is drawn
+     at that height, so the index stays one rhythm. */
+  .curation-entry-item[data-names-episode="true"] {
+    contain-intrinsic-size: 0 71px;
+  }
+
+  .curation-entry-item[data-names-episode="true"] > .curation-entry {
+    min-height: 70px;
   }
 
   /* Find similar sits over the row's right edge, beside the row rather than
@@ -329,7 +335,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 0 12px;
+    padding: 0 var(--curation-index-gutter, 12px);
     border: 0;
     border-bottom: 1px solid var(--tone-line);
     background: var(--tone-sunken);
@@ -367,7 +373,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 6px 12px;
+    padding: 6px var(--curation-index-gutter, 12px);
     border-bottom: 1px solid var(--tone-line);
     color: var(--tone-ink-soft);
     font-size: 11px;
@@ -400,7 +406,7 @@
     align-items: center;
     gap: 8px;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    padding: 4px 12px;
+    padding: 4px var(--curation-index-gutter, 12px);
     border: 0;
     border-bottom: 1px solid var(--tone-line);
     background: none;
@@ -440,18 +446,21 @@
     gap: 0 8px;
   }
 
-  /* A narrow index spends its width on the words. The picture and the score
-     are the two things that read at any size, so they give first. */
+  /* A narrow index spends its width on the words. The picture, the score
+     and the gutter are what read at any size, so they give first; the rows
+     keep their height, so the index keeps one rhythm. */
   @container curation-index (max-width: 22rem) {
+    .curation-review-index > * {
+      --curation-index-gutter: 8px;
+    }
+
     .episode-still {
       width: 72px;
       height: 40px;
     }
 
     .curation-entry {
-      min-height: 52px;
       gap: 6px;
-      padding: 4px 8px;
     }
 
     .episode-row-measure {

@@ -430,19 +430,28 @@ impl StatusFacts {
                 StatusTone::Danger,
             ));
         }
+        // Arms and the control loop speak only when they fall short; every arm
+        // connected at the target rate is the resting state.
+        let arms = snapshot.robots().len();
         let connected_arms = snapshot
             .robots()
             .iter()
             .filter(|robot| robot.connection().connected())
             .count();
-        facts.push(StatusFact::new(
-            format!("{connected_arms}/{} arms", snapshot.robots().len()),
-            StatusTone::Plain,
-        ));
-        if telemetry.target_hz() > 0.0 {
+        if connected_arms < arms {
             facts.push(StatusFact::new(
-                format!("{:.0}/{:.0} Hz", telemetry.loop_hz(), telemetry.target_hz()),
-                StatusTone::Plain,
+                format!("{connected_arms} of {arms} arms connected"),
+                StatusTone::Caution,
+            ));
+        }
+        if telemetry.target_hz() > 0.0 && telemetry.loop_hz() < telemetry.target_hz() * 0.9 {
+            facts.push(StatusFact::new(
+                format!(
+                    "{:.0} of {:.0} Hz",
+                    telemetry.loop_hz(),
+                    telemetry.target_hz()
+                ),
+                StatusTone::Caution,
             ));
         }
         match snapshot.issues().len() {
@@ -521,7 +530,9 @@ fn NotificationCenter() -> Element {
             header { class: "notification-center-header",
                 div {
                     h2 { id: "notification-center-title", "Notifications" }
-                    span { "{message_count} in this session" }
+                    if message_count > 0 {
+                        span { "{message_count} in this session" }
+                    }
                 }
                 if message_count > 0 {
                     Button {
@@ -545,7 +556,6 @@ fn NotificationCenter() -> Element {
                 div { class: "notification-center-empty",
                     NotificationIcon {}
                     strong { "No notifications" }
-                    span { "Command results and recoverable errors will appear here." }
                 }
             } else {
                 ol { class: "notification-list",
@@ -612,7 +622,6 @@ fn StudioToast() -> Element {
 
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct TrainingStatus {
-    runs: usize,
     phase: Option<String>,
     step: Option<String>,
 }
@@ -620,7 +629,6 @@ impl From<&spiral_robotics_common::training::TrainingSnapshot> for TrainingStatu
     fn from(snapshot: &spiral_robotics_common::training::TrainingSnapshot) -> Self {
         let run = snapshot.active_run();
         Self {
-            runs: snapshot.runs().len(),
             phase: run.map(|run| run.phase().label().to_owned()),
             step: run.map(|run| format!("step {} / {}", run.current_step(), run.config().steps())),
         }
@@ -628,23 +636,13 @@ impl From<&spiral_robotics_common::training::TrainingSnapshot> for TrainingStatu
 }
 
 impl TrainingStatus {
-    /// An active run speaks for itself; otherwise the history. Why training
-    /// is unavailable is the Training panel's to explain, in full.
+    /// An active run speaks for itself; a history at rest says nothing. Why
+    /// training is unavailable is the Training panel's to explain, in full.
     fn facts(self) -> Vec<StatusFact> {
-        let mut facts = Vec::new();
-        facts.extend(
-            self.phase
-                .map(|phase| StatusFact::new(phase, StatusTone::Plain)),
-        );
-        facts.extend(
-            self.step
-                .map(|step| StatusFact::new(step, StatusTone::Plain)),
-        );
-        let runs = match self.runs {
-            1 => "1 run".to_owned(),
-            count => format!("{count} runs"),
-        };
-        facts.push(StatusFact::new(runs, StatusTone::Plain));
-        facts
+        self.phase
+            .into_iter()
+            .chain(self.step)
+            .map(|fact| StatusFact::new(fact, StatusTone::Plain))
+            .collect()
     }
 }

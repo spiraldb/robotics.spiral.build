@@ -46,10 +46,10 @@ impl OpenedEpisode {
         }
     }
     /// `episode` opened from a curated view: its intervals on the timeline,
-    /// playing from the one chosen.
+    /// playing the one chosen.
     pub(super) fn from_view(episode: Episode, label: SourceLabel, spans: ViewSpans) -> Self {
         Self {
-            play: spans.chosen().map(PlayRequest::new),
+            play: spans.chosen().map(PlayRequest::span),
             spans: Some(spans),
             ..Self::new(episode, label)
         }
@@ -58,7 +58,7 @@ impl OpenedEpisode {
     /// moment its finding names.
     pub(super) fn checked(checked: CheckedEpisode) -> Self {
         Self {
-            play: checked.moment().map(PlayRequest::new),
+            play: checked.moment().map(PlayRequest::instant),
             ..Self::new(checked.episode().clone(), checked.label().clone())
         }
     }
@@ -81,12 +81,12 @@ impl OpenedEpisode {
     pub(super) fn reopen(&mut self, again: Self) {
         let Some(spans) = again.spans else {
             if let Some(play) = again.play {
-                self.play = Some(PlayRequest::after(self.play, play.start()));
+                self.play = Some(play.after(self.play));
             }
             return;
         };
-        if let Some(start) = spans.chosen() {
-            self.play = Some(PlayRequest::after(self.play, start));
+        if let Some(span) = spans.chosen() {
+            self.play = Some(PlayRequest::span(span).after(self.play));
         }
         self.spans = Some(spans);
     }
@@ -454,10 +454,14 @@ fn CuratedViewList(
                         _ => format!("{} of the curation “{}”", view.output(), view.curation()),
                     },
                     "aria-disabled": view.fill().is_some_and(ViewFill::is_running).then_some("true"),
-                    onselect: (!view.fill().is_some_and(ViewFill::is_running)).then(|| {
+                    onselect: {
                         let view = view.clone();
-                        EventHandler::new(move |_| on_open.call(view.clone()))
-                    }),
+                        move |()| {
+                            if !view.fill().is_some_and(ViewFill::is_running) {
+                                on_open.call(view.clone());
+                            }
+                        }
+                    },
                     label: rsx! {
                         KindMark { letter: 'C', hue: "var(--tone-kind-curated)", label: "Curated view" }
                         span { class: "data-curated-item-words",
