@@ -76,3 +76,43 @@ debug = 0
 [profile.server-release]
 inherits = "release"
 incremental = true
+
+# Dioxus 0.7.10 plus DioxusLabs/dioxus#5894, until a release ships it: an
+# optional event handler that a re-render adds to a mounted component is
+# no longer freed. Every crate of the Dioxus repository comes from the one
+# branch, since its crates depend on each other by path.
+[patch.crates-io]
+dioxus                     = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-asset-resolver      = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-cli-config          = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-config-macro        = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-config-macros       = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-core                = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-core-macro          = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-core-types          = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-devtools            = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-devtools-types      = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-document            = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-fullstack           = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-fullstack-core      = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-fullstack-macro     = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-history             = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-hooks               = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-html                = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-html-internal-macro = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-interpreter-js      = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-logger              = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-router              = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-router-macro        = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-rsx                 = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-signals             = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-stores              = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-stores-macro        = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+dioxus-web                 = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+generational-box           = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+lazy-js-bundle             = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+manganis                   = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+manganis-core              = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+manganis-macro             = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+subsecond                  = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }
+subsecond-types            = { git = "https://github.com/XiangpengHao/dioxus", branch = "fix-optional-callback-owner-0.7" }

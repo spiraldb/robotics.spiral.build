@@ -90,9 +90,8 @@ pub struct TreeItemProps {
     branch: Option<TreeBranch>,
     #[props(default)]
     selected: bool,
-    /// Not an `Option`, for the reason `Button`'s `onclick` is not one.
     #[props(default)]
-    onselect: EventHandler<()>,
+    onselect: Option<EventHandler<()>>,
     /// Counts and row-local actions after the label.
     #[props(default)]
     trailing: Option<Element>,
@@ -160,7 +159,7 @@ pub fn TreeItem(props: TreeItemProps) -> Element {
                     r#type: "button",
                     class: "ui-tree-label",
                     "aria-pressed": props.selected,
-                    onclick: move |_| onselect.call(()),
+                    onclick: move |_| if let Some(handler) = onselect { handler.call(()) },
                     onkeydown: row_keys,
                     {props.label}
                 }

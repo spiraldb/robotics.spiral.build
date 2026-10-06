@@ -133,7 +133,12 @@
               ./crates
             ];
           };
-          cargoDeps = rustPlatform.importCargoLock { lockFile = ./Cargo.lock; };
+          cargoDeps = rustPlatform.importCargoLock {
+            lockFile = ./Cargo.lock;
+            # The patched Dioxus checkout (Cargo.toml's [patch.crates-io]),
+            # one hash for every crate it provides.
+            outputHashes."const-serialize-0.8.0-alpha.0" = "sha256-1YJZcijcAXEQ//NxevLvOUfDu18jdzwOGnBztouwisE=";
+          };
           studioServer = rustPlatform.buildRustPackage {
             pname = "spiral-robotics-backend";
             version = workspaceVersion;

@@ -454,14 +454,10 @@ fn CuratedViewList(
                         _ => format!("{} of the curation “{}”", view.output(), view.curation()),
                     },
                     "aria-disabled": view.fill().is_some_and(ViewFill::is_running).then_some("true"),
-                    onselect: {
+                    onselect: (!view.fill().is_some_and(ViewFill::is_running)).then(|| {
                         let view = view.clone();
-                        move |()| {
-                            if !view.fill().is_some_and(ViewFill::is_running) {
-                                on_open.call(view.clone());
-                            }
-                        }
-                    },
+                        EventHandler::new(move |_| on_open.call(view.clone()))
+                    }),
                     label: rsx! {
                         KindMark { letter: 'C', hue: "var(--tone-kind-curated)", label: "Curated view" }
                         span { class: "data-curated-item-words",

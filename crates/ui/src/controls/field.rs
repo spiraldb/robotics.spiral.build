@@ -87,13 +87,11 @@ pub struct TextInputProps {
     /// opened on purpose such as a rename.
     #[props(default)]
     autofocus: bool,
-    /// Handlers that do nothing by default rather than `Option`s, for the
-    /// reason `Button`'s `onclick` is not one.
     #[props(default)]
-    onkeydown: EventHandler<KeyboardEvent>,
+    onkeydown: Option<EventHandler<KeyboardEvent>>,
     /// Focus left the input, as when an operator tabs or clicks away.
     #[props(default)]
-    onblur: EventHandler<FocusEvent>,
+    onblur: Option<EventHandler<FocusEvent>>,
     #[props(extends = GlobalAttributes, extends = input)]
     attributes: Vec<Attribute>,
 }
@@ -114,8 +112,8 @@ pub fn TextInput(props: TextInputProps) -> Element {
             disabled: props.disabled,
             autofocus: props.autofocus,
             oninput: move |event| oninput.call(event.value()),
-            onkeydown: move |event| onkeydown.call(event),
-            onblur: move |event| onblur.call(event),
+            onkeydown: move |event| if let Some(handler) = onkeydown { handler.call(event) },
+            onblur: move |event| if let Some(handler) = onblur { handler.call(event) },
             ..attributes,
         }
     }
