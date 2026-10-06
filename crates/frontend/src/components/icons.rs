@@ -12,19 +12,6 @@ pub(crate) use spiral_robotics_ui::{
     StepForwardIcon, ZoomInIcon, ZoomOutIcon,
 };
 
-/// Live: a compact arm silhouette rather than a generic sidebar.
-#[component]
-pub(crate) fn RobotPanelIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M3 13h4M5 13V9.5l3-2.5 2.5-3M8 7l2.5 2.5M10.5 9.5l2-1.5M10.5 4l1.5-1.5" }
-            circle { cx: "5", cy: "9.5", r: "1" }
-            circle { cx: "8", cy: "7", r: "1" }
-            circle { cx: "10.5", cy: "4", r: "1" }
-        }
-    }
-}
-
 /// Global configuration, at the end of the top bar.
 #[component]
 pub(crate) fn SettingsIcon() -> Element {

@@ -1,4 +1,4 @@
-//! The mounted Live Timeline: one subject, assembled once per render and read
+//! The mounted take Timeline: one subject, assembled once per render and read
 //! by the Timeline panel, the scene, and every camera.
 
 use std::sync::Arc;
@@ -6,26 +6,26 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 use super::recording_review::EpisodePreview;
-use super::session::LiveSession;
+use super::session::RolloutSession;
 use super::signals::{RecordingTimeline, SignalStore};
-use super::timeline::{LiveTimelinePanel, SignalSource, TimelineSignals, TimelineSubject};
-use super::transport::{LiveClock, LivePreview, LiveTransport};
+use super::timeline::{SignalSource, TakeTimelinePanel, TimelineSignals, TimelineSubject};
+use super::transport::{TakeClock, TakePreview, TakeTransport};
 use crate::components::time_series::TimelineSignalLane;
 use crate::panels::camera::{CameraEditorSource, RecordedCameraSourceRequest};
 use crate::panels::camera_panel::AssignedCamera;
 use crate::panels::recorded_source::RecordedSource;
 use crate::panels::scene::SceneSource;
 
-pub(super) struct LiveTimeline {
+pub(super) struct TakeTimeline {
     source: Option<RecordedSource<EpisodePreview>>,
-    transport: LiveTransport,
+    transport: TakeTransport,
     signals: TimelineSignals,
 }
 
-impl LiveTimeline {
-    pub(super) fn use_timeline(session: LiveSession) -> Self {
+impl TakeTimeline {
+    pub(super) fn use_timeline(session: RolloutSession) -> Self {
         let controller = session.timeline_controller();
-        let preview = LivePreview::use_preview(session);
+        let preview = TakePreview::use_preview(session);
         let subject = session
             .telemetry()
             .recording()
@@ -37,9 +37,9 @@ impl LiveTimeline {
             Self::signal_lanes(session, &subject, source.as_ref()),
             Self::signal_source(&subject, source.as_ref()),
         );
-        let clock = LiveClock::new(controller.playhead_signal()(), controller.previewing())
+        let clock = TakeClock::new(controller.playhead_signal()(), controller.previewing())
             .with_follow_live(controller.follow_live_signal()());
-        let transport = LiveTransport::new(preview, subject, clock);
+        let transport = TakeTransport::new(preview, subject, clock);
         Self {
             source,
             transport,
@@ -51,7 +51,7 @@ impl LiveTimeline {
     /// empty set while a recorded episode is being read, and live telemetry
     /// when there is no recorded episode in view at all.
     fn signal_lanes(
-        session: LiveSession,
+        session: RolloutSession,
         subject: &TimelineSubject,
         source: Option<&RecordedSource<EpisodePreview>>,
     ) -> Arc<[TimelineSignalLane; 6]> {
@@ -104,11 +104,11 @@ impl LiveTimeline {
     }
 
     pub(super) fn render(&self) -> Element {
-        rsx! { LiveTimelinePanel { transport: self.transport.clone(), signals: self.signals.clone() } }
+        rsx! { TakeTimelinePanel { transport: self.transport.clone(), signals: self.signals.clone() } }
     }
 
     /// The transport the workspace binds its recording shortcuts to.
-    pub(super) fn transport(&self) -> LiveTransport {
+    pub(super) fn transport(&self) -> TakeTransport {
         self.transport.clone()
     }
 }

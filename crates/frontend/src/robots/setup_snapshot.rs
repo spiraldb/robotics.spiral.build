@@ -19,7 +19,7 @@ pub(crate) struct RobotSetupSnapshot {
 }
 
 impl RobotSetupSnapshot {
-    pub(super) fn new(mode: ModeStatus) -> Self {
+    pub(crate) fn new(mode: ModeStatus) -> Self {
         Self {
             robots: Vec::new(),
             cameras: Vec::new(),
@@ -27,11 +27,11 @@ impl RobotSetupSnapshot {
             issues: Vec::new(),
         }
     }
-    pub(super) fn with_robots(mut self, robots: Vec<RobotSummary>) -> Self {
+    pub(crate) fn with_robots(mut self, robots: Vec<RobotSummary>) -> Self {
         self.robots = robots;
         self
     }
-    pub(super) fn with_cameras(mut self, cameras: Vec<CameraStatus>) -> Self {
+    pub(crate) fn with_cameras(mut self, cameras: Vec<CameraStatus>) -> Self {
         self.cameras = cameras;
         self
     }
@@ -50,6 +50,16 @@ impl RobotSetupSnapshot {
     }
     pub(crate) fn issues(&self) -> &[String] {
         &self.issues
+    }
+    /// The arm a policy drives: the first one configured as a follower.
+    /// Policies never ask which arm; the follower is the only one they move.
+    pub(crate) fn follower(&self) -> Option<&RobotSummary> {
+        self.robots.iter().find(|robot| {
+            robot
+                .config()
+                .robot_type()
+                .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
+        })
     }
     /// Pick the best connected pair for a recording-led teleoperation session.
     ///

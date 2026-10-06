@@ -828,37 +828,37 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply h-full min-h-0 overflow-y-auto bg-surface;
   }
 
-  .live-workbench {
-    container-name: live-workbench;
+  .rollout-workbench {
+    container-name: rollout-workbench;
     container-type: inline-size;
   }
 
   /* The arm's two readout rows are one instrument: cells divided by
      hairlines, the first cell of each row on the section's left edge, the
      two rows separated by one rule. */
-  .live-summary-readouts {
+  .rollout-arm-readouts {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     margin: 0 14px;
     padding-block: 8px;
   }
 
-  .live-summary-readouts + .live-summary-readouts {
+  .rollout-arm-readouts + .rollout-arm-readouts {
     border-top: 1px solid var(--tone-line-soft);
   }
 
-  .live-summary-readouts > .readout:nth-child(4n + 1) {
+  .rollout-arm-readouts > .readout:nth-child(4n + 1) {
     padding-left: 0;
     border-left: 0;
   }
 
-  @container live-workbench (max-width: 20rem) {
-    .live-summary-readouts {
+  @container rollout-workbench (max-width: 20rem) {
+    .rollout-arm-readouts {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       row-gap: 8px;
     }
 
-    .live-summary-readouts > .readout:nth-child(2n + 1) {
+    .rollout-arm-readouts > .readout:nth-child(2n + 1) {
       padding-left: 0;
       border-left: 0;
     }
@@ -867,42 +867,42 @@ button.studio-status-connection[aria-expanded="true"] {
   /* The arms as tabs over the motors below: plain rows on the panel, the
      chosen one in the selection wash. No box per arm; the row's edges are
      the section's. */
-  .live-robot-roster {
+  .rollout-robot-roster {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
     @apply gap-1 bg-surface px-2 pb-1;
   }
 
-  .live-robot-row {
+  .rollout-robot-row {
     @apply flex min-h-8 min-w-0 items-center gap-2 rounded-[5px] px-1.5 text-left;
   }
 
-  .live-robot-row[aria-selected="true"] {
+  .rollout-robot-row[aria-selected="true"] {
     background: var(--tone-selected);
   }
 
-  .live-robot-row[aria-selected="true"] .live-robot-copy small {
+  .rollout-robot-row[aria-selected="true"] .rollout-robot-copy small {
     color: var(--tone-accent-ink);
   }
 
-  .live-robot-accent {
+  .rollout-robot-accent {
     @apply h-2 w-2 shrink-0 rounded-full;
   }
 
-  .live-robot-copy,
+  .rollout-robot-copy,
   .device-copy {
     @apply flex min-w-0 flex-1 items-baseline gap-1.5;
   }
 
-  .live-robot-copy strong {
+  .rollout-robot-copy strong {
     @apply truncate text-[12.5px] font-medium;
   }
 
-  .live-robot-copy small {
+  .rollout-robot-copy small {
     @apply font-mono text-[10.5px] text-ink-faint;
   }
 
-  .live-robot-problem {
+  .rollout-robot-problem {
     @apply shrink-0 text-[11px] text-caution;
   }
 
@@ -910,19 +910,19 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply px-3.5 py-3 text-[12px] text-ink-faint;
   }
 
-  .live-setup-card {
+  .rollout-setup-card {
     @apply mx-3.5 my-3 flex flex-col items-start gap-1;
   }
 
-  .live-setup-card strong {
+  .rollout-setup-card strong {
     @apply text-[13px] font-semibold text-ink;
   }
 
-  .live-setup-card p {
+  .rollout-setup-card p {
     @apply text-[12px] leading-[18px] text-ink-faint;
   }
 
-  .live-setup-card .ui-button {
+  .rollout-setup-card .ui-button {
     @apply mt-2;
   }
 
@@ -945,8 +945,12 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply ml-auto font-mono text-[11px] text-ink-faint;
   }
 
+  .workbench-section-heading > .workbench-heading-action {
+    @apply ml-auto;
+  }
+
   .control-segmented {
-    @apply mx-3.5 mb-3.5 grid grid-cols-3;
+    @apply mx-3.5 mb-3.5 grid grid-cols-4;
   }
 
   .control-segment {
@@ -1320,8 +1324,7 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
   .training-form-heading h3,
-  .training-subpanel-heading h3,
-  .rollout-section-heading h3 {
+  .training-subpanel-heading h3 {
     @apply min-w-0 flex-1 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-ink-faint;
   }
 
@@ -1908,194 +1911,114 @@ button.studio-status-connection[aria-expanded="true"] {
     }
   }
 
-  /* Rollout -------------------------------------------------------------
-     The workbench stays intentionally shorter than Training: choose one
-     checkpoint, verify the fixed follower, set two execution values, and run.
-     The lower panel is reserved for measured inference evidence rather than a
-     generic dashboard or synthetic preview. */
-  .rollout-workbench,
-  .rollout-inference {
-    color: var(--tone-ink);
-  }
-
-  .rollout-workbench {
-    @apply flex min-h-full flex-col;
-  }
-
-  .rollout-section {
-    @apply border-b px-3.5 py-3.5;
-    border-color: var(--tone-line-soft);
-  }
-
-  .rollout-section-heading {
-    @apply mb-2 flex min-h-5 items-center gap-2;
-  }
-
-  /* Execution reads as a receipt: words hard-left, values hard-right, and
-     the one entry on the same right edge. */
-  .rollout-receipt {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 4px;
-  }
-
-  .rollout-receipt dd {
-    text-align: right;
-  }
-
-  .rollout-duration-field {
-    @apply mt-2;
+  /* Policy --------------------------------------------------------------
+     The Policy driver's rows sit under the Control modes: a checkpoint and a
+     duration on the section's label column, one line for the run, and every
+     measurement of the policy loop behind that line, on demand. */
+  .policy-rows {
+    @apply -mt-1.5 flex flex-col gap-1.5 px-3.5 pb-3.5;
   }
 
   /* Labels are quieter than the values and controls they name. */
-  .rollout-workbench .ui-field-label {
+  .policy-field .ui-field-label {
     color: var(--tone-ink-faint);
   }
 
-  .rollout-duration-field > .ui-input {
+  .policy-receipt {
+    @apply -mt-0.5 truncate text-right font-mono text-[11px] tabular-nums text-ink-faint;
+  }
+
+  .policy-duration > .ui-input {
     flex: 0 0 4.5rem;
     margin-left: auto;
   }
 
-  .rollout-duration-field small {
+  .policy-duration small {
     @apply whitespace-nowrap text-[11px] text-ink-faint;
   }
 
-  .rollout-duration-field .rollout-duration-error {
+  .policy-duration .policy-invalid {
     color: var(--tone-danger);
   }
 
-  .rollout-checkpoint-meta {
-    @apply mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-faint;
+  .policy-status {
+    @apply flex min-w-0 flex-col gap-0.5 text-[12px];
   }
 
-  .rollout-checkpoint-meta span:not(:first-child) {
-    @apply font-mono tabular-nums;
-  }
-
-  .rollout-empty-copy {
-    @apply mt-2 text-[12px] leading-4 text-ink-faint;
-  }
-
-  /* The follower on one line: its mark and name left, what it offers the
-     policy right. Only a problem takes colour. */
-  .rollout-target-row {
-    @apply flex min-h-7 flex-wrap items-baseline gap-x-2;
-  }
-
-  .rollout-target-row .live-robot-accent {
-    align-self: center;
-  }
-
-  .rollout-target-row strong {
-    @apply min-w-0 truncate text-[12px] font-semibold;
-  }
-
-  .rollout-target-row small {
-    @apply ml-auto text-right font-mono text-[11px] text-ink-faint;
-    overflow-wrap: anywhere;
-  }
-
-  .rollout-target-row .rollout-target-problem,
-  .rollout-empty-copy.rollout-target-problem {
-    color: var(--tone-caution);
-  }
-
-  .rollout-action-area {
-    @apply sticky bottom-0 mt-auto border-t border-line bg-surface px-3.5 py-3;
-  }
-
-  .rollout-runtime-note {
-    @apply mb-3 flex min-w-0 flex-col gap-0.5 text-[12px];
-  }
-
-  /*
-    The phase and its explanation wrap rather than share one line. In a 27%
-    workbench "Safety limits and hold-on-stop are active." had 59px of the 165
-    it needs and arrived as "Safety limits …" — a sentence about what is holding
-    the arm, cut off before it says what that is. It takes its own line here
-    like the warning beneath it already does; both change on phase transitions
-    rather than with telemetry, so nothing unfolds under a moving number.
-  */
-  .rollout-runtime-summary {
+  /* The phase and its explanation wrap rather than truncate: the sentence
+     says what is holding the arm, so it is never cut before it says it. */
+  .policy-status-line,
+  .policy-metrics .ui-disclosure-title {
     @apply flex min-w-0 flex-wrap items-baseline gap-x-2;
   }
 
-  .rollout-runtime-note strong {
+  .policy-status strong {
     @apply shrink-0 font-medium;
   }
 
-  .rollout-runtime-note small {
+  .policy-status small {
     @apply min-w-0 text-[12px] text-ink-faint;
     overflow-wrap: anywhere;
   }
 
-  .rollout-runtime-note .rollout-runtime-warning {
-    @apply whitespace-normal text-caution;
-    overflow-wrap: anywhere;
+  .policy-status .policy-status-warning {
+    @apply text-caution;
   }
 
-  .rollout-runtime-dot {
+  .policy-status-dot {
     @apply h-1.5 w-1.5 shrink-0 self-center rounded-full;
     background: var(--tone-caution);
   }
 
-  .rollout-runtime-note-active .rollout-runtime-dot {
+  .policy-status-warning-tone .policy-status-dot {
+    background: var(--tone-caution);
+  }
+
+  .policy-status-active .policy-status-dot {
     background: var(--tone-good-dot);
     box-shadow: 0 1px 5px color-mix(in srgb, var(--tone-good-dot) 28%, transparent);
   }
 
-  .rollout-runtime-note-warning .rollout-runtime-dot {
-    background: var(--tone-caution);
-  }
-
-  .rollout-runtime-note-failed,
-  .rollout-runtime-note-failed small {
+  .policy-status-failed,
+  .policy-status-failed small {
     color: var(--tone-danger);
   }
 
-  .rollout-runtime-note-failed .rollout-runtime-dot {
+  .policy-status-failed .policy-status-dot {
     background: var(--tone-danger);
-  }
-
-  .rollout-actions {
-    @apply grid grid-cols-2 gap-2;
-  }
-
-  .rollout-run-action,
-  .rollout-stop-action {
-    @apply min-w-0;
-  }
-
-  /* Why Run is not available yet: a precondition, said plainly. A failed
-     run's reason is the one that takes the danger colour. */
-  .rollout-blocker {
-    @apply mt-2.5 text-[12px] leading-4 text-ink-faint;
-  }
-
-  .rollout-blocker.rollout-failure {
-    color: var(--tone-danger);
-  }
-
-  .rollout-inference {
-    @apply flex h-full min-h-0 flex-col bg-surface;
   }
 
   /* The kit strip, hugging its readings. Each value reserves its widest
      reading so a growing latency never shifts the readings after it. */
-  .rollout-metric-strip {
-    @apply shrink-0 overflow-x-auto border-b border-line px-3.5 py-2;
+  .policy-metric-strip {
+    @apply mt-1.5 overflow-x-auto;
   }
 
-  .rollout-metric-strip dd {
-    min-width: 8ch;
+  .policy-metric-strip dd {
+    min-width: 6ch;
   }
 
-  .rollout-metric-strip dd small {
+  .policy-metric-strip dd small {
     @apply ml-0.5 text-[11px] font-normal text-ink-faint;
   }
 
-  .rollout-metric-missed dd {
+  .policy-metric-missed dd {
     color: var(--tone-caution);
+  }
+
+  /* Why Policy is not available yet: a precondition, said plainly. */
+  .policy-blocker {
+    @apply text-[12px] leading-4 text-ink-faint;
+  }
+
+  /* Setup in the workbench: the robot connector over the arms it drives. */
+  .rollout-setup-connector {
+    @apply border-b px-3.5 pb-3.5;
+    border-color: var(--tone-line-soft);
+  }
+
+  .rollout-setup-arms {
+    @apply px-3.5 py-2;
   }
 }
 

@@ -4,10 +4,10 @@
 //! port, cameras, motors, and calibration—is one durable configuration
 //! document.
 //!
-//! Settings → Robots shows the whole panel, the durable owner of ports, camera
-//! assignments, and calibration. Live shows the first-run guide built from the
-//! same sections until a leader and a follower are ready, then consumes that
-//! configuration without mixing setup work into the operating surface.
+//! Rollout's Setup shows the whole panel, the durable owner of ports, camera
+//! assignments, and calibration, in its workbench beside the scene and cameras
+//! it configures. Until a follower is ready Rollout shows the first-run guide
+//! built from the same sections instead.
 
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::config::{MotorAccess, RobotConfig, RobotConfigSave};

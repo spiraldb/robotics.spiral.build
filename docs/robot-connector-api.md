@@ -3,7 +3,7 @@
 The robot connector (`crates/robot-connector`) runs next to the arms it drives.
 It owns their serial buses, cameras, calibration, and fixed-rate control loop,
 records takes, and rolls out policies. Studio's browser app is its only client:
-the browser calls it directly at the address saved in **Settings → Robots**,
+the browser calls it directly at the address saved in **Rollout → Set up**,
 and Studio's server never reaches it. It never reaches Spiral either. The two
 share request and response types through `crates/common`.
 
@@ -70,12 +70,22 @@ Robots, saved in the robot connector's `robots.json`:
 
 Takes:
 
-- `POST /recording`: `{dataset_id, leader, follower, video}` starts
-  teleoperating the pair and recording a take, with the cameras bound to the
-  arms when `video` is true. Answers 201 with the take.
-- `PATCH /recording` (`{"paused": …}`), `POST /recording/stop`
-  (`{"keep": …}`). Stopping saves the take as an MCAP file; a discarded take is
-  saved too, marked as discarded.
+- `POST /recording`: `{dataset_id, driver, video}` starts the driver and
+  records a take of the arms it moves, with their cameras when `video` is true.
+  Answers 201 with the take. `driver` is one of:
+  - `{"teleoperate": {"leader": …, "follower": …}}`: teleoperate the pair and
+    record both arms.
+  - `{"policy": RolloutConfig}`: roll the policy out on its `robot` and record
+    that arm. The request answers once the policy has loaded, warmed up, and
+    taken the follower, so the take begins with its first action; it ends when
+    the run does (its duration, a stop, or a failure), and the episode's
+    `source` names the run and step. A run that ends before it moves the
+    follower answers 409 with its reason, and no take is opened.
+- `PATCH /recording` (`{"paused": …}`) pauses or resumes a teleoperation take;
+  a policy's take cannot pause. `POST /recording/stop` (`{"keep": …}`) stops
+  the take and its driver: teleoperation returns to idle, a policy stops and
+  the follower holds. Stopping saves the take as an MCAP file; a discarded take
+  is saved too, marked as discarded.
 - `GET /recording/signals`, `GET /recording/takes/{id}`, and
   `POST /recording/takes/{id}/camera` review the current session's takes.
 - `GET /recordings`: the saved takes, each `{dataset_id, episode_id, bytes}`.

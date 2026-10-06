@@ -29,7 +29,7 @@ use spiral_robotics_viewport::{
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
-use crate::activities::live::recording_review::{
+use crate::activities::rollout::recording_review::{
     EpisodePreview, TimelineArmSample, TimelineSample,
 };
 use crate::panels::recorded_source::{LoadState, RecordedSource};

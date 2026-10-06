@@ -1,5 +1,5 @@
-//! Settings screen for the workspace, its robots and training runtime, and
-//! the Spiral account.
+//! Settings screen for the workspace, its training runtime, and the Spiral
+//! account. The robots are set up where they are driven, in Rollout.
 
 use crate::activities::settings::SettingsClient;
 use dioxus::dioxus_core::CapturedError;
@@ -11,9 +11,6 @@ use spiral_robotics_ui::{
     FileInput, LinkButton, TextInput,
 };
 
-use crate::client::robot_connector::RobotConnector;
-use crate::robots::arm_setup::{RobotConnectorSetup, RobotPanel};
-use crate::robots::{HardwareViewState, RobotSelection};
 use crate::shell::notifications::MessageSource;
 use crate::shell::routes::StudioRoute;
 use crate::shell::state::StudioProjectState;
@@ -22,7 +19,6 @@ use crate::shell::workspace::WorkspaceSettings;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
     Workspace,
-    Robots,
     Training,
     Account,
 }
@@ -107,15 +103,7 @@ struct SettingsPlace {
 }
 
 #[component]
-fn SettingsPanel(
-    project: StudioProjectState,
-    place: SettingsPlace,
-    robots: RobotSettingsView,
-) -> Element {
-    let RobotSettingsView {
-        telemetry,
-        selection,
-    } = robots;
+fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
     let SettingsPlace {
         mut section,
         creating,
@@ -179,8 +167,9 @@ fn SettingsPanel(
         }
     });
 
+    let activity = crate::shell::activity::WorkspaceActivity::current();
     use_effect(move || {
-        if telemetry.is_active() {
+        if activity.is_active() {
             BrowserFocus::after_render("data-settings-panel".to_owned());
         }
     });
@@ -288,7 +277,6 @@ fn SettingsPanel(
                 nav { class: "settings-nav", "aria-label": "Settings sections",
                     for (label, target) in [
                         ("Workspace", SettingsSection::Workspace),
-                        ("Robots", SettingsSection::Robots),
                         ("Training", SettingsSection::Training),
                         ("Account", SettingsSection::Account),
                     ] {
@@ -297,13 +285,6 @@ fn SettingsPanel(
                 }
                 div { class: "settings-content",
                     match section() {
-                        SettingsSection::Robots => rsx! {
-                            SettingsHeading { title: "Robot setup" }
-                            RobotConnectorSetup {}
-                            if RobotConnector::current().reachable() {
-                                div { class: "robot-settings-panel", RobotPanel { project, telemetry, selection } }
-                            }
-                        },
                         SettingsSection::Account => rsx! {
                             SettingsHeading { title: "Spiral account" }
                             super::account::SpiralAccountSection { disabled: saving() || import_project.pending() }
@@ -494,13 +475,6 @@ fn SettingsField(
     }
 }
 
-/// The robots this browser drives, as the Robots section shows them.
-#[derive(Clone, Copy, PartialEq)]
-struct RobotSettingsView {
-    telemetry: HardwareViewState,
-    selection: RobotSelection,
-}
-
 #[component]
 pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
     let workspace = crate::shell::activity::WorkspaceActivity::provide(
@@ -509,37 +483,23 @@ pub(crate) fn SettingsWorkspace(is_active: ReadSignal<bool>) -> Element {
     );
     let project = crate::shell::state::StudioProjectState::current();
     let route = use_route::<StudioRoute>();
-    let mut section = use_signal(|| match route {
-        StudioRoute::RobotSettings {} => SettingsSection::Robots,
-        _ => SettingsSection::Workspace,
-    });
-    // Opening the robot settings shows the robots, and a new workspace the
-    // Workspace section, whichever section was open.
-    use_effect(use_reactive((&route,), move |(route,)| match route {
-        StudioRoute::RobotSettings {} => section.set(SettingsSection::Robots),
-        StudioRoute::NewWorkspace {} => section.set(SettingsSection::Workspace),
-        _ => {}
+    let mut section = use_signal(|| SettingsSection::Workspace);
+    // Opening a new workspace shows the Workspace section, whichever section
+    // was open.
+    use_effect(use_reactive((&route,), move |(route,)| {
+        if route == (StudioRoute::NewWorkspace {}) {
+            section.set(SettingsSection::Workspace);
+        }
     }));
     let chosen = crate::client::project::ProjectClient::current()
         .project()
         .is_chosen();
     let creating = !chosen || route == (StudioRoute::NewWorkspace {});
-    // Only the Robots section reaches for the robot connector, so opening
-    // Settings for anything else never asks to reach the local network.
-    let robots_shown = use_memo(move || is_active() && section() == SettingsSection::Robots);
-    let telemetry = HardwareViewState::use_state(project, robots_shown.into());
-    let selection = RobotSelection::use_selection(telemetry.snapshot());
-    let status = if robots_shown() {
-        crate::shell::frame::WorkspaceStatus::Hardware(telemetry)
-    } else {
-        crate::shell::frame::WorkspaceStatus::General
-    };
     rsx! {
-        crate::shell::frame::WorkspaceFrame { workspace, status,
+        crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::General,
             SettingsPanel {
                 project,
                 place: SettingsPlace { section, creating },
-                robots: RobotSettingsView { telemetry, selection },
             }
         }
     }

@@ -1,4 +1,4 @@
-//! Controlled timeline shared by Data, Curation, and Live.
+//! Controlled timeline shared by Data, Curation, and Rollout.
 //! Callers own the clock and effects; tracks and toolbar slots customize content.
 //!
 //! Build `TimelineState` from the caller's clock, bind `TimelineEvent` with

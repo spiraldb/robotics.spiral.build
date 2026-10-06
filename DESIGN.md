@@ -339,14 +339,15 @@ tab bars take a half-step sidebar tone so a place reads as a place without
 becoming a grey slab. Camera pixels alone keep a dark mat for honest
 letterboxing.
 
-The Studio has five activities, reached from one 44px top bar and the keys
-1–5 in this order: **Data** (catalog, episodes, import; the home route),
+The Studio has four activities, reached from one 44px top bar and the keys
+1–4 in this order: **Data** (catalog, episodes, import; the home route),
 **Curation** (a graph of measurements and selections over one dataset's
 episodes, ending in the parts worth training on),
-**Training** (configuring and observing policy runs), **Rollout** (staging a
-trained checkpoint against the configured follower), and **Live** (operating
-hardware and recording). Training and Rollout are parked until Spiral decodes
-MCAP video into training images. Everything else is a panel in a session-owned
+**Training** (configuring and observing policy runs), and **Rollout**
+(everything that drives the real arms: Studio, a leader, or a trained policy
+controls the robot, and Studio shows it and records it). Training and
+Rollout's Policy driver are parked until Spiral decodes MCAP video into
+training images. Everything else is a panel in a session-owned
 tab-and-tile workspace (`dioxus-workbench`) that docks, tabs, splits, and
 resizes with pointer and keyboard. The layout is powerful; the chrome stays
 quiet.
@@ -599,8 +600,8 @@ The first viewport is a full-height shell:
 - transient toasts floating at the lower right, never inserting a row.
 
 The brand is the Spiral mark and the two-weight "spiral robotics" wordmark,
-closed by a hairline. The nav lists Data · Curation · Training · Rollout ·
-Live as glyph-plus-word items the full height of the bar; keys 1–5
+closed by a hairline. The nav lists Data · Curation · Training · Rollout as
+glyph-plus-word items the full height of the bar; keys 1–4
 open them in that order and `/` routes to Data. Each activity registers its
 own panel set and independent session layout scope, so switching activity
 never moves content between them.
@@ -734,15 +735,18 @@ plots and cameras do not repeat sample/frame time or age. The streams ledger
 prints "all" for a stream present in every episode and the deviation in
 caution.
 
-### Live
+### Rollout
 
-The canonical first-open Live desktop layout is one-third workbench and
+Rollout is one abstraction: something controls the robot — Studio (Hold,
+Release, joint control), a leader (Teleop), or a trained checkpoint
+(Policy) — and Studio visualizes it and records it. The canonical first-open
+Rollout desktop layout is one-third workbench and
 two-thirds visualization, with the Timeline in the lower 42% and each camera
 in its own row of the named camera column:
 
 ```text
 ┌──────────── one third ────────────┬────────────── two thirds ──────────────┐
-│ Live workbench                    │ Scene              │ Camera tabs       │
+│ Rollout workbench                 │ Scene              │ Camera tabs       │
 │                                   ├────────────────────┴───────────────────┤
 │                                   │ Timeline — lower 42%                   │
 └───────────────────────────────────┴─────────────────────────────────────────┘
@@ -753,20 +757,27 @@ panel may be attached to another tile as a tab or docked to an edge. Panel
 identity is stable and unique; camera panels reconcile by named home when
 cameras are assigned, removed, or loaded asynchronously, and content stays
 keyed by panel ID so moving or tabbing a camera does not restart a feed.
-Live begins with Control; recording identity and capture transport stay in
-the Timeline, and recording, torque, and robot problems reach the top bar's
-status line. Robot setup lives in Settings → Robots.
+Rollout begins with Control, the four drivers as one mode group; recording
+identity and capture transport stay in the Timeline, and recording, torque,
+and robot problems reach the top bar's status line. Record starts the driver
+last chosen (Teleop on a bench with a leader, otherwise Policy) and names it:
+"Record teleop" or "Record policy". Setup (the robot connector's address and
+every arm's port, cameras, motors, and calibration) opens in the workbench at
+`/rollout/setup`, beside the scene and cameras it configures; Done returns to
+Control.
 
-Until the robot connector answers and a follower and a leader each have a port
-and a calibration, Live shows its first-run guide instead of the bench: one
+Until the robot connector answers and a follower has a port and a
+calibration, Rollout shows its first-run guide instead of the bench: one
 640px ledger on the canvas under a 19px title, three rows — start the robot
-connector, set up the follower, set up the leader — each a 20px mark (mono
+connector, set up the follower, set up a leader — each a 20px mark (mono
 numeral; ink ring when current; olive check when done), a 13px title, and the
-mono value it settled on. Only the current row opens, holding the start
-command, the address, and the same port and calibration sections Settings →
-Robots shows. Every row is read from the robot connector, so the guide
-resumes where the bench is. "Skip setup" shows the bench for the visit; once
-the bench shows it stays, and finishing setup says so once in a toast.
+mono value it settled on. The leader is for Teleop and optional: a bench with
+only a follower is ready, but a leader once started must be finished. Only
+current rows open, holding the start command, the address, and the same port
+and calibration sections Setup shows. Every row is read from the robot
+connector, so the guide resumes where the bench is. "Skip setup" shows the
+bench for the visit; once the bench shows it stays, and finishing setup says
+so once in a toast.
 
 ### Curation
 
@@ -898,13 +909,10 @@ Every node's workspace has the same anatomy, top to bottom:
   reload asks first ("Leave site?") while unsaved edits, preview reads, or a
   run would go with it.
 
-### Training, Rollout
+### Training
 
 Training is curve-first: Setup above Runs in a left rail, and
-one tab group of opened runs. Rollout is a compact physical-policy bench: a
-27% workbench beside a dominant live Scene, every follower camera recorded
-for the policy, and one low Inference lane; the Run policy area anchors to
-the bottom of a tall workbench.
+one tab group of opened runs.
 
 ### Named Rules
 
@@ -912,7 +920,7 @@ the bottom of a tall workbench.
 focus, or sizing needs, register it as a panel. Do not add another fixed
 shell region or let one component mutate another tile's tabs.
 
-**The Timeline-Is-One-Clock Rule.** Live, Data, Curation, camera
+**The Timeline-Is-One-Clock Rule.** Rollout, Data, Curation, camera
 media, scene, and plots share one playhead contract. Do not create a second
 timeline with different geometry or ownership.
 
@@ -947,18 +955,17 @@ component means or which behavior it owns.
 
 ```text
 StudioShell
-├── StudioTopBar                              brand; activity nav (1–5); shortcuts;
+├── StudioTopBar                              brand; activity nav (1–4); shortcuts;
 │   ├── WorkspaceStatusLine                   connection + ranked activity facts
 │   ├── NotificationCenter                    popover of messages
 │   └── ShortcutSheet                         `?` dialog
 ├── WorkspaceFrame
 │   └── PanelWorkspace                        layout mechanics only
 │       ├── SemanticWorkbenchPanel
-│       │   ├── LiveWorkbench                 operate / record semantics
+│       │   ├── RolloutWorkbench              drive / record / set up semantics
 │       │   ├── DataCatalogRail               dataset / episode selection
 │       │   ├── CurationGraph                 node cards, edges, + menus
-│       │   ├── TrainingWorkbench             train / observe semantics
-│       │   └── RolloutWorkbench              fixed-follower policy semantics
+│       │   └── TrainingWorkbench             train / observe semantics
 │       ├── PrimaryVisualizationPanel
 │       │   ├── Scene
 │       │   ├── DataSubject                   Overview tab + one tab per episode
@@ -967,13 +974,12 @@ StudioShell
 │       │   └── EmptyOrLoadingState
 │       ├── CameraPanel(s)
 │       └── EvidencePanel
-│           ├── TimelinePanel                 one shared episode-clock contract
-│           └── RolloutInferencePanel         measured policy-loop evidence
+│           └── TimelinePanel                 one shared episode-clock contract
 └── Toast                                     newest message, lower right
 ```
 
 `StudioShell` owns the application frame. `StudioTopBar` chooses the active
-activity (including the Settings entry) and owns the global keys 1–5, `,`,
+activity (including the Settings entry) and owns the global keys 1–4, `,`,
 and `?`. `PanelWorkspace` owns tabs, docking, splits, resizing,
 reconciliation, and session layout state; it does not know what an episode,
 camera, robot, query, or playhead means.
@@ -1029,26 +1035,26 @@ for Live. When a recorded sample or clip is missing, the
 panel shows that recorded-source state and never substitutes current live
 telemetry or a live camera frame.
 
-Live camera panels derive from the current Live robot assignments. Recorded
+Live camera panels derive from the current robot assignments. Recorded
 camera panels derive from the selected episode's stream identities.
 Activating a camera panel emits that typed live-camera or recorded-stream
 identity; domain meaning is never recovered by parsing a panel ID string.
 
-Rollout's Scene and cameras are explicit live sources scoped to the configured
-follower: the Scene may show both arms for physical context, while the camera
-panels mirror the follower cameras recorded for the policy. Inference
-evidence is a separate measured source and stays empty until the backend has
-completed a native inference.
+A policy drives the configured follower, and starting one focuses it, so the
+camera panels show the follower's cameras while the Scene keeps both arms for
+physical context. Inference measurements belong to the run, not to a
+visualization: they stay behind the Policy status line and are empty until
+the robot connector has completed a native inference.
 
 ### Timeline Interface Contract
 
-There is one canonical Timeline component and one action vocabulary in Live,
-Data, review, loading, and empty states. Unavailable actions remain part of
-the interface and are disabled with a specific reason. Rollout does not own
-an episode clock, so it registers Inference instead of Timeline.
+There is one canonical Timeline component and one action vocabulary in
+Rollout, Data, review, loading, and empty states. Unavailable actions remain
+part of the interface and are disabled with a specific reason.
 
 The Timeline owns the visible episode clock and playhead; pointer drag and
-keyboard seek; Record, Pause/Resume, Stop, and Discard capture transport;
+keyboard seek; Record, Pause/Resume (Teleop takes only), Stop, and Discard
+capture transport;
 one icon-only Play/Pause with an accessible name; Follow Live while an
 episode is growing; and stream rows and explicit recording gaps.
 
@@ -1064,12 +1070,12 @@ Plots, and the Timeline itself.
 | State | Owner | Consumers |
 |---|---|---|
 | Active activity | `StudioShell` / top bar | Activity nav, active controller, status line |
-| Live robot and camera selection | Live Activity Controller | Live Workbench, Scene, Live camera registry |
-| Live recording and review subject | Live Activity Controller, reconciled with backend truth | Live Workbench, Timeline, status line |
+| Rollout robot and camera selection | Rollout Activity Controller | Rollout Workbench, Scene, live camera registry |
+| Rollout recording and review subject, next take's dataset and driver | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, Timeline, status line |
 | Catalog, Overview dataset, opened episode tabs, front tab | Data workspace selection | Catalog rail, subject tabs, episode inspection |
 | Curation saved graph and published outputs, draft, runs, episode sample, preview reads, selected node | Curation Controller (browser-owned passes; the graph saved and views published through the backend; preview reads held for the session) | Graph, node workspace, document bar, status line |
 | Curation open episode tabs, chosen row, index filter, listed side | The node workspace that shows them | Index, episode tabs, timeline tracks |
-| Rollout checkpoint, execution inputs, fixed follower, readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, Scene, follower cameras, Inference lane |
+| Policy checkpoint, duration, fixed follower, readiness, run | Rollout Activity Controller, reconciled with backend truth | Control section, Policy status line, Scene, follower cameras |
 | Timeline subject, playhead, playback, Follow Live | Timeline Controller within the active activity | Scene, Cameras, Plots, Timeline |
 | Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
 | Hardware, recording, storage, and safety state | Backend | Activity Controller through the wire API |
@@ -1083,14 +1089,19 @@ the front tab to the neighbour; Esc brings the dataset forward in Overview.
 **Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity
 Controller → one synchronized recorded projection`.
 
-**Receive live telemetry:** `Backend event → Live Activity Controller → Live
-projection → Scene + Cameras + Signals + Timeline`.
+**Receive live telemetry:** `Backend event → Rollout Activity Controller →
+live projection → Scene + Cameras + Signals + Timeline`.
 
-**Select a rollout checkpoint:** `RolloutWorkbench → SelectCheckpoint(id) →
-Rollout Activity Controller → fixed follower + live Scene + follower cameras
-+ truthful Inference state`. Run remains disabled until the checkpoint,
-follower, camera binding, calibration, and fresh control stream are
-available; the backend revalidates the complete contract before motion.
+**Run a policy:** `Control → Policy → Rollout Activity Controller → write the
+checkpoint to the robot connector → run on the fixed follower → Policy status
+line + live Scene + follower cameras`. Policy remains disabled until the
+checkpoint, follower, camera binding, calibration, and fresh control stream
+are available; the robot connector revalidates the complete contract before
+motion. Hold stops the run.
+
+**Record a take:** `Timeline → Record → start the next take's driver and the
+take together`. A policy's take answers once the policy has taken the
+follower, begins with its first action, and ends with its run.
 
 ### Named Rules
 
@@ -1257,7 +1268,7 @@ verb first; visual presentation never changes the verb.
   open reads pressed (ink on the recess). The notification count is a lime
   pill with a paper ring, 9px mono.
 - **Shortcut sheet:** A 40rem dialog grouping keys by where they work
-  (Anywhere, Data, Episode playback, Live).
+  (Anywhere, Data, Episode playback, Rollout).
 - **Signed out:** The canvas holds only a 34px Spiral mark, the 19px
   "spiral robotics studio" wordmark in the brand's two weights, and the one
   solid "Sign in with Spiral", as one upright stack slightly above centre.
@@ -1417,7 +1428,7 @@ row, and the playing span's words in the timeline's readout.
 - **Transport:** One toolbar: jump, step, the round ink Play/Pause, the 16px
   mono elapsed clock with the total in faint 11.5px mono, speed, Loop, and
   zoom (`+ − 0`, Ctrl/⌘-wheel). Record, Pause/Resume, Stop/Discard join it in
-  Live; Record always implies Teleop.
+  Rollout; Record always starts its driver, and names it.
 - **Rows:** A filter field, a sticky mono ruler, then one row per stream:
   expander, show checkbox (mixed when only some fields are plotted), kind
   glyph, mono name, mono message count, and a density track. The playhead
@@ -1447,7 +1458,7 @@ row, and the playing span's words in the timeline's readout.
 - **Frame:** Dark mat inside light panel chrome, contained pixels, honest
   letterboxing. Loading, decoding, and failure are told on the same mat in
   camera ink, so a camera never flashes from paper to black.
-- **Lifecycle:** One stable MJPEG element per assigned Live camera; recorded
+- **Lifecycle:** One stable MJPEG element per assigned live camera; recorded
   H.264 frames decode through native WebCodecs and seek from the preceding
   keyframe. Moving or tabbing a panel never fabricates a second connection.
 - **Failure:** Actionable unavailable or permission text appears in the
@@ -1456,13 +1467,21 @@ row, and the playing span's words in the timeline's readout.
 ### Workbench Sections, Training, Rollout, Settings
 
 - **Workbench sections:** A 10.5px upper-case faint label names each control
-  group (Live, Training, Rollout, device setup); the section's content is the
+  group (Rollout, Training, device setup); the section's content is the
   heading's only subordinate.
-- **Robot control:** The Control section exclusively owns Hold, Release, and
-  Teleop as a mode group; Hold and Teleop read in their checked state,
-  Release in the danger treatment, with the inline Release confirmation.
-  Setup lives in Settings → Robots.
-- **Live motors:** The arms are plain rows over the motors (identity dot,
+- **Robot control:** The Control section exclusively owns Hold, Release,
+  Teleop, and Policy as one four-segment mode group; Hold, Teleop, and Policy
+  read in their checked state, Release in the danger treatment, with the
+  inline Release confirmation. Hold ends whichever driver runs. Once a
+  checkpoint exists, Checkpoint and Duration rows hang under the group on the
+  label column, with the checkpoint's receipt (validation loss, action steps,
+  control rate) in faint mono; then one status line for the run (a dot, the
+  phase, what it last said) whose disclosure holds the measurement strip
+  (Latency, Mean, Max, Model, Misses, Chunks, Commands; Misses above zero in
+  caution); then one plain blocker. An idle bench names no phase. A bench
+  without checkpoints shows only the disabled Policy segment, its reason in
+  the tooltip. "Set up" in the Motors heading opens Setup in the workbench.
+- **Rollout motors:** The arms are plain rows over the motors (identity dot,
   name, role in faint mono), the chosen one in the selection wash; a ready
   arm shows nothing more, an arm that cannot be driven names why in caution.
   The arm's readouts (Reach, Height, Gripper "% open", Follow Δ; Hottest,
@@ -1471,7 +1490,7 @@ row, and the playing span's words in the timeline's readout.
   out of range tints the reading, not the cell. A chosen joint's motor
   detail is a section under a hairline, never a card. Takes the connector
   still holds are one caution row: the count left, Store in Studio right.
-  An empty Live Timeline adds no sentence: "No episode" and Record say it.
+  An empty Timeline adds no sentence: "No episode" and Record say it.
   The 3D scene's gesture key appears only while the pointer or keyboard is
   in the scene. A mounted camera is drawn as the eight edges of its view
   pyramid (28 cm deep, 4:3, its arm's colour), never as a solid.
@@ -1484,25 +1503,20 @@ row, and the playing span's words in the timeline's readout.
   running phase and its progress bar are blue (work in progress), a
   completed one a quiet word, a failed one its danger wash. No synthetic
   telemetry.
-- **Rollout:** Checkpoint picker, one fixed-follower line (a ready follower
-  shows only its camera count; otherwise only its problems, in caution),
-  action steps and control rate as a receipt, and the single solid Run policy
-  with one specific blocker beside it. An idle bench names no phase; the
-  safety sentence stays as one quiet line. The Inference lane is one hugging
-  strip (Latency, Mean, Max, Model, Misses, Chunks, Commands) that reads em
-  dashes until the backend measures them, Misses above zero in caution.
 - **Settings:** Replaces the activity workspace while the top bar stays: a
   sidebar-toned section nav (5px rows; the current section is solid lime,
-  ink at 560) beside ordinary forms: Workspace, Robots, Training, Account.
+  ink at 560) beside ordinary forms: Workspace, Training, Account.
   Sections are a heading and space with no description; labels share one
   8rem column and fields stop at 26rem; read-only facts ("Spiral project",
   "Signed in as") sit on the same column. The footer's Save settings is the
-  only save; a section's Test connection only tests the saved value. Arms
-  are rows between hairlines whose one state word is faint while the arm is
-  fine and on its caution wash when it needs work; an opened arm's setup
-  hangs under its name. Restore alone uses the blocking dialog.
+  only save; a section's Test connection only tests the saved value. Restore
+  alone uses the blocking dialog.
+- **Setup:** In Rollout's workbench, headed "Setup" with Done: the robot
+  connector's address, then the arms as rows between hairlines whose one
+  state word is faint while the arm is fine and on its caution wash when it
+  needs work; an opened arm's setup hangs under its name.
 
-**The Fixed-Follower Rule.** Rollout never asks the operator to choose a
+**The Fixed-Follower Rule.** A policy never asks the operator to choose a
 motion target. It commands only the configured follower, and backend
 readiness decides whether execution may begin.
 
@@ -1568,8 +1582,8 @@ while work is in progress; reduced motion keeps fades and nothing else.
   episode identity in every time or transport action.
 - **Do** route workbench, Timeline, panel-focus, and backend events through
   one activity controller that derives the complete visible projection.
-- **Do** keep Rollout fixed to the configured follower, and keep its metrics
-  empty until native measurements arrive.
+- **Do** keep the Policy driver fixed to the configured follower, and keep its
+  metrics empty until native measurements arrive.
 - **Do** spell every colour once as a `--tone-*` role token and read it
   through `--ui-*`, `--wb-*`, or `--chart-*`.
 - **Do** remove a component, property, selector, token, or dependency feature
@@ -1598,7 +1612,7 @@ while work is in progress; reduced motion keeps fades and nothing else.
   reports.
 - **Don't** add fixed one-off shell regions; take a generic mechanic upstream
   to `dioxus-workbench` and register domain content as a panel.
-- **Don't** let a Data action mutate Live camera tabs, or derive recorded
+- **Don't** let a Data action mutate Rollout camera tabs, or derive recorded
   camera tabs from current hardware assignment.
 - **Don't** treat missing recorded data as permission to show live telemetry
   or a live camera inside a recorded episode.

@@ -1,5 +1,5 @@
-//! Live's Timeline: what the shared timeline is showing, and the recording
-//! controls that only Live has.
+//! Rollout's Timeline: what the shared timeline is showing, and the
+//! recording controls that only Rollout has.
 //!
 //! The clock, ruler, scrubber, and keyboard transport are
 //! [`crate::components::timeline`]'s. This module supplies its subject, its
@@ -14,7 +14,7 @@ use spiral_robotics_ui::{
     ConfirmationResponse, InlineConfirmation,
 };
 
-use super::transport::LiveTransport;
+use super::transport::TakeTransport;
 use crate::components::charts::{CharmingChart, ChartPresentation};
 use crate::components::time_series::{TimelineSignalLane, TimelineSignalLanes, TraceChartLayout};
 use crate::components::timeline::{
@@ -78,7 +78,7 @@ impl TimelineSubject {
     }
 }
 
-/// Explicit loading and failure states for Live signal lanes.
+/// Explicit loading and failure states for the Timeline's signal lanes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) enum SignalSource {
     /// Live telemetry from the recording signal store.
@@ -122,7 +122,7 @@ impl TimelineSignals {
 }
 
 #[component]
-pub(super) fn LiveTimelinePanel(transport: LiveTransport, signals: TimelineSignals) -> Element {
+pub(super) fn TakeTimelinePanel(transport: TakeTransport, signals: TimelineSignals) -> Element {
     let TimelineSignals { lanes, source } = signals;
     let subject = transport.subject();
     let recording = subject.recording().cloned();
@@ -182,29 +182,39 @@ pub(super) fn LiveTimelinePanel(transport: LiveTransport, signals: TimelineSigna
         }
     })
     .with_notice(rsx! { TimelineNotice { transport: transport.clone(), source } });
-    rsx! { div { class: "studio-timeline", "aria-label": "Live Timeline", Timeline { interaction, content } } }
+    rsx! { div { class: "studio-timeline", "aria-label": "Take Timeline", Timeline { interaction, content } } }
 }
 
 /// The take being recorded, or the control that starts one.
 #[component]
 fn CaptureControls(
-    transport: LiveTransport,
+    transport: TakeTransport,
     recording: Option<RecordingProgress>,
     confirm_discard: Signal<bool>,
 ) -> Element {
     let mut confirm_discard = confirm_discard;
     let Some(recording) = recording else {
+        let label = transport.record_label();
+        if transport.starting() {
+            return rsx! {
+                Button {
+                    purpose: ActionPurpose::Start, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
+                    class: "take-action", disabled: true, aria_busy: true,
+                    "Starting…"
+                }
+            };
+        }
         let blocker = transport.record_blocker();
         let title = blocker
             .clone()
-            .unwrap_or_else(|| "Start Teleop and record a new episode".into());
+            .unwrap_or_else(|| "Start the driver and record a new episode".into());
         return rsx! {
             Button {
                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
                 class: "take-action", disabled: blocker.is_some(), title: "{title}",
-                aria_label: match blocker { Some(reason) => format!("Record — {reason}"), None => "Record".to_owned() },
+                aria_label: match blocker { Some(reason) => format!("{label} — {reason}"), None => label.to_owned() },
                 onclick: move |_| transport.start_capture(),
-                "Record"
+                "{label}"
             }
         };
     };
@@ -216,10 +226,13 @@ fn CaptureControls(
             onclick: { let transport = transport.clone(); move |_| transport.finish_capture(true) },
             "Stop"
         }
-        Button {
-            purpose: ActionPurpose::Toggle, variant: ButtonVariant::Outline,
-            onclick: { let transport = transport.clone(); move |_| transport.set_capture_paused(!paused) },
-            if paused { "Resume recording" } else { "Pause recording" }
+        // A policy's take is its whole run; it stops, it does not pause.
+        if transport.pausable() {
+            Button {
+                purpose: ActionPurpose::Toggle, variant: ButtonVariant::Outline,
+                onclick: { let transport = transport.clone(); move |_| transport.set_capture_paused(!paused) },
+                if paused { "Resume recording" } else { "Pause recording" }
+            }
         }
         if confirm_discard() {
             InlineConfirmation {
@@ -243,7 +256,7 @@ fn CaptureControls(
 
 /// Returning the playhead to the newest recorded sample.
 #[component]
-fn FollowLiveControl(transport: LiveTransport) -> Element {
+fn FollowLiveControl(transport: TakeTransport) -> Element {
     let follow_live = transport.follow_live();
     rsx! {
         Button {
@@ -273,7 +286,7 @@ fn TimelineIdentity(subject: TimelineSubject) -> Element {
 
 /// Why this Timeline is in trouble or drawing nothing.
 #[component]
-fn TimelineNotice(transport: LiveTransport, source: SignalSource) -> Element {
+fn TimelineNotice(transport: TakeTransport, source: SignalSource) -> Element {
     let problem = transport.subject().problem().map(str::to_owned);
     rsx! {
         if let Some(problem) = problem {

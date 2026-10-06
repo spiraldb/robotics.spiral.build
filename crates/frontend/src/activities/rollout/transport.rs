@@ -1,9 +1,9 @@
-//! What Live's Timeline controls do, and how the recorded frames behind them
-//! are asked for.
+//! What Rollout's Timeline controls do, and how the recorded frames behind
+//! them are asked for.
 //!
 //! While a take records, the elapsed time arrives from the server; once it is
 //! paused, this workspace previews the recorded frames on its own clock.
-//! [`LiveTransport`] turns a press on a shared control into the one recording
+//! [`TakeTransport`] turns a press on a shared control into the one recording
 //! or preview consequence the current phase implies.
 
 use dioxus::prelude::*;
@@ -13,12 +13,12 @@ use super::recording_actions::RecordingCompletion;
 use super::recording_review::{
     EpisodePlaybackTime, EpisodePreview, EpisodePreviewRequest, EpisodePreviewSignals,
 };
-use super::session::LiveSession;
+use super::session::RolloutSession;
 use super::timeline::TimelineSubject;
 use crate::components::timeline::{KeyboardFocus, SeekPhase};
 use crate::panels::recorded_source::RecordedSource;
 
-/// Durable Timeline state for as long as the Live workspace is mounted.
+/// Durable Timeline state for as long as the Rollout workspace is mounted.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct TimelineController {
     playhead: Signal<f64>,
@@ -86,16 +86,16 @@ impl TimelineController {
     }
 }
 
-/// Live's clock as one render sees it: where the playhead is, whether the
+/// The take's clock as one render sees it: where the playhead is, whether the
 /// preview is driving it, and whether it follows the newest recorded sample.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct LiveClock {
+pub(super) struct TakeClock {
     seconds: f64,
     previewing: bool,
     follow_live: bool,
 }
 
-impl LiveClock {
+impl TakeClock {
     pub(super) const fn new(seconds: f64, previewing: bool) -> Self {
         Self {
             seconds,
@@ -113,15 +113,15 @@ impl LiveClock {
 /// The recorded frames behind the Timeline, and the two throttles that keep a
 /// scrubbing playhead from asking for one snapshot per rendered frame.
 #[derive(Clone, Copy, PartialEq)]
-pub(super) struct LivePreview {
-    session: LiveSession,
+pub(super) struct TakePreview {
+    session: RolloutSession,
     signals: EpisodePreviewSignals,
     sampled: Signal<Option<(String, u64)>>,
     interactive: Signal<Option<(String, u64)>>,
 }
 
-impl LivePreview {
-    pub(super) fn use_preview(session: LiveSession) -> Self {
+impl TakePreview {
+    pub(super) fn use_preview(session: RolloutSession) -> Self {
         let signals = EpisodePreviewSignals::use_signals();
         // Throttling is local to the mounted screen; remounting must sample again.
         let preview = Self {
@@ -138,7 +138,7 @@ impl LivePreview {
         preview
     }
 
-    pub(super) const fn session(self) -> LiveSession {
+    pub(super) const fn session(self) -> RolloutSession {
         self.session
     }
 
@@ -243,14 +243,14 @@ impl LivePreview {
 /// own consequence and the only check left is that the recording has not moved
 /// on since the render that drew the control.
 #[derive(Clone, PartialEq)]
-pub(super) struct LiveTransport {
-    preview: LivePreview,
+pub(super) struct TakeTransport {
+    preview: TakePreview,
     subject: TimelineSubject,
-    clock: LiveClock,
+    clock: TakeClock,
 }
 
-impl LiveTransport {
-    pub(super) fn new(preview: LivePreview, subject: TimelineSubject, clock: LiveClock) -> Self {
+impl TakeTransport {
+    pub(super) fn new(preview: TakePreview, subject: TimelineSubject, clock: TakeClock) -> Self {
         Self {
             preview,
             subject,
@@ -280,11 +280,30 @@ impl LiveTransport {
         self.session().recording_blocker()
     }
 
+    /// What the Record button says it starts.
+    pub(super) fn record_label(&self) -> &'static str {
+        self.session().record_driver().record_label()
+    }
+
+    /// Whether Record is waiting for its driver to take the follower.
+    pub(super) fn starting(&self) -> bool {
+        self.session().next_take().starting()
+    }
+
+    /// Whether the take on the clock can pause: teleoperation can, a
+    /// policy's run cannot.
+    pub(super) fn pausable(&self) -> bool {
+        !matches!(
+            self.session().telemetry().mode(),
+            spiral_robotics_common::robots::ModeSelection::Policy { .. }
+        )
+    }
+
     pub(super) fn seek_blocker(&self) -> Option<String> {
         self.subject.preview_blocker()
     }
 
-    const fn session(&self) -> LiveSession {
+    const fn session(&self) -> RolloutSession {
         self.preview.session()
     }
 
@@ -429,7 +448,7 @@ impl LiveTransport {
                 } else {
                     self.session()
                         .project()
-                        .report_live_info("Press Shift+X to discard this take.");
+                        .report_rollout_info("Press Shift+X to discard this take.");
                 }
             }
             _ => {}

@@ -47,7 +47,6 @@ impl MessageSeverity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MessageSource {
     Studio,
-    Live,
     Curation,
     Training,
     Rollout,
@@ -58,7 +57,6 @@ impl MessageSource {
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Studio => "Studio",
-            Self::Live => "Live",
             Self::Curation => "Curation",
             Self::Training => "Training",
             Self::Rollout => "Rollout",
@@ -220,7 +218,7 @@ mod tests {
             MessageNotice::new(
                 "Episode saved.",
                 MessageSeverity::Success,
-                MessageSource::Live,
+                MessageSource::Rollout,
             ),
             100.0,
         );

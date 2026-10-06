@@ -75,7 +75,7 @@ impl AssignedCamera {
                     element_id: "recorded-camera-empty".to_owned(),
                     source: CameraEditorSource::Empty {
                         title: "No camera assigned".to_owned(),
-                        detail: "Assign a camera to this arm in Settings.".to_owned(),
+                        detail: "Assign a camera to this arm in Setup.".to_owned(),
                     },
                 }
             },

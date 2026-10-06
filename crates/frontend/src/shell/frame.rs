@@ -6,8 +6,8 @@ use dioxus::prelude::*;
 use spiral_robotics_ui::{ActionPurpose, BrowserFocus, Button, ButtonVariant, CloseIcon};
 
 use crate::components::icons::{
-    CurationIcon, DataIcon, KeyboardIcon, NotificationIcon, RobotPanelIcon, RolloutIcon,
-    SettingsIcon, SpiralMark, TrainingIcon,
+    CurationIcon, DataIcon, KeyboardIcon, NotificationIcon, RolloutIcon, SettingsIcon, SpiralMark,
+    TrainingIcon,
 };
 use crate::components::page_keys::PageKeys;
 use crate::format::ClockPresentation;
@@ -98,7 +98,6 @@ pub(super) fn StudioTopBar(activity: Activity, on_activity: EventHandler<Activit
 #[component]
 fn ActivityGlyph(activity: Activity) -> Element {
     match activity {
-        Activity::Live => rsx! { RobotPanelIcon {} },
         Activity::Data => rsx! { DataIcon {} },
         Activity::Curation => rsx! { CurationIcon {} },
         Activity::Training => rsx! { TrainingIcon {} },
@@ -114,10 +113,7 @@ fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
         (
             "Anywhere",
             vec![
-                (
-                    "1 – 5".into(),
-                    "Open Data, Curation, Training, Rollout, Live",
-                ),
+                ("1 – 4".into(), "Open Data, Curation, Training, Rollout"),
                 (",".into(), "Open Settings"),
                 ("?".into(), "Show or hide these shortcuts"),
             ],
@@ -147,7 +143,7 @@ fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
             ],
         ),
         (
-            "Live",
+            "Rollout",
             vec![
                 ("R".into(), "Start or finish recording"),
                 ("Shift  X".into(), "Discard the take"),
@@ -309,9 +305,9 @@ impl StatusFact {
             destination: None,
         }
     }
-    /// The fact names something to fix in Settings.
-    fn opening_robot_settings(mut self) -> Self {
-        self.destination = Some(crate::shell::routes::StudioRoute::RobotSettings {});
+    /// The fact names something to fix in Rollout's Setup.
+    fn opening_robot_setup(mut self) -> Self {
+        self.destination = Some(crate::shell::routes::StudioRoute::RolloutSetup {});
         self
     }
 }
@@ -365,13 +361,7 @@ impl StatusFacts {
             ("Robot setup unavailable".to_owned(), StatusTone::Caution)
         } else if hardware.is_some_and(|hardware| !hardware.setup().available()) {
             ("Loading robots…".to_owned(), StatusTone::Caution)
-        } else if hardware.is_some()
-            && matches!(
-                mode,
-                Activity::Live | Activity::Rollout | Activity::Settings
-            )
-            && !controls_available
-        {
+        } else if hardware.is_some() && mode == Activity::Rollout && !controls_available {
             ("Reconnecting".to_owned(), StatusTone::Danger)
         } else if project.is_empty() {
             (workspace.clone(), StatusTone::Caution)
@@ -457,11 +447,11 @@ impl StatusFacts {
         match snapshot.issues().len() {
             0 => {}
             1 => facts.push(
-                StatusFact::new("1 robot problem", StatusTone::Caution).opening_robot_settings(),
+                StatusFact::new("1 robot problem", StatusTone::Caution).opening_robot_setup(),
             ),
             count => facts.push(
                 StatusFact::new(format!("{count} robot problems"), StatusTone::Caution)
-                    .opening_robot_settings(),
+                    .opening_robot_setup(),
             ),
         }
         facts

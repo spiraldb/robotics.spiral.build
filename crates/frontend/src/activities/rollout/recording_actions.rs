@@ -4,58 +4,88 @@
 //! this module to translate consequential intent into admitted commands. The
 //! robot connector remains authoritative for recording, hardware, and safety.
 
-use super::client::RecordingTransfer;
-use crate::activities::live::RecordingClient;
+use super::next_take::RecordDriver;
+use super::policy::PolicyClient;
+use super::recording_client::RecordingTransfer;
+use crate::activities::rollout::RecordingClient;
 use dioxus::prelude::*;
-use spiral_robotics_common::recording::EpisodeInfo;
+use spiral_robotics_common::recording::{EpisodeInfo, RecordingDriver, RecordingStart};
 
-use crate::activities::live::session::LiveSession;
+use crate::activities::rollout::session::RolloutSession;
 use crate::shell::notifications::MessageSource;
 
-impl LiveSession {
+impl RolloutSession {
+    /// Why Record cannot start a take with its driver now, if it cannot.
     pub(super) fn recording_blocker(self) -> Option<String> {
         if !spiral_robotics_common::identity::DatasetId::is_canonical(
-            self.capture().chosen().read().trim(),
+            self.next_take().dataset().read().trim(),
         ) {
-            Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())
-        } else if self
-            .telemetry()
-            .snapshot()
-            .read()
-            .default_teleoperation_pair()
-            .is_none()
-        {
-            Some("Connect and calibrate a compatible leader and follower first.".to_owned())
-        } else if !self.telemetry().controls_available() {
-            Some("Recording is paused while telemetry reconnects.".to_owned())
-        } else {
-            None
+            return Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned());
+        }
+        match self.record_driver() {
+            RecordDriver::Teleop
+                if self
+                    .telemetry()
+                    .snapshot()
+                    .read()
+                    .default_teleoperation_pair()
+                    .is_none() =>
+            {
+                Some("Connect and calibrate a compatible leader and follower first.".to_owned())
+            }
+            RecordDriver::Teleop if !self.telemetry().controls_available() => {
+                Some("Recording is paused while telemetry reconnects.".to_owned())
+            }
+            RecordDriver::Teleop => None,
+            // A take is a whole run: it starts with the policy, not partway in.
+            RecordDriver::Policy if self.policy().active_session().is_some() => {
+                Some("Recording starts with the next policy run.".to_owned())
+            }
+            RecordDriver::Policy => self.policy_blocker(),
         }
     }
 
+    /// Start the next take's driver and record it: the leader and follower
+    /// for Teleop, or the chosen checkpoint on the follower for Policy, whose
+    /// take begins with its first action once it has loaded.
     pub(super) fn start_recording(self) {
         if let Some(reason) = self.recording_blocker() {
             self.project().report(reason);
             return;
         }
-        let Some(pair) = self
-            .telemetry()
-            .snapshot()
-            .read()
-            .default_teleoperation_pair()
-        else {
-            return;
+        let setup = self.telemetry().snapshot();
+        let (driver, policy) = match self.record_driver() {
+            RecordDriver::Teleop => {
+                let Some((leader, follower)) = setup.read().default_teleoperation_pair() else {
+                    return;
+                };
+                (RecordingDriver::Teleoperate { leader, follower }, None)
+            }
+            RecordDriver::Policy => {
+                let follower = setup.read().follower().map(|robot| robot.id().to_owned());
+                let Some(config) = follower.and_then(|id| self.policy().next_run(&id)) else {
+                    return;
+                };
+                (RecordingDriver::Policy(config.clone()), Some(config))
+            }
         };
-        let dataset_id = self.capture().chosen().read().trim().to_owned();
-        let video = *self.capture().video().read();
+        let next_take = self.next_take();
+        let request = RecordingStart::new(
+            next_take.dataset().read().trim().to_owned(),
+            driver,
+            *next_take.video().read(),
+        );
         self.commands().run("", async move {
-            RecordingClient::current()
-                .start_recording(spiral_robotics_common::recording::RecordingStart::new(
-                    dataset_id, pair, video,
-                ))
-                .await
-                .map_err(|error| error.to_string())
-                .map(|_| ())
+            next_take.set_starting(true);
+            let started = async {
+                if let Some(config) = policy.as_ref() {
+                    PolicyClient::current().store(config).await?;
+                }
+                RecordingClient::current().start_recording(request).await
+            }
+            .await;
+            next_take.set_starting(false);
+            started.map(|_| ()).map_err(|error| error.to_string())
         });
     }
 
@@ -104,15 +134,13 @@ impl LiveSession {
                 .await
                 .map_err(|error| error.to_string())?;
             if completion.keep {
-                self.project().report_live_info(format!(
+                self.project().report_rollout_info(format!(
                     "Saving episode to dataset ‘{}’.",
                     summary.dataset_id()
                 ));
             } else {
-                self.project().report_success_from(
-                    MessageSource::Live,
-                    "Recording discarded. Teleoperation stopped.",
-                );
+                self.project()
+                    .report_success_from(MessageSource::Rollout, "Recording discarded.");
             }
             let (dataset, episode) = (summary.dataset_id().to_owned(), summary.id().to_owned());
             (completion.on_completed)(summary);

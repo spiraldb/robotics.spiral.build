@@ -1,5 +1,5 @@
 //! Training retains history across route changes and polls only while active.
-//! Rollout requests its own run/checkpoint choices while its activity is visible.
+//! Rollout requests its own checkpoint choices while its activity is visible.
 //! Run status is live, so it is polled often; checkpoints are read from Spiral
 //! and change only when a run commits one, so they are polled rarely.
 use crate::activities::training::TrainingClient;
@@ -49,6 +49,12 @@ impl TrainingHistory {
         );
         history.use_checkpoints(checkpoints);
         history
+    }
+
+    /// History that never loads, for components tested without a project.
+    #[cfg(test)]
+    pub(crate) fn use_unloaded() -> Self {
+        Self::use_response(use_resource(std::future::pending))
     }
 
     fn use_response(

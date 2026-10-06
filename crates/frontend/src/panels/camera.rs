@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::activities::live::recording_review::EpisodePreview;
+use crate::activities::rollout::recording_review::EpisodePreview;
 use crate::client::http::CameraApiPath;
 use crate::components::icons::CameraStreamIcon;
 use crate::format::ClockPresentation;
@@ -161,8 +161,8 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
                     span { "{problem}" }
                     Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
                         class: "camera-live-error-action",
-                        onclick: move |_| { navigator.push(crate::shell::routes::StudioRoute::Settings {}); },
-                        "Rescan in Settings"
+                        onclick: move |_| { navigator.push(crate::shell::routes::StudioRoute::RolloutSetup {}); },
+                        "Rescan in Setup"
                     }
                 }
             }
@@ -248,7 +248,7 @@ fn RecordedCameraFrame(recorded: RecordedCamera, element_id: String) -> Element 
         let episode = episode.clone();
         let stream = stream.clone();
         async move {
-            crate::activities::live::RecordingClient::current()
+            crate::activities::rollout::RecordingClient::current()
                 .camera_preview(episode, stream)
                 .await
                 .map(std::rc::Rc::new)

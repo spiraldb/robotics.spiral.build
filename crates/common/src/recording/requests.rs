@@ -1,28 +1,39 @@
 //! Explicit request messages shared by HTTP clients and the backend.
 use super::*;
 
-/// Selects the dataset for a new recording, the arms it teleoperates, and
-/// whether their cameras are recorded too.
+/// Selects the dataset for a new recording, what drives the arms it records,
+/// and whether their cameras are recorded too.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingStart {
     dataset_id: String,
-    leader: String,
-    follower: String,
+    driver: RecordingDriver,
     video: bool,
 }
 impl RecordingStart {
-    pub fn new(dataset_id: String, pair: (String, String), video: bool) -> Self {
+    pub fn new(dataset_id: String, driver: RecordingDriver, video: bool) -> Self {
         Self {
             dataset_id,
-            leader: pair.0,
-            follower: pair.1,
+            driver,
             video,
         }
     }
-    pub fn into_parts(self) -> (String, (String, String), bool) {
-        (self.dataset_id, (self.leader, self.follower), self.video)
+    pub fn into_parts(self) -> (String, RecordingDriver, bool) {
+        (self.dataset_id, self.driver, self.video)
     }
+}
+
+/// What moves the follower while a take records. A take starts its driver
+/// and ends with it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RecordingDriver {
+    /// The operator moves the leader and the follower mirrors it; both arms
+    /// are recorded.
+    Teleoperate { leader: String, follower: String },
+    /// A checkpoint's policy drives the follower for its duration; the take
+    /// records the follower from the policy's first action to its last.
+    Policy(crate::rollout::RolloutConfig),
 }
 
 /// Chooses whether stopping a recording retains its episode.

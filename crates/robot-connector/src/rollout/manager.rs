@@ -469,7 +469,12 @@ impl RolloutManager {
         self.lifecycle.state.borrow().clone()
     }
 
-    pub(super) async fn start(
+    /// Every change to the current rollout's snapshot, starting from now.
+    pub(crate) fn subscribe(&self) -> watch::Receiver<RolloutSnapshot> {
+        self.lifecycle.state.subscribe()
+    }
+
+    pub(crate) async fn start(
         self: &Arc<Self>,
         config: RolloutConfig,
     ) -> Result<RolloutSnapshot, String> {
@@ -498,7 +503,7 @@ impl RolloutManager {
         Ok(admitted)
     }
 
-    pub(super) async fn stop(&self, id: &str) -> Result<(), String> {
+    pub(crate) async fn stop(&self, id: &str) -> Result<(), String> {
         let active = self.lifecycle.active.recover_lock();
         let Some(active) = active.as_ref() else {
             return Err("no policy rollout is active".to_owned());

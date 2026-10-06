@@ -20,6 +20,26 @@ pub(crate) struct RecordingSession {
 pub(crate) struct OpenTake {
     episode: String,
     capture: Option<VideoCapture>,
+    driver: TakeDriver,
+}
+
+/// What moves the arms an open take records, which is what its end stops.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TakeDriver {
+    /// Teleoperation the take entered; ending the take returns to idle.
+    Teleoperation,
+    /// The policy session whose run the take is; it ends when the run does.
+    Policy(String),
+}
+
+impl TakeDriver {
+    /// The driver as an error message names it.
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::Teleoperation => "teleoperation",
+            Self::Policy(_) => "the policy",
+        }
+    }
 }
 
 struct ReviewedTake {
@@ -34,13 +54,17 @@ pub(crate) struct TakeChange<'a> {
 }
 
 impl OpenTake {
-    pub(crate) fn new(episode: String, capture: Option<VideoCapture>) -> Self {
+    pub(crate) fn new(episode: String, capture: Option<VideoCapture>, driver: TakeDriver) -> Self {
         debug_assert!(
             capture
                 .as_ref()
                 .is_none_or(|capture| capture.episode_id() == episode)
         );
-        Self { episode, capture }
+        Self {
+            episode,
+            capture,
+            driver,
+        }
     }
 }
 
@@ -98,6 +122,10 @@ impl TakeChange<'_> {
         self.open.as_ref().map(|take| take.episode.as_str())
     }
 
+    pub(crate) fn driver(&self) -> Option<&TakeDriver> {
+        self.open.as_ref().map(|take| &take.driver)
+    }
+
     /// The open take's camera capture; `None` without a take or cameras.
     pub(crate) fn capture(&mut self) -> Option<&mut VideoCapture> {
         self.open.as_mut()?.capture.as_mut()
@@ -128,7 +156,7 @@ mod tests {
     use super::*;
 
     fn take(episode: &str) -> OpenTake {
-        OpenTake::new(episode.to_owned(), None)
+        OpenTake::new(episode.to_owned(), None, TakeDriver::Teleoperation)
     }
 
     #[test]

@@ -5,7 +5,6 @@ use dioxus::prelude::*;
 /// Every top-level Studio view, including Settings.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) enum Activity {
-    Live,
     #[default]
     Data,
     Curation,
@@ -15,9 +14,8 @@ pub(crate) enum Activity {
 }
 
 impl Activity {
-    pub(super) const fn all() -> [Self; 6] {
+    pub(super) const fn all() -> [Self; 5] {
         [
-            Self::Live,
             Self::Data,
             Self::Curation,
             Self::Training,
@@ -27,16 +25,10 @@ impl Activity {
     }
 
     /// The activities the top bar lists, in shortcut order: the data core
-    /// first, what consumes it next, and the bench that records into it
-    /// last. Settings sits apart at the end of the bar.
-    pub(super) const fn primary() -> [Self; 5] {
-        [
-            Self::Data,
-            Self::Curation,
-            Self::Training,
-            Self::Rollout,
-            Self::Live,
-        ]
+    /// first, what consumes it next, and the bench that drives the arms and
+    /// records into it last. Settings sits apart at the end of the bar.
+    pub(super) const fn primary() -> [Self; 4] {
+        [Self::Data, Self::Curation, Self::Training, Self::Rollout]
     }
 
     /// The key that opens this activity from anywhere on the page.
@@ -46,7 +38,6 @@ impl Activity {
             Self::Curation => "2",
             Self::Training => "3",
             Self::Rollout => "4",
-            Self::Live => "5",
             Self::Settings => ",",
         }
     }
@@ -59,7 +50,6 @@ impl Activity {
 
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Live => "Live",
             Self::Data => "Data",
             Self::Curation => "Curation",
             Self::Training => "Training",

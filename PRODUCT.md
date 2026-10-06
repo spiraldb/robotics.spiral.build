@@ -110,11 +110,11 @@ writing glue code or operating a second data stack.
   matching robot remain full citizens of the catalog.
 - **SpiralDB owns the queryable data.** Datasets, published curations, and
   checkpoints live in Spiral; settings, curations, and training run records
-  live in Studio's local SQLite. Each completed Live episode is first saved as
+  live in Studio's local SQLite. Each completed Rollout take is first saved as
   one immutable MCAP file on the robot connector; the browser then carries it
   to Studio, which imports it as a native Blob into the selected Dataset, and
-  only then has the robot connector forget it. Live lists takes still waiting
-  and stores them on request. Backend bootstrap pointers
+  only then has the robot connector forget it. Rollout lists takes still
+  waiting and stores them on request. Backend bootstrap pointers
   select the API endpoint, SpFS endpoint, and project, saved in the private
   local SQLite database; never cached Spiral rows. Studio reaches Spiral as the
   signed-in user, sharing the `spiraldb login` session.
@@ -184,11 +184,9 @@ never becomes the motor-control runtime.
 
 **Shipped today**
 
-- A fullstack Dioxus Studio with six primary operating activities. The
-  Studio opens on Data, which leads the top bar; Live, the collection
-  surface, closes it after Rollout:
-  - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
-    control, health, and camera status.
+- A fullstack Dioxus Studio with four primary operating activities and
+  Settings. The Studio opens on Data, which leads the top bar; Rollout, the
+  bench that drives the arms and records into the data, closes it:
   - **Data** owns datasets and their episodes. A rail lists each dataset's
     MCAP files as chronological episodes; selecting a dataset shows its
     overview, and opening an episode shows it in the shared episode
@@ -214,19 +212,25 @@ never becomes the motor-control runtime.
     inspection/downloads. Starting MCAP camera training is disabled until
     Spiral supports native video decoding into training images; the worker
     also rejects these dataset jobs explicitly.
-  - **Rollout** (parked with Training) owns checkpoint selection, fixed-follower readiness, simple
-    action-chunk and control-rate settings, the live 3D scene, every follower
-    camera recorded for the policy, authoritative start/stop lifecycle, and
-    measured native inference evidence.
-  - **Settings** owns robot setup (the robot connector's address, ports,
-    camera assignment, calibration, add/import/delete), backend data
-    destinations, and complete-project backup/restore. Setup is not mixed into
-    the live operating flow.
+  - **Rollout** owns everything that drives the real arms: something
+    controls the robot — Studio (**Hold** / **Release** and joint control),
+    a leader (**Teleop**), or a trained checkpoint (**Policy**) — and Studio
+    shows it in the 3D scene, cameras, and Timeline, and records it as a take.
+    **Record** starts the driver last chosen and the take together; a policy's
+    take begins with its first action and ends with its run. Policy (parked
+    with Training) owns checkpoint and duration choice, fixed-follower
+    readiness, the start/stop lifecycle (Hold stops it), and measured
+    inference behind its status line. Rollout's **Setup** owns the robot
+    connector's address, ports, camera assignment, calibration, and
+    add/import/delete, beside the scene and cameras it configures; until a
+    follower is ready Rollout shows a first-run guide instead.
+  - **Settings** owns the workspace, the training runtime, the Spiral account,
+    and complete-project backup/restore.
 - The external [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) crate supplies
   tabbed tiles, horizontal and vertical splits, drag docking with five-zone
   previews, split resizing, keyboard equivalents, session-state panel
-  reconciliation, and compact shared chrome. Live, Data, Curation, Training, and Rollout keep independent session
-  layouts. Live defaults to a one-third workbench beside a two-thirds
+  reconciliation, and compact shared chrome. Data, Curation, Training, and Rollout keep independent session
+  layouts. Rollout defaults to a one-third workbench beside a two-thirds
   visualization with movable Scene, camera, and Timeline panels. Data defaults
   to a 21% Datasets rail beside one subject panel; an open episode's
   inspection nests its own workbench of cameras, Scene, Plots, and Timeline,
@@ -237,13 +241,14 @@ never becomes the motor-control runtime.
   read-only), and **Teleop** (leader mapped to follower).
 - A live 3D scene drawn from URDF, live MJPEG camera panels, and one stable
   stream connection per assigned camera.
-- Episode recording during Teleop has server-owned start, pause, resume, stop,
-  and discard. Pause/resume preserves one episode identity and elapsed clock,
+- Episode recording of Teleop or a Policy run has server-owned start, stop,
+  and discard; a Teleop take also pauses and resumes (a policy's run has a
+  duration, not a break). Pause/resume preserves one episode identity and elapsed clock,
   excluding paused time. Pause ends the encoder segment without publishing an
   incomplete Dataset member. Final stop saves one immutable MCAP file holding
   joint observations/actions, metadata, and H.264 camera packets, then imports
   it into the configured Spiral project and target Dataset.
-- One canonical **Timeline** in Live follows capture. Completed episodes can
+- One canonical **Timeline** in Rollout follows capture. Completed episodes can
   be scrubbed to synchronize recorded camera frames, recorded 3D pose,
   signals, and the playhead. Browser WebCodecs decoding is owned by Rust/WASM;
   camera timestamps follow capture time and seeks begin at a preceding
@@ -306,7 +311,7 @@ today, and nothing below may be presented as existing behavior:
   always renders the desktop panel tree. It does not maintain mobile
   breakpoints, alternate narrow-screen navigation, touch gestures, or
   touch-target overrides.
-- **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
+- **Hardware:** SO-ARM101 only for now, with leader and follower roles. Rollout
   calibration supports Feetech protocol-0 motors such as the STS3215.
 - **One selected policy compute endpoint.** The configured HTTP runtime
   retains Arrow transport and ACT model inference for schema-compatible
@@ -352,7 +357,8 @@ today, and nothing below may be presented as existing behavior:
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*
 (the browser interface),
-*workbench* (Live, Data, Curation, Training, or Rollout operating panel),
+*workbench* (Data, Curation, Training, or Rollout operating panel),
+*driver* (what controls the follower in a take: Teleop or a Policy),
 *panel* (one registered content surface), *tile* (a tab group in the layout
 tree), *dataset* (a collection of episodes), *episode* / *take* (one kept
 multi-stream trajectory, recorded or ingested; *episode* is canonical in data
@@ -368,7 +374,7 @@ rollout, export), *ingestion*
 - The name is **Spiral Robotics**; the web interface is **Spiral Robotics
   Studio**.
 - The interface follows a compact, information-dense Notion/Rerun direction,
-  while its panel mechanics use familiar VS Code tab-and-tile behavior. Live,
+  while its panel mechanics use familiar VS Code tab-and-tile behavior.
   Data, Curation, Training, and Rollout are the primary activities;
   panels are
   spatial composition, not a proliferation of navigation modes.

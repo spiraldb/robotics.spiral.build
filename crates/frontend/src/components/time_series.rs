@@ -130,7 +130,7 @@ pub(crate) struct TraceChartLayout {
 }
 
 impl TraceChartLayout {
-    /// Live's compact stack: hairline lanes from the episode start, no axes.
+    /// Rollout's compact stack: hairline lanes from the episode start, no axes.
     pub(crate) fn sparkline(duration: f64) -> Self {
         Self {
             window: (0.0, duration.max(0.001)),

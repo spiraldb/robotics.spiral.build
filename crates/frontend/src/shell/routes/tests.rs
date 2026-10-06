@@ -2,7 +2,6 @@ use super::*;
 
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn every_primary_screen_has_a_stable_route() {
-    assert_eq!(StudioRoute::Live {}.to_string(), "/live");
     assert_eq!(StudioRoute::Data {}.to_string(), "/data");
     assert_eq!(StudioRoute::Curation {}.to_string(), "/curation");
     assert_eq!(StudioRoute::Training {}.to_string(), "/training");
@@ -12,11 +11,8 @@ fn every_primary_screen_has_a_stable_route() {
         assert_eq!(StudioRoute::for_activity(route.activity()), route);
     }
     assert_eq!(StudioRoute::Settings {}.activity(), Activity::Settings);
-    assert_eq!(
-        StudioRoute::RobotSettings {}.to_string(),
-        "/settings/robots"
-    );
-    assert_eq!(StudioRoute::RobotSettings {}.activity(), Activity::Settings);
+    assert_eq!(StudioRoute::RolloutSetup {}.to_string(), "/rollout/setup");
+    assert_eq!(StudioRoute::RolloutSetup {}.activity(), Activity::Rollout);
     assert_eq!(
         StudioRoute::NewWorkspace {}.to_string(),
         "/settings/workspaces/new"
@@ -68,7 +64,7 @@ impl NavigationHarness {
         rsx! {
             for project_id in [project()] {
                 HistoryProvider { key: "{project_id}",
-                    history: |_| Rc::new(dioxus::history::MemoryHistory::with_initial_path("/live")) as Rc<dyn History>,
+                    history: |_| Rc::new(dioxus::history::MemoryHistory::with_initial_path("/rollout")) as Rc<dyn History>,
                     Router::<ProbeRoute> {}
                 }
             }
@@ -107,15 +103,15 @@ impl NavigationHarness {
 #[derive(Clone, Debug, PartialEq, Routable)]
 enum ProbeRoute {
     #[layout(ProbeShell)]
-    #[route("/live", SelectedActivityRoute)]
-    Live {},
+    #[route("/rollout", SelectedActivityRoute)]
+    Rollout {},
     #[route("/data", SelectedActivityRoute)]
     Data {},
 }
 impl ProbeRoute {
     fn activity(self) -> Activity {
         match self {
-            Self::Live {} => Activity::Live,
+            Self::Rollout {} => Activity::Rollout,
             Self::Data {} => Activity::Data,
         }
     }
@@ -131,7 +127,7 @@ fn ProbeShell() -> Element {
     let route = use_route::<ProbeRoute>();
     let selected_view = use_memo(use_reactive((&route,), |(route,)| route.activity()));
     rsx! {
-        for activity in [Activity::Live, Activity::Data] {
+        for activity in [Activity::Rollout, Activity::Data] {
             ProbeWorkspaceSlot { key: "{activity.label()}", activity, selected_view }
         }
         Outlet::<ProbeRoute> {}
@@ -220,20 +216,20 @@ fn navigation_preserves_local_state_and_pauses_reads_until_reactivation() {
     dom.rebuild_in_place();
     NavigationHarness::settle(&mut dom);
     assert!(!harness.0.borrow().workspaces.contains_key(&Activity::Data));
-    let mut live_draft = harness.0.borrow().workspaces[&Activity::Live]
+    let mut rollout_draft = harness.0.borrow().workspaces[&Activity::Rollout]
         .draft
         .unwrap();
-    dom.in_runtime(|| live_draft.set("unsaved live draft".into()));
+    dom.in_runtime(|| rollout_draft.set("unsaved rollout draft".into()));
     dom.in_runtime(|| harness.navigate(ProbeRoute::Data {}));
     NavigationHarness::settle(&mut dom);
     dom.in_runtime(|| harness.assert_active(Activity::Data));
     {
         let observed = harness.0.borrow();
-        let live = &observed.workspaces[&Activity::Live];
-        assert_eq!(live.mounts, 1);
-        assert_eq!(live.drops, 0);
-        assert_eq!(live.cancelled.get(), 1);
-        assert_eq!(live.requests.get(), 1);
+        let rollout = &observed.workspaces[&Activity::Rollout];
+        assert_eq!(rollout.mounts, 1);
+        assert_eq!(rollout.drops, 0);
+        assert_eq!(rollout.cancelled.get(), 1);
+        assert_eq!(rollout.requests.get(), 1);
     }
     let mut data_draft = harness.0.borrow().workspaces[&Activity::Data]
         .draft
@@ -242,12 +238,12 @@ fn navigation_preserves_local_state_and_pauses_reads_until_reactivation() {
     dom.in_runtime(|| harness.traverse_history(false));
     NavigationHarness::settle(&mut dom);
     dom.in_runtime(|| {
-        harness.assert_active(Activity::Live);
-        assert_eq!(live_draft(), "unsaved live draft");
+        harness.assert_active(Activity::Rollout);
+        assert_eq!(rollout_draft(), "unsaved rollout draft");
         assert_eq!(data_draft(), "unsaved data query");
     });
     assert_eq!(
-        harness.0.borrow().workspaces[&Activity::Live]
+        harness.0.borrow().workspaces[&Activity::Rollout]
             .requests
             .get(),
         2
@@ -272,10 +268,10 @@ fn changing_projects_disposes_active_and_hidden_workspaces() {
     let mut dom = VirtualDom::new_with_props(NavigationHarness::render, harness.clone());
     dom.rebuild_in_place();
     NavigationHarness::settle(&mut dom);
-    let mut live_draft = harness.0.borrow().workspaces[&Activity::Live]
+    let mut rollout_draft = harness.0.borrow().workspaces[&Activity::Rollout]
         .draft
         .unwrap();
-    dom.in_runtime(|| live_draft.set("old project".into()));
+    dom.in_runtime(|| rollout_draft.set("old project".into()));
     dom.in_runtime(|| harness.navigate(ProbeRoute::Data {}));
     NavigationHarness::settle(&mut dom);
     let mut project = harness.0.borrow().project.unwrap();
@@ -283,9 +279,9 @@ fn changing_projects_disposes_active_and_hidden_workspaces() {
     NavigationHarness::settle(&mut dom);
     let observed = harness.0.borrow();
     assert_eq!(observed.workspaces[&Activity::Data].drops, 1);
-    assert_eq!(observed.workspaces[&Activity::Live].drops, 1);
-    assert_eq!(observed.workspaces[&Activity::Live].mounts, 2);
-    dom.in_runtime(|| assert!(observed.workspaces[&Activity::Live].draft.unwrap()().is_empty()));
+    assert_eq!(observed.workspaces[&Activity::Rollout].drops, 1);
+    assert_eq!(observed.workspaces[&Activity::Rollout].mounts, 2);
+    dom.in_runtime(|| assert!(observed.workspaces[&Activity::Rollout].draft.unwrap()().is_empty()));
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test]
@@ -297,7 +293,7 @@ fn completed_catalog_reads_survive_navigation_and_refresh_only_when_invalidated(
     dom.in_runtime(|| harness.navigate(ProbeRoute::Data {}));
     NavigationHarness::settle(&mut dom);
     for _ in 0..3 {
-        dom.in_runtime(|| harness.navigate(ProbeRoute::Live {}));
+        dom.in_runtime(|| harness.navigate(ProbeRoute::Rollout {}));
         NavigationHarness::settle(&mut dom);
         dom.in_runtime(|| harness.navigate(ProbeRoute::Data {}));
         NavigationHarness::settle(&mut dom);
@@ -313,7 +309,7 @@ fn completed_catalog_reads_survive_navigation_and_refresh_only_when_invalidated(
     let refresh = harness.0.borrow().refresh.unwrap();
     dom.in_runtime(|| refresh.invalidate(&[QueryDomain::Catalog]));
     NavigationHarness::settle(&mut dom);
-    dom.in_runtime(|| harness.navigate(ProbeRoute::Live {}));
+    dom.in_runtime(|| harness.navigate(ProbeRoute::Rollout {}));
     NavigationHarness::settle(&mut dom);
     {
         let observed = harness.0.borrow();
@@ -326,7 +322,7 @@ fn completed_catalog_reads_survive_navigation_and_refresh_only_when_invalidated(
     dom.in_runtime(|| project.set(2));
     NavigationHarness::settle(&mut dom);
     assert_eq!(
-        harness.0.borrow().workspaces[&Activity::Live]
+        harness.0.borrow().workspaces[&Activity::Rollout]
             .catalog
             .reads
             .get(),

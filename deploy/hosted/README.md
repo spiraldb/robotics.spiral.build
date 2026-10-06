@@ -28,7 +28,7 @@ Each colleague signs in with their own Spiral account. They see the organization
 - The deployment's provider keys. For now Spiral pays for everyone's model calls and Score progress runs.
 - Studio's records of a project they can all open, such as curation drafts and published views. When two people edit the same draft, the last save wins.
 
-Robots are not part of the hosted Studio. Live, Rollout and robot setup talk to the robot connector each colleague runs next to their own arms, at the address saved in their browser.
+Robots are not part of the hosted Studio. Rollout, including its robot setup, talks to the robot connector next to the arms, at the address saved in the workspace; `localhost` means each colleague's own machine.
 
 ## Image
 

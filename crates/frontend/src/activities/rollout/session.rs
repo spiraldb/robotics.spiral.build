@@ -1,37 +1,41 @@
-//! State owned by the mounted Live workspace and shared by its panels.
+//! State owned by the mounted Rollout workspace and shared by its panels.
 use super::RecordingClient;
+use super::next_take::{NextTake, RecordDriver};
+use super::policy::{PolicyControl, PolicyReadiness};
 use super::signals::SignalStore;
 use super::transport::TimelineController;
-use super::workbench::CaptureDestination;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) struct LiveSession {
+pub(crate) struct RolloutSession {
     project: StudioProjectState,
     telemetry: HardwareViewState,
     selection: RobotSelection,
-    capture: CaptureDestination,
+    next_take: NextTake,
+    policy: PolicyControl,
     timeline: TimelineController,
     recording_signals: Signal<SignalStore>,
 }
-impl LiveSession {
+impl RolloutSession {
     pub(super) fn use_session(
         project: StudioProjectState,
         telemetry: HardwareViewState,
         selection: RobotSelection,
     ) -> Self {
         let is_active = telemetry.is_active_signal();
-        let capture = CaptureDestination::use_destination();
+        let next_take = NextTake::use_next_take();
+        let policy = PolicyControl::use_control(is_active);
         let timeline = TimelineController::use_controller();
         let recording_signals = use_signal(SignalStore::default);
         let session = use_hook(|| Self {
             project,
             telemetry,
             selection,
-            capture,
+            next_take,
+            policy,
             timeline,
             recording_signals,
         });
@@ -69,13 +73,54 @@ impl LiveSession {
     pub(super) fn commands(self) -> HardwareCommands {
         HardwareCommands::new(self.project, self.telemetry)
     }
-    pub(super) fn capture(self) -> CaptureDestination {
-        self.capture
+    pub(super) fn next_take(self) -> NextTake {
+        self.next_take
+    }
+    pub(super) fn policy(self) -> PolicyControl {
+        self.policy
     }
     pub(super) fn timeline_controller(self) -> TimelineController {
         self.timeline
     }
     pub(super) fn recording_signals(self) -> MappedSignal<SignalStore, Signal<SignalStore>> {
         self.recording_signals.map(|value| value)
+    }
+
+    /// What Record starts next: the driver the operator last started, or,
+    /// before they have, Teleop on a bench with a leader and Policy on one
+    /// without.
+    pub(super) fn record_driver(self) -> RecordDriver {
+        let teleop_ready = self
+            .telemetry
+            .snapshot()
+            .read()
+            .default_teleoperation_pair()
+            .is_some();
+        let default = if teleop_ready || self.policy.selected().is_none() {
+            RecordDriver::Teleop
+        } else {
+            RecordDriver::Policy
+        };
+        self.next_take.driver(default)
+    }
+
+    /// Why the chosen checkpoint cannot drive the follower now, if it cannot.
+    pub(super) fn policy_blocker(self) -> Option<String> {
+        let setup = self.telemetry.snapshot();
+        let setup = setup.read();
+        PolicyReadiness::new(
+            self.policy.selected().as_ref(),
+            &setup,
+            self.telemetry.controls_available(),
+        )
+        .blocker()
+        .or_else(|| {
+            self.policy.duration_seconds().is_none().then(|| {
+                format!(
+                    "Set a whole-number duration from 1 to {} seconds.",
+                    spiral_robotics_common::rollout::MAX_ROLLOUT_DURATION_SECONDS
+                )
+            })
+        })
     }
 }

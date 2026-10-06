@@ -80,7 +80,7 @@ message buffer's time lookup, with recorded units and mimic relations preserved.
 Robots on the robot connector carry their own `visualization`: the content
 address of a model the robot connector stores (URDF and mesh assets), joint
 telemetry coordinates, and an optional tool link. The browser fetches each
-model once. Live and Studio-recorded poses use that configuration. The only
+model once. Live poses and Studio-recorded ones use that configuration. The only
 SO-ARM101 definition in the repository is the robot connector's `--demo`
 bench; nothing inserts it into new robot configurations.
 
@@ -92,14 +92,14 @@ are explicit. There is no inferred interpolation or sample-index gap rule.
 Null numeric values break traces; changing array lengths leave missing indices
 empty. Names containing punctuation remain distinct from nested field paths.
 
-Data, Curation, and Live compose the same controlled component in
+Data, Curation, and Rollout compose the same controlled component in
 [`components/timeline`](../crates/frontend/src/components/timeline/mod.rs).
 `TimelineInteraction` binds a caller-owned clock projection to typed events;
 `TimelineContent` supplies rows, identity, toolbar additions, and notices.
 The component shares transport controls, ruler, keyboard/wheel handling,
 scrubbing, numeric and interval tracks, and playback timing. Each activity
 owns its effects: Data selects streams, Curation handles interval activation,
-and Live controls recording and permits robot motion only on committed seeks.
+and Rollout controls recording and permits robot motion only on committed seeks.
 Events carry the source identity; owners reject events from replaced sources.
 
 Cameras use a media adapter for `foxglove.CompressedVideo` H.264. They consume

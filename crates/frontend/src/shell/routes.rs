@@ -4,7 +4,6 @@ use dioxus::prelude::*;
 
 use crate::activities::curation::workspace::CurationWorkspace;
 use crate::activities::data::screen::DataWorkspace;
-use crate::activities::live::screen::LiveWorkspace;
 use crate::activities::rollout::screen::RolloutWorkspace;
 use crate::activities::settings::panel::SettingsWorkspace;
 use crate::activities::training::workspace::TrainingWorkspace;
@@ -22,8 +21,6 @@ const FAVICON: Asset = asset!("/assets/favicon.svg");
 pub(crate) enum StudioRoute {
     #[layout(StudioShell)]
     #[redirect("/", || StudioRoute::Data {})]
-    #[route("/live", SelectedActivityRoute)]
-    Live {},
     #[route("/data", SelectedActivityRoute)]
     Data {},
     #[route("/curation", SelectedActivityRoute)]
@@ -32,11 +29,11 @@ pub(crate) enum StudioRoute {
     Training {},
     #[route("/rollout", SelectedActivityRoute)]
     Rollout {},
+    /// Rollout, with the robot connector and the arms' setup in its workbench.
+    #[route("/rollout/setup", SelectedActivityRoute)]
+    RolloutSetup {},
     #[route("/settings", SelectedActivityRoute)]
     Settings {},
-    /// Settings, opened on the robots this workspace drives.
-    #[route("/settings/robots", SelectedActivityRoute)]
-    RobotSettings {},
     /// Settings, opened on a new workspace.
     #[route("/settings/workspaces/new", SelectedActivityRoute)]
     NewWorkspace {},
@@ -45,14 +42,11 @@ pub(crate) enum StudioRoute {
 impl StudioRoute {
     pub(super) const fn activity(&self) -> Activity {
         match self {
-            Self::Live {} => Activity::Live,
             Self::Data {} => Activity::Data,
             Self::Curation {} => Activity::Curation,
             Self::Training {} => Activity::Training,
-            Self::Rollout {} => Activity::Rollout,
-            Self::Settings {} | Self::RobotSettings {} | Self::NewWorkspace {} => {
-                Activity::Settings
-            }
+            Self::Rollout {} | Self::RolloutSetup {} => Activity::Rollout,
+            Self::Settings {} | Self::NewWorkspace {} => Activity::Settings,
         }
     }
 
@@ -62,7 +56,6 @@ impl StudioRoute {
 
     pub(super) const fn for_activity(activity: Activity) -> Self {
         match activity {
-            Activity::Live => Self::Live {},
             Activity::Data => Self::Data {},
             Activity::Curation => Self::Curation {},
             Activity::Training => Self::Training {},
@@ -72,9 +65,8 @@ impl StudioRoute {
     }
 
     #[cfg(test)]
-    fn all() -> [Self; 6] {
+    fn all() -> [Self; 5] {
         [
-            Self::Live {},
             Self::Data {},
             Self::Curation {},
             Self::Training {},
@@ -175,7 +167,6 @@ fn ActivityWorkspace(activity: Activity, selected_view: ReadSignal<Activity>) ->
     rsx! {
         PersistentWorkspace { is_active,
             match activity {
-                Activity::Live => rsx! { LiveWorkspace { is_active } },
                 Activity::Data => rsx! { DataWorkspace { is_active } },
                 Activity::Curation => rsx! { CurationWorkspace { is_active } },
                 Activity::Training => rsx! { TrainingWorkspace { is_active } },

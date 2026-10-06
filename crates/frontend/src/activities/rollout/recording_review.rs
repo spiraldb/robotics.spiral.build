@@ -1,4 +1,4 @@
-//! The paused take's recorded preview for Live: the episode's joint timeline,
+//! The paused take's recorded preview for Rollout: the episode's joint timeline,
 //! loaded once in a compact columnar form, and the frame nearest the playhead
 //! picked from it in the browser.
 
@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 use spiral_robotics_common::recording::{EpisodeInspectionArm, EpisodeInspectionSnapshot};
 use spiral_robotics_viewport::SO101_JOINTS;
 
-use crate::activities::live::signals::SignalNamePresentation;
+use crate::activities::rollout::signals::SignalNamePresentation;
 use crate::components::scoped_task::ScopedTask;
 use crate::components::time_series::{
     TimelineSignalLane, TimelineSignalPoint, TimelineSignalSeries,
@@ -159,7 +159,7 @@ impl EpisodePreviewRequest {
     }
 }
 
-/// The one recorded preview the Live timeline is showing, and the ticket that
+/// The one recorded preview the take Timeline is showing, and the ticket that
 /// tells a completing read whether it is still the read anyone is waiting for.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct EpisodePreviewSignals {

@@ -1,6 +1,6 @@
 //! The project's datasets, read once for every surface that asks for one.
 //!
-//! Curation's dataset node, and Training's and Live's session setup, all ask
+//! Curation's dataset node, and Training's and Rollout's session setup, all ask
 //! the same question and all need the same three answers: the catalog is
 //! still loading, the catalog could not be read, or here are the datasets.
 //! [`DatasetCatalog`] owns the read, including keeping the last good rows on

@@ -1,11 +1,11 @@
 # Datasets and recordings
 
-A dataset is a native Spiral Dataset backed by MCAP files. Live recording and
+A dataset is a native Spiral Dataset backed by MCAP files. Rollout recording and
 Hugging Face import both produce those files; they are not different dataset
 kinds, and readers never ask which one produced an episode.
 
 ```text
-Live capture on the robot connector → browser → complete MCAP bytes ─┐
+Rollout capture on the robot connector → browser → complete MCAP bytes ─┐
                                                                     ├→ dataset_files_<name> → dataset_<name> → Data, Curation
 Hugging Face → pinned Blob URIs ────────────────────────────────────┘
 ```
@@ -34,7 +34,7 @@ Publication creates or appends the files table, creates and refreshes the
 Dataset, and verifies its member count in one transaction. Publishing the same
 recording key with the same bytes (by SHA-256) again is an idempotent retry;
 different bytes at that key are refused. Hugging Face import refuses existing
-target resources; Live recording appends to a validated matching Dataset. Browser uploads carry
+target resources; Rollout recording appends to a validated matching Dataset. Browser uploads carry
 bytes, never filesystem paths for the server to open. The committed Spiral
 project journal supplies resource kinds, identities, and versions; ADBC table
 listings are not the authority for Dataset membership. Studio does not write
@@ -42,7 +42,7 @@ to an arbitrary external dataset.
 
 ## Recording
 
-A completed Live recording becomes one immutable `.mcap` file: the recording
+A completed Rollout recording becomes one immutable `.mcap` file: the recording
 header, stream metadata, joint observations and actions, and H.264 camera
 access units. Camera messages use `foxglove.CompressedVideo`; joint and
 metadata messages use the `studio.recording` Protobuf schemas
@@ -51,7 +51,7 @@ and syncs the file in its data directory, at
 `recordings/<dataset>/<episode-id>.mcap`. The browser then reads it, has Studio
 publish it as above through `POST /datasets/{dataset}/recordings/{episode}`,
 and only then has the robot connector delete it. A take that fails to reach
-Studio stays on the robot connector; Live lists waiting takes and stores them on
+Studio stays on the robot connector; Rollout lists waiting takes and stores them on
 request. A stop with `keep: false` marks the take discarded; it is stored the
 same way.
 
@@ -62,7 +62,7 @@ decoder parameters, so seeking starts from the preceding keyframe. Calibration
 changes affect future recordings only: a recording keeps the normalized values
 captured with it, and angles in degrees need a calibration snapshot.
 
-Live reviews the current take from the robot connector's session, never from
+Rollout reviews the current take from the robot connector's session, never from
 files.
 `RecordingBuffer` holds only the current session's capture and review, and
 camera preview keeps that session's encoded packets, at most 18,000 packets and

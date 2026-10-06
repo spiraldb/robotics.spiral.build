@@ -1,6 +1,5 @@
-//! Live screen workbench: capture, control, and selected-arm state.
-
-use std::collections::BTreeSet;
+//! Rollout's workbench: who controls the arms, where takes go, and the
+//! selected arm's motors.
 
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::ModeSelection;
@@ -10,106 +9,67 @@ use spiral_robotics_ui::{
     TextInput, Toggle,
 };
 
-use crate::activities::live::actions::LiveAction;
-use crate::activities::live::client::RecordingTransfer;
-use crate::activities::live::control::JointPanel;
+use super::next_take::NextTake;
+use super::policy::PolicySection;
+use super::session::RolloutSession;
+use crate::activities::rollout::actions::RolloutAction;
+use crate::activities::rollout::joints::JointPanel;
+use crate::activities::rollout::recording_client::RecordingTransfer;
 use crate::client::queries::{QueryDomain, QueryPolicy};
-use crate::components::dataset_catalog::DatasetCatalog;
+use crate::robots::RobotSelection;
 use crate::robots::Selection;
-use crate::robots::{HardwareViewState, RobotSelection};
+use crate::shell::routes::StudioRoute;
 use crate::shell::state::StudioProjectState;
 use spiral_robotics_common::recording::RecordingProgress;
 
-/// The complete left-hand workbench for operating a connected pair.
+/// The complete left-hand workbench for operating the bench.
 #[component]
-pub(super) fn LiveWorkbench(
-    project: StudioProjectState,
-    hardware: HardwareViewState,
-    selection: RobotSelection,
-    capture: CaptureDestination,
-    on_action: EventHandler<LiveAction>,
-) -> Element {
+pub(super) fn RolloutWorkbench(session: RolloutSession) -> Element {
+    let (project, hardware, selection) =
+        (session.project(), session.telemetry(), session.selection());
     let robots = hardware.snapshot().read().robots().to_owned();
+    let on_action = move |action| session.dispatch(action);
+    let navigator = use_navigator();
 
     rsx! {
-        div { class: "studio-workbench-scroll live-workbench",
-            ControlSection { project, hardware, selection, on_action }
-            CaptureSection { capture, recording: hardware.recording() }
+        div { class: "studio-workbench-scroll rollout-workbench",
+            ControlSection { session }
+            CaptureSection { next_take: session.next_take(), recording: hardware.recording() }
             WaitingTakes { project }
 
-            section { class: "workbench-section live-properties",
+            section { class: "workbench-section rollout-motors",
                 header { class: "workbench-section-heading",
                     h3 { "Motors" }
+                    Button {
+                        purpose: ActionPurpose::Navigate,
+                        variant: ButtonVariant::Link,
+                        class: "workbench-heading-action",
+                        title: "Ports, cameras, calibration, and the robot connector",
+                        onclick: move |_| { navigator.push(StudioRoute::RolloutSetup {}); },
+                        "Set up"
+                    }
                 }
                 RobotRoster {
                     selection,
                     robots,
-                    on_select: move |selection| on_action.call(LiveAction::Select(selection)),
+                    on_select: move |selection| on_action(RolloutAction::Select(selection)),
                 }
                 JointPanel {
                     project, hardware, robot_selection: selection,
-                    on_select: move |selection| on_action.call(LiveAction::Select(selection)),
-                    on_point: move |selection| on_action.call(LiveAction::Point(selection)),
+                    on_select: move |selection| on_action(RolloutAction::Select(selection)),
+                    on_point: move |selection| on_action(RolloutAction::Point(selection)),
                 }
             }
         }
     }
 }
 
-/// Where new episodes are saved, and whether they record the arms' cameras.
-///
-/// Not a choice from the catalog: recording into a dataset that does not exist
-/// yet is how most datasets start, so the operator types a name and the
-/// catalog only offers what is already there as suggestions.
-#[derive(Clone, Copy, PartialEq)]
-pub(super) struct CaptureDestination {
-    chosen: Signal<String>,
-    video: Signal<bool>,
-    catalog: DatasetCatalog,
-}
-
-impl CaptureDestination {
-    pub(super) fn use_destination() -> Self {
-        Self {
-            chosen: use_signal(|| "default".to_owned()),
-            video: use_signal(|| true),
-            catalog: DatasetCatalog::use_catalog(),
-        }
-    }
-
-    /// The dataset name new episodes are recorded into.
-    pub(super) const fn chosen(self) -> Signal<String> {
-        self.chosen
-    }
-
-    /// Whether new episodes record the cameras bound to their arms.
-    pub(super) const fn video(self) -> Signal<bool> {
-        self.video
-    }
-
-    /// The catalog's dataset names, plus whatever is currently typed.
-    fn suggestions(self) -> BTreeSet<String> {
-        self.catalog
-            .datasets()
-            .into_iter()
-            .filter_map(|dataset| {
-                dataset
-                    .selection()
-                    .label()
-                    .strip_prefix("dataset_")
-                    .map(str::to_owned)
-            })
-            .chain(std::iter::once(self.chosen.read().to_owned()))
-            .collect()
-    }
-}
-
 #[component]
-fn CaptureSection(capture: CaptureDestination, recording: Option<RecordingProgress>) -> Element {
-    let mut selected_dataset = capture.chosen;
-    let mut video = capture.video;
-    let dataset_ids = capture.suggestions();
-    let catalog = capture.catalog;
+fn CaptureSection(next_take: NextTake, recording: Option<RecordingProgress>) -> Element {
+    let mut dataset = next_take.dataset();
+    let mut video = next_take.video();
+    let dataset_ids = next_take.suggestions();
+    let catalog = next_take.catalog();
 
     rsx! {
         section { class: "workbench-section capture-destination",
@@ -121,16 +81,16 @@ fn CaptureSection(capture: CaptureDestination, recording: Option<RecordingProgre
             }
             Field { label: "Dataset", layout: FieldLayout::Inline, class: "capture-dataset-field",
                 TextInput {
-                    list: "live-dataset-options",
-                    value: selected_dataset.read().to_owned(),
+                    list: "rollout-dataset-options",
+                    value: dataset.read().to_owned(),
                     disabled: recording.is_some(),
                     maxlength: "96",
                     pattern: "[A-Za-z0-9_.-]+",
                     placeholder: "pick-place-v1",
-                    oninput: move |value| selected_dataset.set(value),
+                    oninput: move |value| dataset.set(value),
                 }
             }
-            datalist { id: "live-dataset-options",
+            datalist { id: "rollout-dataset-options",
                 for id in dataset_ids { option { value: "{id}" } }
             }
             Toggle {
@@ -194,7 +154,7 @@ fn WaitingTakes(project: StudioProjectState) -> Element {
                         for take in &takes {
                             if let Err(error) = transfer.carry(take.dataset_id(), take.episode_id()).await {
                                 project.report_from(
-                                    crate::shell::notifications::MessageSource::Live,
+                                    crate::shell::notifications::MessageSource::Rollout,
                                     format!("Could not store take {} in Studio: {error}", take.episode_id()),
                                 );
                                 break;
@@ -221,7 +181,7 @@ fn RobotRoster(
     let empty = robots.is_empty();
 
     rsx! {
-        section { class: "live-robot-roster", role: "tablist", "aria-label": "Robot arms",
+        section { class: "rollout-robot-roster", role: "tablist", "aria-label": "Robot arms",
             for robot in robots {
                 {
                     let id = robot.id().to_owned();
@@ -250,7 +210,7 @@ fn RobotRoster(
                             key: "{robot.id()}",
                             purpose: ActionPurpose::Select,
                             variant: ButtonVariant::Row,
-                            class: "live-robot-row",
+                            class: "rollout-robot-row",
                             role: "tab",
                             aria_pressed: selected,
                             aria_selected: selected,
@@ -258,36 +218,37 @@ fn RobotRoster(
                             title: "{state}",
                             onclick: move |_| on_select.call(Some(Selection::Robot(id.clone()))),
                             span {
-                                class: "live-robot-accent",
+                                class: "rollout-robot-accent",
                                 style: "background: {accent}",
                             }
-                            span { class: "live-robot-copy",
+                            span { class: "rollout-robot-copy",
                                 strong { "{robot.id()}" }
                                 if show_role { small { "{role}" } }
                             }
                             // A ready arm says nothing; one that cannot be driven
                             // names why, so the exception is what finds the eye.
                             if !ready {
-                                span { class: "live-robot-problem", "aria-hidden": "true", "{state}" }
+                                span { class: "rollout-robot-problem", "aria-hidden": "true", "{state}" }
                             }
                         }
                     }
                 }
             }
             if empty {
-                p { class: "workbench-empty", "Add an arm in Settings to begin." }
+                p { class: "workbench-empty", "Set up an arm to begin." }
             }
         }
     }
 }
 
+/// Who controls the arms: Studio holds or releases the selected arm, the
+/// leader drives the follower, or a checkpoint does. Hold ends whichever
+/// drives.
 #[component]
-fn ControlSection(
-    project: StudioProjectState,
-    hardware: HardwareViewState,
-    selection: RobotSelection,
-    on_action: EventHandler<LiveAction>,
-) -> Element {
+fn ControlSection(session: RolloutSession) -> Element {
+    let (hardware, selection, policy) =
+        (session.telemetry(), session.selection(), session.policy());
+    let on_action = move |action| session.dispatch(action);
     let focused = selection.focused(hardware.snapshot().read().robots());
     let telemetry = focused
         .as_ref()
@@ -295,27 +256,35 @@ fn ControlSection(
     let holding = telemetry.as_ref().is_some_and(|robot| robot.torque());
     let teleop =
         matches!(hardware.mode(), ModeSelection::Teleoperate { .. }) && hardware.mode_active();
+    let policy_running = policy.active_session().is_some();
+    let driven = teleop || policy_running;
     let pair = hardware.snapshot().read().default_teleoperation_pair();
+    let policy_blocker = session.policy_blocker();
     let mut confirm_release = use_signal(|| false);
 
     rsx! {
         section { class: "workbench-section control-section",
             header { class: "workbench-section-heading",
                 h3 { "Control" }
-                if teleop { span { "Leader → follower" } }
+                if teleop {
+                    span { "Leader → follower" }
+                } else if policy_running {
+                    span { "Policy → follower" }
+                }
             }
-            ModeGroup { class: "control-segmented", label: "Motor control mode",
+            ModeGroup { class: "control-segmented", label: "Who controls the arms",
                 ModeButton {
                     purpose: ActionPurpose::Hold,
-                    checked: holding && !teleop,
+                    checked: holding && !driven,
                     class: "control-segment",
                     disabled: focused.is_none() || telemetry.is_none(),
+                    title: if policy_running { "Stop the policy and hold the follower where it is" } else { "Hold the arm where it is" },
                     onclick: {
                         let id = focused.as_ref().map(|robot| robot.id().to_owned());
-                        move |_| if (!holding || teleop)
+                        move |_| if (!holding || driven)
                             && let Some(id) = id.clone()
                         {
-                            on_action.call(LiveAction::Hold(id));
+                            on_action(RolloutAction::Hold(id));
                         }
                     },
                     "Hold"
@@ -324,11 +293,11 @@ fn ControlSection(
                     id: "motor-mode-release",
                     purpose: ActionPurpose::Release,
                     // An arm the Studio cannot hear from is in no known mode.
-                    checked: telemetry.is_some() && !holding && !teleop,
+                    checked: telemetry.is_some() && !holding && !driven,
                     class: "control-segment",
                     aria_label: "Release motor torque",
                     disabled: focused.is_none() || telemetry.is_none(),
-                    onclick: move |_| if holding || teleop { confirm_release.set(true) },
+                    onclick: move |_| if holding || driven { confirm_release.set(true) },
                     "Release"
                 }
                 ModeButton {
@@ -336,14 +305,25 @@ fn ControlSection(
                     checked: teleop,
                     class: "control-segment",
                     disabled: pair.is_none() || !hardware.controls_available(),
+                    title: if pair.is_none() { "Set up a leader to drive the follower by hand" } else { "Drive the follower from the leader" },
                     onclick: move |_| {
                         if !teleop && let Some((leader, follower)) = pair.clone() {
-                            on_action.call(LiveAction::Teleoperate { leader, follower });
+                            on_action(RolloutAction::Teleoperate { leader, follower });
                         }
                     },
                     "Teleop"
                 }
+                ModeButton {
+                    purpose: ActionPurpose::Start,
+                    checked: policy_running,
+                    class: "control-segment",
+                    disabled: !policy_running && policy_blocker.is_some(),
+                    title: policy_blocker.clone().unwrap_or_else(|| "Run the checkpoint on the follower".to_owned()),
+                    onclick: move |_| if !policy_running { on_action(RolloutAction::RunPolicy) },
+                    "Policy"
+                }
             }
+            PolicySection { policy, blocker: policy_blocker }
             if confirm_release() {
                 BlockingConfirmation {
                     id: "release-arm-confirmation",
@@ -360,7 +340,7 @@ fn ControlSection(
                             let id = focused.as_ref().map(|robot| robot.id().to_owned());
                             move |_| {
                                 confirm_release.set(false);
-                                if let Some(id) = id.clone() { on_action.call(LiveAction::Release(id)); }
+                                if let Some(id) = id.clone() { on_action(RolloutAction::Release(id)); }
                             }
                         },
                         move |_| confirm_release.set(false),

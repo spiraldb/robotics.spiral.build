@@ -1,8 +1,27 @@
-//! Rollout screen: checkpoint selection and follower-scoped policy operation.
+//! Rollout: everything that drives the real arms. Studio (Hold and Release),
+//! a leader (Teleop), or a policy controls the robot; the scene, cameras, and
+//! Timeline show it; Record keeps it as a take. Setting the arms up lives
+//! here too.
 
+pub(crate) mod actions;
+pub(crate) mod joints;
 pub(crate) mod screen;
-pub(crate) mod state;
-pub(crate) mod workspace;
+pub(crate) mod workbench;
 
-mod client;
-pub(crate) use client::RolloutClient;
+mod next_take;
+mod policy;
+mod recording_client;
+mod setup;
+pub(crate) use recording_client::RecordingClient;
+
+pub(crate) mod recording_actions;
+
+mod playback;
+
+pub(crate) mod session;
+
+pub(crate) mod recording_review;
+
+pub(crate) mod signals;
+mod timeline;
+mod transport;

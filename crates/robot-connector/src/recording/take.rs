@@ -3,35 +3,34 @@
 use std::collections::BTreeSet;
 
 use spiral_robotics_common::identity::DatasetId;
-use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingStart};
+use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingDriver, RecordingStart};
+use spiral_robotics_common::rollout::RolloutPhase;
 use spiral_robotics_hardware::{CaptureClock, HardwareState, ModeSelection};
 use spiral_robotics_recording::{
     ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter, McapRecording,
 };
 
-use super::session::{OpenTake, TakeChange};
+use super::session::{OpenTake, TakeChange, TakeDriver};
 use crate::OperationError;
 use crate::context::RobotConnectorContext;
 use crate::robotics::video::{
     CameraCaptureSpec, CameraRecording, VideoCapture, VideoCaptureRequest,
 };
 
-/// What a new take records: the dataset it joins, the leader an operator
-/// moves with the follower that mirrors it, and whether their cameras too.
+/// What a new take records: the dataset it joins, what drives its arms, and
+/// whether their cameras too.
 pub(super) struct TakeRequest {
     dataset_id: String,
-    leader: String,
-    follower: String,
+    driver: RecordingDriver,
     video: bool,
 }
 
 impl From<RecordingStart> for TakeRequest {
     fn from(request: RecordingStart) -> Self {
-        let (dataset_id, (leader, follower), video) = request.into_parts();
+        let (dataset_id, driver, video) = request.into_parts();
         Self {
             dataset_id,
-            leader,
-            follower,
+            driver,
             video,
         }
     }
@@ -42,7 +41,9 @@ impl TakeRequest {
         let dataset_id = DatasetId::try_from(self.dataset_id.as_str())
             .map(String::from)
             .map_err(|error| OperationError::invalid_input(error.to_string()))?;
-        if self.leader.is_empty() || self.follower.is_empty() || self.leader == self.follower {
+        if let RecordingDriver::Teleoperate { leader, follower } = &self.driver
+            && (leader.is_empty() || follower.is_empty() || leader == follower)
+        {
             return Err(OperationError::invalid_input(
                 "Recording needs distinct leader and follower identities",
             ));
@@ -50,14 +51,29 @@ impl TakeRequest {
         Ok(Self { dataset_id, ..self })
     }
 
+    /// The arms the take records: the pair a teleoperation moves, or the one
+    /// arm a policy drives.
     fn arms(&self) -> Vec<String> {
-        vec![self.leader.clone(), self.follower.clone()]
+        match &self.driver {
+            RecordingDriver::Teleoperate { leader, follower } => {
+                vec![leader.clone(), follower.clone()]
+            }
+            RecordingDriver::Policy(config) => vec![config.robot().to_owned()],
+        }
     }
 
-    fn teleoperation(&self) -> ModeSelection {
-        ModeSelection::Teleoperate {
-            leader: self.leader.clone(),
-            follower: self.follower.clone(),
+    /// Where the take came from, as its episode says it.
+    fn source(&self) -> String {
+        match &self.driver {
+            RecordingDriver::Teleoperate { leader, follower } => {
+                format!("Teleoperation — {leader} → {follower}")
+            }
+            RecordingDriver::Policy(config) => format!(
+                "Policy — {} step {} → {}",
+                config.run_id(),
+                config.checkpoint_step(),
+                config.robot()
+            ),
         }
     }
 }
@@ -78,10 +94,10 @@ impl<'a> TakeOperations<'a> {
         Self { state }
     }
 
-    /// Enter teleoperation, then open one take, and close it whenever the
-    /// control loop ends it on its own. Once teleoperation is entered, any
-    /// failure returns to idle; a failed rollback is reported, because an
-    /// unnoticed live teleoperation session is safety-relevant.
+    /// Start the request's driver, then open one take, and close it whenever
+    /// its run or the control loop ends it on their own. Once the driver
+    /// runs, any failure stops it again; a failed rollback is reported,
+    /// because an unnoticed live driver is safety-relevant.
     pub(super) async fn start(&self, request: TakeRequest) -> Result<EpisodeInfo, OperationError> {
         let mut take = self.state.recording_session().try_change()?;
         if take.is_open() || self.state.hardware().state().recording().is_some() {
@@ -91,59 +107,75 @@ impl<'a> TakeOperations<'a> {
         }
         let request = request.validated()?;
         let sample_hz = self.admitted_sample_hz(&request)?;
-        self.set_mode(request.teleoperation()).await?;
+        let driver = self.start_driver(&request.driver).await?;
         match self.open(&request, sample_hz).await {
             Ok((summary, capture)) => {
-                take.open(OpenTake::new(summary.id().to_owned(), capture));
+                take.open(OpenTake::new(
+                    summary.id().to_owned(),
+                    capture,
+                    driver.clone(),
+                ));
                 let (state, episode) = (self.state.clone(), summary.id().to_owned());
                 tokio::spawn(async move {
                     TakeOperations::new(&state)
-                        .close_when_the_control_loop_ends(&episode)
+                        .close_when_its_run_ends(&episode, &driver)
                         .await;
                 });
                 Ok(summary)
             }
-            Err(error) => match self.set_mode(ModeSelection::Idle).await {
+            Err(error) => match self.stop_driver(&driver).await {
                 Ok(()) => Err(error),
                 Err(rollback) => Err(OperationError::Conflict(format!(
-                    "{error} Teleoperation also could not stop: {rollback}"
+                    "{error} {} also could not stop: {rollback}",
+                    driver.name()
                 ))),
             },
         }
     }
 
-    /// Stop the take and return to idle whatever happens, then save its
-    /// media. The take is held throughout, so the control loop ending it on
-    /// its own cannot race this stop.
+    /// Stop the take and its driver whatever happens, then save its media.
+    /// The take is held throughout, so its run or the control loop ending it
+    /// on their own cannot race this stop.
     pub(super) async fn stop(&self, keep: bool) -> Result<EpisodeInfo, OperationError> {
         let take = self.state.recording_session().try_change()?;
-        if !take.is_open() {
+        let Some(driver) = take.driver().cloned() else {
             return Err(OperationError::conflict(
                 "no recording is available to stop",
             ));
-        }
+        };
         let recording = self.stopped_episode(keep).await;
-        let idle = self.set_mode(ModeSelection::Idle).await;
+        let stopped = self.stop_driver(&driver).await;
         self.close(take).await?;
-        match (recording, idle) {
+        match (recording, stopped) {
             (Ok(summary), Ok(())) => Ok(summary),
-            (Ok(_), Err(mode_error)) => Err(OperationError::Conflict(format!(
-                "the recording ended, but teleoperation could not stop: {mode_error}"
+            (Ok(_), Err(driver_error)) => Err(OperationError::Conflict(format!(
+                "the recording ended, but {} could not stop: {driver_error}",
+                driver.name()
             ))),
             (Err(recording_error), Ok(())) => Err(recording_error),
-            (Err(recording_error), Err(mode_error)) => Err(OperationError::Conflict(format!(
-                "{recording_error}; teleoperation also could not stop: {mode_error}"
+            (Err(recording_error), Err(driver_error)) => Err(OperationError::Conflict(format!(
+                "{recording_error}; {} also could not stop: {driver_error}",
+                driver.name()
             ))),
         }
     }
 
     /// Pause joint and media capture in a fail-safe order, or resume both.
+    /// A policy's take cannot pause: its run has a duration, not a break.
     pub(super) async fn set_paused(&self, paused: bool) -> Result<(), OperationError> {
         let mut take = self.state.recording_session().try_change()?;
-        if !take.is_open() {
-            return Err(OperationError::conflict(
-                "recording is not available for pause",
-            ));
+        match take.driver() {
+            None => {
+                return Err(OperationError::conflict(
+                    "recording is not available for pause",
+                ));
+            }
+            Some(TakeDriver::Policy(_)) => {
+                return Err(OperationError::conflict(
+                    "a policy take cannot pause; stop it instead",
+                ));
+            }
+            Some(TakeDriver::Teleoperation) => {}
         }
         let hardware = self.state.hardware();
         if paused {
@@ -172,10 +204,28 @@ impl<'a> TakeOperations<'a> {
         }
     }
 
-    /// Close `episode` when the control loop ends it on its own: a robot
-    /// detaches, or the writer fails. An explicit stop closes it first, which
-    /// makes this a no-op.
-    async fn close_when_the_control_loop_ends(&self, episode: &str) {
+    /// Close `episode` when the control loop ends it on its own — a robot
+    /// detaches, or the writer fails — or, for a policy's take, when the
+    /// policy's run ends. An explicit stop closes it first, which makes this a
+    /// no-op.
+    async fn close_when_its_run_ends(&self, episode: &str, driver: &TakeDriver) {
+        let run_ended = async {
+            match driver {
+                TakeDriver::Policy(session) => self.policy_run_ended(session).await,
+                TakeDriver::Teleoperation => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            ended = self.control_loop_ended(episode) => if ended {
+                self.close_ended(Some(episode)).await;
+            },
+            () = run_ended => self.close_after_run(episode).await,
+        }
+    }
+
+    /// Whether the control loop ended `episode`; false if it stopped
+    /// publishing first.
+    async fn control_loop_ended(&self, episode: &str) -> bool {
         let shown = |state: &HardwareState| {
             state
                 .recording()
@@ -185,10 +235,35 @@ impl<'a> TakeOperations<'a> {
         // The loop publishes an accepted take at the end of its cycle, so the
         // first publish after this subscription shows it unless it has ended.
         if !shown(&hardware.borrow_and_update()) && hardware.changed().await.is_err() {
+            return false;
+        }
+        hardware.wait_for(|state| !shown(state)).await.is_ok()
+    }
+
+    /// Wait until policy `session` is no longer running: it reached its
+    /// duration, was stopped, or failed, and the follower holds.
+    async fn policy_run_ended(&self, session: &str) {
+        let mut rollout = self.state.rollout().subscribe();
+        let _ = rollout
+            .wait_for(|snapshot| {
+                snapshot.session_id() != Some(session) || !snapshot.phase().active()
+            })
+            .await;
+    }
+
+    /// Save a policy's take once its run ended: the run's last action and the
+    /// hold after it end the episode.
+    async fn close_after_run(&self, episode: &str) {
+        let take = self.state.recording_session().change().await;
+        if take.episode() != Some(episode) {
             return;
         }
-        if hardware.wait_for(|state| !shown(state)).await.is_ok() {
-            self.close_ended(Some(episode)).await;
+        let recording = self.stopped_episode(true).await.map(|_| ());
+        if let Err(error) = recording.and(self.close(take).await) {
+            tracing::error!("could not save the policy's take: {error}");
+            self.state
+                .cameras()
+                .note_issue(format!("the policy's take could not be saved: {error}"));
         }
     }
 
@@ -232,6 +307,72 @@ impl<'a> TakeOperations<'a> {
             }
         }
         Ok(sample_hz)
+    }
+
+    /// Start `driver`. A policy has loaded, warmed up, and taken the follower
+    /// once this returns, so its take begins with the policy's first action.
+    async fn start_driver(&self, driver: &RecordingDriver) -> Result<TakeDriver, OperationError> {
+        let config = match driver {
+            RecordingDriver::Teleoperate { leader, follower } => {
+                self.set_mode(ModeSelection::Teleoperate {
+                    leader: leader.clone(),
+                    follower: follower.clone(),
+                })
+                .await?;
+                return Ok(TakeDriver::Teleoperation);
+            }
+            RecordingDriver::Policy(config) => config,
+        };
+        let rollout = self.state.rollout();
+        let admitted = rollout
+            .start(config.clone())
+            .await
+            .map_err(OperationError::External)?;
+        let session = admitted
+            .session_id()
+            .ok_or_else(|| OperationError::Internal("the rollout has no session".to_owned()))?
+            .to_owned();
+        let mut updates = rollout.subscribe();
+        // A run that fails on the way passes through its cleanup's Stopping
+        // before it settles, so only Running or the settled end decides.
+        let reached = updates
+            .wait_for(|snapshot| {
+                snapshot.session_id() != Some(session.as_str())
+                    || snapshot.phase() == RolloutPhase::Running
+                    || !snapshot.phase().active()
+            })
+            .await
+            .map_err(|_| OperationError::Internal("the rollout stopped reporting".to_owned()))?
+            .clone();
+        let own = reached.session_id() == Some(session.as_str());
+        if own && reached.phase() == RolloutPhase::Running {
+            return Ok(TakeDriver::Policy(session));
+        }
+        Err(OperationError::conflict(
+            reached
+                .message()
+                .filter(|_| own)
+                .unwrap_or("the policy stopped before it moved the follower"),
+        ))
+    }
+
+    /// Stop `driver`: leave teleoperation for idle, or stop the policy's run
+    /// so the follower holds. A run that already ended has nothing to stop.
+    async fn stop_driver(&self, driver: &TakeDriver) -> Result<(), OperationError> {
+        match driver {
+            TakeDriver::Teleoperation => self.set_mode(ModeSelection::Idle).await,
+            TakeDriver::Policy(session) => {
+                let rollout = self.state.rollout();
+                let current = rollout.snapshot();
+                if current.session_id() != Some(session.as_str()) || !current.phase().active() {
+                    return Ok(());
+                }
+                rollout
+                    .stop(session)
+                    .await
+                    .map_err(OperationError::conflict)
+            }
+        }
     }
 
     async fn set_mode(&self, mode: ModeSelection) -> Result<(), OperationError> {
@@ -408,13 +549,16 @@ impl<'a> TakeOperations<'a> {
             })
             .collect();
 
-        let source = format!("Teleoperation — {} → {}", request.leader, request.follower);
         let writer = self
             .state
             .recording_buffer()
             .begin(
-                EpisodeRecordingRequest::new(request.dataset_id.clone(), source, sample_hz)
-                    .with_arms(arms.clone(), condition),
+                EpisodeRecordingRequest::new(
+                    request.dataset_id.clone(),
+                    request.source(),
+                    sample_hz,
+                )
+                .with_arms(arms.clone(), condition),
             )
             .map_err(OperationError::from)?;
         let summary = EpisodeInfo::new(writer.id().to_owned(), request.dataset_id.clone())
@@ -471,5 +615,46 @@ impl<'a> TakeOperations<'a> {
         )
         .await
         .map_err(|error| OperationError::InvalidInput(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use spiral_robotics_common::recording::{RecordingDriver, RecordingStart};
+    use spiral_robotics_common::rollout::RolloutConfig;
+
+    use super::TakeRequest;
+
+    fn request(driver: RecordingDriver) -> TakeRequest {
+        TakeRequest::from(RecordingStart::new("pick-place".to_owned(), driver, true))
+    }
+
+    #[test]
+    fn a_teleoperation_take_records_both_arms_it_pairs() {
+        let take = request(RecordingDriver::Teleoperate {
+            leader: "leader".to_owned(),
+            follower: "follower".to_owned(),
+        })
+        .validated()
+        .unwrap();
+        assert_eq!(take.arms(), ["leader", "follower"]);
+        assert_eq!(take.source(), "Teleoperation — leader → follower");
+
+        let same_arm = request(RecordingDriver::Teleoperate {
+            leader: "follower".to_owned(),
+            follower: "follower".to_owned(),
+        });
+        assert!(same_arm.validated().is_err());
+    }
+
+    #[test]
+    fn a_policy_take_records_the_arm_it_drives_and_names_its_checkpoint() {
+        let take = request(RecordingDriver::Policy(RolloutConfig::new(
+            "act-run", 20_000, "follower",
+        )))
+        .validated()
+        .unwrap();
+        assert_eq!(take.arms(), ["follower"]);
+        assert_eq!(take.source(), "Policy — act-run step 20000 → follower");
     }
 }

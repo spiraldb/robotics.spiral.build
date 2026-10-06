@@ -73,11 +73,11 @@ impl StudioProjectState {
             source,
         ));
     }
-    pub(crate) fn report_live_info(&self, message: impl Into<String>) {
+    pub(crate) fn report_rollout_info(&self, message: impl Into<String>) {
         self.notify(MessageNotice::new(
             message,
             MessageSeverity::Info,
-            MessageSource::Live,
+            MessageSource::Rollout,
         ));
     }
     fn notify(&self, notice: MessageNotice) {

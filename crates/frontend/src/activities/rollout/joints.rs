@@ -1,4 +1,4 @@
-//! Joint controls for the arm selected on the Live screen.
+//! Joint controls for the arm selected on the Rollout screen.
 
 use crate::robots::RobotClient;
 use std::cell::RefCell;
@@ -44,7 +44,7 @@ pub(super) fn JointPanel(
 ) -> Element {
     let Some(robot) = robot_selection.focused(hardware.snapshot().read().robots()) else {
         return rsx! {
-            ArmSetupCard { title: "No arm yet", detail: "Add an arm in Settings to drive and record it here." }
+            ArmSetupCard { title: "No arm yet", detail: "Set up an arm to drive and record it here." }
         };
     };
 
@@ -53,13 +53,13 @@ pub(super) fn JointPanel(
     // once here rather than printing eight dashed cells above the answer.
     let Some(telemetry) = hardware.robot_telemetry(robot.id()) else {
         return rsx! {
-            ArmSetupCard { title: "{robot.id()} is not connected", detail: "Connect its motor bus in Settings to see and drive its joints." }
+            ArmSetupCard { title: "{robot.id()} is not connected", detail: "Connect its motor bus in Setup to see and drive its joints." }
         };
     };
     let arm = ConnectedArm::new(robot, telemetry);
 
     rsx! {
-        div { class: "live-joint-panel flex flex-col",
+        div { class: "rollout-joint-panel flex flex-col",
             if let Some(error) = arm.telemetry().error() {
                 p { class: "mx-2 mt-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger",
                     "{error}"
@@ -153,7 +153,7 @@ fn ToolReadout(arm: ConnectedArm) -> Element {
     let lagging = telemetry.tracking_lagging();
 
     rsx! {
-        dl { class: "live-summary-readouts",
+        dl { class: "rollout-arm-readouts",
             Readout {
                 label: "Reach",
                 value: tip.map(|[x, y, _]| format!("{:.0}", x.hypot(y))),
@@ -244,7 +244,7 @@ fn ConditionReadout(arm: ConnectedArm) -> Element {
     let strained = hardest.is_some_and(|joint| joint.condition() != MotorCondition::Nominal);
 
     rsx! {
-        dl { class: "live-summary-readouts",
+        dl { class: "rollout-arm-readouts",
             Readout {
                 label: "Hottest",
                 value: hottest
@@ -548,11 +548,11 @@ fn JointControls(
             class: if drivable { "joint-list joint-list-drivable" } else { "joint-list" },
             // The one blocker this panel cannot answer for itself: an
             // uncalibrated arm refuses every command, and the control that fixes
-            // it lives in Settings › Robots. Mode and torque transitions belong
+            // it lives in Setup. Mode and torque transitions belong
             // to the workbench Control section rather than this detail panel.
             if !robot.config().calibrated() {
                 p { class: "joint-blocked joint-list-wide",
-                    "Calibrate this arm in Settings › Robots to command its joints."
+                    "Calibrate this arm in Setup to command its joints."
                 }
             }
             for joint in arm.telemetry().joints().to_owned() {
@@ -773,12 +773,12 @@ fn JointRow(joint: JointTelemetry, state: JointRowState, actions: JointRowAction
 fn ArmSetupCard(title: String, detail: String) -> Element {
     let navigator = use_navigator();
     rsx! {
-        div { class: "live-setup-card", role: "status",
+        div { class: "rollout-setup-card", role: "status",
             strong { "{title}" }
             p { "{detail}" }
             Button { purpose: ActionPurpose::Navigate, variant: ButtonVariant::Outline,
-                onclick: move |_| { navigator.push(crate::shell::routes::StudioRoute::Settings {}); },
-                "Set up in Settings"
+                onclick: move |_| { navigator.push(crate::shell::routes::StudioRoute::RolloutSetup {}); },
+                "Open Setup"
             }
         }
     }

@@ -1,9 +1,10 @@
-//! What Live shows a bench that is not ready yet: start the robot connector,
-//! then bring a follower and a leader to a port and a calibration.
+//! What Rollout shows a bench that is not ready yet: start the robot
+//! connector, then bring a follower, and a leader if there is one, to a port
+//! and a calibration.
 //!
 //! Every step is read from the robot connector, never remembered here, so
-//! leaving Live halfway and coming back resumes where the bench actually is.
-//! The steps are the same sections Settings → Robots shows, in the order the
+//! leaving Rollout halfway and coming back resumes where the bench actually
+//! is. The steps are the same sections Rollout's Setup shows, in the order the
 //! work happens.
 
 use dioxus::prelude::*;
@@ -21,14 +22,15 @@ use crate::client::CommandError;
 use crate::robots::{HardwareViewState, RobotSelection, Selection};
 use crate::shell::state::StudioProjectState;
 
-/// What Live has to show for the bench it can see.
+/// What Rollout has to show for the bench it can see.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BenchStage {
     /// The robot connector has not answered yet, or its robots are loading.
     Checking,
     /// Something is missing: the guide shows what.
     Setup,
-    /// A follower and a leader each have a port and a calibration.
+    /// A follower has a port and a calibration, and so does a leader if one
+    /// was started. A policy needs only the follower.
     Ready,
 }
 
@@ -52,7 +54,10 @@ impl<'a> BenchSetup<'a> {
             (None, _) | (Some(Ok(_)), None) => BenchStage::Checking,
             (Some(Err(_)), _) => BenchStage::Setup,
             (Some(Ok(_)), Some(robots)) => {
-                if ArmRole::Follower.ready_in(robots) && ArmRole::Leader.ready_in(robots) {
+                let leader_settled = ArmRole::Leader
+                    .find(robots)
+                    .is_none_or(RobotSummary::ready_to_drive);
+                if ArmRole::Follower.ready_in(robots) && leader_settled {
                     BenchStage::Ready
                 } else {
                     BenchStage::Setup
@@ -62,7 +67,7 @@ impl<'a> BenchSetup<'a> {
     }
 }
 
-/// One of the two arms Live drives.
+/// One of the two arms Rollout drives.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArmRole {
     Follower,
@@ -87,7 +92,7 @@ impl ArmRole {
     const fn title(self) -> &'static str {
         match self {
             Self::Follower => "Set up the follower",
-            Self::Leader => "Set up the leader",
+            Self::Leader => "Set up a leader",
         }
     }
 
@@ -96,7 +101,9 @@ impl ArmRole {
             Self::Follower => {
                 "The arm that moves on its own. Teleop mirrors the leader onto it, and policies drive it."
             }
-            Self::Leader => "The arm you move by hand.",
+            Self::Leader => {
+                "The arm you move by hand to teleoperate the follower. A policy needs only the follower."
+            }
         }
     }
 
@@ -154,7 +161,7 @@ impl StepState {
     }
 }
 
-/// The robot connector, then the follower, then the leader.
+/// The robot connector, then the follower, and a leader alongside it.
 #[component]
 pub(crate) fn ArmSetupGuide(
     project: StudioProjectState,
@@ -200,7 +207,7 @@ pub(crate) fn ArmSetupGuide(
                     div {
                         h2 { "Get your arms ready" }
                         p {
-                            "Live drives a leader and a follower through the robot connector on the computer they are plugged into. "
+                            "Rollout drives the follower, from a leader you move or from a policy, through the robot connector on the computer the arms are plugged into. "
                             "Plan on about ten minutes, most of it calibration."
                         }
                     }
@@ -232,7 +239,7 @@ pub(crate) fn ArmSetupGuide(
                     GuideStep {
                         number: 3,
                         title: ArmRole::Leader.title(),
-                        state: arm_state(leader_ready, answering && follower_ready),
+                        state: arm_state(leader_ready, answering),
                         summary: leader.as_ref().filter(|_| leader_ready).map(ArmSummary::summary),
                         ArmStep { arms, role: ArmRole::Leader, robot: leader.clone() }
                     }
@@ -427,7 +434,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn the_bench_is_ready_only_with_a_ported_calibrated_leader_and_follower() {
+    fn the_bench_is_ready_with_a_follower_and_any_leader_it_started() {
         let answering = BenchFixture::answering();
         let unreachable = Err(CommandError::new(CommandFailureCode::Transport, "refused"));
         let ready = [
@@ -459,6 +466,10 @@ mod tests {
         }
         assert_eq!(
             BenchSetup::new(Some(&answering), Some(&ready[..1])).stage(),
+            BenchStage::Ready
+        );
+        assert_eq!(
+            BenchSetup::new(Some(&answering), Some(&ready[1..])).stage(),
             BenchStage::Setup
         );
     }

@@ -16,8 +16,7 @@ use super::queries::{QueryDomain, QueryPolicy, QueryRefresh};
 use super::transport::{CommandError, HttpRequest};
 use crate::shell::workspace::WorkspaceSettings;
 
-const UNREACHABLE: &str =
-    "Could not reach the robot connector. Check that it is running and its address in Settings.";
+const UNREACHABLE: &str = "Could not reach the robot connector. Check that it is running and its address in Rollout's Setup.";
 
 #[derive(Clone, Copy)]
 pub(crate) struct RobotConnector {

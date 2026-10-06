@@ -166,10 +166,10 @@ robot connector after navigating away.
 
 The shell owns only the selected project, backend liveness, the robot
 connector's address, its clock, and notifications. The robot connector's
-`/health` is polled by the active Live or Rollout view or Settings → Robots, and
+`/health` is polled by the active Rollout view, and
 its `/robots`, `/hardware/status`, and hardware telemetry only while `/health`
 answers, so an absent robot connector costs one request every two seconds and
-a browser that opens none of these views never reaches for it. Each view retains its own last
+a browser that never opens Rollout never reaches for it. Each view retains its own last
 successful configuration, loading state, and errors until the project scope is
 disposed.
 Reactivating a hardware view requires fresh setup and telemetry before controls
