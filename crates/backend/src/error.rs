@@ -79,6 +79,12 @@ mod tests {
                 CommandFailureCode::StaleProject,
                 409,
             ),
+            // Never 502: Cloudflare would swap the message for its own page.
+            (
+                OperationError::External("arbitrary text".into()),
+                CommandFailureCode::External,
+                500,
+            ),
         ] {
             let failure = CommandFailure::from(error);
             assert_eq!(failure.code(), expected);

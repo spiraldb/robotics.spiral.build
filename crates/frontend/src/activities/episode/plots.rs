@@ -8,6 +8,7 @@ use super::{
     choices::StreamChoices,
     inspection::LoadedEpisode,
     messages::{MessageBuffer, MessageField},
+    reads::StreamRead,
     streams::{RecordedStream, StreamCatalog, StreamKind},
     transport::EpisodeTransport,
 };
@@ -18,7 +19,7 @@ use crate::components::time_series::{
 };
 use crate::format::GroupedCountPresentation;
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::MessageWindow;
+use spiral_robotics_common::datasets::{MessageRead, MessageWindow};
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant};
 use std::rc::Rc;
 
@@ -69,8 +70,7 @@ pub(super) fn PlotsPanel(loaded: LoadedEpisode) -> Element {
                             key: "{key}",
                             stream: stream.clone(),
                             fields: choices.plotted_fields(&key),
-                            transport: transport.clone(),
-                            choices,
+                            loaded: loaded.clone(),
                             hover,
                         }
                     }
@@ -113,85 +113,112 @@ fn PlotsEmpty(catalog: StreamCatalog, mut choices: StreamChoices) -> Element {
     }
 }
 
-/// Whether a stream's traces cover the whole episode or only the visible span.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum LoadSpan {
-    Episode,
-    Visible,
-}
-
-#[derive(PartialEq)]
-struct PlottedStream {
+/// A stream's chosen fields read over a span, laid out as one lane per field.
+pub(super) struct PlottedStream {
     buffer: Rc<MessageBuffer>,
     fields: Vec<MessageField>,
     lanes: Vec<TimelineSignalLane>,
+}
+
+impl PlottedStream {
+    /// `fields` of `read` logged within `bounds`, on a clock that starts at
+    /// `origin`.
+    pub(super) async fn read(
+        read: MessageRead,
+        fields: Vec<MessageField>,
+        bounds: (u64, u64),
+        origin: u64,
+    ) -> Result<Self, String> {
+        let projections = fields.iter().map(MessageField::projection).collect();
+        let buffer =
+            MessageBuffer::load(read.with_window(MessageWindow::new(bounds, projections))).await?;
+        let lanes = buffer.lanes(&fields, origin)?;
+        Ok(Self {
+            buffer,
+            fields,
+            lanes,
+        })
+    }
+    pub(super) fn lanes(&self) -> &[TimelineSignalLane] {
+        &self.lanes
+    }
+}
+
+/// Values are read once and handed around; a view compares the read it was
+/// handed by identity rather than by every sample in it.
+impl PartialEq for PlottedStream {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
 }
 
 #[component]
 fn StreamPlot(
     stream: RecordedStream,
     fields: Vec<MessageField>,
-    transport: EpisodeTransport,
-    mut choices: StreamChoices,
+    loaded: LoadedEpisode,
     hover: Signal<PlotCursor>,
 ) -> Element {
-    let mut load_span = use_signal(|| LoadSpan::Episode);
+    let transport = loaded.transport().clone();
+    let mut choices = loaded.choices();
+    let mut reads = loaded.reads();
+    use_effect(use_reactive((&stream, &fields), move |(stream, fields)| {
+        reads.want_values(&stream, fields)
+    }));
+    let whole = reads.values(&stream);
+    // An episode too long to read whole is plotted for the span in view, read
+    // again a moment after the view settles.
+    let too_long = whole
+        .as_ref()
+        .and_then(StreamRead::failure)
+        .is_some_and(|error| error.contains("exceeds"));
     let range = transport.range();
-    let read = stream.read().clone();
-    let load_fields = fields.clone();
     let view_source = transport.clone();
-    let mut data = use_resource(move || {
-        let fields = load_fields.clone();
-        let read = read.clone();
-        let span = load_span();
-        let bounds = match span {
-            LoadSpan::Episode => range.bounds(),
-            LoadSpan::Visible => {
-                let view = view_source.view();
-                (
+    let read = stream.read().clone();
+    let mut in_view = use_resource(use_reactive(
+        (&too_long, &fields),
+        move |(too_long, fields)| {
+            let view = too_long.then(|| view_source.view());
+            let read = read.clone();
+            async move {
+                let Some(view) = view else {
+                    return Ok(None);
+                };
+                gloo_timers::future::TimeoutFuture::new(250).await;
+                let bounds = (
                     range.ns_at(view.start()),
                     range.ns_at(view.end()).saturating_add(1),
-                )
+                );
+                PlottedStream::read(read, fields, bounds, range.start_ns())
+                    .await
+                    .map(|plotted| Some(Rc::new(plotted)))
             }
-        };
-        async move {
-            if fields.is_empty() {
-                return Ok::<_, String>(None);
-            }
-            if span == LoadSpan::Visible {
-                gloo_timers::future::TimeoutFuture::new(250).await;
-            }
-            let projections = fields.iter().map(MessageField::projection).collect();
-            let buffer =
-                MessageBuffer::load(read.with_window(MessageWindow::new(bounds, projections)))
-                    .await?;
-            let lanes = buffer.lanes(&fields, range.start_ns())?;
-            Ok(Some(Rc::new(PlottedStream {
-                buffer,
-                fields,
-                lanes,
-            })))
+        },
+    ));
+    let shown = if too_long {
+        let pending = *in_view.state().read() == UseResourceState::Pending;
+        match &*in_view.read() {
+            Some(Ok(plotted)) if pending => Some(StreamRead::Reading(plotted.clone())),
+            Some(Ok(Some(plotted))) => Some(StreamRead::Ready(plotted.clone())),
+            Some(Ok(None)) | None => Some(StreamRead::Reading(None)),
+            Some(Err(error)) => Some(StreamRead::Failed(error.clone())),
         }
-    });
-    // A whole episode that exceeds the read bounds falls back to the visible span.
-    use_effect(move || {
-        let exceeded = matches!(&*data.read(), Some(Err(error)) if error.contains("exceeds"));
-        if exceeded && *load_span.peek() == LoadSpan::Episode {
-            load_span.set(LoadSpan::Visible);
-        }
-    });
-    let pending = *data.state().read() == UseResourceState::Pending;
+    } else {
+        whole
+    };
+    let pending = shown.as_ref().is_none_or(StreamRead::reading);
     let hide_stream = stream.clone();
+    let retry_stream = stream.clone();
+    let retry_fields = fields.clone();
     let skeleton_height = fields.len() as f64 * (LANE_HEIGHT + LANE_GAP);
     rsx! {
         section { class: "data-plot", "aria-label": "{stream.label()} plots", "aria-busy": pending,
             header { class: "data-plot-head",
                 SignalStreamIcon {}
                 strong { class: "truncate", title: stream.name(), "{stream.label()}" }
-                // The stream's message count is its Timeline row's; the head
-                // says only what is out of the ordinary.
+                // The head says only what is out of the ordinary.
                 span { class: "data-plot-meta",
-                    if matches!(&*data.read(), Some(Ok(Some(_)))) && load_span() == LoadSpan::Visible {
+                    if too_long && shown.as_ref().and_then(StreamRead::latest).is_some() {
                         "Visible span only"
                     }
                     if pending { span { class: "data-plot-loading", role: "status", "Loading…" } }
@@ -199,18 +226,21 @@ fn StreamPlot(
                 Button { purpose: ActionPurpose::Remove, variant: ButtonVariant::Link, size: ButtonSize::Compact,
                     title: "Stop plotting this stream", onclick: move |_| choices.set_stream_plotted(&hide_stream, false), "Hide" }
             }
-            match &*data.read() {
-                Some(Ok(Some(plotted))) => rsx! {
-                    PlotLanes { plotted: plotted.clone(), stream_key: stream.key().to_owned(), transport: transport.clone(), choices, hover }
-                },
-                Some(Ok(None)) => rsx! {},
-                Some(Err(error)) => rsx! {
+            match shown {
+                Some(StreamRead::Failed(error)) => rsx! {
                     div { class: "data-plot-error", role: "alert",
                         p { "{error}" }
-                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, size: ButtonSize::Compact, onclick: move |_| data.restart(), "Retry" }
+                        Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
+                            onclick: move |_| if too_long { in_view.restart() } else { reads.read_values(&retry_stream, retry_fields.clone()) },
+                            "Retry" }
                     }
                 },
-                None => rsx! { div { class: "data-plot-skeleton", style: "height: {skeleton_height}px", "aria-hidden": "true" } },
+                shown => match shown.as_ref().and_then(StreamRead::latest) {
+                    Some(plotted) => rsx! {
+                        PlotLanes { plotted: plotted.clone(), stream_key: stream.key().to_owned(), transport: transport.clone(), choices, hover }
+                    },
+                    None => rsx! { div { class: "data-plot-skeleton", style: "height: {skeleton_height}px", "aria-hidden": "true" } },
+                },
             }
         }
     }

@@ -4,15 +4,20 @@
 //! A surface's rows are its evidence — a progress score, a measurement's
 //! subtasks — so they lead, and activating one of their intervals plays it.
 //! The streams follow as the hub the operator steers the rest from: ticking a
-//! camera shows its panel, ticking a stream plots its numeric fields. Under
+//! camera shows its panel, ticking a stream plots its numeric fields, and a
+//! ticked row previews what it shows along its track — a camera's stills, a
+//! stream's plotted values — so when something happened reads across the
+//! rows. An unticked row stays one quiet line. Under
 //! evidence they wait folded behind one row, since the streams say nothing
 //! about the measurement being checked.
 use super::{
-    choices::{PlotState, PlottableLeaves, StreamChoices, StreamSchema},
+    choices::{PlotState, PlottableLeaves, StreamSchema},
+    filmstrip::CameraFilmstrip,
     inspection::LoadedEpisode,
     messages::MessageField,
+    reads::StreamRead,
+    sparkline::ValuesSparkline,
     streams::{RecordedStream, StreamKind},
-    transport::EpisodeTransport,
 };
 use crate::components::{
     icons::{CameraStreamIcon, SignalStreamIcon},
@@ -116,11 +121,11 @@ pub(super) fn EpisodeTimeline(loaded: LoadedEpisode, evidence: Vec<EvidenceTrack
         }
         if !folded || streams_open() {
             if nothing_listed { p { class: "data-timeline-none", if catalog.is_empty() { "This episode has no readable streams." } else { "No streams match the filter." } } }
-            StreamRows { streams: leading, transport: transport.clone(), choices, expanded }
+            StreamRows { streams: leading, loaded: loaded.clone(), expanded }
             if !quiet.is_empty() {
                 StreamFoldRow { label: format!("{} with nothing to plot", Counted(quiet.len(), "stream")), open: quiet_open(),
                     on_toggle: move |_| quiet_open.toggle() }
-                if quiet_open() { StreamRows { streams: quiet, transport: transport.clone(), choices, expanded } }
+                if quiet_open() { StreamRows { streams: quiet, loaded: loaded.clone(), expanded } }
             }
         }
     };
@@ -135,13 +140,13 @@ pub(super) fn EpisodeTimeline(loaded: LoadedEpisode, evidence: Vec<EvidenceTrack
 #[component]
 fn StreamRows(
     streams: Vec<RecordedStream>,
-    transport: EpisodeTransport,
-    choices: StreamChoices,
+    loaded: LoadedEpisode,
     expanded: Signal<BTreeSet<String>>,
 ) -> Element {
+    let choices = loaded.choices();
     rsx! {
         for stream in streams {
-            StreamRow { key: "{stream.key()}", stream: stream.clone(), transport: transport.clone(), choices,
+            StreamRow { key: "{stream.key()}", stream: stream.clone(), loaded: loaded.clone(),
                 expanded: expanded.read().contains(stream.key()),
                 on_expand: move |open: bool| {
                     let mut expanded = expanded;
@@ -186,19 +191,54 @@ fn StreamFoldRow(label: String, open: bool, on_toggle: EventHandler<()>) -> Elem
     }
 }
 
+/// What a shown stream's row previews along its track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowPreview {
+    /// A camera's stills.
+    Filmstrip,
+    /// A stream's plotted values.
+    Sparkline,
+}
+
+impl RowPreview {
+    /// What a row previews: what its stream shows, and nothing while it is
+    /// hidden, so a hidden row stays quiet and reads nothing.
+    fn of(kind: StreamKind, state: PlotState) -> Option<Self> {
+        match (kind, state) {
+            (_, PlotState::None) => None,
+            (StreamKind::Video, _) => Some(Self::Filmstrip),
+            (StreamKind::Data, _) => Some(Self::Sparkline),
+        }
+    }
+    fn attribute(self) -> &'static str {
+        match self {
+            Self::Filmstrip => "filmstrip",
+            Self::Sparkline => "sparkline",
+        }
+    }
+}
+
 #[component]
 fn StreamRow(
     stream: RecordedStream,
-    transport: EpisodeTransport,
-    mut choices: StreamChoices,
+    loaded: LoadedEpisode,
     expanded: bool,
     on_expand: EventHandler<bool>,
 ) -> Element {
+    let transport = loaded.transport().clone();
+    let mut choices = loaded.choices();
+    let reads = loaded.reads();
     let key = stream.key().to_owned();
     let kind = stream.kind();
     let schema = choices.schema(&key);
     let no_numeric_fields =
         matches!(&schema, Some(StreamSchema::Ready(root)) if root.plottable_leaves().is_empty());
+    // A camera is called what its picture is captioned: the part of its name
+    // that tells it from the episode's other cameras.
+    let label = match kind {
+        StreamKind::Video => loaded.catalog().camera_title(&stream),
+        StreamKind::Data => stream.label().to_owned(),
+    };
     let (state, check_label) = match kind {
         StreamKind::Video => (
             if choices.camera_open(&key) {
@@ -206,19 +246,36 @@ fn StreamRow(
             } else {
                 PlotState::None
             },
-            format!("Show camera {}", stream.label()),
+            format!("Show camera {label}"),
         ),
-        StreamKind::Data => (choices.plot_state(&key), format!("Plot {}", stream.label())),
+        StreamKind::Data => (choices.plot_state(&key), format!("Plot {label}")),
     };
     let count = stream
         .samples()
         .map(GroupedCountPresentation::grouped_label)
         .unwrap_or_else(|| "—".into());
-    let schemas = stream.schemas().join(", ");
+    let about = format!(
+        "{} · {} · {count} messages",
+        stream.name(),
+        stream.schemas().join(", ")
+    );
+    let preview = RowPreview::of(kind, state);
+    let fields = choices.plotted_fields(&key);
+    let mut wanting = reads;
+    use_effect(use_reactive(
+        (&stream, &preview, &fields),
+        move |(stream, preview, fields)| match preview {
+            Some(RowPreview::Filmstrip) => wanting.want_camera(&stream),
+            Some(RowPreview::Sparkline) => wanting.want_values(&stream, fields),
+            None => {}
+        },
+    ));
+    let view = transport.view();
+    let hidden = choices.hidden_traces(&key);
     let toggle_stream = stream.clone();
     rsx! {
         div { class: "data-stream", "data-kind": if kind == StreamKind::Video { "video" } else { "data" },
-            "data-shown": state != PlotState::None,
+            "data-shown": state != PlotState::None, "data-preview": preview.map(RowPreview::attribute),
             div { class: "data-stream-name",
                 if kind == StreamKind::Data {
                     Button { purpose: ActionPurpose::Toggle, variant: ButtonVariant::Icon, class: "data-stream-expand",
@@ -235,12 +292,27 @@ fn StreamRow(
                 span { class: "data-stream-kind", "aria-hidden": "true",
                     if kind == StreamKind::Video { CameraStreamIcon {} } else { SignalStreamIcon {} }
                 }
-                span { class: "data-stream-label", title: "{stream.name()} · {schemas}",
-                    span { class: "truncate", "{stream.label()}" }
+                span { class: "data-stream-label", title: "{about}",
+                    span { class: "truncate", "{label}" }
                 }
-                span { class: "data-stream-count", title: "Messages in this episode", "{count}" }
             }
             div { class: "data-stream-track",
+                match preview {
+                    Some(RowPreview::Filmstrip) => match reads.camera(&stream) {
+                        Some(StreamRead::Ready(camera)) => rsx! { CameraFilmstrip { camera, view } },
+                        Some(StreamRead::Failed(error)) => rsx! {
+                            span { class: "episode-filmstrip-note", title: "{error}", "Stills unavailable" }
+                        },
+                        _ => rsx! { div { class: "episode-filmstrip", "data-reading": "true", "aria-hidden": "true" } },
+                    },
+                    Some(RowPreview::Sparkline) => match reads.values(&stream).as_ref().and_then(StreamRead::latest) {
+                        Some(plotted) => rsx! {
+                            ValuesSparkline { plotted: plotted.clone(), lane: None, hidden, view }
+                        },
+                        None => rsx! {},
+                    },
+                    None => rsx! {},
+                }
                 TimelineScrubber { interaction: transport.interaction() }
             }
         }
@@ -251,9 +323,9 @@ fn StreamRow(
                 Some(StreamSchema::Ready(root)) => {
                     let children = root.children();
                     if children.is_empty() {
-                        rsx! { FieldRows { stream_key: stream.key().to_owned(), field: root, depth: 0, choices } }
+                        rsx! { FieldRows { stream: stream.clone(), field: root, depth: 0, loaded: loaded.clone() } }
                     } else {
-                        rsx! { for child in children { FieldRows { key: "{child.label()}", stream_key: stream.key().to_owned(), field: child, depth: 0, choices } } }
+                        rsx! { for child in children { FieldRows { key: "{child.label()}", stream: stream.clone(), field: child, depth: 0, loaded: loaded.clone() } } }
                     }
                 }
             }
@@ -273,11 +345,13 @@ fn FieldNote(note: String, alert: bool) -> Element {
 
 #[component]
 fn FieldRows(
-    stream_key: String,
+    stream: RecordedStream,
     field: MessageField,
     depth: usize,
-    mut choices: StreamChoices,
+    loaded: LoadedEpisode,
 ) -> Element {
+    let mut choices = loaded.choices();
+    let stream_key = stream.key().to_owned();
     let children = field.children();
     let is_list = field.type_label().starts_with("list");
     let leaf = if children.is_empty() {
@@ -303,6 +377,14 @@ fn FieldRows(
             };
             let toggle_key = stream_key.clone();
             let toggle_field = leaf.clone();
+            // A plotted field previews its own lane, read with its stream's.
+            let values = loaded.reads().values(&stream);
+            let sparkline = values
+                .as_ref()
+                .and_then(StreamRead::latest)
+                .filter(|_| plotted);
+            let view = loaded.transport().view();
+            let hidden = choices.hidden_traces(&stream_key);
             rsx! {
                 div { class: "data-field", style: "--depth: {depth}",
                     div { class: "data-field-name",
@@ -315,7 +397,11 @@ fn FieldRows(
                         span { class: "data-field-label", title: leaf.label(), "{name}" }
                         span { class: "data-field-type", "{kind}" }
                     }
-                    div { class: "data-field-track" }
+                    div { class: "data-field-track",
+                        if let Some(plotted) = sparkline {
+                            ValuesSparkline { plotted: plotted.clone(), lane: Some(leaf.label()), hidden, view }
+                        }
+                    }
                 }
             }
         }
@@ -329,7 +415,7 @@ fn FieldRows(
                 div { class: "data-field-track" }
             }
             for child in children {
-                FieldRows { key: "{child.label()}", stream_key: stream_key.clone(), field: child, depth: depth + 1, choices }
+                FieldRows { key: "{child.label()}", stream: stream.clone(), field: child, depth: depth + 1, loaded: loaded.clone() }
             }
         },
     }

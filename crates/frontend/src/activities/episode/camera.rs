@@ -1,11 +1,12 @@
 //! Recorded cameras render the episode playhead; they never own a playback clock.
 use super::{
     decoder::{CameraPlayback, EncodedCamera},
-    messages::MessageBuffer,
+    reads::{StreamRead, StreamReads},
+    streams::RecordedStream,
     transport::{EpisodeTransport, FeedState},
 };
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{MessageRead, MessageWindow};
+use spiral_robotics_common::datasets::MessageRead;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -15,68 +16,53 @@ use wasm_bindgen::JsCast as _;
 /// One recorded camera, named on its picture the way a monitor wall names
 /// its screens: its panel carries no header to name it.
 #[component]
-pub(in crate::activities) fn EpisodeCamera(
-    request: MessageRead,
+pub(super) fn EpisodeCamera(
+    camera: RecordedStream,
+    reads: StreamReads,
     transport: EpisodeTransport,
     title: String,
 ) -> Element {
-    let timeline = transport.range();
-    let load_request = request.clone();
-    let mut video = use_resource(move || {
-        let request = load_request.clone();
-        async move {
-            let window = MessageWindow::new(
-                timeline.bounds(),
-                vec![
-                    vec!["value".into(), "format".into()],
-                    vec!["value".into(), "data".into()],
-                ],
-            );
-            let source = MessageBuffer::load(request.with_window(window)).await?;
-            Ok::<_, String>(Rc::new(EncodedCamera::from_messages(
-                source.batches(),
-                timeline.start_ns(),
-            )?))
-        }
-    });
-    let mut status = transport.clone();
-    let status_topic = format!(
+    let mut wanting = reads;
+    use_effect(use_reactive(&camera, move |camera| {
+        wanting.want_camera(&camera)
+    }));
+    let video = reads.camera(&camera);
+    let request = camera.read().clone();
+    let feed = format!(
         "{} · {}",
         request.topic().topic(),
         request.revision().variant()
     );
+    let mut status = transport.clone();
+    let status_feed = feed.clone();
+    let status_camera = camera.clone();
     let panel = dioxus_workbench::PanelContext::current();
     let activity = crate::shell::activity::WorkspaceActivity::current();
     // Only a camera on screen holds the clock: one waiting behind another tab
     // would otherwise keep playback buffering until someone looked at it.
     use_effect(move || {
+        let video = reads.camera(&status_camera);
         if !(panel.geometry().visible() && activity.is_active()) {
-            status.forget(&status_topic);
-        } else if *video.state().read() == UseResourceState::Pending {
-            status.report(&status_topic, FeedState::Loading);
-        } else if matches!(&*video.read(), Some(Err(_))) {
-            status.report(&status_topic, FeedState::Unavailable);
+            status.forget(&status_feed);
+        } else if video.as_ref().is_none_or(StreamRead::reading) {
+            status.report(&status_feed, FeedState::Loading);
+        } else if video.as_ref().and_then(StreamRead::failure).is_some() {
+            status.report(&status_feed, FeedState::Unavailable);
         }
     });
     let mut cleanup = transport.clone();
-    let cleanup_topic = format!(
-        "{} · {}",
-        request.topic().topic(),
-        request.revision().variant()
-    );
-    use_drop(move || cleanup.forget(&cleanup_topic));
-    let pending = *video.state().read() == UseResourceState::Pending;
+    use_drop(move || cleanup.forget(&feed));
+    let mut retrying = reads;
     rsx! {
         div { class: "episode-camera-panel",
-            if pending { p { class: "episode-camera-message", role: "status", "Loading…" } }
-            else { match &*video.read() {
-                Some(Ok(camera)) => rsx! { CameraFrames { camera: camera.clone(), transport, request: request.clone() } },
-                Some(Err(error)) => rsx! { div { class: "episode-camera-message", role: "alert",
+            match video {
+                Some(StreamRead::Ready(encoded)) => rsx! { CameraFrames { camera: encoded, transport, request } },
+                Some(StreamRead::Failed(error)) => rsx! { div { class: "episode-camera-message", role: "alert",
                     p { "The recorded camera could not be read: {error}" }
-                    button { class: "data-text-action", onclick: move |_| video.restart(), "Retry" }
+                    button { class: "data-text-action", onclick: move |_| retrying.read_camera(&camera), "Retry" }
                 } },
-                None => rsx! {},
-            } }
+                _ => rsx! { p { class: "episode-camera-message", role: "status", "Loading…" } },
+            }
             span { class: "camera-caption", "{title}" }
         }
     }

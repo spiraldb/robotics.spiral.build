@@ -37,9 +37,9 @@ pub(in crate::activities::curation) fn CurationDocumentBar(
     let mut opened_over = use_signal(|| Option::<String>::None);
     let current_id = controller.id();
     let switching = opened_over.read().as_deref() == Some(current_id.as_str());
-    // The list is read when Curation first mounts, which is exactly when
-    // this bar does.
-    use_future(move || async move { controller.refresh_documents() });
+    // The latest curation opens when Curation first mounts, which is exactly
+    // when this bar does.
+    use_future(move || async move { controller.open_latest() });
     rsx! {
         header { class: "document-bar",
             div { class: "document-identity",

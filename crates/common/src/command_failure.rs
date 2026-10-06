@@ -17,6 +17,10 @@ pub enum CommandFailureCode {
 }
 
 impl CommandFailureCode {
+    /// The body's code is what tells failures apart. A failure of something
+    /// Studio depends on would be a 502, but Cloudflare, in front of hosted
+    /// Studio, replaces the body of an origin 502 or 504 with its own error
+    /// page, so it travels as a 500 and keeps its message.
     pub const fn http_status(self) -> u16 {
         match self {
             Self::InvalidInput => 400,
@@ -24,8 +28,7 @@ impl CommandFailureCode {
             Self::NotFound => 404,
             Self::Conflict | Self::StaleProject => 409,
             Self::Transport => 503,
-            Self::External => 502,
-            Self::Internal => 500,
+            Self::External | Self::Internal => 500,
         }
     }
 }

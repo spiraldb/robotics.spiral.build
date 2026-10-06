@@ -9,8 +9,12 @@ tabs, splits, and resizing remain available, and each dataset remembers its
 arrangement in the browser.
 
 The Timeline lists every stream with messages in the episode, in topic order.
-Ticking a stream shows it: a camera opens its panel; a data stream draws all of
-its numeric fields (bounded to 16 per stream). Expanding a data stream reads its schema once and
+Ticking a stream shows it: a camera opens its panel and lays a filmstrip of its
+stills along its row; a data stream draws all of its numeric fields (bounded to
+16 per stream) and their shape, as a faint sparkline, along its row. An
+unticked row stays one quiet line and reads nothing. Cameras are named by what
+tells them apart (`left-wrist`, `top`), as their pictures are captioned; a
+row's topic, schemas and message count are in its tooltip. Expanding a data stream reads its schema once and
 lists nested structs, lists, scalar types, and nullability (`?`) with
 per-field checkboxes. Kind is decided from recorded schema names only; topic and field names carry no
 physical meaning, and a validity flag is an ordinary selectable boolean.
@@ -18,9 +22,16 @@ physical meaning, and a validity flag is an ordinary selectable boolean.
 Plots draw one section per plotted stream and one lane per field, one trace
 per recorded array index; the playhead and the hover cursor cross every lane.
 Traces load a complete bounded window; if the whole episode exceeds the read
-bounds, that stream falls back to the visible span and says so. Video mounts
-only while its panel is visible; a closed camera releases its buffers and
-reloads when shown again.
+bounds, that stream falls back to the visible span and says so, and its row
+draws no sparkline.
+
+A camera's encoded video and a stream's plotted values are read once per
+episode and shared by the panel and its timeline row (`episode/reads.rs`). A
+camera decodes only while its panel is visible. Its filmstrip decodes stills
+of its own in the browser from the same video: one still per cell of the
+visible span, at the frame shown mid-cell, visited left to right so each costs
+at most one keyframe interval, and kept while the row is shown. No still is
+decoded on the server.
 
 ## One message transport
 

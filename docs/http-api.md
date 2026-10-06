@@ -50,8 +50,12 @@ JSON endpoint failures have this shape:
 | `not_found` | 404 | Missing resource or endpoint |
 | `conflict` | 409 | Operation conflicts with current activity |
 | `stale_project` | 409 | Request names an endpoint Studio no longer uses, or a deleted workspace |
-| `external` | 502 | An upstream operation failed |
+| `external` | 500 | An upstream operation failed |
 | `internal` | 500 | Backend failure |
+
+`external` is not a 502 because Cloudflare, in front of hosted Studio, replaces
+the body of an origin 502 or 504 with its own error page; the code tells
+`external` and `internal` apart.
 
 HTTP extraction failures also use `invalid_input`, with 400 for malformed JSON or
 query values, 422 for a mismatched JSON shape, 413 for oversized payloads, 415 for

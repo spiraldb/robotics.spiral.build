@@ -3477,7 +3477,7 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply flex shrink-0 text-ink-faint;
   }
 
-  .data-stream[data-kind="video"] .data-stream-kind {
+  .data-stream[data-kind="video"][data-shown="true"] .data-stream-kind {
     color: var(--tone-kind-camera);
   }
 
@@ -3743,6 +3743,27 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 
 }
+
+/* A shown stream's row previews what it shows along its track — a camera's
+   stills, a stream's plotted values — and a hidden one stays a quiet line. */
+.data-stream[data-preview="filmstrip"] > .data-stream-name,
+.data-stream[data-preview="filmstrip"] > .data-stream-track { height: 40px; }
+.data-stream[data-preview="sparkline"] > .data-stream-name,
+.data-stream[data-preview="sparkline"] > .data-stream-track { height: 32px; }
+.episode-filmstrip { position: absolute; inset: 2px 0; overflow: hidden; }
+.episode-filmstrip[data-reading="true"] { background: var(--tone-sunken); animation: data-track-pulse 1.4s ease-in-out infinite; }
+/* Stills sit edge to edge, parted by a hairline of the surface, the way a
+   contact sheet reads. A cell waits as a sunken tile until its still lands. */
+.episode-filmstrip-cell { position: absolute; top: 0; bottom: 0; box-sizing: border-box; overflow: hidden; border-right: 1px solid var(--tone-surface); background: var(--tone-sunken); }
+.episode-filmstrip-cell img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: left center; animation: episode-still-in 160ms ease-out; user-select: none; }
+@keyframes episode-still-in { from { opacity: 0; } }
+.episode-filmstrip-note { position: absolute; inset: 0; display: flex; align-items: center; overflow: hidden; padding: 0 8px; color: var(--tone-ink-faint); font-size: 10.5px; white-space: nowrap; text-overflow: ellipsis; }
+.data-sparkline { position: absolute; inset: 0; display: block; width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
+.data-sparkline path { fill: none; stroke: var(--tone-ink); stroke-opacity: 0.32; stroke-width: 1; stroke-linejoin: round; stroke-linecap: round; }
+@media (prefers-reduced-motion: reduce) { .episode-filmstrip[data-reading="true"] { animation: none; } }
+/* The playhead keeps a hairline of the surface on each side, so it reads over
+   a camera's stills as well as over paper. */
+.data-timeline-cursor { box-shadow: 0 0 0 1px color-mix(in srgb, var(--tone-surface) 65%, transparent); }
 
 /* Derived series extend the existing episode ruler and stream grid. */
 .data-numeric-track .data-numeric-name { height: auto; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 12px; gap: 4px; }

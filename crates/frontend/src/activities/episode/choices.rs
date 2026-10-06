@@ -290,6 +290,17 @@ impl StreamChoices {
             .hidden_traces
             .contains(&PlotSelection::trace_key(key, trace))
     }
+    /// The traces of stream `key` the operator hid.
+    pub(super) fn hidden_traces(&self, key: &str) -> Vec<String> {
+        let stream = PlotSelection::trace_key(key, "");
+        self.plots
+            .read()
+            .hidden_traces
+            .iter()
+            .filter_map(|trace| trace.strip_prefix(&stream))
+            .map(str::to_owned)
+            .collect()
+    }
     pub(super) fn toggle_trace(&mut self, key: &str, trace: &str) {
         let trace_key = PlotSelection::trace_key(key, trace);
         let mut plots = self.plots.write();

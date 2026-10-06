@@ -633,10 +633,10 @@ impl CurationController {
     pub(crate) fn documents(&self) -> Vec<CurationSummary> {
         self.session.summaries()
     }
-    /// Curation opens on a blank graph, so the first read lists what is saved
-    /// without opening any of it.
-    pub(crate) fn refresh_documents(self) {
-        self.session.refresh_summaries();
+    /// Curation opens on the most recently saved curation, and on a blank
+    /// graph only when there is none.
+    pub(crate) fn open_latest(self) {
+        self.session.open_latest(move |opened| self.adopt(opened));
     }
 
     /// Start a new, unsaved, blank graph.

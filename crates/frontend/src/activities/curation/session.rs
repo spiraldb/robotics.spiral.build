@@ -241,17 +241,33 @@ impl DocumentSession {
         });
     }
 
-    /// List what is saved without opening any of it: Curation starts on a
-    /// blank graph rather than on the most recent one.
-    pub(super) fn refresh_summaries(mut self) {
+    /// List what is saved and open the most recently saved curation, which
+    /// Studio lists first. A project with none stays on the blank graph, and
+    /// so does one the operator started drawing before the list arrived.
+    pub(super) fn open_latest(
+        mut self,
+        on_install: impl FnOnce(&CurationDocument) -> Result<(), String> + 'static,
+    ) {
         if self.command().is_some() {
             return;
         }
         self.load_error.set(None);
         self.command.set(Some(DocumentCommand::Opening));
         self.spawn(async move {
-            match CurationClient::current().list().await {
-                Ok(summaries) => self.summaries.set(summaries),
+            let client = CurationClient::current();
+            match client.list().await {
+                Ok(summaries) => {
+                    let latest = summaries.first().map(|summary| summary.id().to_owned());
+                    self.summaries.set(summaries);
+                    let untouched =
+                        self.baseline.peek().revision() == 0 && !self.peek_unsaved_changes();
+                    if let Some(id) = latest.filter(|_| untouched) {
+                        match client.load(&id).await {
+                            Ok(document) => self.install(document, on_install),
+                            Err(error) => self.load_error.set(Some(error.to_string())),
+                        }
+                    }
+                }
                 Err(error) => self.load_error.set(Some(error.to_string())),
             }
             self.command.set(None);

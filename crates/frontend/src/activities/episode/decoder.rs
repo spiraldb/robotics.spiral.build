@@ -1,9 +1,10 @@
 //! Native WebCodecs bindings and playhead-following playback for every
 //! recorded camera. Kept in Rust so decode cancellation and frame disposal
 //! follow component lifetime.
+use super::messages::MessageBuffer;
 use base64::Engine as _;
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
-use spiral_robotics_common::datasets::EpisodeVideo;
+use spiral_robotics_common::datasets::{EpisodeVideo, MessageRead};
 use std::{cell::RefCell, ops::Range, rc::Rc};
 use wasm_bindgen::{JsCast as _, prelude::*};
 
@@ -47,6 +48,15 @@ extern "C" {
     type FrameCanvas;
     #[wasm_bindgen(method, structural, catch, js_name = drawImage)]
     fn draw_frame(this: &FrameCanvas, frame: &VideoFrame, x: f64, y: f64) -> Result<(), JsValue>;
+    #[wasm_bindgen(method, structural, catch, js_name = drawImage)]
+    fn draw_frame_scaled(
+        this: &FrameCanvas,
+        frame: &VideoFrame,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> Result<(), JsValue>;
 }
 
 struct CameraPacket {
@@ -82,10 +92,13 @@ impl EncodedCamera {
         })
     }
 
-    pub(super) fn from_messages(
-        batches: &[arrow_array::RecordBatch],
-        origin: u64,
-    ) -> Result<Self, String> {
+    /// Every packet `request` reads, on a clock that starts at `origin`.
+    pub(super) async fn read(request: MessageRead, origin: u64) -> Result<Self, String> {
+        let messages = MessageBuffer::load(request).await?;
+        Self::from_messages(messages.batches(), origin)
+    }
+
+    fn from_messages(batches: &[arrow_array::RecordBatch], origin: u64) -> Result<Self, String> {
         use arrow_array::Array as _;
         use spiral_robotics_common::datasets::H264AccessUnit;
         let mut camera = Self {
@@ -159,6 +172,19 @@ impl EncodedCamera {
             return Err("No recorded video in this episode".into());
         }
         Ok(camera)
+    }
+
+    /// The frame on screen at `seconds`: the last one logged by then, or the
+    /// first before it.
+    pub(super) fn frame_at(&self, seconds: f64) -> Option<usize> {
+        let logged = self
+            .packets
+            .partition_point(|packet| packet.microseconds as f64 <= seconds * 1e6);
+        (!self.packets.is_empty()).then(|| logged.saturating_sub(1))
+    }
+    /// When `frame` was logged, in seconds from the episode's start.
+    pub(super) fn frame_time(&self, frame: usize) -> f64 {
+        self.packets[frame].microseconds as f64 / 1e6
     }
 
     pub(super) fn frame_seconds(&self, seconds: f64) -> Option<f64> {
@@ -346,17 +372,30 @@ impl CameraPlayback {
         canvas: &web_sys::HtmlCanvasElement,
         seconds: f64,
     ) -> Result<bool, String> {
+        match self.with_frame(seconds, |frame| Self::paint(canvas, frame)) {
+            Some(painted) => painted.map(|()| true),
+            None => Self::clear(canvas).map(|()| false),
+        }
+    }
+
+    /// The frame on screen at `seconds` as a still `height` pixels tall at
+    /// the frame's own aspect.
+    pub(super) async fn still(&mut self, seconds: f64, height: u32) -> Result<CameraStill, String> {
+        self.prepare(seconds).await?;
+        self.with_frame(seconds, |frame| CameraStill::of(frame, height))
+            .unwrap_or_else(|| Err("No frame at this time".into()))
+    }
+
+    /// `paint` applied to the latest retained frame at or before `seconds`.
+    fn with_frame<R>(&self, seconds: f64, paint: impl FnOnce(&VideoFrame) -> R) -> Option<R> {
         let timestamp = (seconds * 1e6).round();
         let output = self.output.borrow();
-        match output
+        output
             .frames
             .iter()
             .rev()
             .find(|frame| frame.0.timestamp() <= timestamp)
-        {
-            Some(frame) => Self::paint(canvas, &frame.0).map(|()| true),
-            None => Self::clear(canvas).map(|()| false),
-        }
+            .map(|frame| paint(&frame.0))
     }
 
     fn paint(canvas: &web_sys::HtmlCanvasElement, frame: &VideoFrame) -> Result<(), String> {
@@ -381,6 +420,42 @@ impl CameraPlayback {
             .map_err(DecoderSession::error)?
             .ok_or_else(|| "Camera canvas is unavailable".to_owned())
             .map(JsCast::unchecked_into)
+    }
+}
+
+/// One frame drawn small, such as a cell of a camera's filmstrip.
+pub(super) struct CameraStill {
+    /// The picture as a JPEG `data:` URL.
+    url: String,
+    /// The frame's width over its height.
+    aspect: f64,
+}
+
+impl CameraStill {
+    fn of(frame: &VideoFrame, height: u32) -> Result<Self, String> {
+        let aspect = f64::from(frame.width()) / f64::from(frame.height().max(1));
+        let width = (f64::from(height) * aspect).round().max(1.0);
+        let canvas = web_sys::window()
+            .and_then(|window| window.document())
+            .ok_or("No document to draw a still in")?
+            .create_element("canvas")
+            .map_err(DecoderSession::error)?
+            .unchecked_into::<web_sys::HtmlCanvasElement>();
+        canvas.set_width(width as u32);
+        canvas.set_height(height);
+        CameraPlayback::context(&canvas)?
+            .draw_frame_scaled(frame, 0.0, 0.0, width, f64::from(height))
+            .map_err(DecoderSession::error)?;
+        let url = canvas
+            .to_data_url_with_type("image/jpeg")
+            .map_err(DecoderSession::error)?;
+        Ok(Self { url, aspect })
+    }
+    pub(super) fn url(&self) -> &str {
+        &self.url
+    }
+    pub(super) fn aspect(&self) -> f64 {
+        self.aspect
     }
 }
 

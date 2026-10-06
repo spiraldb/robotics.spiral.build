@@ -13,6 +13,7 @@ use super::{
     choices::StreamChoices,
     identity::Episode,
     plots::PlotsPanel,
+    reads::StreamReads,
     remembered_layout::RememberedLayout,
     robot::{RobotModel, RobotStage},
     streams::{RecordedStream, StreamCatalog},
@@ -160,12 +161,13 @@ impl Evidence {
 
 /// An inspected episode once its streams are known: the streams its panels
 /// show, the clock they all read, the operator's choices among the streams,
-/// and the dataset's robot model.
+/// what has been read of them, and the dataset's robot model.
 #[derive(Clone, PartialEq)]
 pub(super) struct LoadedEpisode {
     catalog: StreamCatalog,
     transport: EpisodeTransport,
     choices: StreamChoices,
+    reads: StreamReads,
     robot: Resource<Result<Option<RobotModel>, String>>,
 }
 
@@ -178,6 +180,9 @@ impl LoadedEpisode {
     }
     pub(super) fn choices(&self) -> StreamChoices {
         self.choices
+    }
+    pub(super) fn reads(&self) -> StreamReads {
+        self.reads
     }
 }
 
@@ -200,6 +205,7 @@ fn InspectedEpisode(
     let mut catalog = use_resource(move || StreamCatalog::load(selection.clone()));
     let robot = RobotModel::use_dataset(episode.dataset());
     let choices = StreamChoices::use_choices();
+    let reads = StreamReads::use_reads(transport.range());
     use_effect(move || {
         if let Some(Ok(catalog)) = &*catalog.read() {
             let mut choices = choices;
@@ -212,6 +218,7 @@ fn InspectedEpisode(
             catalog: streams.clone(),
             transport: transport.clone(),
             choices,
+            reads,
             robot,
         })),
         (Some(Err(error)), _) => Err(error.clone()),
@@ -278,7 +285,7 @@ fn InspectionDock(
                 EpisodeArrangement::camera(camera.key()),
                 title.clone(),
                 "episode-view-0",
-                rsx! { EpisodeCamera { request: camera.read().clone(), transport: transport.clone(), title } },
+                rsx! { EpisodeCamera { camera: (*camera).clone(), reads: loaded.reads(), transport: transport.clone(), title } },
             )
             .with_closable(true)
             .with_tab_icon(rsx! { CameraStreamIcon {} })
