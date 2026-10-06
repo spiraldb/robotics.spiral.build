@@ -392,11 +392,7 @@ impl SubtaskColumns {
                 .flatten()
                 .ok_or_else(|| format!("A judgment of {value} is not between 0 and 1."))
         };
-        let mut values = vec![
-            "$1".to_owned(),
-            nanos(row.start_time),
-            nanos(row.end_time),
-        ];
+        let mut values = vec!["$1".to_owned(), nanos(row.start_time), nanos(row.end_time)];
         for (column, kind) in &self.0 {
             match (kind, row.judgment(column)) {
                 (SubtaskColumn::Description, _) => values.push(SqlLiteral::text(&row.description)),
@@ -534,7 +530,11 @@ mod tests {
         // A subtask read before a judgment was made has none to hand on, and
         // one never read from a preview has no place to.
         let described = SubtaskRow::new(EpisodeId::fixture(1), (0.0, 1.0), "grasp").unwrap();
-        assert!(columns().values(&described.clone().placed_at(0), 0).is_err());
+        assert!(
+            columns()
+                .values(&described.clone().placed_at(0), 0)
+                .is_err()
+        );
         assert!(
             columns()
                 .values(&described, 0)
