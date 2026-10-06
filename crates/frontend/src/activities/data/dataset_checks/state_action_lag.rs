@@ -104,7 +104,7 @@ impl StateActionLag {
     }
 
     fn sql(streams: CheckedStreams<'_>, paired: &PairedColumns<'_>) -> Result<String, String> {
-        let joints = paired.state().len();
+        let joints = paired.state().count();
         let window = "OVER (PARTITION BY id ORDER BY log_time)";
         let shifted = (Self::EARLIEST..=Self::LATEST)
             .flat_map(|shift| {

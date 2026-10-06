@@ -347,29 +347,9 @@ earlier encoding is refused.
 
 - Columns no curation reads any more stay in the answers table; collecting
   them is later. Cancelling a running query is Spiral's to add.
-- Training does not read published views yet. When it does, it resamples:
-  a recording keeps every stream at its own rate and a view only names
-  intervals, so Training picks a sample rate and makes one moment per tick
-  inside each interval. Rollout must run at that rate, since a policy learns
-  the time between the actions of a chunk; LeRobot, ACT, and π0 all train
-  and control at one rate.
-- The checkpoint carries how the model sees data, and rollout replays it:
-  sample rate, observation and action streams, image size, normalization,
-  and how each stream fills a tick (nearest frame, latest value, or
-  interpolation). It already carries `sample_hz`, camera streams, image
-  normalization, and frame alignment. Each image adjustment has one home: a
-  recording's missing colour space is a dataset fact set in Data; exposure
-  normalization is Training's input contract; colour jitter is training
-  augmentation, never replayed; a few badly exposed episodes are a Curation
-  measure.
-- Picking that up means: a training config of a published view, observation
-  streams, an action stream, a sample rate, and a fill rule per stream, in
-  place of `dataset_id`, `sql`, `state_column`, and `action_column`; a picker
-  listing published views with `episode_id`, `start_ns`, and `end_ns`; a
-  training choice of whether action chunks read past an interval's edges; a
-  run record of the view definition it read; and `McapTrainingDataset` as the
-  resampler. Spiral would need every frame of a camera within an interval
-  decoded sequentially, reliable per-frame presentation times, state and
-  command fields as numeric columns keyed by log time, and an exposure
-  adjustment in `spql.image`.
-- Open: since a view is live, should a training run pin the data it read?
+- Training reads published views ([Training](training.md)): it resamples
+  each kept interval onto its own clock, and the checkpoint carries how the
+  model saw the data. Exposure normalization and colour jitter are not
+  there yet.
+- A run pins what it read: its uploads are named by the dataset version they
+  were read from, though its record keeps only the view's name.

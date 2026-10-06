@@ -154,12 +154,12 @@ gcloud secrets add-iam-policy-binding cloudflare-tunnel-token --project=spiraldb
 | --- | --- | --- |
 | `openrouter-api-key` | `OPENROUTER_API_KEY` | Break down, Classify, Find similar |
 | `huggingface-token` | `HF_TOKEN` | Downloads of models and datasets from Hugging Face |
-| `warp-progress-token` | `WARP_PROGRESS_TOKEN` | Score progress, on the Modal service the image names in `WARP_PROGRESS_URL` |
+| `modal-service-token` | `MODAL_SERVICE_TOKEN` | Score progress and training, on the Modal services the image names in `WARP_PROGRESS_URL` and `TRAINING_SERVICE_URL` |
 
 Create each secret, paste its value at the silent prompt, and let the VM's account read it:
 
 ```bash
-for SECRET in openrouter-api-key huggingface-token warp-progress-token; do
+for SECRET in openrouter-api-key huggingface-token modal-service-token; do
   gcloud secrets create "$SECRET" --project=spiraldb-robotics --replication-policy=automatic
   printf '%s: ' "$SECRET" && read -rs VALUE && echo && printf '%s' "$VALUE" \
     | gcloud secrets versions add "$SECRET" --project=spiraldb-robotics --data-file=- \

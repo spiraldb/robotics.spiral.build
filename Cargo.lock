@@ -5361,7 +5361,6 @@ dependencies = [
  "spiral-robotics-common",
  "spiral-robotics-inference",
  "spiral-robotics-storage",
- "spiral-robotics-training",
  "tempfile",
  "tokio",
  "tower",
@@ -5523,16 +5522,6 @@ dependencies = [
  "url",
  "uuid",
  "zip",
-]
-
-[[package]]
-name = "spiral-robotics-training"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "spiral-robotics-common",
- "thiserror 2.0.19",
 ]
 
 [[package]]

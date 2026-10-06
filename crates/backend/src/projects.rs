@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::settings::{
-    DataSettings, RobotConnectorSettings, SettingsUpdate, SpiralSettings, TrainingRuntimeSettings,
+    DataSettings, RobotConnectorSettings, SettingsUpdate, SpiralSettings,
 };
 use spiral_robotics_storage::{
     ProjectStore, ProviderKeys, SpiralAccess, SpiralConnection, SpiralConnectionSettings,
@@ -81,7 +81,10 @@ impl ProjectFactory {
         let studio = self.data.studio.project(&store.connection_settings());
         let storage = Arc::new(StorageManager::new(store, studio));
         Arc::new(OpenProject {
-            training: Arc::new(TrainingManager::new(storage.clone())),
+            training: Arc::new(TrainingManager::new(
+                storage.clone(),
+                self.data.keys.clone(),
+            )),
             curation: Arc::new(CurationManager::new(
                 storage.clone(),
                 self.data.keys.clone(),
@@ -122,23 +125,15 @@ impl OpenProject {
             .map_err(OperationError::External)
     }
 
-    /// Runs keep the runtime they started on, so the endpoint applies to the
-    /// next run and probe.
     async fn apply_preferences(
         &self,
         preferences: StoredStudioPreferences,
     ) -> Result<(), OperationError> {
-        let endpoint_changed =
-            self.preferences().await?.training().endpoint() != preferences.training().endpoint();
         self.storage()
             .preferences()
             .save(&preferences)
             .await
-            .map_err(OperationError::External)?;
-        if endpoint_changed {
-            self.training().refresh_readiness().await;
-        }
-        Ok(())
+            .map_err(OperationError::External)
     }
 
     /// Whether training is active.
@@ -267,26 +262,18 @@ impl ProjectRegistry {
         Ok(DataSettings::new(
             OpenProject::present(&connection),
             name,
-            TrainingRuntimeSettings::new(preferences.training().endpoint()),
             RobotConnectorSettings::new(preferences.robot_connector().address()),
         ))
     }
 
-    /// Rename `project`'s workspace and set its training runtime.
+    /// Rename `project`'s workspace.
     pub(crate) async fn update_settings(
         &self,
         project: &OpenProject,
         update: SettingsUpdate,
     ) -> Result<DataSettings, OperationError> {
-        let (name, training) = update.into_parts();
         let project_id = Self::chosen(project)?;
-        let preferences = project
-            .preferences()
-            .await?
-            .with_training_endpoint(training.endpoint())
-            .map_err(OperationError::InvalidInput)?;
-        self.rename_workspace(&project_id, &name).await?;
-        project.apply_preferences(preferences).await?;
+        self.rename_workspace(&project_id, update.name()).await?;
         self.settings(project).await
     }
 
@@ -633,16 +620,16 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn training_endpoint_changes_apply_in_place() {
+    async fn preference_changes_apply_in_place() {
         let fixture = ProjectFixture::new().await;
         let project = fixture.open("").await;
         let preferences = StoredStudioPreferences::default()
-            .with_training_endpoint("http://127.0.0.1:5050")
+            .with_robot_connector("http://127.0.0.1:5050")
             .unwrap();
         project.apply_preferences(preferences).await.unwrap();
         assert!(Arc::ptr_eq(&project, &fixture.open("").await));
         let settings = fixture.projects.settings(&project).await.unwrap();
-        assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");
+        assert_eq!(settings.robot_connector().address(), "http://127.0.0.1:5050");
         assert_eq!(settings.name(), "");
     }
 
@@ -663,7 +650,7 @@ pub(crate) mod tests {
             .create(connection, fixture.session().await.access())
             .unwrap();
         let preferences = StoredStudioPreferences::default()
-            .with_training_endpoint("http://127.0.0.1:5050")
+            .with_robot_connector("http://127.0.0.1:5050")
             .unwrap();
         project
             .storage()
@@ -679,11 +666,7 @@ pub(crate) mod tests {
             "https://spfs.spiraldb.dev"
         );
         assert_eq!(settings.name(), "configured_project");
-        assert_eq!(settings.training().endpoint(), "http://127.0.0.1:5050");
-        assert_eq!(
-            settings.robot_connector().address(),
-            RobotConnectorSettings::default().address()
-        );
+        assert_eq!(settings.robot_connector().address(), "http://127.0.0.1:5050");
     }
 }
 

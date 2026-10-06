@@ -1,9 +1,11 @@
-//! Native policy-training contracts: one run configuration, and what a
-//! worker reports about the runs it holds.
+//! Policy training: what a run trains on, how its model sees the data, and
+//! what a run reports. See `docs/training.md`.
 
 use serde::{Deserialize, Serialize};
 
-/// The policy family executed by the native training runtime.
+use crate::datasets::DatasetSelection;
+
+/// The policy family a run trains.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingPolicy {
@@ -12,14 +14,6 @@ pub enum TrainingPolicy {
 }
 
 impl TrainingPolicy {
-    pub const fn mcap_training_blocker(self) -> Option<&'static str> {
-        match self {
-            Self::Act => Some(
-                "MCAP camera training is unavailable until Spiral supports decoding MCAP video into training images.",
-            ),
-        }
-    }
-
     pub const fn label(self) -> &'static str {
         match self {
             Self::Act => "ACT · vision",
@@ -27,31 +21,134 @@ impl TrainingPolicy {
     }
 }
 
-/// Model-specific ACT settings kept together so checkpoints remain
-/// self-describing as the training UI grows.
+/// What a run trains on: one published curated view of one dataset.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TrainingSource {
+    dataset: DatasetSelection,
+    view: String,
+}
+
+impl TrainingSource {
+    pub fn new(dataset: DatasetSelection, view: impl Into<String>) -> Self {
+        Self {
+            dataset,
+            view: view.into(),
+        }
+    }
+    pub const fn dataset(&self) -> &DatasetSelection {
+        &self.dataset
+    }
+    pub fn view(&self) -> &str {
+        &self.view
+    }
+}
+
+/// How the model sees the data: which cameras, at what size, on what clock.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TrainingObservation {
+    /// Video topics, in the order the policy reads them.
+    cameras: Vec<String>,
+    /// The size every camera's frames are resized to.
+    image: ImageSize,
+    /// The training clock: ticks per second over each kept interval.
+    rate_hz: f64,
+}
+
+impl Default for TrainingObservation {
+    fn default() -> Self {
+        Self {
+            cameras: Vec::new(),
+            image: ImageSize::new(320, 240),
+            rate_hz: 30.0,
+        }
+    }
+}
+
+impl TrainingObservation {
+    pub fn cameras(&self) -> &[String] {
+        &self.cameras
+    }
+    pub const fn image(&self) -> ImageSize {
+        self.image
+    }
+    pub const fn rate_hz(&self) -> f64 {
+        self.rate_hz
+    }
+    pub fn set_cameras(&mut self, cameras: Vec<String>) {
+        self.cameras = cameras;
+    }
+    pub const fn set_image(&mut self, image: ImageSize) {
+        self.image = image;
+    }
+    pub const fn set_rate_hz(&mut self, rate_hz: f64) {
+        self.rate_hz = rate_hz;
+    }
+}
+
+/// A frame size in pixels.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ImageSize {
+    width: u32,
+    height: u32,
+}
+
+impl ImageSize {
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+    /// This size divided by `divisor` on both sides, at least one pixel.
+    pub const fn divided(self, divisor: u32) -> Self {
+        let width = self.width / divisor;
+        let height = self.height / divisor;
+        Self::new(
+            if width == 0 { 1 } else { width },
+            if height == 0 { 1 } else { height },
+        )
+    }
+}
+
+/// How the optimizer runs.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TrainingOptimizationConfig {
+    steps: u64,
+    batch_size: usize,
+    /// Fraction of episodes held out from optimizer updates.
+    validation_split: f64,
+    learning_rate: f64,
+    checkpoint_every: u64,
+    /// Actions predicted per observation.
+    chunk_size: usize,
+    seed: u64,
+}
+
+impl Default for TrainingOptimizationConfig {
+    fn default() -> Self {
+        Self {
+            steps: 100_000,
+            batch_size: 8,
+            validation_split: 0.1,
+            learning_rate: 1.0e-5,
+            checkpoint_every: 20_000,
+            chunk_size: 100,
+            seed: 1_000,
+        }
+    }
+}
+
+/// ACT's architecture, kept together so checkpoints stay self-describing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActTrainingConfig {
-    #[serde(flatten)]
-    input: ActInputConfig,
     #[serde(flatten)]
     architecture: ActArchitectureConfig,
     #[serde(flatten)]
     attention: ActAttentionConfig,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ActInputConfig {
-    /// Camera stream IDs that must be present for every sampled anchor.
-    /// An empty list discovers every camera stream shared by the selected
-    /// dataset episodes, matching LeRobot's feature-driven policy inputs.
-    camera_streams: Vec<String>,
-    /// Requested image width. Zero preserves the recorded camera width.
-    image_width: usize,
-    /// Requested image height. Zero preserves the recorded camera height.
-    image_height: usize,
-    /// Spiral video decoder implementation: auto, ffmpeg, videotoolbox, or nvdec.
-    video_decoder: String,
-    /// Use the ImageNet initialization expected by vision ACT.
+    /// Start the vision backbone from its ImageNet weights.
     pretrained_backbone: bool,
 }
 
@@ -78,23 +175,6 @@ pub struct ActAttentionConfig {
     kl_weight: f64,
 }
 
-impl ActInputConfig {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(
-        camera_streams: Vec<String>,
-        image_size: (usize, usize),
-        video_decoder: impl Into<String>,
-    ) -> Self {
-        Self {
-            camera_streams,
-            image_width: image_size.0,
-            image_height: image_size.1,
-            video_decoder: video_decoder.into(),
-            pretrained_backbone: true,
-        }
-    }
-}
-
 impl ActArchitectureConfig {
     #[cfg(any(test, feature = "test-support"))]
     pub const fn new(hidden_dim: usize, latent_dim: usize, layers: ActLayerCounts) -> Self {
@@ -119,16 +199,20 @@ impl ActAttentionConfig {
     }
 }
 
+impl ActLayerCounts {
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn new(encoder: usize, variational_encoder: usize, decoder: usize) -> Self {
+        Self {
+            encoder,
+            variational_encoder,
+            decoder,
+        }
+    }
+}
+
 impl Default for ActTrainingConfig {
     fn default() -> Self {
         Self {
-            input: ActInputConfig {
-                camera_streams: Vec::new(),
-                image_width: 0,
-                image_height: 0,
-                video_decoder: "auto".to_owned(),
-                pretrained_backbone: true,
-            },
             architecture: ActArchitectureConfig {
                 hidden_dim: 512,
                 latent_dim: 32,
@@ -144,31 +228,23 @@ impl Default for ActTrainingConfig {
                 feedforward_dim: 3_200,
                 kl_weight: 10.0,
             },
+            pretrained_backbone: true,
         }
     }
 }
 
 impl ActTrainingConfig {
-    pub fn set_camera_streams(&mut self, streams: Vec<String>) {
-        self.input.camera_streams = streams;
-    }
-    pub const fn set_image_width(&mut self, width: usize) {
-        self.input.image_width = width;
-    }
-    pub const fn set_image_height(&mut self, height: usize) {
-        self.input.image_height = height;
-    }
-    pub fn camera_streams(&self) -> &[String] {
-        &self.input.camera_streams
-    }
-    pub const fn image_width(&self) -> usize {
-        self.input.image_width
-    }
-    pub const fn image_height(&self) -> usize {
-        self.input.image_height
-    }
-    pub fn video_decoder(&self) -> &str {
-        &self.input.video_decoder
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(
+        architecture: ActArchitectureConfig,
+        attention: ActAttentionConfig,
+        pretrained_backbone: bool,
+    ) -> Self {
+        Self {
+            architecture,
+            attention,
+            pretrained_backbone,
+        }
     }
     pub const fn hidden_dim(&self) -> usize {
         self.architecture.hidden_dim
@@ -194,138 +270,45 @@ impl ActTrainingConfig {
     pub const fn kl_weight(&self) -> f64 {
         self.attention.kl_weight
     }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(
-        input: ActInputConfig,
-        architecture: ActArchitectureConfig,
-        attention: ActAttentionConfig,
-    ) -> Self {
-        Self {
-            input,
-            architecture,
-            attention,
-        }
+    pub const fn pretrained_backbone(&self) -> bool {
+        self.pretrained_backbone
     }
 }
 
-/// Lifecycle of one training run, as its worker reports it.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrainingRunPhase {
-    #[default]
-    Starting,
-    Running,
-    Stopping,
-    Completed,
-    Stopped,
-    Failed,
-    /// The run's worker no longer holds it, or cannot be reached.
-    Unavailable,
-}
-
-impl TrainingRunPhase {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Starting => "Starting",
-            Self::Running => "Running",
-            Self::Stopping => "Stopping",
-            Self::Completed => "Completed",
-            Self::Stopped => "Stopped",
-            Self::Failed => "Failed",
-            Self::Unavailable => "Unavailable",
-        }
-    }
-
-    pub const fn active(self) -> bool {
-        matches!(self, Self::Starting | Self::Running | Self::Stopping)
-    }
-}
-
-/// Everything needed to reproduce one run. Spiral is the only sample source.
+/// Everything needed to reproduce one run.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TrainingConfig {
-    #[serde(flatten)]
-    selection: TrainingDataSelection,
-    #[serde(flatten)]
+    run_name: String,
+    policy: TrainingPolicy,
+    source: TrainingSource,
+    observation: TrainingObservation,
     optimization: TrainingOptimizationConfig,
     act: ActTrainingConfig,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct TrainingDataSelection {
-    run_name: String,
-    /// Relational dataset selected by the operator. The configured Spiral
-    /// namespace remains a storage location; this ID is the training set.
-    dataset_id: String,
-    policy: TrainingPolicy,
-    sql: String,
-    state_column: String,
-    action_column: String,
-    device: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct TrainingOptimizationConfig {
-    steps: u64,
-    batch_size: usize,
-    /// Fraction of covered episodes held out from optimizer updates.
-    validation_split: f64,
-    learning_rate: f64,
-    checkpoint_every: u64,
-    chunk_size: usize,
-    seed: u64,
-}
-
-impl Default for TrainingConfig {
-    fn default() -> Self {
+impl TrainingConfig {
+    /// The default run of `source`.
+    pub fn new(run_name: impl Into<String>, source: TrainingSource) -> Self {
         Self {
-            selection: TrainingDataSelection::new("act-run", "default", ""),
-            optimization: TrainingOptimizationConfig {
-                steps: 100_000,
-                batch_size: 8,
-                validation_split: 0.1,
-                learning_rate: 1.0e-5,
-                checkpoint_every: 20_000,
-                chunk_size: 100,
-                seed: 1_000,
-            },
+            run_name: run_name.into(),
+            policy: TrainingPolicy::default(),
+            source,
+            observation: TrainingObservation::default(),
+            optimization: TrainingOptimizationConfig::default(),
             act: ActTrainingConfig::default(),
         }
     }
-}
-
-impl TrainingConfig {
-    pub fn for_dataset(
-        run_name: impl Into<String>,
-        dataset_id: impl Into<String>,
-        sql: impl Into<String>,
-    ) -> Self {
-        let defaults = Self::default();
-        Self {
-            selection: TrainingDataSelection::new(run_name, dataset_id, sql),
-            ..defaults
-        }
-    }
     pub fn run_name(&self) -> &str {
-        &self.selection.run_name
-    }
-    pub fn dataset_id(&self) -> &str {
-        &self.selection.dataset_id
+        &self.run_name
     }
     pub const fn policy(&self) -> TrainingPolicy {
-        self.selection.policy
+        self.policy
     }
-    pub fn sql(&self) -> &str {
-        &self.selection.sql
+    pub const fn source(&self) -> &TrainingSource {
+        &self.source
     }
-    pub fn state_column(&self) -> &str {
-        &self.selection.state_column
-    }
-    pub fn action_column(&self) -> &str {
-        &self.selection.action_column
-    }
-    pub fn device(&self) -> &str {
-        &self.selection.device
+    pub const fn observation(&self) -> &TrainingObservation {
+        &self.observation
     }
     pub const fn steps(&self) -> u64 {
         self.optimization.steps
@@ -345,30 +328,21 @@ impl TrainingConfig {
     pub const fn chunk_size(&self) -> usize {
         self.optimization.chunk_size
     }
+    pub const fn seed(&self) -> u64 {
+        self.optimization.seed
+    }
     pub const fn act(&self) -> &ActTrainingConfig {
         &self.act
     }
-    pub fn act_mut(&mut self) -> &mut ActTrainingConfig {
-        &mut self.act
-    }
 
     pub fn set_run_name(&mut self, run_name: impl Into<String>) {
-        self.selection.run_name = run_name.into();
+        self.run_name = run_name.into();
     }
-    pub fn set_dataset_id(&mut self, dataset_id: impl Into<String>) {
-        self.selection.dataset_id = dataset_id.into();
+    pub fn set_source(&mut self, source: TrainingSource) {
+        self.source = source;
     }
-    pub fn set_sql(&mut self, sql: impl Into<String>) {
-        self.selection.sql = sql.into();
-    }
-    pub fn set_device(&mut self, device: impl Into<String>) {
-        self.selection.device = device.into();
-    }
-    pub fn set_state_column(&mut self, column: impl Into<String>) {
-        self.selection.state_column = column.into();
-    }
-    pub fn set_action_column(&mut self, column: impl Into<String>) {
-        self.selection.action_column = column.into();
+    pub fn observation_mut(&mut self) -> &mut TrainingObservation {
+        &mut self.observation
     }
     pub const fn set_steps(&mut self, steps: u64) {
         self.optimization.steps = steps;
@@ -390,25 +364,56 @@ impl TrainingConfig {
     }
 }
 
-impl TrainingDataSelection {
-    fn new(
-        run_name: impl Into<String>,
-        dataset_id: impl Into<String>,
-        sql: impl Into<String>,
-    ) -> Self {
-        Self {
-            run_name: run_name.into(),
-            dataset_id: dataset_id.into(),
-            policy: TrainingPolicy::default(),
-            sql: sql.into(),
-            state_column: "state".to_owned(),
-            action_column: "action".to_owned(),
-            device: "auto".to_owned(),
+/// Lifecycle of one training run.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingRunPhase {
+    /// Studio is uploading the run's data to Modal.
+    #[default]
+    Uploading,
+    /// Modal has the run and is starting its job.
+    Starting,
+    /// The job is decoding and sampling the data.
+    Preparing,
+    Running,
+    Stopping,
+    Completed,
+    Stopped,
+    Failed,
+    /// Nobody can say where the run is, and why is in its message.
+    Unavailable,
+}
+
+impl TrainingRunPhase {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Uploading => "Uploading",
+            Self::Starting => "Starting",
+            Self::Preparing => "Preparing",
+            Self::Running => "Running",
+            Self::Stopping => "Stopping",
+            Self::Completed => "Completed",
+            Self::Stopped => "Stopped",
+            Self::Failed => "Failed",
+            Self::Unavailable => "Unavailable",
         }
+    }
+
+    pub const fn active(self) -> bool {
+        matches!(
+            self,
+            Self::Uploading | Self::Starting | Self::Preparing | Self::Running | Self::Stopping
+        )
+    }
+
+    /// Whether the run is still getting ready for its first step, so its
+    /// message, not its step, says how far it has got.
+    pub const fn before_first_step(self) -> bool {
+        matches!(self, Self::Uploading | Self::Starting | Self::Preparing)
     }
 }
 
-/// One sample on the shared training-step axis, exactly as the worker reports it.
+/// One sample on the shared training-step axis, exactly as the job reports it.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingMetricPoint {
     #[serde(flatten)]
@@ -432,19 +437,19 @@ struct TrainingMetricProgress {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingResourceMetrics {
     examples_per_second: f64,
-    /// Worker process CPU usage; 100% represents one fully occupied core.
+    /// Job process CPU usage; 100% represents one fully occupied core.
     cpu_percent: Option<f64>,
-    /// Whole-device GPU utilization when the worker's device exposes it.
+    /// Whole-device GPU utilization.
     gpu_percent: Option<f64>,
-    /// Current resident memory used by the worker process.
+    /// Current resident memory used by the job process.
     memory_bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct TrainingStageTimings {
-    /// Spiral query, frame decode, normalization, and batch assembly time.
+    /// Batch assembly from the prepared samples.
     loader_ms: Option<f64>,
-    /// Conversion and host-to-device transfer time.
+    /// Host-to-device transfer time.
     device_copy_ms: Option<f64>,
     /// Optimizer or validation compute time.
     model_ms: Option<f64>,
@@ -532,7 +537,7 @@ impl TrainingMetricPoint {
     }
 }
 
-/// An inference checkpoint the worker committed to Spiral.
+/// An inference checkpoint a run saved.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingCheckpoint {
     run_id: String,
@@ -603,85 +608,82 @@ impl CheckpointPolicy {
     }
 }
 
-/// Result of checking every dependency needed before a native run can start.
+/// Whether a run could start now, and why not.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingReadiness {
     ready: bool,
-    spiral_ready: bool,
-    runtime: Option<TrainingRuntimeInfo>,
     summary: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TrainingRuntimeInfo {
-    display_name: String,
-    runtime: String,
-    devices: Vec<String>,
 }
 
 impl Default for TrainingReadiness {
     fn default() -> Self {
-        Self {
-            ready: false,
-            spiral_ready: false,
-            runtime: None,
-            summary: "Checking the training runtime…".to_owned(),
-        }
+        Self::new(false, "Checking the training service…")
     }
 }
 
 impl TrainingReadiness {
-    pub fn new(ready: bool, spiral_ready: bool, summary: impl Into<String>) -> Self {
+    pub fn new(ready: bool, summary: impl Into<String>) -> Self {
         Self {
             ready,
-            spiral_ready,
-            runtime: None,
             summary: summary.into(),
         }
     }
-    pub fn with_runtime(mut self, runtime: Option<TrainingRuntimeInfo>) -> Self {
-        self.runtime = runtime;
-        self
-    }
     pub const fn ready(&self) -> bool {
         self.ready
-    }
-    pub const fn spiral_ready(&self) -> bool {
-        self.spiral_ready
-    }
-    pub const fn runtime(&self) -> Option<&TrainingRuntimeInfo> {
-        self.runtime.as_ref()
     }
     pub fn summary(&self) -> &str {
         &self.summary
     }
 }
 
-impl TrainingRuntimeInfo {
-    pub fn new(display_name: impl Into<String>, runtime: impl Into<String>) -> Self {
+/// What a run was given, resolved when it started: how much of the view it
+/// trains on, and the joints its state and action carry.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TrainingInputSummary {
+    episodes: usize,
+    intervals: usize,
+    seconds: f64,
+    state: Vec<String>,
+    action: Vec<String>,
+}
+
+impl TrainingInputSummary {
+    /// `intervals` kept intervals of `episodes` episodes, `seconds` long in all.
+    pub fn new(episodes: usize, intervals: usize, seconds: f64) -> Self {
         Self {
-            display_name: display_name.into(),
-            runtime: runtime.into(),
-            devices: Vec::new(),
+            episodes,
+            intervals,
+            seconds,
+            state: Vec::new(),
+            action: Vec::new(),
         }
     }
-    pub fn with_devices(mut self, devices: Vec<String>) -> Self {
-        self.devices = devices;
+    /// The joints the state and the action carry, in order.
+    pub fn with_joints(mut self, state: Vec<String>, action: Vec<String>) -> Self {
+        self.state = state;
+        self.action = action;
         self
     }
-    pub fn display_name(&self) -> &str {
-        &self.display_name
+    pub const fn episodes(&self) -> usize {
+        self.episodes
     }
-    pub fn runtime(&self) -> &str {
-        &self.runtime
+    pub const fn intervals(&self) -> usize {
+        self.intervals
     }
-    pub fn devices(&self) -> &[String] {
-        &self.devices
+    pub const fn seconds(&self) -> f64 {
+        self.seconds
+    }
+    /// What each state value is, in order.
+    pub fn state(&self) -> &[String] {
+        &self.state
+    }
+    /// What each action value is, in order.
+    pub fn action(&self) -> &[String] {
+        &self.action
     }
 }
 
-/// One run as Studio shows it: what it was asked to do, and what its worker
-/// reports now.
+/// One run as Studio shows it: what it was asked to do, and where it is.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingRun {
     #[serde(flatten)]
@@ -697,6 +699,7 @@ pub struct TrainingRun {
 pub struct TrainingRunIdentity {
     id: String,
     config: TrainingConfig,
+    input: TrainingInputSummary,
     started_ms: i64,
 }
 
@@ -708,11 +711,24 @@ pub struct TrainingRunStatus {
     message: Option<String>,
 }
 
-/// The metrics and log tail a worker retains for one run.
+/// The metrics and log tail a run's job retains.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingRunHistory {
     metrics: Vec<TrainingMetricPoint>,
     logs: Vec<String>,
+}
+
+impl Default for TrainingConfig {
+    fn default() -> Self {
+        Self::new(
+            "act-run-001",
+            TrainingSource::new(
+                DatasetSelection::new(vec!["dataset_default".to_owned()])
+                    .expect("one nonempty name is a dataset path"),
+                "",
+            ),
+        )
+    }
 }
 
 impl TrainingRun {
@@ -735,6 +751,9 @@ impl TrainingRun {
     pub const fn config(&self) -> &TrainingConfig {
         &self.identity.config
     }
+    pub const fn input(&self) -> &TrainingInputSummary {
+        &self.identity.input
+    }
     pub const fn phase(&self) -> TrainingRunPhase {
         self.status.phase
     }
@@ -753,15 +772,24 @@ impl TrainingRun {
 }
 
 impl TrainingRunIdentity {
-    pub fn new(id: impl Into<String>, config: TrainingConfig, started_ms: i64) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        config: TrainingConfig,
+        input: TrainingInputSummary,
+        started_ms: i64,
+    ) -> Self {
         Self {
             id: id.into(),
             config,
+            input,
             started_ms,
         }
     }
     pub fn id(&self) -> &str {
         &self.id
+    }
+    pub const fn config(&self) -> &TrainingConfig {
+        &self.config
     }
     pub const fn started_ms(&self) -> i64 {
         self.started_ms
@@ -777,14 +805,17 @@ impl TrainingRunStatus {
         }
     }
 
-    /// A run whose worker cannot say where it is, and why.
+    /// A run nobody can say the state of, and why.
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self::new(TrainingRunPhase::Unavailable, 0, Some(reason.into()))
+    }
+
+    pub const fn phase(&self) -> TrainingRunPhase {
+        self.phase
     }
 }
 
 impl TrainingRunHistory {
-    #[cfg(any(test, feature = "test-support"))]
     pub fn new(metrics: Vec<TrainingMetricPoint>, logs: Vec<String>) -> Self {
         Self { metrics, logs }
     }
@@ -812,17 +843,6 @@ impl TrainingSnapshot {
     }
 }
 
-impl ActLayerCounts {
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn new(encoder: usize, variational_encoder: usize, decoder: usize) -> Self {
-        Self {
-            encoder,
-            variational_encoder,
-            decoder,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,11 +854,17 @@ mod tests {
         assert_eq!(config.feedforward_dim(), 3_200);
         assert_eq!(config.vae_encoder_layers(), 4);
         assert_eq!(config.decoder_layers(), 1);
-        assert!(config.camera_streams().is_empty());
         let config = TrainingConfig::default();
         assert_eq!(config.batch_size(), 8);
         assert_eq!(config.steps(), 100_000);
         assert_eq!(config.checkpoint_every(), 20_000);
         assert_eq!(config.validation_split(), 0.1);
+        assert!(config.observation().cameras().is_empty());
+    }
+
+    #[test]
+    fn halving_a_size_never_reaches_zero() {
+        assert_eq!(ImageSize::new(848, 480).divided(2), ImageSize::new(424, 240));
+        assert_eq!(ImageSize::new(3, 1).divided(4), ImageSize::new(1, 1));
     }
 }

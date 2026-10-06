@@ -101,8 +101,8 @@ mod tests {
         RobotSummary,
     };
     use spiral_robotics_common::training::{
-        CheckpointPolicy, TrainingCheckpoint, TrainingConfig, TrainingRun, TrainingRunIdentity,
-        TrainingRunPhase, TrainingRunStatus,
+        CheckpointPolicy, TrainingCheckpoint, TrainingConfig, TrainingInputSummary, TrainingRun,
+        TrainingRunIdentity, TrainingRunPhase, TrainingRunStatus,
     };
 
     use super::PolicyReadiness;
@@ -133,7 +133,12 @@ mod tests {
 
     fn checkpoint(phase: TrainingRunPhase) -> CheckpointChoice {
         let run = TrainingRun::new(
-            TrainingRunIdentity::new("run", TrainingConfig::default(), 1),
+            TrainingRunIdentity::new(
+                "run",
+                TrainingConfig::default(),
+                TrainingInputSummary::default(),
+                1,
+            ),
             TrainingRunStatus::new(phase, 0, None),
         );
         let policy = CheckpointPolicy::new(

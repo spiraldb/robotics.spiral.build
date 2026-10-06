@@ -204,9 +204,7 @@ impl ProjectRegistry {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_common::project::ProjectKey;
-    use spiral_robotics_common::settings::{
-        RobotConnectorSettings, SettingsUpdate, TrainingRuntimeSettings,
-    };
+    use spiral_robotics_common::settings::{RobotConnectorSettings, SettingsUpdate};
     use spiral_robotics_common::workspace::{NewWorkspace, Workspace};
 
     use crate::OperationError;
@@ -320,17 +318,10 @@ mod tests {
         let registry = &fixture.projects;
         let project = fixture.open("project_a").await;
         let renamed = registry
-            .update_settings(
-                &project,
-                SettingsUpdate::new(
-                    "Lab arms",
-                    TrainingRuntimeSettings::new("http://runtime.example"),
-                ),
-            )
+            .update_settings(&project, SettingsUpdate::new("Lab arms"))
             .await
             .unwrap();
         assert_eq!(renamed.name(), "Lab arms");
-        assert_eq!(renamed.training().endpoint(), "http://runtime.example");
         let connected = registry
             .set_robot_connector(
                 &project,
@@ -342,7 +333,7 @@ mod tests {
             connected.robot_connector().address(),
             "http://lab-arms.example:7070"
         );
-        assert_eq!(connected.training().endpoint(), "http://runtime.example");
+        assert_eq!(connected.name(), "Lab arms");
         assert!(matches!(
             registry
                 .set_robot_connector(&project, RobotConnectorSettings::new("lab-arms:7070"))
@@ -389,7 +380,6 @@ mod tests {
         let again = fixture.open("project_a").await;
         let settings = registry.settings(&again).await.unwrap();
         assert_eq!(settings.name(), "project_a");
-        assert_eq!(settings.training(), &TrainingRuntimeSettings::default());
         assert_eq!(
             settings.robot_connector(),
             &RobotConnectorSettings::default()

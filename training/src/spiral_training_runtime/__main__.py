@@ -6,7 +6,7 @@ import uvicorn
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Serve Spiral Robotics ACT training and inference over HTTP + Arrow IPC"
+        description="Serve ACT policies to the robot connector over HTTP + Arrow IPC"
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=50051, type=int)

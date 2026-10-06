@@ -4,10 +4,9 @@ Spiral Robotics is a Rust-native robotics toolkit and browser studio inspired by
 [LeRobot](https://github.com/huggingface/lerobot) and
 [Rerun](https://github.com/rerun-io/rerun). It sets up, calibrates, and operates
 SO-ARM101 arms; records synchronized robot and camera data directly in SpiralDB;
-queries and curates that data; trains vision-conditioned ACT policies; and
+queries and curates that data; trains vision-conditioned ACT policies on
+Modal GPUs from curated views ([docs/training.md](docs/training.md)); and
 safely executes trained policies through the follower's bounded rollout path.
-Training and Rollout are parked until Spiral decodes MCAP video into training
-images: Studio refuses to start a run, and Rollout runs existing checkpoints.
 
 It runs as two programs. **Studio** (`crates/backend` and `crates/frontend`)
 serves the browser app, keeps Studio state, and reaches SpiralDB; it runs at
@@ -151,7 +150,9 @@ reads them from its environment at startup, and no page shows or sets them.
 | --- | --- |
 | `OPENROUTER_API_KEY` | Model calls: Break down, Classify, Find similar, robot discovery |
 | `HF_TOKEN` | Downloads of models and datasets from Hugging Face |
-| `WARP_PROGRESS_URL`, `WARP_PROGRESS_TOKEN` | Score progress, on the Modal service in `modal/warp_progress` |
+| `WARP_PROGRESS_URL` | Score progress, on the Modal service in `modal/warp_progress` |
+| `TRAINING_SERVICE_URL` | Training, on the Modal service in `training/` |
+| `MODAL_SERVICE_TOKEN` | The bearer token both Modal services accept |
 
 The Nix development shells export the checkout's untracked `.env.local`, so a
 local Studio started from them gets the keys without further setup:
@@ -159,8 +160,9 @@ local Studio started from them gets the keys without further setup:
 ```sh
 OPENROUTER_API_KEY='sk-or-…'
 HF_TOKEN='hf_…'
-WARP_PROGRESS_URL='https://…modal.run'
-WARP_PROGRESS_TOKEN='…'
+WARP_PROGRESS_URL='https://spiral-dev--warp-progress-warpprogress-web.modal.run'
+TRAINING_SERVICE_URL='https://spiral-dev--spiral-robotics-training-control.modal.run'
+MODAL_SERVICE_TOKEN='…'
 ```
 
 An unset key turns off only what needs it. The relay attaches each key to
@@ -176,10 +178,11 @@ Priority processing costs more than standard processing; the provider
 determines the actual served tier. The process environment's `LLM_BASE_URL`
 remains an optional developer override of the endpoint.
 
-Start the Python policy compute runtime separately (on the same machine or a
-remote compute host). It owns PyTorch for rollout inference, which the robot
-connector calls (`--policy-runtime`, `http://127.0.0.1:50051` by default),
-and, once training is unparked, for training, which Studio starts:
+Training runs on the Modal app in [`training/`](training/README.md), which
+Studio reaches through `TRAINING_SERVICE_URL` and `MODAL_SERVICE_TOKEN`.
+The same Python project is the policy runtime for rollout inference: start it
+next to the robot connector, which calls it (`--policy-runtime`,
+`http://127.0.0.1:50051` by default):
 
 ```console
 cd training
@@ -187,17 +190,9 @@ uv sync --extra dev
 uv run spiral-training-runtime --port 50051
 ```
 
-For a fresh Lambda Stack machine, clone the repository and run
-`./training/bootstrap-lambda.sh`. See [training/README.md](training/README.md)
-for the runtime and Lambda workflow.
-
-In Studio, open **Settings → Training**, enter the runtime's `http://` endpoint,
-and choose **Save and connect**. New training runs use that endpoint; an active
-run keeps its existing connection.
-
-The policy runtime refuses non-loopback listeners by default. Use SSH
-forwarding for a remote worker. Its `--allow-remote-access` is reserved for
-deployments placed behind an authenticated TLS proxy.
+The policy runtime refuses non-loopback listeners by default. Its
+`--allow-remote-access` is reserved for deployments placed behind an
+authenticated TLS proxy.
 
 Every browser signs in to Spiral itself. Choose **Sign in with Spiral**: Studio
 sends the browser to Spiral's sign-in page, which returns it to Studio's

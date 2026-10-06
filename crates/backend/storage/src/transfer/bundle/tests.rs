@@ -179,23 +179,6 @@ fn arrow_decode_rejects_oversized_schema_before_stream_reader_conversion() {
 
 struct Fixture;
 impl Fixture {
-    fn checkpoint() -> RecordBatch {
-        use arrow_array::{Float64Array, Int64Array, LargeBinaryArray};
-        RecordBatch::try_new(
-            Arc::new(Table::TrainingCheckpoints.schema()),
-            vec![
-                Arc::new(StringArray::from(vec!["run-1"])),
-                Arc::new(StringArray::from(vec!["Pick and place"])),
-                Arc::new(StringArray::from(vec!["act"])),
-                Arc::new(UInt64Array::from(vec![100])),
-                Arc::new(Int64Array::from(vec![123456])),
-                Arc::new(Float64Array::from(vec![Some(0.25)])),
-                Arc::new(StringArray::from(vec!["{}"])),
-                Arc::new(LargeBinaryArray::from(vec![b"model weights".as_slice()])),
-            ],
-        )
-        .unwrap()
-    }
     fn connection() -> crate::SpiralConnectionSettings {
         crate::SpiralConnectionSettings::new(
             "http://localhost:1".into(),
@@ -205,11 +188,11 @@ impl Fixture {
         .with_project("source")
         .unwrap()
     }
-    fn empty_relations() -> [Vec<u8>; 2] {
+    fn empty_relations() -> [Vec<u8>; 1] {
         Table::ALL.map(|table| arrow_payload(&RecordBatch::new_empty(Arc::new(table.schema()))))
     }
     /// A bundle holding `relations` in `Table::ALL` order.
-    fn bundle(manifest: &Manifest, studio: &[u8], relations: [Vec<u8>; 2]) -> Vec<u8> {
+    fn bundle(manifest: &Manifest, studio: &[u8], relations: [Vec<u8>; 1]) -> Vec<u8> {
         let mut bundle = BundleWriter::new(manifest, studio).unwrap();
         for (table, payload) in Table::ALL.into_iter().zip(relations) {
             bundle.start(&ProjectBundle::relation_entry(table)).unwrap();
@@ -229,7 +212,7 @@ impl Fixture {
 }
 
 #[test]
-fn data_archive_preserves_recordings_and_checkpoint_bytes() {
+fn data_archive_preserves_recording_bytes() {
     let sources = RecordBatch::try_new(
         Arc::new(Table::DatasetSources.schema()),
         vec![
@@ -241,39 +224,31 @@ fn data_archive_preserves_recordings_and_checkpoint_bytes() {
         ],
     )
     .unwrap();
-    let checkpoints = Fixture::checkpoint();
     let bytes = Fixture::bundle(
         &Manifest::current(vec!["demonstrations".into()]),
         b"sqlite validated separately",
-        [arrow_payload(&sources), arrow_payload(&checkpoints)],
+        [arrow_payload(&sources)],
     );
     let decoded = ProjectBundle::decode(&bytes).unwrap();
     assert_eq!(decoded.datasets, ["demonstrations"]);
     assert_eq!(decoded.studio, b"sqlite validated separately");
-    assert_eq!(
-        decoded.tables,
-        vec![
-            (Table::DatasetSources, vec![sources]),
-            (Table::TrainingCheckpoints, vec![checkpoints]),
-        ]
-    );
+    assert_eq!(decoded.tables, vec![(Table::DatasetSources, vec![sources])]);
 }
 
 #[test]
-fn data_archive_rejects_changed_checkpoint_schema() {
+fn data_archive_rejects_changed_source_schema() {
     let invalid = record_batch(
-        vec![Field::new("checkpoint", DataType::Utf8, false)],
-        vec![Arc::new(StringArray::from(vec!["not a checkpoint schema"]))],
+        vec![Field::new("recording", DataType::Utf8, false)],
+        vec![Arc::new(StringArray::from(vec!["not a source schema"]))],
     );
-    let [sources, _] = Fixture::empty_relations();
     let bytes = Fixture::bundle(
         &Manifest::current(vec![]),
         b"unused",
-        [sources, arrow_payload(&invalid)],
+        [arrow_payload(&invalid)],
     );
     let error = ProjectBundle::decode(&bytes).err().unwrap();
     assert!(
-        error.contains("training_checkpoints has 1 columns; expected 8"),
+        error.contains("dataset_source has 1 columns; expected 3"),
         "{error}"
     );
 }
@@ -284,30 +259,17 @@ async fn export_writes_what_decode_reads() {
     let studio = store.project(&Fixture::connection());
     let spiral = crate::ProjectStore::in_memory();
     let mut connection = spiral.connect_exclusive().await.unwrap();
-    connection
-        .create_or_append_batches(
-            &Table::TrainingCheckpoints.qualified_name(),
-            vec![Fixture::checkpoint()],
-        )
-        .await
-        .unwrap();
     let bytes = ProjectBundle
         .export(&mut connection, ProjectBundleExport::new(&studio, vec![]))
         .await
         .unwrap();
     let decoded = ProjectBundle::decode(&bytes).unwrap();
+    assert_eq!(decoded.tables.len(), 1);
     assert_eq!(decoded.tables[0].1[0].num_rows(), 0);
-    // Spiral returns view types; the managed schema accepts either encoding.
-    let [exported] = decoded.tables[1].1.as_slice() else {
-        panic!("one exported checkpoint batch")
-    };
-    use arrow_array::cast::AsArray;
-    let weights = exported.column_by_name("checkpoint").unwrap();
-    assert_eq!(weights.as_binary_view().value(0), b"model weights");
 }
 
 #[tokio::test]
-async fn format_four_is_a_manifest_sqlite_and_one_arrow_stream_per_relation() {
+async fn format_five_is_a_manifest_sqlite_and_one_arrow_stream_per_relation() {
     let store = crate::StudioStore::in_memory();
     let source = store.project(&Fixture::connection());
     crate::SessionStore::new(store.clone())
@@ -337,16 +299,11 @@ async fn format_four_is_a_manifest_sqlite_and_one_arrow_stream_per_relation() {
     let zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
     assert_eq!(
         zip.file_names().collect::<Vec<_>>(),
-        [
-            "manifest.json",
-            "studio.sqlite3",
-            "dataset_source.arrows",
-            "training_checkpoints.arrows"
-        ]
+        ["manifest.json", "studio.sqlite3", "dataset_source.arrows"]
     );
     let decoded = ProjectBundle::decode(&bytes).unwrap();
     assert_eq!(decoded.datasets, ["empty_dataset"]);
-    assert_eq!(decoded.tables.len(), 2);
+    assert_eq!(decoded.tables.len(), 1);
     StudioSnapshot::open(&decoded.studio, &source)
         .await
         .unwrap();
@@ -359,7 +316,7 @@ fn older_formats_wrong_members_and_corrupt_data_are_rejected() {
     let format_three = Fixture::zip(&[("studio.sqlite3", b"unused"), ("spiral.data", b"unused")]);
     assert!(error(&format_three).contains("older Studio versions"));
     let manifest = Manifest {
-        format_version: 3,
+        format_version: 4,
         ..Manifest::current(vec![])
     };
     assert!(
@@ -368,17 +325,16 @@ fn older_formats_wrong_members_and_corrupt_data_are_rejected() {
             b"unused",
             Fixture::empty_relations()
         ))
-        .contains("format 3 is not supported")
+        .contains("format 4 is not supported")
     );
 
     let manifest = serde_json::to_vec(&Manifest::current(vec![])).unwrap();
-    let [sources, checkpoints] = Fixture::empty_relations();
+    let [sources] = Fixture::empty_relations();
     let members = |studio: &str, extra: &[(&str, &[u8])]| {
         let mut entries = vec![
             ("manifest.json", manifest.as_slice()),
             (studio, b"unused".as_slice()),
             ("dataset_source.arrows", sources.as_slice()),
-            ("training_checkpoints.arrows", checkpoints.as_slice()),
         ];
         entries.extend_from_slice(extra);
         Fixture::zip(&entries)
@@ -395,11 +351,7 @@ fn older_formats_wrong_members_and_corrupt_data_are_rejected() {
     let mut trailing = sources.clone();
     trailing.push(1);
     for corrupt in [truncated, trailing] {
-        let bytes = Fixture::bundle(
-            &Manifest::current(vec![]),
-            b"unused",
-            [corrupt, checkpoints.clone()],
-        );
+        let bytes = Fixture::bundle(&Manifest::current(vec![]), b"unused", [corrupt]);
         assert!(ProjectBundle::decode(&bytes).is_err());
     }
 }

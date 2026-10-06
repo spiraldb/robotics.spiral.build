@@ -1,7 +1,8 @@
 //! Spikes: a measured joint that moves faster than 3 rad/s into one sample
 //! and just as fast back out of it — one bad reading rather than motion.
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
-use super::stream_reads::{CheckedStreams, ValueColumns};
+use super::stream_reads::{CheckedStreams, CheckedValueColumns as _};
+use spiral_robotics_common::datasets::ValueColumns;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
@@ -58,7 +59,7 @@ impl JointSpikes {
         let columns = ValueColumns::new(arm.state(), "q");
         let mut ctes = columns.ctes("s", &streams.read_values(arm.state())?);
         ctes.push(columns.motion_cte("s"));
-        let joints = columns.len();
+        let joints = columns.count();
         let rates = (0..joints)
             .map(|joint| format!("v{joint}"))
             .collect::<Vec<_>>()

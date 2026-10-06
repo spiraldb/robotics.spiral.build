@@ -3,7 +3,8 @@
 //! works is how two arms share a task, so only stillness of all of them
 //! counts. Arms are compared at the instants they were logged together.
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Verdict};
-use super::stream_reads::{CheckedStreams, Greatest, ValueColumns};
+use super::stream_reads::{CheckedStreams, CheckedValueColumns as _, Greatest};
+use spiral_robotics_common::datasets::ValueColumns;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
@@ -75,7 +76,7 @@ impl Pauses {
             ctes.extend(columns.ctes(&name, &streams.read_values(arm.state())?));
             ctes.push(columns.motion_cte(&name));
             speeds.extend(
-                (0..columns.len()).map(|joint| format!("spql.math.abs({name}_motion.v{joint})")),
+                (0..columns.count()).map(|joint| format!("spql.math.abs({name}_motion.v{joint})")),
             );
         }
         let joined = (1..arms.len())

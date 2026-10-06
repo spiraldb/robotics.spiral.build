@@ -5,13 +5,12 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_SPIRAL_ENDPOINT: &str = "https://api.spiraldb.dev";
 pub const DEFAULT_SPIRAL_SPFS_ENDPOINT: &str = "https://spfs.spiraldb.dev";
 
-/// The immutable Spiral destination plus what one workspace keeps: its name,
-/// training runtime, and robot connector.
+/// The immutable Spiral destination plus what one workspace keeps: its name
+/// and robot connector.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DataSettings {
     spiral: SpiralSettings,
     name: String,
-    training: TrainingRuntimeSettings,
     robot_connector: RobotConnectorSettings,
 }
 
@@ -19,13 +18,11 @@ impl DataSettings {
     pub fn new(
         spiral: SpiralSettings,
         name: impl Into<String>,
-        training: TrainingRuntimeSettings,
         robot_connector: RobotConnectorSettings,
     ) -> Self {
         Self {
             spiral,
             name: name.into(),
-            training,
             robot_connector,
         }
     }
@@ -39,49 +36,12 @@ impl DataSettings {
         &self.name
     }
 
-    pub const fn training(&self) -> &TrainingRuntimeSettings {
-        &self.training
-    }
-
     pub const fn robot_connector(&self) -> &RobotConnectorSettings {
         &self.robot_connector
     }
 
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
-    }
-    pub fn training_mut(&mut self) -> &mut TrainingRuntimeSettings {
-        &mut self.training
-    }
-}
-
-/// HTTP and Arrow IPC endpoint selected for future training sessions.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TrainingRuntimeSettings {
-    endpoint: String,
-}
-
-impl Default for TrainingRuntimeSettings {
-    fn default() -> Self {
-        Self {
-            endpoint: "http://127.0.0.1:50051".to_owned(),
-        }
-    }
-}
-
-impl TrainingRuntimeSettings {
-    pub fn new(endpoint: impl Into<String>) -> Self {
-        Self {
-            endpoint: endpoint.into(),
-        }
-    }
-
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {
-        self.endpoint = endpoint.into();
     }
 }
 

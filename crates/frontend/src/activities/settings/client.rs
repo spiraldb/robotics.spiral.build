@@ -21,7 +21,7 @@ impl SettingsClient {
         update: SettingsUpdate,
     ) -> impl Future<Output = Result<DataSettings, CommandError>> + use<> {
         self.project.mutate(
-            &[Settings, Training],
+            &[Settings],
             HttpRequest::new("PUT", "/api/settings").json(&update),
         )
     }
@@ -32,15 +32,6 @@ impl SettingsClient {
         self.project.mutate(
             &[Project, Settings, RobotSetup, Catalog],
             HttpRequest::new("POST", "/api/settings/spiral/test"),
-        )
-    }
-
-    pub(super) fn test_training_runtime(
-        &self,
-    ) -> impl Future<Output = Result<ConnectionTest, CommandError>> + use<> {
-        self.project.mutate(
-            &[Training],
-            HttpRequest::new("POST", "/api/settings/training/test"),
         )
     }
 

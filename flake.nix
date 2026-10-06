@@ -208,9 +208,11 @@
                 "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
                 # Spiral's sign-in returns browsers to this address's /callback.
                 "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com"
-                # The Modal service Score progress runs on; its token is a
-                # deployment secret.
-                "WARP_PROGRESS_URL=https://xiangpeng--warp-progress-warpprogress-web.modal.run"
+                # The Modal services Score progress and training run on, in the
+                # spiral-dev workspace; their shared token is a deployment
+                # secret.
+                "WARP_PROGRESS_URL=https://spiral-dev--warp-progress-warpprogress-web.modal.run"
+                "TRAINING_SERVICE_URL=https://spiral-dev--spiral-robotics-training-control.modal.run"
                 "SPIRALDB_ADBC_DRIVER=${spiralAdbc}/lib/${adbcLibrary}"
                 "DIOXUS_PUBLIC_PATH=${studioWeb}"
               ];

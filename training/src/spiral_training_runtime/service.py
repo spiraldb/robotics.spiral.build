@@ -1,132 +1,60 @@
+"""The local policy runtime the robot connector calls during rollout: it loads a training
+checkpoint and turns observations into action chunks."""
+
 from __future__ import annotations
 
 import os
 import threading
 import uuid
-from collections import OrderedDict
 from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
-from .act import PolicySession, backend_info
+from .act import PolicySession
 from .arrow import decode_inference_input
 from .errors import RuntimeRequestError
-from .jobs import TrainingJob
-from .models import (
-    TrainingBackendInfoModel,
-    TrainingJobHistoryModel,
-    TrainingJobRequestModel,
-    TrainingJobStateModel,
-)
-from .protocol import VERSIONS
 
 ARROW_STREAM_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 POLICY_ARTIFACT_CONTENT_TYPE = "application/vnd.spiral.policy-artifact"
 MAX_REQUEST_BYTES = 520 * 1024 * 1024
-MAX_ACTIVE_JOBS = 4
-MAX_RETAINED_TERMINAL_JOBS = 64
 
 
-class RuntimeState:
+class PolicySessions:
     def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.jobs: OrderedDict[str, TrainingJob] = OrderedDict()
-        self.policies: dict[str, PolicySession] = {}
+        self._lock = threading.Lock()
+        self._sessions: dict[str, PolicySession] = {}
 
-    def add_job(self, request: dict[str, Any]) -> TrainingJob:
-        job_id = TrainingJob.request_id(request)
-        with self.lock:
-            self._prune_jobs_locked()
-            existing = self.jobs.get(job_id)
-            if existing is not None:
-                if not existing.matches(request):
-                    raise RuntimeRequestError(
-                        f"training job {job_id!r} already has a different immutable specification",
-                        409,
-                    )
-                return existing
-            active_jobs = sum(not job.terminal() for job in self.jobs.values())
-            if active_jobs >= MAX_ACTIVE_JOBS:
-                raise RuntimeRequestError(
-                    f"runtime already owns {MAX_ACTIVE_JOBS} active training jobs", 429
-                )
-            job = TrainingJob(request)
-            self.jobs[job_id] = job
-        job.start()
-        return job
-
-    def all_jobs(self) -> list[TrainingJob]:
-        with self.lock:
-            self._prune_jobs_locked()
-            return list(self.jobs.values())
-
-    def job(self, job_id: str) -> TrainingJob:
-        with self.lock:
-            self._prune_jobs_locked()
-            job = self.jobs.get(job_id)
-        if job is None:
-            raise RuntimeRequestError(f"training job {job_id!r} does not exist", 404)
-        return job
-
-    def _prune_jobs_locked(self) -> None:
-        terminal_ids = [job_id for job_id, job in self.jobs.items() if job.terminal()]
-        for job_id in terminal_ids[:-MAX_RETAINED_TERMINAL_JOBS]:
-            self.jobs.pop(job_id, None)
-
-    def add_policy(self, policy: PolicySession) -> str:
+    def add(self, policy: PolicySession) -> str:
         policy_id = f"policy-{uuid.uuid4().hex}"
-        with self.lock:
-            self.policies[policy_id] = policy
+        with self._lock:
+            self._sessions[policy_id] = policy
         return policy_id
 
-    def policy(self, policy_id: str) -> PolicySession:
-        with self.lock:
-            policy = self.policies.get(policy_id)
+    def get(self, policy_id: str) -> PolicySession:
+        with self._lock:
+            policy = self._sessions.get(policy_id)
         if policy is None:
             raise RuntimeRequestError(f"policy session {policy_id!r} does not exist", 404)
         return policy
 
-    def remove_policy(self, policy_id: str) -> None:
-        with self.lock:
-            self.policies.pop(policy_id, None)
+    def remove(self, policy_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(policy_id, None)
 
 
 def create_app(policy_device: str | None = None) -> FastAPI:
-    app = FastAPI(
-        title="Spiral Robotics PyTorch Runtime",
-        version=VERSIONS.training_protocol.display_version,
-        docs_url="/docs",
-        redoc_url=None,
-    )
-    state = RuntimeState()
+    app = FastAPI(title="Spiral Robotics policy runtime", docs_url="/docs", redoc_url=None)
+    sessions = PolicySessions()
     policy_device = policy_device or os.environ.get("SPIRAL_POLICY_DEVICE", "auto")
 
     @app.exception_handler(RuntimeRequestError)
     async def runtime_error(_request: Request, error: RuntimeRequestError) -> JSONResponse:
         return JSONResponse(status_code=error.status_code, content={"error": str(error)})
 
-    @app.get("/v1/health", response_model=TrainingBackendInfoModel)
-    def health() -> dict[str, Any]:
-        return backend_info()
-
-    @app.post("/v1/jobs", status_code=201, response_model=TrainingJobStateModel)
-    def create_job(request: TrainingJobRequestModel) -> dict[str, Any]:
-        return state.add_job(request.model_dump()).state()
-
-    @app.get("/v1/jobs", response_model=list[TrainingJobStateModel])
-    def list_jobs() -> list[dict[str, Any]]:
-        return [job.state() for job in state.all_jobs()]
-
-    @app.get("/v1/jobs/{job_id}", response_model=TrainingJobHistoryModel)
-    def get_job(job_id: str) -> dict[str, Any]:
-        return state.job(job_id).history()
-
-    @app.post("/v1/jobs/{job_id}/stop", response_model=TrainingJobStateModel)
-    def stop_job(job_id: str) -> dict[str, Any]:
-        job = state.job(job_id)
-        job.stop()
-        return job.state()
+    @app.get("/v1/health")
+    def health() -> dict[str, str]:
+        return {"service": "spiral-training-runtime", "serves": "ACT policies for rollout"}
 
     @app.post("/v1/policies", status_code=201)
     def create_policy(
@@ -137,17 +65,17 @@ def create_app(policy_device: str | None = None) -> FastAPI:
         _require_body_size(body)
         config, weights = _decode_policy_artifact(body)
         policy = PolicySession.from_artifact(config, weights, policy_device)
-        policy_id = state.add_policy(policy)
+        policy_id = sessions.add(policy)
         return {"session_id": policy_id, "specification": policy.specification}
 
     @app.delete("/v1/policies/{policy_id}", status_code=204)
     def delete_policy(policy_id: str) -> Response:
-        state.remove_policy(policy_id)
+        sessions.remove(policy_id)
         return Response(status_code=204)
 
     @app.post("/v1/policies/{policy_id}/warm-up")
     def warm_up_policy(policy_id: str) -> dict[str, float]:
-        return state.policy(policy_id).warm_up()
+        return sessions.get(policy_id).warm_up()
 
     @app.post("/v1/policies/{policy_id}/infer")
     def infer_policy(
@@ -157,7 +85,7 @@ def create_app(policy_device: str | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         _require_content_type(request, ARROW_STREAM_CONTENT_TYPE, "Arrow tensor requests")
         _require_body_size(body)
-        policy = state.policy(policy_id)
+        policy = sessions.get(policy_id)
         return policy.infer(decode_inference_input(body, policy.config))
 
     return app

@@ -8,7 +8,6 @@
 #![allow(async_fn_in_trait)]
 
 mod account;
-mod adapters;
 mod clock;
 mod curation;
 mod data;

@@ -1,9 +1,6 @@
-//! Backend-only SQL construction and policy adaptation for SpiralDB.
-//!
-//! Owned relation names, table prefix qualification, and column names come from
-//! this module group's `schema` layer. This module turns those names into
-//! auditable statements. Raw user queries delegate to the framework-free core
-//! authorization policy before a database driver sees them.
+//! Backend-only SQL execution for SpiralDB. Raw user queries delegate to the
+//! framework-free core authorization policy before a database driver sees
+//! them.
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -25,9 +22,8 @@ use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryColumn, Spiral
 
 use super::database::{DatabaseSession, RecordBatchStream, SqlStatement};
 use super::project_store::{ProjectConnection, ProjectStore};
-use super::schema::{Table, column};
 use crate::datasets::EpisodeUuids;
-use spiral_robotics_common::sql::{ReadOnlyQueryMode, SqlLiteral};
+use spiral_robotics_common::sql::ReadOnlyQueryMode;
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -131,50 +127,35 @@ impl<'a> QueryImage<'a> {
     }
 }
 
-/// SQL generated for Spiral Robotics-owned storage resources.
+/// The read-only rule every query run for the browser follows.
 pub(crate) struct SpiralSql;
 
 impl SpiralSql {
-    pub(crate) fn delete_training_run(relation: &str, run_id: &str) -> String {
-        format!(
-            "DELETE FROM {relation} WHERE {} = {}",
-            column::RUN_ID,
-            SqlLiteral::text(run_id)
-        )
-    }
-
-    /// Every checkpoint's identity and policy configuration, without its weights.
-    pub(crate) fn training_checkpoint_catalog() -> String {
-        format!(
-            "SELECT {run}, {step}, {loss}, {config} FROM {checkpoints} \
-         ORDER BY {run}, {step}",
-            run = column::RUN_ID,
-            step = column::STEP,
-            loss = column::VALIDATION_LOSS,
-            config = column::CONFIG_JSON,
-            checkpoints = Table::TrainingCheckpoints.qualified_name(),
-        )
-    }
-
-    pub(crate) fn training_checkpoint(run_id: &str, step: u64) -> String {
-        let checkpoints = Table::TrainingCheckpoints.qualified_name();
-        format!(
-            "SELECT {config}, {checkpoint} FROM {checkpoints} \
-         WHERE {run_column} = {run_id} AND {step_column} = {step} \
-         ORDER BY {created} DESC LIMIT 2",
-            config = column::CONFIG_JSON,
-            checkpoint = column::CHECKPOINT,
-            run_column = column::RUN_ID,
-            run_id = SqlLiteral::text(run_id),
-            step_column = column::STEP,
-            created = column::CREATED_MS,
-        )
-    }
-
     fn ensure_read_only(sql: &str) -> Result<(), String> {
         spiral_robotics_common::sql::ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Preview)
             .authorize()
             .map_err(|error| error.to_string())
+    }
+}
+
+/// One interval a curated view keeps: the stretch of an episode between two
+/// absolute log times.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeptInterval {
+    episode_id: EpisodeId,
+    start_ns: i64,
+    end_ns: i64,
+}
+
+impl KeptInterval {
+    pub fn episode_id(&self) -> &EpisodeId {
+        &self.episode_id
+    }
+    pub const fn start_ns(&self) -> i64 {
+        self.start_ns
+    }
+    pub const fn end_ns(&self) -> i64 {
+        self.end_ns
     }
 }
 
@@ -253,6 +234,71 @@ impl<'a> ProjectQueries<'a> {
         Ok((schema, batches))
     }
 
+    /// The same episode read as it arrives, for a caller that passes it on
+    /// without holding it: the stream keeps its connection until it ends.
+    pub async fn stream_for_episode(
+        &self,
+        request: &EpisodeQueryRequest,
+    ) -> Result<RecordBatchStream, String> {
+        let statement = Self::bound(request)?;
+        let mut connection = self.project_store.connect().await?;
+        let records = connection
+            .query(statement)
+            .await
+            .map_err(|error| format!("executing Spiral query: {error}"))?;
+        // A retained resource must be `Sync`; the connection is only `Send`,
+        // and nothing reads it while it is retained, so a lock costs nothing.
+        Ok(records.retain(std::sync::Mutex::new(connection)))
+    }
+
+    /// The intervals a curated view keeps: its `episode_id`, `start_ns`, and
+    /// `end_ns`, in episode and time order, leaving out empty ones.
+    pub async fn kept_intervals(&self, view: &str) -> Result<Vec<KeptInterval>, String> {
+        let sql = format!(
+            "SELECT episode_id, CAST(start_ns AS BIGINT) AS start_ns, CAST(end_ns AS BIGINT) AS end_ns \
+             FROM ({}) kept WHERE end_ns > start_ns ORDER BY episode_id, start_ns",
+            view.trim().trim_end_matches(';')
+        );
+        SpiralSql::ensure_read_only(&sql)?;
+        let batches = self
+            .project_store
+            .connect()
+            .await?
+            .read_batches(&sql)
+            .await?;
+        let mut intervals = Vec::new();
+        for batch in batches {
+            let column = |name: &str| {
+                batch
+                    .column_by_name(name)
+                    .ok_or_else(|| format!("The view lists no {name}."))
+            };
+            let episodes = EpisodeUuids::read(column("episode_id")?.as_ref())?;
+            let times = |name: &str| -> Result<Vec<i64>, String> {
+                let cast = arrow_cast::cast(column(name)?, &DataType::Int64)
+                    .map_err(|error| error.to_string())?;
+                let values = cast
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .filter(|values| values.null_count() == 0)
+                    .ok_or_else(|| format!("Every kept interval needs a {name}."))?;
+                Ok(values.values().to_vec())
+            };
+            let (starts, ends) = (times("start_ns")?, times("end_ns")?);
+            intervals.extend(
+                episodes
+                    .into_iter()
+                    .zip(starts.into_iter().zip(ends))
+                    .map(|(episode_id, (start_ns, end_ns))| KeptInterval {
+                        episode_id,
+                        start_ns,
+                        end_ns,
+                    }),
+            );
+        }
+        Ok(intervals)
+    }
+
     /// The episodes a read-only statement lists in its `episode_id` column.
     pub async fn episode_ids(&self, sql: &str) -> Result<Vec<EpisodeId>, String> {
         SpiralSql::ensure_read_only(sql)?;
@@ -281,37 +327,6 @@ impl<'a> ProjectQueries<'a> {
             request.statement().trim().to_owned(),
         )?
         .into_statement())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generated_values_are_escaped_in_one_place() {
-        fn assert_single_literal(sql: &str, value: &str) {
-            let literal = SqlLiteral::text(value);
-            assert!(
-                sql.contains(&literal),
-                "{sql:?} does not contain {literal:?}"
-            );
-            assert!(
-                !sql.contains(&format!("'{literal}'")),
-                "{sql:?} wraps the encoded literal {literal:?} in another pair of quotes"
-            );
-        }
-
-        let cases = [
-            (
-                SpiralSql::delete_training_run("robot_training_checkpoints", "run-'one"),
-                "run-'one",
-            ),
-            (SpiralSql::training_checkpoint("run-'two", 42), "run-'two"),
-        ];
-        for (sql, value) in cases {
-            assert_single_literal(&sql, value);
-        }
     }
 }
 

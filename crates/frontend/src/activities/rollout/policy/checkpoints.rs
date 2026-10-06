@@ -126,8 +126,9 @@ impl From<&TrainingCheckpoint> for CheckpointPolicy {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_common::training::{
-        CheckpointPolicy as TrainedPolicy, TrainingCheckpoint, TrainingConfig, TrainingRun,
-        TrainingRunIdentity, TrainingRunPhase, TrainingRunStatus,
+        CheckpointPolicy as TrainedPolicy, TrainingCheckpoint, TrainingConfig,
+        TrainingInputSummary, TrainingRun, TrainingRunIdentity, TrainingRunPhase,
+        TrainingRunStatus,
     };
 
     use super::{CheckpointChoice, MAX_ROLLOUT_ACTION_STEPS};
@@ -137,7 +138,12 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn checkpoints_of_recorded_runs_are_listed_newest_first() {
         let run = TrainingRun::new(
-            TrainingRunIdentity::new("active-run", TrainingConfig::default(), 1),
+            TrainingRunIdentity::new(
+                "active-run",
+                TrainingConfig::default(),
+                TrainingInputSummary::default(),
+                1,
+            ),
             TrainingRunStatus::new(TrainingRunPhase::Running, 0, None),
         );
         let policy = TrainedPolicy::new(

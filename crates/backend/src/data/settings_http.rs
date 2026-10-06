@@ -22,7 +22,6 @@ impl SettingsEndpoints {
             .route("/settings/connection", get(Self::connection_settings))
             .route("/settings", get(Self::data_settings))
             .route("/settings/spiral/test", post(Self::test_spiral_connection))
-            .route("/settings/training/test", post(Self::test_training_runtime))
     }
     pub(crate) fn commands() -> Router<StudioContext> {
         Router::new()
@@ -79,11 +78,6 @@ impl SettingsEndpoints {
     async fn test_spiral_connection(Project(project): Project) -> Json<ConnectionTest> {
         Json(ConnectionTest::from(
             project.storage().database().test().await,
-        ))
-    }
-    async fn test_training_runtime(Project(project): Project) -> Json<ConnectionTest> {
-        Json(ConnectionTest::from(
-            project.training().test_runtime().await,
         ))
     }
 }

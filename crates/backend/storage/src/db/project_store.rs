@@ -16,7 +16,6 @@ use super::database::{
 use crate::settings::SpiralConnectionSettings;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
-use super::schema::Table;
 
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
 
@@ -185,6 +184,7 @@ impl ProjectConnection {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn table_exists(&mut self, target: &str) -> Result<bool, String> {
         self.relation_schema(target)
             .await
@@ -395,24 +395,8 @@ impl<'a> ProjectDatabasePersistence<'a> {
                 "Choose a Spiral project in Settings before testing the connection.".to_owned(),
             );
         }
-        let provisioning = async {
-            let mut connection = self.project_store.connect_exclusive().await?;
-            let relation = Table::TrainingCheckpoints.qualified_name();
-            if let Some(schema) = connection.relation_schema(&relation).await? {
-                Table::TrainingCheckpoints.validate(&schema, "SpiralDB destination")
-                    .map_err(|error| format!("{error}; existing artifact table {relation} was not modified. Remove that table, then run Settings → SpiralDB → Test connection."))?;
-                Ok::<_, String>("model artifact table ready")
-            } else {
-                connection.create_or_append_batches(&relation, vec![RecordBatch::new_empty(Arc::new(Table::TrainingCheckpoints.schema()))]).await?;
-                Ok("created model artifact table")
-            }
-        }
-        .await;
-        match provisioning {
-            Ok(detail) => (
-                true,
-                format!("Connected to {endpoint} · project {project} · {detail}"),
-            ),
+        match self.project_store.connect_exclusive().await {
+            Ok(_) => (true, format!("Connected to {endpoint} · project {project}")),
             Err(error) => (false, error),
         }
     }

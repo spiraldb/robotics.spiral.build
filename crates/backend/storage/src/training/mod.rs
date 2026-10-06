@@ -1,9 +1,5 @@
-//! Training-run records in Studio and checkpoints in Spiral.
+//! Studio's records of the training runs it started.
 
-mod checkpoints;
 mod training_runs;
 
-pub(crate) use checkpoints::TrainingCheckpointPersistence;
-pub use checkpoints::{CheckpointArtifact, CheckpointKey};
 pub(crate) use training_runs::TrainingRunPersistence;
-pub use training_runs::TrainingRunRecord;

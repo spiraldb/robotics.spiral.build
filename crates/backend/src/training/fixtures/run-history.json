@@ -1,0 +1,45 @@
+{
+  "run_id": "train-1791300000000-0",
+  "phase": "running",
+  "current_step": 3,
+  "message": "Training ACT on CUDA:0 (NVIDIA L4): 2 episodes, 3 intervals, 55 ticks.",
+  "checkpoints": [
+    { "step": 3, "validation_loss": 0.5, "created_ms": 1791300100000 }
+  ],
+  "metrics": [
+    {
+      "step": 1,
+      "train_loss": 2.5,
+      "validation_loss": null,
+      "learning_rate": 1e-05,
+      "elapsed_seconds": 0.8,
+      "event": null,
+      "examples_per_second": 12.5,
+      "cpu_percent": 95.0,
+      "gpu_percent": 40.0,
+      "memory_bytes": 2147483648,
+      "loader_ms": 1.5,
+      "device_copy_ms": 0.4,
+      "model_ms": 60.0
+    },
+    {
+      "step": 2,
+      "train_loss": 2.0,
+      "validation_loss": 2.25,
+      "learning_rate": 1e-05,
+      "elapsed_seconds": 1.6,
+      "event": "validation",
+      "examples_per_second": 12.0,
+      "cpu_percent": 90.0,
+      "gpu_percent": 45.0,
+      "memory_bytes": 2147483648,
+      "loader_ms": 1.4,
+      "device_copy_ms": 0.4,
+      "model_ms": 61.0
+    }
+  ],
+  "logs": [
+    "Prepared 2 episodes: 55 ticks of 2 cameras at 64x48.",
+    "Checkpoint 3 saved."
+  ]
+}

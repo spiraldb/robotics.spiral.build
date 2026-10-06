@@ -3,14 +3,14 @@
 The backend owns two persistence boundaries:
 
 - **SQLite / SeaORM:** each browser's Spiral session (its WorkOS tokens and
-  chosen workspace), the workspaces, project preferences (the training
-  runtime and robot connector address), each dataset's robot model, joint roles
-  and check report, saved curation recipes and the statements of the views
-  they publish, and a record of each training run Studio started (its
-  configuration and worker endpoint).
-- **Spiral / ADBC:** datasets, their MCAP sources and model answers, and model
-  checkpoint artifacts. The training worker publishes
-  checkpoints directly to Spiral and owns each run's metrics and logs.
+  chosen workspace), the workspaces, project preferences (the robot connector
+  address), each dataset's robot model, joint roles and check report, saved
+  curation recipes and the statements of the views they publish, and a record
+  of each training run Studio started (its configuration and what it was
+  given).
+- **Spiral / ADBC:** datasets, their MCAP sources and model answers. Training
+  runs' metrics, logs, and checkpoints live on the Modal training service
+  ([Training](training.md)).
 
 Robot documents and calibration are not Studio state: the robot connector that
 drives the arms saves them, in its own data directory.
@@ -53,8 +53,8 @@ stopped backend's database can be copied after its connections have closed.
 SeaORM entities live in `crates/backend/storage/src/studio`. Product-facing
 methods stay with their feature; callers do not receive ORM models. Curation
 edits use conditional writes to preserve conflict detection. A
-training run is stored as its ID beside the JSON of what Studio asked its
-worker to do.
+training run is stored as its ID beside the JSON of what Studio asked it to
+do.
 
 A curation is stored as its own row: identity, name, revision, the frontend's
 encoding version, and the payload as opaque TEXT. Storage never parses that
@@ -77,22 +77,21 @@ exported before it cannot be imported.
 
 The SQLite migration sequence is independent of
 `crates/backend/storage/schema/version.json`. That version remains the Spiral
-data/artifact contract used by the training worker. Project bundles have their
-own format version.
+data contract recordings carry. Project bundles have their own format version.
 
 ## Leftover Spiral control tables
 
 Studio keeps no control records in Spiral. A project older than the move to
 SQLite may still hold the retired `studio_robots`, `studio_settings`,
 `studio_training_runs`, `studio_training_run_metrics`,
-`studio_training_run_checkpoints`, `studio_rollout_runs`, `studio_workflows`,
-and `studio_feature_registry` tables, which the Data catalog lists like any
-other table. Drop them in Spiral; nothing reads them.
-`studio_training_checkpoints` is live: it holds the model artifacts.
+`studio_training_run_checkpoints`, `studio_training_checkpoints`,
+`studio_rollout_runs`, `studio_workflows`, and `studio_feature_registry`
+tables, which the Data catalog lists like any other table. Drop them in
+Spiral; nothing reads them.
 
 ## Project transfer
 
-Version **4** `.spiral-project` bundles are ZIP archives containing:
+Version **5** `.spiral-project` bundles are ZIP archives containing:
 
 - `studio.sqlite3`: a native SQLite snapshot of the selected project's Studio
   records. SQLite's `VACUUM INTO` captures committed state, including WAL data.
@@ -100,20 +99,18 @@ Version **4** `.spiral-project` bundles are ZIP archives containing:
   (a bundle carries no model answers for them to read), and other projects,
   then vacuums again to remove their deleted bytes. Project keys are neutralized so
   the snapshot can be restored into another project.
-- `manifest.json`: `{"format":"spiral-robotics-project","format_version":4,
+- `manifest.json`: `{"format":"spiral-robotics-project","format_version":5,
   "schema_version":<Spiral schema>,"mcap_datasets":[…]}`; unknown fields are
   refused.
 - `dataset_source.arrows`: one Arrow IPC stream of every dataset's source
   files (`dataset_name`, `recording`, and `payload`, the MCAP bytes); each
   dataset restores into its own `dataset_files_<name>`.
-- `training_checkpoints.arrows`: one Arrow IPC stream of
-  `studio_training_checkpoints`.
 
 A relation absent from Spiral is exported as an empty stream with its canonical
 schema. Arrow is used only for data-plane payloads; Studio records have no Arrow
-backup schemas. Import requires exactly these four entries. A ZIP without
+backup schemas. Import requires exactly these three entries. A ZIP without
 `manifest.json`, which includes every version-3 bundle, fails with "Not a
-format 4 project; project files from older Studio versions cannot be imported";
+format 5 project; project files from older Studio versions cannot be imported";
 any other `format_version` or Spiral schema version is refused. SQLite
 snapshots must match the current managed schema. Imports open snapshots
 read-only, validate their integrity and records, and insert records through

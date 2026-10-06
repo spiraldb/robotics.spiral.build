@@ -64,6 +64,85 @@ impl DatasetJointRoles {
     }
 }
 
+impl DatasetJointRoles {
+    /// What a policy trained on these roles reads and commands: arm by arm,
+    /// the arm's joints and then its gripper's opening — measured for the
+    /// state, commanded for the action. An arm without commanded positions
+    /// leaves nothing to learn.
+    pub fn policy_joints(&self) -> Result<PolicyJoints<'_>, String> {
+        if self.arms.is_empty() {
+            return Err("These joint roles name no arm.".into());
+        }
+        let mut joints = PolicyJoints {
+            state: Vec::new(),
+            action: Vec::new(),
+        };
+        for arm in &self.arms {
+            let commanded = arm.action.as_ref().ok_or_else(|| {
+                format!("The {} arm records no commanded positions.", arm.name)
+            })?;
+            let names = (1..=arm.state.indices.len().max(1))
+                .map(|joint| format!("{}.j{joint}", arm.name))
+                .collect::<Vec<_>>();
+            joints.state.push(NamedValues::new(&arm.state, names.clone()));
+            joints.action.push(NamedValues::new(commanded, names));
+            if let Some(gripper) = &arm.gripper {
+                let name = vec![format!("{}.gripper", arm.name)];
+                joints.state.push(NamedValues::new(&gripper.state, name.clone()));
+                joints.action.push(NamedValues::new(&gripper.action, name));
+            }
+        }
+        Ok(joints)
+    }
+}
+
+/// The values a policy's state and its action concatenate, in order.
+pub struct PolicyJoints<'a> {
+    state: Vec<NamedValues<'a>>,
+    action: Vec<NamedValues<'a>>,
+}
+
+impl<'a> PolicyJoints<'a> {
+    pub fn state(&self) -> &[NamedValues<'a>] {
+        &self.state
+    }
+    pub fn action(&self) -> &[NamedValues<'a>] {
+        &self.action
+    }
+    /// What each state value is: `left.j1`, …, `left.gripper`.
+    pub fn state_names(&self) -> Vec<String> {
+        Self::names(&self.state)
+    }
+    /// What each action value is, in the state's order.
+    pub fn action_names(&self) -> Vec<String> {
+        Self::names(&self.action)
+    }
+    fn names(values: &[NamedValues<'a>]) -> Vec<String> {
+        values
+            .iter()
+            .flat_map(|values| values.names.iter().cloned())
+            .collect()
+    }
+}
+
+/// Numbers recorded in one stream, and what each one is.
+pub struct NamedValues<'a> {
+    values: &'a RecordedValues,
+    names: Vec<String>,
+}
+
+impl<'a> NamedValues<'a> {
+    fn new(values: &'a RecordedValues, names: Vec<String>) -> Self {
+        Self { values, names }
+    }
+    pub fn values(&self) -> &'a RecordedValues {
+        self.values
+    }
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+}
+
 /// One arm: its joints' measured and commanded positions, and its gripper.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -218,6 +297,35 @@ mod tests {
 
     fn roles(value: serde_json::Value) -> DatasetJointRoles {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_policy_reads_each_arm_then_its_gripper_and_needs_commands() {
+        let values = |topic: &str, indices: &[usize]| {
+            json!({"topic": topic, "schema": "RobotState", "field": ["position"], "element": [], "indices": indices})
+        };
+        let gripper = json!({"state": values("/left-ee-state", &[0]), "action": values("/left-ee-action", &[0]),
+            "open": 1.0, "closed": 0.0});
+        let two_arms = roles(json!({"arms": [
+            {"name": "left", "state": values("/left-arm-state", &[0, 1]),
+             "action": values("/left-arm-action", &[0, 1]), "gripper": gripper},
+            {"name": "right", "state": values("/right-arm-state", &[0]),
+             "action": values("/right-arm-action", &[0]), "gripper": null},
+        ]}));
+        let joints = two_arms.policy_joints().unwrap();
+        assert_eq!(
+            joints.state_names(),
+            ["left.j1", "left.j2", "left.gripper", "right.j1"]
+        );
+        assert_eq!(joints.action_names(), joints.state_names());
+        assert_eq!(joints.action()[1].values().topic(), "/left-ee-action");
+        let uncommanded = roles(json!({"arms": [
+            {"name": "follower", "state": values("/joints", &[0]), "action": null, "gripper": null}
+        ]}));
+        assert_eq!(
+            uncommanded.policy_joints().err().unwrap(),
+            "The follower arm records no commanded positions."
+        );
     }
 
     #[test]

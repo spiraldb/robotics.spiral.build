@@ -149,8 +149,8 @@ The account endpoints:
 ### Workspaces
 
 A workspace is one Spiral project under the name Studio shows for it, with
-everything Studio keeps for that project: its curations, preferences, robot
-connector, and training runtime. Every signed-in user sees the workspaces whose
+everything Studio keeps for that project: its curations, preferences, training
+runs, and robot connector. Every signed-in user sees the workspaces whose
 projects Spiral lets them open; Spiral alone decides who may open, change, or
 delete which. Each backend keeps its own workspaces, in its
 [Studio database](studio-sqlite.md).
@@ -170,10 +170,9 @@ delete which. Each backend keeps its own workspaces, in its
 - `PUT /settings/connection` (`{"project_id": …}`) makes the session work in
   that workspace and returns the same shape.
 - `GET /settings` returns the named workspace's `DataSettings`: the Spiral
-  endpoints and project, its `name`, `training` runtime, and `robot_connector`
-  address.
-- `PUT /settings` (`{"name": …, "training": {"endpoint": …}}`) renames the named
-  workspace and sets its training runtime; `PUT /settings/robot-connector`
+  endpoints and project, its `name`, and `robot_connector` address.
+- `PUT /settings` (`{"name": …}`) renames the named workspace;
+  `PUT /settings/robot-connector`
   (`{"address": …}`) sets the robot connector every browser in it drives. Both
   return `DataSettings` and refuse before a workspace is chosen.
 
@@ -208,9 +207,13 @@ their existing project APIs.
 
 ### Training and rollout
 
-Both are parked: starting a training run fails until Spiral decodes MCAP video
-into training images, so Rollout has only existing checkpoints to run.
-Training selection and assembly of catalog/detail responses are frontend state.
+A training run fits a policy to a published curated view on the Modal
+training service; [Training](training.md) describes the run end to end.
+`POST /training/runs` (`TrainingConfig`) admits a run, records it, and starts
+uploading its data; `GET /training/runs` lists every run with whether a new one
+could start; `GET /training/runs/{id}` adds one run's metrics and log tail;
+`POST /training/runs/{id}/stop` and `DELETE /training/runs/{id}` stop and
+delete one; `GET /training/checkpoints` lists every saved checkpoint.
 Rollouts run on the robot connector. `GET /training/runs/{id}/checkpoints/{step}/policy`
 answers that checkpoint as a policy envelope
 (`application/vnd.spiral.policy-artifact`), which the browser writes to the robot
@@ -283,7 +286,7 @@ the view, and answers `null`; its stored answers stay. See
   making a project-sized WebAssembly copy. Import returns `ProjectImportSummary`.
 - `GET /project/export?endpoint=...&project_id=...`: version 4 project bundle
   download, a ZIP of `studio.sqlite3` (project-scoped control records, no
-  backend credentials) and the project's MCAP sources and checkpoint artifacts.
+  backend credentials) and the project's MCAP sources.
   Import accepts only this version and also bounds total uncompressed contents
   to 256 MiB. See [project transfer](studio-sqlite.md#project-transfer).
 - `POST /datasets/{dataset}/recordings/{episode}`: one take's MCAP bytes, carried

@@ -1,0 +1,9 @@
+{
+  "run_id": "train-1791300000000-0",
+  "phase": "running",
+  "current_step": 3,
+  "message": "Training ACT on CUDA:0 (NVIDIA L4): 2 episodes, 3 intervals, 55 ticks.",
+  "checkpoints": [
+    { "step": 3, "validation_loss": 0.5, "created_ms": 1791300100000 }
+  ]
+}

@@ -1,5 +1,7 @@
 //! The keys Studio's deployment gives it for its providers: the OpenRouter
-//! key, the Hugging Face token, and the Modal service's address and token.
+//! key, the Hugging Face token, the address of each Modal service — the one
+//! that scores progress and the one that trains — and the one token both
+//! accept.
 //! They come from the process environment, so no user sees or sets them. The
 //! backend attaches them to its own requests and hands the first two to every
 //! database it opens.
@@ -10,6 +12,7 @@ pub struct ProviderKeys {
     llm_api_key: Option<String>,
     huggingface_token: Option<String>,
     modal_base_url: Option<String>,
+    training_service_url: Option<String>,
     modal_token: Option<String>,
 }
 
@@ -17,7 +20,8 @@ impl ProviderKeys {
     const LLM_API_KEY: &str = "OPENROUTER_API_KEY";
     const HUGGINGFACE_TOKEN: &str = "HF_TOKEN";
     const MODAL_BASE_URL: &str = "WARP_PROGRESS_URL";
-    const MODAL_TOKEN: &str = "WARP_PROGRESS_TOKEN";
+    const TRAINING_SERVICE_URL: &str = "TRAINING_SERVICE_URL";
+    const MODAL_TOKEN: &str = "MODAL_SERVICE_TOKEN";
 
     /// The keys in this process's environment.
     pub fn from_environment() -> Self {
@@ -36,6 +40,7 @@ impl ProviderKeys {
             llm_api_key: key(Self::LLM_API_KEY),
             huggingface_token: key(Self::HUGGINGFACE_TOKEN),
             modal_base_url: key(Self::MODAL_BASE_URL),
+            training_service_url: key(Self::TRAINING_SERVICE_URL),
             modal_token: key(Self::MODAL_TOKEN),
         }
     }
@@ -53,6 +58,12 @@ impl ProviderKeys {
         self.modal_base_url.as_deref()
     }
 
+    /// Where the Modal service that trains policies is reached.
+    pub fn training_service_url(&self) -> Option<&str> {
+        self.training_service_url.as_deref()
+    }
+
+    /// The bearer token every Modal service of this deployment accepts.
     pub fn modal_token(&self) -> Option<&str> {
         self.modal_token.as_deref()
     }
@@ -65,6 +76,10 @@ impl std::fmt::Debug for ProviderKeys {
             .field(Self::LLM_API_KEY, &self.llm_api_key.is_some())
             .field(Self::HUGGINGFACE_TOKEN, &self.huggingface_token.is_some())
             .field(Self::MODAL_BASE_URL, &self.modal_base_url.is_some())
+            .field(
+                Self::TRAINING_SERVICE_URL,
+                &self.training_service_url.is_some(),
+            )
             .field(Self::MODAL_TOKEN, &self.modal_token.is_some())
             .finish()
     }
@@ -81,7 +96,8 @@ mod tests {
             ("OPENROUTER_API_KEY", " sk-or-private "),
             ("HF_TOKEN", "  "),
             ("WARP_PROGRESS_URL", "https://scores.modal.run"),
-            ("WARP_PROGRESS_TOKEN", "modal-private"),
+            ("TRAINING_SERVICE_URL", "https://train.modal.run"),
+            ("MODAL_SERVICE_TOKEN", "modal-private"),
         ]);
         let keys =
             ProviderKeys::from_variables(|name| variables.get(name).map(ToString::to_string));
@@ -89,6 +105,7 @@ mod tests {
         assert_eq!(keys.huggingface_token(), None);
         assert_eq!(keys.modal_base_url(), Some("https://scores.modal.run"));
         assert_eq!(keys.modal_token(), Some("modal-private"));
+        assert_eq!(keys.training_service_url(), Some("https://train.modal.run"));
         let debug = format!("{keys:?}");
         assert!(!debug.contains("sk-or-private") && !debug.contains("modal-private"));
         assert_eq!(

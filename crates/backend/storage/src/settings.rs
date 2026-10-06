@@ -117,10 +117,6 @@ impl ServiceEndpoint {
         Self::parse(endpoint, "Spiral SpFS endpoint")
     }
 
-    fn training_runtime(endpoint: &str) -> Result<Self, String> {
-        Self::parse(endpoint, "Training runtime endpoint")
-    }
-
     fn robot_connector(address: &str) -> Result<Self, String> {
         Self::parse(address, "Robot connector address")
     }
@@ -174,23 +170,16 @@ impl ServiceEndpoint {
 /// shape and another pins the defaults to the wire defaults.
 ///
 /// Documents written before cameras moved to the robot connector also hold a
-/// `video` preference; reads ignore it. Documents written before workspaces
+/// `video` preference, and those written before training moved to Modal a
+/// `training` one; reads ignore both. Documents written before workspaces
 /// kept a robot connector read as the default one.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StoredStudioPreferences {
-    #[serde(default)]
-    training: StoredTrainingRuntimePreference,
     #[serde(default)]
     robot_connector: StoredRobotConnectorPreference,
 }
 
 impl StoredStudioPreferences {
-    /// These preferences with the training runtime at `endpoint`, validated.
-    pub fn with_training_endpoint(mut self, endpoint: &str) -> Result<Self, String> {
-        self.training.endpoint = ServiceEndpoint::training_runtime(endpoint)?.into_string();
-        Ok(self)
-    }
-
     /// These preferences with the robot connector at `address`, validated.
     pub fn with_robot_connector(mut self, address: &str) -> Result<Self, String> {
         self.robot_connector.address = ServiceEndpoint::robot_connector(address)?.into_string();
@@ -200,38 +189,12 @@ impl StoredStudioPreferences {
     /// These preferences, refused unless every endpoint in them is valid: a
     /// document from an imported snapshot is untrusted.
     pub(crate) fn validated(self) -> Result<Self, String> {
-        let training = self.training.endpoint.clone();
         let robot_connector = self.robot_connector.address.clone();
-        self.with_training_endpoint(&training)?
-            .with_robot_connector(&robot_connector)
-    }
-
-    pub const fn training(&self) -> &StoredTrainingRuntimePreference {
-        &self.training
+        self.with_robot_connector(&robot_connector)
     }
 
     pub const fn robot_connector(&self) -> &StoredRobotConnectorPreference {
         &self.robot_connector
-    }
-}
-
-/// Persisted training-runtime preference: the endpoint future sessions dial.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct StoredTrainingRuntimePreference {
-    endpoint: String,
-}
-
-impl Default for StoredTrainingRuntimePreference {
-    fn default() -> Self {
-        Self {
-            endpoint: "http://127.0.0.1:50051".to_owned(),
-        }
-    }
-}
-
-impl StoredTrainingRuntimePreference {
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
     }
 }
 
@@ -270,15 +233,8 @@ mod tests {
     }
 
     #[test]
-    fn training_runtime_and_robot_connector_require_an_http_or_https_endpoint() {
+    fn the_robot_connector_requires_an_http_or_https_endpoint() {
         let preferences = StoredStudioPreferences::default();
-        assert!(
-            preferences
-                .clone()
-                .with_training_endpoint("ftp://runtime.example")
-                .unwrap_err()
-                .contains("http:// or https://")
-        );
         assert!(
             preferences
                 .clone()
@@ -288,10 +244,8 @@ mod tests {
         );
 
         let staged = preferences
-            .with_training_endpoint(" http://runtime.example:50051 ")
-            .and_then(|staged| staged.with_robot_connector("http://lab-arms.example:7070/"))
+            .with_robot_connector("http://lab-arms.example:7070/")
             .expect("HTTP endpoints are accepted");
-        assert_eq!(staged.training().endpoint(), "http://runtime.example:50051");
         assert_eq!(
             staged.robot_connector().address(),
             "http://lab-arms.example:7070"
@@ -303,15 +257,11 @@ mod tests {
     #[test]
     fn the_preferences_document_format_is_frozen() {
         let json = serde_json::to_string(&StoredStudioPreferences::default()).unwrap();
-        assert_eq!(
-            json,
-            r#"{"training":{"endpoint":"http://127.0.0.1:50051"},"robot_connector":{"address":"http://localhost:7070"}}"#
-        );
+        assert_eq!(json, r#"{"robot_connector":{"address":"http://localhost:7070"}}"#);
         let earlier: StoredStudioPreferences = serde_json::from_str(
             r#"{"training":{"endpoint":"http://runtime.example"},"video":{"enabled":false}}"#,
         )
         .unwrap();
-        assert_eq!(earlier.training().endpoint(), "http://runtime.example");
         assert_eq!(
             earlier.robot_connector().address(),
             StoredRobotConnectorPreference::default().address()
@@ -321,12 +271,8 @@ mod tests {
     /// A fresh project and a fresh browser session must agree on defaults.
     #[test]
     fn stored_preference_defaults_match_the_wire_defaults() {
-        use spiral_robotics_common::settings::{RobotConnectorSettings, TrainingRuntimeSettings};
+        use spiral_robotics_common::settings::RobotConnectorSettings;
 
-        assert_eq!(
-            StoredTrainingRuntimePreference::default().endpoint(),
-            TrainingRuntimeSettings::default().endpoint()
-        );
         assert_eq!(
             StoredRobotConnectorPreference::default().address(),
             RobotConnectorSettings::default().address()

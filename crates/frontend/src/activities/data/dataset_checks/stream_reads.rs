@@ -4,7 +4,9 @@
 //! so a topic, a field path or a clock is spelled one way.
 use crate::activities::data::DatasetClient;
 use serde::de::DeserializeOwned;
-use spiral_robotics_common::datasets::{DatasetSelection, DatasetTopic, RecordedValues};
+use spiral_robotics_common::datasets::{
+    DatasetSelection, DatasetTopic, RecordedValues, ValueColumns,
+};
 use spiral_robotics_common::sql::SqlLiteral;
 
 /// The most rows one check statement may answer with; the checks aggregate
@@ -142,66 +144,18 @@ struct PartRow<R> {
     row: R,
 }
 
-/// Numbers of one stream as columns: `{prefix}0`, `{prefix}1`, … per
-/// message, beside the episode `id` and `log_time`.
-pub(super) struct ValueColumns<'a> {
-    values: &'a RecordedValues,
-    prefix: &'static str,
+/// What the checks read from a stream's value columns beyond the numbers
+/// themselves: how fast they change, and what a position is called.
+pub(super) trait CheckedValueColumns {
+    fn motion_cte(&self, name: &str) -> String;
+    fn joint_name(position: usize) -> String;
 }
 
-impl<'a> ValueColumns<'a> {
-    pub(super) fn new(values: &'a RecordedValues, prefix: &'static str) -> Self {
-        Self { values, prefix }
-    }
-    /// How many numbers each message holds.
-    pub(super) fn len(&self) -> usize {
-        self.values.indices().len().max(1)
-    }
-    pub(super) fn names(&self) -> Vec<String> {
-        (0..self.len())
-            .map(|position| format!("{}{position}", self.prefix))
-            .collect()
-    }
-    /// The column expressions picking each number from `value`, as the
-    /// statement `read` answers it. A list item's element is a field of a
-    /// picked column, which Spiral reads only from a named column, so an
-    /// element path takes a second step.
-    pub(super) fn ctes(&self, name: &str, read: &str) -> Vec<String> {
-        let field = Self::path("value", self.values.field());
-        let names = self.names();
-        if self.values.indices().is_empty() {
-            return vec![format!(
-                "{name} AS (SELECT id, log_time, {field} AS {} FROM {read})",
-                names[0]
-            )];
-        }
-        let picked = self
-            .values
-            .indices()
-            .iter()
-            .zip(&names)
-            .map(|(index, column)| format!("spql.list.get({field}, {index}) AS {column}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if self.values.element().is_empty() {
-            return vec![format!(
-                "{name} AS (SELECT id, log_time, {picked} FROM {read})"
-            )];
-        }
-        let elements = names
-            .iter()
-            .map(|column| format!("{} AS {column}", Self::path(column, self.values.element())))
-            .collect::<Vec<_>>()
-            .join(", ");
-        vec![
-            format!("{name}_items AS (SELECT id, log_time, {picked} FROM {read})"),
-            format!("{name} AS (SELECT id, log_time, {elements} FROM {name}_items)"),
-        ]
-    }
+impl CheckedValueColumns for ValueColumns<'_> {
     /// `{name}_motion`, over `{name}`: each message's numbers beside the
     /// seconds since the episode's previous message (`dt`) and how fast each
     /// number changed over them (`v0`, `v1`, …).
-    pub(super) fn motion_cte(&self, name: &str) -> String {
+    fn motion_cte(&self, name: &str) -> String {
         let step = CheckedStreams::step_seconds();
         let columns = self.names();
         let rates = columns
@@ -220,16 +174,8 @@ impl<'a> ValueColumns<'a> {
         )
     }
     /// The joint an arm's position `position` is: j1, j2, …
-    pub(super) fn joint_name(position: usize) -> String {
+    fn joint_name(position: usize) -> String {
         format!("j{}", position + 1)
-    }
-    /// `root` then each of `names`, quoted, as one field path.
-    fn path(root: &str, names: &[String]) -> String {
-        std::iter::once(root)
-            .chain(names.iter().map(String::as_str))
-            .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(".")
     }
 }
 
@@ -258,8 +204,8 @@ impl<'a> PairedColumns<'a> {
         name: &str,
         streams: CheckedStreams<'_>,
     ) -> Result<Vec<String>, String> {
-        let state = streams.read_values(self.state.values)?;
-        let action = streams.read_values(self.action.values)?;
+        let state = streams.read_values(self.state.values())?;
+        let action = streams.read_values(self.action.values())?;
         let mut ctes = self.state.ctes(&format!("{name}_state"), &state);
         ctes.extend(self.action.ctes(&format!("{name}_action"), &action));
         let measured = self
@@ -300,42 +246,9 @@ impl Greatest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    fn values(value: serde_json::Value) -> RecordedValues {
-        serde_json::from_value(value).unwrap()
-    }
 
     #[test]
-    fn list_items_with_an_element_take_a_named_column_first() {
-        let wrapped = values(json!({
-            "topic": "/joints", "schema": "JointSample", "field": ["state_position", "values"],
-            "element": ["value"], "indices": [0, 4]
-        }));
-        let ctes = ValueColumns::new(&wrapped, "q").ctes("follower", "READ");
-        assert_eq!(
-            ctes,
-            [
-                "follower_items AS (SELECT id, log_time, spql.list.get(\"value\".\"state_position\".\"values\", 0) AS q0, spql.list.get(\"value\".\"state_position\".\"values\", 4) AS q1 FROM READ)",
-                "follower AS (SELECT id, log_time, \"q0\".\"value\" AS q0, \"q1\".\"value\" AS q1 FROM follower_items)",
-            ]
-        );
-        let plain = values(json!({
-            "topic": "/arm", "schema": "RobotState", "field": ["position"], "element": [], "indices": [2]
-        }));
-        assert_eq!(
-            ValueColumns::new(&plain, "a").ctes("arm", "READ"),
-            [
-                "arm AS (SELECT id, log_time, spql.list.get(\"value\".\"position\", 2) AS a0 FROM READ)"
-            ]
-        );
-        let scalar = values(json!({
-            "topic": "/grip", "schema": "Grip", "field": ["opening"], "element": [], "indices": []
-        }));
-        assert_eq!(
-            ValueColumns::new(&scalar, "q").ctes("grip", "READ"),
-            ["grip AS (SELECT id, log_time, \"value\".\"opening\" AS q0 FROM READ)"]
-        );
+    fn greatest_is_spelled_only_for_two_or_more() {
         assert_eq!(Greatest::of(&["x".into()]), "x");
         assert_eq!(Greatest::of(&["x".into(), "y".into()]), "greatest(x, y)");
     }

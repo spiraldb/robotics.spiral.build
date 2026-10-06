@@ -2,8 +2,10 @@ use super::*;
 use crate::curations::CurationPersistence;
 use crate::settings::StudioPreferencePersistence;
 use crate::studio::StudioStore;
-use crate::training::{TrainingRunPersistence, TrainingRunRecord};
-use spiral_robotics_common::training::{TrainingConfig, TrainingRunIdentity};
+use crate::training::TrainingRunPersistence;
+use spiral_robotics_common::training::{
+    TrainingConfig, TrainingInputSummary, TrainingRunIdentity,
+};
 
 struct Fixture;
 impl Fixture {
@@ -58,9 +60,11 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
                 .unwrap()
         );
     }
-    let run = TrainingRunRecord::new(
-        TrainingRunIdentity::new("run", TrainingConfig::default(), 10),
-        "http://localhost:9000",
+    let run = TrainingRunIdentity::new(
+        "run",
+        TrainingConfig::default(),
+        TrainingInputSummary::new(1, 1, 2.0),
+        10,
     );
     TrainingRunPersistence::new(&source)
         .insert(&run)
@@ -69,7 +73,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
     StudioPreferencePersistence::new(&source)
         .save(
             &crate::StoredStudioPreferences::default()
-                .with_training_endpoint("http://localhost:9000")
+                .with_robot_connector("http://localhost:9000")
                 .unwrap(),
         )
         .await
@@ -129,8 +133,8 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
             .load()
             .await
             .unwrap()
-            .training()
-            .endpoint(),
+            .robot_connector()
+            .address(),
         "http://localhost:9000"
     );
 }

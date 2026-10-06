@@ -8,6 +8,7 @@ mod h264;
 mod joint_roles;
 mod messages;
 mod robot;
+mod value_columns;
 pub use camera_video::CameraVideo;
 pub use catalog::{
     DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeSelection,
@@ -17,10 +18,12 @@ pub use check_report::{DatasetCheckLookup, DatasetCheckSave};
 pub use episode_id::EpisodeId;
 pub use h264::H264AccessUnit;
 pub use joint_roles::{
-    ArmRoles, DatasetJointRoles, DatasetJointRolesSave, GripperRoles, RecordedValues,
+    ArmRoles, DatasetJointRoles, DatasetJointRolesSave, GripperRoles, NamedValues, PolicyJoints,
+    RecordedValues,
 };
 pub use messages::{MessageCursor, MessageRead, MessageWindow, TopicRevision, ValueSchemaRead};
 pub use robot::{DatasetRobot, DatasetRobotSave, JointBinding, JointSelector};
+pub use value_columns::ValueColumns;
 
 use serde::{Deserialize, Serialize};
 

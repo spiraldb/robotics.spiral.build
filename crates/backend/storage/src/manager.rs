@@ -15,7 +15,7 @@ use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
 use crate::settings::StudioPreferencePersistence;
-use crate::training::{TrainingCheckpointPersistence, TrainingRunPersistence};
+use crate::training::TrainingRunPersistence;
 use crate::transfer::TransferPersistence;
 
 pub struct StorageManager {
@@ -54,10 +54,6 @@ impl StorageManager {
 
     pub fn training_runs(&self) -> TrainingRunPersistence<'_> {
         TrainingRunPersistence::new(&self.studio)
-    }
-
-    pub fn training_checkpoints(&self) -> TrainingCheckpointPersistence<'_> {
-        TrainingCheckpointPersistence::new(&self.project_store)
     }
 
     pub fn curations(&self) -> CurationPersistence<'_> {

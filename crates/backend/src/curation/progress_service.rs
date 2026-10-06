@@ -51,7 +51,7 @@ impl ProgressService {
     pub(super) fn of(keys: &ProviderKeys, permits: Arc<Semaphore>) -> Result<Self, String> {
         let (Some(base_url), Some(token)) = (keys.modal_base_url(), keys.modal_token()) else {
             return Err(
-                "Score progress needs the Modal service, which this Studio was started without: set WARP_PROGRESS_URL and WARP_PROGRESS_TOKEN."
+                "Score progress needs the Modal service, which this Studio was started without: set WARP_PROGRESS_URL and MODAL_SERVICE_TOKEN."
                     .into(),
             );
         };
@@ -149,7 +149,7 @@ impl ProgressService {
                     ));
                 }
                 StatusCode::UNAUTHORIZED => {
-                    return Err("The Modal service refused WARP_PROGRESS_TOKEN.".into());
+                    return Err("The Modal service refused MODAL_SERVICE_TOKEN.".into());
                 }
                 status if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() => {
                     last_failure = format!("the service answered {status}");

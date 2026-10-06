@@ -31,7 +31,7 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_sync(extra_options="--no-dev")
     .add_local_python_source("warp_progress", copy=True)
-    .run_function(download_artifacts, secrets=[modal.Secret.from_name("huggingface")])
+    .run_function(download_artifacts, secrets=[modal.Secret.from_name("spiral-robotics-huggingface")])
 )
 app = modal.App("warp-progress", image=image)
 
@@ -45,7 +45,7 @@ with image.imports():
 
 @app.cls(
     gpu="T4",
-    secrets=[modal.Secret.from_name("warp-progress-auth")],
+    secrets=[modal.Secret.from_name("spiral-robotics-auth")],
     scaledown_window=120,
     min_containers=0,
     timeout=TIMEOUT_S,
@@ -61,4 +61,4 @@ class WarpProgress:
 
     @modal.asgi_app()
     def web(self):
-        return ProgressService(self._model, os.environ["WARP_PROGRESS_TOKEN"]).app()
+        return ProgressService(self._model, os.environ["MODAL_SERVICE_TOKEN"]).app()

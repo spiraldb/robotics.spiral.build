@@ -144,7 +144,7 @@ fn packets(count: i64) -> RecordBatch {
 fn service(base_url: &str, token: &str) -> Result<ProgressService, String> {
     let keys = ProviderKeys::from_variables(|name| match name {
         "WARP_PROGRESS_URL" => Some(base_url.to_owned()),
-        "WARP_PROGRESS_TOKEN" => Some(token.to_owned()),
+        "MODAL_SERVICE_TOKEN" => Some(token.to_owned()),
         _ => None,
     });
     ProgressService::of(&keys, Arc::new(Semaphore::new(8)))
@@ -153,7 +153,7 @@ fn service(base_url: &str, token: &str) -> Result<ProgressService, String> {
 #[test]
 fn the_service_needs_its_url_and_token() {
     let missing = ProgressService::of(&ProviderKeys::default(), Arc::new(Semaphore::new(1)));
-    assert!(missing.err().unwrap().contains("WARP_PROGRESS_TOKEN"));
+    assert!(missing.err().unwrap().contains("MODAL_SERVICE_TOKEN"));
     let insecure = service("http://scores.example.com", "good");
     assert!(insecure.err().unwrap().contains("HTTPS"));
     assert!(service("https://scores.modal.run", "good").is_ok());
@@ -200,7 +200,7 @@ async fn a_video_is_scored_rejected_or_refused_as_the_contract_says() {
         refused
             .err()
             .unwrap()
-            .contains("refused WARP_PROGRESS_TOKEN")
+            .contains("refused MODAL_SERVICE_TOKEN")
     );
 }
 

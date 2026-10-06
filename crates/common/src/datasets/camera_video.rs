@@ -46,6 +46,20 @@ impl<'a> CameraVideo<'a> {
         )
     }
 
+    /// One statement listing this camera's packets of the episode bound as
+    /// `$1` exactly as recorded, in decode order, as training uploads them:
+    /// `log_time_ns`, the absolute MCAP log time, and `payload`, the access
+    /// unit.
+    pub fn recorded_packets(self) -> String {
+        format!(
+            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload \
+             FROM spql.mcap.read_topic({}, {}) r WHERE r.id = $1 \
+             ORDER BY r.chunk_start_offset, r.sample_ordinal",
+            SqlLiteral::text(self.dataset),
+            SqlLiteral::text(self.camera)
+        )
+    }
+
     /// Every packet of the episodes `members` admits, numbered in decode
     /// order within its episode and timed by `timed`.
     fn read(self, timed: &str, members: &str) -> String {
@@ -75,6 +89,14 @@ mod tests {
         assert!(many.starts_with("p AS (SELECT r.id,"));
         assert!(many.contains("WHERE r.id IN (SELECT episode_id FROM kept)), v AS (SELECT id,"));
         assert!(many.ends_with("FROM p GROUP BY id)"));
+    }
+
+    #[test]
+    fn training_reads_the_bound_episodes_packets_as_recorded() {
+        assert_eq!(
+            CameraVideo::new("d", "/c").recorded_packets(),
+            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload FROM spql.mcap.read_topic('d', '/c') r WHERE r.id = $1 ORDER BY r.chunk_start_offset, r.sample_ordinal"
+        );
     }
 
     #[test]

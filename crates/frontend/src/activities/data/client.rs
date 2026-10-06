@@ -76,7 +76,7 @@ impl DatasetClient {
 
     /// The joint roles resolved for the dataset's current version; `None`
     /// until they are.
-    pub(super) fn joint_roles(
+    pub(in crate::activities) fn joint_roles(
         &self,
         selection: &DatasetSelection,
     ) -> impl Future<

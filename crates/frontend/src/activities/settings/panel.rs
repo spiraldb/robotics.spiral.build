@@ -1,5 +1,5 @@
-//! Settings screen for the workspace, its training runtime, and the Spiral
-//! account. The robots are set up where they are driven, in Rollout.
+//! Settings screen for the workspace and the Spiral account. The robots are
+//! set up where they are driven, in Rollout.
 
 use crate::activities::settings::SettingsClient;
 use dioxus::dioxus_core::CapturedError;
@@ -19,29 +19,7 @@ use crate::shell::workspace::WorkspaceSettings;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
     Workspace,
-    Training,
     Account,
-}
-
-/// A connection a section can test against its saved settings. Testing
-/// saves nothing; the footer's Save is the one way a draft is kept.
-#[derive(Clone, Copy)]
-enum ConnectionCheck {
-    SpiralProject,
-    TrainingRuntime,
-}
-
-impl ConnectionCheck {
-    async fn run(self) -> ConnectionTest {
-        let client = SettingsClient::current();
-        let result = match self {
-            Self::SpiralProject => client.test_spiral_connection().await,
-            Self::TrainingRuntime => client.test_training_runtime().await,
-        };
-        result.unwrap_or_else(|error| {
-            ConnectionTest::new(false, format!("{error} {}", error.recovery_guidance()))
-        })
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -204,10 +182,7 @@ fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
         save_error.set(None);
         saving.set(true);
         let submitted = current();
-        let update = spiral_robotics_common::settings::SettingsUpdate::new(
-            submitted.name(),
-            submitted.training().to_owned(),
-        );
+        let update = spiral_robotics_common::settings::SettingsUpdate::new(submitted.name());
         crate::client::project::ProjectClient::current().spawn(async move {
             match SettingsClient::current().update_data_settings(update).await {
                 Ok(_) => {
@@ -223,21 +198,25 @@ fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
             saving.set(false);
         });
     };
-    let mut test_connection = move |check: ConnectionCheck| {
+    // Testing saves nothing; the footer's Save is the one way a draft is kept.
+    let mut test_connection = move || {
         if testing() {
             return;
         }
         testing.set(true);
         test_result.set(None);
         crate::client::project::ProjectClient::current().spawn(async move {
-            test_result.set(Some(check.run().await));
+            let tested = SettingsClient::current()
+                .test_spiral_connection()
+                .await
+                .unwrap_or_else(|error| {
+                    ConnectionTest::new(false, format!("{error} {}", error.recovery_guidance()))
+                });
+            test_result.set(Some(tested));
             testing.set(false);
         });
     };
     let test_disabled = saving() || testing() || import_project.pending();
-    // The runtime is tested where the backend reaches it, which is the saved
-    // endpoint; an edited one has to be saved before it can be tested.
-    let endpoint_unsaved = current().training() != base().training();
     let connection_result = test_result().map(|response| rsx! {
         p {
             class: if response.connected() { "connection-test connection-test-ok settings-control-column" } else { "connection-test connection-test-failed settings-control-column" },
@@ -254,11 +233,7 @@ fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
         .as_ref()
         .map(|settings| settings.spiral().project_id().to_owned())
         .unwrap_or_default();
-    let shows_draft = !creating
-        && matches!(
-            section(),
-            SettingsSection::Workspace | SettingsSection::Training
-        );
+    let shows_draft = !creating && section() == SettingsSection::Workspace;
 
     rsx! {
         section {
@@ -277,7 +252,6 @@ fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
                 nav { class: "settings-nav", "aria-label": "Settings sections",
                     for (label, target) in [
                         ("Workspace", SettingsSection::Workspace),
-                        ("Training", SettingsSection::Training),
                         ("Account", SettingsSection::Account),
                     ] {
                         SettingsSectionAction { key: "{label}", label, active: section() == target, onclick: move |_| { section.set(target); test_result.set(None); save_error.set(None); } }
@@ -316,12 +290,12 @@ fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
                                         disabled: test_disabled,
                                         aria_busy: testing(),
                                         title: "Check that Studio can reach this Spiral project",
-                                        onclick: move |_| test_connection(ConnectionCheck::SpiralProject),
+                                        onclick: move |_| test_connection(),
                                         if testing() { "Testing…" } else { "Test connection" }
                                     }
                                 }
                             }
-                            {connection_result.clone()}
+                            {connection_result}
                             section { class: "settings-group", "aria-labelledby": "project-transfer-title",
                                 SettingsHeading { title: "Workspace backup", id: "project-transfer-title" }
                                 p { class: "settings-help", "Import replaces this workspace’s data and Studio records." }
@@ -364,30 +338,6 @@ fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
                                 }
                             }
                             super::workspace::DeleteWorkspace { name: workspace_name.clone(), project_id: project_id.clone() }
-                        },
-                        SettingsSection::Training => rsx! {
-                            SettingsHeading { title: "Training runtime" }
-                            div { class: "settings-row",
-                                SettingsField {
-                                    label: "Endpoint",
-                                    value: current().training().endpoint(),
-                                    placeholder: "http://127.0.0.1:50051",
-                                    oninput: move |value| current.write().training_mut().set_endpoint(value),
-                                }
-                                Button {
-                                    purpose: ActionPurpose::Refresh,
-                                    variant: ButtonVariant::Link,
-                                    disabled: test_disabled || endpoint_unsaved,
-                                    aria_busy: testing(),
-                                    title: if endpoint_unsaved { "Save the endpoint to test it" } else { "Check that Studio can reach this runtime" },
-                                    onclick: move |_| test_connection(ConnectionCheck::TrainingRuntime),
-                                    if testing() { "Testing…" } else { "Test connection" }
-                                }
-                            }
-                            {connection_result}
-                            p { class: "settings-help settings-control-column",
-                                "New runs use the saved endpoint; an active run keeps its connection."
-                            }
                         },
                     }
                 }

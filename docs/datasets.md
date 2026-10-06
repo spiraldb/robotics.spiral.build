@@ -19,7 +19,6 @@ The selected Spiral project holds Studio's resources at its root:
 | `dataset_files_<name>` | Table | The dataset's MCAP files: `recording` (an opaque source key within its dataset, not an episode identity) and the `source` Blob |
 | `dataset_<name>` | Native Dataset | Made from its files table through `spql.mcap.dataset`, with `recording` as the member key and `materialization = 'all'` |
 | `dataset_answers_<name>` | Table | One row per episode, keyed by `episode_id`, and one column per exact model call a curation made, each value `STRUCT(value …)`: NULL not asked yet, a NULL `value` asked and failed. Created from the Dataset's first refresh, given a row by every append, dropped with the Dataset |
-| `studio_training_checkpoints` | Table | Model checkpoint artifacts |
 
 A Dataset refresh reads every file of its files table and copies every
 topic into Spiral, so reads never reopen an MCAP file. Adding a file rebuilds
@@ -102,6 +101,7 @@ populations in the same transaction as Studio state. See
 
 ## Training and rollout
 
-Training is parked until Spiral decodes MCAP video into training images:
-Studio refuses to start a run, and there is no Studio-side decoder. Rollout
-runs existing checkpoints whose schema matches exactly.
+Training reads a curated view's intervals and uploads each episode's camera
+packets and joint values to the Modal training service, which decodes and
+resamples them next to the GPU and keeps the checkpoints
+([Training](training.md)).

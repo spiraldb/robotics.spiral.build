@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/common",
     "crates/backend/storage",
-    "crates/backend/training",
     "crates/backend",
     "crates/robot-connector/hardware",
     "crates/robot-connector/inference",
@@ -32,7 +31,6 @@ spiral-robotics-inference = { path = "crates/robot-connector/inference" }
 spiral-robotics-hardware = { path = "crates/robot-connector/hardware" }
 spiral-robotics-recording = { path = "crates/robot-connector/recording" }
 spiral-robotics-storage = { path = "crates/backend/storage" }
-spiral-robotics-training = { path = "crates/backend/training" }
 spiral-robotics-ui = { path = "crates/ui" }
 spiral-robotics-viewport = { path = "crates/viewport" }
 clap = { version = "4.5", features = ["derive", "env"] }

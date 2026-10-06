@@ -12,7 +12,8 @@ use std::collections::BTreeSet;
 use std::io::{self, Cursor, Read, Write};
 
 const PROJECT_FORMAT: &str = "spiral-robotics-project";
-const FORMAT_VERSION: u32 = 4;
+/// Format 5 dropped the training checkpoints, which now live on Modal.
+const FORMAT_VERSION: u32 = 5;
 const MANIFEST_ENTRY: &str = "manifest.json";
 const STUDIO_ENTRY: &str = "studio.sqlite3";
 const MAX_ARROW_MESSAGE_METADATA_BYTES: usize = 1024 * 1024;
@@ -122,28 +123,10 @@ impl ProjectBundle {
         )?;
         for table in Table::ALL {
             bundle.start(&Self::relation_entry(table))?;
-            if table == Table::DatasetSources {
-                Self::export_sources(connection, &source.datasets, &mut bundle).await?;
-                continue;
-            }
-            let relation = table.qualified_name();
-            if connection.table_exists(&relation).await? {
-                let mut records = connection
-                    .execute_query(format!("SELECT * FROM {relation}"))
-                    .await?;
-                table.validate(records.schema().as_ref(), "project export")?;
-                let mut writer = StreamWriter::try_new(&mut bundle, records.schema().as_ref())
-                    .map_err(|error| error.to_string())?;
-                while let Some(batch) = records.next().await {
-                    writer
-                        .write(&batch.map_err(|error| error.to_string())?)
-                        .map_err(|error| error.to_string())?;
+            match table {
+                Table::DatasetSources => {
+                    Self::export_sources(connection, &source.datasets, &mut bundle).await?;
                 }
-                writer.finish().map_err(|error| error.to_string())?;
-            } else {
-                StreamWriter::try_new(&mut bundle, &table.schema())
-                    .and_then(|mut writer| writer.finish())
-                    .map_err(|error| error.to_string())?;
             }
         }
         bundle.finish()
@@ -224,11 +207,6 @@ impl ProjectBundle {
                     match table {
                         Table::DatasetSources => {
                             McapSources::restore(connection, &batches, &archive.datasets).await?;
-                        }
-                        Table::TrainingCheckpoints => {
-                            connection
-                                .replace_or_create_batches(&table.qualified_name(), batches)
-                                .await?;
                         }
                     }
                 }

@@ -8,8 +8,9 @@ use crate::activities::training::TrainingClient;
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use spiral_robotics_common::training::TrainingConfig;
+use spiral_robotics_common::training::{ImageSize, TrainingConfig, TrainingSource};
 
+use super::observation::{ImageScale, SourceSizes};
 use crate::components::scoped_task::ScopedTask;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
@@ -19,12 +20,16 @@ pub(crate) struct TrainingController {
     draft: TrainingDraftSignals,
     history: TrainingHistorySignals,
     commands: TrainingCommandSignals,
+    source_sizes: SourceSizes,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 struct TrainingDraftSignals {
     config: Signal<TrainingConfig>,
     automatic_run_name: Signal<bool>,
+    /// The image size as a fraction of the first camera's, which the size
+    /// itself follows once that camera's is read.
+    image_scale: Signal<ImageScale>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -52,17 +57,14 @@ impl TrainingRunIdentity {
 }
 
 impl TrainingController {
-    /// The draft names its own dataset: the catalog field writes it straight
-    /// into the config, so there is no second copy of the choice to keep in step.
+    /// The draft trains on no view until one is chosen: its source names a
+    /// view no catalog lists.
     pub(super) fn use_controller() -> Self {
         use_hook(|| Self {
             draft: TrainingDraftSignals {
-                config: Signal::new(TrainingConfig::for_dataset(
-                    "act-run-001",
-                    "default".to_owned(),
-                    String::new(),
-                )),
+                config: Signal::new(TrainingConfig::default()),
                 automatic_run_name: Signal::new(true),
+                image_scale: Signal::new(ImageScale::default()),
             },
             history: TrainingHistorySignals {
                 selected_run: Signal::new(None),
@@ -73,6 +75,7 @@ impl TrainingController {
                 stopping: Signal::new(None),
                 deleting: Signal::new(None),
             },
+            source_sizes: SourceSizes::new(),
         })
     }
 
@@ -82,6 +85,48 @@ impl TrainingController {
 
     pub(super) fn edit_config(mut self, edit: impl FnOnce(&mut TrainingConfig)) {
         edit(&mut self.draft.config.write());
+    }
+
+    /// Train on `source`. Its cameras are chosen afresh, all of them once its
+    /// dataset's are known.
+    pub(super) fn choose_source(mut self, source: TrainingSource) {
+        if *self.draft.config.peek().source() == source {
+            return;
+        }
+        let mut config = self.draft.config.write();
+        config.set_source(source);
+        config.observation_mut().set_cameras(Vec::new());
+    }
+
+    /// Read every one of `cameras` while none is chosen.
+    pub(super) fn default_cameras(mut self, cameras: &[String]) {
+        if self.draft.config.peek().observation().cameras().is_empty() && !cameras.is_empty() {
+            self.draft
+                .config
+                .write()
+                .observation_mut()
+                .set_cameras(cameras.to_vec());
+        }
+    }
+
+    pub(super) fn image_scale(&self) -> ImageScale {
+        *self.draft.image_scale.read()
+    }
+
+    pub(super) fn set_image_scale(mut self, scale: ImageScale) {
+        self.draft.image_scale.set(scale);
+    }
+
+    /// Resize every frame to `image`.
+    pub(super) fn set_image(mut self, image: ImageSize) {
+        if self.draft.config.peek().observation().image() != image {
+            self.draft.config.write().observation_mut().set_image(image);
+        }
+    }
+
+    /// The size each camera records at, as far as it has been read.
+    pub(super) const fn source_sizes(&self) -> SourceSizes {
+        self.source_sizes
     }
 
     pub(super) fn set_run_name(mut self, value: String) {

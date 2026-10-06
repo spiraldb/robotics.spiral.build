@@ -38,21 +38,23 @@ weights in `~/.cache/warp-progress/artifacts`. To fetch them, run
 
 ## Deploy
 
+The app lives in the `spiral-dev` Modal workspace, beside the
+[training service](../../training/README.md), and accepts the same bearer token.
 One-time setup. DINOv3 is gated, so the Hugging Face token needs access to it:
 
 ```sh
-modal token new
-modal secret create huggingface HF_TOKEN=…
-modal secret create warp-progress-auth WARP_PROGRESS_TOKEN=…
+modal token new --profile spiral-dev
+modal secret create spiral-robotics-huggingface HF_TOKEN=…
+modal secret create spiral-robotics-auth MODAL_SERVICE_TOKEN=…
 ```
 
-Then:
+Then, with the image builder `uv_sync` needs (the workspace defaults to an older one):
 
 ```sh
-uv run modal deploy app.py
-curl https://<workspace>--warp-progress-warpprogress-web.modal.run/health
+MODAL_IMAGE_BUILDER_VERSION=2025.06 uv run modal deploy app.py
+curl https://spiral-dev--warp-progress-warpprogress-web.modal.run/health
 ```
 
-The image build downloads both artifacts with the `huggingface` secret. Running containers need no
+The image build downloads both artifacts with the `spiral-robotics-huggingface` secret. Running containers need no
 token. The build copies `warp_progress/` in before that download, so any code change downloads the
 weights again on the next deploy.

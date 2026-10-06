@@ -6,26 +6,20 @@ use arrow_schema::{DataType, Field, Schema};
 
 include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 
-/// Prefix of the relations Studio owns in Spiral, such as
-/// `studio_training_checkpoints`.
-pub const STUDIO_TABLE_PREFIX: &str = "studio";
-
 /// Data-plane relations included in project bundles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Table {
     /// Every MCAP dataset's source files, in one entry naming each file's
     /// dataset; each dataset keeps them in its own source table.
     DatasetSources,
-    TrainingCheckpoints,
 }
 
 impl Table {
-    pub(crate) const ALL: [Self; 2] = [Self::DatasetSources, Self::TrainingCheckpoints];
+    pub(crate) const ALL: [Self; 1] = [Self::DatasetSources];
 
     pub(crate) fn schema(self) -> Schema {
         match self {
             Self::DatasetSources => crate::datasets::McapSources::bundle_schema(),
-            Self::TrainingCheckpoints => crate::training::CheckpointArtifact::schema(),
         }
     }
 
@@ -36,14 +30,6 @@ impl Table {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::DatasetSources => "dataset_source",
-            Self::TrainingCheckpoints => "training_checkpoints",
-        }
-    }
-
-    pub(crate) fn qualified_name(self) -> String {
-        match self {
-            Self::DatasetSources => self.name().into(),
-            Self::TrainingCheckpoints => format!("{STUDIO_TABLE_PREFIX}_{}", self.name()),
         }
     }
 }
@@ -123,18 +109,6 @@ impl ManagedDataTypeCompatibility for DataType {
             _ => self == expected,
         }
     }
-}
-
-/// Persisted and query-result column names.
-pub(crate) mod column {
-    pub(crate) const CHECKPOINT: &str = "checkpoint";
-    pub(crate) const CONFIG_JSON: &str = "config_json";
-    pub(crate) const CREATED_MS: &str = "created_ms";
-    pub(crate) const POLICY: &str = "policy";
-    pub(crate) const RUN_ID: &str = "run_id";
-    pub(crate) const RUN_NAME: &str = "run_name";
-    pub(crate) const STEP: &str = "step";
-    pub(crate) const VALIDATION_LOSS: &str = "validation_loss";
 }
 
 /// Storage-schema naming validation.

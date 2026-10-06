@@ -1,3 +1,5 @@
+"""Rollout inference inputs: one Arrow IPC record batch of FixedSizeList tensors."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,21 +9,6 @@ import pyarrow as pa
 
 from .config import PolicyConfig
 from .errors import RuntimeRequestError
-
-
-@dataclass(frozen=True)
-class TrainingArrays:
-    """Zero-copy NumPy views whose owner keeps the Arrow buffers alive."""
-
-    owner: pa.RecordBatch | None
-    states: np.ndarray
-    images: np.ndarray
-    actions: np.ndarray
-    action_is_pad: np.ndarray
-
-    @property
-    def batch_size(self) -> int:
-        return int(self.states.shape[0])
 
 
 @dataclass(frozen=True)

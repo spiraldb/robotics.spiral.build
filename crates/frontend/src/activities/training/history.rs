@@ -1,7 +1,7 @@
 //! Training retains history across route changes and polls only while active.
 //! Rollout requests its own checkpoint choices while its activity is visible.
-//! Run status is live, so it is polled often; checkpoints are read from Spiral
-//! and change only when a run commits one, so they are polled rarely.
+//! Run status is live, so it is polled often; checkpoints change only when a
+//! run saves one, so they are polled rarely.
 use crate::activities::training::TrainingClient;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::shell::project::ProjectSelection;
@@ -122,7 +122,7 @@ impl TrainingHistory {
     pub(crate) fn snapshot(self) -> MappedSignal<TrainingSnapshot, Signal<TrainingSnapshot>> {
         self.snapshot.map(|value| value)
     }
-    /// Every checkpoint in Spiral, across runs.
+    /// Every checkpoint of every run.
     pub(crate) fn checkpoints(self) -> ReadSignal<Vec<TrainingCheckpoint>> {
         self.checkpoints.into()
     }
@@ -173,12 +173,17 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn selected_details_are_assembled_locally_without_expanding_other_runs() {
         use spiral_robotics_common::training::{
-            TrainingConfig, TrainingReadiness, TrainingRun, TrainingRunHistory,
-            TrainingRunIdentity, TrainingRunStatus,
+            TrainingConfig, TrainingInputSummary, TrainingReadiness, TrainingRun,
+            TrainingRunHistory, TrainingRunIdentity, TrainingRunStatus,
         };
         let listed = |id: &str| {
             TrainingRun::new(
-                TrainingRunIdentity::new(id, TrainingConfig::default(), 1),
+                TrainingRunIdentity::new(
+                    id,
+                    TrainingConfig::default(),
+                    TrainingInputSummary::default(),
+                    1,
+                ),
                 TrainingRunStatus::default(),
             )
         };

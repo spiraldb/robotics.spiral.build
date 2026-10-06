@@ -620,7 +620,9 @@ impl From<&spiral_robotics_common::training::TrainingSnapshot> for TrainingStatu
         let run = snapshot.active_run();
         Self {
             phase: run.map(|run| run.phase().label().to_owned()),
-            step: run.map(|run| format!("step {} / {}", run.current_step(), run.config().steps())),
+            step: run
+                .filter(|run| !run.phase().before_first_step())
+                .map(|run| format!("step {} / {}", run.current_step(), run.config().steps())),
         }
     }
 }

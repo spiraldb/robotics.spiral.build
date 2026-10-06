@@ -1,524 +1,513 @@
-//! Framework-neutral training capability actions.
+//! The Modal training service as Studio reaches it, and the wire it speaks
+//! (`docs/training.md#the-modal-service`): the deployment's address and
+//! token, one request per call, and the fixtures in `fixtures/` fixing every
+//! body both sides read.
+use std::time::Duration;
 
-use std::collections::BTreeSet;
+use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use spiral_robotics_common::training::{TrainingConfig, TrainingRunHistory, TrainingRunStatus};
+use spiral_robotics_storage::ProviderKeys;
+use url::Url;
 
-use spiral_robotics_common::identity::DatasetId;
-use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
-use spiral_robotics_common::training::{TrainingConfig, TrainingRun};
+/// The service API this Studio speaks.
+const API_VERSION: u32 = 1;
+/// A control call: the service answers from its Volume.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+/// One stream's upload, which may be a few hundred megabytes.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const ARROW_STREAM: &str = "application/vnd.apache.arrow.stream";
 
-use crate::OperationError;
-use crate::training::manager::TrainingManager;
-
-/// One image batch expanded to f32 model inputs must leave enough memory for
-/// model activations, optimizer state, and the hardware-control process itself.
-pub(crate) const MAX_TRAINING_IMAGE_BATCH_BYTES: usize = 256 * 1024 * 1024;
-
-/// Aggregate ACT compute-session budget. Independently valid dimensions must
-/// not combine into a multi-gigabyte optimizer allocation that can terminate
-/// the selected remote runtime.
-const MAX_ACT_TRAINING_RESOURCE_BYTES: usize = 2 * 1024 * 1024 * 1024;
-const ACT_NON_TRANSFORMER_RESOURCE_RESERVE_BYTES: usize = 256 * 1024 * 1024;
-const ACT_IMAGE_RUNTIME_MULTIPLIER: usize = 4;
-/// Parameter + gradient + two AdamW moments, plus one parameter-sized runtime
-/// workspace reserve. All ACT trainable tensors use f32 today.
-const ACT_TRAINING_BYTES_PER_TRANSFORMER_PARAMETER: usize = 5 * std::mem::size_of::<f32>();
-
-struct ActTrainingResourceEstimate(Option<usize>);
-
-impl ActTrainingResourceEstimate {
-    fn for_command(command: &TrainingConfig, runtime_image_bytes: usize) -> Self {
-        Self(command.estimated_act_resource_bytes(runtime_image_bytes))
-    }
-
-    fn enforce(self) -> Result<(), OperationError> {
-        if self
-            .0
-            .is_none_or(|bytes| bytes > MAX_ACT_TRAINING_RESOURCE_BYTES)
-        {
-            return Err(OperationError::invalid_input(format!(
-                "ACT model and optimizer may not exceed the {MAX_ACT_TRAINING_RESOURCE_BYTES}-byte remote compute-session budget. Reduce hidden size, feed-forward size, layer count, batch size, cameras, or image dimensions."
-            )));
-        }
-        Ok(())
-    }
+/// The service the provider keys name.
+#[derive(Clone)]
+pub(super) struct TrainingService {
+    client: reqwest::Client,
+    base: Url,
+    token: String,
 }
 
-impl TrainingManager {
-    pub(super) fn admitted_deletion(
-        runs: &[TrainingRun],
-        run_id: &str,
-    ) -> Result<String, OperationError> {
-        let run_id = run_id.trim().to_owned();
-        if run_id.is_empty()
-            || run_id.len() > 128
-            || !run_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        {
-            return Err(OperationError::invalid_input("Training run ID is invalid."));
-        }
-        let Some(run) = runs.iter().find(|run| run.id() == run_id) else {
-            return Err(OperationError::NotFound(format!(
-                "training run {run_id:?} is no longer available"
-            )));
+impl TrainingService {
+    /// The service the provider keys name; a missing or malformed one is said
+    /// plainly.
+    pub(super) fn of(keys: &ProviderKeys) -> Result<Self, String> {
+        let (Some(base), Some(token)) = (keys.training_service_url(), keys.modal_token())
+        else {
+            return Err(
+                "Training needs the Modal training service, which this Studio was started without: set TRAINING_SERVICE_URL and MODAL_SERVICE_TOKEN."
+                    .into(),
+            );
         };
-        if run.phase().active() {
-            return Err(OperationError::Conflict(format!(
-                "training run {run_id:?} is still active; stop it before deleting it"
-            )));
+        let base =
+            Url::parse(base).map_err(|error| format!("TRAINING_SERVICE_URL is invalid: {error}"))?;
+        let local = matches!(base.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+        if base.scheme() != "https" && !(base.scheme() == "http" && local) {
+            return Err(
+                "TRAINING_SERVICE_URL must use HTTPS (HTTP is allowed only for localhost).".into(),
+            );
         }
-        Ok(run_id)
-    }
-}
-
-/// Admission rules for a training configuration.
-///
-/// The configuration already carries every value an operator can set; these
-/// rules decide whether that combination may start a run. Keeping them on the
-/// configuration means no second copy has to exist to hold them.
-pub(super) trait StartTrainingAdmission: Sized {
-    fn normalize_identifiers(&mut self);
-    fn estimated_act_resource_bytes(&self, runtime_image_bytes: usize) -> Option<usize>;
-    fn validated(self) -> Result<Self, OperationError>;
-}
-
-impl StartTrainingAdmission for TrainingConfig {
-    fn normalize_identifiers(&mut self) {
-        let run_name = self.run_name().trim().to_owned();
-        self.set_run_name(run_name);
-        let dataset_id = self.dataset_id().trim().to_owned();
-        self.set_dataset_id(dataset_id);
-        let state_column = self.state_column().trim().to_owned();
-        self.set_state_column(state_column);
-        let action_column = self.action_column().trim().to_owned();
-        self.set_action_column(action_column);
-        let device = self.device().trim().to_owned();
-        self.set_device(device);
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            client,
+            base,
+            token: token.to_owned(),
+        })
     }
 
-    fn validated(mut self) -> Result<Self, OperationError> {
-        let command = &mut self;
-        command.normalize_identifiers();
-
-        if command.run_name().is_empty()
-            || command.run_name().len() > 80
-            || !command
-                .run_name()
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        {
-            return Err(OperationError::invalid_input(
-                "Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.",
+    /// The GPU the service trains on, once it is known to speak this API.
+    pub(super) async fn health(&self) -> Result<String, String> {
+        let health: ServiceHealth = self
+            .send(self.client.get(self.url(&["v1", "health"])), "Asking the training service")
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Reading the training service's health: {error}"))?;
+        if health.api_version != API_VERSION {
+            return Err(format!(
+                "The training service speaks API {}, this Studio {API_VERSION}; deploy matching versions.",
+                health.api_version
             ));
         }
-        DatasetId::try_from(command.dataset_id()).map_err(|_| {
-            OperationError::InvalidInput(
-                "Dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters.".to_owned(),
+        Ok(health.gpu)
+    }
+
+    /// Which of `keys` the service does not hold yet.
+    pub(super) async fn missing(&self, keys: &[StreamKey]) -> Result<Vec<StreamKey>, String> {
+        let missing: MissingStreams = self
+            .json(
+                self.authorized(self.client.post(self.url(&["v1", "streams", "missing"])))
+                    .json(&StreamKeys { keys }),
+                "Listing the streams the training service lacks",
             )
-        })?;
-        ReadOnlyQuery::new(command.sql(), ReadOnlyQueryMode::Training)
-            .authorize()
-            .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
-        for (label, column) in [
-            ("State column", command.state_column()),
-            ("Action column", command.action_column()),
-        ] {
-            if UnquotedSqlIdentifier::try_from(column).is_err() {
-                return Err(OperationError::invalid_input(format!(
-                    "{label} must be a SQL identifier."
-                )));
-            }
-        }
-        if command.state_column() == command.action_column() {
-            return Err(OperationError::invalid_input(
-                "State and action columns must be different.",
-            ));
-        }
-        if command.device().is_empty()
-            || command.device().len() > 64
-            || !command.device().bytes().all(|byte| {
-                byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/' | b'+')
-            })
-        {
-            return Err(OperationError::invalid_input(
-                "Training device must be a 1–64 character identifier advertised by the runtime.",
-            ));
-        }
-        if !(1..=10_000_000).contains(&command.steps()) {
-            return Err(OperationError::invalid_input(
-                "Training steps must be between 1 and 10,000,000.",
-            ));
-        }
-        if !(1..=512).contains(&command.batch_size()) {
-            return Err(OperationError::invalid_input(
-                "Batch size must be between 1 and 512.",
-            ));
-        }
-        if !command.validation_split().is_finite()
-            || !(0.0..=0.5).contains(&command.validation_split())
-        {
-            return Err(OperationError::invalid_input(
-                "Validation split must be between 0% and 50%.",
-            ));
-        }
-        if !(1..=256).contains(&command.chunk_size()) {
-            return Err(OperationError::invalid_input(
-                "Action chunk size must be between 1 and 256.",
-            ));
-        }
-        if command
-            .batch_size()
-            .checked_mul(command.chunk_size())
-            .is_none_or(|rows| rows > 8_192)
-        {
-            return Err(OperationError::invalid_input(
-                "Batch size × action chunk size may not exceed 8,192 manifest rows.",
-            ));
-        }
-        if command.checkpoint_every() == 0 || command.checkpoint_every() > command.steps() {
-            return Err(OperationError::invalid_input(
-                "Checkpoint cadence must be between 1 and the run step count.",
-            ));
-        }
-        if !command.learning_rate().is_finite() || command.learning_rate() <= 0.0 {
-            return Err(OperationError::invalid_input(
-                "Learning rate must be a finite positive number.",
-            ));
-        }
-        if command.act().camera_streams().len() > 8 {
-            return Err(OperationError::invalid_input(
-                "ACT supports at most eight camera streams.",
-            ));
-        }
-        let mut camera_streams = BTreeSet::new();
-        for stream in command.act().camera_streams() {
-            if stream.is_empty()
-                || !stream
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-            {
-                return Err(OperationError::invalid_input(format!(
-                    "Invalid ACT camera stream {stream:?}."
-                )));
-            }
-            if !camera_streams.insert(stream) {
-                return Err(OperationError::invalid_input(format!(
-                    "ACT camera stream {stream:?} is repeated."
-                )));
-            }
-        }
-        let native_images = command.act().image_width() == 0 && command.act().image_height() == 0;
-        if !native_images
-            && (!(32..=1_024).contains(&command.act().image_width())
-                || !(32..=1_024).contains(&command.act().image_height()))
-        {
-            return Err(OperationError::invalid_input(
-                "ACT image width and height must both be zero (native) or between 32 and 1,024.",
-            ));
-        }
-        let runtime_image_bytes = if native_images {
-            // The adapter repeats the exact check after resolving dataset
-            // dimensions. Budget the largest batch it is allowed to admit here.
-            MAX_TRAINING_IMAGE_BATCH_BYTES
-        } else {
-            // An empty list means automatic selection, not zero cameras. Admission
-            // must budget the maximum the use case permits; the adapter repeats the
-            // check with the exact resolved dataset camera count.
-            let camera_count = if command.act().camera_streams().is_empty() {
-                8
-            } else {
-                command.act().camera_streams().len()
-            };
-            // Training transports one byte per channel, but the runtime expands
-            // every image to f32 before model execution. Admission budgets that
-            // expanded representation rather than the smaller HTTP request body.
-            let image_bytes = command
-                .batch_size()
-                .checked_mul(camera_count)
-                .and_then(|values| values.checked_mul(3))
-                .and_then(|values| values.checked_mul(command.act().image_width()))
-                .and_then(|values| values.checked_mul(command.act().image_height()))
-                .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()));
-            if image_bytes.is_none_or(|bytes| bytes > MAX_TRAINING_IMAGE_BATCH_BYTES) {
-                return Err(OperationError::invalid_input(format!(
-                    "ACT expanded f32 image batch may not exceed {MAX_TRAINING_IMAGE_BATCH_BYTES} bytes. Reduce batch size, camera count, or image dimensions."
-                )));
-            }
-            image_bytes.expect("checked runtime image byte count")
-        };
-        if !matches!(
-            command.act().video_decoder(),
-            "auto" | "ffmpeg" | "videotoolbox" | "nvdec"
-        ) {
-            return Err(OperationError::invalid_input(
-                "ACT video decoder must be auto, ffmpeg, videotoolbox, or nvdec.",
-            ));
-        }
-        if !(1..=16).contains(&command.act().attention_heads()) {
-            return Err(OperationError::invalid_input(
-                "ACT attention heads must be between 1 and 16.",
-            ));
-        }
-        if !(64..=1_024).contains(&command.act().hidden_dim())
-            || !command.act().hidden_dim().is_multiple_of(4)
-            || !command
-                .act()
-                .hidden_dim()
-                .is_multiple_of(command.act().attention_heads())
-        {
-            return Err(OperationError::invalid_input(
-                "ACT hidden size must be 64–1,024 and divisible by four and the attention-head count.",
-            ));
-        }
-        if !(1..=12).contains(&command.act().encoder_layers())
-            || !(1..=12).contains(&command.act().vae_encoder_layers())
-            || !(1..=12).contains(&command.act().decoder_layers())
-            || !(1..=512).contains(&command.act().latent_dim())
-            || command.act().feedforward_dim() < command.act().hidden_dim()
-            || command.act().feedforward_dim() > 16_384
-        {
-            return Err(OperationError::invalid_input(
-                "ACT transformer configuration is outside the supported range.",
-            ));
-        }
-        ActTrainingResourceEstimate::for_command(command, runtime_image_bytes).enforce()?;
-        if !command.act().kl_weight().is_finite() || command.act().kl_weight() < 0.0 {
-            return Err(OperationError::invalid_input(
-                "ACT KL weight must be finite and non-negative.",
-            ));
-        }
-        Ok(self)
+            .await?;
+        Ok(missing.missing)
     }
 
-    /// Conservatively estimate memory owned while one ACT optimizer step is
-    /// live, including transformer parameters and expanded image tensors.
-    fn estimated_act_resource_bytes(&self, runtime_image_bytes: usize) -> Option<usize> {
-        let hidden = self.act().hidden_dim();
-        let feedforward = self.act().feedforward_dim();
-        let hidden_squared = hidden.checked_mul(hidden)?;
-        let hidden_feedforward = hidden.checked_mul(feedforward)?;
+    /// Store `body`, one stream's Arrow IPC, under `key`.
+    pub(super) async fn upload(&self, key: &StreamKey, body: reqwest::Body) -> Result<(), String> {
+        let request = self
+            .authorized(self.client.put(self.url(&["v1", "streams", key.as_str()])))
+            .timeout(UPLOAD_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, ARROW_STREAM)
+            .body(body);
+        self.send(request, "Uploading a stream").await.map(drop)
+    }
 
-        // Encoder/CVAE encoder: one self-attention, one feed-forward pair, two
-        // norms. Decoder: self + cross attention, one feed-forward pair, 3 norms.
-        let encoder_parameters = hidden_squared
-            .checked_mul(4)?
-            .checked_add(hidden_feedforward.checked_mul(2)?)?
-            .checked_add(hidden.checked_mul(9)?)?
-            .checked_add(feedforward)?;
-        let decoder_parameters = hidden_squared
-            .checked_mul(8)?
-            .checked_add(hidden_feedforward.checked_mul(2)?)?
-            .checked_add(hidden.checked_mul(15)?)?
-            .checked_add(feedforward)?;
-        let encoder_count = self
-            .act()
-            .encoder_layers()
-            .checked_add(self.act().vae_encoder_layers())?;
-        let transformer_parameters = encoder_parameters
-            .checked_mul(encoder_count)?
-            .checked_add(decoder_parameters.checked_mul(self.act().decoder_layers())?)?
-            .checked_add(hidden.checked_mul(self.act().latent_dim())?)?
-            .checked_add(hidden.checked_mul(self.chunk_size())?)?;
-        let transformer_training_bytes =
-            transformer_parameters.checked_mul(ACT_TRAINING_BYTES_PER_TRANSFORMER_PARAMETER)?;
-        let image_runtime_bytes = runtime_image_bytes.checked_mul(ACT_IMAGE_RUNTIME_MULTIPLIER)?;
-        transformer_training_bytes
-            .checked_add(image_runtime_bytes)?
-            .checked_add(ACT_NON_TRANSFORMER_RESOURCE_RESERVE_BYTES)
+    /// Start the run `request` describes; the same request again answers its
+    /// status.
+    pub(super) async fn start(&self, request: &RunRequest) -> Result<RunStatus, String> {
+        self.json(
+            self.authorized(self.client.post(self.url(&["v1", "runs"])))
+                .json(request),
+            "Starting the run",
+        )
+        .await
+    }
+
+    /// Where each of `project`'s runs `ids` is; a run the service does not
+    /// hold is left out.
+    pub(super) async fn statuses(
+        &self,
+        project: &str,
+        ids: &[String],
+    ) -> Result<Vec<RunStatus>, String> {
+        let mut url = self.url(&["v1", "runs", project]);
+        url.query_pairs_mut().append_pair("ids", &ids.join(","));
+        self.json(
+            self.authorized(self.client.get(url)),
+            "Asking where the runs are",
+        )
+        .await
+    }
+
+    /// Run `id` with its metrics and log tail, or `None` when the service
+    /// does not hold it.
+    pub(super) async fn history(
+        &self,
+        project: &str,
+        id: &str,
+    ) -> Result<Option<RunHistory>, String> {
+        let response = self
+            .authorized(self.client.get(self.url(&["v1", "runs", project, id])))
+            .timeout(CONTROL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| format!("Reading the run: {error}"))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Self::checked(response, "Reading the run")
+            .await?
+            .json()
+            .await
+            .map(Some)
+            .map_err(|error| format!("Reading the run: {error}"))
+    }
+
+    pub(super) async fn stop(&self, project: &str, id: &str) -> Result<RunStatus, String> {
+        self.json(
+            self.authorized(
+                self.client
+                    .post(self.url(&["v1", "runs", project, id, "stop"])),
+            ),
+            "Stopping the run",
+        )
+        .await
+    }
+
+    /// Delete run `id` and its checkpoints; a run the service never held
+    /// has nothing to delete.
+    pub(super) async fn delete(&self, project: &str, id: &str) -> Result<(), String> {
+        let response = self
+            .authorized(self.client.delete(self.url(&["v1", "runs", project, id])))
+            .timeout(CONTROL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| format!("Deleting the run: {error}"))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Self::checked(response, "Deleting the run").await.map(drop)
+    }
+
+    /// Checkpoint `step` of run `id`: its policy config and its weights.
+    pub(super) async fn checkpoint(
+        &self,
+        project: &str,
+        id: &str,
+        step: u64,
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let step = step.to_string();
+        let part = |name: &'static str| {
+            let url = self.url(&["v1", "runs", project, id, "checkpoints", &step, name]);
+            async move {
+                self.send(
+                    self.authorized(self.client.get(url)).timeout(UPLOAD_TIMEOUT),
+                    "Reading the checkpoint",
+                )
+                .await?
+                .bytes()
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|error| format!("Reading the checkpoint: {error}"))
+            }
+        };
+        Ok((part("config").await?, part("model").await?))
+    }
+
+    /// The service's URL at `segments`, each one escaped.
+    fn url(&self, segments: &[&str]) -> Url {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .expect("an HTTP URL has a path")
+            .pop_if_empty()
+            .extend(segments);
+        url
+    }
+
+    fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request.bearer_auth(&self.token)
+    }
+
+    async fn json<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        context: &str,
+    ) -> Result<T, String> {
+        self.send(request, context)
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("{context}: {error}"))
+    }
+
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+        context: &str,
+    ) -> Result<reqwest::Response, String> {
+        let response = request
+            .timeout(CONTROL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| format!("{context}: {error}"))?;
+        Self::checked(response, context).await
+    }
+
+    /// `response` when it succeeded, or what the service said went wrong.
+    async fn checked(response: reqwest::Response, context: &str) -> Result<reqwest::Response, String> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        if status == StatusCode::UNAUTHORIZED {
+            return Err("The training service refused MODAL_SERVICE_TOKEN.".into());
+        }
+        let body = response.text().await.unwrap_or_default();
+        let reason = serde_json::from_str::<ServiceError>(&body)
+            .map(|error| error.error)
+            .unwrap_or(body);
+        Err(format!("{context}: the training service answered {status}: {reason}"))
+    }
+}
+
+/// `GET /v1/health`.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+struct ServiceHealth {
+    api_version: u32,
+    gpu: String,
+}
+
+/// What the service says went wrong.
+#[derive(Deserialize)]
+struct ServiceError {
+    error: String,
+}
+
+#[derive(Serialize)]
+struct StreamKeys<'a> {
+    keys: &'a [StreamKey],
+}
+
+#[derive(Deserialize)]
+struct MissingStreams {
+    missing: Vec<StreamKey>,
+}
+
+/// A stream's name on the service: the hash of what was read, so one read
+/// of one dataset version is uploaded once, by any run.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(super) struct StreamKey(String);
+
+impl StreamKey {
+    /// The key of `statement` read for `episode` of the dataset version
+    /// `(resource id, version id)`.
+    pub(super) fn of(dataset: (&str, &str), episode: &str, statement: &str) -> Self {
+        let read = serde_json::json!([dataset.0, dataset.1, episode, statement]);
+        Self(format!("{:x}", Sha256::digest(read.to_string().as_bytes())))
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// `POST /v1/runs`: everything the job needs, with Studio's config unchanged.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct RunRequest {
+    project: String,
+    run_id: String,
+    config: TrainingConfig,
+    #[serde(flatten)]
+    data: RunData,
+}
+
+impl RunRequest {
+    pub(super) fn new((project, run_id): (&str, &str), config: TrainingConfig, data: RunData) -> Self {
+        Self {
+            project: project.to_owned(),
+            run_id: run_id.to_owned(),
+            config,
+            data,
+        }
+    }
+}
+
+/// What a run trains on: the robot, what its joints are, and each episode's
+/// intervals and streams.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct RunData {
+    robot_type: String,
+    joints: JointNames,
+    episodes: Vec<EpisodeStreams>,
+}
+
+impl RunData {
+    pub(super) fn new(robot_type: String, joints: JointNames, episodes: Vec<EpisodeStreams>) -> Self {
+        Self {
+            robot_type,
+            joints,
+            episodes,
+        }
+    }
+}
+
+/// What each state and action value is, in order.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct JointNames {
+    state: Vec<String>,
+    action: Vec<String>,
+}
+
+impl JointNames {
+    pub(super) fn new(state: Vec<String>, action: Vec<String>) -> Self {
+        Self { state, action }
+    }
+    pub(super) fn state(&self) -> &[String] {
+        &self.state
+    }
+    pub(super) fn action(&self) -> &[String] {
+        &self.action
+    }
+}
+
+/// One episode of a run: the intervals its view keeps, and its streams.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct EpisodeStreams {
+    episode_id: String,
+    intervals: Vec<[i64; 2]>,
+    #[serde(flatten)]
+    streams: EpisodeStreamKeys,
+}
+
+impl EpisodeStreams {
+    pub(super) fn new(episode_id: String, intervals: Vec<[i64; 2]>, streams: EpisodeStreamKeys) -> Self {
+        Self {
+            episode_id,
+            intervals,
+            streams,
+        }
+    }
+}
+
+/// An episode's streams: one per camera in the config's order, and the value
+/// streams whose columns concatenate into the state and the action.
+#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
+pub(super) struct EpisodeStreamKeys {
+    cameras: Vec<StreamKey>,
+    state: Vec<StreamKey>,
+    action: Vec<StreamKey>,
+}
+
+impl EpisodeStreamKeys {
+    pub(super) fn new(cameras: Vec<StreamKey>, state: Vec<StreamKey>, action: Vec<StreamKey>) -> Self {
+        Self {
+            cameras,
+            state,
+            action,
+        }
+    }
+}
+
+/// Where a run is, as the service reports it.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct RunStatus {
+    run_id: String,
+    #[serde(flatten)]
+    status: TrainingRunStatus,
+    checkpoints: Vec<SavedCheckpoint>,
+}
+
+impl RunStatus {
+    pub(super) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub(super) fn status(&self) -> &TrainingRunStatus {
+        &self.status
+    }
+    pub(super) fn checkpoints(&self) -> &[SavedCheckpoint] {
+        &self.checkpoints
+    }
+}
+
+/// A checkpoint a run saved.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct SavedCheckpoint {
+    step: u64,
+    validation_loss: Option<f64>,
+    created_ms: i64,
+}
+
+impl SavedCheckpoint {
+    pub(super) const fn step(&self) -> u64 {
+        self.step
+    }
+    pub(super) const fn validation_loss(&self) -> Option<f64> {
+        self.validation_loss
+    }
+}
+
+/// A run's status with the metrics and log tail its job keeps.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct RunHistory {
+    #[serde(flatten)]
+    status: RunStatus,
+    #[serde(flatten)]
+    history: TrainingRunHistory,
+}
+
+impl RunHistory {
+    pub(super) fn into_parts(self) -> (RunStatus, TrainingRunHistory) {
+        (self.status, self.history)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_common::training::{
-        TrainingRunIdentity, TrainingRunPhase, TrainingRunStatus,
-    };
+    use serde::de::DeserializeOwned;
 
-    fn training_command() -> TrainingConfig {
-        let mut config =
-            TrainingConfig::for_dataset(" act-run ", " demo ", "SELECT state, action FROM samples");
-        config.set_state_column(" state ");
-        config.set_action_column(" action ");
-        config.set_device(" CPU ");
-        config.set_steps(1_000);
-        config.set_batch_size(8);
-        config.set_validation_split(0.1);
-        config.set_learning_rate(1.0e-5);
-        config.set_checkpoint_every(100);
-        config.set_chunk_size(16);
-        config
-            .act_mut()
-            .set_camera_streams(vec!["wrist".to_owned()]);
-        config
-    }
-
-    fn act_config(
-        architecture: spiral_robotics_common::training::ActArchitectureConfig,
-        attention: spiral_robotics_common::training::ActAttentionConfig,
-    ) -> spiral_robotics_common::training::ActTrainingConfig {
-        spiral_robotics_common::training::ActTrainingConfig::new(
-            spiral_robotics_common::training::ActInputConfig::new(
-                vec!["wrist".to_owned()],
-                (0, 0),
-                "auto",
-            ),
-            architecture,
-            attention,
-        )
+    /// A fixture both sides read, unchanged by a round trip through its type.
+    fn round_trips<T: DeserializeOwned + Serialize>(fixture: &str) -> T {
+        let expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let parsed: T = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), expected);
+        parsed
     }
 
     #[test]
-    fn training_validation_normalizes_identifiers() {
-        let command = training_command().validated().unwrap();
-        assert_eq!(command.run_name(), "act-run");
-        assert_eq!(command.dataset_id(), "demo");
-        assert_eq!(command.state_column(), "state");
-        assert_eq!(command.action_column(), "action");
-        assert_eq!(command.device(), "CPU");
-    }
-
-    #[test]
-    fn training_accepts_runtime_advertised_cuda_device_identifiers() {
-        let mut command = training_command();
-        command.set_device(" cuda:0 ");
-
-        assert_eq!(command.validated().unwrap().device(), "cuda:0");
-    }
-
-    #[test]
-    fn invalid_training_is_rejected_by_admission() {
-        let mut commands = Vec::new();
-        let mut mutating = training_command();
-        mutating.set_sql("DELETE FROM samples");
-        commands.push(mutating);
-        let mut duplicate_columns = training_command();
-        duplicate_columns.set_action_column("state");
-        commands.push(duplicate_columns);
-        let mut invalid_vae = training_command();
-        *invalid_vae.act_mut() = act_config(
-            spiral_robotics_common::training::ActArchitectureConfig::new(
-                256,
-                8,
-                spiral_robotics_common::training::ActLayerCounts::new(4, 0, 4),
-            ),
-            spiral_robotics_common::training::ActAttentionConfig::new(32, 1_024, 10.0),
-        );
-        commands.push(invalid_vae);
-        let mut non_finite = training_command();
-        non_finite.set_learning_rate(f64::NAN);
-        commands.push(non_finite);
-        let mut invalid_validation_split = training_command();
-        invalid_validation_split.set_validation_split(0.75);
-        commands.push(invalid_validation_split);
-
-        for command in commands {
-            assert!(matches!(
-                command.validated(),
-                Err(OperationError::InvalidInput(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn expanded_image_batch_budget_is_checked_at_the_exact_boundary() {
-        let mut boundary = training_command();
-        boundary.set_batch_size(85);
-        boundary.set_chunk_size(1);
-        boundary
-            .act_mut()
-            .set_camera_streams(vec!["wrist".to_owned()]);
-        boundary.act_mut().set_image_width(512);
-        boundary.act_mut().set_image_height(512);
-        // 85 × 1 × 3 × 512 × 512 × 4 = 255 MiB, under the 256 MiB cap.
-        boundary.clone().validated().unwrap();
-
-        boundary.set_batch_size(86);
-        let error = boundary.validated().unwrap_err();
-        assert!(error.message().contains("expanded f32 image batch"));
-
-        let mut automatic = training_command();
-        automatic.set_batch_size(11);
-        automatic.set_chunk_size(1);
-        automatic.act_mut().set_camera_streams(Vec::new());
-        automatic.act_mut().set_image_width(512);
-        automatic.act_mut().set_image_height(512);
-        let error = automatic.validated().unwrap_err();
-        assert!(error.message().contains("expanded f32 image batch"));
-    }
-
-    #[test]
-    fn aggregate_act_budget_rejects_individually_valid_dimensions() {
-        let mut command = training_command();
-        command.set_batch_size(1);
-        command.set_chunk_size(1);
-        *command.act_mut() = act_config(
-            spiral_robotics_common::training::ActArchitectureConfig::new(
-                1_024,
-                512,
-                spiral_robotics_common::training::ActLayerCounts::new(12, 12, 12),
-            ),
-            spiral_robotics_common::training::ActAttentionConfig::new(16, 16_384, 10.0),
-        );
-
-        let error = command.validated().unwrap_err();
-        assert!(error.message().contains("model and optimizer"));
-    }
-
-    #[test]
-    fn aggregate_act_budget_is_inclusive_and_overflow_is_fail_closed() {
+    fn the_wire_fixtures_are_what_studio_writes_and_reads() {
+        let health: ServiceHealth = round_trips(include_str!("fixtures/health.json"));
+        assert_eq!(health.api_version, API_VERSION);
+        let request: RunRequest = round_trips(include_str!("fixtures/run-request.json"));
+        assert_eq!(request.config.observation().cameras().len(), 2);
         assert!(
-            ActTrainingResourceEstimate(Some(MAX_ACT_TRAINING_RESOURCE_BYTES))
-                .enforce()
-                .is_ok()
+            request
+                .data
+                .episodes
+                .iter()
+                .all(|episode| episode.streams.cameras.len() == 2)
         );
-        assert!(
-            ActTrainingResourceEstimate(MAX_ACT_TRAINING_RESOURCE_BYTES.checked_add(1))
-                .enforce()
-                .is_err()
-        );
-        assert!(ActTrainingResourceEstimate(None).enforce().is_err());
-
-        let mut overflow = training_command();
-        *overflow.act_mut() = act_config(
-            spiral_robotics_common::training::ActArchitectureConfig::new(
-                usize::MAX,
-                512,
-                spiral_robotics_common::training::ActLayerCounts::new(usize::MAX, 4, 4),
-            ),
-            spiral_robotics_common::training::ActAttentionConfig::new(16, usize::MAX, 10.0),
-        );
-        assert!(
-            overflow.estimated_act_resource_bytes(usize::MAX).is_none(),
-            "checked resource arithmetic must never wrap to an admitted estimate"
-        );
-    }
-
-    fn run(active: bool) -> Vec<TrainingRun> {
-        let phase = if active {
-            TrainingRunPhase::Running
-        } else {
-            TrainingRunPhase::Completed
-        };
-        vec![TrainingRun::new(
-            TrainingRunIdentity::new("run-1", TrainingConfig::default(), 1),
-            TrainingRunStatus::new(phase, 20_000, None),
-        )]
+        let status: RunStatus = round_trips(include_str!("fixtures/run-status.json"));
+        assert_eq!(status.checkpoints()[0].step(), 3);
+        let history: RunHistory = round_trips(include_str!("fixtures/run-history.json"));
+        let (status, history) = history.into_parts();
+        assert_eq!(status.status().phase().label(), "Running");
+        assert_eq!(serde_json::to_value(history).unwrap()["metrics"][1]["event"], "validation");
     }
 
     #[test]
-    fn deleting_a_run_rejects_training_activity() {
-        let error = TrainingManager::admitted_deletion(&run(true), "run-1").unwrap_err();
-        assert!(matches!(error, OperationError::Conflict(_)));
+    fn a_key_names_exactly_one_read_of_one_dataset_version() {
+        let key = StreamKey::of(("resource", "v1"), "episode", "SELECT 1");
+        assert_eq!(key.as_str().len(), 64);
+        assert_eq!(key, StreamKey::of(("resource", "v1"), "episode", "SELECT 1"));
+        assert_ne!(key, StreamKey::of(("resource", "v2"), "episode", "SELECT 1"));
+        assert_ne!(key, StreamKey::of(("resource", "v1"), "episode", "SELECT 2"));
     }
 
     #[test]
-    fn deleting_a_missing_run_is_not_found_and_an_idle_run_is_admitted() {
-        let error = TrainingManager::admitted_deletion(&[], "run-1").unwrap_err();
-        assert!(matches!(error, OperationError::NotFound(_)));
-
-        let run_id = TrainingManager::admitted_deletion(&run(false), "run-1").unwrap();
-        assert_eq!(run_id, "run-1");
+    fn paths_escape_every_segment() {
+        let keys = ProviderKeys::from_variables(|name| match name {
+            "TRAINING_SERVICE_URL" => Some("https://train.example/base/".into()),
+            "MODAL_SERVICE_TOKEN" => Some("token".into()),
+            _ => None,
+        });
+        let service = TrainingService::of(&keys).unwrap();
+        assert_eq!(
+            service.url(&["v1", "runs", "a/b", "c"]).as_str(),
+            "https://train.example/base/v1/runs/a%2Fb/c"
+        );
+        let insecure = ProviderKeys::from_variables(|name| match name {
+            "TRAINING_SERVICE_URL" => Some("http://train.example".into()),
+            "MODAL_SERVICE_TOKEN" => Some("token".into()),
+            _ => None,
+        });
+        assert!(TrainingService::of(&insecure).is_err());
+        assert!(TrainingService::of(&ProviderKeys::default()).is_err());
     }
 }

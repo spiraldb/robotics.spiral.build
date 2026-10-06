@@ -77,7 +77,7 @@ impl StuckJoints {
     }
 
     fn sql(streams: CheckedStreams<'_>, paired: &PairedColumns<'_>) -> Result<String, String> {
-        let joints = paired.state().len();
+        let joints = paired.state().count();
         let window = "OVER (PARTITION BY id ORDER BY log_time)";
         let deltas = (0..joints)
             .map(|joint| format!("q{joint} - LAG(q{joint}) {window} AS dq{joint}, a{joint} - LAG(a{joint}) {window} AS da{joint}"))

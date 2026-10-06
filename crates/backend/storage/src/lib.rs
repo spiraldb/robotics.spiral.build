@@ -26,18 +26,6 @@ pub mod bundle {
     pub use crate::transfer::ProjectBundle;
 }
 
-pub mod checkpoints {
-    //! Training checkpoints the worker commits to Spiral.
-
-    pub use crate::training::{CheckpointArtifact, CheckpointKey};
-}
-
-pub mod training_runs {
-    //! Studio's record of the training runs it started.
-
-    pub use crate::training::TrainingRunRecord;
-}
-
 pub mod ingestion {
     //! Hugging Face discovery and Spiral dataset materialization.
 
@@ -54,13 +42,13 @@ pub use db::{
     DatabaseResult, DatabaseSession, DatabaseTransaction, ExecutionSummary, IngestMode,
     RecordBatchStream, RelationName, SqlStatement,
 };
-pub use db::{SCHEMA_VERSION, STUDIO_TABLE_PREFIX};
+pub use db::{KeptInterval, SCHEMA_VERSION};
 pub use manager::StorageManager;
 pub use provider_keys::ProviderKeys;
 pub use sessions::{SessionStore, StoredSession};
 pub use settings::{
     ServiceEndpoint, SpiralConnectionSettings, StoredRobotConnectorPreference,
-    StoredStudioPreferences, StoredTrainingRuntimePreference,
+    StoredStudioPreferences,
 };
 pub use spiral_access::{SpiralAccess, SpiralAccessPublisher, SpiralConnection};
 pub use workspaces::WorkspaceStore;

@@ -1,31 +1,7 @@
-//! Studio's record of the training runs it started.
+//! Studio's record of the training runs it started: what each was asked to
+//! do. Where a run is now belongs to the Modal service that runs it.
 
 use spiral_robotics_common::training::TrainingRunIdentity;
-
-/// What Studio asked a worker to do, and which worker holds the run. Every
-/// other fact about the run belongs to that worker and to Spiral.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct TrainingRunRecord {
-    identity: TrainingRunIdentity,
-    runtime_endpoint: String,
-}
-
-impl TrainingRunRecord {
-    pub fn new(identity: TrainingRunIdentity, runtime_endpoint: impl Into<String>) -> Self {
-        Self {
-            identity,
-            runtime_endpoint: runtime_endpoint.into(),
-        }
-    }
-
-    pub const fn identity(&self) -> &TrainingRunIdentity {
-        &self.identity
-    }
-
-    pub fn runtime_endpoint(&self) -> &str {
-        &self.runtime_endpoint
-    }
-}
 
 /// Training-run records of one project.
 pub struct TrainingRunPersistence<'a> {
@@ -38,7 +14,7 @@ impl<'a> TrainingRunPersistence<'a> {
     }
 
     /// Every recorded run, newest first.
-    pub async fn load(&self) -> Result<Vec<TrainingRunRecord>, String> {
+    pub async fn load(&self) -> Result<Vec<TrainingRunIdentity>, String> {
         use crate::studio::training_runs as table;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         let mut records = table::Entity::find()
@@ -47,14 +23,14 @@ impl<'a> TrainingRunPersistence<'a> {
             .await
             .map_err(|error| error.to_string())?
             .into_iter()
-            .map(|row| serde_json::from_value::<TrainingRunRecord>(row.document))
+            .map(|row| serde_json::from_value::<TrainingRunIdentity>(row.document))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
-        records.sort_by_key(|record| std::cmp::Reverse(record.identity.started_ms()));
+        records.sort_by_key(|record| std::cmp::Reverse(record.started_ms()));
         Ok(records)
     }
 
-    pub async fn load_run(&self, id: &str) -> Result<Option<TrainingRunRecord>, String> {
+    pub async fn load_run(&self, id: &str) -> Result<Option<TrainingRunIdentity>, String> {
         use crate::studio::training_runs as table;
         use sea_orm::EntityTrait;
         table::Entity::find_by_id((self.project_store.key().to_owned(), id.to_owned()))
@@ -66,12 +42,12 @@ impl<'a> TrainingRunPersistence<'a> {
             .map_err(|error| error.to_string())
     }
 
-    pub async fn insert(&self, record: &TrainingRunRecord) -> Result<(), String> {
+    pub async fn insert(&self, record: &TrainingRunIdentity) -> Result<(), String> {
         use crate::studio::training_runs as table;
         use sea_orm::{EntityTrait, Set};
         table::Entity::insert(table::ActiveModel {
             project: Set(self.project_store.key().to_owned()),
-            id: Set(record.identity.id().to_owned()),
+            id: Set(record.id().to_owned()),
             document: Set(serde_json::to_value(record).map_err(|error| error.to_string())?),
         })
         .exec(self.project_store.connection().await?)
@@ -91,9 +67,9 @@ impl<'a> TrainingRunPersistence<'a> {
     }
 
     pub(crate) fn validate_record(id: &str, document: serde_json::Value) -> Result<(), String> {
-        let record: TrainingRunRecord =
+        let record: TrainingRunIdentity =
             serde_json::from_value(document).map_err(|error| error.to_string())?;
-        if record.identity.id() != id || id.is_empty() {
+        if record.id() != id || id.is_empty() {
             return Err("Training document identity disagrees with its row".into());
         }
         Ok(())
@@ -103,7 +79,7 @@ impl<'a> TrainingRunPersistence<'a> {
 #[cfg(test)]
 mod sqlite_tests {
     use super::*;
-    use spiral_robotics_common::training::TrainingConfig;
+    use spiral_robotics_common::training::{TrainingConfig, TrainingInputSummary};
 
     #[tokio::test]
     async fn records_load_newest_first_and_delete_by_id() {
@@ -118,21 +94,23 @@ mod sqlite_tests {
         let project = store.project(&connection);
         let runs = TrainingRunPersistence::new(&project);
         for (id, started_ms) in [("older", 1), ("newer", 2)] {
-            let identity = TrainingRunIdentity::new(id, TrainingConfig::default(), started_ms);
-            runs.insert(&TrainingRunRecord::new(identity, "http://runtime.test"))
-                .await
-                .unwrap();
+            let identity = TrainingRunIdentity::new(
+                id,
+                TrainingConfig::default(),
+                TrainingInputSummary::new(1, 1, 2.0),
+                started_ms,
+            );
+            runs.insert(&identity).await.unwrap();
         }
 
         let loaded = runs.load().await.unwrap();
         assert_eq!(
             loaded
                 .iter()
-                .map(|record| record.identity().id())
+                .map(TrainingRunIdentity::id)
                 .collect::<Vec<_>>(),
             ["newer", "older"]
         );
-        assert_eq!(loaded[0].runtime_endpoint(), "http://runtime.test");
         assert_eq!(
             runs.load_run("older").await.unwrap(),
             Some(loaded[1].clone())

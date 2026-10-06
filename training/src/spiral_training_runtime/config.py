@@ -1,85 +1,11 @@
+"""The config of an ACT checkpoint the policy runtime serves."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
 from .errors import RuntimeRequestError
-
-
-@dataclass(frozen=True)
-class TrainingConfig:
-    state_dimensions: int
-    action_dimensions: int
-    camera_streams: tuple[str, ...]
-    image_width: int
-    image_height: int
-    chunk_size: int
-    hidden_dimensions: int
-    latent_dimensions: int
-    attention_heads: int
-    feedforward_dimensions: int
-    encoder_layers: int
-    vae_encoder_layers: int
-    decoder_layers: int
-    kl_weight: float
-    learning_rate: float
-    seed: int
-    requested_device: str
-    pretrained_backbone: bool
-
-    @classmethod
-    def from_request(cls, request: dict[str, Any]) -> TrainingConfig:
-        model = _mapping(request, "model")
-        if model.get("policy") != "act":
-            raise RuntimeRequestError("only the ACT training policy is supported", 422)
-        cameras = tuple(
-            _nonempty_string(value, "camera stream") for value in _list(model, "camera_streams")
-        )
-        if len(cameras) != len(set(cameras)):
-            raise RuntimeRequestError("ACT camera streams must be unique", 422)
-        initialization = request.get("initialization")
-        if initialization not in {"random", "pretrained_backbone"}:
-            raise RuntimeRequestError("initialization must be random or pretrained_backbone", 422)
-        config = cls(
-            state_dimensions=_positive_int(model, "state_dimensions"),
-            action_dimensions=_positive_int(model, "action_dimensions"),
-            camera_streams=cameras,
-            image_width=_positive_int(model, "image_width"),
-            image_height=_positive_int(model, "image_height"),
-            chunk_size=_positive_int(model, "chunk_size"),
-            hidden_dimensions=_positive_int(model, "hidden_dimensions"),
-            latent_dimensions=_positive_int(model, "latent_dimensions"),
-            attention_heads=_positive_int(model, "attention_heads"),
-            feedforward_dimensions=_positive_int(model, "feedforward_dimensions"),
-            encoder_layers=_positive_int(model, "encoder_layers"),
-            vae_encoder_layers=_positive_int(model, "vae_encoder_layers"),
-            decoder_layers=_positive_int(model, "decoder_layers"),
-            kl_weight=_finite_float(model, "kl_weight"),
-            learning_rate=_finite_float(model, "learning_rate"),
-            seed=_nonnegative_int(model, "seed"),
-            requested_device=_nonempty_string(request.get("device"), "device"),
-            pretrained_backbone=initialization == "pretrained_backbone",
-        )
-        config.validate()
-        return config
-
-    def validate(self) -> None:
-        if not self.camera_streams:
-            raise RuntimeRequestError("ACT requires at least one camera stream", 422)
-        if self.image_width < 32 or self.image_height < 32:
-            raise RuntimeRequestError("ACT images must be at least 32x32", 422)
-        if self.hidden_dimensions % self.attention_heads != 0:
-            raise RuntimeRequestError(
-                "ACT hidden dimensions must be divisible by attention heads", 422
-            )
-        if self.feedforward_dimensions < self.hidden_dimensions:
-            raise RuntimeRequestError(
-                "ACT feedforward dimensions must not be smaller than hidden dimensions", 422
-            )
-        if self.kl_weight < 0:
-            raise RuntimeRequestError("ACT KL weight cannot be negative", 422)
-        if self.learning_rate <= 0:
-            raise RuntimeRequestError("ACT learning rate must be positive", 422)
 
 
 @dataclass(frozen=True)
@@ -114,8 +40,6 @@ class PolicyConfig:
             raise RuntimeRequestError("only resnet18 ACT policy artifacts are supported", 422)
         if raw.get("replace_final_stride_with_dilation", False):
             raise RuntimeRequestError("dilated ACT backbones are unsupported", 422)
-        if raw.get("spiral_camera_embedding", False):
-            raise RuntimeRequestError("camera-embedding ACT artifacts are unsupported", 422)
 
         inputs = _mapping(raw, "input_features")
         outputs = _mapping(raw, "output_features")
@@ -193,41 +117,11 @@ def _mapping(source: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
-def _list(source: dict[str, Any], name: str) -> list[Any]:
-    value = source.get(name)
-    if not isinstance(value, list):
-        raise RuntimeRequestError(f"{name} must be an array", 422)
-    return value
-
-
 def _positive_int(source: dict[str, Any], name: str) -> int:
     value = source.get(name)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise RuntimeRequestError(f"{name} must be a positive integer", 422)
     return value
-
-
-def _nonnegative_int(source: dict[str, Any], name: str) -> int:
-    value = source.get(name)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise RuntimeRequestError(f"{name} must be a nonnegative integer", 422)
-    return value
-
-
-def _finite_float(source: dict[str, Any], name: str) -> float:
-    value = source.get(name)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise RuntimeRequestError(f"{name} must be a number", 422)
-    result = float(value)
-    if not (-float("inf") < result < float("inf")):
-        raise RuntimeRequestError(f"{name} must be finite", 422)
-    return result
-
-
-def _nonempty_string(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise RuntimeRequestError(f"{name} must be a non-empty string", 422)
-    return value.strip()
 
 
 def _shape(feature: dict[str, Any], name: str, rank: int) -> tuple[int, ...]:

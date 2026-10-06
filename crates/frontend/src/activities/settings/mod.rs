@@ -1,5 +1,4 @@
-//! Settings screen: the workspace, the robots and training runtime it uses,
-//! and the Spiral account.
+//! Settings screen: the workspace and the Spiral account.
 
 mod account;
 pub(crate) mod panel;

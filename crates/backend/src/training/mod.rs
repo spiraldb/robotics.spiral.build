@@ -1,7 +1,9 @@
-//! Backend-neutral training supervision.
-//!
-//! The injected worker owns data preparation, model, and optimizer execution.
+//! Training runs (`docs/training.md`): Studio admits a run, uploads the data
+//! it trains on to the Modal training service, and reports where each run is.
 
+mod admission;
 pub(crate) mod http;
+mod input;
 pub(crate) mod manager;
-pub(crate) mod service;
+mod service;
+mod upload;

@@ -1,8 +1,10 @@
 use super::*;
 use crate::settings::{StoredStudioPreferences, StudioPreferencePersistence};
-use crate::training::{TrainingRunPersistence, TrainingRunRecord};
+use crate::training::TrainingRunPersistence;
 use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement};
-use spiral_robotics_common::training::{TrainingConfig, TrainingRunIdentity};
+use spiral_robotics_common::training::{
+    TrainingConfig, TrainingInputSummary, TrainingRunIdentity,
+};
 
 struct Fixture;
 impl Fixture {
@@ -156,15 +158,20 @@ async fn local_state_survives_reopening() {
     StudioPreferencePersistence::new(&project)
         .save(
             &StoredStudioPreferences::default()
-                .with_training_endpoint("http://localhost:9")
+                .with_robot_connector("http://localhost:9")
                 .unwrap(),
         )
         .await
         .unwrap();
     for (run, started_ms) in [("run", 2), ("second_run", 1)] {
-        let identity = TrainingRunIdentity::new(run, TrainingConfig::default(), started_ms);
+        let identity = TrainingRunIdentity::new(
+            run,
+            TrainingConfig::default(),
+            TrainingInputSummary::new(1, 1, 2.0),
+            started_ms,
+        );
         TrainingRunPersistence::new(&project)
-            .insert(&TrainingRunRecord::new(identity, "http://localhost:9"))
+            .insert(&identity)
             .await
             .unwrap();
     }
@@ -182,8 +189,8 @@ async fn local_state_survives_reopening() {
             .load()
             .await
             .unwrap()
-            .training()
-            .endpoint(),
+            .robot_connector()
+            .address(),
         "http://localhost:9"
     );
     assert_eq!(
@@ -192,7 +199,7 @@ async fn local_state_survives_reopening() {
             .await
             .unwrap()
             .iter()
-            .map(|record| record.identity().id())
+            .map(TrainingRunIdentity::id)
             .collect::<Vec<_>>(),
         ["run", "second_run"]
     );

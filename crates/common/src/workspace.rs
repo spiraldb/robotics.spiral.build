@@ -1,6 +1,6 @@
 //! Workspaces: each is one Spiral project under the name Studio shows for it,
 //! with everything Studio keeps for that project — its datasets, curations,
-//! robot connector, and training endpoint. Every signed-in user sees the
+//! training runs, and robot connector. Every signed-in user sees the
 //! workspaces whose projects Spiral lets them open; each browser works in one.
 
 use serde::{Deserialize, Serialize};

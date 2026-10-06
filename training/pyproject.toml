@@ -5,11 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "spiral-training-runtime"
 version = "0.1.0"
-description = "Remote PyTorch ACT runtime for Spiral Robotics"
+description = "ACT training on Modal and the local policy runtime for Spiral Robotics"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
 dependencies = [
+    "av>=19,<20",
     "fastapi>=0.116,<1",
     "lerobot==0.6.0",
     "numpy>=2.0,<2.3",
@@ -26,7 +27,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "httpx>=0.28,<1",
+    "httpx2>=2.13,<3",
+    "modal>=1.6,<2",
     "pytest>=8.4,<10",
     "ruff>=0.12,<1",
 ]
@@ -36,10 +38,6 @@ spiral-training-runtime = "spiral_training_runtime.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spiral_training_runtime"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"../crates/backend/storage/schema/version.json" = "spiral_training_runtime/storage_schema_version.json"
-"../crates/backend/training/protocol/version.json" = "spiral_training_runtime/training_protocol_version.json"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

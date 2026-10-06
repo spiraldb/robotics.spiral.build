@@ -7,7 +7,7 @@ use spiral_robotics_storage::{ProjectStore, StudioStore};
 fn keys(base_url: Option<&str>) -> Arc<ProviderKeys> {
     Arc::new(ProviderKeys::from_variables(|name| match name {
         "WARP_PROGRESS_URL" => base_url.map(str::to_owned),
-        "WARP_PROGRESS_TOKEN" => Some("good".into()),
+        "MODAL_SERVICE_TOKEN" => Some("good".into()),
         _ => None,
     }))
 }
