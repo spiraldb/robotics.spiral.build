@@ -89,13 +89,13 @@ redirects it.
 
 ## Examples
 
-Every request carries a browser's session cookie, `studio_session`; sign in at
+Every request carries a browser's session cookie, `studio_oauth_session`; sign in at
 `http://localhost:3000` and copy it from the browser's developer tools. Read
 the session's connection, then its project's training runs:
 
 ```sh
-curl -b "studio_session=$STUDIO_SESSION" http://localhost:3000/api/settings/connection
-curl -b "studio_session=$STUDIO_SESSION" \
+curl -b "studio_oauth_session=$STUDIO_SESSION" http://localhost:3000/api/settings/connection
+curl -b "studio_oauth_session=$STUDIO_SESSION" \
   -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
   http://localhost:3000/api/training/runs
 ```
@@ -103,7 +103,7 @@ curl -b "studio_session=$STUDIO_SESSION" \
 Submit a read-only SQL query with an explicit row bound:
 
 ```sh
-curl -X POST http://localhost:3000/api/queries -b "studio_session=$STUDIO_SESSION" \
+curl -X POST http://localhost:3000/api/queries -b "studio_oauth_session=$STUDIO_SESSION" \
   -H 'X-Spiral-Endpoint: https://api.spiraldb.dev' -H 'X-Spiral-Project: <project_id>' \
   -H 'Content-Type: application/json' \
   --data '{"statement":"SELECT 1 AS example","max_rows":10}'
@@ -122,9 +122,9 @@ request and response types are in `crates/common`.
 
 ### Spiral account
 
-Every browser signs in to Spiral itself, on Spiral's WorkOS sign-in page, with
-an authorization code and PKCE. The backend keeps each session's tokens and
-names the session in an HttpOnly `studio_session` cookie; responses never
+Every browser signs in through this environment's registered Spiral application,
+with an authorization code, PKCE, and user consent. The backend keeps each session's tokens and
+names the session in an HttpOnly `studio_oauth_session` cookie; responses never
 include a token. Every `/api` request needs a live session and otherwise fails
 with `401` and the code `unauthenticated`. Opening a project asks Spiral
 whether the session's user may view it.
@@ -138,13 +138,11 @@ The sign-in pages are outside `/api`, because the browser navigates to them:
 The account endpoints:
 
 - `GET /account` returns the `SpiralIdentity`: `email` and `organization`.
-- `GET /account/organizations` and `GET /account/projects` list the user's
-  organizations and the projects they can open in the current one.
-- `POST /account/sign-out` and `PUT /account/organization`
-  (`{"organization_id": …}`) name the mounted project. They refuse while any of
-  the session's projects is training, then close the
-  session's open projects. Signing out ends the session and its cookie;
-  another organization forgets the session's workspace.
+- `GET /account/projects` lists the projects the application may open on behalf
+  of this user in the consented organization.
+- `POST /account/sign-out` names the mounted project. It refuses while any of the
+  session's projects is training, then revokes the refresh token, closes the
+  session's open projects, and ends the session and its cookie.
 
 ### Workspaces
 
@@ -158,9 +156,9 @@ delete which. Each backend keeps its own workspaces, in its
 - `GET /workspaces` lists the `Workspace`s (`project_id`, `name`) the user can
   open, by name.
 - `POST /workspaces` (`NewWorkspace`: `{"name": …, "project_id": … | null}`)
-  makes a workspace on an existing project the user can open, or with a null
-  `project_id` on a new project Spiral creates in the user's organization. A
-  project has at most one workspace: another fails with `conflict`.
+  makes a workspace on an existing project the application may open. A null
+  `project_id` fails with `invalid_input`; create projects in Spiral Studio first.
+  A project has at most one workspace: another fails with `conflict`.
 - `DELETE /workspaces/{project_id}` forgets the workspace and every Studio
   record of its project, and closes it in every browser. The Spiral project and
   its data stay. It refuses while the project is training.

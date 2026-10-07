@@ -598,7 +598,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn changing_the_account_closes_only_that_sessions_projects() {
+    async fn signing_out_closes_only_that_sessions_projects() {
         let fixture = ProjectFixture::new().await;
         let session = fixture.session().await;
         fixture.open("project_a").await;
@@ -608,12 +608,12 @@ pub(crate) mod tests {
             .open(&elsewhere, &ProjectKey::new(ENDPOINT, "project_a"))
             .await
             .unwrap();
-        let identity = fixture
+        fixture
             .projects
-            .change_account(&session, session.switch_organization("org_2"))
+            .change_account(&session, fixture.sessions.sign_out(&session))
             .await
             .unwrap();
-        assert_eq!(identity.organization().id(), "org_2");
+        assert!(session.ended());
         let remaining = fixture.projects.opened();
         assert_eq!(remaining.len(), 1);
         assert!(Arc::ptr_eq(&remaining[0].0, &elsewhere));
@@ -629,7 +629,10 @@ pub(crate) mod tests {
         project.apply_preferences(preferences).await.unwrap();
         assert!(Arc::ptr_eq(&project, &fixture.open("").await));
         let settings = fixture.projects.settings(&project).await.unwrap();
-        assert_eq!(settings.robot_connector().address(), "http://127.0.0.1:5050");
+        assert_eq!(
+            settings.robot_connector().address(),
+            "http://127.0.0.1:5050"
+        );
         assert_eq!(settings.name(), "");
     }
 
@@ -666,7 +669,10 @@ pub(crate) mod tests {
             "https://spfs.spiraldb.dev"
         );
         assert_eq!(settings.name(), "configured_project");
-        assert_eq!(settings.robot_connector().address(), "http://127.0.0.1:5050");
+        assert_eq!(
+            settings.robot_connector().address(),
+            "http://127.0.0.1:5050"
+        );
     }
 }
 

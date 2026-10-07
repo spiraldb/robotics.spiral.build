@@ -2,7 +2,7 @@
 
 The backend owns two persistence boundaries:
 
-- **SQLite / SeaORM:** each browser's Spiral session (its WorkOS tokens and
+- **SQLite / SeaORM:** each browser's Spiral session (its application OAuth tokens and
   chosen workspace), the workspaces, project preferences (the robot connector
   address), each dataset's robot model, joint roles and check report, saved
   curation recipes and the statements of the views they publish, and a record

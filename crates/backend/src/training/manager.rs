@@ -112,7 +112,10 @@ impl TrainingManager {
     }
 
     /// Admit `config` as a run, record it, and start uploading its data.
-    pub(super) async fn start(&self, config: TrainingConfig) -> Result<TrainingRun, OperationError> {
+    pub(super) async fn start(
+        &self,
+        config: TrainingConfig,
+    ) -> Result<TrainingRun, OperationError> {
         let config = config.validated()?;
         let service = self.service().map_err(OperationError::Conflict)?;
         service.health().await.map_err(OperationError::Conflict)?;
@@ -306,7 +309,10 @@ impl RunReports {
         statuses
             .iter()
             .filter_map(|status| {
-                let record = self.records.iter().find(|record| record.id() == status.run_id())?;
+                let record = self
+                    .records
+                    .iter()
+                    .find(|record| record.id() == status.run_id())?;
                 let config = record.config();
                 let policy = CheckpointPolicy::new(
                     config.observation().cameras().to_vec(),

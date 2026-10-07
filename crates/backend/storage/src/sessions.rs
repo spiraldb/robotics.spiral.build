@@ -2,7 +2,7 @@
 
 use crate::StudioStore;
 
-/// One browser's saved sign-in: its WorkOS tokens and the project it works on,
+/// One browser's saved sign-in: its Spiral OAuth tokens and the project it works on,
 /// empty before one is chosen.
 #[derive(Clone, Eq, PartialEq)]
 pub struct StoredSession {

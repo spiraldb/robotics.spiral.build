@@ -64,7 +64,7 @@ impl HttpFixture {
 #[tokio::test]
 async fn every_route_requires_a_live_session() {
     let fixture = HttpFixture::new().await;
-    for cookie in [None, Some("studio_session=forged")] {
+    for cookie in [None, Some("studio_oauth_session=forged")] {
         for (method, path) in [
             ("GET", "/settings/connection"),
             ("GET", "/providers"),
@@ -163,11 +163,11 @@ async fn a_browser_creates_chooses_and_deletes_workspaces() {
         .send(request(
             "POST",
             "/workspaces",
-            Some(serde_json::json!({"name": "Lab arms", "project_id": null})),
+            Some(serde_json::json!({"name": "Lab arms", "project_id": "project_b"})),
         ))
         .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    assert_eq!(created["project_id"], "lab-arms-000001");
+    assert_eq!(created["project_id"], "project_b");
     let existing = serde_json::json!({"name": "Bench", "project_id": "project_a"});
     for expected in [StatusCode::OK, StatusCode::CONFLICT] {
         let (status, _) = fixture
@@ -184,14 +184,14 @@ async fn a_browser_creates_chooses_and_deletes_workspaces() {
         .collect();
     assert_eq!(names, ["Bench", "Lab arms"]);
 
-    let choice = serde_json::json!({"project_id": "lab-arms-000001"});
+    let choice = serde_json::json!({"project_id": "project_b"});
     let (status, chosen) = fixture
         .send(request("PUT", "/settings/connection", Some(choice)))
         .await;
     assert_eq!(status, StatusCode::OK, "{chosen}");
-    assert_eq!(working_in().await, "lab-arms-000001");
+    assert_eq!(working_in().await, "project_b");
     let (status, _) = fixture
-        .send(request("DELETE", "/workspaces/lab-arms-000001", None))
+        .send(request("DELETE", "/workspaces/project_b", None))
         .await;
     assert_eq!(status, StatusCode::OK);
     // The browser goes on in the oldest workspace it can open.

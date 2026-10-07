@@ -20,11 +20,11 @@ pub use database::{
 pub(crate) use project_store::ProjectConnection;
 pub use project_store::ProjectStore;
 pub(crate) use project_store::{ProjectDatabasePersistence, StorageClock};
-pub(crate) use schema::StorageSchema;
 pub use schema::SCHEMA_VERSION;
+pub(crate) use schema::StorageSchema;
 pub(crate) use schema::Table;
-pub(crate) use sql::ProjectQueries;
 pub use sql::KeptInterval;
+pub(crate) use sql::ProjectQueries;
 
 pub use adbc_database::AdbcDatabase;
 

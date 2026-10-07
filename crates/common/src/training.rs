@@ -864,7 +864,10 @@ mod tests {
 
     #[test]
     fn halving_a_size_never_reaches_zero() {
-        assert_eq!(ImageSize::new(848, 480).divided(2), ImageSize::new(424, 240));
+        assert_eq!(
+            ImageSize::new(848, 480).divided(2),
+            ImageSize::new(424, 240)
+        );
         assert_eq!(ImageSize::new(3, 1).divided(4), ImageSize::new(1, 1));
     }
 }

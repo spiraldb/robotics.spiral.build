@@ -9,16 +9,14 @@ use axum::{
     http::header,
     middleware::Next,
     response::{AppendHeaders, IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
 };
-use spiral_robotics_common::account::{
-    OrganizationSwitch, SpiralIdentity, SpiralOrganization, SpiralProject,
-};
+use spiral_robotics_common::account::{SpiralIdentity, SpiralProject};
 
 use super::SpiralSession;
 use super::sign_in::{BrowserCookies, BrowserSignIn};
 use crate::OperationError;
-use crate::http::delivery::{ApiJson, Project, SignedIn};
+use crate::http::delivery::{Project, SignedIn};
 use crate::projects::context::StudioContext;
 
 pub(crate) struct AccountEndpoints;
@@ -27,14 +25,11 @@ impl AccountEndpoints {
     pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
             .route("/account", get(Self::identity))
-            .route("/account/organizations", get(Self::organizations))
             .route("/account/projects", get(Self::projects))
     }
 
     pub(crate) fn commands() -> Router<StudioContext> {
-        Router::new()
-            .route("/account/sign-out", post(Self::sign_out))
-            .route("/account/organization", put(Self::switch_organization))
+        Router::new().route("/account/sign-out", post(Self::sign_out))
     }
 
     /// Admit a request only with a live session, which its handlers then read.
@@ -61,12 +56,6 @@ impl AccountEndpoints {
         Ok(Json(session.identity().await?))
     }
 
-    async fn organizations(
-        SignedIn(session): SignedIn,
-    ) -> Result<Json<Vec<SpiralOrganization>>, OperationError> {
-        Ok(Json(session.organizations().await?))
-    }
-
     async fn projects(
         SignedIn(session): SignedIn,
     ) -> Result<Json<Vec<SpiralProject>>, OperationError> {
@@ -89,21 +78,5 @@ impl AccountEndpoints {
             Json(()),
         )
             .into_response())
-    }
-
-    /// Another organization has other projects, so this browser's open ones close.
-    async fn switch_organization(
-        Project(project): Project,
-        ApiJson(request): ApiJson<OrganizationSwitch>,
-    ) -> Result<Json<SpiralIdentity>, OperationError> {
-        let session = project.session().clone();
-        let identity = project
-            .projects()
-            .change_account(
-                &session,
-                session.switch_organization(request.organization_id()),
-            )
-            .await?;
-        Ok(Json(identity))
     }
 }

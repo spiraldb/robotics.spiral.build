@@ -52,7 +52,7 @@ async fn restoring_refreshes_a_lapsed_session_and_forgets_an_ended_one() {
 
     let session = sessions.find("lapsed").await.unwrap();
     assert_eq!(session.project_id().await.unwrap(), "arms");
-    assert_eq!(spiral.requests().refreshes, [None]);
+    assert_eq!(spiral.requests().refreshes, ["saved"]);
     let saved = store.load("lapsed").await.unwrap().unwrap();
     assert_eq!(saved.refresh_token(), "refresh-1");
     assert_eq!(saved.project_id(), "arms");
@@ -82,11 +82,10 @@ async fn a_session_asks_spiral_which_projects_it_may_open() {
         projects.iter().map(SpiralProject::id).collect::<Vec<_>>(),
         ["project_a", "project_b"]
     );
-    assert_eq!(session.organizations().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn switching_organization_forgets_the_project_and_signing_out_ends_the_session() {
+async fn signing_out_revokes_the_refresh_token_and_ends_the_session() {
     let spiral = FakeSpiral::start().await;
     let store = store();
     let sessions = spiral.sessions(store.clone());
@@ -94,14 +93,8 @@ async fn switching_organization_forgets_the_project_and_signing_out_ends_the_ses
     let session = sessions.find(&id).await.unwrap();
     session.choose_project("arms").await.unwrap();
 
-    let switched = session.switch_organization("org_2").await.unwrap();
-    assert_eq!(switched.organization().id(), "org_2");
-    assert_eq!(session.project_id().await.unwrap(), "");
-    assert_eq!(spiral.requests().refreshes, [Some("org_2".to_owned())]);
-    let saved = store.load(&id).await.unwrap().unwrap();
-    assert_eq!(saved.refresh_token(), "refresh-2");
-
     sessions.sign_out(&session).await.unwrap();
+    assert_eq!(spiral.requests().revoked, ["refresh-1"]);
     assert!(session.ended());
     assert!(store.load(&id).await.unwrap().is_none());
     assert!(matches!(
@@ -145,6 +138,17 @@ async fn a_browser_signs_in_on_spirals_page_and_reaches_the_api_with_its_cookie(
     let spiral_page =
         url::Url::parse(started.headers()[header::LOCATION].to_str().unwrap()).unwrap();
     let query: HashMap<_, _> = spiral_page.query_pairs().into_owned().collect();
+    assert_eq!(spiral_page.path(), "/oauth/authorize");
+    assert_eq!(query["client_id"], "client_robotics_test");
+    assert_eq!(
+        query["resource"],
+        spiral_page.origin().ascii_serialization()
+    );
+    assert_eq!(query["response_type"], "code");
+    assert_eq!(
+        query["scope"],
+        "openid email projects:read catalog:read catalog:write tables:read tables:write"
+    );
     assert_eq!(query["redirect_uri"], "http://localhost:3000/callback");
     assert_eq!(query["code_challenge_method"], "S256");
     let attempt = started.headers()[header::SET_COOKIE]
@@ -176,7 +180,7 @@ async fn a_browser_signs_in_on_spirals_page_and_reaches_the_api_with_its_cookie(
         .collect();
     let session = cookies
         .iter()
-        .find(|cookie| cookie.starts_with("studio_session="))
+        .find(|cookie| cookie.starts_with("studio_oauth_session="))
         .unwrap();
     assert!(session.contains("HttpOnly") && session.contains("SameSite=Lax"));
     let session = session.split(';').next().unwrap();

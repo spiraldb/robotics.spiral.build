@@ -3,9 +3,7 @@ use crate::curations::CurationPersistence;
 use crate::settings::StudioPreferencePersistence;
 use crate::studio::StudioStore;
 use crate::training::TrainingRunPersistence;
-use spiral_robotics_common::training::{
-    TrainingConfig, TrainingInputSummary, TrainingRunIdentity,
-};
+use spiral_robotics_common::training::{TrainingConfig, TrainingInputSummary, TrainingRunIdentity};
 
 struct Fixture;
 impl Fixture {

@@ -64,7 +64,12 @@ impl RunUploads {
     pub(super) fn status(&self, id: &str) -> Option<TrainingRunStatus> {
         let uploads = self.uploads.recover_lock();
         let held = uploads.get(id)?;
-        if held.task.is_finished() && matches!(*held.progress.recover_lock(), UploadProgress::Uploading { .. }) {
+        if held.task.is_finished()
+            && matches!(
+                *held.progress.recover_lock(),
+                UploadProgress::Uploading { .. }
+            )
+        {
             // The service has the run now and reports it.
             return None;
         }
@@ -247,8 +252,9 @@ impl IpcUpload {
             writer: Some(writer),
             shape: self.shape,
         };
-        let chunks = futures_util::stream::once(std::future::ready(Ok(head)))
-            .chain(futures_util::stream::unfold(encoder, IpcEncoder::next_chunk));
+        let chunks = futures_util::stream::once(std::future::ready(Ok(head))).chain(
+            futures_util::stream::unfold(encoder, IpcEncoder::next_chunk),
+        );
         Ok(reqwest::Body::wrap_stream(chunks))
     }
 }

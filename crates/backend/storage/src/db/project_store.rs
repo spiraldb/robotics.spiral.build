@@ -16,7 +16,6 @@ use super::database::{
 use crate::settings::SpiralConnectionSettings;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
-
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
 
 pub(crate) struct StorageClock;

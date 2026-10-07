@@ -2,9 +2,9 @@
 //! and just as fast back out of it — one bad reading rather than motion.
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::stream_reads::{CheckedStreams, CheckedValueColumns as _};
-use spiral_robotics_common::datasets::ValueColumns;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
+use spiral_robotics_common::datasets::ValueColumns;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

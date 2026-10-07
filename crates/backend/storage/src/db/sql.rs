@@ -285,16 +285,13 @@ impl<'a> ProjectQueries<'a> {
                 Ok(values.values().to_vec())
             };
             let (starts, ends) = (times("start_ns")?, times("end_ns")?);
-            intervals.extend(
-                episodes
-                    .into_iter()
-                    .zip(starts.into_iter().zip(ends))
-                    .map(|(episode_id, (start_ns, end_ns))| KeptInterval {
-                        episode_id,
-                        start_ns,
-                        end_ns,
-                    }),
-            );
+            intervals.extend(episodes.into_iter().zip(starts.into_iter().zip(ends)).map(
+                |(episode_id, (start_ns, end_ns))| KeptInterval {
+                    episode_id,
+                    start_ns,
+                    end_ns,
+                },
+            ));
         }
         Ok(intervals)
     }

@@ -36,15 +36,15 @@ nix develop .
 ```
 
 The default and CI shells select the pinned published Spiral ADBC library.
-That archive is currently stale: hosted persistence requires a driver built
-from current upstream. For this workspace's local release build, enter
-`nix develop .#local-driver` instead. This shell selects the local library
-automatically; see [database setup](docs/database-boundary.md) for its location.
+The pinned `0.16.41` driver does not support storage bindings, which Spiral
+application tokens require. For local application sign-in, build the driver
+from current upstream and enter `nix develop .#local-driver`. This shell selects
+the local library automatically; see [database setup](docs/database-boundary.md)
+for the build instructions.
 
 Run CI commands with `nix develop .#ci --command <command>`.
 
-The MCAP dataset inspector currently requires the `local-driver` shell;
-the pinned release driver predates its query functions. See
+Use the `local-driver` shell for the MCAP dataset inspector as well. See
 [datasets and recordings](docs/datasets.md).
 
 Start the robot connector next to the arms, from the workspace root in the
@@ -194,17 +194,30 @@ The policy runtime refuses non-loopback listeners by default. Its
 `--allow-remote-access` is reserved for deployments placed behind an
 authenticated TLS proxy.
 
-Every browser signs in to Spiral itself. Choose **Sign in with Spiral**: Studio
-sends the browser to Spiral's sign-in page, which returns it to Studio's
-`/callback`, then pick a project in **Settings → SpiralDB**. Each browser gets
-its own session. The backend keeps that user's tokens in its SQLite database,
-keeps the short-lived access token fresh, and opens every project as that user,
-who must be able to see it in Spiral. The browser holds only a session cookie and
-never sees a token. Sessions survive restarts; signing out or switching
-organization closes that browser's open projects.
+Every browser signs in through a registered Spiral application. Choose **Sign in
+with Spiral**, approve access on Spiral's consent page, then choose an existing
+project in **Settings → SpiralDB**. The application requests `openid email` for
+identity and `projects:read catalog:read catalog:write tables:read tables:write`
+for project data. Its permissions are also limited by the signed-in user's
+permissions. Create projects in Spiral Studio before adding their workspaces here.
+
+Set `SPIRAL_ROBOTICS_CLIENT_ID` to the registration for this environment.
+The Nix development shell sets Dev (`client_aRm8njLb18Px`); the hosted image
+sets Prod (`client_PiwYy0njXU92`). These IDs are public, not secrets.
 `SPIRAL_ROBOTICS_PUBLIC_URL` (or `--public-url`) sets the address browsers reach
-Studio at, `http://localhost:3000` by default; its `/callback` must be registered
-with Spiral's sign-in.
+Studio at, `http://localhost:3000` by default. Register its exact `/callback` URL:
+`http://localhost:3000/callback` for Dev and
+`https://robotics.spiraldb.com/callback` for Prod. The two registrations belong to
+the Spiral organization and have separate client IDs. No client secret is needed.
+`SPIRAL_ROBOTICS_AUTH_URL` defaults to `https://auth.spiraldb.com`.
+
+Each browser gets its own session. The backend keeps that user's tokens in SQLite,
+refreshes access tokens, and opens every project with the application's delegated
+access. Identity comes from `/userinfo`; the application does not switch
+organizations. The browser holds only an HttpOnly session cookie and never sees a
+token. Sessions survive restarts. Signing out revokes the refresh token and closes
+that browser's open projects. After migrating from the previous sign-in flow,
+browsers must sign in again.
 The hosted services are the default endpoints; `SPIRAL__SERVER__URL` and
 `SPIRAL__SPFS__URL` choose others when the backend starts. The session remembers
 its project, and project switches apply immediately while Studio is idle.

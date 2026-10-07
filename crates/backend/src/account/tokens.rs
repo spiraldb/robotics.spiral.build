@@ -1,4 +1,4 @@
-//! One session's WorkOS tokens, as WorkOS issues them and Studio saves them.
+//! One session's Spiral OAuth tokens, as Spiral OAuth issues them and Studio saves them.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

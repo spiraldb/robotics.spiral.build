@@ -2,9 +2,7 @@ use super::*;
 use crate::settings::{StoredStudioPreferences, StudioPreferencePersistence};
 use crate::training::TrainingRunPersistence;
 use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement};
-use spiral_robotics_common::training::{
-    TrainingConfig, TrainingInputSummary, TrainingRunIdentity,
-};
+use spiral_robotics_common::training::{TrainingConfig, TrainingInputSummary, TrainingRunIdentity};
 
 struct Fixture;
 impl Fixture {

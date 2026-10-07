@@ -59,7 +59,7 @@ impl ProjectRegistry {
     }
 
     /// A workspace on the existing project `request` names, which its user
-    /// must be able to open, or on a new project Spiral creates for it.
+    /// must be able to open.
     pub(crate) async fn create_workspace(
         &self,
         session: &SpiralSession,
@@ -79,7 +79,12 @@ impl ProjectRegistry {
                 session.admit(project_id).await?;
                 project_id.to_owned()
             }
-            None => session.create_project(&name).await?.id().to_owned(),
+            None => {
+                return Err(OperationError::InvalidInput(
+                    "Choose an existing Spiral project. Create new projects in Spiral Studio."
+                        .to_owned(),
+                ));
+            }
         };
         let workspace = Workspace::new(project_id, name);
         if !self
@@ -221,15 +226,16 @@ mod tests {
         let registry = &fixture.projects;
         assert!(registry.workspaces(&session).await.unwrap().is_empty());
         let created = registry
-            .create_workspace(&session, &NewWorkspace::new(" Lab arms ", None))
+            .create_workspace(&session, &existing(" Lab arms ", "project_a"))
             .await
             .unwrap();
-        assert_eq!(created, Workspace::new("lab-arms-000001", "Lab arms"));
+        assert_eq!(created, Workspace::new("project_a", "Lab arms"));
         registry
             .create_workspace(&session, &existing("bench", "project_b"))
             .await
             .unwrap();
         for (request, refused) in [
+            (NewWorkspace::new("New project", None), "invalid"),
             (existing("Again", "project_b"), "taken"),
             (existing("Hidden", "forbidden_arms"), "hidden"),
             (existing("Escape", "../v1/organizations"), "invalid"),
@@ -255,7 +261,7 @@ mod tests {
             registry.workspaces(&elsewhere).await.unwrap(),
             [
                 Workspace::new("project_b", "bench"),
-                Workspace::new("lab-arms-000001", "Lab arms")
+                Workspace::new("project_a", "Lab arms")
             ]
         );
     }
