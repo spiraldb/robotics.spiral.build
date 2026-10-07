@@ -1,8 +1,8 @@
 use super::*;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{
-    Comparison, DATASET_NODE_ID, EpisodeFact, ProgressScoring, Selection, SubtaskAnnotation,
-    SubtaskCategory, SubtaskGrouping, SubtaskSearch,
+    Comparison, DATASET_NODE_ID, EpisodeFact, ObjectTracking, ProgressScoring, Selection,
+    SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::preview::{PreviewReads, PreviewRows, ReadInput};
@@ -42,6 +42,11 @@ fn lasting(comparison: Comparison, seconds: f64) -> Selection {
 
 fn published(graph: &CurationGraph, node: &str) -> String {
     CurationPath::to(graph, node).unwrap().statement().unwrap()
+}
+
+/// The same, where a test names another of its nodes `published`.
+fn published_of(graph: &CurationGraph, node: &str) -> String {
+    published(graph, node)
 }
 
 /// `node`'s preview over `input`, as its parent's preview hands it on.
@@ -781,6 +786,7 @@ fn configured(kind: CurationNodeKind) -> Vec<CurationNodeKind> {
         }
         CurationNodeKind::FindSimilarSubtasks(_) => vec![searching("fold the towel")],
         CurationNodeKind::GroupSimilarSubtasks(_) => vec![grouping(&["fold", "grasp"])],
+        CurationNodeKind::TrackObjects(_) => vec![tracking_bottles()],
         kind => vec![kind],
     }
 }
@@ -948,5 +954,110 @@ fn the_browser_keeps_the_stretches_the_statement_keeps() {
     assert_eq!(
         kept,
         [(first.clone(), 0, 40), (first, 60, 95), (second, 0, 40),]
+    );
+}
+
+/// A Track objects node tracking bottles on the top camera.
+fn tracking_bottles() -> CurationNodeKind {
+    let mut tracking = ObjectTracking::default();
+    tracking.set_camera(Some("/top-camera".to_owned()));
+    tracking.set_prompt("bottle");
+    CurationNodeKind::TrackObjects(tracking)
+}
+
+#[test]
+fn track_objects_counts_the_most_objects_seen_at_once_and_keeps_its_range() {
+    let mut graph = graph();
+    let track = keeping(
+        &mut graph,
+        (DATASET_NODE_ID, tracking_bottles()),
+        Selection::ObjectCount {
+            fewest: 3,
+            most: Some(4),
+        },
+    );
+    let score = child(
+        &mut graph,
+        &track,
+        CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+    );
+    let tracks = column(&graph, &track);
+    let scores = column(&graph, &score);
+    // Track objects keeps whole episodes but reads what was stored, so the
+    // episode row is built before it, carrying every column the path reads.
+    let published = published(&graph, &score);
+    for step in [
+        format!(
+            "i.start_ns AS origin_ns, a.{tracks}.value AS {tracks}, a.{scores}.value AS {scores} FROM dataset_0 i JOIN {ANSWERS} a ON a.episode_id = i.episode_id)"
+        ),
+        format!(
+            "track_objects_1_pictures AS (SELECT r.episode_id, r.start_ns, r.end_ns, r.duration_seconds, r.messages, r.channels, r.size_megabytes, r.origin_ns, r.{tracks}, r.{scores}, spql.list.len(p.objects) AS visible FROM episodes r LEFT JOIN LATERAL UNNEST(r.{tracks}) p ON TRUE)"
+        ),
+        format!(
+            "MAX(visible) OVER (PARTITION BY episode_id, start_ns, end_ns) AS most, ROW_NUMBER() OVER (PARTITION BY episode_id, start_ns, end_ns) AS place FROM track_objects_1_pictures)"
+        ),
+        // An episode with no tracks stays, with no count, for the rule.
+        format!(
+            "CAST(most AS BIGINT) AS object_count, origin_ns, {tracks}, {scores} FROM track_objects_1_counted WHERE place = 1)"
+        ),
+        "FROM track_objects_1 WHERE object_count >= 3 AND object_count <= 4)".to_owned(),
+        format!("FROM track_objects_1_kept r CROSS JOIN LATERAL UNNEST(r.{scores}) p)"),
+    ] {
+        assert!(published.contains(&step), "{step}\n{published}");
+    }
+    assert!(published_of(&graph, &track).ends_with(
+        "\nSELECT episode_id, start_ns, end_ns, object_count FROM track_objects_1_kept"
+    ));
+    // The tracks are filled first, for every episode; the scores only for
+    // the episodes the count keeps.
+    let fills = CurationPath::to(&graph, &score).unwrap().fills().unwrap();
+    assert_eq!(
+        fills[0].source(),
+        &AnswerSource::ObjectTracking {
+            camera: "/top-camera".to_owned(),
+            prompt: "bottle".to_owned(),
+            model: "facebook/sam3.1@daa63191845a41281374e725f4c9e51c7a824460".to_owned(),
+            revision: "object-tracking-0.1.0".to_owned(),
+        }
+    );
+    match fills[1].episodes() {
+        FillEpisodes::Reaching(statement) => assert!(
+            statement.ends_with("SELECT DISTINCT episode_id FROM track_objects_1_kept"),
+            "{statement}"
+        ),
+        listed => panic!("{listed:?}"),
+    }
+    // The preview counts the bound episode's stored tracks and leaves the
+    // rule to the browser.
+    let counting = preview(&graph, &track, intervals());
+    assert!(counting.contains(&format!(
+        "FROM preview_reached r LEFT JOIN LATERAL UNNEST(r.{tracks}) p ON TRUE)"
+    )));
+    assert!(!counting.contains("_kept") && !counting.contains("spql.ai."));
+    assert!(
+        counting
+            .ends_with("\nSELECT episode_id, start_ns, end_ns, object_count FROM track_objects_1")
+    );
+    admitted(&published, &counting);
+}
+
+#[test]
+fn track_objects_asks_nothing_until_it_names_a_camera_and_what_to_track() {
+    let mut graph = graph();
+    let mut unnamed = ObjectTracking::default();
+    unnamed.set_camera(Some("/top-camera".to_owned()));
+    let track = child(
+        &mut graph,
+        DATASET_NODE_ID,
+        CurationNodeKind::TrackObjects(unnamed),
+    );
+    let error = CurationPath::to(&graph, &track)
+        .unwrap()
+        .statement()
+        .unwrap_err();
+    assert!(
+        error.message().contains("Name what to track"),
+        "{}",
+        error.message()
     );
 }

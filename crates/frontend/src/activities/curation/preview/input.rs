@@ -65,9 +65,9 @@ impl PreviewInput {
             .parent_of(node)
             .ok_or_else(|| PathError::new("Only the dataset starts a path."))?;
         match kind {
-            CurationNodeKind::ScoreProgress(_) | CurationNodeKind::BreakDownSubtasks(_) => {
-                Ok(Self::Intervals)
-            }
+            CurationNodeKind::ScoreProgress(_)
+            | CurationNodeKind::TrackObjects(_)
+            | CurationNodeKind::BreakDownSubtasks(_) => Ok(Self::Intervals),
             CurationNodeKind::FindSimilarSubtasks(_)
             | CurationNodeKind::GroupSimilarSubtasks(_) => {
                 let relation = CurationPath::to(graph, parent)?

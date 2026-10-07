@@ -1,0 +1,25 @@
+[project]
+name = "video-service"
+version = "0.1.0"
+description = "The request contract, decoding, and timing every Modal video service shares."
+requires-python = "==3.12.*"
+# Ranges, not pins: each service resolves them against its own model's pins.
+dependencies = [
+    "av>=19,<20",
+    "fastapi>=0.142,<1",
+    "numpy>=1.26",
+    "pyarrow>=25,<26",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2==2.13.1",
+    "pytest==9.1.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

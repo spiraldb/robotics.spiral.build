@@ -10,6 +10,7 @@
 //! project.
 
 mod arrangement;
+mod boxes;
 mod camera;
 mod choices;
 mod decoder;
@@ -29,6 +30,7 @@ mod streams;
 mod timeline;
 mod transport;
 
+pub(in crate::activities) use boxes::{BoxedPicture, CameraBoxes, PictureBox};
 pub(crate) use decoder::{CameraPlayback, EncodedCamera};
 pub(in crate::activities) use heading::{EpisodeHeading, HeadingSubject};
 pub(in crate::activities) use identity::{Episode, EpisodeFactsPresentation, SourceLabel};

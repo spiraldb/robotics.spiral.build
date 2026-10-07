@@ -90,9 +90,7 @@ describes the inspection built on them.
 Episode-scoped reads bind the member UUID as `$1`. The driver must compare the
 UUIDv7 in member metadata with the generic UUID that Arrow parameter binding
 restores (Spiral PR #7033, `ed42714c9`); no filename, timestamp, text-cast, or
-raw-storage filter substitutes for member identity. The pinned published
-driver predates the MCAP query functions, so use `nix develop .#local-driver`
-(see [database setup](database-boundary.md)).
+raw-storage filter substitutes for member identity.
 
 Project bundles carry the original MCAP bytes and Dataset names, including
 empty datasets; import validates ownership and rebuilds the views and

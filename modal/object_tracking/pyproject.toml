@@ -1,0 +1,51 @@
+[project]
+name = "object-tracking"
+version = "0.1.0"
+description = "SAM 3.1 object tracks for one episode's camera video, served on Modal."
+requires-python = "==3.12.*"
+dependencies = [
+    "av==19.0.0",
+    "fastapi==0.142.1",
+    "huggingface-hub==1.33.0",
+    # SAM 3 pins NumPy below 2.
+    "numpy>=1.26,<2",
+    "pillow>=11,<13",
+    "pyarrow==25.0.1",
+    # The SAM 3.1 release. Later commits pass `offload_state_to_cpu` from
+    # `start_session`, which the SAM 3.1 tracker does not accept.
+    "sam3 @ git+https://github.com/facebookresearch/sam3.git@5a3143c652ac41c28b788a419b40ec424d0f6aab",
+    # What SAM 3 imports beyond its declared dependencies.
+    "einops>=0.8,<1",
+    "matplotlib>=3.9,<4",
+    "opencv-python-headless>=4.10,<5",
+    "pandas>=2.2,<3",
+    "psutil>=6,<8",
+    "pycocotools>=2.0.8,<3",
+    "scikit-image>=0.24,<1",
+    "scipy>=1.14,<2",
+    "setuptools<81",
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "video-service",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2==2.13.1",
+    "modal==1.6.0",
+    "pytest==9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.uv.sources]
+# Shared with the other video services. Editable, so a deploy copies the source as it is.
+video-service = { path = "../video_service", editable = true }
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

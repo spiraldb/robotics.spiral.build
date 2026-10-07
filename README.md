@@ -35,17 +35,12 @@ their environment variables. With direnv, `.envrc` loads the same default shell.
 nix develop .
 ```
 
-The default and CI shells select the pinned published Spiral ADBC library.
-The pinned `0.16.41` driver does not support storage bindings, which Spiral
-application tokens require. For local application sign-in, build the driver
-from current upstream and enter `nix develop .#local-driver`. This shell selects
-the local library automatically; see [database setup](docs/database-boundary.md)
-for the build instructions.
+The default and CI shells select the pinned published Spiral ADBC library. To
+try an unreleased upstream driver, build it and enter `nix develop .#local-driver`,
+which selects the local library automatically; see
+[database setup](docs/database-boundary.md) for the build instructions.
 
 Run CI commands with `nix develop .#ci --command <command>`.
-
-Use the `local-driver` shell for the MCAP dataset inspector as well. See
-[datasets and recordings](docs/datasets.md).
 
 Start the robot connector next to the arms, from the workspace root in the
 Nix shell (which supplies FFmpeg for camera recording):
@@ -151,8 +146,9 @@ reads them from its environment at startup, and no page shows or sets them.
 | `OPENROUTER_API_KEY` | Model calls: Break down, Classify, Find similar, robot discovery |
 | `HF_TOKEN` | Downloads of models and datasets from Hugging Face |
 | `WARP_PROGRESS_URL` | Score progress, on the Modal service in `modal/warp_progress` |
+| `OBJECT_TRACKING_URL` | Track objects, on the Modal service in `modal/object_tracking` |
 | `TRAINING_SERVICE_URL` | Training, on the Modal service in `training/` |
-| `MODAL_SERVICE_TOKEN` | The bearer token both Modal services accept |
+| `MODAL_SERVICE_TOKEN` | The bearer token every Modal service accepts |
 
 The Nix development shells export the checkout's untracked `.env.local`, so a
 local Studio started from them gets the keys without further setup:
@@ -161,6 +157,7 @@ local Studio started from them gets the keys without further setup:
 OPENROUTER_API_KEY='sk-or-…'
 HF_TOKEN='hf_…'
 WARP_PROGRESS_URL='https://spiral-dev--warp-progress-warpprogress-web.modal.run'
+OBJECT_TRACKING_URL='https://spiral-dev--spiral-robotics-object-tracking-objecttracking-web.modal.run'
 TRAINING_SERVICE_URL='https://spiral-dev--spiral-robotics-training-control.modal.run'
 MODAL_SERVICE_TOKEN='…'
 ```

@@ -16,11 +16,14 @@ mod scoring;
 pub(super) use moment::Moment;
 pub(super) use scoring::{MAX_MOMENTS, ProgressScorer};
 
-use super::preview::{PreviewPlan, PreviewProgress};
+use super::measure_run::{
+    MeasureInput, MeasureRun, MeasureRunActions, MeasureRunStart, MeasureVerb,
+};
+use super::preview::PreviewPlan;
 use super::primer::{NodePrimer, Primer};
-use super::review::{Counted, FailedEpisodes, NodeBar, NodeNotes, NodeReach};
+use super::review::{NodeBar, NodeNotes, NodeReach};
 use super::select::{ProgressRule, RuleReview, RuleStrip, RuleView};
-use super::state::{CurationController, RunState};
+use super::state::CurationController;
 use crate::activities::episode::{
     Episode, EpisodeHeading, EpisodeInspection, HeadingSubject, PlayRequest, StreamCatalog,
 };
@@ -29,97 +32,23 @@ use crate::components::timeline::{
     NumericReading, NumericTrack, TimelineInterval, TimelineSample, TimelineTrack,
 };
 use dioxus::prelude::*;
-use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant, EmptyState, Notice, NoticeTone};
-
-/// The episodes reaching one Score progress node, and where its preview
-/// stands over them.
-#[derive(Clone, PartialEq)]
-struct ScoringInput {
-    episodes: Vec<Episode>,
-    preview: PreviewProgress,
-}
-
-impl ScoringInput {
-    fn of(controller: CurationController, node: &str) -> Option<Self> {
-        let sample = controller.sample()?;
-        let (input, _) = controller.populations(node)?;
-        let episodes = input
-            .episodes()
-            .iter()
-            .filter_map(|id| sample.episode(id).cloned())
-            .collect::<Vec<_>>();
-        Some(Self {
-            episodes,
-            preview: controller.progress(node)?,
-        })
-    }
-    /// The episodes a Run scores: not read yet, or read from intervals that
-    /// have changed since.
-    fn pending(&self) -> Vec<Episode> {
-        let pending = self.preview.pending();
-        self.episodes
-            .iter()
-            .filter(|episode| pending.contains(episode.id()))
-            .cloned()
-            .collect()
-    }
-    /// Why the episodes that failed did, when one reason stands for every
-    /// one of them, such as the Modal service not being set up.
-    fn failure(&self) -> Option<&str> {
-        let mut reasons = self
-            .preview
-            .failed()
-            .iter()
-            .map(|(_, reason)| reason.as_str());
-        let first = reasons.next()?;
-        reasons.all(|reason| reason == first).then_some(first)
-    }
-    fn failed(&self) -> Vec<Episode> {
-        self.episodes
-            .iter()
-            .filter(|episode| {
-                self.preview
-                    .failed()
-                    .iter()
-                    .any(|(id, _)| id == episode.id())
-            })
-            .cloned()
-            .collect()
-    }
-}
+use spiral_robotics_ui::{EmptyState, Notice, NoticeTone};
 
 /// The workspace shown for a selected Score progress node: its threshold on
 /// the node's bar beside the run, and the stretches it keeps and leaves out.
 #[component]
 pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> Element {
     // The preview runs this node's step, the one a published view chains,
-    // over the intervals that reach it, one episode bound at a time. The
-    // pass is the curation's, not this view's: choosing another node leaves
-    // it scoring. Stop ends it at once; the episodes in flight stay unscored.
-    let run = controller.run_state(&node);
-    let problem = use_signal(|| Option::<String>::None);
-    let start = {
-        let node = node.clone();
-        move |episodes: Vec<Episode>| {
-            let episodes = episodes
-                .iter()
-                .map(|episode| episode.id().clone())
-                .collect::<Vec<_>>();
-            if !episodes.is_empty() {
-                let mut problem = problem;
-                problem.set(controller.run_preview(&node, &episodes).err());
-            }
-        }
-    };
-    let running = run != RunState::Idle;
-    let input = ScoringInput::of(controller, &node);
+    // over the intervals that reach it, one episode bound at a time.
+    let run = MeasureRun::use_run(controller, &node, MeasureVerb::Score);
+    let input = MeasureInput::of(controller, &node);
     // The scorer reads the camera it was trained on, which only some datasets
     // record; elsewhere the node says so rather than failing per episode.
     let camera = ProgressScorer::WarpSimBottles.camera();
     let unsupported = StreamCatalog::use_camera_topics(
         input
             .as_ref()
-            .and_then(|input| input.episodes.first())
+            .and_then(|input| input.episodes().first())
             .map(Episode::selection),
     )
     .filter(|cameras| !cameras.iter().any(|topic| topic == camera))
@@ -140,106 +69,29 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
             }
         };
     };
-    let pending = input.pending();
-    let failed = input.failed();
-    let unscored = pending.len();
-    let stale = input
-        .preview
-        .is_stale()
-        .then(|| "Out of date: its input changed".to_owned());
-    let failures = FailedEpisodes::note(failed.len()).map(|note| match input.failure() {
-        Some(reason) => format!("{note}: {reason}"),
-        None => note,
-    });
     let blocked = unsupported.is_some() || uncompiled.is_some();
     // Nothing scored yet: the workspace says what scoring is for, beside the
     // run that starts it, rather than an empty strip, map, and index.
-    let unmeasured = input.preview.is_unmeasured();
-    let running_line = controller
-        .activity()
-        .get(&node)
-        .cloned()
-        .unwrap_or_else(|| "Scoring…".to_owned());
+    let unmeasured = input.preview().is_unmeasured();
     let strips = view.strips();
     let threshold = strips.first().map(RuleStrip::threshold);
     rsx! {
         section { class: "curation-score-progress-workspace", "aria-label": "Score progress",
             NodeBar {
                 lead: rsx! { ProgressRule { threshold } },
-                note: NodeNotes::join([unsupported.clone(), uncompiled.clone(), problem(), stale, failures]),
+                note: NodeNotes::join([unsupported, uncompiled, run.problem(), input.stale(), input.failures()]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
                     if !unmeasured {
                         p { class: "curation-threshold-tally", role: "status", "{view.tally()}" }
                     }
-                    if running {
-                        Button {
-                            purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
-                            disabled: run == RunState::Stopping,
-                            title: "Stop scoring; the episodes in flight stay unscored",
-                            onclick: {
-                                let node = node.clone();
-                                move |_| controller.stop_run(&node)
-                            },
-                            if run == RunState::Stopping { "Stopping…" } else { "Stop" }
-                        }
-                    } else {
-                        if !failed.is_empty() {
-                            Button {
-                                purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline,
-                                disabled: blocked,
-                                title: "Score the {failed.len()} episodes that failed again",
-                                onclick: {
-                                    let start = start.clone();
-                                    let failed = failed.clone();
-                                    move |_| start(failed.clone())
-                                },
-                                "Retry failed"
-                            }
-                        }
-                        // Scoring runs on the Modal service and what it scores
-                        // is stored, so no later Run or Publish scores an
-                        // episode again. Before the first score the primer
-                        // holds the run.
-                        if !pending.is_empty() && !unmeasured {
-                            Button {
-                                purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
-                                disabled: blocked,
-                                title: "Score the {unscored} episodes not yet scored",
-                                onclick: {
-                                    let start = start.clone();
-                                    let fresh = pending.clone();
-                                    move |_| start(fresh.clone())
-                                },
-                                if unscored < input.episodes.len() { "Run {unscored} left" } else { "Run" }
-                            }
-                        }
-                    }
+                    MeasureRunActions { run: run.clone(), input: input.clone(), blocked }
                 },
             }
             if unmeasured {
                 NodePrimer {
                     primer: Primer::ScoreProgress,
-                    action: rsx! {
-                        if running {
-                            p { class: "curation-primer-status", role: "status",
-                                SpinnerIcon {}
-                                "{running_line}"
-                            }
-                        } else if !pending.is_empty() {
-                            Button {
-                                purpose: ActionPurpose::Start, variant: ButtonVariant::Solid,
-                                disabled: blocked,
-                                title: "Score the {unscored} episodes not yet scored",
-                                onclick: {
-                                    let start = start.clone();
-                                    let fresh = pending.clone();
-                                    move |_| start(fresh.clone())
-                                },
-                                "Score {Counted::episodes(unscored)}"
-                            }
-                        }
-                    },
+                    action: rsx! { MeasureRunStart { run, input, blocked } },
                 }
             } else {
                 RuleReview { view, strips }

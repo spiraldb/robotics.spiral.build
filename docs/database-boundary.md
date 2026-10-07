@@ -41,15 +41,13 @@ standalone deployment, include its library beside the server or supply the
 absolute override. The `local-driver` development shell selects an upstream
 validation build without adding a Spiral source dependency to Studio.
 
-**Use a current-upstream build for Spiral application sign-in.** The pinned
-`0.16.41` driver requests legacy storage tokens, which the API refuses for
-application credentials. Application sessions need the storage-binding client
-introduced in upstream [PR #7595](https://github.com/spiraldb/spiraldb/pull/7595).
-Update the archive pin when a published driver passes the hosted contract with
-an application token. A source release alone does not update the downloaded
-library.
+The pinned `0.16.43` driver includes the storage-binding client that Spiral
+application sessions need (upstream
+[PR #7595](https://github.com/spiraldb/spiraldb/pull/7595)). Move the archive pin
+only to a published driver that passes the hosted contract below; a source
+release alone does not update the downloaded library.
 
-For this workspace's validated local build, run from the repository root:
+To validate an unreleased upstream build, run from the repository root:
 
 ```sh
 nix develop .#local-driver

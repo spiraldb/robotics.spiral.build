@@ -1,0 +1,24 @@
+/* Curation › Track objects styles. Prefix every class with
+   `curation-track-objects-`. Use @layer components like tailwind.css. */
+
+@layer components {
+  /* A measurement's workspace: its status line over the strips, the index,
+     and the recording, as Score progress lays its own out. */
+  .curation-track-objects-workspace {
+    @apply flex h-full min-h-0 min-w-0 flex-col;
+    background: var(--tone-surface);
+  }
+
+  /* "Track [bottle] on [top camera]": what the node asks, read as a phrase. */
+  .curation-track-objects-settings {
+    @apply flex min-w-0 flex-1 items-center gap-2;
+  }
+
+  .curation-track-objects-label {
+    @apply shrink-0 text-xs text-ink-soft;
+  }
+
+  .curation-track-objects-prompt {
+    @apply w-40 min-w-0;
+  }
+}

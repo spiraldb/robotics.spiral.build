@@ -9,6 +9,7 @@
 //! operator recognizes the same recording wherever it is shown.
 use super::{
     arrangement::{EpisodeArrangement, Size},
+    boxes::CameraBoxes,
     camera::EpisodeCamera,
     choices::StreamChoices,
     identity::Episode,
@@ -128,25 +129,42 @@ pub(in crate::activities) fn EpisodeInspection(
     /// Which camera leads the others.
     #[props(default)]
     featured_camera: FeaturedCamera,
+    /// Boxes drawn over one of the cameras, such as the objects a
+    /// measurement tracked on it.
+    #[props(default)]
+    camera_boxes: Option<CameraBoxes>,
 ) -> Element {
     // Another episode is another clock, other streams and other choices, so
     // it mounts afresh rather than rewiring the previous one's.
+    let evidence = Evidence {
+        tracks,
+        lead: tracks_lead,
+        boxes: camera_boxes,
+    };
     rsx! {
         Remount { identity: format!("{}/{}", episode.dataset().label(), episode.id()),
-            InspectedEpisode { episode, evidence: Evidence { tracks, lead: tracks_lead }, focus, featured_camera }
+            InspectedEpisode { episode, evidence, focus, featured_camera }
         }
     }
 }
 
-/// The rows a surface draws above the recorded streams, and whether they
-/// lead the recording.
+/// The rows a surface draws above the recorded streams, whether they lead
+/// the recording, and the boxes it draws over a camera.
 #[derive(Clone, PartialEq)]
 struct Evidence {
     tracks: Vec<EvidenceTrack>,
     lead: bool,
+    boxes: Option<CameraBoxes>,
 }
 
 impl Evidence {
+    /// The boxes drawn over `camera`, when the surface marks that one.
+    fn boxes_over(&self, camera: &RecordedStream) -> Option<CameraBoxes> {
+        self.boxes
+            .as_ref()
+            .filter(|boxes| boxes.camera() == camera.name())
+            .cloned()
+    }
     /// `arrangement` with the timeline room these rows claim.
     fn arranging(&self, arrangement: EpisodeArrangement) -> EpisodeArrangement {
         match (self.tracks.is_empty(), self.lead) {
@@ -285,7 +303,7 @@ fn InspectionDock(
                 EpisodeArrangement::camera(camera.key()),
                 title.clone(),
                 "episode-view-0",
-                rsx! { EpisodeCamera { camera: (*camera).clone(), reads: loaded.reads(), transport: transport.clone(), title } },
+                rsx! { EpisodeCamera { camera: (*camera).clone(), reads: loaded.reads(), transport: transport.clone(), title, boxes: evidence.boxes_over(camera) } },
             )
             .with_closable(true)
             .with_tab_icon(rsx! { CameraStreamIcon {} })

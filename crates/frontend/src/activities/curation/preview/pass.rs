@@ -14,6 +14,7 @@ use crate::activities::curation::path::{CurationPath, PathError};
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::curation::score_progress::{MAX_MOMENTS, Moment};
 use crate::activities::curation::state::{CurationController, RunHandle};
+use crate::activities::curation::track_objects::ObjectCount;
 use spiral_robotics_common::curation::{
     ColumnFill, FillRequest, FillState, FilledEpisodesRequest, PreviewQuery, PreviewQueryState,
 };
@@ -25,11 +26,13 @@ const POLL_INTERVAL_MS: u32 = 1_000;
 /// How soon, between polls, a pass notices Stop.
 const STOP_CHECK_MS: u32 = 100;
 
-/// How a preview's answers read back.
+/// How a preview's answers read back: a Track objects node's as the count
+/// in the column it wrote.
 #[derive(Clone, Debug, PartialEq)]
 enum PreviewReading {
     Moments,
     Subtasks(SubtaskColumns),
+    ObjectCount(String),
 }
 
 /// One query of a preview: its statement, the episode it reads, bound as
@@ -102,6 +105,12 @@ impl PreviewPlan {
         let fill = path.fill_for(jobs.iter().map(|job| job.episode().clone()).collect())?;
         let reading = match measured.kind() {
             CurationNodeKind::ScoreProgress(_) => PreviewReading::Moments,
+            CurationNodeKind::TrackObjects(_) => PreviewReading::ObjectCount(
+                path.relation()?
+                    .measured(ObjectCount::COLUMN)
+                    .ok_or_else(|| PathError::new("This path counts no objects."))?
+                    .to_owned(),
+            ),
             _ => PreviewReading::Subtasks(
                 SubtaskColumns::of(&path.relation()?).map_err(PathError::new)?,
             ),
@@ -130,6 +139,7 @@ impl PreviewPlan {
     fn doing(&self) -> &'static str {
         match self.node.kind() {
             CurationNodeKind::ScoreProgress(_) => "Scoring",
+            CurationNodeKind::TrackObjects(_) => "Tracking",
             CurationNodeKind::BreakDownSubtasks(_) => "Breaking down",
             CurationNodeKind::FindSimilarSubtasks(_) => "Searching",
             CurationNodeKind::GroupSimilarSubtasks(_) => "Grouping",
@@ -147,6 +157,10 @@ impl PreviewPlan {
             }
             PreviewReading::Subtasks(_) => {
                 PreviewQuery::EpisodeRows(EpisodeQueryRequest::new(bound, statement, MAX_SUBTASKS))
+            }
+            // A whole episode reaches a Track objects node as one row.
+            PreviewReading::ObjectCount(_) => {
+                PreviewQuery::EpisodeRows(EpisodeQueryRequest::new(bound, statement, 1))
             }
         }
     }
@@ -170,6 +184,10 @@ impl PreviewPlan {
             PreviewReading::Subtasks(columns) => {
                 let answer = run.rows(query).await.map_err(fail)?;
                 Ok(PreviewRows::Subtasks(columns.read(&answer, &self.sample)?))
+            }
+            PreviewReading::ObjectCount(column) => {
+                let answer = run.rows(query).await.map_err(fail)?;
+                Ok(PreviewRows::ObjectCount(ObjectCount::read(&answer, column)))
             }
         }
     }

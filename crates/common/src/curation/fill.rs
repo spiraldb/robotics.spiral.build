@@ -27,6 +27,15 @@ pub enum AnswerSource {
         model: String,
         revision: String,
     },
+    /// The object tracking service's tracks of the objects `prompt` names in
+    /// the episode's video on `camera`, from the checkpoint `model`, as the
+    /// service `revision` computes them.
+    ObjectTracking {
+        camera: String,
+        prompt: String,
+        model: String,
+        revision: String,
+    },
 }
 
 /// Which episodes a column is filled for.

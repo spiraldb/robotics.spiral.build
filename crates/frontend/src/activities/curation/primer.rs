@@ -12,6 +12,7 @@ use dioxus::prelude::*;
 pub(super) enum Primer {
     BreakDown,
     ScoreProgress,
+    TrackObjects,
 }
 
 impl Primer {
@@ -25,6 +26,10 @@ impl Primer {
                 "Even good demonstrations hesitate, regrasp, and retry, and training on those \
                  moments can make a policy worse."
             }
+            Self::TrackObjects => {
+                "The same task gets harder with more to handle: three bottles take longer to \
+                 clear than two, and a slow take may only be a busy one."
+            }
         }
     }
     /// What the node does about it.
@@ -37,6 +42,10 @@ impl Primer {
             Self::ScoreProgress => {
                 "Score progress rates every moment against the expert rate and leaves out the \
                  stretches that stall. The rest of the episode still trains."
+            }
+            Self::TrackObjects => {
+                "Track objects finds and follows what you name through every episode, so you \
+                 can keep the episodes with the right number of it."
             }
         }
     }
@@ -53,6 +62,7 @@ pub(super) fn NodePrimer(primer: Primer, action: Element) -> Element {
                 match primer {
                     Primer::BreakDown => rsx! { BreakDownDrawing {} },
                     Primer::ScoreProgress => rsx! { ScoreProgressDrawing {} },
+                    Primer::TrackObjects => rsx! { TrackObjectsDrawing {} },
                 }
             }
             div { class: "curation-primer-words",
@@ -187,6 +197,47 @@ fn ScoreProgressDrawing() -> Element {
             text { class: "curation-primer-side", x: "109", y: "172", "kept" }
             text { class: "curation-primer-side", "data-left-out": "true", x: "240", y: "172", "left out" }
             text { class: "curation-primer-side", x: "371", y: "172", "kept" }
+        }
+    }
+}
+
+/// Three takes of one task with two, three, and four bottles on the table:
+/// each bottle is boxed as it is found, and the rule keeps the takes with
+/// three or four.
+#[component]
+fn TrackObjectsDrawing() -> Element {
+    rsx! {
+        svg { class: "curation-primer-objects", view_box: "0 0 480 176",
+            rect { class: "curation-primer-scene", x: "24", y: "12", width: "128", height: "96", rx: "6" }
+            rect { class: "curation-primer-bottle", x: "44", y: "40", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-bottle", x: "96", y: "52", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-found", style: "--found: 0", x: "41", y: "37", width: "15", height: "26", rx: "2" }
+            rect { class: "curation-primer-found", style: "--found: 1", x: "93", y: "49", width: "15", height: "26", rx: "2" }
+            rect { class: "curation-primer-scene", x: "176", y: "12", width: "128", height: "96", rx: "6" }
+            rect { class: "curation-primer-bottle", x: "194", y: "34", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-bottle", x: "228", y: "58", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-bottle", x: "266", y: "40", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-found", style: "--found: 2", x: "191", y: "31", width: "15", height: "26", rx: "2" }
+            rect { class: "curation-primer-found", style: "--found: 3", x: "225", y: "55", width: "15", height: "26", rx: "2" }
+            rect { class: "curation-primer-found", style: "--found: 4", x: "263", y: "37", width: "15", height: "26", rx: "2" }
+            rect { class: "curation-primer-scene", x: "328", y: "12", width: "128", height: "96", rx: "6" }
+            rect { class: "curation-primer-bottle", x: "342", y: "36", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-bottle", x: "370", y: "60", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-bottle", x: "404", y: "32", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-bottle", x: "434", y: "54", width: "9", height: "20", rx: "3" }
+            rect { class: "curation-primer-found", style: "--found: 5", x: "339", y: "33", width: "15", height: "26", rx: "2" }
+            rect { class: "curation-primer-found", style: "--found: 6", x: "367", y: "57", width: "15", height: "26", rx: "2" }
+            rect { class: "curation-primer-found", style: "--found: 7", x: "401", y: "29", width: "15", height: "26", rx: "2" }
+            rect { class: "curation-primer-found", style: "--found: 8", x: "431", y: "51", width: "15", height: "26", rx: "2" }
+            text { class: "curation-primer-count", x: "88", y: "126", "2 at once" }
+            text { class: "curation-primer-count", x: "240", y: "126", "3 at once" }
+            text { class: "curation-primer-count", x: "392", y: "126", "4 at once" }
+            rect { class: "curation-primer-cut", x: "24", y: "136", width: "128", height: "18", rx: "4" }
+            rect { class: "curation-primer-kept", x: "176", y: "136", width: "128", height: "18", rx: "4" }
+            rect { class: "curation-primer-kept", x: "328", y: "136", width: "128", height: "18", rx: "4" }
+            text { class: "curation-primer-side", "data-left-out": "true", x: "88", y: "172", "left out" }
+            text { class: "curation-primer-side", x: "240", y: "172", "kept" }
+            text { class: "curation-primer-side", x: "392", y: "172", "kept" }
         }
     }
 }

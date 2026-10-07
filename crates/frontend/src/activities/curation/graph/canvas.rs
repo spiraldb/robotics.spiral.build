@@ -19,6 +19,7 @@ use super::flow_canvas::{CardGraph, FlowFit, FlowMargins, ReadableViewport};
 use super::node_card::{ChildMenu, NodeCard, NodeFace, OutputFlag};
 use crate::components::icons::{
     DataIcon, FilmFrameIcon, FunnelIcon, OverlapIcon, SignalStreamIcon, SparkIcon,
+    TrackedObjectsIcon,
 };
 
 /// A node's size, so the layout can place it before it mounts: the graph
@@ -307,6 +308,7 @@ pub(in crate::activities::curation) fn NodeGlyph(face: NodeFace) -> Element {
         NodeFace::Search => rsx! { FilmFrameIcon {} },
         NodeFace::Grouping => rsx! { OverlapIcon {} },
         NodeFace::Scoring => rsx! { SignalStreamIcon {} },
+        NodeFace::Tracking => rsx! { TrackedObjectsIcon {} },
         NodeFace::Select => rsx! { FunnelIcon {} },
     }
 }

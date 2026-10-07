@@ -20,6 +20,7 @@
 @import "./styles/curation-similar.css";
 @import "./styles/curation-select.css";
 @import "./styles/curation-score-progress.css";
+@import "./styles/curation-track-objects.css";
 @import "./styles/curation-threshold.css";
 @import "./styles/curation-publish.css";
 @import "./styles/curation-primer.css";
@@ -2402,6 +2403,12 @@ button.studio-status-connection[aria-expanded="true"] {
 .episode-camera-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
 .episode-camera-message { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; padding: 16px; text-align: center; font-size: 11px; background: var(--tone-camera); color: var(--tone-camera-ink); overflow: auto; }
 .episode-camera-message .data-text-action { color: var(--tone-camera-ink); text-decoration: underline; }
+/* Boxes a measurement marked on the picture, drawn in the picture's own
+   coordinates and fitted the way the canvas fits the picture, so each sits
+   on what it marks at any panel size. */
+.episode-camera-boxes { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.episode-camera-boxes rect { fill: none; stroke: var(--tone-kind-camera); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.episode-camera-boxes text { fill: rgb(255 255 255 / 0.95); font: 600 12px/1 var(--font-mono); paint-order: stroke; stroke: rgb(0 0 0 / 0.72); stroke-width: 3px; dominant-baseline: text-after-edge; }
 
 /* A camera panel has no header, so every camera picture names itself at its
    top-left, on the mat, the way a monitor wall labels its screens. Recorded

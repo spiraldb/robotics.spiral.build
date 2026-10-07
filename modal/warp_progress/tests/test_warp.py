@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 import torch
 
-from warp_progress.video import PacketVideo, RejectedVideo
+from video_service.episode import EpisodeVideo, RejectedVideo
+
 from warp_progress.warp import (
     FRAME_PERIOD_NS,
     IMAGENET_MEAN,
@@ -10,19 +11,15 @@ from warp_progress.warp import (
     DenseScores,
     PresentationTimes,
     SquashPreprocessing,
+    WarpModel,
     WindowPlan,
 )
 
 
-def test_pictures_come_in_display_order_with_their_packet_times(episode):
-    assert episode.times_ns != sorted(episode.times_ns)
-    times = [time_ns for time_ns, rgb in PacketVideo(episode.payloads, episode.times_ns).pictures()]
-    assert times == sorted(episode.times_ns)
-
-
-def test_undecodable_packets_are_rejected():
-    with pytest.raises(RejectedVideo):
-        list(PacketVideo([b"\x00\x00\x01\x65garbage"] * 3, [0, 1, 2]).pictures())
+def test_pictures_come_in_display_order_as_rgb_with_their_packet_times(episode):
+    pictures = list(WarpModel._pictures(EpisodeVideo(episode.payloads, episode.times_ns)))
+    assert [time_ns for time_ns, _ in pictures] == sorted(episode.times_ns)
+    assert pictures[0][1].shape == (48, 64, 3)
 
 
 def test_presentation_times_need_33_pictures_on_a_30_hz_clock():

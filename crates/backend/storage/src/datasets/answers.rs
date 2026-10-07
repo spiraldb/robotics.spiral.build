@@ -359,7 +359,9 @@ impl StoredType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Float64Array, Int64Array, StringArray, UInt64Array};
+    use arrow_array::{
+        Float32Array, Float64Array, Int64Array, StringArray, UInt32Array, UInt64Array,
+    };
 
     fn subtasks(descriptions: &[&str]) -> ArrayRef {
         let fields = Fields::from(vec![
@@ -373,6 +375,57 @@ mod tests {
                 vec![
                     Arc::new(UInt64Array::from(starts)),
                     Arc::new(StringArray::from(descriptions.to_vec())),
+                ],
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Track objects' pictures, the `n`th tracking `tracked[n]` objects, as
+    /// a service declares them: every field it fills non-nullable.
+    fn pictures(tracked: &[usize]) -> ArrayRef {
+        let object = Fields::from(vec![
+            Field::new("id", DataType::UInt32, false),
+            Field::new("score", DataType::Float32, false),
+            Field::new("x", DataType::Float32, false),
+            Field::new("y", DataType::Float32, false),
+            Field::new("width", DataType::Float32, false),
+            Field::new("height", DataType::Float32, false),
+        ]);
+        let count = tracked.iter().sum::<usize>();
+        let fraction = || -> ArrayRef { Arc::new(Float32Array::from(vec![0.5; count])) };
+        let objects = StructArray::try_new(
+            object.clone(),
+            vec![
+                Arc::new(UInt32Array::from_iter_values(0..count as u32)),
+                fraction(),
+                fraction(),
+                fraction(),
+                fraction(),
+                fraction(),
+            ],
+            None,
+        )
+        .unwrap();
+        let item = Arc::new(Field::new_list_field(DataType::Struct(object), false));
+        let objects = ListArray::new(
+            item,
+            OffsetBuffer::from_lengths(tracked.iter().copied()),
+            Arc::new(objects),
+            None,
+        );
+        let times = (0..tracked.len() as u64).map(|picture| picture * 200_000_000);
+        let fields = Fields::from(vec![
+            Field::new("timestamp_ns", DataType::UInt64, false),
+            Field::new("objects", objects.data_type().clone(), false),
+        ]);
+        Arc::new(
+            StructArray::try_new(
+                fields,
+                vec![
+                    Arc::new(UInt64Array::from_iter_values(times)),
+                    Arc::new(objects),
                 ],
                 None,
             )
@@ -441,6 +494,40 @@ mod tests {
                 .data_type(),
             &stored
         );
+    }
+
+    #[test]
+    fn an_answer_nesting_lists_in_lists_is_spelled_and_cast_for_spiral() {
+        let column = AnswerColumn::of("track_objects", &["m"]).unwrap();
+        let mut answers = ColumnAnswers::default();
+        let tracked = EpisodeAnswer::listing(pictures(&[2, 0, 1]));
+        answers.hold(episode(1), EpisodeAnswer::failed(tracked.0.data_type()));
+        answers.hold(episode(2), tracked);
+        let batch = answers.batch(&column, None).unwrap();
+        assert_eq!(
+            StoredType::sql(batch.schema().field(1).data_type()).unwrap(),
+            "STRUCT(value STRUCT(timestamp_ns uint64, objects STRUCT(id uint32, score real, x real, y real, width real, height real)[])[])"
+        );
+        let wrapped = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let episodes = wrapped
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        assert!(episodes.is_null(0) && episodes.is_valid(1));
+        let pictures = episodes.value(1);
+        let pictures = pictures.as_any().downcast_ref::<StructArray>().unwrap();
+        let objects = pictures
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let lengths = (0..objects.len()).map(|picture| objects.value_length(picture));
+        assert_eq!(lengths.collect::<Vec<_>>(), [2, 0, 1]);
     }
 
     #[test]
@@ -609,6 +696,24 @@ mod tests {
                 .await?;
             assert_eq!(read.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
             assert_eq!(read[0].schema().field(0).data_type(), &DataType::UInt32);
+
+            // Track objects' pictures, each nesting the objects it tracks.
+            let tracks = AnswerColumn::of("track_objects", &["probe"]).unwrap();
+            let mut tracked = ColumnAnswers::default();
+            for (episode, objects) in episodes.iter().zip([2, 0]) {
+                tracked.hold(episode.clone(), EpisodeAnswer::listing(pictures(&[objects, 1])));
+            }
+            answers.write(&tracks, tracked).await?;
+            assert_eq!(answers.filled(&tracks).await?.len(), 2);
+            let read = store
+                .connect()
+                .await?
+                .read_batches(&format!(
+                    "SELECT p.timestamp_ns FROM {} a CROSS JOIN LATERAL UNNEST(a.{tracks}.value) p",
+                    table.quoted()
+                ))
+                .await?;
+            assert_eq!(read.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
 
             // A later episode gets a row naming every column the table has.
             storage.record_probe_episode(&name, "three").await?;

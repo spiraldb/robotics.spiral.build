@@ -7,7 +7,8 @@
 //! the tabs are an ordinary workbench: they dock, split, and close.
 use super::document::EpisodeFact;
 use crate::activities::episode::{
-    Episode, EpisodeHeading, EpisodeInspection, FeaturedCamera, HeadingSubject, PlayRequest,
+    CameraBoxes, Episode, EpisodeHeading, EpisodeInspection, FeaturedCamera, HeadingSubject,
+    PlayRequest,
 };
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace};
@@ -204,12 +205,13 @@ impl OpenEpisodes {
 }
 
 /// One episode's tab when the episode is open whole: its name and length
-/// over its recording.
+/// over its recording, with what a measurement marked on a camera.
 #[component]
 pub(super) fn WholeEpisodeTab(
     episode: Episode,
     featured_camera: FeaturedCamera,
     focus: Option<PlayRequest>,
+    #[props(default)] camera_boxes: Option<CameraBoxes>,
 ) -> Element {
     let facts = EpisodeFact::DurationSeconds
         .reading(&episode)
@@ -218,7 +220,7 @@ pub(super) fn WholeEpisodeTab(
     rsx! {
         EpisodeHeading { subject: HeadingSubject::episode(&episode).with_facts(facts) }
         div { class: "curation-review-player",
-            EpisodeInspection { episode, featured_camera, focus }
+            EpisodeInspection { episode, featured_camera, focus, camera_boxes }
         }
     }
 }

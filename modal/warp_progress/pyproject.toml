@@ -12,6 +12,7 @@ dependencies = [
     "safetensors==0.8.0",
     "torch==2.14.0",
     "transformers==5.17.0",
+    "video-service",
 ]
 
 [dependency-groups]
@@ -24,3 +25,7 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.uv.sources]
+# Shared with the other video services. Editable, so a deploy copies the source as it is.
+video-service = { path = "../video_service", editable = true }

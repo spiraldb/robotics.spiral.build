@@ -2,8 +2,9 @@
 //! node's rule.
 //!
 //! A rule narrows; it never measures. What it keeps by is its basis: a Score
-//! progress node's progress rate, a Find similar node's similarity, and a
-//! Group similar node's categories are those nodes' own knobs, and a Select
+//! progress node's progress rate, a Track objects node's count, a Find
+//! similar node's similarity, and a Group similar node's categories are those
+//! nodes' own knobs, and a Select
 //! keeps by the dataset's recorded facts of each episode, as many conditions
 //! as it names — never by what a model answered. The rule is stored in those
 //! terms, so it reads as one sentence about the node it belongs to.
@@ -14,6 +15,7 @@
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
 use crate::activities::curation::score_progress::Moment;
+use crate::activities::curation::track_objects::ObjectCount;
 use crate::activities::episode::Episode;
 use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,9 @@ pub(crate) enum SelectionBasis {
     Categories,
     /// A Score progress node's progress rate for each moment.
     Progress,
+    /// A Track objects node's count for each episode: the most it saw at
+    /// once.
+    ObjectCount,
 }
 
 /// One statistic Spiral records for every episode.
@@ -241,6 +246,11 @@ pub(crate) enum Selection {
     /// Moments progressing at least this fast. A moment the scorer could not
     /// read is kept: an unread moment is not a slow one.
     Progressing { minimum: f64 },
+    /// Episodes showing at least `fewest` of what a Track objects node
+    /// tracks at once, and at most `most` when it names a most. An episode
+    /// the tracker could not read is not kept: nothing says how many it
+    /// shows.
+    ObjectCount { fewest: u64, most: Option<u64> },
 }
 
 impl Selection {
@@ -260,6 +270,10 @@ impl Selection {
             SelectionBasis::Similarity => Self::Similar { minimum: 0.5 },
             SelectionBasis::Categories => Self::Categories { names: Vec::new() },
             SelectionBasis::Progress => Self::Progressing { minimum: 0.0 },
+            SelectionBasis::ObjectCount => Self::ObjectCount {
+                fewest: 0,
+                most: None,
+            },
         }
     }
     pub(crate) fn basis(&self) -> SelectionBasis {
@@ -268,6 +282,7 @@ impl Selection {
             Self::Similar { .. } => SelectionBasis::Similarity,
             Self::Categories { .. } => SelectionBasis::Categories,
             Self::Progressing { .. } => SelectionBasis::Progress,
+            Self::ObjectCount { .. } => SelectionBasis::ObjectCount,
         }
     }
     /// Whether an episode is kept: it meets every condition.
@@ -298,13 +313,23 @@ impl Selection {
             _ => false,
         }
     }
+    /// Whether an episode is kept, by the most a Track objects node saw at
+    /// once in it.
+    pub(crate) fn keeps_count(&self, count: Option<u64>) -> bool {
+        match self {
+            Self::ObjectCount { fewest, most } => {
+                count.is_some_and(|count| count >= *fewest && most.is_none_or(|most| count <= most))
+            }
+            _ => false,
+        }
+    }
     /// The least a measure's rule keeps: the knob of a Score progress or a
     /// Find similar node. Episode conditions each have their own value, and
     /// categories none.
     pub(crate) fn minimum(&self) -> Option<f64> {
         match self {
             Self::Similar { minimum } | Self::Progressing { minimum } => Some(*minimum),
-            Self::Episodes { .. } | Self::Categories { .. } => None,
+            Self::Episodes { .. } | Self::Categories { .. } | Self::ObjectCount { .. } => None,
         }
     }
     /// The same measure's rule keeping at least `value`; any other rule
@@ -313,6 +338,17 @@ impl Selection {
         match self {
             Self::Similar { .. } => Self::Similar { minimum: value },
             Self::Progressing { .. } => Self::Progressing { minimum: value },
+            rule => rule,
+        }
+    }
+    /// The same count rule keeping from `fewest` to `most` objects, the
+    /// larger taken as the most; any other rule stays as it is.
+    pub(crate) fn with_count_range(self, (fewest, most): (u64, u64)) -> Self {
+        match self {
+            Self::ObjectCount { .. } => Self::ObjectCount {
+                fewest: fewest.min(most),
+                most: Some(fewest.max(most)),
+            },
             rule => rule,
         }
     }
@@ -334,6 +370,13 @@ impl Selection {
             Self::Similar { minimum } => format!("At least {:.0}% similar", minimum * 100.0),
             Self::Categories { names } => names.join(", "),
             Self::Progressing { minimum } => format!("Progress rate at least {minimum:.2}×"),
+            Self::ObjectCount { fewest, most } => match (*fewest, *most) {
+                (0, None) => "Any number at once".to_owned(),
+                (fewest, None) => format!("At least {fewest} at once"),
+                (0, Some(most)) => format!("At most {most} at once"),
+                (fewest, Some(most)) if fewest == most => format!("Exactly {fewest} at once"),
+                (fewest, Some(most)) => format!("{fewest} to {most} at once"),
+            },
         }
     }
     /// The rule as the predicate over the columns of `input`: what
@@ -359,6 +402,14 @@ impl Selection {
                 literal(*minimum)?,
                 rate = Moment::PROGRESS_RATE
             )),
+            // An episode with no count compares as unknown, so it is not kept.
+            Self::ObjectCount { fewest, most } => {
+                let count = measured(ObjectCount::COLUMN)?;
+                Ok(match most {
+                    Some(most) => format!("{count} >= {fewest} AND {count} <= {most}"),
+                    None => format!("{count} >= {fewest}"),
+                })
+            }
             Self::Similar { minimum } => Ok(format!(
                 "{} >= {}",
                 measured(SubtaskRow::SIMILARITY)?,
@@ -399,6 +450,10 @@ impl Selection {
             Self::Progressing { minimum } if !minimum.is_finite() => {
                 Err("A progress threshold must be a number.".into())
             }
+            Self::ObjectCount {
+                fewest,
+                most: Some(most),
+            } if most < fewest => Err("The most to keep cannot be fewer than the fewest.".into()),
             Self::Categories { names } => {
                 let mut seen = std::collections::BTreeSet::new();
                 for name in names {
@@ -471,7 +526,7 @@ impl PathFragment for Selection {
                     input.renamed(name).publishing(rate),
                 )
             }
-            Self::Similar { .. } | Self::Categories { .. } => {
+            Self::Similar { .. } | Self::Categories { .. } | Self::ObjectCount { .. } => {
                 StepSql::new(vec![kept], input.renamed(name))
             }
         })
@@ -568,6 +623,36 @@ mod tests {
                 None => comparison(&self.0),
             }
         }
+    }
+
+    #[test]
+    fn a_count_rule_keeps_in_the_browser_what_its_predicate_keeps() {
+        let counted = Relation::new("episodes", Vec::new()).measuring("track", ObjectCount::COLUMN);
+        let range = Selection::ObjectCount {
+            fewest: 3,
+            most: Some(4),
+        };
+        assert_eq!(
+            range.predicate(&counted).unwrap(),
+            "object_count >= 3 AND object_count <= 4"
+        );
+        // An episode the tracker could not count is NULL in SQL, which no
+        // comparison keeps.
+        assert_eq!(
+            [None, Some(2), Some(3), Some(4), Some(5)].map(|count| range.keeps_count(count)),
+            [false, false, true, true, false]
+        );
+        let any = Selection::for_basis(SelectionBasis::ObjectCount);
+        assert_eq!(any.predicate(&counted).unwrap(), "object_count >= 0");
+        assert!(any.keeps_count(Some(0)) && !any.keeps_count(None));
+        // A range given backwards is still a range.
+        assert_eq!(
+            range.with_count_range((6, 2)),
+            Selection::ObjectCount {
+                fewest: 2,
+                most: Some(6)
+            }
+        );
     }
 
     #[test]

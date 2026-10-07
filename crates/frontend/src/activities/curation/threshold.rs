@@ -6,8 +6,9 @@
 //! between the values beside the line says how firm the choice is, which the
 //! count alone cannot, and dragging the line re-divides kept from left out.
 //!
-//! A Select's episode conditions, Score progress's progress rate, and Find
-//! similar's similarity all slide on this one strip.
+//! A Select's episode conditions, Score progress's progress rate, Find
+//! similar's similarity, and Track objects' count range all slide on this one
+//! strip; a range slides a second handle along the same track.
 use crate::format::GroupedCountPresentation as _;
 use dioxus::prelude::*;
 
@@ -91,6 +92,31 @@ pub(super) enum AxisUnit {
     /// A recorded fact, whose unit the rule's sentence says after it: a
     /// duration, count, or size, all measured from zero.
     Plain,
+    /// A number of things, such as the objects seen at once, from zero, one
+    /// at a time.
+    Count,
+}
+
+/// Which values a rule keeps, against its threshold.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Keeps {
+    /// At least the threshold.
+    Above,
+    /// At most the threshold.
+    Below,
+    /// At least the threshold and at most this second one, slid by a second
+    /// handle on the same track.
+    UpTo(f64),
+}
+
+impl Keeps {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Above => "above",
+            Self::Below => "below",
+            Self::UpTo(_) => "between",
+        }
+    }
 }
 
 /// Where a rule's threshold stands, the axis it slides along, and which side
@@ -99,9 +125,7 @@ pub(super) enum AxisUnit {
 pub(super) struct Threshold {
     value: f64,
     scale: ThresholdScale,
-    /// Whether the rule keeps what is at least the threshold, rather than
-    /// at most it.
-    keeps_above: bool,
+    keeps: Keeps,
 }
 
 impl Threshold {
@@ -111,8 +135,56 @@ impl Threshold {
     pub(super) fn over(dots: &[StripDot], value: f64, unit: AxisUnit, keeps_above: bool) -> Self {
         Self {
             value,
-            scale: ThresholdScale::of(dots, value, unit),
-            keeps_above,
+            scale: ThresholdScale::of(dots, &[value], unit),
+            keeps: if keeps_above {
+                Keeps::Above
+            } else {
+                Keeps::Below
+            },
+        }
+    }
+    /// A range from `least` to `most` on an axis over the values `dots`
+    /// judge, in `unit`, keeping what lies within it.
+    pub(super) fn between(dots: &[StripDot], (least, most): (f64, f64), unit: AxisUnit) -> Self {
+        Self {
+            value: least,
+            scale: ThresholdScale::of(dots, &[least, most], unit),
+            keeps: Keeps::UpTo(most),
+        }
+    }
+    /// Where the threshold stands; a range's least.
+    pub(super) fn value(self) -> f64 {
+        self.value
+    }
+    /// A range's most.
+    pub(super) fn upper(self) -> Option<f64> {
+        match self.keeps {
+            Keeps::UpTo(most) => Some(most),
+            Keeps::Above | Keeps::Below => None,
+        }
+    }
+    /// The threshold slid to `value`, on the nearest step. A range's least
+    /// slid past its most carries the most along, so the range stays whole
+    /// and neither handle is ever stuck behind the other.
+    fn slid(self, value: f64) -> Self {
+        let value = self.scale.snap(value);
+        let keeps = match self.keeps {
+            Keeps::UpTo(most) => Keeps::UpTo(most.max(value)),
+            keeps => keeps,
+        };
+        Self {
+            value,
+            keeps,
+            ..self
+        }
+    }
+    /// A range's most slid to `value`, carrying its least along below it.
+    fn upper_slid(self, value: f64) -> Self {
+        let most = self.scale.snap(value);
+        Self {
+            value: self.value.min(most),
+            keeps: Keeps::UpTo(most),
+            ..self
         }
     }
     /// The threshold as the rule's sentence and the strip print it.
@@ -138,12 +210,12 @@ struct ThresholdScale {
 }
 
 impl ThresholdScale {
-    /// The scale for `threshold` over the values `dots` judge. A recorded
+    /// The scale for `thresholds` over the values `dots` judge. A recorded
     /// fact's axis starts at zero, where a new condition keeps everything, so
     /// the first drag away from it never rescales the axis under the pointer.
     /// With nothing judged yet the axis spans one unit either side of the
     /// threshold, so the slider still moves.
-    fn of(dots: &[StripDot], threshold: f64, unit: AxisUnit) -> Self {
+    fn of(dots: &[StripDot], thresholds: &[f64], unit: AxisUnit) -> Self {
         if unit == AxisUnit::Percent {
             return Self {
                 low: 0.0,
@@ -152,11 +224,11 @@ impl ThresholdScale {
                 unit,
             };
         }
-        let origin = (unit == AxisUnit::Plain).then_some(0.0);
+        let origin = matches!(unit, AxisUnit::Plain | AxisUnit::Count).then_some(0.0);
         let (low, high) = dots
             .iter()
             .map(|dot| dot.value)
-            .chain(std::iter::once(threshold))
+            .chain(thresholds.iter().copied())
             .chain(origin)
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| {
                 (low.min(value), high.max(value))
@@ -164,9 +236,12 @@ impl ThresholdScale {
         let (low, high) = if high - low > f64::EPSILON {
             (low, high)
         } else {
-            (threshold - 1.0, threshold + 1.0)
+            (low - 1.0, low + 1.0)
         };
-        let step = SliderStep::of((low, high));
+        let step = match unit {
+            AxisUnit::Count => SliderStep::WHOLE,
+            _ => SliderStep::of((low, high)),
+        };
         let (low, high) = step.bounds((low, high));
         Self {
             low,
@@ -181,7 +256,7 @@ impl ThresholdScale {
     }
     /// A value as the rule and the strip print it: a whole percentage for a
     /// probability, otherwise with the step's own decimals, and a whole count
-    /// in thousands: "150,000" messages.
+    /// in thousands: "150,000" messages, "3" objects.
     fn label(self, value: f64) -> String {
         match self.unit {
             AxisUnit::Percent => format!("{:.0}%", value * 100.0),
@@ -190,6 +265,7 @@ impl ThresholdScale {
                 (value.round() as u64).grouped_label()
             }
             AxisUnit::Plain => format!("{value:.*}", self.step.decimals()),
+            AxisUnit::Count => (value.max(0.0).round() as u64).grouped_label(),
         }
     }
     /// The expert rate, on a progress-rate axis that reaches it.
@@ -213,6 +289,8 @@ struct SliderStep(f64);
 impl SliderStep {
     /// A probability moves by whole percents.
     const PERCENT: Self = Self(0.01);
+    /// A count moves by whole things.
+    const WHOLE: Self = Self(1.0);
 
     fn of((low, high): (f64, f64)) -> Self {
         let spread = (high - low).max(f64::EPSILON);
@@ -239,20 +317,20 @@ impl SliderStep {
 }
 
 /// The strip itself: every judged value as a dot, and the threshold as a
-/// line with the slider's thumb at its foot. The dots and the thumb share one
-/// track, inset by half a thumb at either end as a range input insets its
-/// own, so a value's dot and the thumb set to it stand at the same pixel. A
-/// dot is a pointer shortcut to its item; keyboard users reach the same item
-/// in the index below, so no dot is a tab stop, and the slider takes the
-/// arrows.
+/// line with the slider's thumb at its foot; a range has a second line and
+/// thumb at its most. The dots and the thumbs share one track, inset by half
+/// a thumb at either end as a range input insets its own, so a value's dot and
+/// the thumb set to it stand at the same pixel. A dot is a pointer shortcut to
+/// its item; keyboard users reach the same item in the index below, so no dot
+/// is a tab stop, and the sliders take the arrows.
 #[component]
 pub(super) fn ThresholdStrip(
     dots: Vec<StripDot>,
     threshold: Threshold,
     chosen: Option<usize>,
     on_select: EventHandler<usize>,
-    /// The threshold slid to a new value, on the nearest step.
-    on_threshold: EventHandler<f64>,
+    /// The threshold with one of its handles slid, on the nearest step.
+    on_threshold: EventHandler<Threshold>,
     /// What the slider sets, for a page with more than one.
     #[props(default = "Threshold".to_owned())]
     label: String,
@@ -260,14 +338,19 @@ pub(super) fn ThresholdStrip(
     let Threshold {
         value,
         scale,
-        keeps_above,
+        keeps,
     } = threshold;
+    let upper = threshold.upper();
+    let at = |value: f64| scale.place(value) / 100.0;
     rsx! {
         div { class: "curation-threshold-strip",
             div { class: "curation-threshold-strip-track", "aria-hidden": "true",
-                span {
-                    class: "curation-threshold-strip-threshold",
-                    style: "left: {scale.place(value):.2}%",
+                for (handle, line) in std::iter::once(value).chain(upper).enumerate() {
+                    span {
+                        key: "{handle}",
+                        class: "curation-threshold-strip-threshold",
+                        style: "left: {scale.place(line):.2}%",
+                    }
                 }
                 for dot in dots {
                     button {
@@ -284,39 +367,67 @@ pub(super) fn ThresholdStrip(
                 }
             }
             // The slider's track fills on the side the rule keeps, so the
-            // bar reads as what is selected before its value is.
-            input {
-                class: "curation-threshold-strip-slider",
-                r#type: "range",
-                style: "--at: {scale.place(value) / 100.0:.4}",
-                "data-keeps": if keeps_above { "above" } else { "below" },
-                min: "{scale.low}",
-                max: "{scale.high}",
-                step: "{scale.step.0}",
-                value: "{value}",
-                "aria-label": "{label}",
-                "aria-valuetext": "{scale.label(value)}",
-                oninput: move |event: FormEvent| {
-                    if let Ok(slid) = event.value().parse::<f64>() {
-                        on_threshold.call(scale.snap(slid));
+            // bar reads as what is selected before its value is. A range's
+            // second slider lies over the first, and only its thumb takes
+            // the pointer.
+            div { class: "curation-threshold-strip-sliders",
+                input {
+                    class: "curation-threshold-strip-slider",
+                    r#type: "range",
+                    style: "--at: {at(value):.4}; --to: {at(upper.unwrap_or(scale.high)):.4}",
+                    "data-keeps": keeps.key(),
+                    min: "{scale.low}",
+                    max: "{scale.high}",
+                    step: "{scale.step.0}",
+                    value: "{value}",
+                    "aria-label": if upper.is_some() { "{label}, from" } else { "{label}" },
+                    "aria-valuetext": "{scale.label(value)}",
+                    oninput: move |event: FormEvent| {
+                        if let Ok(slid) = event.value().parse::<f64>() {
+                            on_threshold.call(threshold.slid(slid));
+                        }
+                    },
+                }
+                if let Some(most) = upper {
+                    input {
+                        class: "curation-threshold-strip-slider",
+                        r#type: "range",
+                        "data-handle": "upper",
+                        min: "{scale.low}",
+                        max: "{scale.high}",
+                        step: "{scale.step.0}",
+                        value: "{most}",
+                        "aria-label": "{label}, to",
+                        "aria-valuetext": "{scale.label(most)}",
+                        oninput: move |event: FormEvent| {
+                            if let Ok(slid) = event.value().parse::<f64>() {
+                                on_threshold.call(threshold.upper_slid(slid));
+                            }
+                        },
                     }
-                },
+                }
             }
-            // The axis's ends, the threshold's value under its handle, and
-            // on a progress-rate axis where the expert rate falls.
+            // The axis's ends, each handle's value under it, and on a
+            // progress-rate axis where the expert rate falls.
             span { class: "curation-threshold-strip-axis", "aria-hidden": "true",
                 span { "{scale.label(scale.low)}" }
                 if let Some(reference) = scale.reference() {
                     span {
                         class: "curation-threshold-strip-reference",
-                        style: "--at: {scale.place(reference) / 100.0:.4}",
+                        style: "--at: {at(reference):.4}",
                         "1×"
                     }
                 }
-                span {
-                    class: "curation-threshold-strip-value",
-                    style: "--at: {scale.place(value) / 100.0:.4}",
-                    "{scale.label(value)}"
+                for (handle, reading) in std::iter::once(value)
+                    .chain(upper.filter(|most| *most != value))
+                    .enumerate()
+                {
+                    span {
+                        key: "{handle}",
+                        class: "curation-threshold-strip-value",
+                        style: "--at: {at(reading):.4}",
+                        "{scale.label(reading)}"
+                    }
                 }
                 span { "{scale.label(scale.high)}" }
             }
@@ -326,7 +437,7 @@ pub(super) fn ThresholdStrip(
 
 #[cfg(test)]
 mod tests {
-    use super::{AxisUnit, SliderStep, StripDot, ThresholdScale};
+    use super::{AxisUnit, SliderStep, StripDot, Threshold, ThresholdScale};
 
     #[test]
     fn a_slid_threshold_snaps_to_its_step_and_keeps_its_decimals() {
@@ -341,17 +452,17 @@ mod tests {
 
     #[test]
     fn a_scale_prints_values_in_its_own_steps() {
-        let progress = ThresholdScale::of(&[], 0.89, AxisUnit::ProgressRate);
+        let progress = ThresholdScale::of(&[], &[0.89], AxisUnit::ProgressRate);
         assert_eq!(progress.label(0.8912), "0.89×");
         // With nothing judged the axis spans one unit either side, in
         // hundredths; a recorded fact's reaches down to zero, in tenths, and
         // carries no unit of its own.
-        let seconds = ThresholdScale::of(&[], 20.0, AxisUnit::Plain);
+        let seconds = ThresholdScale::of(&[], &[20.0], AxisUnit::Plain);
         assert_eq!(seconds.label(20.0), "20.0");
         let counts = StripDot::of(&[Some(2_000.0), Some(531_000.0)], &[true, true]);
-        let messages = ThresholdScale::of(&counts, 150_000.0, AxisUnit::Plain);
+        let messages = ThresholdScale::of(&counts, &[150_000.0], AxisUnit::Plain);
         assert_eq!(messages.label(150_000.0), "150,000");
-        let similarity = ThresholdScale::of(&[], 0.5, AxisUnit::Percent);
+        let similarity = ThresholdScale::of(&[], &[0.5], AxisUnit::Percent);
         assert_eq!(
             (similarity.low, similarity.high, similarity.step.0),
             (0.0, 1.0, 0.01)
@@ -360,10 +471,27 @@ mod tests {
     }
 
     #[test]
+    fn a_count_range_slides_from_zero_one_thing_at_a_time_and_stays_whole() {
+        let counts = StripDot::of(&[Some(2.0), Some(6.0)], &[true, true]);
+        let range = Threshold::between(&counts, (3.0, 7.0), AxisUnit::Count);
+        // The axis reaches the range's most, past every count.
+        assert_eq!(range.ends(), (0.0, 7.0));
+        assert_eq!((range.value(), range.upper()), (3.0, Some(7.0)));
+        assert_eq!(range.label(), "3");
+        let fewer = range.slid(1.4);
+        assert_eq!((fewer.value(), fewer.upper()), (1.0, Some(7.0)));
+        // Either handle slid past the other carries it along.
+        let pushed = range.upper_slid(2.0);
+        assert_eq!((pushed.value(), pushed.upper()), (2.0, Some(2.0)));
+        let pushed = pushed.slid(5.0);
+        assert_eq!((pushed.value(), pushed.upper()), (5.0, Some(5.0)));
+    }
+
+    #[test]
     fn a_recorded_fact_slides_on_one_axis_from_zero() {
         let durations = StripDot::of(&[Some(13.57), Some(60.53)], &[true, true]);
-        let fresh = ThresholdScale::of(&durations, 0.0, AxisUnit::Plain);
-        let slid = ThresholdScale::of(&durations, 45.0, AxisUnit::Plain);
+        let fresh = ThresholdScale::of(&durations, &[0.0], AxisUnit::Plain);
+        let slid = ThresholdScale::of(&durations, &[45.0], AxisUnit::Plain);
         assert_eq!((fresh.low, fresh.high), (0.0, 60.6));
         assert_eq!((slid.low, slid.high), (fresh.low, fresh.high));
     }

@@ -136,7 +136,12 @@ async fn the_canvas_opens_the_latest_curation_and_grows_the_graph_from_a_nodes_m
         .expect("the dataset accepts children");
     assert_eq!(
         menu.labels(),
-        ["Break down subtasks", "Score progress", "Select"]
+        [
+            "Break down subtasks",
+            "Score progress",
+            "Track objects",
+            "Select"
+        ]
     );
     let added = dom
         .in_scope(ScopeId::ROOT, || menu.choose(controller, 0))

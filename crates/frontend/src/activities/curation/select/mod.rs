@@ -20,6 +20,7 @@ use super::population::{EpisodeSample, Population, Slice};
 use super::review::{Counted, NodeBar, NodeReach};
 use super::state::CurationController;
 use super::threshold::{AxisUnit, DotSide, StripDot, Threshold, ThresholdStrip};
+use super::track_objects::StoredTracks;
 use crate::components::icons::SpinnerIcon;
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
@@ -57,6 +58,8 @@ enum RuleKnob {
     Condition(usize),
     /// A measure's least value.
     Minimum,
+    /// The fewest and the most objects a Track objects node's rule keeps.
+    Count,
 }
 
 /// One threshold of a rule on its strip: which it is, what it slides along,
@@ -103,6 +106,40 @@ impl RuleView {
     /// slip can never re-point a node at something else.
     fn set(&self, rule: Selection) {
         let _ = self.controller.set_rule(&self.node, rule);
+    }
+    /// Slide one of the rule's thresholds to where `threshold` stands. A
+    /// count range slides by whole objects.
+    fn slide(&self, knob: RuleKnob, threshold: Threshold) {
+        let rule = self.selection.clone();
+        self.set(match (knob, threshold.upper()) {
+            (RuleKnob::Count, Some(most)) => {
+                let whole = |value: f64| value.round().max(0.0) as u64;
+                rule.with_count_range((whole(threshold.value()), whole(most)))
+            }
+            _ => rule.with_minimum(threshold.value()),
+        });
+    }
+    /// Where the Track objects node the rule belongs to stored its tracks,
+    /// when the rule is one's.
+    fn stored_tracks(&self) -> Option<StoredTracks> {
+        match self.measure.kind() {
+            CurationNodeKind::TrackObjects(tracking) => StoredTracks::of(tracking),
+            _ => None,
+        }
+    }
+    /// The most objects the Track objects node the rule belongs to saw at
+    /// once in each episode that reaches the rule, in input order.
+    fn object_counts(&self) -> Vec<Option<u64>> {
+        self.controller.with_reading(|_, reader| {
+            let Some(reader) = reader else {
+                return Vec::new();
+            };
+            self.input
+                .episodes()
+                .iter()
+                .map(|episode| reader.reads().object_count(&self.measure, episode))
+                .collect()
+        })
     }
     /// Whether the rule keeps each item that reaches it, in input order.
     fn kept(&self) -> Vec<bool> {
@@ -208,6 +245,25 @@ impl RuleView {
                     })
                     .collect()
             }
+            // Every count is a whole number of objects; the range keeps the
+            // dots between its two handles, and without a most it reaches
+            // the highest count.
+            (Selection::ObjectCount { fewest, most }, Population::Episodes(_)) => {
+                let values = self
+                    .object_counts()
+                    .into_iter()
+                    .map(|count| count.map(|count| count as f64))
+                    .collect::<Vec<_>>();
+                let dots = StripDot::of(&values, &self.kept());
+                let highest = values.iter().flatten().copied().fold(0.0, f64::max);
+                let most = most.map_or(highest, |most| most as f64);
+                vec![RuleStrip {
+                    knob: RuleKnob::Count,
+                    label: "Objects at once",
+                    threshold: Threshold::between(&dots, (*fewest as f64, most), AxisUnit::Count),
+                    dots,
+                }]
+            }
             (Selection::Progressing { minimum }, Population::Moments(rows)) => {
                 let values = rows
                     .iter()
@@ -279,6 +335,11 @@ impl RuleView {
                 CurationNodeKind::ScoreProgress(_) => "No episode is scored yet.",
                 _ => "Nothing reaches this rule yet.",
             },
+            true if matches!(self.measure.kind(), CurationNodeKind::TrackObjects(_))
+                && self.object_counts().iter().all(Option::is_none) =>
+            {
+                "No episode is tracked yet."
+            }
             true => "Nothing passes this rule.",
             false => "Nothing is left out.",
         }
@@ -456,12 +517,15 @@ pub(in crate::activities::curation) fn RuleReview(
                         },
                         on_threshold: {
                             let view = view.clone();
-                            move |value| view.set(view.selection.clone().with_minimum(value))
+                            let knob = strip.knob;
+                            move |threshold| view.slide(knob, threshold)
                         },
                     }
                 }
-                // Where the kept parts lie inside their episodes.
-                EpisodeMap {
+                // Where the kept parts lie inside their episodes; a rule over
+                // whole episodes keeps each end to end or not at all, so it
+                // draws none.
+                if !matches!(view.input, Population::Episodes(_)) { EpisodeMap {
                     lanes: EpisodeLanes::of(&view.input.episodes(), &segments.slices, &spans),
                     // Kept in ink, left out faded; the Kept and Left out
                     // segments over the index say the same in words.
@@ -479,7 +543,7 @@ pub(in crate::activities::curation) fn RuleReview(
                             }
                         }
                     },
-                }
+                } }
             }
         }
         if matches!(view.input, Population::Moments(_)) {

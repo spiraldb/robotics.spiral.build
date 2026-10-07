@@ -20,6 +20,7 @@ pub(in crate::activities::curation) enum NodeFace {
     Search,
     Grouping,
     Scoring,
+    Tracking,
     Select,
 }
 
@@ -31,13 +32,14 @@ impl NodeFace {
             CurationNodeKind::FindSimilarSubtasks(_) => Self::Search,
             CurationNodeKind::GroupSimilarSubtasks(_) => Self::Grouping,
             CurationNodeKind::ScoreProgress(_) => Self::Scoring,
+            CurationNodeKind::TrackObjects(_) => Self::Tracking,
             CurationNodeKind::Select => Self::Select,
         }
     }
     pub(super) const fn class_name(self) -> &'static str {
         match self {
             Self::Dataset => "curation-canvas-stage-source",
-            Self::Annotation | Self::Scoring => "curation-canvas-stage-model",
+            Self::Annotation | Self::Scoring | Self::Tracking => "curation-canvas-stage-model",
             Self::Search => "curation-canvas-stage-media",
             Self::Grouping => "curation-canvas-stage-join",
             Self::Select => "curation-canvas-stage-shape",
@@ -268,6 +270,29 @@ impl NodeCard {
                 ),
                 _ => "Stretches progressing fast enough".to_owned(),
             },
+            // What it tracks, then how many of the episodes it counted have
+            // the number its rule keeps.
+            CurationNodeKind::TrackObjects(tracking) => {
+                let tracked = match tracking.prompt() {
+                    "" => "Nothing named yet".to_owned(),
+                    prompt => format!("“{prompt}”"),
+                };
+                match (counts, reader) {
+                    (Some((input, _)), Some(reader)) if Self::unmeasured(node, reader) => {
+                        format!("{tracked} · {}", Self::unrun(input.len()))
+                    }
+                    (Some((input, output)), Some(reader)) => Self::stale(
+                        format!(
+                            "{tracked} · {} of {}",
+                            output.len(),
+                            Counted::episodes(input.len())
+                        ),
+                        node,
+                        reader,
+                    ),
+                    _ => tracked,
+                }
+            }
             CurationNodeKind::Select => {
                 let sentence = node.keeps().map(Selection::sentence).unwrap_or_default();
                 match counts {
@@ -383,7 +408,12 @@ mod tests {
                 .menu()
                 .expect("the dataset accepts children")
                 .labels(),
-            ["Break down subtasks", "Score progress", "Select"]
+            [
+                "Break down subtasks",
+                "Score progress",
+                "Track objects",
+                "Select"
+            ]
         );
     }
 

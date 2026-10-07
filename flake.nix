@@ -85,11 +85,11 @@
           ];
           # Pin the official standalone release and its archive checksums here.
           # Rust builds never compile the embedded engine.
-          adbcVersion = "0.16.41";
+          adbcVersion = "0.16.43";
           adbcArchiveHashes = {
-            aarch64-apple-darwin = "a794846ef442afae8ef23c648161b009ce96e2d021001b6ca66b7568bb4868db";
-            aarch64-unknown-linux-gnu = "26176532a8c83ac10f1105646b6e4aa3f0cec4fd99ad71cd9e1d3212d0559e4a";
-            x86_64-unknown-linux-gnu = "90752bfc12b167086834df3d0505a5a06ca6e801895710f879ad9aacf6de2324";
+            aarch64-apple-darwin = "5bb2c2031c3c1a75d583a67bba134f14a9fabd3ac00b5596b48fdefd1e6d6b25";
+            aarch64-unknown-linux-gnu = "bccecbfc624b8fd3aa1526a600ff071966263e7009e597bd3193297b3ddb8f93";
+            x86_64-unknown-linux-gnu = "537a010fa5216e1446c8b975da35967477cb1ffb5a130e9f5582ae2f7f1c98e0";
           };
           adbcTarget =
             {
@@ -219,10 +219,11 @@
                 # Spiral's sign-in returns browsers to this address's /callback.
                 "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com"
                 "SPIRAL_ROBOTICS_CLIENT_ID=client_PiwYy0njXU92"
-                # The Modal services Score progress and training run on, in the
-                # spiral-dev workspace; their shared token is a deployment
-                # secret.
+                # The Modal services Score progress, Track objects, and
+                # training run on, in the spiral-dev workspace; their shared
+                # token is a deployment secret.
                 "WARP_PROGRESS_URL=https://spiral-dev--warp-progress-warpprogress-web.modal.run"
+                "OBJECT_TRACKING_URL=https://spiral-dev--spiral-robotics-object-tracking-objecttracking-web.modal.run"
                 "TRAINING_SERVICE_URL=https://spiral-dev--spiral-robotics-training-control.modal.run"
                 "SPIRALDB_ADBC_DRIVER=${spiralAdbc}/lib/${adbcLibrary}"
                 "DIOXUS_PUBLIC_PATH=${studioWeb}"

@@ -80,6 +80,17 @@ pub(crate) fn FunnelIcon() -> Element {
     }
 }
 
+/// Two objects boxed in a picture: what a tracker found.
+#[component]
+pub(crate) fn TrackedObjectsIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "2", y: "5", width: "5", height: "7.5", rx: "0.8" }
+            rect { x: "9", y: "3", width: "5", height: "9.5", rx: "0.8" }
+        }
+    }
+}
+
 #[component]
 pub(crate) fn FitViewIcon() -> Element {
     rsx! {

@@ -22,8 +22,10 @@ it keeps part of the answer by, tuned in its workspace.
 
 - **Measures** add a property to each interval, or cut intervals into finer
   ones: Break down subtasks, Find similar subtasks, Group similar subtasks,
-  and Score progress. Score progress keeps the moments progressing at least
-  its threshold, joined into stretches; Find similar the subtasks at least
+  Score progress, and Track objects. Score progress keeps the moments
+  progressing at least its threshold, joined into stretches; Track objects
+  the whole episodes in which the most objects seen at once is within its
+  range; Find similar the subtasks at least
   its cutoff likely to be what it asks; and Group similar the subtasks of
   the categories it keeps, every one until some are unchecked.
 - **Selects** measure nothing: their rule is all they are. A Select follows
@@ -36,15 +38,16 @@ What may follow a node:
 
 | Node | Followed by |
 | --- | --- |
-| Dataset | Break down, Score progress, Select |
-| Select of episodes | Break down, Score progress |
+| Dataset | Break down, Score progress, Track objects, Select |
+| Select of episodes | Break down, Score progress, Track objects |
 | Score progress | Break down, which reads the stretches it keeps |
+| Track objects | Break down, Score progress, Track objects, over the episodes it keeps |
 | Break down | Find similar, Group similar |
 | Find similar | Find similar, Group similar, over the subtasks it keeps |
 | Group similar | Find similar, Group similar, over the subtasks it keeps |
 
-Every Score progress, Find similar, Group similar, and Select node is an
-**output**, whatever follows it: its relation is what a published view holds.
+Every Score progress, Track objects, Find similar, Group similar, and Select
+node is an **output**, whatever follows it: its relation is what a published view holds.
 Break down is not one: its descriptions are free text that differs from
 episode to episode until a search or a grouping reads them.
 
@@ -83,6 +86,7 @@ rows that reach it.
 | Dataset | | Every episode of `spql.mcap.episodes` as one whole interval, with its facts, through the episode listing `Episode` uses everywhere | `graph/dataset.rs` |
 | Select | | Its rule alone: a `WHERE` of every condition, from the same `Selection` the browser filters with | `document/selection.rs` |
 | Score progress | Its stored scores: the Modal service's WARP scores of the top camera's packets | The scores unnested, one moment per scored frame from its time to the next frame's, cut to the interval of the row they arrived on; then its rule keeps the moments at least its threshold, and those with no progress rate, and joins touching ones into stretches carrying their mean progress rate | `score_progress/scoring.rs` |
+| Track objects | Its stored tracks: the Modal object tracking service's SAM 3.1 tracks of what it names on its camera, five sampled pictures a second, each picture's objects with their track and box | Each row with `object_count`, the most objects one sampled picture of its episode held, counted over a window so the row above is read once; a row whose episode has no tracks has none, and its rule (`object_count` at least its fewest and at most its most) does not keep it | `track_objects/tracking.rs` |
 | Break down subtasks | Its stored subtasks: `spql.ai.breakdown_task` over the chosen camera's packet video, with Studio's annotation model and the configured sample interval, and the episode's first `/instruction` message as its `task` when the dataset records one | The subtasks listed with their place in the answer (`subtask_index`), moved from the video's timeline to log time, and cut to the interval of the row they arrived on | `annotate/breakdown.rs` |
 | Find similar subtasks | Its stored similarities: `spql.ai.similarity(subtask, query)` of every subtask of the Break down above, one list per episode aligned with its subtasks | Each subtask's similarity at its `subtask_index` as `similarity`; then its rule keeps the subtasks at least its cutoff | `similar/judgment.rs` |
 | Group similar subtasks | Its stored categories: `spql.ai.classify(subtask, categories)` the same way, the categories written into the call as a literal list | Each subtask's category at its `subtask_index` as `subtask_category`; then its rule keeps the subtasks of the categories it keeps | `similar/judgment.rs` |
@@ -93,8 +97,9 @@ A node's rule is its own entry after its step, named after it
 A published view is one stream of episode rows (decided 2026-09-25). The
 dataset's listing and its Select of episodes come first; a Select only
 follows the dataset, so it always comes before the first measure, and it is
-the `WHERE` on the episode rows. Where the path leaves whole episodes, it
-builds each episode's row once, joined to the dataset's answers table:
+the `WHERE` on the episode rows. Before the first node that reads a stored
+answer or hands on less than whole episodes, it builds each episode's row
+once, joined to the dataset's answers table:
 
 ```text
 dataset_0, select_1       the listing with its facts, and the Selects of episodes
@@ -128,7 +133,7 @@ which is never asked again. Unpublishing drops only the view.
 order, its column, the episodes that reach it (the path above compiled over
 the columns already filled, `SELECT DISTINCT episode_id`), and how one
 episode's answer is computed: a statement over the episode bound as `$1`,
-or, for Score progress, the Modal service. Break down's statement asks its
+or, for Score progress and Track objects, their Modal service. Break down's statement asks its
 model once per episode, and a judgment's judges the episode's whole stored
 list of subtasks in one call (the list forms of `spql.ai.similarity` and
 `spql.ai.classify`), which answers with a list aligned with them. Break down
@@ -284,9 +289,9 @@ statement as one read-only query. The run is the backend's and outlives the
 page. For each column in
 order it
 reads the episodes that reach the node, skips those the column holds, asks
-about the rest (a statement eight at a time; the Modal service twenty
+about the rest (a statement eight at a time; the progress service twenty
 across runs, its containers each taking in eight uploads while the GPU
-scores, and
+scores; the object tracking service eight, two H100 containers' worth; and
 retries 429s, 5xx, and timeouts with a pause), and holds the answers in
 memory; then it ingests them into a staging table, adds the column the first
 time, merges it in by `episode_id`, and drops the staging table. A rejected
@@ -324,7 +329,8 @@ recipe: nodes, edges, each node's configuration and rule, and the published
 outputs. Break down keeps its camera, sample interval, and the topic it
 reads each episode's task from; Find similar its query and cutoff; Group
 similar its categories and the ones it keeps; Score progress its threshold;
-a Select its conditions. Nothing any node read is saved. A document in an
+Track objects its camera, what it tracks, and its fewest and most; a Select
+its conditions. Nothing any node read is saved. A document in an
 earlier encoding is refused.
 
 ## Why

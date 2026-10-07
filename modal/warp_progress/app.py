@@ -29,8 +29,9 @@ def download_artifacts() -> None:
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .uv_sync(extra_options="--no-dev")
-    .add_local_python_source("warp_progress", copy=True)
+    # The shared package is a path dependency outside the image; its source is copied in instead.
+    .uv_sync(extra_options="--no-dev --no-install-package video-service")
+    .add_local_python_source("video_service", "warp_progress", copy=True)
     .run_function(download_artifacts, secrets=[modal.Secret.from_name("spiral-robotics-huggingface")])
 )
 app = modal.App("warp-progress", image=image)

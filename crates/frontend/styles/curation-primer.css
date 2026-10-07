@@ -215,6 +215,29 @@
     fill: var(--tone-ink-faint);
   }
 
+  .curation-primer-scene {
+    fill: rgb(16 16 16 / 0.04);
+    stroke: var(--tone-line);
+  }
+
+  .curation-primer-bottle {
+    fill: rgb(16 16 16 / 0.32);
+  }
+
+  /* Each bottle is boxed as the tracker finds it, in the camera overlay's
+     colour. */
+  .curation-primer-found {
+    fill: none;
+    stroke: var(--tone-kind-camera);
+    stroke-width: 1.5;
+    animation: curation-primer-fade-in 240ms calc(320ms + var(--found) * 90ms) ease-out both;
+  }
+
+  .curation-primer-figure .curation-primer-count {
+    text-anchor: middle;
+    animation: curation-primer-fade-in 320ms 1260ms ease-out both;
+  }
+
   @keyframes curation-primer-record {
     from {
       opacity: 1;

@@ -127,10 +127,8 @@ support. Desktop minimum viewport is 1024 CSS pixels.
 
 ## Driver and workbench
 
-Use the `local-driver` shell: the default Nix shell's public archive predates
-the native MCAP query functions, and a running server keeps the driver it
-loaded until restarted. See [database-boundary.md](database-boundary.md) for
-the rebuild command.
+A running server keeps the driver it loaded until restarted. See
+[database-boundary.md](database-boundary.md) for building an upstream driver.
 
 Studio uses the published `dioxus-workbench` 0.1.2 from crates.io, which
 preserves mounted panel state when neighboring panels close. No local

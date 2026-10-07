@@ -13,8 +13,10 @@
 //! restarted backend loses the answers of the column in flight, and
 //! publishing again resumes past every episode already written.
 use super::held_runs::{HeldRuns, HeldWork};
+use super::object_tracking::ObjectTrackingService;
 use super::preview::ABANDONED_AFTER;
-use super::progress_service::{ProgressScores, ProgressService};
+use super::progress_service::ProgressService;
+use super::video_service::{VideoAnswer, VideoQuestion};
 use crate::OperationError;
 use crate::sync::MutexRecovery;
 use futures_util::StreamExt as _;
@@ -34,11 +36,16 @@ use tokio::time::Instant;
 
 /// How many episodes a statement column asks Spiral about at once.
 const STATEMENTS_IN_FLIGHT: usize = 8;
-/// How many requests the Modal service has in flight, across every run. The
-/// uploads bound it: each container takes in eight at once while its GPU
+/// How many requests the progress service has in flight, across every run.
+/// The uploads bound it: each container takes in eight at once while its GPU
 /// scores (`target_inputs` in `modal/warp_progress/app.py`), and more in
 /// flight only splits the upload bandwidth.
 const SCORINGS_IN_FLIGHT: usize = 20;
+/// How many requests the object tracking service has in flight, across every
+/// run: each of its H100 containers takes four at once while its two model
+/// workers track (`target_inputs` in `modal/object_tracking/app.py`), so
+/// this keeps two containers busy.
+const TRACKINGS_IN_FLIGHT: usize = 8;
 /// What a run reports while it creates its views.
 const PUBLISHING: &str = "Publishing";
 
@@ -47,6 +54,7 @@ pub(crate) struct FillRuns {
     storage: Arc<StorageManager>,
     keys: Arc<ProviderKeys>,
     scorings: Arc<Semaphore>,
+    trackings: Arc<Semaphore>,
     runs: HeldRuns<FillRun>,
 }
 
@@ -56,12 +64,13 @@ impl FillRuns {
             storage,
             keys,
             scorings: Arc::new(Semaphore::new(SCORINGS_IN_FLIGHT)),
+            trackings: Arc::new(Semaphore::new(TRACKINGS_IN_FLIGHT)),
             runs: HeldRuns::new("fill"),
         }
     }
 
     /// `request`, admitted as a run: every statement read-only, every view
-    /// named as a view, and the Modal service configured when a column
+    /// named as a view, and each Modal service configured when a column
     /// needs it.
     pub(super) fn admit(&self, request: FillRequest) -> Result<AdmittedFill, OperationError> {
         let invalid = OperationError::InvalidInput;
@@ -73,19 +82,26 @@ impl FillRuns {
             [] => None,
             _ => Some(AnswerTable::of(request.dataset()).map_err(invalid)?),
         };
-        let mut service = None;
+        let mut progress = None;
+        let mut tracking = None;
         for column in request.columns() {
             if let FillEpisodes::Reaching(statement) = column.episodes() {
                 Self::read_only(statement)?;
             }
             match column.source() {
                 AnswerSource::Statement { statement } => Self::read_only(statement)?,
-                AnswerSource::ProgressService { .. } if service.is_none() => {
-                    service = Some(
+                AnswerSource::ProgressService { .. } if progress.is_none() => {
+                    progress = Some(
                         ProgressService::of(&self.keys, self.scorings.clone()).map_err(invalid)?,
                     );
                 }
-                AnswerSource::ProgressService { .. } => {}
+                AnswerSource::ObjectTracking { .. } if tracking.is_none() => {
+                    tracking = Some(
+                        ObjectTrackingService::of(&self.keys, self.trackings.clone())
+                            .map_err(invalid)?,
+                    );
+                }
+                AnswerSource::ProgressService { .. } | AnswerSource::ObjectTracking { .. } => {}
             }
         }
         let mut views = Vec::new();
@@ -99,7 +115,8 @@ impl FillRuns {
             work: FillWork {
                 storage: self.storage.clone(),
                 answers,
-                service,
+                progress,
+                tracking,
             },
         })
     }
@@ -166,11 +183,12 @@ pub(super) struct AdmittedFill {
 }
 
 /// What a run works with: the project's storage, the answers table it
-/// writes when it fills a column, and the Modal service when one needs it.
+/// writes when it fills a column, and each Modal service when one needs it.
 struct FillWork {
     storage: Arc<StorageManager>,
     answers: Option<AnswerTable>,
-    service: Option<ProgressService>,
+    progress: Option<ProgressService>,
+    tracking: Option<ObjectTrackingService>,
 }
 
 /// One episode's answer, and why it failed when it did.
@@ -185,6 +203,7 @@ impl FillWork {
         match source {
             AnswerSource::Statement { .. } => STATEMENTS_IN_FLIGHT,
             AnswerSource::ProgressService { .. } => SCORINGS_IN_FLIGHT,
+            AnswerSource::ObjectTracking { .. } => TRACKINGS_IN_FLIGHT,
         }
     }
 
@@ -196,19 +215,11 @@ impl FillWork {
         source: &AnswerSource,
         episode: &EpisodeId,
     ) -> Result<Answered, String> {
-        let bound = |statement: String| {
-            EpisodeQueryRequest::new(
-                EpisodeSelection::new(request.dataset().clone(), episode.clone()),
-                statement,
-                1,
-            )
-        };
-        let queries = self.storage.queries();
+        let selected = EpisodeSelection::new(request.dataset().clone(), episode.clone());
         match source {
             AnswerSource::Statement { statement } => {
-                let (schema, batches) = queries
-                    .batches_for_episode(&bound(statement.clone()))
-                    .await?;
+                let bound = EpisodeQueryRequest::new(selected, statement.clone(), 1);
+                let (schema, batches) = self.storage.queries().batches_for_episode(&bound).await?;
                 let answer = EpisodeAnswer::from_statement(&schema, &batches)?;
                 let failure = answer
                     .is_failed()
@@ -221,30 +232,57 @@ impl FillWork {
                 revision,
             } => {
                 let service = self
-                    .service
+                    .progress
                     .as_ref()
-                    .ok_or("The Modal service is not set up.")?;
-                let video = CameraVideo::new(&request.dataset().sql_name(), camera).packets();
-                let (schema, batches) = queries.batches_for_episode(&bound(video)).await?;
-                let packets = arrow_select::concat::concat_batches(&schema, &batches)
-                    .map_err(|error| error.to_string())?;
-                let scored = if packets.num_rows() == 0 {
-                    ProgressScores::Rejected(format!("This episode records no {camera} video."))
-                } else {
-                    service.score(&packets, model, revision).await?
-                };
-                Ok(match scored {
-                    ProgressScores::Scored(answer) => Answered {
-                        answer,
-                        failure: None,
-                    },
-                    ProgressScores::Rejected(reason) => Answered {
-                        answer: EpisodeAnswer::failed(&ProgressService::answer_type()),
-                        failure: Some(reason),
-                    },
-                })
+                    .ok_or("The progress service is not set up.")?;
+                self.video_answer(selected, camera, service.scoring(model, revision))
+                    .await
+            }
+            AnswerSource::ObjectTracking {
+                camera,
+                prompt,
+                model,
+                revision,
+            } => {
+                let service = self
+                    .tracking
+                    .as_ref()
+                    .ok_or("The object tracking service is not set up.")?;
+                self.video_answer(selected, camera, service.tracking(prompt, model, revision))
+                    .await
             }
         }
+    }
+
+    /// What `question` answers about the `selected` episode's video on
+    /// `camera`, or the episode's failed answer when that camera recorded no
+    /// video of it.
+    async fn video_answer(
+        &self,
+        selected: EpisodeSelection,
+        camera: &str,
+        question: VideoQuestion<'_>,
+    ) -> Result<Answered, String> {
+        let video = CameraVideo::new(&selected.dataset().sql_name(), camera).packets();
+        let bound = EpisodeQueryRequest::new(selected, video, 1);
+        let (schema, batches) = self.storage.queries().batches_for_episode(&bound).await?;
+        let packets = arrow_select::concat::concat_batches(&schema, &batches)
+            .map_err(|error| error.to_string())?;
+        let answered = if packets.num_rows() == 0 {
+            VideoAnswer::Rejected(format!("This episode records no {camera} video."))
+        } else {
+            question.ask(&packets).await?
+        };
+        Ok(match answered {
+            VideoAnswer::Answered(answer) => Answered {
+                answer,
+                failure: None,
+            },
+            VideoAnswer::Rejected(reason) => Answered {
+                answer: EpisodeAnswer::failed(&question.answer_type()),
+                failure: Some(reason),
+            },
+        })
     }
 }
 

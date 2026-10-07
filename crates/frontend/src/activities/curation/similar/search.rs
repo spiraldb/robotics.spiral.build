@@ -491,7 +491,8 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                             },
                             on_threshold: {
                                 let node = node.clone();
-                                move |minimum: f64| {
+                                move |threshold: Threshold| {
+                                    let minimum = threshold.value();
                                     let _ = controller.set_rule(&node, Selection::Similar { minimum });
                                 }
                             },

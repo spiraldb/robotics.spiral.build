@@ -18,6 +18,7 @@ use crate::activities::curation::score_progress::{
 };
 use crate::activities::curation::state::CurationController;
 use crate::activities::curation::thumbnail::Thumbnails;
+use crate::activities::curation::track_objects::{StoredTracks, TrackedEpisodeTab};
 use crate::activities::episode::{Episode, EpisodeRows};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
@@ -162,7 +163,9 @@ pub(super) fn EpisodeListing(
             ))
         })
         .collect::<Vec<_>>();
-    let thumbnails = Thumbnails::use_camera(controller, None);
+    // A tracker's episodes show the camera it tracked on, boxed.
+    let tracked = view.stored_tracks();
+    let thumbnails = Thumbnails::use_camera(controller, tracked.as_ref().map(StoredTracks::camera));
     let featured = controller.with_payload(|payload| payload.configured_camera());
     let sample = view.sample.clone();
     let stop = listed.chosen_position();
@@ -191,7 +194,10 @@ pub(super) fn EpisodeListing(
                         let Some(episode) = sample.episode(tab.episode()).cloned() else {
                             return rsx! {};
                         };
-                        rsx! { WholeEpisodeTab { episode, featured_camera: featured.clone(), focus: tab.play() } }
+                        match tracked.clone() {
+                            Some(tracks) => rsx! { TrackedEpisodeTab { episode, tracks, focus: tab.play() } },
+                            None => rsx! { WholeEpisodeTab { episode, featured_camera: featured.clone(), focus: tab.play() } },
+                        }
                     },
                 }
             },
@@ -205,6 +211,9 @@ impl RuleView {
     /// condition reads it; a fact the episode fails a condition on is
     /// marked, so the Left out side says why each row is there.
     fn episode_face(&self, rows: &EpisodeRows, episode: &Episode) -> SliceFace {
+        if let Selection::ObjectCount { .. } = &self.selection {
+            return self.tracked_face(rows, episode);
+        }
         let conditions = match &self.selection {
             Selection::Episodes { conditions } => conditions.as_slice(),
             _ => &[],
@@ -226,6 +235,26 @@ impl RuleView {
             face = face.judged(reading, fact.name(), failing);
         }
         face.length_last()
+    }
+}
+
+impl RuleView {
+    /// An episode's row under a Track objects rule: the most objects it
+    /// showed at once, marked when that is what leaves it out, then its
+    /// length.
+    fn tracked_face(&self, rows: &EpisodeRows, episode: &Episode) -> SliceFace {
+        let position = self
+            .input
+            .episodes()
+            .iter()
+            .position(|id| id == episode.id());
+        let count =
+            position.and_then(|position| self.object_counts().get(position).copied().flatten());
+        let reading = count.map_or_else(|| "Not tracked".to_owned(), |count| count.to_string());
+        let failing = !self.selection.keeps_count(count);
+        SliceFace::episode(rows, episode)
+            .judged(reading, "Most at once", failing)
+            .length_last()
     }
 }
 

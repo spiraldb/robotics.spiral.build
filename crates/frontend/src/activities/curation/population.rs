@@ -262,8 +262,11 @@ impl<'a> PopulationReader<'a> {
     /// one. A node the graph does not hold hands on nothing.
     pub(super) fn of(&self, node: &str) -> Population {
         let judged = self.judged(node);
-        match self.graph.node(node).and_then(CurationNode::keeps) {
-            Some(rule) => self.kept(judged, rule),
+        let Some(measured) = self.graph.node(node) else {
+            return judged;
+        };
+        match measured.keeps() {
+            Some(rule) => self.kept(measured, judged, rule),
             None => judged,
         }
     }
@@ -304,7 +307,9 @@ impl<'a> PopulationReader<'a> {
                     .cloned()
                     .collect(),
             ),
-            CurationNodeKind::Select => self.input(node),
+            // A tracker counts whole episodes, so it hands on the episodes
+            // that reach it; its rule keeps them by what it counted.
+            CurationNodeKind::TrackObjects(_) | CurationNodeKind::Select => self.input(node),
         }
     }
     /// What reaches `node`: what its parent hands on.
@@ -314,9 +319,21 @@ impl<'a> PopulationReader<'a> {
             None => Population::Episodes(Vec::new()),
         }
     }
-    /// The part of `judged` `selection` keeps.
-    fn kept(&self, judged: Population, selection: &Selection) -> Population {
+    /// The part of `judged` `node`'s rule, `selection`, keeps.
+    fn kept(&self, node: &CurationNode, judged: Population, selection: &Selection) -> Population {
         match judged {
+            // A Track objects node's rule keeps by the count its preview read
+            // for each episode; a Select's by the episode's recorded facts.
+            Population::Episodes(episodes)
+                if matches!(node.kind(), CurationNodeKind::TrackObjects(_)) =>
+            {
+                Population::Episodes(
+                    episodes
+                        .into_iter()
+                        .filter(|id| selection.keeps_count(self.reads.object_count(node, id)))
+                        .collect(),
+                )
+            }
             Population::Episodes(episodes) => Population::Episodes(
                 episodes
                     .into_iter()
@@ -346,8 +363,8 @@ impl<'a> PopulationReader<'a> {
 mod tests {
     use super::super::annotate::{CategoryPlacement, JudgmentValue};
     use super::super::document::{
-        Comparison, DATASET_NODE_ID, EpisodeCondition, EpisodeFact, ProgressScoring,
-        SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
+        Comparison, DATASET_NODE_ID, EpisodeCondition, EpisodeFact, ObjectTracking,
+        ProgressScoring, SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
     };
     use super::super::preview::{PreviewRows, ReadInput};
     use super::*;
@@ -644,6 +661,40 @@ mod tests {
                 .map(|slice| (slice.start(), slice.end()))
                 .collect::<Vec<_>>(),
             [(0.0, 2.0), (3.0, 4.0)]
+        );
+    }
+
+    #[test]
+    fn track_objects_keeps_the_episodes_whose_count_is_in_its_range() {
+        let mut graph = CurationGraph::new(None);
+        let track = graph
+            .add_keeping(
+                DATASET_NODE_ID,
+                CurationNodeKind::TrackObjects(ObjectTracking::default()),
+                Selection::ObjectCount {
+                    fewest: 3,
+                    most: Some(4),
+                },
+            )
+            .unwrap();
+        let tracker = node(&graph, &track);
+        let mut reads = unread();
+        // The first episode shows three at once, the second five, and the
+        // third the tracker could not count; nothing has read a fourth.
+        for (ordinal, count) in [(1, Some(3)), (2, Some(5)), (3, None)] {
+            reads.record(
+                &tracker,
+                (&EpisodeId::fixture(ordinal), ReadInput::untracked()),
+                Ok(PreviewRows::ObjectCount(count)),
+            );
+        }
+        let sample = sample();
+        let reader = PopulationReader::new(&graph, &sample, &reads);
+        // It judges every episode that reaches it, and keeps them whole.
+        assert_eq!(reader.judged(&track).len(), 3);
+        assert_eq!(
+            reader.of(&track),
+            Population::Episodes(vec![EpisodeId::fixture(1)])
         );
     }
 

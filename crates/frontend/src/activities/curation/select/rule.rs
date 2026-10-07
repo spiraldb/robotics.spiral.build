@@ -182,7 +182,7 @@ fn ConditionLine(view: RuleView, row: ConditionRow, removable: bool, pick: Strip
                 on_select: move |item| pick.on_select.call(item),
                 on_threshold: {
                     let with = with.clone();
-                    move |value| with(condition.at(value))
+                    move |threshold: Threshold| with(condition.at(threshold.value()))
                 },
             }
             p { class: "curation-select-condition-count",

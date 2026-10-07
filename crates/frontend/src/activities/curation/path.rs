@@ -476,8 +476,9 @@ impl<'a> CurationPath<'a> {
     }
 
     /// Every node's step from the dataset down, each followed by its rule,
-    /// with the episode row built once, before the first node below the
-    /// dataset's own Select: until then every row is a whole episode.
+    /// with the episode row built once, before the first node that reads a
+    /// stored answer or hands on less than whole episodes: until then every
+    /// row is a whole episode, and no step reads what a model answered.
     fn compile(&self) -> Result<StepSql, PathError> {
         let dataset = self.dataset()?;
         let columns = self.answer_columns()?;
@@ -496,7 +497,7 @@ impl<'a> CurationPath<'a> {
         for (depth, node) in self.nodes.iter().enumerate() {
             let whole_episodes =
                 self.graph.population_kind(node.id()) == Some(PopulationKind::Episodes);
-            if !whole_episodes
+            if (!whole_episodes || column(depth).is_some())
                 && let Some(episodes) = relation.as_ref()
                 && let Some(built) = row
                     .take()
@@ -545,6 +546,7 @@ impl<'a> CurationPath<'a> {
             CurationNodeKind::Dataset => Some(dataset),
             CurationNodeKind::Select => None,
             CurationNodeKind::ScoreProgress(scoring) => Some(scoring),
+            CurationNodeKind::TrackObjects(tracking) => Some(tracking),
             CurationNodeKind::BreakDownSubtasks(annotation) => Some(annotation),
             CurationNodeKind::FindSimilarSubtasks(search) => Some(search),
             CurationNodeKind::GroupSimilarSubtasks(grouping) => Some(grouping),
@@ -556,6 +558,7 @@ impl<'a> CurationPath<'a> {
         match kind {
             CurationNodeKind::Dataset | CurationNodeKind::Select => None,
             CurationNodeKind::ScoreProgress(scoring) => Some(scoring),
+            CurationNodeKind::TrackObjects(tracking) => Some(tracking),
             CurationNodeKind::BreakDownSubtasks(annotation) => Some(annotation),
             CurationNodeKind::FindSimilarSubtasks(search) => Some(search),
             CurationNodeKind::GroupSimilarSubtasks(grouping) => Some(grouping),

@@ -2,7 +2,7 @@ use super::input::PreviewInput;
 use super::*;
 use crate::activities::curation::annotate::{CategoryPlacement, JudgmentValue, SubtaskRow};
 use crate::activities::curation::document::{
-    CurationGraph, CurationNodeKind, DATASET_NODE_ID, ProgressScoring, Selection,
+    CurationGraph, CurationNodeKind, DATASET_NODE_ID, ObjectTracking, ProgressScoring, Selection,
     SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
 use crate::activities::curation::path::CurationPath;
@@ -249,6 +249,12 @@ fn every_measurement_previews_what_it_has_the_backend_answer_and_store_first() {
             CurationNodeKind::ScoreProgress(ProgressScoring::default()),
         )
         .unwrap();
+    let mut tracking = ObjectTracking::default();
+    tracking.set_camera(Some("/top-camera".to_owned()));
+    tracking.set_prompt("bottle");
+    let track = graph
+        .add_child(DATASET_NODE_ID, CurationNodeKind::TrackObjects(tracking))
+        .unwrap();
     let annotate = graph.add_child(DATASET_NODE_ID, breakdown()).unwrap();
     let grouping = SubtaskGrouping::of(vec![
         SubtaskCategory::new("fold", "Folding cloth.").unwrap(),
@@ -268,7 +274,7 @@ fn every_measurement_previews_what_it_has_the_backend_answer_and_store_first() {
         );
     }
     let reader = PopulationReader::new(&graph, &sample, &reads);
-    for node in [&score, &annotate, &group] {
+    for node in [&score, &track, &annotate, &group] {
         let plan = PreviewPlan::of(&reader, node, &episodes).unwrap();
         let fill = plan.fill();
         assert_eq!(fill.episodes(), &FillEpisodes::Listed(episodes.to_vec()));
@@ -280,6 +286,13 @@ fn every_measurement_previews_what_it_has_the_backend_answer_and_store_first() {
         }
         match fill.source() {
             AnswerSource::ProgressService { .. } => assert_eq!(node, &score),
+            AnswerSource::ObjectTracking { camera, prompt, .. } => {
+                assert_eq!(node, &track);
+                assert_eq!(
+                    (camera.as_str(), prompt.as_str()),
+                    ("/top-camera", "bottle")
+                );
+            }
             AnswerSource::Statement { statement } if node == &group => {
                 assert!(
                     statement.contains("spql.ai.classify(s.listed.description"),

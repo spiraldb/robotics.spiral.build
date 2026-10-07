@@ -822,6 +822,7 @@ impl NodeReach {
                 .with_payload(|payload| payload.node(&id).map(|node| node.kind().clone()))?;
             let verb = match kind {
                 CurationNodeKind::ScoreProgress(_) => Some("Score the rest"),
+                CurationNodeKind::TrackObjects(_) => Some("Track the rest"),
                 CurationNodeKind::BreakDownSubtasks(_) => Some("Break down the rest"),
                 CurationNodeKind::FindSimilarSubtasks(_) => Some("Search the rest"),
                 CurationNodeKind::GroupSimilarSubtasks(_) => Some("Group the rest"),

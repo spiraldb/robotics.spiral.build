@@ -16,9 +16,10 @@ import torch
 from torch import nn
 from transformers import DINOv3ViTModel
 
+from video_service.episode import EpisodeVideo, RejectedVideo
+from video_service.timing import StageTimes
+
 from warp_progress.artifacts import Artifacts
-from warp_progress.timing import StageTimes
-from warp_progress.video import PacketVideo, RejectedVideo
 
 # Pictures the backbone embeds per batch: fp16 on a T4 takes 5.84 s for 1,817 pictures at 16,
 # 5.58 s at 64 and 5.49 s at 128, which doubles each request's host buffer for 2% more.
@@ -59,10 +60,10 @@ class WarpModel:
         self._squashes: dict[tuple[int, int], SquashPreprocessing] = {}
 
     @torch.inference_mode()
-    def score(self, video: PacketVideo, times: StageTimes) -> pa.RecordBatch:
+    def score(self, video: EpisodeVideo, times: StageTimes) -> pa.RecordBatch:
         """Every picture's velocity and progress, in display order."""
         timestamps, embeddings = [], []
-        pictures = times.timed("decode", video.pictures())
+        pictures = times.timed("decode", self._pictures(video))
         for _, same_size in itertools.groupby(pictures, key=lambda picture: picture[1].shape):
             for batch in itertools.batched(same_size, BATCH_FRAMES):
                 timestamps.extend(time_ns for time_ns, _ in batch)
@@ -71,6 +72,15 @@ class WarpModel:
         with self._device_turn(times), self._device_stage("temporal", times), self._precision():
             scores = self._temporal.score(torch.cat(embeddings))
         return scores.record_batch(clock.nanoseconds())
+
+    @staticmethod
+    def _pictures(video: EpisodeVideo) -> Iterator[tuple[int, np.ndarray]]:
+        """Every picture in display order, with its presentation time and its height x width x 3 RGB24
+        pixels converted as spiral-video converts them: swscale at the decoded size with
+        FAST_BILINEAR, using the matrix and range the stream signals, so an untagged stream converts as
+        BT.601 limited range."""
+        for frame in video.frames():
+            yield frame.pts, frame.to_ndarray(format="rgb24", interpolation="FAST_BILINEAR")
 
     def _embed(self, pictures: list[np.ndarray], times: StageTimes) -> torch.Tensor:
         """The backbone's final-norm CLS embedding of each picture, all of one size."""

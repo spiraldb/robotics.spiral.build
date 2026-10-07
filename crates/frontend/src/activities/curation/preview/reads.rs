@@ -7,11 +7,14 @@ use crate::activities::curation::score_progress::Moment;
 use spiral_robotics_common::datasets::EpisodeId;
 use std::collections::BTreeMap;
 
-/// What one episode's preview answered: its moments, or its subtasks.
+/// What one episode's preview answered: its moments, its subtasks, or the
+/// most objects it showed at once, which it lacks when the tracker could not
+/// count them.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::activities::curation) enum PreviewRows {
     Moments(Vec<Moment>),
     Subtasks(Vec<SubtaskRow>),
+    ObjectCount(Option<u64>),
 }
 
 /// What went into one read: the nearest node above as it was configured, and
@@ -104,6 +107,18 @@ impl PreviewReads {
         match self.read(node, episode).map(|read| &read.outcome) {
             Some(ReadOutcome::Rows(PreviewRows::Subtasks(rows))) => rows,
             _ => &[],
+        }
+    }
+    /// The most objects `node` saw at once in `episode`; none until it has
+    /// read the episode, or when the tracker could not count it.
+    pub(in crate::activities::curation) fn object_count(
+        &self,
+        node: &CurationNode,
+        episode: &EpisodeId,
+    ) -> Option<u64> {
+        match self.read(node, episode).map(|read| &read.outcome) {
+            Some(ReadOutcome::Rows(PreviewRows::ObjectCount(count))) => *count,
+            _ => None,
         }
     }
     /// What went into `node`'s read of `episode`, when it has one.

@@ -656,3 +656,65 @@ fn a_published_output_keeps_its_branch_until_it_is_unpublished() {
     payload.remove_publication(&long, 2).unwrap();
     payload.remove_node(&long).unwrap();
 }
+
+#[test]
+fn a_track_objects_node_saves_what_it_tracks_and_its_count_range() {
+    let mut payload = CurationGraph::new(None);
+    let mut tracking = ObjectTracking::default();
+    tracking.set_camera(Some("/top-camera".to_owned()));
+    tracking.set_prompt("  bottle ");
+    let track = payload
+        .add_child(DATASET_NODE_ID, CurationNodeKind::TrackObjects(tracking))
+        .unwrap();
+    // A new node keeps every episode it counts.
+    assert_eq!(
+        payload.node(&track).and_then(CurationNode::keeps),
+        Some(&Selection::ObjectCount {
+            fewest: 0,
+            most: None
+        })
+    );
+    payload
+        .set_rule(
+            &track,
+            Selection::ObjectCount {
+                fewest: 3,
+                most: Some(4),
+            },
+        )
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
+    assert_eq!(
+        json["nodes"][1]["kind"],
+        serde_json::json!({"type": "track_objects", "camera": "/top-camera", "prompt": "bottle"})
+    );
+    assert_eq!(
+        json["nodes"][1]["keeps"],
+        serde_json::json!({"keep": "object_count", "fewest": 3, "most": 4})
+    );
+    // A range whose most is fewer than its fewest is refused.
+    assert!(
+        payload
+            .set_rule(
+                &track,
+                Selection::ObjectCount {
+                    fewest: 5,
+                    most: Some(4)
+                }
+            )
+            .is_err()
+    );
+    // It hands on whole episodes, so whatever reads episodes may follow it.
+    assert_eq!(
+        payload.population_kind(&track),
+        Some(PopulationKind::Episodes)
+    );
+    assert_eq!(
+        payload
+            .child_kinds(&track)
+            .iter()
+            .map(CurationNodeKind::label)
+            .collect::<Vec<_>>(),
+        ["Break down subtasks", "Score progress", "Track objects"]
+    );
+}

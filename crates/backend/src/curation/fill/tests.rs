@@ -1,15 +1,27 @@
 use super::*;
-use crate::curation::progress_service::tests::MockService;
+use crate::curation::video_service::tests::MockService;
 use spiral_robotics_common::curation::{AnswerColumn, PublishedView};
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_storage::{ProjectStore, StudioStore};
+use std::collections::HashMap;
 
-fn keys(base_url: Option<&str>) -> Arc<ProviderKeys> {
+/// The token, and the address of each Modal service `urls` sets, by its
+/// variable.
+fn keys(urls: &[(&str, &str)]) -> Arc<ProviderKeys> {
+    let urls = urls
+        .iter()
+        .map(|(variable, url)| (variable.to_string(), url.to_string()))
+        .collect::<HashMap<_, _>>();
     Arc::new(ProviderKeys::from_variables(|name| match name {
-        "WARP_PROGRESS_URL" => base_url.map(str::to_owned),
         "MODAL_SERVICE_TOKEN" => Some("good".into()),
-        _ => None,
+        name => urls.get(name).cloned(),
     }))
+}
+
+fn storage() -> Arc<StorageManager> {
+    let store = Arc::new(ProjectStore::in_memory());
+    let studio = StudioStore::in_memory().project(&store.connection_settings());
+    Arc::new(StorageManager::new(store, studio))
 }
 
 fn dataset(name: &str) -> DatasetSelection {
@@ -33,22 +45,24 @@ fn scoring(camera: &str) -> AnswerSource {
     }
 }
 
+fn refused(fills: &FillRuns, request: FillRequest) -> bool {
+    matches!(fills.admit(request), Err(OperationError::InvalidInput(_)))
+}
+
 #[tokio::test]
 async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_needs() {
-    let store = Arc::new(ProjectStore::in_memory());
-    let studio = StudioStore::in_memory().project(&store.connection_settings());
-    let storage = Arc::new(StorageManager::new(store, studio));
+    let storage = storage();
     let listed = || FillEpisodes::Listed(Vec::new());
-    let refused = |fills: &FillRuns, request: FillRequest| {
-        matches!(fills.admit(request), Err(OperationError::InvalidInput(_)))
-    };
-    let unset = FillRuns::new(storage.clone(), keys(None));
+    let unset = FillRuns::new(storage.clone(), keys(&[]));
     let score = column("Score progress", listed(), scoring("/top"));
     assert!(refused(
         &unset,
         FillRequest::new(dataset("dataset_folding"), vec![score.clone()])
     ));
-    let fills = FillRuns::new(storage, keys(Some("https://scores.modal.run")));
+    let fills = FillRuns::new(
+        storage,
+        keys(&[("WARP_PROGRESS_URL", "https://scores.modal.run")]),
+    );
     assert!(
         fills
             .admit(FillRequest::new(
@@ -84,6 +98,34 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
     let published = FillRequest::new(dataset("dataset_folding"), Vec::new())
         .publishing(vec![PublishedView::new("folds", "SELECT 1; SELECT 2")]);
     assert!(refused(&fills, published));
+}
+
+#[tokio::test]
+async fn object_tracking_is_admitted_only_with_its_own_service() {
+    let tracking = AnswerSource::ObjectTracking {
+        camera: "/top".into(),
+        prompt: "the red cup".into(),
+        model: "sam3".into(),
+        revision: "rev".into(),
+    };
+    let request = || {
+        let track = column(
+            "Track objects",
+            FillEpisodes::Listed(Vec::new()),
+            tracking.clone(),
+        );
+        FillRequest::new(dataset("dataset_folding"), vec![track])
+    };
+    let progress_only = FillRuns::new(
+        storage(),
+        keys(&[("WARP_PROGRESS_URL", "https://scores.modal.run")]),
+    );
+    assert!(refused(&progress_only, request()));
+    let fills = FillRuns::new(
+        storage(),
+        keys(&[("OBJECT_TRACKING_URL", "https://tracks.modal.run")]),
+    );
+    assert!(fills.admit(request()).is_ok());
 }
 
 /// Poll run `id` until it settles.
@@ -130,9 +172,9 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
     let (_publisher, storage) = hosted_storage();
     let name = format!("probe_fill_{}", uuid_suffix());
     let view = format!("probe_fill_view_{}", uuid_suffix());
-    let mock = MockService::default();
+    let mock = MockService::scoring();
     let base = mock.clone().serve().await;
-    let fills = FillRuns::new(storage.clone(), keys(Some(&base)));
+    let fills = FillRuns::new(storage.clone(), keys(&[("WARP_PROGRESS_URL", &base)]));
     let dataset = dataset(&format!("dataset_{name}"));
     let answers = AnswerTable::of(&dataset).unwrap();
     let episodes = format!("SELECT id AS episode_id FROM spql.mcap.episodes('dataset_{name}')");

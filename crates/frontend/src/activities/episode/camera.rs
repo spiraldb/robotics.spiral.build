@@ -1,5 +1,6 @@
 //! Recorded cameras render the episode playhead; they never own a playback clock.
 use super::{
+    boxes::{CameraBoxOverlay, CameraBoxes},
     decoder::{CameraPlayback, EncodedCamera},
     reads::{StreamRead, StreamReads},
     streams::RecordedStream,
@@ -14,13 +15,15 @@ use std::{
 use wasm_bindgen::JsCast as _;
 
 /// One recorded camera, named on its picture the way a monitor wall names
-/// its screens: its panel carries no header to name it.
+/// its screens: its panel carries no header to name it. A surface may mark
+/// it with `boxes`.
 #[component]
 pub(super) fn EpisodeCamera(
     camera: RecordedStream,
     reads: StreamReads,
     transport: EpisodeTransport,
     title: String,
+    #[props(default)] boxes: Option<CameraBoxes>,
 ) -> Element {
     let mut wanting = reads;
     use_effect(use_reactive(&camera, move |camera| {
@@ -56,7 +59,7 @@ pub(super) fn EpisodeCamera(
     rsx! {
         div { class: "episode-camera-panel",
             match video {
-                Some(StreamRead::Ready(encoded)) => rsx! { CameraFrames { camera: encoded, transport, request } },
+                Some(StreamRead::Ready(encoded)) => rsx! { CameraFrames { camera: encoded, transport, request, boxes } },
                 Some(StreamRead::Failed(error)) => rsx! { div { class: "episode-camera-message", role: "alert",
                     p { "The recorded camera could not be read: {error}" }
                     button { class: "data-text-action", onclick: move |_| retrying.read_camera(&camera), "Retry" }
@@ -83,6 +86,7 @@ fn CameraFrames(
     camera: Rc<EncodedCamera>,
     transport: EpisodeTransport,
     request: MessageRead,
+    boxes: Option<CameraBoxes>,
 ) -> Element {
     let topic = format!(
         "{} · {}",
@@ -93,6 +97,8 @@ fn CameraFrames(
     let mut canvas = use_signal(|| None::<web_sys::HtmlCanvasElement>);
     let mut failure = use_signal(|| None::<String>);
     let mut covered = use_signal(|| false);
+    // The painted picture's own size, which boxes over it are drawn in.
+    let mut picture = use_signal(|| None::<(u32, u32)>);
     let panel = dioxus_workbench::PanelContext::current();
     let activity = crate::shell::activity::WorkspaceActivity::current();
     // The decode loop takes the playback out of its cell while it awaits the
@@ -154,6 +160,10 @@ fn CameraFrames(
                 match outcome {
                     Ok(drawn) => {
                         covered.set(drawn);
+                        let size = drawn.then(|| (canvas.width(), canvas.height()));
+                        if *picture.peek() != size {
+                            picture.set(size);
+                        }
                         status.report(&topic, FeedState::Ready);
                     }
                     Err(error) => {
@@ -182,6 +192,9 @@ fn CameraFrames(
                         canvas.set(Some(element.clone().unchecked_into()));
                     } else { failure.set(Some("Camera canvas is unavailable".into())); }
                 }
+            }
+            if let (Some(boxes), Some(size)) = (boxes, picture()) {
+                CameraBoxOverlay { boxes, seconds, size }
             }
             if let Some(error) = failure() { div { class: "episode-camera-message", role: "alert",
                 p { "The recorded camera could not be decoded: {error}" }

@@ -10,7 +10,8 @@
 //! may follow a node is decided by that kind and by the node itself.
 //!
 //! A node is what it asks, its kind, and what it keeps of the answer, its
-//! rule: Score progress keeps the moments progressing fast enough, Find
+//! rule: Score progress keeps the moments progressing fast enough, Track
+//! objects the episodes showing the right number of what it tracks, Find
 //! similar the subtasks close enough, Group similar the subtasks in the
 //! categories chosen, and a Select the episodes whose recorded facts pass its
 //! conditions. The rule is the node's knob, so moving it re-reads nothing the
@@ -205,6 +206,7 @@ pub(crate) enum CurationNodeKind {
     FindSimilarSubtasks(SubtaskSearch),
     GroupSimilarSubtasks(SubtaskGrouping),
     ScoreProgress(ProgressScoring),
+    TrackObjects(ObjectTracking),
     Select,
 }
 impl CurationNodeKind {
@@ -215,6 +217,7 @@ impl CurationNodeKind {
             Self::FindSimilarSubtasks(_) => "find_similar_subtasks",
             Self::GroupSimilarSubtasks(_) => "group_similar_subtasks",
             Self::ScoreProgress(_) => "score_progress",
+            Self::TrackObjects(_) => "track_objects",
             Self::Select => "select",
         }
     }
@@ -225,6 +228,7 @@ impl CurationNodeKind {
             Self::FindSimilarSubtasks(_) => "Find similar subtasks",
             Self::GroupSimilarSubtasks(_) => "Group similar subtasks",
             Self::ScoreProgress(_) => "Score progress",
+            Self::TrackObjects(_) => "Track objects",
             Self::Select => "Select",
         }
     }
@@ -235,6 +239,7 @@ impl CurationNodeKind {
     pub(crate) fn is_output(&self) -> bool {
         match self {
             Self::ScoreProgress(_)
+            | Self::TrackObjects(_)
             | Self::FindSimilarSubtasks(_)
             | Self::GroupSimilarSubtasks(_)
             | Self::Select => true,
@@ -251,6 +256,7 @@ impl CurationNodeKind {
             | Self::FindSimilarSubtasks(_)
             | Self::GroupSimilarSubtasks(_)
             | Self::ScoreProgress(_)
+            | Self::TrackObjects(_)
             | Self::Select => None,
         }
     }
@@ -259,6 +265,7 @@ impl CurationNodeKind {
     fn rule_basis(&self, parent: &Self) -> Option<SelectionBasis> {
         match self {
             Self::ScoreProgress(_) => Some(SelectionBasis::Progress),
+            Self::TrackObjects(_) => Some(SelectionBasis::ObjectCount),
             Self::FindSimilarSubtasks(_) => Some(SelectionBasis::Similarity),
             Self::GroupSimilarSubtasks(_) => Some(SelectionBasis::Categories),
             Self::Select => parent.select_basis(),
@@ -288,6 +295,7 @@ impl CurationNodeKind {
             Self::Dataset
             | Self::FindSimilarSubtasks(_)
             | Self::ScoreProgress(_)
+            | Self::TrackObjects(_)
             | Self::Select => Ok(()),
         }
     }
@@ -361,6 +369,34 @@ impl SubtaskAnnotation {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProgressScoring {}
+
+/// What one Track objects node asks: what to track, and on which camera. How
+/// many is the right number is the node's rule.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObjectTracking {
+    /// Camera topic to track on; unset until one is chosen.
+    #[serde(default)]
+    camera: Option<String>,
+    /// What to track, as a short noun phrase such as "bottle"; empty until
+    /// one is named.
+    #[serde(default)]
+    prompt: String,
+}
+impl ObjectTracking {
+    pub(crate) fn camera(&self) -> Option<&str> {
+        self.camera.as_deref()
+    }
+    pub(crate) fn set_camera(&mut self, camera: Option<String>) {
+        self.camera = camera.filter(|value| !value.trim().is_empty());
+    }
+    pub(crate) fn prompt(&self) -> &str {
+        &self.prompt
+    }
+    pub(crate) fn set_prompt(&mut self, prompt: &str) {
+        prompt.trim().clone_into(&mut self.prompt);
+    }
+}
 
 /// The query of one Find similar subtasks node, which its step asks about
 /// every subtask that reaches it. How close is close enough is the node's
@@ -581,6 +617,7 @@ impl CurationGraph {
         crate::activities::episode::FeaturedCamera::measured(self.nodes.iter().find_map(|node| {
             match node.kind() {
                 CurationNodeKind::BreakDownSubtasks(annotation) => annotation.camera(),
+                CurationNodeKind::TrackObjects(tracking) => tracking.camera(),
                 _ => None,
             }
         }))
@@ -609,7 +646,9 @@ impl CurationGraph {
     /// it hands on what its parent does.
     pub(crate) fn population_kind(&self, node: &str) -> Option<PopulationKind> {
         match self.node(node)?.kind() {
-            CurationNodeKind::Dataset => Some(PopulationKind::Episodes),
+            CurationNodeKind::Dataset | CurationNodeKind::TrackObjects(_) => {
+                Some(PopulationKind::Episodes)
+            }
             CurationNodeKind::BreakDownSubtasks(_)
             | CurationNodeKind::FindSimilarSubtasks(_)
             | CurationNodeKind::GroupSimilarSubtasks(_) => Some(PopulationKind::Subtasks),
@@ -630,6 +669,7 @@ impl CurationGraph {
             (Some(PopulationKind::Episodes), _) => vec![
                 CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
                 CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+                CurationNodeKind::TrackObjects(ObjectTracking::default()),
             ],
             // Break down the stretches that progress fast enough.
             (Some(PopulationKind::Moments), _) => vec![CurationNodeKind::BreakDownSubtasks(
@@ -705,7 +745,8 @@ impl CurationGraph {
                 CurationNodeKind::BreakDownSubtasks(_)
                 | CurationNodeKind::FindSimilarSubtasks(_)
                 | CurationNodeKind::GroupSimilarSubtasks(_)
-                | CurationNodeKind::ScoreProgress(_) => self
+                | CurationNodeKind::ScoreProgress(_)
+                | CurationNodeKind::TrackObjects(_) => self
                     .measure_above(below.id())
                     .is_some_and(|above| above.id() == node),
             })
