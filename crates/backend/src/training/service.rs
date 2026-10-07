@@ -32,15 +32,14 @@ impl TrainingService {
     /// The service the provider keys name; a missing or malformed one is said
     /// plainly.
     pub(super) fn of(keys: &ProviderKeys) -> Result<Self, String> {
-        let (Some(base), Some(token)) = (keys.training_service_url(), keys.modal_token())
-        else {
+        let (Some(base), Some(token)) = (keys.training_service_url(), keys.modal_token()) else {
             return Err(
                 "Training needs the Modal training service, which this Studio was started without: set TRAINING_SERVICE_URL and MODAL_SERVICE_TOKEN."
                     .into(),
             );
         };
-        let base =
-            Url::parse(base).map_err(|error| format!("TRAINING_SERVICE_URL is invalid: {error}"))?;
+        let base = Url::parse(base)
+            .map_err(|error| format!("TRAINING_SERVICE_URL is invalid: {error}"))?;
         let local = matches!(base.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
         if base.scheme() != "https" && !(base.scheme() == "http" && local) {
             return Err(
@@ -61,7 +60,10 @@ impl TrainingService {
     /// The GPU the service trains on, once it is known to speak this API.
     pub(super) async fn health(&self) -> Result<String, String> {
         let health: ServiceHealth = self
-            .send(self.client.get(self.url(&["v1", "health"])), "Asking the training service")
+            .send(
+                self.client.get(self.url(&["v1", "health"])),
+                "Asking the training service",
+            )
             .await?
             .json()
             .await
@@ -186,7 +188,8 @@ impl TrainingService {
             let url = self.url(&["v1", "runs", project, id, "checkpoints", &step, name]);
             async move {
                 self.send(
-                    self.authorized(self.client.get(url)).timeout(UPLOAD_TIMEOUT),
+                    self.authorized(self.client.get(url))
+                        .timeout(UPLOAD_TIMEOUT),
                     "Reading the checkpoint",
                 )
                 .await?
@@ -239,7 +242,10 @@ impl TrainingService {
     }
 
     /// `response` when it succeeded, or what the service said went wrong.
-    async fn checked(response: reqwest::Response, context: &str) -> Result<reqwest::Response, String> {
+    async fn checked(
+        response: reqwest::Response,
+        context: &str,
+    ) -> Result<reqwest::Response, String> {
         let status = response.status();
         if status.is_success() {
             return Ok(response);
@@ -251,7 +257,9 @@ impl TrainingService {
         let reason = serde_json::from_str::<ServiceError>(&body)
             .map(|error| error.error)
             .unwrap_or(body);
-        Err(format!("{context}: the training service answered {status}: {reason}"))
+        Err(format!(
+            "{context}: the training service answered {status}: {reason}"
+        ))
     }
 }
 
@@ -308,7 +316,11 @@ pub(super) struct RunRequest {
 }
 
 impl RunRequest {
-    pub(super) fn new((project, run_id): (&str, &str), config: TrainingConfig, data: RunData) -> Self {
+    pub(super) fn new(
+        (project, run_id): (&str, &str),
+        config: TrainingConfig,
+        data: RunData,
+    ) -> Self {
         Self {
             project: project.to_owned(),
             run_id: run_id.to_owned(),
@@ -328,7 +340,11 @@ pub(super) struct RunData {
 }
 
 impl RunData {
-    pub(super) fn new(robot_type: String, joints: JointNames, episodes: Vec<EpisodeStreams>) -> Self {
+    pub(super) fn new(
+        robot_type: String,
+        joints: JointNames,
+        episodes: Vec<EpisodeStreams>,
+    ) -> Self {
         Self {
             robot_type,
             joints,
@@ -366,7 +382,11 @@ pub(super) struct EpisodeStreams {
 }
 
 impl EpisodeStreams {
-    pub(super) fn new(episode_id: String, intervals: Vec<[i64; 2]>, streams: EpisodeStreamKeys) -> Self {
+    pub(super) fn new(
+        episode_id: String,
+        intervals: Vec<[i64; 2]>,
+        streams: EpisodeStreamKeys,
+    ) -> Self {
         Self {
             episode_id,
             intervals,
@@ -385,7 +405,11 @@ pub(super) struct EpisodeStreamKeys {
 }
 
 impl EpisodeStreamKeys {
-    pub(super) fn new(cameras: Vec<StreamKey>, state: Vec<StreamKey>, action: Vec<StreamKey>) -> Self {
+    pub(super) fn new(
+        cameras: Vec<StreamKey>,
+        state: Vec<StreamKey>,
+        action: Vec<StreamKey>,
+    ) -> Self {
         Self {
             cameras,
             state,
@@ -478,16 +502,28 @@ mod tests {
         let history: RunHistory = round_trips(include_str!("fixtures/run-history.json"));
         let (status, history) = history.into_parts();
         assert_eq!(status.status().phase().label(), "Running");
-        assert_eq!(serde_json::to_value(history).unwrap()["metrics"][1]["event"], "validation");
+        assert_eq!(
+            serde_json::to_value(history).unwrap()["metrics"][1]["event"],
+            "validation"
+        );
     }
 
     #[test]
     fn a_key_names_exactly_one_read_of_one_dataset_version() {
         let key = StreamKey::of(("resource", "v1"), "episode", "SELECT 1");
         assert_eq!(key.as_str().len(), 64);
-        assert_eq!(key, StreamKey::of(("resource", "v1"), "episode", "SELECT 1"));
-        assert_ne!(key, StreamKey::of(("resource", "v2"), "episode", "SELECT 1"));
-        assert_ne!(key, StreamKey::of(("resource", "v1"), "episode", "SELECT 2"));
+        assert_eq!(
+            key,
+            StreamKey::of(("resource", "v1"), "episode", "SELECT 1")
+        );
+        assert_ne!(
+            key,
+            StreamKey::of(("resource", "v2"), "episode", "SELECT 1")
+        );
+        assert_ne!(
+            key,
+            StreamKey::of(("resource", "v1"), "episode", "SELECT 2")
+        );
     }
 
     #[test]

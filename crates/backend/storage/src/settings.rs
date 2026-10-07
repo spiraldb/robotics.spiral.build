@@ -257,7 +257,10 @@ mod tests {
     #[test]
     fn the_preferences_document_format_is_frozen() {
         let json = serde_json::to_string(&StoredStudioPreferences::default()).unwrap();
-        assert_eq!(json, r#"{"robot_connector":{"address":"http://localhost:7070"}}"#);
+        assert_eq!(
+            json,
+            r#"{"robot_connector":{"address":"http://localhost:7070"}}"#
+        );
         let earlier: StoredStudioPreferences = serde_json::from_str(
             r#"{"training":{"endpoint":"http://runtime.example"},"video":{"enabled":false}}"#,
         )

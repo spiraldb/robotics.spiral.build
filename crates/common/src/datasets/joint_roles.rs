@@ -78,17 +78,22 @@ impl DatasetJointRoles {
             action: Vec::new(),
         };
         for arm in &self.arms {
-            let commanded = arm.action.as_ref().ok_or_else(|| {
-                format!("The {} arm records no commanded positions.", arm.name)
-            })?;
+            let commanded = arm
+                .action
+                .as_ref()
+                .ok_or_else(|| format!("The {} arm records no commanded positions.", arm.name))?;
             let names = (1..=arm.state.indices.len().max(1))
                 .map(|joint| format!("{}.j{joint}", arm.name))
                 .collect::<Vec<_>>();
-            joints.state.push(NamedValues::new(&arm.state, names.clone()));
+            joints
+                .state
+                .push(NamedValues::new(&arm.state, names.clone()));
             joints.action.push(NamedValues::new(commanded, names));
             if let Some(gripper) = &arm.gripper {
                 let name = vec![format!("{}.gripper", arm.name)];
-                joints.state.push(NamedValues::new(&gripper.state, name.clone()));
+                joints
+                    .state
+                    .push(NamedValues::new(&gripper.state, name.clone()));
                 joints.action.push(NamedValues::new(&gripper.action, name));
             }
         }
@@ -301,9 +306,7 @@ mod tests {
 
     #[test]
     fn a_policy_reads_each_arm_then_its_gripper_and_needs_commands() {
-        let values = |topic: &str, indices: &[usize]| {
-            json!({"topic": topic, "schema": "RobotState", "field": ["position"], "element": [], "indices": indices})
-        };
+        let values = |topic: &str, indices: &[usize]| json!({"topic": topic, "schema": "RobotState", "field": ["position"], "element": [], "indices": indices});
         let gripper = json!({"state": values("/left-ee-state", &[0]), "action": values("/left-ee-action", &[0]),
             "open": 1.0, "closed": 0.0});
         let two_arms = roles(json!({"arms": [

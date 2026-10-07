@@ -95,11 +95,15 @@ impl TrainingInput {
             .flat_map(|episode| &episode.intervals)
             .map(|[start, end]| end - start)
             .sum();
-        TrainingInputSummary::new(self.episodes.len(), intervals.sum(), nanoseconds as f64 / 1e9)
-            .with_joints(
-                self.reads.joints.state().to_vec(),
-                self.reads.joints.action().to_vec(),
-            )
+        TrainingInputSummary::new(
+            self.episodes.len(),
+            intervals.sum(),
+            nanoseconds as f64 / 1e9,
+        )
+        .with_joints(
+            self.reads.joints.state().to_vec(),
+            self.reads.joints.action().to_vec(),
+        )
     }
 
     /// The run's data as the training service reads it.
@@ -296,7 +300,10 @@ impl StreamShape {
                 ),
             Self::Values(count) => Schema::new(
                 std::iter::once(time)
-                    .chain((0..count).map(|value| Field::new(format!("v{value}"), DataType::Float64, true)))
+                    .chain(
+                        (0..count)
+                            .map(|value| Field::new(format!("v{value}"), DataType::Float64, true)),
+                    )
                     .collect::<Vec<_>>(),
             ),
         })
@@ -353,8 +360,16 @@ mod tests {
         );
         assert_eq!(reads.joints.action(), reads.joints.state());
         assert_eq!(
-            reads.state.iter().map(StreamRead::shape).collect::<Vec<_>>(),
-            [StreamShape::Values(2), StreamShape::Values(1), StreamShape::Values(2)]
+            reads
+                .state
+                .iter()
+                .map(StreamRead::shape)
+                .collect::<Vec<_>>(),
+            [
+                StreamShape::Values(2),
+                StreamShape::Values(1),
+                StreamShape::Values(2)
+            ]
         );
         assert_eq!(
             reads.action[1].statement(),
@@ -370,7 +385,11 @@ mod tests {
         assert_eq!(camera.field(1).data_type(), &DataType::Binary);
         let values = StreamShape::Values(2).schema();
         assert_eq!(
-            values.fields().iter().map(|field| field.name().as_str()).collect::<Vec<_>>(),
+            values
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
             ["log_time_ns", "v0", "v1"]
         );
     }
