@@ -178,14 +178,15 @@ Priority processing costs more than standard processing; the provider
 determines the actual served tier. The process environment's `LLM_BASE_URL`
 remains an optional developer override of the endpoint.
 
-Training runs on the Modal app in [`training/`](training/README.md), which
-Studio reaches through `TRAINING_SERVICE_URL` and `MODAL_SERVICE_TOKEN`.
+Training runs on the Modal app in
+[`modal/training/`](modal/training/README.md), which Studio reaches through
+`TRAINING_SERVICE_URL` and `MODAL_SERVICE_TOKEN`.
 The same Python project is the policy runtime for rollout inference: start it
 next to the robot connector, which calls it (`--policy-runtime`,
 `http://127.0.0.1:50051` by default):
 
 ```console
-cd training
+cd modal/training
 uv sync --extra dev
 uv run spiral-training-runtime --port 50051
 ```

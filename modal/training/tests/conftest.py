@@ -15,7 +15,7 @@ from spiral_training_runtime.request import RunRequest
 from spiral_training_runtime.volume import TrainingVolume
 
 FIXTURES = (
-    Path(__file__).resolve().parents[2] / "crates" / "backend" / "src" / "training" / "fixtures"
+    Path(__file__).resolve().parents[3] / "crates" / "backend" / "src" / "training" / "fixtures"
 )
 TOKEN = "secret"
 AUTHORIZED = {"Authorization": f"Bearer {TOKEN}"}

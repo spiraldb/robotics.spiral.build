@@ -39,7 +39,7 @@ weights in `~/.cache/warp-progress/artifacts`. To fetch them, run
 ## Deploy
 
 The app lives in the `spiral-dev` Modal workspace, beside the
-[training service](../../training/README.md), and accepts the same bearer token.
+[training service](../training/README.md), and accepts the same bearer token.
 One-time setup. DINOv3 is gated, so the Hugging Face token needs access to it:
 
 ```sh

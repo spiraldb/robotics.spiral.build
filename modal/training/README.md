@@ -25,7 +25,7 @@ and the endpoints.
 ## Deploy
 
 The app lives in the `spiral-dev` Modal workspace, beside
-[`warp-progress`](../modal/warp_progress/README.md), and accepts the same
+[`warp-progress`](../warp_progress/README.md), and accepts the same
 bearer token. One-time setup:
 
 ```sh

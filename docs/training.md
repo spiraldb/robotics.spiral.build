@@ -71,9 +71,10 @@ One run per project is active at a time.
 
 ## The Modal service
 
-One Modal app, `spiral-robotics-training`, in [`training/`](../training), with
-the Volume `spiral-robotics-training` and a CPU control endpoint in front of
-the GPU function, in the `spiral-dev` Modal workspace. Studio reaches it with
+One Modal app, `spiral-robotics-training`, in
+[`modal/training/`](../modal/training), with the Volume
+`spiral-robotics-training` and a CPU control endpoint in front of the GPU
+function, in the `spiral-dev` Modal workspace. Studio reaches it with
 `TRAINING_SERVICE_URL` and the bearer token `MODAL_SERVICE_TOKEN`, which
 warp-progress accepts too: deployment secrets read from the backend's
 environment like the other provider keys.

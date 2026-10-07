@@ -36,16 +36,27 @@
           inherit (pkgs.stdenv) hostPlatform;
           llvmPackages = pkgs.llvmPackages_latest;
           # This flake owns the toolchain, tools, and exported build environment.
-          # rust-toolchain.toml pins Rust for the shells, the packages, and
-          # builds without Nix.
-          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          # One Rust pin for the shells and the packages.
+          rustPin = {
+            channel = "nightly-2026-10-01";
+            # The studio's web interface compiles to WebAssembly.
+            targets = [ "wasm32-unknown-unknown" ];
+          };
+          rustToolchain = pkgs.rust-bin.fromRustupToolchain (
+            rustPin
+            // {
+              components = [
+                "rust-src"
+                "rust-analyzer"
+                "rustfmt"
+                "clippy"
+              ];
+            }
+          );
           # The packages build with the same compiler but none of the shells'
           # components: with rust-src installed, panic locations name the
           # toolchain's store path, which would put all of it in the image.
-          packageRustToolchain = pkgs.rust-bin.fromRustupToolchain {
-            inherit ((lib.importTOML ./rust-toolchain.toml).toolchain) channel targets;
-            profile = "minimal";
-          };
+          packageRustToolchain = pkgs.rust-bin.fromRustupToolchain (rustPin // { profile = "minimal"; });
           rustPlatform = pkgs.makeRustPlatform {
             cargo = packageRustToolchain;
             rustc = packageRustToolchain;
@@ -128,7 +139,6 @@
             fileset = lib.fileset.unions [
               ./Cargo.toml
               ./Cargo.lock
-              ./rust-toolchain.toml
               ./.cargo
               ./crates
             ];

@@ -69,8 +69,8 @@ jobs:
 
       - name: Check Python source
         run: |
-          nix develop .#ci --command ruff check training
-          nix develop .#ci --command ruff format --check training
+          nix develop .#ci --command ruff check modal/training
+          nix develop .#ci --command ruff format --check modal/training
 
       - name: Check native server without the frontend
         run: nix develop .#ci --command cargo check -p spiral-robotics-backend --bin spiral-robotics-backend --locked
