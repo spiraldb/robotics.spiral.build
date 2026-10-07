@@ -8,11 +8,11 @@ mod control_plane;
 #[cfg(test)]
 pub(crate) mod fake;
 pub(crate) mod http;
+mod oauth;
 pub(crate) mod sign_in;
 #[cfg(test)]
 mod tests;
 mod tokens;
-mod workos;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,25 +20,25 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use base64::Engine as _;
-use spiral_robotics_common::account::{SpiralIdentity, SpiralOrganization, SpiralProject};
+use spiral_robotics_common::account::{SpiralIdentity, SpiralProject};
 use spiral_robotics_storage::{SessionStore, SpiralAccess, SpiralAccessPublisher};
 use tokio::sync::{Mutex, MutexGuard, Notify, OnceCell};
 
 use crate::OperationError;
 use crate::sync::MutexRecovery as _;
 use control_plane::SpiralControlPlane;
+use oauth::{RefreshFailure, SpiralOAuth};
 use sign_in::{PublicAddress, SignInAttempt};
 use tokens::SessionTokens;
-use workos::{RefreshFailure, WorkOs};
 
 /// Replace an access token this long before it expires.
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
-/// Wait this long before retrying a refresh WorkOS could not answer.
+/// Wait this long before retrying a refresh Spiral could not answer.
 const REFRESH_RETRY: Duration = Duration::from_secs(15);
 
 /// How sessions reach Spiral's sign-in and API, and where they are saved.
 struct SessionServices {
-    workos: WorkOs,
+    oauth: SpiralOAuth,
     control_plane: SpiralControlPlane,
     store: SessionStore,
 }
@@ -62,7 +62,7 @@ impl SpiralSessions {
         address: PublicAddress,
     ) -> Result<Self, String> {
         let services = SessionServices {
-            workos: WorkOs::production()?,
+            oauth: SpiralOAuth::from_environment(spiral_api.clone(), address.callback())?,
             control_plane: SpiralControlPlane::new(spiral_api)?,
             store,
         };
@@ -116,11 +116,9 @@ impl SpiralSessions {
     /// Spiral's sign-in page for `attempt`, which returns the browser to this
     /// Studio's callback.
     fn authorization_url(&self, attempt: &SignInAttempt) -> String {
-        self.services.workos.authorization_url(
-            &self.address.callback(),
-            attempt.state(),
-            &attempt.challenge(),
-        )
+        self.services
+            .oauth
+            .authorization_url(attempt.state(), &attempt.challenge())
     }
 
     /// Start the session `code` signs in, proven by `attempt`. Returns the new
@@ -132,13 +130,13 @@ impl SpiralSessions {
     ) -> Result<String, OperationError> {
         let tokens = self
             .services
-            .workos
+            .oauth
             .redeem(code, attempt.verifier())
             .await
             .map_err(OperationError::External)?;
         let identity = self
             .services
-            .control_plane
+            .oauth
             .identity(tokens.access_token())
             .await
             .map_err(OperationError::External)?;
@@ -171,7 +169,7 @@ impl SpiralSessions {
             .ok_or_else(SpiralSession::signed_out)?;
         let mut tokens = SessionTokens::saved(&stored);
         if tokens.remaining() <= REFRESH_MARGIN {
-            tokens = match self.services.workos.refresh(&tokens, None).await {
+            tokens = match self.services.oauth.refresh(&tokens).await {
                 Ok(tokens) => tokens,
                 Err(RefreshFailure::Ended(ended)) => {
                     tracing::info!("a saved Spiral session ended: {ended}");
@@ -192,7 +190,7 @@ impl SpiralSessions {
         }
         let identity = self
             .services
-            .control_plane
+            .oauth
             .identity(tokens.access_token())
             .await
             .map_err(OperationError::External)?;
@@ -309,15 +307,6 @@ impl SpiralSession {
         }
     }
 
-    pub(crate) async fn organizations(&self) -> Result<Vec<SpiralOrganization>, OperationError> {
-        let token = self.access_token().await?;
-        self.services
-            .control_plane
-            .organizations(&token)
-            .await
-            .map_err(OperationError::External)
-    }
-
     pub(crate) async fn projects(&self) -> Result<Vec<SpiralProject>, OperationError> {
         let token = self.access_token().await?;
         self.services
@@ -325,55 +314,6 @@ impl SpiralSession {
             .projects(&token)
             .await
             .map_err(OperationError::External)
-    }
-
-    /// A new Spiral project in the session's organization, described by `name`.
-    pub(crate) async fn create_project(&self, name: &str) -> Result<SpiralProject, OperationError> {
-        let token = self.access_token().await?;
-        self.services
-            .control_plane
-            .create_project(&token, name)
-            .await
-            .map_err(OperationError::External)
-    }
-
-    /// Continue in another of the user's organizations, whose projects are
-    /// others: the chosen project is forgotten.
-    pub(crate) async fn switch_organization(
-        &self,
-        organization: &str,
-    ) -> Result<SpiralIdentity, OperationError> {
-        let mut state = self.active().await?;
-        let tokens = match self
-            .services
-            .workos
-            .refresh(&state.tokens, Some(organization))
-            .await
-        {
-            Ok(tokens) => tokens,
-            Err(RefreshFailure::Ended(ended)) => {
-                self.mark_ended();
-                self.forget().await;
-                return Err(OperationError::Unauthenticated(format!(
-                    "Your Spiral session ended ({ended}). Sign in again."
-                )));
-            }
-            Err(failure) => return Err(OperationError::External(failure.message().to_owned())),
-        };
-        state.tokens = tokens;
-        state.project_id.clear();
-        self.access
-            .publish(Some(state.tokens.access_token().to_owned()));
-        self.changed.notify_one();
-        let saved = self.save(&state).await;
-        state.identity = self
-            .services
-            .control_plane
-            .identity(state.tokens.access_token())
-            .await
-            .map_err(OperationError::External)?;
-        saved.map_err(OperationError::Internal)?;
-        Ok(state.identity.clone())
     }
 
     /// The failure a request without a live session gets.
@@ -399,7 +339,8 @@ impl SpiralSession {
 
     /// Sign out: no Spiral client of this session reaches Spiral again.
     async fn end(&self) -> Result<(), String> {
-        let _state = self.state.lock().await;
+        let state = self.state.lock().await;
+        self.services.oauth.revoke(&state.tokens).await?;
         self.mark_ended();
         self.services.store.remove(&self.id).await
     }
@@ -445,7 +386,7 @@ impl SpiralSession {
         if self.ended() {
             return Ok(());
         }
-        match self.services.workos.refresh(&state.tokens, None).await {
+        match self.services.oauth.refresh(&state.tokens).await {
             Ok(tokens) => {
                 state.tokens = tokens;
                 self.access

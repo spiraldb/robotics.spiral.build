@@ -136,7 +136,7 @@ pub(crate) struct BrowserCookies {
 
 impl BrowserCookies {
     /// The browser's session ID.
-    pub(crate) const SESSION: &str = "studio_session";
+    pub(crate) const SESSION: &str = "studio_oauth_session";
     /// The browser's sign-in in progress.
     const SIGN_IN: &str = "studio_sign_in";
 
@@ -326,7 +326,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append(
             header::COOKIE,
-            HeaderValue::from_static("other_studio_session=x; studio_session=abc"),
+            HeaderValue::from_static("other_studio_oauth_session=x; studio_oauth_session=abc"),
         );
         headers.append(
             header::COOKIE,

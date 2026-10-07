@@ -95,22 +95,6 @@ impl SpiralProject {
     }
 }
 
-/// Act in another of the user's organizations.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OrganizationSwitch {
-    organization_id: String,
-}
-
-impl OrganizationSwitch {
-    pub fn new(organization_id: String) -> Self {
-        Self { organization_id }
-    }
-    pub fn organization_id(&self) -> &str {
-        &self.organization_id
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

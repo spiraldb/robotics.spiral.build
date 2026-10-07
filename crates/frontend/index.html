@@ -6,6 +6,37 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
     </head>
     <body>
+        <section id="startup" role="status" style="margin: 48px auto; padding: 24px; max-width: 480px; font: 16px/1.5 system-ui, sans-serif; color: #24251f">
+            <h1 style="font-size: 24px">Spiral Robotics</h1>
+            <p id="startup-message">Loading the application…</p>
+            <noscript>Enable JavaScript to open Spiral Robotics.</noscript>
+        </section>
         <div id="main"></div>
+        <script>
+            (() => {
+                const startup = document.getElementById("startup");
+                const message = document.getElementById("startup-message");
+                const root = document.getElementById("main");
+                const failed = (error) => {
+                    if (!root.hasChildNodes()) {
+                        message.textContent = "The application could not start. " + String(error).slice(0, 500);
+                    }
+                };
+                window.addEventListener("error", (event) => {
+                    failed(event.message || "A required file could not be loaded. Reload this page.");
+                }, true);
+                window.addEventListener("unhandledrejection", (event) => failed(event.reason));
+                const mounted = new MutationObserver(() => {
+                    if (root.hasChildNodes()) {
+                        startup.remove();
+                        mounted.disconnect();
+                    }
+                });
+                mounted.observe(root, { childList: true });
+                if (typeof WebAssembly === "undefined") {
+                    failed("WebAssembly is unavailable in this browser.");
+                }
+            })();
+        </script>
     </body>
 </html>

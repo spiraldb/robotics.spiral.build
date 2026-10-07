@@ -4,9 +4,9 @@
 use std::future::Future;
 
 use dioxus::prelude::*;
-use spiral_robotics_common::account::{OrganizationSwitch, SpiralIdentity, SpiralOrganization};
+use spiral_robotics_common::account::SpiralIdentity;
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonVariant, Fact, FactList, Notice, NoticeTone, Select,
+    ActionPurpose, Button, ButtonVariant, Fact, FactList, Notice, NoticeTone,
 };
 
 use crate::client::project::ProjectClient;
@@ -32,40 +32,12 @@ impl AccountClient {
             .request(HttpRequest::new("GET", "/api/account"))
     }
 
-    fn organizations(
-        &self,
-    ) -> impl Future<Output = Result<Vec<SpiralOrganization>, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("GET", "/api/account/organizations"))
-    }
-
     fn sign_out(&self) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.project.mutate(
             &[QueryDomain::Project, QueryDomain::Settings],
             HttpRequest::new("POST", "/api/account/sign-out"),
         )
     }
-
-    fn switch_organization(
-        &self,
-        organization: String,
-    ) -> impl Future<Output = Result<SpiralIdentity, CommandError>> + use<> {
-        self.project.mutate(
-            &[QueryDomain::Project, QueryDomain::Settings],
-            HttpRequest::new("PUT", "/api/account/organization")
-                .json(&OrganizationSwitch::new(organization)),
-        )
-    }
-}
-
-/// Where this browser goes once an account command succeeds.
-#[derive(Clone, Copy)]
-enum AccountChange {
-    /// Another organization's workspaces are others: start over in the
-    /// first one it can open.
-    LeavesProject,
-    /// Only signing in again continues.
-    SignsOut,
 }
 
 /// One account command at a time, and what the last one reported.
@@ -86,11 +58,7 @@ impl AccountActions {
     }
 
     /// Run `command`, which closes this browser's projects.
-    fn run<T: 'static>(
-        mut self,
-        command: impl Future<Output = Result<T, CommandError>> + 'static,
-        change: AccountChange,
-    ) {
+    fn run<T: 'static>(mut self, command: impl Future<Output = Result<T, CommandError>> + 'static) {
         if *self.pending.peek() {
             return;
         }
@@ -100,10 +68,9 @@ impl AccountActions {
         client.spawn(async move {
             let result = command.await;
             self.pending.set(false);
-            match (result, change) {
-                (Ok(_), AccountChange::LeavesProject) => self.selection.forget(),
-                (Ok(_), AccountChange::SignsOut) => self.selection.sign_out(),
-                (Err(error), _) => self.failure.set(Some(error)),
+            match result {
+                Ok(_) => self.selection.sign_out(),
+                Err(error) => self.failure.set(Some(error)),
             }
         });
     }
@@ -114,11 +81,6 @@ impl AccountActions {
 pub(super) fn SpiralAccountSection(disabled: bool) -> Element {
     let identity = QueryPolicy::new(QueryDomain::Settings, 1_000)
         .use_resource(|| AccountClient::current().identity());
-    let signed_in = use_memo(move || matches!(&*identity.read(), Some(Ok(_))));
-    let organizations = QueryPolicy::on_demand(QueryDomain::Settings).use_when(
-        move || *signed_in.read(),
-        || AccountClient::current().organizations(),
-    );
     let actions = AccountActions::use_actions();
     let disabled = disabled || (actions.pending)();
     let current = identity.read().clone();
@@ -135,71 +97,18 @@ pub(super) fn SpiralAccountSection(disabled: bool) -> Element {
                             variant: ButtonVariant::Link,
                             disabled,
                             title: "Signs this browser out of Studio",
-                            onclick: move |_| actions.run(AccountClient::current().sign_out(), AccountChange::SignsOut),
+                            onclick: move |_| actions.run(AccountClient::current().sign_out()),
                             "Sign out"
                         }
                     }
                     Fact { label: "Organization",
-                        OrganizationChoice {
-                            current: identity.organization().clone(),
-                            organizations: organizations.read().as_ref().and_then(|result| result.as_ref().ok()).cloned().unwrap_or_default(),
-                            choice: AccountChoice::new(
-                                EventHandler::new(move |organization| actions.run(AccountClient::current().switch_organization(organization), AccountChange::LeavesProject)),
-                                disabled,
-                            ),
-                        }
+                        "{identity.organization().label()}"
                     }
                 }
             },
         }
         if let Some(error) = (actions.failure)() {
             Notice { tone: NoticeTone::Danger, "{error} {error.recovery_guidance()}" }
-        }
-    }
-}
-
-/// Where a choice goes, and whether one can be made now.
-#[derive(Clone, PartialEq)]
-struct AccountChoice {
-    on_choose: EventHandler<String>,
-    disabled: bool,
-}
-
-impl AccountChoice {
-    fn new(on_choose: EventHandler<String>, disabled: bool) -> Self {
-        Self {
-            on_choose,
-            disabled,
-        }
-    }
-}
-
-/// The organization this browser works in, which a user in more than one
-/// can switch here.
-#[component]
-fn OrganizationChoice(
-    current: SpiralOrganization,
-    organizations: Vec<SpiralOrganization>,
-    choice: AccountChoice,
-) -> Element {
-    if organizations.len() < 2 {
-        return rsx! { "{current.label()}" };
-    }
-    let on_organization = choice.on_choose;
-    rsx! {
-        Select {
-            value: current.id().to_owned(),
-            disabled: choice.disabled,
-            aria_label: "Organization",
-            onchange: move |chosen| on_organization.call(chosen),
-            for organization in organizations.iter() {
-                option {
-                    key: "{organization.id()}",
-                    value: "{organization.id()}",
-                    selected: organization.id() == current.id(),
-                    "{organization.label()}"
-                }
-            }
         }
     }
 }

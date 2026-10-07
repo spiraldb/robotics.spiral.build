@@ -17,8 +17,7 @@ use crate::shell::routes::StudioRoute;
 use super::panel::SettingsHeading;
 use crate::shell::workspace::{WorkspaceClient, WorkspaceSwitch};
 
-/// A name, and the Spiral project the workspace works on: a new one, or one
-/// the user can already open. Making it moves this browser into it.
+/// A name and an existing Spiral project. Making a workspace selects it.
 #[component]
 pub(super) fn NewWorkspaceForm(cancellable: bool) -> Element {
     let mut name = use_signal(String::new);
@@ -31,14 +30,11 @@ pub(super) fn NewWorkspaceForm(cancellable: bool) -> Element {
     let switch = WorkspaceSwitch::current();
     let named = !name.read().trim().is_empty();
     let mut create = move || {
-        if *pending.peek() || name.peek().trim().is_empty() {
+        if *pending.peek() || name.peek().trim().is_empty() || project.peek().is_empty() {
             return;
         }
         let existing = project.peek().clone();
-        let request = NewWorkspace::new(
-            name.peek().clone(),
-            (!existing.is_empty()).then_some(existing),
-        );
+        let request = NewWorkspace::new(name.peek().clone(), Some(existing));
         pending.set(true);
         failure.set(None);
         ProjectClient::current().spawn(async move {
@@ -79,18 +75,18 @@ pub(super) fn NewWorkspaceForm(cancellable: bool) -> Element {
                     value: project(),
                     disabled: pending(),
                     onchange: move |chosen| project.set(chosen),
-                    option { value: "", selected: project().is_empty(), "A new project" }
+                    option { value: "", selected: project().is_empty(), "Select a project" }
                     ProjectOptions { projects: projects.read().clone(), chosen: project() }
                 }
             }
             p { class: "settings-help settings-control-column",
-                "A new project goes in your current organization. An existing one keeps its datasets, and its members see this workspace."
+                "Choose an existing project. Create new projects in Spiral Studio. Project members share this workspace."
             }
             div { class: "settings-transfer-actions settings-control-column",
                 Button {
                     purpose: ActionPurpose::Create,
                     variant: ButtonVariant::Solid,
-                    disabled: pending() || !named,
+                    disabled: pending() || !named || project().is_empty(),
                     aria_busy: pending(),
                     onclick: move |_| create(),
                     if pending() { "Creating…" } else { "Create workspace" }
