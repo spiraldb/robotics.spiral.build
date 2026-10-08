@@ -20,6 +20,14 @@ fn categories(names: &[&str]) -> Vec<SubtaskCategory> {
         .collect()
 }
 
+fn select() -> CurationNodeKind {
+    CurationNodeKind::Select(Selection::keeping_everything())
+}
+
+fn labels(kinds: &[CurationNodeKind]) -> Vec<&'static str> {
+    kinds.iter().map(CurationNodeKind::label).collect()
+}
+
 #[test]
 fn a_fresh_graph_is_one_dataset_node_that_validates() {
     let payload = CurationGraph::new(None);
@@ -30,12 +38,21 @@ fn a_fresh_graph_is_one_dataset_node_that_validates() {
         "Dataset"
     );
     assert_eq!(payload.parent_of(DATASET_NODE_ID), None);
+    assert!(payload.outputs().is_empty(), "the dataset never publishes");
 }
 
 #[test]
-fn children_follow_the_menu_and_get_unique_ids() {
-    let group = || CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default());
+fn anything_follows_anything_but_a_judgment_needs_a_break_down_above() {
     let mut payload = CurationGraph::new(None);
+    assert_eq!(
+        labels(&payload.child_kinds(DATASET_NODE_ID)),
+        [
+            "Break down subtasks",
+            "Score progress",
+            "Track objects",
+            "Select"
+        ]
+    );
     let first = payload
         .add_child(
             DATASET_NODE_ID,
@@ -52,130 +69,58 @@ fn children_follow_the_menu_and_get_unique_ids() {
         (first.as_str(), second.as_str()),
         ("break_down_subtasks-1", "break_down_subtasks-2")
     );
-    let search = payload
+    // Below a Break down, through anything, a judgment may follow.
+    let narrowed = payload.add_child(&first, select()).unwrap();
+    let scored = payload
         .add_child(
-            &first,
-            CurationNodeKind::FindSimilarSubtasks(SubtaskSearch::default()),
-        )
-        .unwrap();
-    assert_eq!(payload.parent_of(&search), Some(first.as_str()));
-    assert_eq!(payload.subtask_source(&search), Some(first.as_str()));
-    assert!(payload.add_child(DATASET_NODE_ID, group()).is_err());
-    // A search keeps by its own cutoff, so what follows reads what it kept;
-    // there is nothing left for a Select to keep by.
-    assert!(
-        payload
-            .add_child(&search, CurationNodeKind::Select)
-            .is_err()
-    );
-    assert!(payload.add_child(&search, group()).is_ok());
-    assert!(payload.add_child("missing", group()).is_err());
-    assert_eq!(payload.children_of(DATASET_NODE_ID).len(), 2);
-    assert_eq!(payload.validate(), Ok(()));
-}
-
-#[test]
-fn each_node_keeps_by_the_rule_its_kind_and_place_allow() {
-    let mut payload = CurationGraph::new(None);
-    let rule = |id: &str, payload: &CurationGraph| {
-        payload
-            .node(id)
-            .and_then(CurationNode::keeps)
-            .map(Selection::basis)
-    };
-    let score = payload
-        .add_child(
-            DATASET_NODE_ID,
+            &narrowed,
             CurationNodeKind::ScoreProgress(ProgressScoring::default()),
         )
         .unwrap();
-    let episodes = payload
-        .add_child(DATASET_NODE_ID, CurationNodeKind::Select)
-        .unwrap();
-    let annotate = payload
-        .add_child(
-            &score,
-            CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
-        )
-        .unwrap();
+    assert_eq!(
+        labels(&payload.child_kinds(&scored)),
+        [
+            "Break down subtasks",
+            "Score progress",
+            "Track objects",
+            "Find similar subtasks",
+            "Group similar subtasks",
+            "Select"
+        ]
+    );
     let search = payload
         .add_child(
-            &annotate,
+            &scored,
             CurationNodeKind::FindSimilarSubtasks(SubtaskSearch::default()),
         )
         .unwrap();
-    let group = payload
-        .add_child(
-            &annotate,
-            CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
-        )
-        .unwrap();
-    assert_eq!(rule(&score, &payload), Some(SelectionBasis::Progress));
-    assert_eq!(
-        rule(&episodes, &payload),
-        Some(SelectionBasis::EpisodeFacts)
-    );
-    assert_eq!(rule(&search, &payload), Some(SelectionBasis::Similarity));
-    assert_eq!(rule(&group, &payload), Some(SelectionBasis::Categories));
-    assert_eq!(rule(&annotate, &payload), None);
-    // A Select reads only what the dataset recorded, so it follows nothing a
-    // model answered; a grouping chooses its own categories.
-    for measure in [&score, &annotate, &search, &group] {
-        assert!(
-            payload
-                .add_child(measure, CurationNodeKind::Select)
-                .is_err(),
-            "{measure}"
-        );
-    }
-    // Every one of them is an output but Break down.
-    assert_eq!(
-        payload
-            .outputs()
-            .iter()
-            .map(|output| output.id())
-            .collect::<Vec<_>>(),
-        [
-            score.as_str(),
-            episodes.as_str(),
-            search.as_str(),
-            group.as_str()
-        ]
-    );
-    // A rule of another basis is refused, and one the kind keeps by is taken.
+    assert_eq!(payload.subtask_source(&search), Some(first.as_str()));
+    // A Select may follow a Select, and a model a judgment.
+    let again = payload.add_child(&narrowed, select()).unwrap();
     assert!(
         payload
-            .set_rule(&score, Selection::Similar { minimum: 0.5 })
-            .is_err()
-    );
-    assert!(
-        payload
-            .set_rule(&annotate, Selection::Similar { minimum: 0.5 })
-            .is_err()
-    );
-    payload
-        .set_rule(&score, Selection::Progressing { minimum: 0.4 })
-        .unwrap();
-    assert!(
-        payload
-            .set_rule(
-                &episodes,
-                Selection::Episodes {
-                    conditions: Vec::new()
-                }
+            .add_child(
+                &search,
+                CurationNodeKind::TrackObjects(ObjectTracking::default())
             )
-            .is_err(),
-        "a Select of episodes names at least one condition"
+            .is_ok()
     );
+    let group = || CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default());
+    assert!(payload.add_child(DATASET_NODE_ID, group()).is_err());
+    assert!(payload.add_child(&again, group()).is_ok());
+    assert!(payload.add_child("missing", group()).is_err());
+    assert_eq!(payload.children_of(DATASET_NODE_ID).len(), 2);
     assert_eq!(payload.validate(), Ok(()));
-    assert_eq!(
-        CurationGraph::decode(CURATION_ENCODING_VERSION, &payload.encode().unwrap()).unwrap(),
-        payload
-    );
+    // Every node but the dataset may be published.
+    assert_eq!(payload.outputs().len(), payload.nodes().len() - 1);
+    // A judgment saved without a Break down above it is refused.
+    let orphan = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"find_similar_subtasks-1","kind":{"type":"find_similar_subtasks","query":"fold"}}],"edges":[{"from":"dataset","to":"find_similar_subtasks-1"}]}"#;
+    assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, orphan).is_err());
 }
 
-/// A graph whose grouping has proposed `names`, and the grouping's id.
-fn grouped(names: &[&str]) -> (CurationGraph, String) {
+/// A graph whose grouping has proposed `names`, a Select below it choosing
+/// among them, and both their ids.
+fn grouped(names: &[&str]) -> (CurationGraph, String, String) {
     let (mut payload, annotate) = annotated_graph();
     let group = payload
         .add_child(
@@ -184,40 +129,52 @@ fn grouped(names: &[&str]) -> (CurationGraph, String) {
         )
         .unwrap();
     payload
-        .node_mut(&group)
-        .unwrap()
-        .propose_categories(categories(names))
+        .propose_categories(&group, categories(names))
         .unwrap();
-    (payload, group)
+    let chooser = payload.add_child(&group, select()).unwrap();
+    let chosen = payload
+        .conditions_for(&chooser)
+        .last()
+        .unwrap()
+        .condition()
+        .clone();
+    payload
+        .set_selection(&chooser, Selection::of(vec![chosen]))
+        .unwrap();
+    (payload, group, chooser)
 }
 
-/// The names `node` keeps, in its rule's order.
-fn kept(payload: &CurationGraph, node: &str) -> Vec<String> {
-    match payload.node(node).and_then(CurationNode::keeps) {
-        Some(Selection::Categories { names }) => names.clone(),
-        other => panic!("a rule of categories, not {other:?}"),
-    }
+/// The categories, by name, the Select `node` chooses.
+fn chosen(payload: &CurationGraph, node: &str) -> Vec<String> {
+    let CurationNodeKind::Select(selection) = payload.node(node).unwrap().kind() else {
+        panic!("a Select");
+    };
+    let [
+        SelectCondition::InCategories {
+            node: grouping,
+            categories,
+        },
+    ] = selection.conditions()
+    else {
+        panic!("one category condition, not {selection:?}");
+    };
+    let CurationNodeKind::GroupSimilarSubtasks(grouping) = payload.node(grouping).unwrap().kind()
+    else {
+        panic!("a grouping");
+    };
+    categories
+        .iter()
+        .map(|id| grouping.category(*id).unwrap().name().to_owned())
+        .collect()
 }
 
 #[test]
-fn a_grouping_holds_its_categories_and_refuses_a_list_the_classifier_would() {
-    let (mut payload, annotate) = annotated_graph();
-    let group = payload
-        .add_child(
-            &annotate,
-            CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
-        )
-        .unwrap();
-    assert!(
-        kept(&payload, &group).is_empty(),
-        "none before any are proposed"
-    );
-    let node = payload.node_mut(&group).unwrap();
-    node.propose_categories(categories(&["fold", "grasp"]))
-        .unwrap();
+fn a_grouping_numbers_its_categories_and_refuses_a_list_the_classifier_would() {
+    let (mut payload, group, chooser) = grouped(&["fold", "grasp"]);
     // The same name twice would be two indistinguishable options.
     assert!(
-        node.propose_categories(categories(&["fold", "fold"]))
+        payload
+            .propose_categories(&group, categories(&["fold", "fold"]))
             .unwrap_err()
             .contains("appears twice")
     );
@@ -225,9 +182,13 @@ fn a_grouping_holds_its_categories_and_refuses_a_list_the_classifier_would() {
         .map(|index| format!("c{index}"))
         .collect::<Vec<_>>();
     let too_many = too_many.iter().map(String::as_str).collect::<Vec<_>>();
-    assert!(node.propose_categories(categories(&too_many)).is_err());
-    // A refused list leaves the categories, and what is kept, as they were.
-    assert_eq!(kept(&payload, &group), ["fold", "grasp"]);
+    assert!(
+        payload
+            .propose_categories(&group, categories(&too_many))
+            .is_err()
+    );
+    // A refused list leaves the categories, and what is chosen, as they were.
+    assert_eq!(chosen(&payload, &chooser), ["fold", "grasp"]);
     assert!(SubtaskCategory::new("fold", " ").is_err());
 
     let json: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
@@ -236,66 +197,81 @@ fn a_grouping_holds_its_categories_and_refuses_a_list_the_classifier_would() {
         serde_json::json!({
             "type": "group_similar_subtasks",
             "categories": [
-                {"name": "fold", "definition": "Everything that folds."},
-                {"name": "grasp", "definition": "Everything that grasps."},
+                {"id": 1, "name": "fold", "definition": "Everything that folds."},
+                {"id": 2, "name": "grasp", "definition": "Everything that grasps."},
             ],
         })
     );
     assert_eq!(
-        json["nodes"][2]["keeps"],
-        serde_json::json!({"keep": "categories", "names": ["fold", "grasp"]})
+        json["nodes"][3]["kind"],
+        serde_json::json!({
+            "type": "select",
+            "conditions": [{"keep": "in_categories", "node": group, "categories": [1, 2]}],
+        })
     );
     assert_eq!(
         CurationGraph::decode(CURATION_ENCODING_VERSION, &payload.encode().unwrap()).unwrap(),
         payload
     );
     // A document naming a category twice is refused on the way in too, and
-    // so is one keeping a category its grouping does not name.
+    // so is a Select choosing a category its grouping does not have.
     let twice = payload.encode().unwrap().replace("\"grasp\"", "\"fold\"");
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, &twice).is_err());
     let stray = payload
         .encode()
         .unwrap()
-        .replace("\"names\":[\"fold\",", "\"names\":[\"flatten\",");
+        .replace("\"categories\":[1,2]", "\"categories\":[1,7]");
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, &stray).is_err());
 }
 
 #[test]
-fn a_grouping_keeps_what_it_chose_through_every_edit_of_its_categories() {
-    let (mut payload, group) = grouped(&["fold", "grasp", "smooth"]);
-    assert_eq!(kept(&payload, &group), ["fold", "grasp", "smooth"]);
-    // Leaving a category out is a rule of the grouping's own names.
-    let only = |names: &[&str]| Selection::Categories {
-        names: names.iter().map(|name| (*name).to_owned()).collect(),
+fn a_select_chooses_the_same_categories_through_every_edit_of_them() {
+    let (mut payload, group, chooser) = grouped(&["fold", "grasp", "smooth"]);
+    let only = |payload: &mut CurationGraph, ids: &[u32]| {
+        let id = |raw: &u32| serde_json::from_value::<CategoryId>(serde_json::json!(raw)).unwrap();
+        payload.set_selection(
+            &chooser,
+            Selection::of(vec![SelectCondition::InCategories {
+                node: group.clone(),
+                categories: ids.iter().map(id).collect(),
+            }]),
+        )
     };
-    payload.set_rule(&group, only(&["fold", "smooth"])).unwrap();
+    only(&mut payload, &[1, 3]).unwrap();
     assert!(
-        payload.set_rule(&group, only(&["flatten"])).is_err(),
+        only(&mut payload, &[9]).is_err(),
         "a category the grouping does not name"
     );
-    let node = payload.node_mut(&group).unwrap();
-    // A renamed category keeps its standing under its new name, and a name
-    // another category holds is refused.
-    node.edit_category(
-        "fold",
-        SubtaskCategory::new("fold in half", "Folding the cloth over itself.").unwrap(),
-    )
-    .unwrap();
-    node.edit_category(
-        "grasp",
-        SubtaskCategory::new("reach", "Moving toward the cloth.").unwrap(),
-    )
-    .unwrap();
+    // A renamed category keeps its id, so the Select still chooses it, and a
+    // name another category holds is refused.
+    payload
+        .edit_category(
+            &group,
+            "fold",
+            SubtaskCategory::new("fold in half", "Folding the cloth over itself.").unwrap(),
+        )
+        .unwrap();
+    payload
+        .edit_category(
+            &group,
+            "grasp",
+            SubtaskCategory::new("reach", "Moving toward the cloth.").unwrap(),
+        )
+        .unwrap();
     assert!(
-        node.edit_category("reach", SubtaskCategory::new("smooth", "Flat.").unwrap())
+        payload
+            .edit_category(
+                &group,
+                "reach",
+                SubtaskCategory::new("smooth", "Flat.").unwrap()
+            )
             .is_err()
     );
-    assert_eq!(kept(&payload, &group), ["fold in half", "smooth"]);
-    // Merging drops the merged category, and the one it joins keeps both
-    // definitions and its own standing.
-    let node = payload.node_mut(&group).unwrap();
-    node.merge_category("smooth", "reach").unwrap();
-    assert_eq!(kept(&payload, &group), ["fold in half"]);
+    assert_eq!(chosen(&payload, &chooser), ["fold in half", "smooth"]);
+    // Merging drops the merged category; a Select that chose it chooses the
+    // one it joined, which keeps both definitions.
+    payload.merge_category(&group, "smooth", "reach").unwrap();
+    assert_eq!(chosen(&payload, &chooser), ["fold in half", "reach"]);
     let CurationNodeKind::GroupSimilarSubtasks(grouping) = payload.node(&group).unwrap().kind()
     else {
         panic!("a grouping");
@@ -311,13 +287,107 @@ fn a_grouping_keeps_what_it_chose_through_every_edit_of_its_categories() {
             ("reach", "Moving toward the cloth. Everything that smooths.")
         ]
     );
-    let node = payload.node_mut(&group).unwrap();
-    assert!(node.merge_category("reach", "reach").is_err());
-    assert!(node.merge_category("gone", "reach").is_err());
-    // A list proposed afresh is kept whole.
-    node.propose_categories(categories(&["lift", "place"]))
+    assert!(payload.merge_category(&group, "reach", "reach").is_err());
+    assert!(payload.merge_category(&group, "gone", "reach").is_err());
+    // A list proposed afresh is chosen whole.
+    payload
+        .propose_categories(&group, categories(&["lift", "place"]))
         .unwrap();
-    assert_eq!(kept(&payload, &group), ["lift", "place"]);
+    assert_eq!(chosen(&payload, &chooser), ["lift", "place"]);
+    assert_eq!(payload.validate(), Ok(()));
+}
+
+#[test]
+fn a_select_reads_only_nodes_above_it_of_the_kind_each_condition_reads() {
+    let mut payload = CurationGraph::new(None);
+    let mut tracking = ObjectTracking::default();
+    tracking.set_prompt("bottle");
+    let track = payload
+        .add_child(DATASET_NODE_ID, CurationNodeKind::TrackObjects(tracking))
+        .unwrap();
+    let score = payload
+        .add_child(
+            DATASET_NODE_ID,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        )
+        .unwrap();
+    let fastest = payload.add_child(&track, select()).unwrap();
+    // The menu offers the facts and what the Track objects above counted.
+    assert_eq!(
+        payload
+            .conditions_for(&fastest)
+            .iter()
+            .map(|choice| choice.label().to_owned())
+            .collect::<Vec<_>>(),
+        [
+            "Duration",
+            "Message count",
+            "Channel count",
+            "File size",
+            "Most bottles at once",
+            "Duration per bottle",
+            "Bottles visible"
+        ]
+    );
+    let per_bottle = SelectCondition::Episodes(EpisodeCondition::new(
+        EpisodeNumber::DurationPer(track.clone()),
+        Comparison::Lowest,
+        0.25,
+    ));
+    payload
+        .set_selection(&fastest, Selection::of(vec![per_bottle.clone()]))
+        .unwrap();
+    // A node in another branch, or of another kind, is no column to read.
+    for stray in [
+        SelectCondition::Progressing {
+            node: score.clone(),
+            minimum: 0.2,
+        },
+        SelectCondition::Similar {
+            node: track.clone(),
+            minimum: 0.5,
+        },
+    ] {
+        assert!(
+            payload
+                .set_selection(&fastest, Selection::of(vec![stray]))
+                .is_err()
+        );
+    }
+    // A share is between none and all, and a Select names a condition.
+    let share = |value| {
+        Selection::of(vec![SelectCondition::Episodes(EpisodeCondition::new(
+            EpisodeNumber::MostAtOnce(track.clone()),
+            Comparison::Highest,
+            value,
+        ))])
+    };
+    assert!(payload.set_selection(&fastest, share(1.5)).is_err());
+    assert!(payload.set_selection(&fastest, share(0.1)).is_ok());
+    assert!(
+        payload
+            .set_selection(&fastest, Selection::of(Vec::new()))
+            .is_err()
+    );
+    payload
+        .set_selection(&fastest, Selection::of(vec![per_bottle]))
+        .unwrap();
+    let CurationNodeKind::Select(selection) = payload.node(&fastest).unwrap().kind() else {
+        panic!("a Select");
+    };
+    assert_eq!(
+        selection.sentence(&payload),
+        "Duration per bottle in the lowest 25%"
+    );
+    let json: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
+    assert_eq!(
+        json["nodes"][3]["kind"]["conditions"],
+        serde_json::json!([{"keep": "episodes", "number": {"duration_per": track}, "comparison": "lowest", "value": 0.25}])
+    );
+    // Removing the Track objects node takes its Select with it, so no
+    // condition ever reads a node that is gone.
+    payload.remove_node(&track).unwrap();
+    assert!(payload.node(&fastest).is_none());
     assert_eq!(payload.validate(), Ok(()));
 }
 
@@ -367,11 +437,9 @@ fn removing_a_node_takes_its_subtree_with_it() {
 }
 
 #[test]
-fn the_measures_below_a_node_read_it_through_any_select_between() {
+fn the_model_nodes_below_a_node_read_once_it_has_through_any_select_between() {
     let mut payload = CurationGraph::new(None);
-    let select = payload
-        .add_child(DATASET_NODE_ID, CurationNodeKind::Select)
-        .unwrap();
+    let select = payload.add_child(DATASET_NODE_ID, select()).unwrap();
     let annotate = payload
         .add_child(
             &select,
@@ -432,12 +500,24 @@ fn encoding_round_trips_and_rejects_other_versions_and_broken_graphs() {
         CurationGraph::decode(CURATION_ENCODING_VERSION, &encoded).unwrap(),
         payload
     );
-    assert!(CurationGraph::decode(CURATION_ENCODING_VERSION + 1, &encoded).is_err());
+    assert!(CurationGraph::decode(CURATION_ENCODING_VERSION - 1, &encoded).is_err());
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, r#"{"nodes":[]}"#).is_err());
     let two_parents = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5}},{"id":"b","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5}}],"edges":[{"from":"dataset","to":"a"},{"from":"dataset","to":"b"},{"from":"a","to":"b"}]}"#;
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, two_parents).is_err());
     let unknown_field = r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"colour":"blue"}"#;
     assert!(CurationGraph::decode(CURATION_ENCODING_VERSION, unknown_field).is_err());
+    // A node id is what its columns are named by, so it is one identifier
+    // once its hyphen is a stroke, and no two ids name the same columns.
+    for ids in [("a b", "c"), ("a-1", "a_1")] {
+        let clash = format!(
+            r#"{{"nodes":[{{"id":"dataset","kind":{{"type":"dataset"}}}},{{"id":"{}","kind":{{"type":"score_progress"}}}},{{"id":"{}","kind":{{"type":"score_progress"}}}}],"edges":[{{"from":"dataset","to":"{}"}},{{"from":"dataset","to":"{}"}}]}}"#,
+            ids.0, ids.1, ids.0, ids.1
+        );
+        assert!(
+            CurationGraph::decode(CURATION_ENCODING_VERSION, &clash).is_err(),
+            "{clash}"
+        );
+    }
 }
 
 #[test]
@@ -451,81 +531,38 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
     assert_eq!(
-        json["nodes"][1]["kind"],
-        serde_json::json!({"type": "score_progress"})
+        json["nodes"][1],
+        serde_json::json!({"id": "score_progress-1", "kind": {"type": "score_progress"}})
     );
-    assert_eq!(
-        json["nodes"][1]["keeps"],
-        serde_json::json!({"keep": "progressing", "minimum": 0.0})
-    );
-    assert!(json.get("moments").is_none());
-    // What earlier encodings stored is refused rather than carried: what the
-    // nodes read, which the preview reads again; a Select holding one fact of
-    // its own; and a rule a node's kind or place does not keep by.
+    // What earlier encodings stored is refused rather than carried: a rule on
+    // a model node, and a Select without its conditions.
     for stored in [
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"s","kind":{"type":"select","keep":"episodes","fact":"duration_seconds","comparison":"at_least","value":10.0}}],"edges":[{"from":"dataset","to":"s"}]}"#,
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress"},"keeps":{"keep":"progressing","minimum":0.5}}],"edges":[{"from":"dataset","to":"m"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"s","kind":{"type":"select"}}],"edges":[{"from":"dataset","to":"s"}]}"#,
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5},"keeps":{"keep":"similar","minimum":0.5}}],"edges":[{"from":"dataset","to":"a"}]}"#,
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress"},"keeps":{"keep":"similar","minimum":0.5}}],"edges":[{"from":"dataset","to":"m"}]}"#,
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"m","kind":{"type":"score_progress","completed_episodes":[]}}],"edges":[{"from":"dataset","to":"m"}]}"#,
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5,"completed_episodes":[]}}],"edges":[{"from":"dataset","to":"a"}]}"#,
+        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}},{"id":"t","kind":{"type":"track_objects","camera":"/top","prompt":"bottle"}}],"edges":[{"from":"dataset","to":"t"}]}"#,
         r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"subtasks":[]}"#,
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"groupings":[]}"#,
-        r#"{"nodes":[{"id":"dataset","kind":{"type":"dataset"}}],"rankings":[]}"#,
     ] {
         assert!(
             CurationGraph::decode(CURATION_ENCODING_VERSION, stored).is_err(),
             "{stored}"
         );
     }
-    // A grouping keeps by its own categories, so one saved without that
-    // rule, or with a Select choosing them after it, is refused.
-    let grouping = r#"{"id":"dataset","kind":{"type":"dataset"}},{"id":"a","kind":{"type":"break_down_subtasks","sample_interval_seconds":0.5}},{"id":"g","kind":{"type":"group_similar_subtasks","categories":[{"name":"fold","definition":"Folding."}]}"#;
-    let edges = r#"{"from":"dataset","to":"a"},{"from":"a","to":"g"}"#;
-    for stored in [
-        format!(r#"{{"nodes":[{grouping}}}],"edges":[{edges}]}}"#),
-        format!(
-            r#"{{"nodes":[{grouping},"keeps":{{"keep":"categories","names":["fold"]}}}},{{"id":"s","kind":{{"type":"select"}},"keeps":{{"keep":"categories","names":["fold"]}}}}],"edges":[{edges},{{"from":"g","to":"s"}}]}}"#
-        ),
-    ] {
-        assert!(
-            CurationGraph::decode(CURATION_ENCODING_VERSION, &stored).is_err(),
-            "{stored}"
-        );
-    }
-    let unproposed = format!(
-        r#"{{"nodes":[{},"keeps":{{"keep":"categories","names":[]}}}}],"edges":[{edges}]}}"#,
-        grouping.replace(
-            r#","categories":[{"name":"fold","definition":"Folding."}]"#,
-            ""
-        )
-    );
-    let decoded = CurationGraph::decode(CURATION_ENCODING_VERSION, &unproposed).unwrap();
-    assert_eq!(
-        decoded.node("g").unwrap().kind(),
-        &CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default())
-    );
 }
 
-/// A graph with two outputs over whole episodes: longer and shorter ones.
+/// A graph with two Selects over whole episodes: longer and shorter ones.
 fn two_outputs() -> (CurationGraph, String, String) {
     let mut payload = CurationGraph::new(None);
-    let rule =
-        |comparison| Selection::episodes_where(EpisodeFact::DurationSeconds, comparison, 10.0);
-    let long = payload
-        .add_keeping(
-            DATASET_NODE_ID,
-            CurationNodeKind::Select,
-            rule(Comparison::AtLeast),
-        )
-        .unwrap();
-    let short = payload
-        .add_keeping(
-            DATASET_NODE_ID,
-            CurationNodeKind::Select,
-            rule(Comparison::AtMost),
-        )
-        .unwrap();
+    let mut add = |comparison| {
+        let id = payload.add_child(DATASET_NODE_ID, select()).unwrap();
+        payload
+            .set_selection(
+                &id,
+                Selection::episodes_where(EpisodeFact::DurationSeconds, comparison, 10.0),
+            )
+            .unwrap();
+        id
+    };
+    let (long, short) = (add(Comparison::AtLeast), add(Comparison::AtMost));
     (payload, long, short)
 }
 
@@ -541,7 +578,7 @@ fn a_view_is_current_until_a_later_save_changes_the_recipe() {
     assert!(published.is_current(3) && published.is_current(4));
     // An edit saved as 5 moves the recipe past the view.
     assert!(!published.is_current(5));
-    // Publishing the other output records nothing new about the first: a
+    // Publishing the other node records nothing new about the first: a
     // view current before stays current, and one out of date stays so.
     let mut current = payload.clone();
     current
@@ -553,27 +590,10 @@ fn a_view_is_current_until_a_later_save_changes_the_recipe() {
         .unwrap();
     assert!(!payload.publication(&long).unwrap().is_current(6));
     assert!(payload.publication(&short).unwrap().is_current(6));
-    // Unpublishing forgets the output, and only a published one.
+    // Unpublishing forgets the node, and only a published one.
     payload.remove_publication(&short, 6).unwrap();
     assert!(payload.publication(&short).is_none());
     assert!(payload.remove_publication(&short, 7).is_err());
-}
-
-#[test]
-fn a_publication_an_older_studio_bounded_to_its_first_episodes_still_reads() {
-    let (mut payload, long, _) = two_outputs();
-    payload
-        .record_publication(&long, "long_episodes", 3)
-        .unwrap();
-    let mut encoded: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
-    encoded["published"][0]["episodes"] = serde_json::json!(20);
-    let recorded = CurationGraph::decode(CURATION_ENCODING_VERSION, &encoded.to_string()).unwrap();
-    let (published, node) = recorded.publications().next().unwrap();
-    assert_eq!(
-        (node.id(), published.view()),
-        (long.as_str(), "long_episodes")
-    );
-    assert!(!recorded.encode().unwrap().contains("episodes\":20"));
 }
 
 #[test]
@@ -582,7 +602,6 @@ fn a_copy_unpublished_elsewhere_differs_by_its_publications_alone() {
     open.record_publication(&long, "long_episodes", 3).unwrap();
     open.record_publication(&short, "short_episodes", 4)
         .unwrap();
-    let shortest = Selection::episodes_where(EpisodeFact::DurationSeconds, Comparison::AtMost, 5.0);
     // Data unpublished one view and stored the curation.
     let mut stored = open.clone();
     stored.remove_publication(&long, 5).unwrap();
@@ -591,9 +610,7 @@ fn a_copy_unpublished_elsewhere_differs_by_its_publications_alone() {
     assert_eq!(open, stored);
     // A recipe edited elsewhere is another writer's change.
     let mut edited = stored.clone();
-    edited
-        .add_keeping(DATASET_NODE_ID, CurationNodeKind::Select, shortest)
-        .unwrap();
+    edited.add_child(DATASET_NODE_ID, select()).unwrap();
     assert!(!open.same_recipe(&edited));
 }
 
@@ -613,7 +630,7 @@ fn the_views_a_stored_payload_publishes_are_read_without_decoding_it() {
 }
 
 #[test]
-fn a_publication_names_one_output_by_one_view_name() {
+fn a_publication_names_one_node_by_one_view_name() {
     let (mut payload, long, short) = two_outputs();
     assert!(
         payload
@@ -631,12 +648,12 @@ fn a_publication_names_one_output_by_one_view_name() {
 }
 
 #[test]
-fn a_published_output_keeps_its_branch_until_it_is_unpublished() {
+fn a_published_node_keeps_its_branch_until_it_is_unpublished() {
     let (mut payload, long, _) = two_outputs();
     payload
         .record_publication(&long, "long_episodes", 1)
         .unwrap();
-    // A step after it leaves it an output, published as it was.
+    // A step after it leaves it published as it was.
     let mut followed = payload.clone();
     followed
         .add_child(
@@ -658,63 +675,39 @@ fn a_published_output_keeps_its_branch_until_it_is_unpublished() {
 }
 
 #[test]
-fn a_track_objects_node_saves_what_it_tracks_and_its_count_range() {
+fn a_track_objects_node_saves_what_it_tracks_and_its_rate() {
     let mut payload = CurationGraph::new(None);
     let mut tracking = ObjectTracking::default();
     tracking.set_camera(Some("/top-camera".to_owned()));
     tracking.set_prompt("  bottle ");
+    assert_eq!(tracking.rate(), 5, "five pictures a second by default");
+    assert!(tracking.set_rate(0).is_err() && tracking.set_rate(31).is_err());
+    tracking.set_rate(2).unwrap();
     let track = payload
         .add_child(DATASET_NODE_ID, CurationNodeKind::TrackObjects(tracking))
-        .unwrap();
-    // A new node keeps every episode it counts.
-    assert_eq!(
-        payload.node(&track).and_then(CurationNode::keeps),
-        Some(&Selection::ObjectCount {
-            fewest: 0,
-            most: None
-        })
-    );
-    payload
-        .set_rule(
-            &track,
-            Selection::ObjectCount {
-                fewest: 3,
-                most: Some(4),
-            },
-        )
         .unwrap();
     let json: serde_json::Value = serde_json::from_str(&payload.encode().unwrap()).unwrap();
     assert_eq!(
         json["nodes"][1]["kind"],
-        serde_json::json!({"type": "track_objects", "camera": "/top-camera", "prompt": "bottle"})
+        serde_json::json!({"type": "track_objects", "camera": "/top-camera", "prompt": "bottle", "rate": 2})
     );
+    // It keeps nothing by itself, so whatever reads episodes may follow it.
     assert_eq!(
-        json["nodes"][1]["keeps"],
-        serde_json::json!({"keep": "object_count", "fewest": 3, "most": 4})
+        labels(&payload.child_kinds(&track)),
+        [
+            "Break down subtasks",
+            "Score progress",
+            "Track objects",
+            "Select"
+        ]
     );
-    // A range whose most is fewer than its fewest is refused.
-    assert!(
-        payload
-            .set_rule(
-                &track,
-                Selection::ObjectCount {
-                    fewest: 5,
-                    most: Some(4)
-                }
-            )
-            .is_err()
-    );
-    // It hands on whole episodes, so whatever reads episodes may follow it.
+    let plural = |prompt: &str| {
+        let mut tracking = ObjectTracking::default();
+        tracking.set_prompt(prompt);
+        tracking.plural()
+    };
     assert_eq!(
-        payload.population_kind(&track),
-        Some(PopulationKind::Episodes)
-    );
-    assert_eq!(
-        payload
-            .child_kinds(&track)
-            .iter()
-            .map(CurationNodeKind::label)
-            .collect::<Vec<_>>(),
-        ["Break down subtasks", "Score progress", "Track objects"]
+        ["bottle", "box", "cherry", "toy", "glass", ""].map(plural),
+        ["bottles", "boxes", "cherries", "toys", "glasses", "objects"]
     );
 }

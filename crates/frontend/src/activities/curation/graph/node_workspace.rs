@@ -44,7 +44,7 @@ pub(in crate::activities::curation) fn NodeWorkspace(controller: CurationControl
                     CurationNodeKind::TrackObjects(_) => rsx! {
                         track_objects::TrackingWorkspace { controller, node: node.clone() }
                     },
-                    CurationNodeKind::Select => rsx! {
+                    CurationNodeKind::Select(_) => rsx! {
                         select::SelectWorkspace { controller, node: node.clone() }
                     },
                 }

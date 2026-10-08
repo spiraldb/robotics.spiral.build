@@ -30,6 +30,10 @@ impl MigratorTrait for Migrator {
                 "m20261005_000004_workspaces",
                 include_str!("m20261005_000004_workspaces.sql"),
             )),
+            Box::new(SqlMigration::new(
+                "m20261008_000001_curations_encoding_5",
+                include_str!("m20261008_000001_curations_encoding_5.sql"),
+            )),
         ]
     }
 }

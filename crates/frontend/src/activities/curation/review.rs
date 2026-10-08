@@ -8,7 +8,7 @@
 //! proportion now: the index owns the scroll, the evidence column never
 //! moves, and the row the operator chose is always beside its own footage.
 use super::annotate::SubtaskRow;
-use super::document::{CurationNodeKind, PopulationKind};
+use super::document::CurationNodeKind;
 use super::episode_tabs::OpenEpisodes;
 use super::state::CurationController;
 use super::thumbnail::{Thumbnail, ThumbnailMoment, Thumbnails};
@@ -46,17 +46,6 @@ impl Counted {
     pub(super) fn categories(count: usize) -> Self {
         Self(count, Noun::CATEGORY)
     }
-    pub(super) fn moments(count: usize) -> Self {
-        Self(count, Noun::MOMENT)
-    }
-    /// A count of whatever a population of this kind holds.
-    pub(super) fn of_kind(kind: Option<PopulationKind>, count: usize) -> Self {
-        match kind {
-            Some(PopulationKind::Subtasks) => Self::subtasks(count),
-            Some(PopulationKind::Moments) => Self::moments(count),
-            Some(PopulationKind::Episodes) | None => Self::episodes(count),
-        }
-    }
 }
 
 impl Display for Counted {
@@ -77,7 +66,6 @@ impl Noun {
     const EPISODE: Self = Self("episode", "episodes");
     const SUBTASK: Self = Self("subtask", "subtasks");
     const CATEGORY: Self = Self("category", "categories");
-    const MOMENT: Self = Self("moment", "moments");
 }
 
 /// The keys a list of subtask rows is keyed by: episode and start, which tell
@@ -735,7 +723,7 @@ impl SubtaskIntervals {
 }
 
 /// The one bar every node's workspace opens with: on the left what the node
-/// reads, runs with or asks — its query, its rule, its settings — and any note
+/// reads, runs with or asks — its query, its settings — and any note
 /// that needs attention, and at the far end the node's own actions. What the
 /// node holds is on its card, so it is not repeated here.
 #[component]
@@ -826,7 +814,7 @@ impl NodeReach {
                 CurationNodeKind::BreakDownSubtasks(_) => Some("Break down the rest"),
                 CurationNodeKind::FindSimilarSubtasks(_) => Some("Search the rest"),
                 CurationNodeKind::GroupSimilarSubtasks(_) => Some("Group the rest"),
-                CurationNodeKind::Dataset | CurationNodeKind::Select => None,
+                CurationNodeKind::Dataset | CurationNodeKind::Select(_) => None,
             };
             let finished = controller
                 .progress(&id)

@@ -3,14 +3,13 @@
 //! preview runs that step over the subtasks Break down's preview holds, many
 //! episodes to a query, as the curation's own run.
 //!
-//! Every subtask is listed with its probability, best first, divided where
-//! the node's cutoff falls: the node hands on the subtasks at least that
-//! likely, and the cutoff slides on the strip over the ranking without asking
-//! anything again. Asking a question saves it as the node's query.
+//! Every subtask is listed with its probability, best first. The node keeps
+//! nothing by itself: a Select below it keeps the subtasks similar enough.
+//! Asking a question saves it as the node's query.
 use super::coverage::{CoverageMeasure, EpisodeCoverage, SubtaskList};
 use super::source::SubtaskSource;
 use crate::activities::curation::annotate::SubtaskRow;
-use crate::activities::curation::document::{CurationNodeKind, Selection};
+use crate::activities::curation::document::CurationNodeKind;
 use crate::activities::curation::episode_map::{
     EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
 };
@@ -21,7 +20,6 @@ use crate::activities::curation::review::{
     SubtaskEntry, SubtaskEvidence, SubtaskIntervals, SubtaskReview, TabStop,
 };
 use crate::activities::curation::state::{CurationController, EpisodeFocus, RunState};
-use crate::activities::curation::threshold::{AxisUnit, StripDot, Threshold, ThresholdStrip};
 use crate::activities::curation::thumbnail::{Thumbnail, ThumbnailMoment, Thumbnails};
 use crate::activities::episode::Episode;
 use crate::format::ClockPresentation as _;
@@ -94,14 +92,10 @@ impl SearchTable {
             .filter(|_| self.answers.is_some())
             .and_then(|row| self.rows.get(row))
     }
-    /// Which episodes the answers reached at the cutoff. The row asked about
-    /// is the question, and finding it the same as itself says nothing about
-    /// its episode, so it is not counted.
-    fn coverage(
-        &self,
-        source: &SubtaskSource,
-        (about, cutoff): (Option<usize>, f64),
-    ) -> Option<EpisodeCoverage> {
+    /// Which episodes the answers reached, more likely than not. The row
+    /// asked about is the question, and finding it the same as itself says
+    /// nothing about its episode, so it is not counted.
+    fn coverage(&self, source: &SubtaskSource, about: Option<usize>) -> Option<EpisodeCoverage> {
         let answers = self.answers.as_ref()?;
         Some(EpisodeCoverage::of(
             &source.measured(),
@@ -111,24 +105,8 @@ impl SearchTable {
                 .enumerate()
                 .filter(|(row, _)| Some(*row) != about)
                 .filter_map(|(_, (row, answer))| Some((row.episode(), (*answer)?))),
-            CoverageMeasure::BestMatch { at_least: cutoff },
+            CoverageMeasure::BestMatch { at_least: 0.5 },
         ))
-    }
-    /// Every answered row as a dot at its probability, but the row asked
-    /// about, which is the question; kept in ink at or above the cutoff.
-    fn dots(&self, (about, cutoff): (Option<usize>, f64)) -> Vec<StripDot> {
-        let answers = self
-            .answers
-            .iter()
-            .flatten()
-            .enumerate()
-            .map(|(row, answer)| answer.filter(|_| Some(row) != about))
-            .collect::<Vec<_>>();
-        let kept = answers
-            .iter()
-            .map(|answer| answer.is_some_and(|probability| probability >= cutoff))
-            .collect::<Vec<_>>();
-        StripDot::of(&answers, &kept)
     }
 }
 
@@ -192,8 +170,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     // Asking costs one judgment of each subtask, so a saved question the
     // node has not answered from the subtasks that reach it now is asked at
     // once: after Find similar on a row, and on opening a search whose
-    // answer is gone or out of date. A search whose last answer failed
-    // waits for Search.
+    // answer is gone. A search whose last answer failed waits for Search.
     let unanswered = node.clone();
     use_effect(move || {
         let Some(progress) = controller.progress(&unanswered) else {
@@ -241,13 +218,6 @@ pub(in crate::activities::curation) fn SearchWorkspace(
 
     let table = SearchTable::of(&source);
     let about = table.about(&source);
-    // How close a subtask must be to be kept: the node's own rule.
-    let rule = controller
-        .with_payload(|payload| payload.node(&node).and_then(|node| node.keeps()).cloned());
-    let cutoff = rule
-        .as_ref()
-        .and_then(Selection::minimum)
-        .unwrap_or_default();
     // The best answer opens as soon as there is one, so the question's result
     // is on screen, not a click away.
     let top = table.top(about).map(|row| {
@@ -297,7 +267,7 @@ pub(in crate::activities::curation) fn SearchWorkspace(
         .filter(|(row, _)| Some(*row) != about)
         .collect::<Vec<_>>();
     let answered = table.answers.clone();
-    let summary = table.coverage(&source, (about, cutoff)).map_or_else(
+    let summary = table.coverage(&source, about).map_or_else(
         || {
             format!(
                 "{} across {}",
@@ -337,10 +307,6 @@ pub(in crate::activities::curation) fn SearchWorkspace(
         .failed()
         .first()
         .map(|(_, reason)| reason.clone());
-    let stale = source
-        .progress()
-        .is_stale()
-        .then(|| "Out of date: its subtasks changed".to_owned());
     let pending = source.progress().pending().len();
     // An empty box asks nothing, and a question every episode has answered
     // is already on screen.
@@ -350,32 +316,6 @@ pub(in crate::activities::curation) fn SearchWorkspace(
     let places = listed.iter().map(|(row, _)| *row).collect::<Vec<_>>();
     let listed_count = places.len();
     let chosen_place = chosen.and_then(|chosen| places.iter().position(|row| *row == chosen));
-    // The first listed row an answered search puts below its cutoff; a
-    // ranking whose every row is below it, or none, draws no divider.
-    let cut = answered.as_ref().and_then(|answers| {
-        places
-            .iter()
-            .position(|row| {
-                answers
-                    .get(*row)
-                    .copied()
-                    .flatten()
-                    .is_none_or(|probability| probability < cutoff)
-            })
-            .filter(|cut| *cut > 0)
-    });
-    // What the cutoff keeps, of the rows answered other than the question.
-    let kept = listed
-        .iter()
-        .filter(|(row, _)| {
-            answered
-                .as_ref()
-                .and_then(|answers| answers.get(*row).copied().flatten())
-                .is_some_and(|probability| probability >= cutoff)
-        })
-        .count();
-    let dots = table.dots((about, cutoff));
-    let threshold = Threshold::over(&dots, cutoff, AxisUnit::Percent, true);
     let find = {
         let annotation = annotation.clone();
         move |row: SubtaskRow, from: Option<Place>| controller.find_similar(&annotation, &row, from)
@@ -438,15 +378,8 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                         }
                     }
                 },
-                note: NodeNotes::join([stale, FailedEpisodes::note(failed)]),
+                note: NodeNotes::join([FailedEpisodes::note(failed)]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
-                actions: rsx! {
-                    if answered.is_some() {
-                        p { class: "curation-threshold-tally", role: "status",
-                            "Keeps {kept} of {Counted::subtasks(listed_count)}"
-                        }
-                    }
-                },
             }
             if let Some(problem) = problem() {
                 Notice { tone: NoticeTone::Danger, "{problem}" }
@@ -479,25 +412,6 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                             }
                         },
                     }
-                    if answered.is_some() {
-                        ThresholdStrip {
-                            dots,
-                            threshold,
-                            chosen,
-                            label: "Similarity threshold".to_owned(),
-                            on_select: {
-                                let choose = choose.clone();
-                                move |row: usize| choose(row)
-                            },
-                            on_threshold: {
-                                let node = node.clone();
-                                move |threshold: Threshold| {
-                                    let minimum = threshold.value();
-                                    let _ = controller.set_rule(&node, Selection::Similar { minimum });
-                                }
-                            },
-                        }
-                    }
                 }
             }
             if listed.is_empty() && about.is_none() {
@@ -529,16 +443,8 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                             class: "curation-entries",
                             "aria-label": "Subtasks, closest to the query first; each row ends with how likely it is the same operation",
                             for (position , (row , standing)) in listed.into_iter().enumerate() {
-                                // Where the ranking crosses the line the
-                                // episode count above is drawn at: likely
-                                // matches above it, the rest below.
-                                Fragment { key: "{keys[row]}",
-                                if Some(position) == cut {
-                                    li { class: "curation-entries-divider", role: "separator",
-                                        "Below {threshold.label()} · left out"
-                                    }
-                                }
                                 SubtaskEntry {
+                                    key: "{keys[row]}",
                                     row: rows[row].clone(),
                                     standing: standing.roving(TabStop::at(position, chosen_place)),
                                     episode: Episode::listed_name_of(rows[row].episode()),
@@ -552,7 +458,6 @@ pub(in crate::activities::curation) fn SearchWorkspace(
                                         let asked = rows[row].clone();
                                         move |from| find(asked.clone(), from)
                                     },
-                                }
                                 }
                             }
                         }
@@ -627,10 +532,7 @@ mod tests {
         let row = |start: f64, similarity: Option<f64>| {
             SubtaskRow::new(EpisodeId::fixture(1), (start, start + 1.0), "fold")
                 .unwrap()
-                .judged(
-                    SubtaskRow::SIMILARITY,
-                    JudgmentValue::Similarity(similarity),
-                )
+                .judged(JudgmentValue::Similarity(similarity))
         };
         let rows = vec![
             row(0.0, Some(0.2)),

@@ -1,34 +1,32 @@
 //! Track objects: track what the node names on one camera of every episode
-//! that reaches it, with SAM 3.1 on the Modal service, and keep the episodes
-//! showing the right number of it at once.
+//! that reaches it, with SAM 3.1 on the Modal service at the node's rate, and
+//! add each episode's timeline of tracked pictures to the table.
 //!
-//! The tracker samples each episode five times a second and follows every
-//! object it finds by one track to the end, so the count is the most objects
-//! one sampled picture held: an object hidden for a moment, or carried out of
-//! sight, still counts. How many is the right number is the node's own rule,
-//! reviewed as every rule is; each episode opens on the tracked camera with
-//! every object boxed. The tracks are stored once tracked; what the node
-//! reads is its own step run over them, held for the session, so moving the
-//! rule tracks nothing again.
+//! The tracker follows every object it finds by one track to the end, so
+//! the most objects one sampled picture held counts an object hidden for a
+//! moment, or carried out of sight. The node keeps nothing by itself: a
+//! Select below it keeps by how many it saw. Each episode opens on the
+//! tracked camera with every object boxed. The tracks are stored once
+//! tracked, and what the node reads is how many objects each picture held.
 mod tracking;
 mod tracks;
 
-pub(super) use tracking::ObjectCount;
 pub(super) use tracks::{StoredTracks, TrackedEpisodeTab};
 
 use super::document::{CurationNode, CurationNodeKind, ObjectTracking};
 use super::measure_run::{
-    MeasureInput, MeasureRun, MeasureRunActions, MeasureRunStart, MeasureVerb,
+    MeasureInput, MeasureRun, MeasureRunActions, MeasureRunStart, MeasureVerb, MeasuredEpisode,
+    MeasuredEpisodes,
 };
 use super::preview::PreviewPlan;
 use super::primer::{NodePrimer, Primer};
 use super::review::{NodeBar, NodeNotes, NodeReach};
-use super::select::{RuleReview, RuleView};
 use super::state::CurationController;
-use crate::activities::episode::{Episode, StreamCatalog};
+use super::thumbnail::Thumbnails;
+use crate::activities::episode::{Episode, PlayRequest, StreamCatalog};
 use crate::components::icons::SpinnerIcon;
 use dioxus::prelude::*;
-use spiral_robotics_ui::{EmptyState, Notice, NoticeTone, Select, TextInput};
+use spiral_robotics_ui::{EmptyState, Notice, NoticeTone, Select, TextInput, TextInputKind};
 
 /// One Track objects node of the open curation.
 #[derive(Clone, PartialEq)]
@@ -63,9 +61,9 @@ impl TrackedNode {
     }
 }
 
-/// The workspace shown for a selected Track objects node: what it tracks and
-/// on which camera, on the node's bar beside the run, and the episodes its
-/// count keeps and leaves out.
+/// The workspace shown for a selected Track objects node: what it tracks, on
+/// which camera and how often, on the node's bar beside the run, and the
+/// episodes it tracked with the most each showed at once.
 #[component]
 pub(super) fn TrackingWorkspace(controller: CurationController, node: String) -> Element {
     let tracked = TrackedNode {
@@ -103,9 +101,12 @@ pub(super) fn TrackingWorkspace(controller: CurationController, node: String) ->
         .with_payload(|payload| PreviewPlan::check(payload, &node))
         .err()
         .map(|error| error.message().to_owned());
-    let (Some(input), Some(view), Some(settings)) =
-        (input, RuleView::of(controller, &node), tracked.settings())
-    else {
+    let settings = tracked.settings();
+    let thumbnails = Thumbnails::use_camera(
+        controller,
+        settings.as_ref().and_then(ObjectTracking::camera),
+    );
+    let (Some(input), Some(settings)) = (input, settings) else {
         return rsx! {
             section { class: "curation-track-objects-workspace",
                 match controller.sample_error() {
@@ -119,36 +120,49 @@ pub(super) fn TrackingWorkspace(controller: CurationController, node: String) ->
     };
     let blocked = unsupported.is_some() || uncompiled.is_some();
     // Nothing tracked yet: the workspace says what tracking is for, beside
-    // the run that starts it, rather than empty strips and index.
+    // the run that starts it, rather than an empty index.
     let unmeasured = input.preview().is_unmeasured();
-    let strips = view.strips();
+    let stored = StoredTracks::of(&settings);
+    let episodes = input
+        .episodes()
+        .iter()
+        .filter_map(|episode| {
+            let most = controller.timeline(&node, episode.id())?.most();
+            Some(MeasuredEpisode::new(
+                episode.clone(),
+                most.map(|most| format!("{most:.0}")),
+            ))
+        })
+        .collect::<Vec<_>>();
     rsx! {
         section { class: "curation-track-objects-workspace", "aria-label": "Track objects",
             NodeBar {
-                lead: rsx! { TrackedSettings { tracked, settings, cameras: cameras.unwrap_or_default() } },
-                note: NodeNotes::join([unsupported, uncompiled, run.problem(), input.stale(), input.failures()]),
+                lead: rsx! { TrackedSettings { tracked, settings: settings.clone(), cameras: cameras.unwrap_or_default() } },
+                note: NodeNotes::join([unsupported, uncompiled, run.problem(), input.failures()]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
-                actions: rsx! {
-                    if !unmeasured {
-                        p { class: "curation-threshold-tally", role: "status", "{view.tally()}" }
-                    }
-                    MeasureRunActions { run: run.clone(), input: input.clone(), blocked }
-                },
+                actions: rsx! { MeasureRunActions { run: run.clone(), input: input.clone(), blocked } },
             }
             if unmeasured {
                 NodePrimer {
                     primer: Primer::TrackObjects,
                     action: rsx! { MeasureRunStart { run, input, blocked } },
                 }
-            } else {
-                RuleReview { view, strips }
+            } else if let Some(stored) = stored {
+                MeasuredEpisodes {
+                    episodes,
+                    meaning: "The most seen in one picture",
+                    thumbnails,
+                    render: move |(episode, play): (Episode, Option<PlayRequest>)| rsx! {
+                        TrackedEpisodeTab { episode, tracks: stored.clone(), focus: play }
+                    },
+                }
             }
         }
     }
 }
 
 /// What the node tracks, typed and kept on Enter or when the field is left,
-/// and the camera it tracks on.
+/// the camera it tracks on, and how many pictures a second.
 #[component]
 fn TrackedSettings(
     tracked: TrackedNode,
@@ -167,6 +181,7 @@ fn TrackedSettings(
     };
     let camera = settings.camera().unwrap_or_default().to_owned();
     let keep_on_enter = keep.clone();
+    let paced = tracked.clone();
     rsx! {
         form {
             class: "curation-track-objects-settings",
@@ -199,6 +214,25 @@ fn TrackedSettings(
                         "{StreamCatalog::camera_title_among(topic, &cameras)}" }
                 }
             }
+            label { class: "curation-track-objects-label", r#for: "curation-track-objects-rate", "at" }
+            TextInput {
+                id: "curation-track-objects-rate",
+                class: "curation-track-objects-rate",
+                kind: TextInputKind::Number,
+                value: settings.rate().to_string(),
+                min: "1",
+                max: "{ObjectTracking::MAX_RATE}",
+                step: "1",
+                "aria-label": "Pictures a second",
+                oninput: move |value: String| {
+                    if let Ok(rate) = value.trim().parse::<u32>() {
+                        paced.configure(|tracking| {
+                            let _ = tracking.set_rate(rate);
+                        });
+                    }
+                },
+            }
+            span { class: "curation-track-objects-label", "pictures/s" }
         }
     }
 }

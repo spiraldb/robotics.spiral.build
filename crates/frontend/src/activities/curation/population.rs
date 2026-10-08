@@ -1,27 +1,24 @@
-//! What flows along an edge: which parts of which episodes a node hands on.
+//! What flows along an edge, over the sample: which episodes reach a node,
+//! and which ranges of each are kept.
 //!
 //! A curation is shaped against an interpretive sample — the first hundred
 //! episodes its dataset lists — so every node answers while the graph is
-//! still being built. The dataset hands on those episodes whole; a
-//! measurement hands on what its preview read over the episodes it received,
-//! already cut to what reached it; and a node's rule, a Select's or a
-//! measure's own, keeps part of that.
-//! Any population reads out as slices, one part of one episode each, which is
-//! what a published view holds one row per.
+//! still being built. The dataset hands on those episodes whole; a model
+//! node hands on what reaches it and adds what its preview read; and a
+//! Select keeps part of it by its conditions (`select/reading.rs`), as the
+//! published view's SQL does.
 use super::annotate::SubtaskRow;
-use super::document::{CurationGraph, CurationNode, CurationNodeKind, Selection};
+use super::document::{CurationGraph, CurationNodeKind};
+use super::measured_timeline::MeasuredTimeline;
+use super::path::CurationPath;
 use super::preview::PreviewReads;
-use super::score_progress::Moment;
 use crate::activities::episode::Episode;
+use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use std::collections::BTreeMap;
 
 /// How many of a dataset's episodes interpretive execution reads.
 pub(super) const INTERPRETED_EPISODES: usize = 100;
-
-/// Two moments this close are one stretch of recording. A moment ends where
-/// the next frame starts, so touching moments share their boundary exactly;
-/// the published view joins them on that equality.
-const TOUCHING_SECONDS: f64 = 1e-6;
 
 /// The episodes a curation is shaped against: the first the dataset lists,
 /// in recording order.
@@ -79,91 +76,139 @@ impl EpisodeSample {
     }
 }
 
-/// What one node hands on.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Population {
-    /// Whole episodes, in sample order.
-    Episodes(Vec<EpisodeId>),
-    /// Subtasks, episode by episode in sample order, each episode's in time
-    /// order, with what the node that read them judged.
-    Subtasks(Vec<SubtaskRow>),
-    /// Scored moments of one Score progress node, episode by episode in sample
-    /// order,
-    /// each episode's in time order.
-    Moments(Vec<Moment>),
+/// The ranges kept of one episode, in seconds from its first message, in
+/// time order, never overlapping or touching.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct KeptRanges(Vec<(f64, f64)>);
+
+impl KeptRanges {
+    /// `ranges` in time order, those that overlap or touch joined into one,
+    /// as the SQL folds them: two subtasks back to back are one stretch.
+    fn merged(mut ranges: Vec<(f64, f64)>) -> Self {
+        ranges.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let mut merged: Vec<(f64, f64)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        Self(merged)
+    }
+    /// The whole of an episode `seconds` long.
+    pub(super) fn whole(seconds: f64) -> Self {
+        Self(vec![(0.0, seconds)])
+    }
+    pub(super) fn ranges(&self) -> &[(f64, f64)] {
+        &self.0
+    }
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub(super) fn seconds(&self) -> f64 {
+        self.0
+            .iter()
+            .map(|(start, end)| (end - start).max(0.0))
+            .sum()
+    }
+    /// What is kept of these within `within`, a range at a time, as the SQL
+    /// intersects them: every overlap of one of these with one of those,
+    /// merged.
+    pub(super) fn within(&self, within: &[(f64, f64)]) -> Self {
+        Self::merged(
+            self.0
+                .iter()
+                .flat_map(|(start, end)| {
+                    within
+                        .iter()
+                        .filter(move |(from, to)| from < end && to > start)
+                        .map(move |(from, to)| (start.max(*from), end.min(*to)))
+                })
+                .collect(),
+        )
+    }
+    /// What of these `other` does not keep: the parts left out between them.
+    pub(super) fn without(&self, other: &Self) -> Self {
+        let mut left = Vec::new();
+        for (start, end) in &self.0 {
+            let mut from = *start;
+            for (kept_start, kept_end) in &other.0 {
+                if *kept_end <= from || *kept_start >= *end {
+                    continue;
+                }
+                if *kept_start > from {
+                    left.push((from, *kept_start));
+                }
+                from = from.max(*kept_end);
+            }
+            if from < *end {
+                left.push((from, *end));
+            }
+        }
+        Self(left)
+    }
+    /// Whether the instant `time` is kept.
+    pub(super) fn holds(&self, time: f64) -> bool {
+        self.0
+            .iter()
+            .any(|(start, end)| *start <= time && time < *end)
+    }
 }
 
+/// One episode a node hands on, and what of it is kept.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct KeptEpisode {
+    episode: EpisodeId,
+    kept: KeptRanges,
+}
+
+impl KeptEpisode {
+    pub(super) fn new(episode: EpisodeId, kept: KeptRanges) -> Self {
+        Self { episode, kept }
+    }
+    pub(super) fn episode(&self) -> &EpisodeId {
+        &self.episode
+    }
+    pub(super) fn kept(&self) -> &KeptRanges {
+        &self.kept
+    }
+}
+
+/// What reaches a node, or what it hands on: the episodes it keeps any of,
+/// in sample order, each with its kept ranges.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Population(Vec<KeptEpisode>);
+
 impl Population {
-    /// The episodes this population reaches, each at its first mention.
+    pub(super) fn new(episodes: Vec<KeptEpisode>) -> Self {
+        Self(episodes)
+    }
+    pub(super) fn kept_episodes(&self) -> &[KeptEpisode] {
+        &self.0
+    }
+    /// The episodes it reaches.
     pub(super) fn episodes(&self) -> Vec<EpisodeId> {
-        let mentioned: Vec<&EpisodeId> = match self {
-            Self::Episodes(episodes) => episodes.iter().collect(),
-            Self::Subtasks(rows) => rows.iter().map(SubtaskRow::episode).collect(),
-            Self::Moments(rows) => rows.iter().map(Moment::episode).collect(),
-        };
-        let mut episodes = Vec::<EpisodeId>::new();
-        for episode in mentioned {
-            if !episodes.contains(episode) {
-                episodes.push(episode.clone());
-            }
-        }
-        episodes
+        self.0.iter().map(|kept| kept.episode.clone()).collect()
     }
-    /// The subtask rows this population holds; none unless it holds subtasks.
-    pub(super) fn subtasks(&self) -> &[SubtaskRow] {
-        match self {
-            Self::Subtasks(rows) => rows,
-            Self::Episodes(_) | Self::Moments(_) => &[],
-        }
+    /// What it keeps of `episode`, when it reaches it.
+    pub(super) fn of(&self, episode: &EpisodeId) -> Option<&KeptRanges> {
+        self.0
+            .iter()
+            .find(|kept| &kept.episode == episode)
+            .map(|kept| &kept.kept)
     }
-    /// How many things it holds, in its own unit.
     pub(super) fn len(&self) -> usize {
-        match self {
-            Self::Episodes(episodes) => episodes.len(),
-            Self::Subtasks(rows) => rows.len(),
-            Self::Moments(rows) => rows.len(),
-        }
+        self.0.len()
     }
-    /// One slice per thing it holds, as a published relation holds them:
-    /// whole episodes, each subtask, each moment.
-    pub(super) fn items(&self, sample: &EpisodeSample) -> Vec<Slice> {
-        match self {
-            Self::Episodes(episodes) => episodes
-                .iter()
-                .map(|episode| Slice::of_episode(episode, sample))
-                .collect(),
-            Self::Subtasks(rows) => rows.iter().map(Slice::of_subtask).collect(),
-            Self::Moments(rows) => rows.iter().map(Slice::of_moment).collect(),
-        }
-    }
-    /// The population as training is given it: each episode's kept parts in
-    /// time order, with moments that touch joined into one stretch.
-    pub(super) fn slices(&self, sample: &EpisodeSample) -> Vec<Slice> {
-        match self {
-            Self::Episodes(episodes) => episodes
-                .iter()
-                .map(|episode| Slice::of_episode(episode, sample))
-                .filter(|slice| slice.seconds() > 0.0)
-                .collect(),
-            Self::Subtasks(rows) => rows.iter().map(Slice::of_subtask).collect(),
-            Self::Moments(rows) => {
-                let mut slices = Vec::<Slice>::new();
-                for slice in rows.iter().map(Slice::of_moment) {
-                    match slices.last_mut() {
-                        Some(last) if last.continues_into(&slice) => last.extend_to(&slice),
-                        _ => slices.push(slice),
-                    }
-                }
-                slices
-            }
-        }
+    /// How much recording it keeps.
+    pub(super) fn seconds(&self) -> f64 {
+        self.0.iter().map(|kept| kept.kept.seconds()).sum()
     }
 }
 
 /// One part of one episode, in seconds from its start, `start` inclusive and
-/// `end` exclusive: the unit a curation finally selects. Training reads the
-/// dataset's messages inside it; a subtask's slice also carries the words the
-/// annotation described it with.
+/// `end` exclusive: what a map draws and a listing plays. A subtask's slice
+/// also carries the words the annotation described it with.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Slice {
     episode: EpisodeId,
@@ -173,27 +218,13 @@ pub(super) struct Slice {
 }
 
 impl Slice {
-    fn new(episode: EpisodeId, start: f64, end: f64, label: Option<String>) -> Self {
+    pub(super) fn new(episode: EpisodeId, start: f64, end: f64, label: Option<String>) -> Self {
         Self {
             episode,
             start,
             end,
             label,
         }
-    }
-    /// A whole episode, as long as the sample says it is.
-    pub(super) fn of_episode(episode: &EpisodeId, sample: &EpisodeSample) -> Self {
-        let end = sample.duration(episode).unwrap_or_default().max(0.0);
-        Self::new(episode.clone(), 0.0, end, None)
-    }
-    /// One scored moment's stretch of recording.
-    pub(super) fn of_moment(row: &Moment) -> Self {
-        Self::new(
-            row.episode().clone(),
-            row.start_time(),
-            row.end_time(),
-            None,
-        )
     }
     /// One subtask row's interval, under the words it was described with.
     pub(super) fn of_subtask(row: &SubtaskRow) -> Self {
@@ -213,28 +244,19 @@ impl Slice {
     pub(super) fn end(&self) -> f64 {
         self.end
     }
-    pub(super) fn seconds(&self) -> f64 {
-        self.end - self.start
-    }
     pub(super) fn label(&self) -> Option<&str> {
         self.label.as_deref()
-    }
-    /// Whether `next` starts where this slice ends, in the same episode.
-    pub(super) fn continues_into(&self, next: &Self) -> bool {
-        self.episode == next.episode && next.start - self.end <= TOUCHING_SECONDS
-    }
-    /// Run this slice on to where `next` ends.
-    pub(super) fn extend_to(&mut self, next: &Self) {
-        self.end = self.end.max(next.end);
     }
 }
 
 /// Reads what each node of one graph hands on over one sample, and what the
-/// preview has read over it.
+/// previews of its model nodes have read over it, each under the column the
+/// node stores its answers in now.
 pub(super) struct PopulationReader<'a> {
     graph: &'a CurationGraph,
     sample: &'a EpisodeSample,
     reads: &'a PreviewReads,
+    columns: BTreeMap<String, AnswerColumn>,
 }
 
 impl<'a> PopulationReader<'a> {
@@ -243,10 +265,22 @@ impl<'a> PopulationReader<'a> {
         sample: &'a EpisodeSample,
         reads: &'a PreviewReads,
     ) -> Self {
+        let columns = graph
+            .nodes()
+            .iter()
+            .filter(|node| node.kind().is_model())
+            .filter_map(|node| {
+                let column = CurationPath::to(graph, node.id())
+                    .and_then(|path| path.answer_column())
+                    .ok()?;
+                Some((node.id().to_owned(), column))
+            })
+            .collect();
         Self {
             graph,
             sample,
             reads,
+            columns,
         }
     }
     pub(super) fn graph(&self) -> &CurationGraph {
@@ -258,475 +292,73 @@ impl<'a> PopulationReader<'a> {
     pub(super) fn reads(&self) -> &PreviewReads {
         self.reads
     }
-    /// What `node` hands on: what it judged, kept by its rule when it has
-    /// one. A node the graph does not hold hands on nothing.
-    pub(super) fn of(&self, node: &str) -> Population {
-        let judged = self.judged(node);
-        let Some(measured) = self.graph.node(node) else {
-            return judged;
-        };
-        match measured.keeps() {
-            Some(rule) => self.kept(measured, judged, rule),
-            None => judged,
+    /// The column `node` stores its answers in now, once it can ask.
+    pub(super) fn column(&self, node: &str) -> Option<&AnswerColumn> {
+        self.columns.get(node)
+    }
+    /// The timeline `node`'s preview read of `episode`, when it has one.
+    pub(super) fn timeline(&self, node: &str, episode: &EpisodeId) -> Option<&MeasuredTimeline> {
+        self.reads.timeline((node, self.column(node)?), episode)
+    }
+    /// The subtasks `node`'s preview read of `episode`; none until it has.
+    pub(super) fn subtasks(&self, node: &str, episode: &EpisodeId) -> &[SubtaskRow] {
+        match self.column(node) {
+            Some(column) => self.reads.subtasks((node, column), episode),
+            None => &[],
         }
     }
-    /// What `node`'s rule judges: what the node measured, or for a Select
-    /// what reaches it.
-    pub(super) fn judged(&self, node: &str) -> Population {
-        let Some(measured) = self.graph.node(node) else {
-            return Population::Episodes(Vec::new());
+    /// The subtasks `node`'s preview read of every episode that reaches it,
+    /// in sample order.
+    pub(super) fn subtasks_reaching(&self, node: &str) -> Vec<SubtaskRow> {
+        self.input(node)
+            .episodes()
+            .iter()
+            .flat_map(|episode| self.subtasks(node, episode))
+            .cloned()
+            .collect()
+    }
+    /// What `node` hands on. A node the graph does not hold hands on
+    /// nothing.
+    pub(super) fn of(&self, node: &str) -> Population {
+        let Some(found) = self.graph.node(node) else {
+            return Population::default();
         };
-        match measured.kind() {
-            CurationNodeKind::Dataset => Population::Episodes(
+        match found.kind() {
+            CurationNodeKind::Dataset => Population::new(
                 self.sample
                     .episodes()
                     .iter()
-                    .map(|episode| episode.id().clone())
+                    .map(|episode| {
+                        let seconds = episode.facts().duration_seconds().unwrap_or_default();
+                        KeptEpisode::new(episode.id().clone(), KeptRanges::whole(seconds))
+                    })
                     .collect(),
             ),
-            // A measurement of subtasks hands on what its own preview read of
-            // the episodes that reach it: Break down's cut to the intervals it
-            // received, a search's or a grouping's with their judgment.
-            CurationNodeKind::BreakDownSubtasks(_)
-            | CurationNodeKind::FindSimilarSubtasks(_)
-            | CurationNodeKind::GroupSimilarSubtasks(_) => Population::Subtasks(
-                self.input(node)
-                    .episodes()
-                    .iter()
-                    .flat_map(|episode| self.reads.subtasks(measured, episode))
-                    .cloned()
-                    .collect(),
-            ),
-            // The preview already cut each episode's moments to what reached
-            // the node; an episode it has not read yet holds none.
-            CurationNodeKind::ScoreProgress(_) => Population::Moments(
-                self.input(node)
-                    .episodes()
-                    .iter()
-                    .flat_map(|episode| self.reads.moments(measured, episode))
-                    .cloned()
-                    .collect(),
-            ),
-            // A tracker counts whole episodes, so it hands on the episodes
-            // that reach it; its rule keeps them by what it counted.
-            CurationNodeKind::TrackObjects(_) | CurationNodeKind::Select => self.input(node),
+            CurationNodeKind::Select(selection) => selection.keep(&self.input(node), self),
+            _ => self.input(node),
         }
     }
     /// What reaches `node`: what its parent hands on.
     pub(super) fn input(&self, node: &str) -> Population {
         match self.graph.parent_of(node) {
             Some(parent) => self.of(parent),
-            None => Population::Episodes(Vec::new()),
-        }
-    }
-    /// The part of `judged` `node`'s rule, `selection`, keeps.
-    fn kept(&self, node: &CurationNode, judged: Population, selection: &Selection) -> Population {
-        match judged {
-            // A Track objects node's rule keeps by the count its preview read
-            // for each episode; a Select's by the episode's recorded facts.
-            Population::Episodes(episodes)
-                if matches!(node.kind(), CurationNodeKind::TrackObjects(_)) =>
-            {
-                Population::Episodes(
-                    episodes
-                        .into_iter()
-                        .filter(|id| selection.keeps_count(self.reads.object_count(node, id)))
-                        .collect(),
-                )
-            }
-            Population::Episodes(episodes) => Population::Episodes(
-                episodes
-                    .into_iter()
-                    .filter(|id| {
-                        self.sample
-                            .episode(id)
-                            .is_some_and(|episode| selection.keeps_episode(episode))
-                    })
-                    .collect(),
-            ),
-            // Each subtask carries what the measure above judged it to be.
-            Population::Subtasks(rows) => Population::Subtasks(
-                rows.into_iter()
-                    .filter(|row| selection.keeps_subtask(row.similarity(), row.category()))
-                    .collect(),
-            ),
-            Population::Moments(rows) => Population::Moments(
-                rows.into_iter()
-                    .filter(|row| selection.keeps_moment(row.progress_rate()))
-                    .collect(),
-            ),
+            None => Population::default(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::annotate::{CategoryPlacement, JudgmentValue};
-    use super::super::document::{
-        Comparison, DATASET_NODE_ID, EpisodeCondition, EpisodeFact, ObjectTracking,
-        ProgressScoring, SubtaskAnnotation, SubtaskCategory, SubtaskGrouping, SubtaskSearch,
-    };
-    use super::super::preview::{PreviewRows, ReadInput};
     use super::*;
 
-    /// A preview that has read nothing.
-    fn unread() -> PreviewReads {
-        PreviewReads::default()
-    }
-
-    fn node(graph: &CurationGraph, id: &str) -> CurationNode {
-        graph.node(id).expect("the node is in the graph").clone()
-    }
-
-    /// Record that `node` read one episode's moments, one per `(start, rate)`,
-    /// each a second long.
-    fn read_moments(
-        reads: &mut PreviewReads,
-        node: &CurationNode,
-        episode: &EpisodeId,
-        moments: &[(f64, Option<f64>)],
-    ) {
-        reads.record(
-            node,
-            (episode, ReadInput::untracked()),
-            Ok(PreviewRows::Moments(
-                moments
-                    .iter()
-                    .map(|(start, rate)| {
-                        Moment::new(episode.clone(), (*start, start + 1.0), *rate).unwrap()
-                    })
-                    .collect(),
-            )),
-        );
-    }
-
-    /// Record that `node` read these subtasks of their episode.
-    fn read_subtasks(reads: &mut PreviewReads, node: &CurationNode, rows: &[SubtaskRow]) {
-        reads.record(
-            node,
-            (rows[0].episode(), ReadInput::untracked()),
-            Ok(PreviewRows::Subtasks(rows.to_vec())),
-        );
-    }
-
-    fn subtask(episode: u32, (start, end): (f64, f64), description: &str) -> SubtaskRow {
-        SubtaskRow::new(EpisodeId::fixture(episode), (start, end), description).unwrap()
-    }
-
-    fn sample() -> EpisodeSample {
-        EpisodeSample::fixture(vec![
-            Episode::fixture(&EpisodeId::fixture(1), 30_000_000_000),
-            Episode::fixture(&EpisodeId::fixture(2), 10_000_000_000),
-            Episode::fixture(&EpisodeId::fixture(3), 25_000_000_000),
-        ])
-    }
-
-    fn select(graph: &mut CurationGraph, parent: &str, selection: Selection) -> String {
-        graph
-            .add_keeping(parent, CurationNodeKind::Select, selection)
-            .expect("the grammar allows this Select")
-    }
-
-    fn longer_than_20_seconds() -> Selection {
-        Selection::episodes_where(EpisodeFact::DurationSeconds, Comparison::AtLeast, 20.0)
-    }
-
     #[test]
-    fn a_select_of_episodes_keeps_those_meeting_every_condition_whole() {
-        let mut graph = CurationGraph::new(None);
-        let between = select(
-            &mut graph,
-            DATASET_NODE_ID,
-            Selection::Episodes {
-                conditions: vec![
-                    EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtLeast, 20.0),
-                    EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtMost, 28.0),
-                ],
-            },
-        );
-        let sample = sample();
-        let reads = unread();
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        assert_eq!(reader.of(DATASET_NODE_ID).len(), 3);
-        assert_eq!(reader.judged(&between).len(), 3);
-        let kept = reader.of(&between);
-        assert_eq!(kept.episodes(), [EpisodeId::fixture(3)]);
-        let slices = kept.slices(&sample);
-        assert_eq!((slices[0].start(), slices[0].end()), (0.0, 25.0));
-        assert_eq!(graph.outputs().len(), 1);
-        assert_eq!(graph.outputs()[0].id(), between);
-        // Its conditions are all in the one node, so no Select follows it.
-        assert!(
-            !graph
-                .child_kinds(&between)
-                .iter()
-                .any(|kind| matches!(kind, CurationNodeKind::Select))
-        );
-    }
-
-    #[test]
-    fn a_breakdown_hands_on_what_it_read_of_the_episodes_that_reach_it() {
-        let mut graph = CurationGraph::new(None);
-        let long = select(&mut graph, DATASET_NODE_ID, longer_than_20_seconds());
-        let annotate = graph
-            .add_child(
-                &long,
-                CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
-            )
-            .unwrap();
-        let mut reads = unread();
-        for ordinal in [1, 2] {
-            read_subtasks(
-                &mut reads,
-                &node(&graph, &annotate),
-                &[subtask(ordinal, (0.0, 4.0), "grasp")],
-            );
-        }
-        let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        // Episode 2 was read before the Select above tightened; it no longer
-        // reaches the node, so what it read there is not handed on.
-        assert_eq!(reader.of(&annotate).episodes(), [EpisodeId::fixture(1)]);
-        assert_eq!(
-            reader.of(&annotate).slices(&sample)[0].label(),
-            Some("grasp")
-        );
-        // Asked with another camera, the node has read nothing yet.
-        if let CurationNodeKind::BreakDownSubtasks(annotation) =
-            graph.node_mut(&annotate).unwrap().kind_mut()
-        {
-            annotation.set_camera(Some("/top-camera".into()));
-        }
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        assert!(reader.of(&annotate).subtasks().is_empty());
-    }
-
-    #[test]
-    fn a_grouping_keeps_its_chosen_categories_and_a_search_the_close_subtasks() {
-        let mut graph = CurationGraph::new(None);
-        let annotate = graph
-            .add_child(
-                DATASET_NODE_ID,
-                CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
-            )
-            .unwrap();
-        let grouping = SubtaskGrouping::of(vec![
-            SubtaskCategory::new("Grasp", "Take hold").unwrap(),
-            SubtaskCategory::new("Fold", "Bring over").unwrap(),
-        ]);
-        let group = graph
-            .add_keeping(
-                &annotate,
-                CurationNodeKind::GroupSimilarSubtasks(grouping),
-                Selection::Categories {
-                    names: vec!["Fold".into()],
-                },
-            )
-            .unwrap();
-        // A search inside the chosen category reads only its rows, and keeps
-        // those at least as close as its own cutoff.
-        let mut query = SubtaskSearch::default();
-        query.set_query("fold the towel");
-        let search = graph
-            .add_keeping(
-                &group,
-                CurationNodeKind::FindSimilarSubtasks(query),
-                Selection::Similar { minimum: 0.5 },
-            )
-            .unwrap();
-        assert_eq!(graph.subtask_source(&search), Some(annotate.as_str()));
-
-        let placed = |row: SubtaskRow, category: Option<&str>| {
-            row.judged(
-                SubtaskRow::CATEGORY,
-                JudgmentValue::Category(
-                    category.map(|category| CategoryPlacement::new(category, 0.9).unwrap()),
-                ),
-            )
-        };
-        let similar = |row: SubtaskRow, similarity: Option<f64>| {
-            row.judged(
-                SubtaskRow::SIMILARITY,
-                JudgmentValue::Similarity(similarity),
-            )
-        };
-        let (grasp, fold, smooth) = (
-            subtask(1, (0.0, 5.0), "grasp the corner"),
-            subtask(1, (5.0, 9.0), "fold in half"),
-            subtask(1, (9.0, 12.0), "smooth the cloth"),
-        );
-        let mut reads = unread();
-        read_subtasks(
-            &mut reads,
-            &node(&graph, &annotate),
-            &[grasp.clone(), fold.clone(), smooth.clone()],
-        );
-        read_subtasks(
-            &mut reads,
-            &node(&graph, &group),
-            &[
-                placed(grasp, Some("Grasp")),
-                placed(fold.clone(), Some("Fold")),
-                // A row the model could not place joins no category.
-                placed(smooth, None),
-            ],
-        );
-        read_subtasks(
-            &mut reads,
-            &node(&graph, &search),
-            &[
-                similar(fold.clone(), Some(0.8)),
-                similar(fold.clone(), Some(0.3)),
-            ],
-        );
-
-        let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        assert_eq!(reader.judged(&group).len(), 3);
-        assert_eq!(
-            reader
-                .of(&group)
-                .subtasks()
-                .iter()
-                .map(SubtaskRow::description)
-                .collect::<Vec<_>>(),
-            ["fold in half"]
-        );
-        assert_eq!(reader.judged(&search).len(), 2);
-        assert_eq!(
-            reader.of(&search).subtasks(),
-            [similar(fold.clone(), Some(0.8))]
-        );
-
-        // Sliding the cutoff keeps more of what was read, and reads nothing.
-        graph
-            .set_rule(&search, Selection::Similar { minimum: 0.2 })
-            .unwrap();
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        assert_eq!(reader.of(&search).len(), 2);
-
-        // A new question makes what the search read an answer to another one.
-        if let Some(CurationNodeKind::FindSimilarSubtasks(config)) =
-            graph.node_mut(&search).map(CurationNode::kind_mut)
-        {
-            config.set_query("smooth the cloth");
-        }
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        assert!(reader.of(&search).subtasks().is_empty());
-    }
-
-    #[test]
-    fn score_progress_keeps_moving_and_unread_moments_and_joins_them() {
-        let mut graph = CurationGraph::new(None);
-        let score = graph
-            .add_child(
-                DATASET_NODE_ID,
-                CurationNodeKind::ScoreProgress(ProgressScoring::default()),
-            )
-            .unwrap();
-        let episode = EpisodeId::fixture(1);
-        let mut reads = unread();
-        read_moments(
-            &mut reads,
-            &node(&graph, &score),
-            &episode,
-            &[
-                (0.0, Some(0.4)),
-                (1.0, None),
-                (2.0, Some(-0.1)),
-                (3.0, Some(0.2)),
-            ],
-        );
-        // How fast is fast enough is the node's own; breaking down what it
-        // keeps is what follows.
-        assert_eq!(
-            graph.node(&score).and_then(CurationNode::keeps),
-            Some(&Selection::Progressing { minimum: 0.0 })
-        );
-        assert_eq!(
-            graph
-                .child_kinds(&score)
-                .iter()
-                .map(CurationNodeKind::label)
-                .collect::<Vec<_>>(),
-            ["Break down subtasks"]
-        );
-        let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        assert_eq!(reader.judged(&score).len(), 4);
-        let slices = reader.of(&score).slices(&sample);
-        assert_eq!(
-            slices
-                .iter()
-                .map(|slice| (slice.start(), slice.end()))
-                .collect::<Vec<_>>(),
-            [(0.0, 2.0), (3.0, 4.0)]
-        );
-    }
-
-    #[test]
-    fn track_objects_keeps_the_episodes_whose_count_is_in_its_range() {
-        let mut graph = CurationGraph::new(None);
-        let track = graph
-            .add_keeping(
-                DATASET_NODE_ID,
-                CurationNodeKind::TrackObjects(ObjectTracking::default()),
-                Selection::ObjectCount {
-                    fewest: 3,
-                    most: Some(4),
-                },
-            )
-            .unwrap();
-        let tracker = node(&graph, &track);
-        let mut reads = unread();
-        // The first episode shows three at once, the second five, and the
-        // third the tracker could not count; nothing has read a fourth.
-        for (ordinal, count) in [(1, Some(3)), (2, Some(5)), (3, None)] {
-            reads.record(
-                &tracker,
-                (&EpisodeId::fixture(ordinal), ReadInput::untracked()),
-                Ok(PreviewRows::ObjectCount(count)),
-            );
-        }
-        let sample = sample();
-        let reader = PopulationReader::new(&graph, &sample, &reads);
-        // It judges every episode that reaches it, and keeps them whole.
-        assert_eq!(reader.judged(&track).len(), 3);
-        assert_eq!(
-            reader.of(&track),
-            Population::Episodes(vec![EpisodeId::fixture(1)])
-        );
-    }
-
-    #[test]
-    fn moments_reach_only_the_episodes_that_reach_the_score_node() {
-        let mut graph = CurationGraph::new(None);
-        let long = select(&mut graph, DATASET_NODE_ID, longer_than_20_seconds());
-        let score = graph
-            .add_child(
-                &long,
-                CurationNodeKind::ScoreProgress(ProgressScoring::default()),
-            )
-            .unwrap();
-        // Episode 2 was read before the Select above tightened; it no longer
-        // reaches the Score progress node, so its moments are not handed on.
-        let score_node = node(&graph, &score);
-        let mut reads = unread();
-        read_moments(
-            &mut reads,
-            &score_node,
-            &EpisodeId::fixture(1),
-            &[(0.0, Some(0.5))],
-        );
-        read_moments(
-            &mut reads,
-            &score_node,
-            &EpisodeId::fixture(2),
-            &[(0.0, None)],
-        );
-        let sample = sample();
-        let moments = PopulationReader::new(&graph, &sample, &reads).of(&score);
-        assert_eq!(moments.episodes(), [EpisodeId::fixture(1)]);
-        assert_eq!(moments.len(), 1);
+    fn kept_ranges_narrow_as_the_sql_intersects_them_and_say_what_they_leave_out() {
+        let kept = KeptRanges(vec![(0.0, 15.0), (25.0, 50.0)]);
+        let within = kept.within(&[(0.0, 20.0), (30.0, 50.0)]);
+        assert_eq!(within, KeptRanges(vec![(0.0, 15.0), (30.0, 50.0)]));
+        assert_eq!(within.seconds(), 35.0);
+        assert_eq!(kept.without(&within), KeptRanges(vec![(25.0, 30.0)]));
+        assert!(within.holds(31.0) && !within.holds(20.0));
+        assert!(kept.within(&[]).is_empty());
     }
 }

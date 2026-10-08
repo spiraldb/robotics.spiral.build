@@ -1,16 +1,16 @@
-//! Break down subtasks: the node's step splits every episode that reaches it
-//! into subtasks with `spql.ai.breakdown_task`, and its preview runs that step
-//! over each episode's intervals that reach it, as the curation's own run.
-//! What the preview read is held for the session, and every node below reads
-//! it.
+//! Break down subtasks: the node splits every episode that reaches it into
+//! subtasks with `spql.ai.breakdown_task`, and its preview reads what it
+//! stored of each, as the curation's own run. What the preview read is held
+//! for the session, and the judgments below read it.
 mod breakdown;
 mod episodes;
 mod output;
 mod subtask;
 
+pub(super) use breakdown::SubtaskListing;
 #[cfg(test)]
 pub(super) use subtask::{CategoryPlacement, JudgmentValue};
-pub(super) use subtask::{MAX_SUBTASKS, SubtaskColumns, SubtaskRow};
+pub(super) use subtask::{MAX_SUBTASKS, SubtaskReading, SubtaskRow};
 
 use super::document::{CurationNode, CurationNodeKind, SubtaskAnnotation};
 use super::episode_tabs::{EpisodeTabs, OpenEpisode};
@@ -40,8 +40,7 @@ use spiral_robotics_ui::{
 /// Which episodes one run covers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RunScope {
-    /// Everything the preview has not read yet, or read from rows that have
-    /// changed since: the ordinary Run.
+    /// Everything the preview has not read yet: the ordinary Run.
     Pending,
     /// Only the episodes whose last read failed.
     Failed,
@@ -61,7 +60,7 @@ impl RunScope {
     fn explanation(self, episodes: usize) -> String {
         match self {
             Self::Pending => {
-                format!("Break down the {episodes} episodes not yet read, or out of date")
+                format!("Break down the {episodes} episodes not yet read")
             }
             Self::Failed => format!("Try the {episodes} episodes that failed again"),
             Self::All => format!("Break down all {episodes} episodes again"),
@@ -116,12 +115,9 @@ impl AnnotationNode {
             }
         })
     }
-    /// The rows the node hands on: its preview's, of the episodes reaching it.
+    /// The rows its preview read of the episodes reaching it.
     fn rows(&self) -> Vec<SubtaskRow> {
-        self.controller
-            .populations(&self.id)
-            .map(|(_, output)| output.subtasks().to_vec())
-            .unwrap_or_default()
+        self.controller.subtasks(&self.id)
     }
     /// Apply one configuration change, reporting what the document refused.
     fn configure(
@@ -207,9 +203,9 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
         chosen.focus(focus.episode(), focus.interval());
     });
 
-    // The preview runs this node's step, the one a published view chains,
-    // over the intervals that reach it, one query per episode. The pass is
-    // the curation's, not this view's: choosing another node leaves it
+    // The preview reads what this node stored of each episode that reaches
+    // it, one query per episode, after the backend asks the model. The pass
+    // is the curation's, not this view's: choosing another node leaves it
     // reading. Stop ends it at once; the episodes in flight stay unread.
     let run = controller.run_state(&node);
     let problem = use_signal(|| Option::<String>::None);
@@ -254,9 +250,6 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
         .iter()
         .map(|(episode, reason)| EpisodeFailure::new(episode.clone(), reason))
         .collect::<Vec<_>>();
-    let stale = progress
-        .is_stale()
-        .then(|| "Out of date: its input changed".to_owned());
     let rows = annotation.rows();
     let groups = EpisodeSubtasks::group(rows.clone().into_iter());
     let context = SubtaskContext::new(
@@ -322,7 +315,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
                         },
                     }
                 },
-                note: NodeNotes::join([uncompiled.clone(), problem(), stale, FailedEpisodes::note(failures.len())]),
+                note: NodeNotes::join([uncompiled.clone(), problem(), FailedEpisodes::note(failures.len())]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! {
                     if running {

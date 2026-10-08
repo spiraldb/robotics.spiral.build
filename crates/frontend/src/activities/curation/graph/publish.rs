@@ -1,4 +1,4 @@
-//! Publishing from the document bar: the outputs the operator chooses, each
+//! Publishing from the document bar: the nodes the operator chooses, each
 //! compiled over every episode of the dataset and published as a view under
 //! the name they give it, then recorded in the curation, which saves.
 //! A view cannot be turned back into a graph, so the recipe stays in the
@@ -370,9 +370,9 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                 aria_expanded: open(),
                 disabled: none,
                 title: if none {
-                    "Add Score progress, Find similar, Group similar, or a Select: each is an output that publishes as a view"
+                    "Add a node after the dataset: every node but the dataset publishes as a view"
                 } else {
-                    "Choose outputs to publish as views"
+                    "Choose nodes to publish as views"
                 },
                 onclick: {
                     let outputs = outputs.clone();

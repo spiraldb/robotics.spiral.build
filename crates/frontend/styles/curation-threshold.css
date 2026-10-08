@@ -77,15 +77,14 @@
   .curation-threshold-strip-value {
     @apply z-[1] font-medium text-ink;
   }
-  /* A range's two sliders lie one over the other. */
   .curation-threshold-strip-sliders {
     @apply relative;
   }
 }
 
 /* Unlayered: a range input's parts are browser pseudo-elements. The level
-   a rule keeps by is slid on a real slider: a 4px track, filled in ink on
-   the side the rule keeps, and a round handle the threshold line runs into.
+   a condition keeps by is slid on a real slider: a 4px track, filled in ink
+   on the side it keeps, and a round handle the threshold line runs into.
    The fill stops at the handle's centre, on the same inset as the dots. */
 .curation-threshold-strip-slider {
   --kept: var(--tone-ink-soft);
@@ -106,38 +105,6 @@
 
 .curation-threshold-strip-slider[data-keeps="below"] {
   --track: linear-gradient(to right, var(--kept) var(--stop), var(--dropped) var(--stop));
-}
-
-/* A range fills between its handles, `--at` to `--to`. */
-.curation-threshold-strip-slider[data-keeps="between"] {
-  --until: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--to));
-  --track: linear-gradient(
-    to right,
-    var(--dropped) var(--stop),
-    var(--kept) var(--stop) var(--until),
-    var(--dropped) var(--until)
-  );
-}
-
-/* A range's second handle rides the first slider's track: its own track is
-   bare, and on both sliders only the thumbs take the pointer, so either
-   handle can be grabbed wherever the other stands. */
-.curation-threshold-strip-slider[data-handle="upper"] {
-  --track: transparent;
-  position: absolute;
-  inset: 0;
-}
-
-.curation-threshold-strip-sliders:has(> [data-handle="upper"]) > .curation-threshold-strip-slider {
-  pointer-events: none;
-}
-
-.curation-threshold-strip-sliders:has(> [data-handle="upper"]) > .curation-threshold-strip-slider::-webkit-slider-thumb {
-  pointer-events: auto;
-}
-
-.curation-threshold-strip-sliders:has(> [data-handle="upper"]) > .curation-threshold-strip-slider::-moz-range-thumb {
-  pointer-events: auto;
 }
 
 .curation-threshold-strip-slider::-webkit-slider-runnable-track {

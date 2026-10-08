@@ -1,8 +1,8 @@
-//! Each episode's row: what the nodes of a path ask a model about the whole
-//! episode, built once where the path still holds one row per episode, and
-//! the answers that then ride on the interval rows below it until the step
-//! that unnests each.
-use super::{PathError, PathSource, Relation, StepSql};
+//! Each episode's row: the episode's first message, which every stored time
+//! counts from, and what the nodes of a path ask a model about the whole
+//! episode, one column each, which their entries read.
+use super::{PathError, PathSource};
+use crate::activities::curation::graph::DatasetStep;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
 use spiral_robotics_common::datasets::{CameraVideo, DatasetSelection};
 use spiral_robotics_common::sql::SqlLiteral;
@@ -15,13 +15,13 @@ enum RowAnswer {
     Asked(String),
 }
 
-/// Each episode's row, where a path still holds one row per episode: every
-/// answer the nodes ask a model about the whole episode, one column each,
-/// named for the answers table column that stores it. A stored answer is
-/// read from the answers table; one asked on the row reads the camera videos
-/// and the instructions its call names, a camera two models watch read once,
-/// and no video leaves the row. Every answer counts from the episode's first
-/// message, which the row carries beside them.
+/// Each episode's row: every answer the nodes ask a model about the whole
+/// episode, one column each, named for the answers table column that stores
+/// it. A stored answer is read from the answers table; one asked on the row
+/// reads the camera videos and the instructions its call names, a camera two
+/// models watch read once, and no video leaves the row. Published, the row is
+/// built on the dataset's listing, one per episode; previewed or filled, it
+/// is the bound episode's alone.
 pub(in crate::activities::curation) struct EpisodeRow {
     dataset: DatasetSelection,
     source: PathSource,
@@ -34,9 +34,7 @@ impl EpisodeRow {
     /// The column the episode's first message rides in, in log time.
     pub(in crate::activities::curation) const ORIGIN: &'static str = "origin_ns";
     /// The entry holding each episode's row.
-    const EPISODES: &'static str = "episodes";
-    /// The entry in which a preview's rows reach its node, beside the row.
-    const REACHED: &'static str = "preview_reached";
+    pub(in crate::activities::curation) const EPISODES: &'static str = "episodes";
     /// The entries holding each episode's video of one camera, numbered.
     const VIDEOS: &'static str = "camera_video";
     /// The entries holding each episode's instruction on one topic, numbered.
@@ -90,50 +88,26 @@ impl EpisodeRow {
         self.answer(column, RowAnswer::Asked(call))
     }
 
-    /// The row's entries over the rows that reach it, and the relation
-    /// handing those rows on with every answer beside them; nothing when no
-    /// node asks anything. Published, the rows are whole episodes, one each,
-    /// so the row is built on them and each one's start is its first message.
-    /// Previewed, they are the parent's preview rows, and the row is the
-    /// bound episode's alone, read from its listing and joined to each.
-    pub(super) fn over(self, reaching: &Relation) -> Result<Option<StepSql>, PathError> {
+    /// The row's entries, the last of them [`Self::EPISODES`]; nothing when
+    /// no node asks anything. Published, each episode's first message is the
+    /// start of its listed span.
+    pub(in crate::activities::curation) fn entries(self) -> Result<Vec<String>, PathError> {
         if self.answers.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        let (episodes, origin) = (Self::EPISODES, Self::ORIGIN);
-        let carried = RowAnswers(
-            self.answers
-                .iter()
-                .map(|(column, _)| column.to_string())
-                .collect(),
-        );
-        let mut entries = self.reads(Some(reaching));
-        let relation = match self.source {
-            PathSource::Published => {
-                entries.push(format!(
-                    "{episodes} AS (SELECT {}, i.start_ns AS {origin}{} FROM {} i{})",
-                    reaching.columns_of("i."),
-                    self.answer_columns(),
-                    reaching.name(),
-                    self.joins("i.episode_id")?
-                ));
-                reaching.renamed(episodes)
-            }
-            PathSource::Preview | PathSource::Fill => {
-                entries.extend([
-                    self.bound_episode()?,
-                    format!(
-                        "{} AS (SELECT {}{} FROM {} i JOIN {episodes} e ON e.episode_id = i.episode_id)",
-                        Self::REACHED,
-                        reaching.columns_of("i."),
-                        carried.following("e."),
-                        reaching.name()
-                    ),
-                ]);
-                reaching.renamed(Self::REACHED)
-            }
-        };
-        Ok(Some(StepSql::new(entries, relation.carrying(carried))))
+        let mut entries = self.reads();
+        entries.push(match self.source {
+            PathSource::Published => format!(
+                "{} AS (SELECT d.episode_id, d.{origin}{} FROM {} d{})",
+                Self::EPISODES,
+                self.answer_columns(),
+                DatasetStep::NAME,
+                self.joins("d.episode_id")?,
+                origin = Self::ORIGIN,
+            ),
+            PathSource::Preview | PathSource::Fill => self.bound_episode()?,
+        });
+        Ok(entries)
     }
 
     /// The one statement filling the one answer the row asks for, for the
@@ -143,8 +117,8 @@ impl EpisodeRow {
         let [(column, _)] = self.answers.as_slice() else {
             return Err(PathError::new("A fill asks each episode one thing."));
         };
-        let mut entries = self.reads(None);
-        entries.push(self.bound_episode()?);
+        let column = column.clone();
+        let entries = self.entries()?;
         Ok(format!(
             "WITH\n  {}\nSELECT episode_id, {column} AS answer FROM {}",
             entries.join(",\n  "),
@@ -192,19 +166,14 @@ impl EpisodeRow {
     }
 
     /// The entries reading every camera video and instruction the row asks
-    /// with: of the episodes that reach it, or of the episode bound as `$1`.
-    fn reads(&self, reaching: Option<&Relation>) -> Vec<String> {
+    /// with, of the episode bound as `$1`: only a fill asks on the row.
+    fn reads(&self) -> Vec<String> {
         let dataset = self.dataset.sql_name();
-        let members = match (self.source, reaching) {
-            (PathSource::Published, Some(reaching)) => {
-                format!("r.id IN (SELECT episode_id FROM {})", reaching.name())
-            }
-            _ => "r.id = $1".to_owned(),
-        };
+        let members = "r.id = $1";
         let videos = self.cameras.iter().enumerate().map(|(index, camera)| {
             let videos = Self::entry(Self::VIDEOS, index);
             CameraVideo::new(&dataset, camera)
-                .videos((&format!("{videos}_packets"), &videos), &members)
+                .videos((&format!("{videos}_packets"), &videos), members)
         });
         let instructions = self.instructions.iter().enumerate().map(|(index, topic)| {
             format!(
@@ -265,45 +234,5 @@ impl EpisodeRow {
                 reads.len() - 1
             }
         }
-    }
-}
-
-/// The answers of episode rows riding on interval rows, each until the step
-/// of the node that asked for it unnests it, and with them the episode's
-/// first message, which every answer's times count from. Each rides under
-/// the name of the column that stores it.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(in crate::activities::curation) struct RowAnswers(Vec<String>);
-
-impl RowAnswers {
-    /// The columns, each after `qualifier` (such as `r.`) and led by a comma,
-    /// to follow others in a `SELECT`; nothing when no answer rides.
-    pub(in crate::activities::curation) fn following(&self, qualifier: &str) -> String {
-        self.columns()
-            .map(|column| format!(", {qualifier}{column}"))
-            .collect()
-    }
-    pub(super) fn columns(&self) -> impl Iterator<Item = &str> + '_ {
-        let origin = (!self.0.is_empty()).then_some(EpisodeRow::ORIGIN);
-        origin.into_iter().chain(self.0.iter().map(String::as_str))
-    }
-    /// What rides on past the step that unnests `answer`, which must be
-    /// riding here.
-    pub(in crate::activities::curation) fn without(
-        &self,
-        answer: &AnswerColumn,
-    ) -> Result<Self, PathError> {
-        if !self.0.iter().any(|riding| riding == answer.as_str()) {
-            return Err(PathError::new(format!(
-                "Nothing that reaches this node carries each episode's {answer}."
-            )));
-        }
-        Ok(Self(
-            self.0
-                .iter()
-                .filter(|riding| *riding != answer.as_str())
-                .cloned()
-                .collect(),
-        ))
     }
 }

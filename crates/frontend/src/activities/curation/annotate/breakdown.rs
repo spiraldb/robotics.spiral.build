@@ -1,20 +1,20 @@
-//! What a Break down subtasks node adds to a path.
+//! What a Break down subtasks node adds to a path, and the listing of its
+//! subtasks every judgment of them reads too.
 //!
 //! The node asks each episode for `spql.ai.breakdown_task` over the chosen
 //! camera's video, with the episode's recorded instruction as its task when
 //! the dataset records one. A fill stores the answer in the dataset's
 //! answers table, and the published view and the preview read it from there.
-//! The model reads each episode whole, so what it is asked never
-//! depends on anything above the node. Its step lists the subtasks of every
-//! row that reaches the node, each with its place in the answer, which the
-//! stored judgments below read by, and cuts them to that row's interval. The
-//! function answers on the video's presentation timeline, which Studio's
-//! packets count from the episode's first message, so a subtask's log time
-//! is that message's time plus its own.
-use super::subtask::SubtaskRow;
+//! The model reads each episode whole, so what it is asked never depends on
+//! anything above the node. Its entries list the subtasks of every episode,
+//! each with its place in the answer, which the stored judgments below read
+//! by. The function answers on the video's presentation timeline, which
+//! Studio's packets count from the episode's first message, so a subtask's
+//! log time is that message's time plus its own.
 use crate::activities::curation::document::{DEFAULT_ANNOTATION_MODEL, SubtaskAnnotation};
 use crate::activities::curation::path::{
-    EpisodeRow, PathError, PathFragment, PathSource, PathStep, Relation, StepSql, StoredAnswers,
+    ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, PathSource,
+    TableColumn,
 };
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
 use spiral_robotics_common::datasets::DatasetSelection;
@@ -44,7 +44,7 @@ impl SubtaskAnnotation {
 
 /// Each episode's subtasks are stored under the model, the camera, the
 /// sample interval, and the instruction topic it was told its task by.
-impl StoredAnswers for SubtaskAnnotation {
+impl ModelNode for SubtaskAnnotation {
     fn answer_column(&self, _subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
         let call = serde_json::json!([
             "spql.ai.breakdown_task",
@@ -59,70 +59,115 @@ impl StoredAnswers for SubtaskAnnotation {
     fn answer_source(
         &self,
         dataset: &DatasetSelection,
-        (column, _): (&AnswerColumn, Option<&AnswerColumn>),
+        step: &ModelStep<'_>,
     ) -> Result<AnswerSource, PathError> {
         let mut row = EpisodeRow::new(dataset, PathSource::Fill);
-        self.episode_columns(&mut row, column)?;
+        self.episode_columns(&mut row, step)?;
         Ok(AnswerSource::Statement {
             statement: row.answering()?,
         })
     }
-}
 
-impl PathFragment for SubtaskAnnotation {
-    fn episode_columns(
-        &self,
-        row: &mut EpisodeRow,
-        column: &AnswerColumn,
-    ) -> Result<(), PathError> {
+    /// A fill asks the model on the row; every other reading reads what it
+    /// stored.
+    fn episode_columns(&self, row: &mut EpisodeRow, step: &ModelStep<'_>) -> Result<(), PathError> {
         match row.source() {
-            PathSource::Published | PathSource::Preview => row.stored(column),
+            PathSource::Published | PathSource::Preview => row.stored(step.column()),
             PathSource::Fill => {
                 let call = self.call(row)?;
-                row.asked(column, call)
+                row.asked(step.column(), call)
             }
         }
     }
 
-    /// Every subtask the model found in the episode of every row that
-    /// reaches the node, at its place in the answer, cut to that row's
-    /// interval.
-    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
-        let input = step.input()?;
-        let answer = step.column()?;
-        let rides = input.answers().without(answer)?;
-        let (name, subtask, index, origin) = (
-            step.name(),
-            SubtaskRow::DESCRIPTION,
-            SubtaskRow::INDEX,
-            EpisodeRow::ORIGIN,
-        );
+    /// Every subtask the model found in the episode, at its place in the
+    /// answer, in log time.
+    fn entries(&self, step: &ModelStep<'_>) -> Result<ModelEntries, PathError> {
+        Ok(SubtaskListing::new(step, step.column()).entries(|entries| {
+            entries.folding(
+                TableColumn::of_node(step.node(), &step.name(), ColumnMeaning::Subtasks),
+                (
+                    "STRUCT_PACK(description := description, start_ns := start_ns, end_ns := end_ns)"
+                        .to_owned(),
+                    None,
+                ),
+            )
+        }))
+    }
+}
+
+/// The subtasks a Break down stored for each episode, listed one per entry
+/// with their place in its answer and their log times, and beside each the
+/// fields of the judgment a node stored for it at the same place, when it
+/// judges them.
+pub(in crate::activities::curation) struct SubtaskListing<'a> {
+    step: &'a ModelStep<'a>,
+    subtasks: &'a AnswerColumn,
+    judged: &'a [(&'a str, &'a str)],
+}
+
+impl<'a> SubtaskListing<'a> {
+    /// What a preview reads of every listing's entries, before any judgment.
+    const LISTED: [&'static str; 4] = ["episode_id", "description", "start_ns", "end_ns"];
+
+    /// The subtasks the Break down column `subtasks` stores.
+    pub(in crate::activities::curation) fn new(
+        step: &'a ModelStep<'a>,
+        subtasks: &'a AnswerColumn,
+    ) -> Self {
+        Self {
+            step,
+            subtasks,
+            judged: &[],
+        }
+    }
+
+    /// The same, with `judged` read of the node's own stored judgment of
+    /// each: every field as its expression over `judgment` and its name.
+    pub(in crate::activities::curation) fn judged_as(
+        self,
+        judged: &'a [(&'a str, &'a str)],
+    ) -> Self {
+        Self { judged, ..self }
+    }
+
+    /// The node's entries, folded into its columns by `fold`. A preview reads
+    /// every field of each entry.
+    pub(in crate::activities::curation) fn entries(
+        &self,
+        fold: impl FnOnce(ModelEntries) -> ModelEntries,
+    ) -> ModelEntries {
+        let (step, subtasks, origin) = (self.step, self.subtasks, EpisodeRow::ORIGIN);
+        let listed = format!("{}_listed", step.name());
+        let judgment = if self.judged.is_empty() {
+            String::new()
+        } else {
+            format!(", spql.list.get(r.{}, g._) AS judgment", step.column())
+        };
+        let judged = self
+            .judged
+            .iter()
+            .map(|(field, name)| format!(", l.{field} AS {name}"))
+            .collect::<String>();
         let entries = vec![
             format!(
-                "{name}_listed AS (SELECT r.episode_id, r.start_ns AS reached_start_ns, r.end_ns AS reached_end_ns{}, \
-                 r.{origin} AS listed_origin_ns, g._ AS {index}, spql.list.get(r.{answer}, g._) AS listed \
-                 FROM {} r CROSS JOIN LATERAL spql.range(CAST(spql.list.len(r.{answer}) AS BIGINT)) g)",
-                rides.following("r."),
-                input.name()
+                "{listed} AS (SELECT r.episode_id, r.{origin}, g._ AS subtask_index, \
+                 spql.list.get(r.{subtasks}, g._) AS listed{judgment} FROM {} r \
+                 CROSS JOIN LATERAL spql.range(CAST(spql.list.len(r.{subtasks}) AS BIGINT)) g)",
+                EpisodeRow::EPISODES,
             ),
             format!(
-                "{name}_subtasks AS (SELECT l.episode_id, l.reached_start_ns, l.reached_end_ns{}, \
-                 l.listed_origin_ns + CAST(l.listed.start_ns AS BIGINT) AS start_ns, l.listed_origin_ns + CAST(l.listed.end_ns AS BIGINT) AS end_ns, \
-                 l.listed.description AS {subtask}, l.{index} FROM {name}_listed l)",
-                rides.following("l.")
-            ),
-            format!(
-                "{name} AS (SELECT episode_id, GREATEST(start_ns, reached_start_ns) AS start_ns, \
-                 LEAST(end_ns, reached_end_ns) AS end_ns, {subtask}, {index}{} FROM {name}_subtasks \
-                 WHERE start_ns < reached_end_ns AND end_ns > reached_start_ns)",
-                rides.following("")
+                "{} AS (SELECT l.episode_id, l.subtask_index, l.listed.description AS description, \
+                 l.{origin} + CAST(l.listed.start_ns AS BIGINT) AS start_ns, \
+                 l.{origin} + CAST(l.listed.end_ns AS BIGINT) AS end_ns{judged} FROM {listed} l)",
+                step.entries(),
             ),
         ];
-        Ok(StepSql::new(
-            entries,
-            Relation::new(name, vec![subtask, index])
-                .publishing(subtask)
-                .carrying(rides),
-        ))
+        let previewed = Self::LISTED
+            .into_iter()
+            .chain(self.judged.iter().map(|(_, name)| *name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fold(ModelEntries::new(entries, "subtask_index", previewed))
     }
 }

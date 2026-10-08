@@ -9,7 +9,7 @@ use spiral_robotics_common::project::ProjectKey;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 
-use super::super::document::{CurationNodeKind, DATASET_NODE_ID};
+use super::super::document::{CurationNodeKind, DATASET_NODE_ID, Selection};
 use super::super::state::CurationController;
 use super::node_card::NodeCard;
 
@@ -165,7 +165,14 @@ async fn the_canvas_opens_the_latest_curation_and_grows_the_graph_from_a_nodes_m
             .menu()
             .expect("an annotation accepts children")
             .labels(),
-        ["Find similar subtasks", "Group similar subtasks"]
+        [
+            "Break down subtasks",
+            "Score progress",
+            "Track objects",
+            "Find similar subtasks",
+            "Group similar subtasks",
+            "Select"
+        ]
     );
     // An entry the graph no longer offers changes nothing.
     assert!(
@@ -191,7 +198,10 @@ async fn publishing_saves_what_is_drawn_before_it_records_a_view() {
     harness.settle(&mut dom).await;
     dom.in_scope(ScopeId::ROOT, || {
         controller.edit(|payload| {
-            payload.add_child(DATASET_NODE_ID, CurationNodeKind::Select)?;
+            payload.add_child(
+                DATASET_NODE_ID,
+                CurationNodeKind::Select(Selection::keeping_everything()),
+            )?;
             Ok(())
         })
     })

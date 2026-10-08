@@ -1,4 +1,4 @@
-//! Which outputs are published as catalog views, and whether each view is
+//! Which nodes are published as catalog views, and whether each view is
 //! still what the saved recipe compiles to.
 //!
 //! A view cannot be turned back into a graph, so the recipe stays in the
@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use spiral_robotics_common::curation::ViewName;
 use std::collections::BTreeSet;
 
-/// One output published as a catalog view, over every episode of the
-/// dataset. A view an older Studio published also recorded the most
-/// episodes it read, which this one reads past.
+/// One node published as a catalog view, over every episode of the
+/// dataset.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PublishedOutput {
     node: String,
     view: String,
@@ -132,19 +132,19 @@ impl CurationGraph {
         }
     }
 
-    /// Whether `node` may be published as `view`: it is an output, and the
-    /// name is a view name.
+    /// Whether `node` may be published as `view`: it is a node but the
+    /// dataset, and the name is a view name.
     fn check_publication(&self, node: &str, view: &str) -> Result<(), String> {
         ViewName::try_from(view)?;
         if !self.outputs().iter().any(|output| output.id() == node) {
             return Err(format!(
-                "“{view}” names a node that is not an output; only Score progress, Find similar, Group similar, and Select publish."
+                "“{view}” names no node that publishes; every node but the dataset does."
             ));
         }
         Ok(())
     }
 
-    /// Every publication names one output by a valid view name, and no two
+    /// Every publication names one node by a valid view name, and no two
     /// share a view.
     pub(super) fn validate_publications(&self) -> Result<(), String> {
         let mut views = BTreeSet::new();

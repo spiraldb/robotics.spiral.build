@@ -1,15 +1,20 @@
 //! Running a measurement that asks a Modal service about each episode: which
-//! of the episodes reaching it a Run asks about, which failed and why, and
-//! the Stop, Retry failed and Run that drive its preview.
+//! of the episodes reaching it a Run asks about, which failed and why, the
+//! Stop, Retry failed and Run that drive its preview, and the episodes it
+//! measured beside the one opened.
 //!
 //! The pass is the curation's, not the workspace's: choosing another node
 //! leaves it running. Stop ends it at once; the episodes in flight stay
 //! unread. What the service answered is stored, so no later Run or Publish
 //! asks about an episode again.
+use super::episode_tabs::{EpisodeTabs, OpenEpisode, OpenEpisodes};
 use super::preview::PreviewProgress;
-use super::review::{Counted, FailedEpisodes};
+use super::review::{
+    Counted, FailedEpisodes, IndexBar, RowStanding, SliceEntry, SliceFace, SubtaskReview, TabStop,
+};
 use super::state::{CurationController, RunState};
-use crate::activities::episode::Episode;
+use super::thumbnail::Thumbnails;
+use crate::activities::episode::{Episode, EpisodeRows, PlayRequest};
 use crate::components::icons::SpinnerIcon;
 use dioxus::prelude::*;
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonVariant};
@@ -70,8 +75,7 @@ impl MeasureInput {
     pub(super) fn preview(&self) -> &PreviewProgress {
         &self.preview
     }
-    /// The episodes a Run asks about: not read yet, or read from intervals
-    /// that have changed since.
+    /// The episodes a Run asks about: not read yet.
     fn pending(&self) -> Vec<Episode> {
         let pending = self.preview.pending();
         self.episodes
@@ -106,12 +110,6 @@ impl MeasureInput {
             Some(first) if reasons.all(|reason| reason == first) => format!("{note}: {first}"),
             _ => note,
         })
-    }
-    /// What the node's bar says when what reaches it changed since it ran.
-    pub(super) fn stale(&self) -> Option<String> {
-        self.preview
-            .is_stale()
-            .then(|| "Out of date: its input changed".to_owned())
     }
 }
 
@@ -242,6 +240,92 @@ pub(super) fn MeasureRunStart(run: MeasureRun, input: MeasureInput, blocked: boo
                 },
                 "{verb.base()} {Counted::episodes(pending.len())}"
             }
+        }
+    }
+}
+
+/// One episode a measurement read, and what it read of it, as its row says.
+#[derive(Clone, PartialEq)]
+pub(super) struct MeasuredEpisode {
+    episode: Episode,
+    reading: Option<String>,
+}
+
+impl MeasuredEpisode {
+    pub(super) fn new(episode: Episode, reading: Option<String>) -> Self {
+        Self { episode, reading }
+    }
+}
+
+/// The episodes a measurement read, one row each with what it measured,
+/// beside the one opened, drawn by `render` from the episode and the ask to
+/// play it. The first opens by itself.
+#[component]
+pub(super) fn MeasuredEpisodes(
+    episodes: Vec<MeasuredEpisode>,
+    /// What each row's reading means.
+    meaning: &'static str,
+    /// The camera the rows' thumbnails show.
+    thumbnails: Thumbnails,
+    render: Callback<(Episode, Option<PlayRequest>), Element>,
+) -> Element {
+    let tabs = OpenEpisodes::use_open();
+    let first = episodes
+        .first()
+        .map(|measured| (measured.episode.id().clone(), None));
+    use_effect(use_reactive((&first,), move |(first,)| {
+        tabs.open_first(first)
+    }));
+    let listed = episodes
+        .iter()
+        .map(|measured| measured.episode.clone())
+        .collect::<Vec<_>>();
+    let rows = EpisodeRows::of(&listed);
+    let front = tabs.front().map(|tab| tab.episode().clone());
+    let chosen = episodes
+        .iter()
+        .position(|measured| front.as_ref() == Some(measured.episode.id()));
+    let faces = episodes
+        .iter()
+        .map(|measured| {
+            let face = SliceFace::episode(&rows, &measured.episode);
+            let face = match measured.reading.clone() {
+                Some(reading) => face.measured(reading, meaning),
+                None => face,
+            };
+            (measured.episode.id().clone(), face.length_last())
+        })
+        .collect::<Vec<_>>();
+    rsx! {
+        SubtaskReview {
+            index: rsx! {
+                IndexBar {
+                    p { class: "curation-index-caption", "{Counted::episodes(episodes.len())}" }
+                }
+                ol { class: "curation-entries", "aria-label": "Episodes this node measured",
+                    for (position, (id, face)) in faces.into_iter().enumerate() {
+                        SliceEntry {
+                            key: "{id}",
+                            face,
+                            thumbnails,
+                            standing: RowStanding::plain(chosen == Some(position))
+                                .roving(TabStop::at(position, chosen)),
+                            on_select: move |()| tabs.open(&id, None),
+                        }
+                    }
+                }
+            },
+            evidence: rsx! {
+                EpisodeTabs {
+                    open: tabs,
+                    render: move |tab: OpenEpisode| {
+                        let Some(episode) = listed.iter().find(|episode| episode.id() == tab.episode()).cloned() else {
+                            return rsx! {};
+                        };
+                        render.call((episode, tab.play()))
+                    },
+                }
+            },
         }
     }
 }

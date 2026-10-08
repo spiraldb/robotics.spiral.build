@@ -105,6 +105,7 @@ async fn object_tracking_is_admitted_only_with_its_own_service() {
     let tracking = AnswerSource::ObjectTracking {
         camera: "/top".into(),
         prompt: "the red cup".into(),
+        rate: 5,
         model: "sam3".into(),
         revision: "rev".into(),
     };

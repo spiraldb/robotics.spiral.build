@@ -10,14 +10,14 @@ from video_service.service import EpisodeRequest, VideoContract, VideoService
 from video_service.timing import StageTimes
 
 from object_tracking.artifacts import SELECTOR
-from object_tracking.video import SampledPicture, SampledVideo
+from object_tracking.video import SampledPicture, SampledVideo, SampleRate
 
 IMPLEMENTATION = (
-    "object-tracking 0.1.0: SAM 3.1 multiplex at its released 1008 pixels, five pictures a second, "
-    "two MPS workers per H100"
+    "object-tracking 0.2.0: SAM 3.1 multiplex at its released 1008 pixels, at the rate each request "
+    "names, two MPS workers per H100"
 )
 # Requests name the revision they were built for, so Studio never stores tracks from another one.
-REVISION = "object-tracking-0.1.0"
+REVISION = "object-tracking-0.2.0"
 CONTRACT = VideoContract(SELECTOR, REVISION, IMPLEMENTATION)
 # SAM 3.1 tracks what a short noun phrase names.
 MAX_PROMPT_CHARS = 200
@@ -29,7 +29,8 @@ class Tracker(Protocol):
 
 class TrackingService:
     """`POST /track_objects` for callers holding the bearer token, and an open `GET /health`. A
-    request names what to track as schema metadata `prompt`."""
+    request names what to track as schema metadata `prompt`, and how many pictures a second to
+    sample as `rate`."""
 
     def __init__(self, tracker: Tracker, token: str):
         self._tracker = tracker
@@ -42,7 +43,8 @@ class TrackingService:
         prompt = (episode.metadata("prompt") or "").strip()
         if not prompt or len(prompt) > MAX_PROMPT_CHARS:
             raise RejectedVideo(f"name what to track in at most {MAX_PROMPT_CHARS} characters")
+        rate = SampleRate(episode.metadata("rate"))
         with times.stage("decode"):
-            pictures = SampledVideo(episode.video).pictures()
+            pictures = SampledVideo(episode.video, rate).pictures()
         with times.stage("track"):
             return self._tracker.track(pictures, prompt)

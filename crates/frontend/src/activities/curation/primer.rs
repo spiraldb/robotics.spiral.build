@@ -40,12 +40,12 @@ impl Primer {
                  out of all of them."
             }
             Self::ScoreProgress => {
-                "Score progress rates every moment against the expert rate and leaves out the \
-                 stretches that stall. The rest of the episode still trains."
+                "Score progress rates every moment against the expert rate, so a Select can \
+                 leave out the stretches that stall. The rest of the episode still trains."
             }
             Self::TrackObjects => {
-                "Track objects finds and follows what you name through every episode, so you \
-                 can keep the episodes with the right number of it."
+                "Track objects finds and follows what you name through every episode, so a \
+                 Select can keep the episodes with the right number of it, or time per object."
             }
         }
     }
@@ -202,7 +202,7 @@ fn ScoreProgressDrawing() -> Element {
 }
 
 /// Three takes of one task with two, three, and four bottles on the table:
-/// each bottle is boxed as it is found, and the rule keeps the takes with
+/// each bottle is boxed as it is found, and a Select keeps the takes with
 /// three or four.
 #[component]
 fn TrackObjectsDrawing() -> Element {

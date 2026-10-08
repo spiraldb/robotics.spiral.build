@@ -16,7 +16,8 @@ mod publish;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod browser_tests;
 
-pub(super) use canvas::{AddGlyph, CurationGraphCanvas, NodeGlyph};
+pub(super) use canvas::{CurationGraphCanvas, NodeGlyph};
+pub(super) use dataset::DatasetStep;
 pub(super) use document_bar::CurationDocumentBar;
 pub(super) use node_card::NodeFace;
 pub(super) use node_workspace::NodeWorkspace;

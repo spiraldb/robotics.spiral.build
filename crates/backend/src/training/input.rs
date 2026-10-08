@@ -1,6 +1,7 @@
 //! What a run trains on, resolved when it starts: the intervals its view
-//! keeps and, for every episode, the streams that hold them — each camera's
-//! packets and each joint stream's values — named by what is read.
+//! keeps — each episode row's `kept` ranges, unnested — and, for every
+//! episode, the streams that hold them — each camera's packets and each
+//! joint stream's values — named by what is read.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

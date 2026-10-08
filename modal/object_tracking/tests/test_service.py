@@ -15,6 +15,7 @@ CONTRACT = {
     "model": SELECTOR,
     "implementation": REVISION,
     "prompt": "bottle",
+    "rate": "5",
 }
 
 
@@ -53,7 +54,7 @@ def client(tracker) -> TestClient:
 
 
 def test_health_needs_no_token(client):
-    assert client.get("/health").json()["revision"] == "object-tracking-0.1.0"
+    assert client.get("/health").json()["revision"] == "object-tracking-0.2.0"
 
 
 def test_answers_each_sampled_picture_with_its_tracked_objects(client, tracker, episode):
@@ -72,10 +73,28 @@ def test_answers_each_sampled_picture_with_its_tracked_objects(client, tracker, 
     assert stages == ["request", "decode", "track", "response"]
 
 
+def test_samples_at_the_rate_the_request_names(client, episode):
+    body = episode.request(CONTRACT | {"rate": "2"})
+    response = client.post("/track_objects", content=body, headers=AUTHORIZED)
+    assert response.status_code == 200
+    tracks = pa.ipc.open_stream(response.content).read_all()
+    assert tracks["timestamp_ns"].to_pylist() == [0, 500_000_000, 1_000_000_000]
+
+
 @pytest.mark.parametrize(
-    "change", [{"model": "facebook/sam3.1@main"}, {"prompt": None}, {"prompt": " "}, {"prompt": "x" * 201}]
+    "change",
+    [
+        {"model": "facebook/sam3.1@main"},
+        {"prompt": None},
+        {"prompt": " "},
+        {"prompt": "x" * 201},
+        {"rate": None},
+        {"rate": "0"},
+        {"rate": "31"},
+        {"rate": "fast"},
+    ],
 )
-def test_rejects_another_model_and_a_missing_or_long_prompt(client, episode, change):
+def test_rejects_another_model_a_missing_or_long_prompt_and_a_bad_rate(client, episode, change):
     response = client.post("/track_objects", content=episode.request(CONTRACT | change), headers=AUTHORIZED)
     assert response.status_code == 422
 

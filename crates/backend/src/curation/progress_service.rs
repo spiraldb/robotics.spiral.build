@@ -25,9 +25,11 @@ impl ProgressService {
     }
 
     /// Scoring with the checkpoint `model` on the service `revision`.
-    pub(super) fn scoring<'a>(&'a self, model: &'a str, revision: &'a str) -> VideoQuestion<'a> {
-        self.0
-            .question(vec![("model", model), ("implementation", revision)])
+    pub(super) fn scoring(&self, model: &str, revision: &str) -> VideoQuestion<'_> {
+        self.0.question(vec![
+            ("model", model.to_owned()),
+            ("implementation", revision.to_owned()),
+        ])
     }
 
     fn contract() -> VideoContract {

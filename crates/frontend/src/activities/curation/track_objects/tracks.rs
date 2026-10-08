@@ -1,12 +1,12 @@
 //! One episode's stored tracks, read when the episode is opened, drawn as
 //! boxes over the camera they were tracked on.
 //!
-//! The preview reads only each episode's count, which is all the rule and
-//! the index need; the boxes, one list per sampled picture, are read for the
-//! one episode on screen.
+//! The preview reads only how many objects each picture held, which is all
+//! a Select and the index need; the boxes, one list per sampled picture, are
+//! read for the one episode on screen.
 use crate::activities::curation::document::ObjectTracking;
 use crate::activities::curation::episode_tabs::WholeEpisodeTab;
-use crate::activities::curation::path::StoredAnswers as _;
+use crate::activities::curation::path::ModelNode as _;
 use crate::activities::data::DatasetClient;
 use crate::activities::episode::{
     BoxedPicture, CameraBoxes, Episode, FeaturedCamera, PictureBox, PlayRequest,

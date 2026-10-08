@@ -16,7 +16,7 @@ use super::super::population::PopulationReader;
 use super::super::state::{CurationController, NodeActivity};
 use super::canvas_controls::CanvasControls;
 use super::flow_canvas::{CardGraph, FlowFit, FlowMargins, ReadableViewport};
-use super::node_card::{ChildMenu, NodeCard, NodeFace, OutputFlag};
+use super::node_card::{ChildMenu, NodeCard, NodeFace};
 use crate::components::icons::{
     DataIcon, FilmFrameIcon, FunnelIcon, OverlapIcon, SignalStreamIcon, SparkIcon,
     TrackedObjectsIcon,
@@ -339,7 +339,7 @@ impl CardStop {
 /// The + of every add in Curation: alone on a node's edge, where it opens
 /// the child menu, and before the words of Add condition.
 #[component]
-pub(in crate::activities::curation) fn AddGlyph() -> Element {
+fn AddGlyph() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             path { d: "M8 4.5v7M4.5 8h7" }
@@ -401,25 +401,18 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
             } else {
                 p { class: "curation-canvas-summary", "{card.summary()}" }
             }
-            // An output's state ends the card's last line, inside its
+            // A published node's view ends the card's last line, inside its
             // outline: clear of the title and of the trash in the corner
             // above, and of the + centred under it.
-            match card.output() {
-                Some(OutputFlag::Unpublished) => rsx! {
-                    span {
-                        class: "curation-canvas-output",
-                        title: "One of this curation's outputs: publish it from the document bar",
-                        "Output"
-                    }
-                },
-                Some(OutputFlag::Published(published)) if published.is_current(hand.controller.saved_revision()) => rsx! {
+            match card.published() {
+                Some(published) if published.is_current(hand.controller.saved_revision()) => rsx! {
                     span {
                         class: "curation-canvas-output is-published",
                         title: "Published as the catalog view {published.view()}",
                         "Published"
                     }
                 },
-                Some(OutputFlag::Published(published)) => rsx! {
+                Some(published) => rsx! {
                     span {
                         class: "curation-canvas-output is-stale",
                         title: "The saved curation has changed since {published.view()} was published; publish it again from the document bar",

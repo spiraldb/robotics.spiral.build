@@ -28,11 +28,12 @@ pub enum AnswerSource {
         revision: String,
     },
     /// The object tracking service's tracks of the objects `prompt` names in
-    /// the episode's video on `camera`, from the checkpoint `model`, as the
-    /// service `revision` computes them.
+    /// the episode's video on `camera`, sampled `rate` pictures a second,
+    /// from the checkpoint `model`, as the service `revision` computes them.
     ObjectTracking {
         camera: String,
         prompt: String,
+        rate: u32,
         model: String,
         revision: String,
     },

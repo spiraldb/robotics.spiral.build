@@ -1,41 +1,22 @@
-//! What a node keeps of what it measured, or a Select of what reaches it: the
-//! node's rule.
+//! A Select's conditions, the one filter of a curation. An episode is kept
+//! when every condition holds, each judged over the episodes that reach the
+//! Select.
 //!
-//! A rule narrows; it never measures. What it keeps by is its basis: a Score
-//! progress node's progress rate, a Track objects node's count, a Find
-//! similar node's similarity, and a Group similar node's categories are those
-//! nodes' own knobs, and a Select
-//! keeps by the dataset's recorded facts of each episode, as many conditions
-//! as it names — never by what a model answered. The rule is stored in those
-//! terms, so it reads as one sentence about the node it belongs to.
+//! An episode condition keeps or drops the row: a number per episode — a
+//! recorded fact, or one derived from a Track objects column above — compared
+//! with a value or ranked among the reaching episodes. A range condition
+//! narrows the episode's kept ranges to where a column above passes:
+//! progressing fast enough, enough objects in view, a similar subtask, or a
+//! chosen category. A condition names the node whose column it reads by its
+//! id, so it reads as one sentence about the graph.
 //!
-//! One rule has two readings that must agree: the browser keeps what the
-//! preview read as the threshold slides (`keeps_*`), and the path compiles it
-//! to the `WHERE` the published view keeps by (`predicate`).
-use crate::activities::curation::annotate::SubtaskRow;
-use crate::activities::curation::path::{PathError, PathFragment, PathStep, Relation, StepSql};
-use crate::activities::curation::score_progress::Moment;
-use crate::activities::curation::track_objects::ObjectCount;
+//! The conditions have two readings that must agree: the browser keeps what
+//! the preview read as a threshold slides (`select/reading.rs`), and the path
+//! compiles them to the SQL a published view keeps by (`select/step.rs`).
+use super::{CategoryId, CurationGraph, CurationNode, CurationNodeKind};
 use crate::activities::episode::Episode;
 use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::sql::SqlLiteral;
-
-/// What a rule keeps by, and so what it can name.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SelectionBasis {
-    /// The dataset's own statistics of each episode: a Select's.
-    EpisodeFacts,
-    /// A Find similar node's probability for each subtask.
-    Similarity,
-    /// A Group similar node's category for each subtask.
-    Categories,
-    /// A Score progress node's progress rate for each moment.
-    Progress,
-    /// A Track objects node's count for each episode: the most it saw at
-    /// once.
-    ObjectCount,
-}
 
 /// One statistic Spiral records for every episode.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,6 +35,7 @@ impl EpisodeFact {
         Self::Channels,
         Self::SizeMegabytes,
     ];
+    /// Its column in the curation table.
     pub(crate) const fn key(self) -> &'static str {
         match self {
             Self::DurationSeconds => "duration_seconds",
@@ -62,9 +44,6 @@ impl EpisodeFact {
             Self::SizeMegabytes => "size_megabytes",
         }
     }
-    pub(crate) fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|fact| fact.key() == key)
-    }
     /// The fact as a condition's row starts with it.
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -72,15 +51,6 @@ impl EpisodeFact {
             Self::Messages => "Message count",
             Self::Channels => "Channel count",
             Self::SizeMegabytes => "File size",
-        }
-    }
-    /// The fact as the noun of "Keep episodes whose … is at least".
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::DurationSeconds => "duration",
-            Self::Messages => "message count",
-            Self::Channels => "channel count",
-            Self::SizeMegabytes => "file size",
         }
     }
     /// What the threshold is counted in, when the fact has a unit.
@@ -123,20 +93,27 @@ impl EpisodeFact {
     }
 }
 
-/// Which side of its value a condition keeps.
+/// How an episode condition keeps: by its number against a value, or by
+/// where its number ranks among the reaching episodes that have one.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Comparison {
     AtLeast,
     AtMost,
+    /// Its percent rank from the smallest is at most the value.
+    Lowest,
+    /// Its percent rank from the largest is at most the value.
+    Highest,
 }
 
 impl Comparison {
-    pub(crate) const ALL: [Self; 2] = [Self::AtLeast, Self::AtMost];
+    pub(crate) const ALL: [Self; 4] = [Self::AtLeast, Self::AtMost, Self::Lowest, Self::Highest];
     pub(crate) const fn key(self) -> &'static str {
         match self {
             Self::AtLeast => "at_least",
             Self::AtMost => "at_most",
+            Self::Lowest => "lowest",
+            Self::Highest => "highest",
         }
     }
     pub(crate) fn from_key(key: &str) -> Option<Self> {
@@ -148,42 +125,86 @@ impl Comparison {
         match self {
             Self::AtLeast => "at least",
             Self::AtMost => "at most",
+            Self::Lowest => "lowest",
+            Self::Highest => "highest",
         }
     }
-    fn holds(self, value: f64, threshold: f64) -> bool {
-        match self {
-            Self::AtLeast => value >= threshold,
-            Self::AtMost => value <= threshold,
-        }
-    }
-    /// The comparison as SQL spells it, as `holds` reads it.
-    const fn operator(self) -> &'static str {
-        match self {
-            Self::AtLeast => ">=",
-            Self::AtMost => "<=",
-        }
+    /// Whether its value is a share of the reaching episodes, 0 to 1.
+    pub(crate) const fn ranks(self) -> bool {
+        matches!(self, Self::Lowest | Self::Highest)
     }
 }
 
-/// One condition an episode meets: its recorded fact compared with a value.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+/// A number every episode may have.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EpisodeNumber {
+    /// What Spiral recorded of it.
+    Fact(EpisodeFact),
+    /// The most objects one sampled picture of a Track objects node held.
+    MostAtOnce(String),
+    /// Its duration per that most.
+    DurationPer(String),
+}
+
+impl EpisodeNumber {
+    /// The Track objects node it reads, when it reads one.
+    pub(crate) fn node(&self) -> Option<&str> {
+        match self {
+            Self::Fact(_) => None,
+            Self::MostAtOnce(node) | Self::DurationPer(node) => Some(node),
+        }
+    }
+    /// The number as a condition's row starts with it: "Duration", "Most
+    /// bottles at once", "Duration per bottle".
+    pub(crate) fn name(&self, graph: &CurationGraph) -> String {
+        let tracked = |node: &str| match graph.node(node).map(CurationNode::kind) {
+            Some(CurationNodeKind::TrackObjects(tracking)) => tracking.clone(),
+            _ => Default::default(),
+        };
+        match self {
+            Self::Fact(fact) => fact.name().to_owned(),
+            Self::MostAtOnce(node) => format!("Most {} at once", tracked(node).plural()),
+            Self::DurationPer(node) => match tracked(node).prompt() {
+                "" => "Duration per object".to_owned(),
+                prompt => format!("Duration per {prompt}"),
+            },
+        }
+    }
+    /// What a value of it is counted in, when it has a unit.
+    pub(crate) fn unit(&self) -> Option<&'static str> {
+        match self {
+            Self::Fact(fact) => fact.unit(),
+            Self::MostAtOnce(_) => None,
+            Self::DurationPer(_) => Some("s"),
+        }
+    }
+    /// Whether it counts things, one at a time.
+    pub(crate) fn counts(&self) -> bool {
+        matches!(self, Self::MostAtOnce(_))
+    }
+}
+
+/// One condition on a number per episode.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EpisodeCondition {
-    fact: EpisodeFact,
+    number: EpisodeNumber,
     comparison: Comparison,
     value: f64,
 }
 
 impl EpisodeCondition {
-    pub(crate) const fn new(fact: EpisodeFact, comparison: Comparison, value: f64) -> Self {
+    /// `number` compared as asked; a ranked value is a share, 0 to 1.
+    pub(crate) fn new(number: EpisodeNumber, comparison: Comparison, value: f64) -> Self {
         Self {
-            fact,
+            number,
             comparison,
             value,
         }
     }
-    pub(crate) const fn fact(&self) -> EpisodeFact {
-        self.fact
+    pub(crate) fn number(&self) -> &EpisodeNumber {
+        &self.number
     }
     pub(crate) const fn comparison(&self) -> Comparison {
         self.comparison
@@ -191,706 +212,392 @@ impl EpisodeCondition {
     pub(crate) const fn value(&self) -> f64 {
         self.value
     }
-    /// The same condition on another fact, from where it keeps everything.
-    pub(crate) const fn on(self, fact: EpisodeFact) -> Self {
-        Self::new(fact, self.comparison, 0.0)
+    /// The same condition on another number, from where it keeps everything.
+    pub(crate) fn on(&self, number: EpisodeNumber) -> Self {
+        Self::new(number, self.comparison, self.kept_whole(self.comparison))
     }
-    pub(crate) const fn comparing(self, comparison: Comparison) -> Self {
-        Self::new(self.fact, comparison, self.value)
+    /// The same condition compared another way: a ranked one from where it
+    /// keeps everything, since a share and a number do not convert.
+    pub(crate) fn comparing(&self, comparison: Comparison) -> Self {
+        let value = if comparison.ranks() == self.comparison.ranks() {
+            self.value
+        } else {
+            self.kept_whole(comparison)
+        };
+        Self::new(self.number.clone(), comparison, value)
     }
-    pub(crate) const fn at(self, value: f64) -> Self {
-        Self::new(self.fact, self.comparison, value)
+    pub(crate) fn at(&self, value: f64) -> Self {
+        Self::new(self.number.clone(), self.comparison, value)
     }
-    /// Whether an episode meets it, by its recorded facts. An episode Spiral
-    /// did not record the fact of does not.
-    pub(in crate::activities::curation) fn holds(&self, episode: &Episode) -> bool {
-        self.fact
-            .of(episode)
-            .is_some_and(|measured| self.comparison.holds(measured, self.value))
+    /// Where `comparison` keeps every episode that has the number: all of
+    /// them ranked, from nothing at least.
+    fn kept_whole(&self, comparison: Comparison) -> f64 {
+        match comparison {
+            Comparison::Lowest | Comparison::Highest => 1.0,
+            Comparison::AtLeast | Comparison::AtMost => 0.0,
+        }
     }
-    /// "duration at least 20 s".
-    fn sentence(&self) -> String {
+    /// "duration per bottle in the lowest 25%", "duration at least 20 s".
+    fn sentence(&self, graph: &CurationGraph) -> String {
+        let number = self.number.name(graph).to_lowercase();
+        if self.comparison.ranks() {
+            return format!(
+                "{number} in the {} {:.0}%",
+                self.comparison.label(),
+                self.value * 100.0
+            );
+        }
         let unit = self
-            .fact
+            .number
             .unit()
             .map(|unit| format!(" {unit}"))
             .unwrap_or_default();
-        format!(
-            "{} {} {}{unit}",
-            self.fact.label(),
-            self.comparison.label(),
-            self.value
-        )
+        format!("{number} {} {}{unit}", self.comparison.label(), self.value)
     }
-    fn predicate(&self) -> Result<String, PathError> {
-        let value = SqlLiteral::double(self.value)
-            .ok_or_else(|| PathError::new("A Select's threshold must be a number."))?;
-        Ok(format!(
-            "{} {} {value}",
-            self.fact.key(),
-            self.comparison.operator()
-        ))
+    fn validate(&self) -> Result<(), String> {
+        if !self.value.is_finite() {
+            return Err("A Select's threshold must be a number.".into());
+        }
+        if self.comparison.ranks() && !(0.0..=1.0).contains(&self.value) {
+            return Err("A share of the episodes is between 0% and 100%.".into());
+        }
+        Ok(())
     }
 }
 
-/// One rule, in the terms of its basis.
+/// One condition of a Select.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "keep", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Selection {
-    /// Episodes that meet every condition.
-    Episodes { conditions: Vec<EpisodeCondition> },
-    /// Subtasks at least this likely to be the operation a search asked about.
-    Similar { minimum: f64 },
-    /// Subtasks in any of these categories, which the grouping names.
-    Categories { names: Vec<String> },
-    /// Moments progressing at least this fast. A moment the scorer could not
-    /// read is kept: an unread moment is not a slow one.
-    Progressing { minimum: f64 },
-    /// Episodes showing at least `fewest` of what a Track objects node
-    /// tracks at once, and at most `most` when it names a most. An episode
-    /// the tracker could not read is not kept: nothing says how many it
-    /// shows.
-    ObjectCount { fewest: u64, most: Option<u64> },
+#[serde(tag = "keep", rename_all = "snake_case")]
+pub(crate) enum SelectCondition {
+    /// Episodes whose number passes.
+    Episodes(EpisodeCondition),
+    /// The moments of a Score progress timeline progressing at least
+    /// `minimum`, and those the scorer could not read: an unread moment is
+    /// not a slow one.
+    Progressing { node: String, minimum: f64 },
+    /// The moments of a Track objects timeline whose picture holds at least
+    /// `fewest` objects.
+    Visible { node: String, fewest: u64 },
+    /// The subtasks of a Find similar column at least `minimum` similar. A
+    /// subtask the model could not judge is not kept.
+    Similar { node: String, minimum: f64 },
+    /// The subtasks a Group similar node put in any of `categories`.
+    InCategories {
+        node: String,
+        categories: Vec<CategoryId>,
+    },
 }
 
-impl Selection {
-    /// A new rule. Episode conditions start where they keep every episode, so
-    /// adding a Select never silently drops data; categories start empty,
-    /// because a grouping has none until they are proposed, and then keeps
-    /// them all.
-    pub(crate) fn for_basis(basis: SelectionBasis) -> Self {
-        match basis {
-            SelectionBasis::EpisodeFacts => Self::Episodes {
-                conditions: vec![EpisodeCondition::new(
-                    EpisodeFact::DurationSeconds,
-                    Comparison::AtLeast,
-                    0.0,
-                )],
-            },
-            SelectionBasis::Similarity => Self::Similar { minimum: 0.5 },
-            SelectionBasis::Categories => Self::Categories { names: Vec::new() },
-            SelectionBasis::Progress => Self::Progressing { minimum: 0.0 },
-            SelectionBasis::ObjectCount => Self::ObjectCount {
-                fewest: 0,
-                most: None,
-            },
+impl SelectCondition {
+    /// The node whose column the condition reads, when it reads one.
+    pub(crate) fn node(&self) -> Option<&str> {
+        match self {
+            Self::Episodes(condition) => condition.number.node(),
+            Self::Progressing { node, .. }
+            | Self::Visible { node, .. }
+            | Self::Similar { node, .. }
+            | Self::InCategories { node, .. } => Some(node),
         }
     }
-    pub(crate) fn basis(&self) -> SelectionBasis {
-        match self {
-            Self::Episodes { .. } => SelectionBasis::EpisodeFacts,
-            Self::Similar { .. } => SelectionBasis::Similarity,
-            Self::Categories { .. } => SelectionBasis::Categories,
-            Self::Progressing { .. } => SelectionBasis::Progress,
-            Self::ObjectCount { .. } => SelectionBasis::ObjectCount,
-        }
+    /// Whether it narrows the kept ranges rather than keeping or dropping
+    /// whole rows.
+    pub(crate) fn narrows(&self) -> bool {
+        !matches!(self, Self::Episodes(_))
     }
-    /// Whether an episode is kept: it meets every condition.
-    pub(in crate::activities::curation) fn keeps_episode(&self, episode: &Episode) -> bool {
+    /// What the condition keeps by, as its row and the menu adding it name
+    /// it: "Duration per bottle", "Progress rate", "Bottles visible".
+    pub(crate) fn name(&self, graph: &CurationGraph) -> String {
         match self {
-            Self::Episodes { conditions } => {
-                conditions.iter().all(|condition| condition.holds(episode))
-            }
-            _ => false,
-        }
-    }
-    /// Whether a subtask is kept, by its probability in a search or its
-    /// category in a grouping. A subtask nothing has scored or placed yet is
-    /// not kept: nothing says it belongs.
-    pub(crate) fn keeps_subtask(&self, probability: Option<f64>, category: Option<&str>) -> bool {
-        match self {
-            Self::Similar { minimum } => probability.is_some_and(|value| value >= *minimum),
-            Self::Categories { names } => {
-                category.is_some_and(|category| names.iter().any(|name| name == category))
-            }
-            _ => false,
-        }
-    }
-    /// Whether a moment is kept, by its progress rate.
-    pub(crate) fn keeps_moment(&self, velocity: Option<f64>) -> bool {
-        match self {
-            Self::Progressing { minimum } => velocity.is_none_or(|value| value >= *minimum),
-            _ => false,
-        }
-    }
-    /// Whether an episode is kept, by the most a Track objects node saw at
-    /// once in it.
-    pub(crate) fn keeps_count(&self, count: Option<u64>) -> bool {
-        match self {
-            Self::ObjectCount { fewest, most } => {
-                count.is_some_and(|count| count >= *fewest && most.is_none_or(|most| count <= most))
-            }
-            _ => false,
-        }
-    }
-    /// The least a measure's rule keeps: the knob of a Score progress or a
-    /// Find similar node. Episode conditions each have their own value, and
-    /// categories none.
-    pub(crate) fn minimum(&self) -> Option<f64> {
-        match self {
-            Self::Similar { minimum } | Self::Progressing { minimum } => Some(*minimum),
-            Self::Episodes { .. } | Self::Categories { .. } | Self::ObjectCount { .. } => None,
-        }
-    }
-    /// The same measure's rule keeping at least `value`; any other rule
-    /// stays as it is.
-    pub(crate) fn with_minimum(self, value: f64) -> Self {
-        match self {
-            Self::Similar { .. } => Self::Similar { minimum: value },
-            Self::Progressing { .. } => Self::Progressing { minimum: value },
-            rule => rule,
-        }
-    }
-    /// The same count rule keeping from `fewest` to `most` objects, the
-    /// larger taken as the most; any other rule stays as it is.
-    pub(crate) fn with_count_range(self, (fewest, most): (u64, u64)) -> Self {
-        match self {
-            Self::ObjectCount { .. } => Self::ObjectCount {
-                fewest: fewest.min(most),
-                most: Some(fewest.max(most)),
-            },
-            rule => rule,
-        }
-    }
-    /// A Select's conditions as its node card says them: "Duration at
-    /// least 20 s and message count at most 5000".
-    pub(crate) fn sentence(&self) -> String {
-        match self {
-            Self::Episodes { conditions } => {
-                let mut sentence = conditions
-                    .iter()
-                    .map(EpisodeCondition::sentence)
-                    .collect::<Vec<_>>()
-                    .join(" and ");
-                if let Some(first) = sentence.get_mut(..1) {
-                    first.make_ascii_uppercase();
-                }
-                sentence
-            }
-            Self::Similar { minimum } => format!("At least {:.0}% similar", minimum * 100.0),
-            Self::Categories { names } => names.join(", "),
-            Self::Progressing { minimum } => format!("Progress rate at least {minimum:.2}×"),
-            Self::ObjectCount { fewest, most } => match (*fewest, *most) {
-                (0, None) => "Any number at once".to_owned(),
-                (fewest, None) => format!("At least {fewest} at once"),
-                (0, Some(most)) => format!("At most {most} at once"),
-                (fewest, Some(most)) if fewest == most => format!("Exactly {fewest} at once"),
-                (fewest, Some(most)) => format!("{fewest} to {most} at once"),
-            },
-        }
-    }
-    /// The rule as the predicate over the columns of `input`: what
-    /// `keeps_*` keep, in SQL. A moment the scorer could not read is kept
-    /// here too; a subtask the model could not judge is not.
-    fn predicate(&self, input: &Relation) -> Result<String, PathError> {
-        let literal = |value: f64| {
-            SqlLiteral::double(value).ok_or_else(|| PathError::new("A threshold must be a number."))
-        };
-        let measured = |measure: &str| {
-            input.measured(measure).ok_or_else(|| {
-                PathError::new(format!("Nothing above this rule measures {measure}."))
-            })
-        };
-        match self {
-            Self::Episodes { conditions } => Ok(conditions
-                .iter()
-                .map(EpisodeCondition::predicate)
-                .collect::<Result<Vec<_>, _>>()?
-                .join(" AND ")),
-            Self::Progressing { minimum } => Ok(format!(
-                "({rate} IS NULL OR {rate} >= {})",
-                literal(*minimum)?,
-                rate = Moment::PROGRESS_RATE
-            )),
-            // An episode with no count compares as unknown, so it is not kept.
-            Self::ObjectCount { fewest, most } => {
-                let count = measured(ObjectCount::COLUMN)?;
-                Ok(match most {
-                    Some(most) => format!("{count} >= {fewest} AND {count} <= {most}"),
-                    None => format!("{count} >= {fewest}"),
+            Self::Episodes(condition) => condition.number.name(graph),
+            Self::Progressing { .. } => "Progress rate".to_owned(),
+            Self::Visible { node, .. } => {
+                let plural = Self::tracking(graph, node).plural();
+                let mut letters = plural.chars();
+                letters.next().map_or_else(String::new, |first| {
+                    format!("{}{} visible", first.to_uppercase(), letters.as_str())
                 })
             }
-            Self::Similar { minimum } => Ok(format!(
-                "{} >= {}",
-                measured(SubtaskRow::SIMILARITY)?,
-                literal(*minimum)?
-            )),
-            Self::Categories { names } if names.is_empty() => Err(PathError::new(
-                "Keep at least one category: this grouping keeps none.",
-            )),
-            // The column is qualified by its relation, so the field is read
-            // from the column rather than the column from a table.
-            Self::Categories { names } => Ok(format!(
-                "{}.{}.category IN ({})",
-                input.name(),
-                measured(SubtaskRow::CATEGORY)?,
-                names
-                    .iter()
-                    .map(|name| SqlLiteral::text(name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
+            Self::Similar { node, .. } => match graph.node(node).map(CurationNode::kind) {
+                Some(CurationNodeKind::FindSimilarSubtasks(search)) => {
+                    format!("Similar to “{}”", search.query().trim())
+                }
+                _ => "Similarity".to_owned(),
+            },
+            Self::InCategories { .. } => "Category".to_owned(),
         }
     }
-    pub(super) fn validate(&self) -> Result<(), String> {
+    /// The condition as the node card says it: "progress rate at least
+    /// 0.20×".
+    pub(crate) fn sentence(&self, graph: &CurationGraph) -> String {
         match self {
-            Self::Episodes { conditions } if conditions.is_empty() => {
-                Err("A Select of episodes names at least one condition.".into())
+            Self::Episodes(condition) => condition.sentence(graph),
+            Self::Progressing { minimum, .. } => format!("progress rate at least {minimum:.2}×"),
+            Self::Visible { node, fewest } => format!(
+                "at least {fewest} {} visible",
+                Self::tracking(graph, node).plural()
+            ),
+            Self::Similar { minimum, .. } => {
+                format!("at least {:.0}% similar", minimum * 100.0)
             }
-            Self::Episodes { conditions }
-                if conditions
+            Self::InCategories { node, categories } => {
+                let grouping = Self::grouping(graph, node);
+                let names = categories
                     .iter()
-                    .any(|condition| !condition.value.is_finite()) =>
-            {
-                Err("A Select's threshold must be a number.".into())
+                    .filter_map(|id| grouping.category(*id))
+                    .map(|category| category.name().to_owned())
+                    .collect::<Vec<_>>();
+                match names.as_slice() {
+                    [] => "in no category".to_owned(),
+                    names => format!("in {}", names.join(", ")),
+                }
             }
-            Self::Similar { minimum } if !(0.0..=1.0).contains(minimum) => {
-                Err("A similarity threshold must be between 0% and 100%.".into())
-            }
-            Self::Progressing { minimum } if !minimum.is_finite() => {
+        }
+    }
+    fn tracking(graph: &CurationGraph, node: &str) -> super::ObjectTracking {
+        match graph.node(node).map(CurationNode::kind) {
+            Some(CurationNodeKind::TrackObjects(tracking)) => tracking.clone(),
+            _ => Default::default(),
+        }
+    }
+    fn grouping(graph: &CurationGraph, node: &str) -> super::SubtaskGrouping {
+        match graph.node(node).map(CurationNode::kind) {
+            Some(CurationNodeKind::GroupSimilarSubtasks(grouping)) => grouping.clone(),
+            _ => Default::default(),
+        }
+    }
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Episodes(condition) => condition.validate(),
+            Self::Progressing { minimum, .. } if !minimum.is_finite() => {
                 Err("A progress threshold must be a number.".into())
             }
-            Self::ObjectCount {
-                fewest,
-                most: Some(most),
-            } if most < fewest => Err("The most to keep cannot be fewer than the fewest.".into()),
-            Self::Categories { names } => {
+            Self::Similar { minimum, .. } if !(0.0..=1.0).contains(minimum) => {
+                Err("A similarity threshold must be between 0% and 100%.".into())
+            }
+            Self::InCategories { categories, .. } => {
                 let mut seen = std::collections::BTreeSet::new();
-                for name in names {
-                    if name.trim().is_empty() || !seen.insert(name.as_str()) {
-                        return Err("A grouping keeps each category once.".into());
-                    }
+                if categories.iter().any(|id| !seen.insert(*id)) {
+                    return Err("A Select chooses each category once.".into());
                 }
                 Ok(())
             }
             _ => Ok(()),
         }
     }
+    /// Whether the node it reads is `above`, of the kind it reads, and has
+    /// every category it chooses.
+    fn reads(&self, above: &CurationNode) -> bool {
+        match (self, above.kind()) {
+            (Self::Episodes(_) | Self::Visible { .. }, CurationNodeKind::TrackObjects(_))
+            | (Self::Progressing { .. }, CurationNodeKind::ScoreProgress(_))
+            | (Self::Similar { .. }, CurationNodeKind::FindSimilarSubtasks(_)) => true,
+            (
+                Self::InCategories { categories, .. },
+                CurationNodeKind::GroupSimilarSubtasks(grouping),
+            ) => categories.iter().all(|id| grouping.category(*id).is_some()),
+            _ => false,
+        }
+    }
 }
 
-/// A rule of episodes keeps the rows that meet every condition, and a rule
-/// of subtasks the ones it passes; a rule of moments keeps the moments that
-/// pass and joins the ones that touch into stretches, each carrying its mean
-/// progress rate.
-impl PathFragment for Selection {
-    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
-        let input = step.input()?;
-        let name = step.name();
-        let predicate = self.predicate(input)?;
-        let kept = format!(
-            "{name} AS (SELECT {} FROM {} WHERE {predicate})",
-            input.columns(),
-            input.name()
-        );
-        Ok(match self {
-            Self::Episodes { conditions } => StepSql::new(
-                vec![kept],
-                conditions
-                    .iter()
-                    .fold(input.renamed(name), |relation, condition| {
-                        relation.publishing(condition.fact.key())
-                    }),
-            ),
-            // Moments tile their episode, so kept moments with none left out
-            // between them touch: numbering every moment and then the kept
-            // ones, a stretch is where the two numbers keep one difference.
-            // Each stretch is measured over a window rather than grouped, and
-            // its first moment stands for it, so the answers riding on every
-            // moment of an episode ride on with its stretches.
-            Self::Progressing { .. } => {
-                let (rate, columns) = (Moment::PROGRESS_RATE, input.columns());
-                let stretch = "OVER (PARTITION BY episode_id, stretch)";
-                StepSql::new(
-                    vec![
-                        format!(
-                            "{name}_numbered AS (SELECT {columns}, \
-                             ROW_NUMBER() OVER (PARTITION BY episode_id ORDER BY start_ns) AS position FROM {})",
-                            input.name()
-                        ),
-                        format!(
-                            "{name}_passing AS (SELECT {columns}, \
-                             position - ROW_NUMBER() OVER (PARTITION BY episode_id ORDER BY start_ns) AS stretch \
-                             FROM {name}_numbered WHERE {predicate})"
-                        ),
-                        format!(
-                            "{name}_stretches AS (SELECT episode_id, MIN(start_ns) {stretch} AS start_ns, \
-                             MAX(end_ns) {stretch} AS end_ns, AVG({rate}) {stretch} AS {rate}{}, \
-                             ROW_NUMBER() OVER (PARTITION BY episode_id, stretch ORDER BY start_ns) AS place \
-                             FROM {name}_passing)",
-                            input.answers().following("")
-                        ),
-                        format!(
-                            "{name} AS (SELECT {columns} FROM {name}_stretches WHERE place = 1)"
-                        ),
-                    ],
-                    input.renamed(name).publishing(rate),
-                )
+/// A condition the Select may add, and what its menu calls it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ConditionChoice {
+    label: String,
+    condition: SelectCondition,
+}
+
+impl ConditionChoice {
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+    pub(crate) fn condition(&self) -> &SelectCondition {
+        &self.condition
+    }
+}
+
+/// A Select: every condition an episode it keeps meets.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Selection {
+    conditions: Vec<SelectCondition>,
+}
+
+impl Selection {
+    /// A new Select keeps every episode, so adding one never silently drops
+    /// data: its one condition is a duration of at least nothing.
+    pub(crate) fn keeping_everything() -> Self {
+        Self {
+            conditions: vec![SelectCondition::Episodes(EpisodeCondition::new(
+                EpisodeNumber::Fact(EpisodeFact::DurationSeconds),
+                Comparison::AtLeast,
+                0.0,
+            ))],
+        }
+    }
+    pub(crate) fn conditions(&self) -> &[SelectCondition] {
+        &self.conditions
+    }
+    /// The same Select with its condition at `index` replaced.
+    pub(crate) fn replacing(&self, index: usize, condition: SelectCondition) -> Self {
+        let mut conditions = self.conditions.clone();
+        if let Some(slot) = conditions.get_mut(index) {
+            *slot = condition;
+        }
+        Self { conditions }
+    }
+    /// The same Select with one more condition.
+    pub(crate) fn adding(&self, condition: SelectCondition) -> Self {
+        let mut conditions = self.conditions.clone();
+        conditions.push(condition);
+        Self { conditions }
+    }
+    /// The same Select without its condition at `index`.
+    pub(crate) fn without(&self, index: usize) -> Self {
+        let mut conditions = self.conditions.clone();
+        if index < conditions.len() {
+            conditions.remove(index);
+        }
+        Self { conditions }
+    }
+    /// The conditions as the node card says them: "Duration per bottle in
+    /// the lowest 25% and progress rate at least 0.20×".
+    pub(crate) fn sentence(&self, graph: &CurationGraph) -> String {
+        let mut sentence = self
+            .conditions
+            .iter()
+            .map(|condition| condition.sentence(graph))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        if let Some(first) = sentence.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        sentence
+    }
+    /// A grouping's categories changed: each condition choosing among
+    /// `node`'s chooses what `rechoose` makes of its choice, when it makes
+    /// anything.
+    pub(super) fn rechoose_categories(
+        &mut self,
+        node: &str,
+        rechoose: &impl Fn(&[CategoryId]) -> Option<Vec<CategoryId>>,
+    ) {
+        for condition in &mut self.conditions {
+            if let SelectCondition::InCategories {
+                node: chosen_from,
+                categories,
+            } = condition
+                && chosen_from == node
+                && let Some(chosen) = rechoose(categories)
+            {
+                *categories = chosen;
             }
-            Self::Similar { .. } | Self::Categories { .. } | Self::ObjectCount { .. } => {
-                StepSql::new(vec![kept], input.renamed(name))
+        }
+    }
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if self.conditions.is_empty() {
+            return Err("A Select names at least one condition.".into());
+        }
+        self.conditions
+            .iter()
+            .try_for_each(SelectCondition::validate)
+    }
+    /// Every condition reads a node among `above`, of the kind it reads.
+    pub(super) fn validate_against(&self, above: &[&CurationNode]) -> Result<(), String> {
+        for condition in &self.conditions {
+            let Some(node) = condition.node() else {
+                continue;
+            };
+            if !above
+                .iter()
+                .any(|above| above.id() == node && condition.reads(above))
+            {
+                return Err(format!(
+                    "A Select reads “{node}”, which is not a node above it of the kind it reads."
+                ));
             }
-        })
+        }
+        Ok(())
+    }
+}
+
+impl CurationGraph {
+    /// The numbers a Select's episode condition may compare, in menu order:
+    /// the recorded facts, then what each Track objects node above it
+    /// counted.
+    pub(crate) fn numbers_for(&self, select: &str) -> Vec<EpisodeNumber> {
+        let mut numbers = EpisodeFact::ALL
+            .into_iter()
+            .map(EpisodeNumber::Fact)
+            .collect::<Vec<_>>();
+        for above in self.ancestors(select).into_iter().rev() {
+            if let CurationNodeKind::TrackObjects(_) = above.kind() {
+                numbers.push(EpisodeNumber::MostAtOnce(above.id().to_owned()));
+                numbers.push(EpisodeNumber::DurationPer(above.id().to_owned()));
+            }
+        }
+        numbers
+    }
+    /// Every condition a Select may add, built from the nodes above it, each
+    /// from where it keeps the most: a number at least nothing, and a range
+    /// at the threshold a review starts from.
+    pub(crate) fn conditions_for(&self, select: &str) -> Vec<ConditionChoice> {
+        let numbers = self.numbers_for(select).into_iter().map(|number| {
+            SelectCondition::Episodes(EpisodeCondition::new(number, Comparison::AtLeast, 0.0))
+        });
+        let ranges = self
+            .ancestors(select)
+            .into_iter()
+            .rev()
+            .filter_map(|above| {
+                let node = above.id().to_owned();
+                Some(match above.kind() {
+                    CurationNodeKind::ScoreProgress(_) => {
+                        SelectCondition::Progressing { node, minimum: 0.0 }
+                    }
+                    CurationNodeKind::TrackObjects(_) => {
+                        SelectCondition::Visible { node, fewest: 1 }
+                    }
+                    CurationNodeKind::FindSimilarSubtasks(_) => {
+                        SelectCondition::Similar { node, minimum: 0.5 }
+                    }
+                    CurationNodeKind::GroupSimilarSubtasks(grouping) => {
+                        SelectCondition::InCategories {
+                            node,
+                            categories: grouping
+                                .categories()
+                                .iter()
+                                .map(|category| category.id())
+                                .collect(),
+                        }
+                    }
+                    CurationNodeKind::Dataset
+                    | CurationNodeKind::BreakDownSubtasks(_)
+                    | CurationNodeKind::Select(_) => return None,
+                })
+            })
+            .collect::<Vec<_>>();
+        numbers
+            .chain(ranges)
+            .map(|condition| ConditionChoice {
+                label: condition.name(self),
+                condition,
+            })
+            .collect()
     }
 }
 
 #[cfg(test)]
 impl Selection {
+    pub(crate) fn of(conditions: Vec<SelectCondition>) -> Self {
+        Self { conditions }
+    }
     /// Episodes whose one recorded fact compares with `value` as asked.
     pub(crate) fn episodes_where(fact: EpisodeFact, comparison: Comparison, value: f64) -> Self {
-        Self::Episodes {
-            conditions: vec![EpisodeCondition::new(fact, comparison, value)],
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use spiral_robotics_common::datasets::EpisodeId;
-
-    /// What a search's rule judges below Break down: the subtask and its
-    /// similarity.
-    fn searched() -> Relation {
-        Relation::new("breakdown", vec![SubtaskRow::DESCRIPTION])
-            .measuring("search", SubtaskRow::SIMILARITY)
-    }
-
-    /// The same below a grouping: the subtask and its category.
-    fn grouped() -> Relation {
-        Relation::new("breakdown", vec![SubtaskRow::DESCRIPTION])
-            .measuring("grouping", SubtaskRow::CATEGORY)
-    }
-
-    /// The predicate as rendered, read back: `column >= CAST(n AS DOUBLE)`,
-    /// `column <= …`, or the moments' `(column IS NULL OR column >= …)`, over
-    /// one row's value of that column. Anything else is not a predicate this
-    /// module renders, and fails the test that reads it.
-    struct RenderedPredicate(String);
-
-    /// A rule of categories as rendered, read back:
-    /// `relation.column.category IN ('a', 'b')`, over one row's category. A
-    /// row without one is NULL in SQL, which `IN` never keeps.
-    struct RenderedCategories(String);
-
-    impl RenderedCategories {
-        fn keeps(&self, qualified: &str, category: Option<&str>) -> bool {
-            let names = self
-                .0
-                .strip_prefix(&format!("{qualified}.category IN ("))
-                .and_then(|rest| rest.strip_suffix(')'))
-                .unwrap_or_else(|| panic!("a list of categories: {}", self.0));
-            let names = names
-                .split(", ")
-                .map(|name| {
-                    name.strip_prefix('\'')
-                        .and_then(|name| name.strip_suffix('\''))
-                        .expect("a quoted name")
-                        .replace("''", "'")
-                })
-                .collect::<Vec<_>>();
-            category.is_some_and(|category| names.iter().any(|name| name == category))
-        }
-    }
-
-    impl RenderedPredicate {
-        fn keeps(&self, column: &str, value: Option<f64>) -> bool {
-            let comparison = |text: &str| {
-                let (name, rest) = text.split_once(' ').expect("a column");
-                assert_eq!(name, column, "{}", self.0);
-                let (operator, literal) = rest.split_once(' ').expect("an operator");
-                let threshold = literal
-                    .strip_prefix("CAST(")
-                    .and_then(|literal| literal.strip_suffix(" AS DOUBLE)"))
-                    .expect("a double literal")
-                    .parse::<f64>()
-                    .expect("a number");
-                value.is_some_and(|value| match operator {
-                    ">=" => value >= threshold,
-                    "<=" => value <= threshold,
-                    other => panic!("operator {other}"),
-                })
-            };
-            match self
-                .0
-                .strip_prefix('(')
-                .and_then(|inner| inner.strip_suffix(')'))
-                .and_then(|inner| inner.split_once(" OR "))
-            {
-                Some((unread, rule)) => {
-                    assert_eq!(unread, format!("{column} IS NULL"), "{}", self.0);
-                    value.is_none() || comparison(rule)
-                }
-                None => comparison(&self.0),
-            }
-        }
-    }
-
-    #[test]
-    fn a_count_rule_keeps_in_the_browser_what_its_predicate_keeps() {
-        let counted = Relation::new("episodes", Vec::new()).measuring("track", ObjectCount::COLUMN);
-        let range = Selection::ObjectCount {
-            fewest: 3,
-            most: Some(4),
-        };
-        assert_eq!(
-            range.predicate(&counted).unwrap(),
-            "object_count >= 3 AND object_count <= 4"
-        );
-        // An episode the tracker could not count is NULL in SQL, which no
-        // comparison keeps.
-        assert_eq!(
-            [None, Some(2), Some(3), Some(4), Some(5)].map(|count| range.keeps_count(count)),
-            [false, false, true, true, false]
-        );
-        let any = Selection::for_basis(SelectionBasis::ObjectCount);
-        assert_eq!(any.predicate(&counted).unwrap(), "object_count >= 0");
-        assert!(any.keeps_count(Some(0)) && !any.keeps_count(None));
-        // A range given backwards is still a range.
-        assert_eq!(
-            range.with_count_range((6, 2)),
-            Selection::ObjectCount {
-                fewest: 2,
-                most: Some(6)
-            }
-        );
-    }
-
-    #[test]
-    fn the_browser_filter_and_the_rendered_predicate_keep_the_same_rows() {
-        // Episodes either side of each threshold, on it, and without the fact.
-        let episodes = [
-            9_999_999_999_u64,
-            10_000_000_000,
-            10_000_000_001,
-            20_500_000_000,
-        ]
-        .into_iter()
-        .zip(1..)
-        .map(|(duration, ordinal)| Episode::fixture(&EpisodeId::fixture(ordinal), duration))
-        .collect::<Vec<_>>();
-        for condition in [
-            EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtLeast, 10.0),
-            EpisodeCondition::new(
-                EpisodeFact::DurationSeconds,
-                Comparison::AtMost,
-                10.000_000_001,
-            ),
-            EpisodeCondition::new(EpisodeFact::Messages, Comparison::AtLeast, 0.0),
-        ] {
-            let rule = Selection::Episodes {
-                conditions: vec![condition],
-            };
-            let fact = condition.fact();
-            let rendered = RenderedPredicate(rule.predicate(&searched()).unwrap());
-            for episode in &episodes {
-                assert_eq!(
-                    rule.keeps_episode(episode),
-                    rendered.keeps(fact.key(), fact.of(episode)),
-                    "{} on {:?}",
-                    rendered.0,
-                    fact.of(episode)
-                );
-            }
-        }
-        // Moments below, on, and above the threshold, and one never read.
-        for minimum in [-0.5, 0.0, 0.2] {
-            let rule = Selection::Progressing { minimum };
-            let rendered = RenderedPredicate(rule.predicate(&searched()).unwrap());
-            for rate in [
-                Some(-0.6),
-                Some(-0.5),
-                Some(0.0),
-                Some(0.19),
-                Some(0.2),
-                Some(1.4),
-                None,
-            ] {
-                assert_eq!(
-                    rule.keeps_moment(rate),
-                    rendered.keeps(Moment::PROGRESS_RATE, rate),
-                    "{} on {rate:?}",
-                    rendered.0
-                );
-            }
-        }
-        // Subtasks below, on, and above a similarity, and one the model could
-        // not judge, which neither side keeps.
-        for minimum in [0.0, 0.5, 0.7] {
-            let rule = Selection::Similar { minimum };
-            let rendered = RenderedPredicate(rule.predicate(&searched()).unwrap());
-            for similarity in [None, Some(0.0), Some(0.49), Some(0.5), Some(0.7), Some(1.0)] {
-                assert_eq!(
-                    rule.keeps_subtask(similarity, None),
-                    rendered.keeps(SubtaskRow::SIMILARITY, similarity),
-                    "{} on {similarity:?}",
-                    rendered.0
-                );
-            }
-        }
-        // Subtasks in a kept category, in another, and in none; a name with a
-        // quote in it survives the quoting.
-        let rule = Selection::Categories {
-            names: vec!["fold".into(), "fold's edge".into()],
-        };
-        let rendered = RenderedCategories(rule.predicate(&grouped()).unwrap());
-        for category in [
-            None,
-            Some("fold"),
-            Some("fold's edge"),
-            Some("grasp"),
-            Some("Fold"),
-        ] {
-            assert_eq!(
-                rule.keeps_subtask(None, category),
-                rendered.keeps("grouping.subtask_category", category),
-                "{} on {category:?}",
-                rendered.0
-            );
-        }
-        // Choosing no category keeps nothing, so there is nothing to publish.
-        assert!(
-            Selection::Categories { names: Vec::new() }
-                .predicate(&grouped())
-                .is_err()
-        );
-        // A rule over a measure nothing above took has no column to read.
-        assert!(
-            Selection::Similar { minimum: 0.5 }
-                .predicate(&grouped())
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn an_episode_is_kept_when_it_meets_every_condition() {
-        let rule = Selection::Episodes {
-            conditions: vec![
-                EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtLeast, 10.0),
-                EpisodeCondition::new(EpisodeFact::DurationSeconds, Comparison::AtMost, 20.0),
-            ],
-        };
-        let lasting = |seconds: u64| {
-            rule.keeps_episode(&Episode::fixture(
-                &EpisodeId::fixture(1),
-                seconds * 1_000_000_000,
-            ))
-        };
-        assert!(!lasting(9) && lasting(10) && lasting(20) && !lasting(21));
-        assert_eq!(
-            rule.predicate(&searched()).unwrap(),
-            "duration_seconds >= CAST(10 AS DOUBLE) AND duration_seconds <= CAST(20 AS DOUBLE)"
-        );
-        assert_eq!(
-            rule.sentence(),
-            "Duration at least 10 s and duration at most 20 s"
-        );
-    }
-
-    #[test]
-    fn a_rule_reads_the_nearest_measure_of_its_kind() {
-        // A second search below the first writes its own column, and the
-        // Select below it reads that one.
-        let twice = searched().measuring("again", SubtaskRow::SIMILARITY);
-        assert_eq!(
-            Selection::Similar { minimum: 0.5 }
-                .predicate(&twice)
-                .unwrap(),
-            "similarity_2 >= CAST(0.5 AS DOUBLE)"
-        );
-    }
-
-    #[test]
-    fn a_new_select_keeps_everything_measured_and_says_so() {
-        let episodes = Selection::for_basis(SelectionBasis::EpisodeFacts);
-        let episode = Episode::fixture(&EpisodeId::fixture(1), 12_000_000_000);
-        assert!(episodes.keeps_episode(&episode));
-        assert_eq!(episodes.sentence(), "Duration at least 0 s");
-        assert!(Selection::for_basis(SelectionBasis::Progress).keeps_moment(Some(0.0)));
-        assert_eq!(
-            Selection::for_basis(SelectionBasis::Categories),
-            Selection::Categories { names: Vec::new() }
-        );
-        for basis in [
-            SelectionBasis::EpisodeFacts,
-            SelectionBasis::Similarity,
-            SelectionBasis::Categories,
-            SelectionBasis::Progress,
-        ] {
-            assert_eq!(Selection::for_basis(basis).basis(), basis);
-        }
-    }
-
-    #[test]
-    fn each_rule_keeps_by_its_own_measure_and_nothing_unmeasured() {
-        let longer = Selection::Episodes {
-            conditions: vec![EpisodeCondition::new(
-                EpisodeFact::DurationSeconds,
-                Comparison::AtLeast,
-                20.0,
-            )],
-        };
-        assert!(!longer.keeps_episode(&Episode::fixture(&EpisodeId::fixture(1), 19_000_000_000)));
-        assert!(longer.keeps_episode(&Episode::fixture(&EpisodeId::fixture(1), 20_000_000_000)));
-        assert_eq!(longer.sentence(), "Duration at least 20 s");
-
-        let similar = Selection::Similar { minimum: 0.7 };
-        assert!(similar.keeps_subtask(Some(0.7), None));
-        assert!(!similar.keeps_subtask(Some(0.69), None));
-        assert!(!similar.keeps_subtask(None, Some("Fold")));
-
-        let folds = Selection::Categories {
-            names: vec!["Fold".into(), "Smooth".into()],
-        };
-        assert!(folds.keeps_subtask(None, Some("Smooth")));
-        assert!(!folds.keeps_subtask(Some(1.0), Some("Grasp")));
-        assert!(!folds.keeps_subtask(Some(1.0), None));
-        assert_eq!(folds.sentence(), "Fold, Smooth");
-
-        let moving = Selection::Progressing { minimum: 0.2 };
-        assert!(!moving.keeps_moment(Some(0.1)));
-        assert!(moving.keeps_moment(Some(0.2)));
-        assert!(moving.keeps_moment(None), "an unread moment is kept");
-    }
-
-    #[test]
-    fn a_rule_is_stored_in_its_own_words_and_checked() {
-        let json = serde_json::to_value(Selection::Episodes {
-            conditions: vec![EpisodeCondition::new(
-                EpisodeFact::Messages,
-                Comparison::AtMost,
-                5000.0,
-            )],
-        })
-        .unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"keep": "episodes", "conditions": [{"fact": "messages", "comparison": "at_most", "value": 5000.0}]})
-        );
-        assert!(
-            Selection::Episodes {
-                conditions: Vec::new()
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(Selection::Similar { minimum: 1.2 }.validate().is_err());
-        assert!(
-            Selection::Categories {
-                names: vec!["Fold".into(), "Fold".into()]
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            Selection::Episodes {
-                conditions: vec![EpisodeCondition::new(
-                    EpisodeFact::Channels,
-                    Comparison::AtLeast,
-                    f64::NAN,
-                )],
-            }
-            .validate()
-            .is_err()
-        );
+        Self::of(vec![SelectCondition::Episodes(EpisodeCondition::new(
+            EpisodeNumber::Fact(fact),
+            comparison,
+            value,
+        ))])
     }
 }

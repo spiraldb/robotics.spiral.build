@@ -11,8 +11,8 @@
 //! metadata. It answers an Arrow IPC stream of the rows its contract types.
 //! A video it rejects (422) is that episode's failed answer; a service on
 //! another revision (409) or a refused token (401) ends the run; anything
-//! that may pass (429, 5xx, a timeout, no connection) is tried again after a
-//! pause.
+//! that may pass (408, 429, 5xx, a timeout, no connection) is tried again
+//! after a pause: Modal answers 408 when it drops an upload part way.
 use arrow_array::{Array, ArrayRef, RecordBatch, StructArray};
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
 use reqwest::StatusCode;
@@ -170,10 +170,7 @@ impl VideoService {
 
     /// A question to this service, its request carrying `arguments` in its
     /// schema metadata.
-    pub(super) fn question<'a>(
-        &'a self,
-        arguments: Vec<(&'static str, &'a str)>,
-    ) -> VideoQuestion<'a> {
+    pub(super) fn question(&self, arguments: Vec<(&'static str, String)>) -> VideoQuestion<'_> {
         VideoQuestion {
             service: self,
             arguments,
@@ -234,7 +231,11 @@ impl VideoService {
                 StatusCode::UNAUTHORIZED => {
                     return Err("The Modal service refused MODAL_SERVICE_TOKEN.".into());
                 }
-                status if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() => {
+                status
+                    if status == StatusCode::REQUEST_TIMEOUT
+                        || status == StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error() =>
+                {
                     last_failure = format!("the service answered {status}");
                 }
                 status => {
@@ -263,7 +264,7 @@ impl VideoService {
 /// beside the packets.
 pub(super) struct VideoQuestion<'a> {
     service: &'a VideoService,
-    arguments: Vec<(&'static str, &'a str)>,
+    arguments: Vec<(&'static str, String)>,
 }
 
 impl VideoQuestion<'_> {
@@ -293,7 +294,11 @@ impl VideoQuestion<'_> {
         };
         let metadata = [("codec", "h264"), ("framing", "annex_b")]
             .into_iter()
-            .chain(self.arguments.iter().copied())
+            .chain(
+                self.arguments
+                    .iter()
+                    .map(|(key, value)| (*key, value.as_str())),
+            )
             .map(|(key, value)| (key.to_owned(), value.to_owned()))
             .collect::<HashMap<_, _>>();
         let schema = Arc::new(

@@ -1,9 +1,9 @@
 # Training
 
 Training fits an ACT policy to a curated view on a Modal GPU. Curation decides
-**what** to train on: one row per kept interval of an episode. Training
-decides **how the model sees it**: which cameras, at what image size, on what
-clock. Studio moves the recorded data to Modal compressed, and the job turns it
+**what** to train on: one row per episode, with the time ranges it keeps of
+it in `kept`. Training decides **how the model sees it**: which cameras, at
+what image size, on what clock. Studio moves the recorded data to Modal compressed, and the job turns it
 into training samples next to the GPU.
 
 ```
@@ -20,9 +20,10 @@ Browser ── POST /api/training/runs ──▶ Studio backend ── 1. upload
    view, its cameras, an image size, the training rate, and the ACT settings,
    and starts a run with that `TrainingConfig`.
 2. **Admission** (backend). The config is checked; the view's statement is read
-   from Studio's curated views and run once to list its kept intervals
-   (`episode_id, start_ns, end_ns`); the dataset's joint roles name the state
-   and action streams. The run is recorded in Studio SQLite with what it was
+   from Studio's curated views and run once, with each row's `kept` unnested
+   into its kept intervals (`episode_id, start_ns, end_ns`, an empty one left
+   out; `ProjectQueries::kept_intervals`); the dataset's joint roles name the
+   state and action streams. The run is recorded in Studio SQLite with what it was
    given, and its upload starts.
 3. **Upload** (backend, held in memory). For each episode, each camera's
    packets and each joint stream's values are one **stream**, content-addressed
@@ -104,8 +105,8 @@ in recorded order.
   row per recorded message, in log-time order. A row with a null value is
   skipped.
 
-`log_time_ns` is the absolute MCAP log time, the clock the view's
-`start_ns`/`end_ns` use. A key is the lowercase hex SHA-256 of the JSON array
+`log_time_ns` is the absolute MCAP log time, the clock the view's `kept`
+ranges use. A key is the lowercase hex SHA-256 of the JSON array
 `[dataset resource id, dataset version id, episode id, statement]`: the same
 read of the same dataset version is uploaded once, by any run.
 

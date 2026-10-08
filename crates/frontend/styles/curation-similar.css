@@ -186,22 +186,8 @@
     @apply flex min-w-0 flex-col items-stretch gap-1 text-left;
   }
 
-  /* A category the grouping leaves out steps back: its words and its share
-     fade, and only its checkbox keeps full strength, to bring it back. */
-  .curation-similar-category[data-kept="false"] > :not(.curation-similar-category-head),
-  .curation-similar-category[data-kept="false"] .curation-similar-category-open {
-    opacity: 0.5;
-  }
-
   .curation-similar-category-head {
     @apply flex min-w-0 items-center gap-1.5;
-  }
-
-  /* Whether a category's subtasks are handed on: a checkbox before its
-     name, in ink, on the card and on the chip alike. */
-  .curation-similar-keep {
-    @apply m-0 size-3.5 shrink-0 cursor-pointer;
-    accent-color: var(--tone-ink);
   }
 
   /* One row of chips while a category is open: the same six categories, the
@@ -211,8 +197,7 @@
   }
 
   /* The name is what a chip is for, so it keeps its width and the row wraps
-     rather than cutting six names to three words each. The checkbox keeps
-     the category; the rest of the chip opens it. */
+     rather than cutting six names to three words each. */
   .curation-similar-chip {
     @apply flex min-h-6 max-w-full items-center gap-1.5 rounded border border-line bg-surface pl-1.5 text-left;
     transition:
@@ -234,10 +219,6 @@
   .curation-similar-chip[data-selected="true"] {
     border-color: var(--tone-accent-line);
     background: var(--tone-accent-wash);
-  }
-
-  .curation-similar-chip[data-kept="false"] .curation-similar-chip-open {
-    opacity: 0.5;
   }
 
   .curation-similar-chip-name {

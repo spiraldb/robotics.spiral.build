@@ -90,14 +90,14 @@ async fn the_objects_a_prompt_names_are_tracked_into_one_listing_of_pictures() {
     let mock = MockService::tracking();
     let base = mock.clone().serve().await;
     let service = ObjectTrackingService::of(&keys(&base), Arc::new(Semaphore::new(1))).unwrap();
-    let tracking = service.tracking("the red cup", "sam3@5f1c2d0", "rev");
+    let tracking = service.tracking(("the red cup", 2), ("sam3@5f1c2d0", "rev"));
     let Ok(VideoAnswer::Answered(answer)) = tracking.ask(&MockService::packets(3)).await else {
         panic!("the video was tracked")
     };
     let metadata = mock.metadata();
     assert_eq!(
-        ["prompt", "model", "implementation"].map(|key| metadata[key].as_str()),
-        ["the red cup", "sam3@5f1c2d0", "rev"]
+        ["prompt", "rate", "model", "implementation"].map(|key| metadata[key].as_str()),
+        ["the red cup", "2", "sam3@5f1c2d0", "rev"]
     );
 
     // The answer is the contract's type, whatever the service declared

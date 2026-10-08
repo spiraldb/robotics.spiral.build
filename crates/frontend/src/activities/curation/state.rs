@@ -5,18 +5,19 @@
 use super::annotate::SubtaskRow;
 use super::client::CurationClient;
 use super::document::{
-    CURATION_ENCODING_VERSION, CurationGraph, CurationNode, DATASET_NODE_ID, Selection,
+    CURATION_ENCODING_VERSION, CurationGraph, CurationNodeKind, DATASET_NODE_ID, Selection,
 };
+use super::measured_timeline::MeasuredTimeline;
 use super::population::{EpisodeSample, Population, PopulationReader};
-use super::preview::{
-    PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows, ReadInput,
-};
+use super::preview::{PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows};
+use super::select::SelectReading;
 use super::session::{DocumentCommand, DocumentSession};
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::components::scoped_task::ScopedTask;
 use crate::shell::state::StudioProjectState;
 use dioxus::dioxus_core::Task;
 use dioxus::prelude::*;
+use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::curation::{CurationDocument, CurationSummary};
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_ui::Place;
@@ -391,17 +392,35 @@ impl CurationController {
             Some((reader.input(node), reader.of(node)))
         })
     }
-    /// What `node`'s rule judges, and what it keeps of that, once the sample
-    /// is read.
-    pub(super) fn judged(&self, node: &str) -> Option<(Population, Population)> {
+    /// The timeline `node`'s preview read of `episode`, when it has one.
+    pub(super) fn timeline(&self, node: &str, episode: &EpisodeId) -> Option<MeasuredTimeline> {
+        self.with_reading(|_, reader| reader?.timeline(node, episode).cloned())
+    }
+    /// The subtasks `node`'s preview read of the episodes reaching it, once
+    /// the sample is read.
+    pub(super) fn subtasks(&self, node: &str) -> Vec<SubtaskRow> {
         self.with_reading(|_, reader| {
-            let reader = reader?;
-            Some((reader.judged(node), reader.of(node)))
+            reader
+                .map(|reader| reader.subtasks_reaching(node))
+                .unwrap_or_default()
         })
     }
-    /// Replace `node`'s rule, when it still keeps by that measure.
-    pub(super) fn set_rule(self, node: &str, rule: Selection) -> Result<(), String> {
-        self.edit(|payload| payload.set_rule(node, rule))
+    /// What the Select `node` makes of what reaches it, once the sample is
+    /// read.
+    pub(super) fn select_reading(&self, node: &str) -> Option<SelectReading> {
+        self.with_reading(|graph, reader| {
+            let reader = reader?;
+            match graph.node(node)?.kind() {
+                CurationNodeKind::Select(selection) => {
+                    Some(selection.read(reader.input(node), reader))
+                }
+                _ => None,
+            }
+        })
+    }
+    /// Replace the Select `node`'s conditions.
+    pub(super) fn set_selection(self, node: &str, selection: Selection) -> Result<(), String> {
+        self.edit(|payload| payload.set_selection(node, selection))
     }
     /// Read the graph together with what it is interpreted over, once the
     /// sample is read.
@@ -418,18 +437,18 @@ impl CurationController {
             read(payload, reader.as_ref())
         })
     }
-    /// Hold what `node`'s preview of one episode answered from what went
-    /// into it, for the session.
+    /// Hold what `node`'s preview of `episode` answered, under the column it
+    /// stores its answers in, for the session.
     pub(super) fn record_preview(
         mut self,
-        node: &CurationNode,
-        read_from: (&EpisodeId, ReadInput),
+        node: (&str, &AnswerColumn),
+        episode: &EpisodeId,
         read: Result<PreviewRows, String>,
     ) {
         self.interpretation
             .reads
             .write()
-            .record(node, read_from, read);
+            .record(node, episode, read);
     }
     /// The revision Studio holds the open curation at; 0 before its first save.
     pub(super) fn saved_revision(&self) -> u64 {

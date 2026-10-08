@@ -12,8 +12,8 @@ use spiral_robotics_common::datasets::EpisodeId;
 #[derive(Clone, PartialEq)]
 pub(super) struct SubtaskSource {
     annotation: Option<String>,
-    /// The subtasks that reach this node: the annotation's, less whatever a
-    /// Select above it left out.
+    /// The subtasks of the episodes that reach this node, as the annotation
+    /// read them.
     reaching: Vec<SubtaskRow>,
     /// The recordings, the camera the annotation read, and the order the
     /// episodes list in.
@@ -23,28 +23,32 @@ pub(super) struct SubtaskSource {
     measured: Vec<EpisodeId>,
     /// The search a Find similar node asks; a grouping node has none.
     search: Option<SubtaskSearch>,
-    /// What the node's own preview judged of those subtasks, before a
-    /// search's cutoff keeps the close ones.
+    /// What the node's own preview judged of those subtasks.
     judged: Vec<SubtaskRow>,
     progress: PreviewProgress,
 }
 
 impl SubtaskSource {
     pub(super) fn of(controller: CurationController, node: &str) -> Self {
-        let reaching = controller
-            .populations(node)
-            .map(|(input, _)| input.subtasks().to_vec())
-            .unwrap_or_default();
-        let judged = controller
-            .judged(node)
-            .map(|(judged, _)| judged.subtasks().to_vec())
-            .unwrap_or_default();
         let annotation = controller.with_payload(|payload| {
             payload
                 .subtask_source(node)
                 .and_then(|annotation| payload.node(annotation))
                 .cloned()
         });
+        let reaching = controller.with_reading(|_, reader| {
+            let (Some(reader), Some(annotation)) = (reader, annotation.as_ref()) else {
+                return Vec::new();
+            };
+            reader
+                .input(node)
+                .episodes()
+                .iter()
+                .flat_map(|episode| reader.subtasks(annotation.id(), episode))
+                .cloned()
+                .collect()
+        });
+        let judged = controller.subtasks(node);
         let measured = annotation
             .as_ref()
             .map(|annotation| Self::measured_by(controller, annotation))

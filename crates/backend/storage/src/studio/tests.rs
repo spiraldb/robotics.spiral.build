@@ -338,16 +338,9 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
 
 #[tokio::test]
 async fn projects_with_records_become_workspaces_named_by_their_id() {
-    use sea_orm_migration::MigratorTrait as _;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("before-workspaces.sqlite3");
-    let raw = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
-        .await
-        .unwrap();
-    let before = super::migrations::Migrator::migrations().len() - 1;
-    super::migrations::Migrator::up(&raw, Some(before as u32))
-        .await
-        .unwrap();
+    let raw = migrated_until(&path, "m20261005_000004_workspaces").await;
     raw.execute_unprepared(
         r#"INSERT INTO curations VALUES ('["https://api.spiraldb.dev","arms-618551"]', 'c', 'Grasp', 1, 1, '{}', 1);
            INSERT INTO studio_settings VALUES ('["https://api.spiraldb.dev","arms-618551"]', '{}');
@@ -367,4 +360,60 @@ async fn projects_with_records_become_workspaces_named_by_their_id() {
             "arms-618551"
         )]
     );
+}
+
+#[tokio::test]
+async fn curations_before_encoding_5_are_dropped_with_the_views_they_published() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("before-encoding-5.sqlite3");
+    let raw = migrated_until(&path, "m20261008_000001_curations_encoding_5").await;
+    raw.execute_unprepared(
+        r#"INSERT INTO curations VALUES ('p', 'old', 'Steady drops', 1, 4, '{"published":[{"node":"select_1","view":"steady_drops","revision":1}]}', 1);
+           INSERT INTO curations VALUES ('p', 'broken', 'Broken', 1, 3, 'not json', 1);
+           INSERT INTO curations VALUES ('p', 'new', 'Experts', 1, 5, '{"published":[{"node":"select_2","view":"expert_demos","revision":1}]}', 1);
+           INSERT INTO curated_views VALUES ('p', 'Steady_Drops', 'SELECT 1');
+           INSERT INTO curated_views VALUES ('p', 'expert_demos', 'SELECT 1');
+           INSERT INTO curated_views VALUES ('q', 'steady_drops', 'SELECT 1');"#,
+    )
+    .await
+    .unwrap();
+    let store = StudioStore::at(path);
+    store.initialize().await.unwrap();
+    let connection = store.connection().await.unwrap();
+    let mut left = Vec::new();
+    for sql in [
+        "SELECT id FROM curations ORDER BY id",
+        "SELECT project || ':' || name FROM curated_views ORDER BY project, name",
+    ] {
+        let rows = connection
+            .query_all(Statement::from_string(DbBackend::Sqlite, sql))
+            .await
+            .unwrap();
+        left.push(
+            rows.iter()
+                .map(|row| row.try_get_by_index::<String>(0).unwrap())
+                .collect::<Vec<_>>(),
+        );
+    }
+    // A view of the same name in another project is not the dropped one.
+    assert_eq!(
+        left,
+        [vec!["new"], vec!["p:expert_demos", "q:steady_drops"]]
+    );
+}
+
+/// A database at `path` with every migration before `name` applied.
+async fn migrated_until(path: &std::path::Path, name: &str) -> sea_orm::DatabaseConnection {
+    use sea_orm_migration::MigratorTrait as _;
+    let raw = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
+        .await
+        .unwrap();
+    let before = super::migrations::Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name() == name)
+        .unwrap();
+    super::migrations::Migrator::up(&raw, Some(before as u32))
+        .await
+        .unwrap();
+    raw
 }

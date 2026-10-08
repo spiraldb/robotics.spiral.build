@@ -241,6 +241,7 @@ impl FillWork {
             AnswerSource::ObjectTracking {
                 camera,
                 prompt,
+                rate,
                 model,
                 revision,
             } => {
@@ -248,8 +249,8 @@ impl FillWork {
                     .tracking
                     .as_ref()
                     .ok_or("The object tracking service is not set up.")?;
-                self.video_answer(selected, camera, service.tracking(prompt, model, revision))
-                    .await
+                let tracking = service.tracking((prompt, *rate), (model, revision));
+                self.video_answer(selected, camera, tracking).await
             }
         }
     }

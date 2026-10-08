@@ -3,28 +3,19 @@
    of kit controls must be unlayered too. */
 
 @layer components {
-  /* The Select reads top to bottom as its decision does: the rule, how much it
-     keeps, where the threshold falls, where the kept parts lie, and then the
-     parts themselves beside their recording. */
+  /* The Select reads top to bottom as its decision does: how much it keeps,
+     where each condition's threshold falls, where the kept parts lie, and
+     then the parts themselves beside their recording. */
   .curation-select-workspace {
     @apply flex h-full min-h-0 min-w-0 flex-col;
     background: var(--tone-surface);
   }
 
-  /* A measure's rule is one sentence on the node's bar; its threshold reads
-     out in the rule's own digits. */
-  .curation-select-rule {
-    @apply flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-ink;
-  }
-  .curation-select-rule-readout {
-    @apply min-w-[3.5ch] font-mono text-[12px] font-medium tabular-nums text-ink;
-  }
-
   /* A Select's conditions, one row each: what it reads and which side it
-     keeps, the value, the strip the value slides on, and how many episodes
-     it leaves out. The columns line up across rows, so several conditions
-     read as one table of the rule, and the strip stops at a strip's measure
-     rather than carrying "leaves out" to the far side of a wide pane. */
+     keeps, the value, the strip the value slides on, and how much it leaves
+     out. The columns line up across rows, so several conditions read as one
+     table, and the strip stops at a strip's measure rather than carrying
+     "leaves out" to the far side of a wide pane. */
   .curation-select-conditions {
     @apply flex shrink-0 flex-col border-b border-line px-3 pb-1.5;
   }
@@ -47,13 +38,24 @@
   .curation-select-condition-remove .ui-icon {
     @apply size-3;
   }
-  /* Add condition starts the row under the last condition: its box on the
-     fact column's edge and its + where the fact's words begin. */
+  /* A range condition names what it reads in the fact column, in words. */
+  span.curation-select-condition-fact,
+  span.curation-select-condition-comparison {
+    @apply truncate text-[12px] text-ink;
+  }
+  /* A category condition's categories fill the columns between its name and
+     its remove, wrapping as many as there are. */
+  .curation-select-categories {
+    @apply flex flex-wrap items-center gap-x-3 gap-y-1;
+    grid-column: 2 / 6;
+  }
+  /* Add condition starts the row under the last condition: its menu on the
+     fact column's edge, the width of a fact. */
   .curation-select-condition-add {
     @apply flex pt-1.5;
   }
-  .curation-select-condition-add .ui-icon {
-    @apply size-3.5;
+  .curation-select-condition-add .ui-select {
+    width: 9rem;
   }
 
   /* The strips over the episode map: where each threshold falls among the
@@ -65,8 +67,9 @@
   }
 }
 
-/* Unlayered: the kit's mode group is unlayered, so the two sides of the rule
-   are laid in one row here, at the size of the other segmented controls. */
+/* Unlayered: the kit's mode group is unlayered, so the two sides of the
+   Select are laid in one row here, at the size of the other segmented
+   controls. */
 .curation-select-sides {
   grid-auto-flow: column;
   grid-auto-columns: max-content;

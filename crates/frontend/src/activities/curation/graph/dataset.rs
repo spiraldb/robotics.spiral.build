@@ -13,7 +13,6 @@ use super::super::document::{CurationGraph, EpisodeFact};
 use super::super::episode_tabs::{
     EpisodeTabs, LeadingTab, OpenEpisode, OpenEpisodes, WholeEpisodeTab,
 };
-use super::super::path::{PathError, PathFragment, PathStep, Relation, StepSql};
 use super::super::review::{
     Counted, IndexBar, NodeBar, RowStanding, SliceEntry, SliceFace, SubtaskReview, TabStop,
 };
@@ -26,28 +25,38 @@ use crate::components::dataset_catalog::DatasetCatalog;
 use crate::components::icons::SpinnerIcon;
 use crate::format::ClockPresentation as _;
 
-/// Every episode of the dataset, each as one whole interval from its first
-/// message to its last, with the facts Spiral records for it. Only the
-/// published view and a fill read the dataset this way; a preview is given
-/// the episodes the sample already listed.
-impl PathFragment for DatasetSelection {
-    fn interval_step(&self, step: &PathStep<'_>) -> Result<StepSql, PathError> {
+/// The step every path starts with: every episode of the dataset as one row,
+/// with the facts Spiral records for it, its first message as `origin_ns`,
+/// and `kept` of one range, from its first message to its last, through the
+/// episode listing `Episode` uses everywhere.
+pub(in crate::activities::curation) struct DatasetStep<'a>(&'a DatasetSelection);
+
+impl<'a> DatasetStep<'a> {
+    /// The entry holding it, which the facts of the table are read from.
+    pub(in crate::activities::curation) const NAME: &'static str = "dataset";
+
+    pub(in crate::activities::curation) fn new(dataset: &'a DatasetSelection) -> Self {
+        Self(dataset)
+    }
+    pub(in crate::activities::curation) fn entry(&self) -> String {
         let facts = EpisodeFact::ALL
             .iter()
             .map(|fact| format!("{} AS {}", fact.expression(), fact.key()))
             .collect::<Vec<_>>()
             .join(", ");
-        let entry = format!(
-            "{} AS (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, \
-             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts} FROM ({}) listed)",
-            step.name(),
-            Episode::listing_sql(self),
-        );
-        let properties = EpisodeFact::ALL.iter().map(|fact| fact.key()).collect();
-        Ok(StepSql::new(
-            vec![entry],
-            Relation::new(step.name(), properties),
-        ))
+        let keys = EpisodeFact::ALL
+            .iter()
+            .map(|fact| fact.key())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{} AS (SELECT episode_id, start_ns AS origin_ns, \
+             [STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)] AS kept, {keys} \
+             FROM (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, \
+             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts} FROM ({}) listed) spans)",
+            Self::NAME,
+            Episode::listing_sql(self.0),
+        )
     }
 }
 

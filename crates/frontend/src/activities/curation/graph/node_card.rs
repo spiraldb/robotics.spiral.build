@@ -4,13 +4,12 @@
 use spiral_robotics_common::datasets::DatasetSelection;
 
 use super::super::document::{
-    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PublishedOutput, Selection,
+    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PublishedOutput,
 };
-use super::super::population::{EpisodeSample, Population, PopulationReader, Slice};
+use super::super::population::{EpisodeSample, PopulationReader};
 use super::super::preview::PreviewProgress;
 use super::super::review::Counted;
 use super::super::state::CurationController;
-use crate::format::ClockPresentation as _;
 
 /// What a node does to the data; drives its glyph and identity tint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,7 +32,7 @@ impl NodeFace {
             CurationNodeKind::GroupSimilarSubtasks(_) => Self::Grouping,
             CurationNodeKind::ScoreProgress(_) => Self::Scoring,
             CurationNodeKind::TrackObjects(_) => Self::Tracking,
-            CurationNodeKind::Select => Self::Select,
+            CurationNodeKind::Select(_) => Self::Select,
         }
     }
     pub(super) const fn class_name(self) -> &'static str {
@@ -95,16 +94,8 @@ enum CardLine {
     Running(String),
 }
 
-/// Whether an output is published, and as what.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum OutputFlag {
-    Unpublished,
-    Published(PublishedOutput),
-}
-
 /// One node as the canvas draws it: what it is, one line of what it holds or
-/// is doing, whether it is one of the curation's outputs, and what may follow
-/// it.
+/// is doing, the view it is published as, and what may follow it.
 ///
 /// The run line is part of the card rather than read beside it: the canvas
 /// redraws a node when its card changes, so a line kept anywhere else went
@@ -115,7 +106,7 @@ pub(super) struct NodeCard {
     face: NodeFace,
     label: &'static str,
     line: CardLine,
-    output: Option<OutputFlag>,
+    published: Option<PublishedOutput>,
     menu: Option<ChildMenu>,
     order: usize,
 }
@@ -123,11 +114,6 @@ pub(super) struct NodeCard {
 impl NodeCard {
     /// Every node of the graph, in payload order. Counts wait for the sample.
     pub(super) fn all(payload: &CurationGraph, reader: Option<&PopulationReader<'_>>) -> Vec<Self> {
-        let outputs = payload
-            .outputs()
-            .into_iter()
-            .map(|node| node.id().to_owned())
-            .collect::<Vec<_>>();
         payload
             .nodes()
             .iter()
@@ -136,12 +122,7 @@ impl NodeCard {
                 face: NodeFace::of(node.kind()),
                 label: node.kind().label(),
                 line: CardLine::Holds(Self::describe(payload, node, reader)),
-                output: outputs.iter().any(|output| output == node.id()).then(|| {
-                    payload
-                        .publication(node.id())
-                        .cloned()
-                        .map_or(OutputFlag::Unpublished, OutputFlag::Published)
-                }),
+                published: payload.publication(node.id()).cloned(),
                 menu: ChildMenu::of(payload, node),
                 order: 0,
             })
@@ -157,6 +138,25 @@ impl NodeCard {
     ) -> String {
         let sample = reader.map(PopulationReader::sample);
         let counts = reader.map(|reader| (reader.input(node.id()), reader.of(node.id())));
+        // How far a model node's preview has read what reaches it, or that it
+        // has read nothing yet: what is waiting for it, rather than zeros
+        // that read as a result.
+        let measured = |reader: &PopulationReader<'_>| {
+            let reaching = reader.input(node.id()).len();
+            let progress = PreviewProgress::of(reader, node.id());
+            if progress.is_unmeasured() {
+                format!("Not run yet · {}", Counted::episodes(reaching))
+            } else {
+                format!(
+                    "{} of {}",
+                    progress.read().len(),
+                    Counted::episodes(reaching)
+                )
+            }
+        };
+        let judged = |reader: &PopulationReader<'_>| {
+            Counted::subtasks(reader.subtasks_reaching(node.id()).len()).to_string()
+        };
         match node.kind() {
             CurationNodeKind::Dataset => {
                 // The name the Dataset workspace and Data show, without the
@@ -180,157 +180,64 @@ impl NodeCard {
             }
             // What the node holds, not what it runs with: the camera and model
             // are the workspace's status line.
-            CurationNodeKind::BreakDownSubtasks(_) => match (counts, reader) {
-                (Some((input, _)), Some(reader)) if Self::unmeasured(node, reader) => {
-                    Self::unrun(input.episodes().len())
+            CurationNodeKind::BreakDownSubtasks(_) => match reader {
+                Some(reader) if !PreviewProgress::of(reader, node.id()).is_unmeasured() => {
+                    format!("{} · {}", measured(reader), judged(reader))
                 }
-                (Some((input, output)), Some(reader)) => Self::stale(
-                    format!(
-                        "{} of {} · {}",
-                        PreviewProgress::of(reader, node.id()).read().len(),
-                        Counted::episodes(input.episodes().len()),
-                        Counted::subtasks(output.len()),
-                    ),
-                    node,
-                    reader,
-                ),
-                _ => "Subtasks of every episode".to_owned(),
+                Some(reader) => measured(reader),
+                None => "Subtasks of every episode".to_owned(),
             },
-            // The question, then how many of the subtasks it answered for
-            // are close enough to keep.
+            // The question, then how many subtasks it has answered for.
             CurationNodeKind::FindSimilarSubtasks(search) => {
-                let query = search.query().trim();
-                let asked = if query.is_empty() {
-                    "No query yet".to_owned()
-                } else {
-                    format!("“{query}”")
+                let asked = match search.query().trim() {
+                    "" => "No query yet".to_owned(),
+                    query => format!("“{query}”"),
                 };
                 match reader {
-                    Some(reader) => {
-                        let judged = reader.judged(node.id()).len();
-                        let line = if judged == 0 {
-                            asked
-                        } else {
-                            format!(
-                                "{asked} · {} of {}",
-                                reader.of(node.id()).len(),
-                                Counted::subtasks(judged)
-                            )
-                        };
-                        Self::stale(line, node, reader)
+                    Some(reader) if !PreviewProgress::of(reader, node.id()).is_unmeasured() => {
+                        format!("{asked} · {}", judged(reader))
                     }
-                    None => asked,
+                    _ => asked,
                 }
             }
-            // How many of its categories it keeps, then how many of the
-            // subtasks it grouped are in them.
+            // How many categories, then how many subtasks it grouped.
             CurationNodeKind::GroupSimilarSubtasks(grouping) => {
-                let kept = match node.keeps() {
-                    Some(Selection::Categories { names }) => names.len(),
-                    _ => 0,
-                };
                 let line = match grouping.categories().len() {
                     0 => "No categories yet".to_owned(),
-                    categories => format!("{kept} of {}", Counted::categories(categories)),
+                    categories => Counted::categories(categories).to_string(),
                 };
                 match reader {
-                    Some(reader) => {
-                        let judged = reader.judged(node.id()).len();
-                        let line = if judged == 0 {
-                            line
-                        } else {
-                            format!(
-                                "{line} · {} of {}",
-                                reader.of(node.id()).len(),
-                                Counted::subtasks(judged)
-                            )
-                        };
-                        Self::stale(line, node, reader)
+                    Some(reader) if !PreviewProgress::of(reader, node.id()).is_unmeasured() => {
+                        format!("{line} · {}", judged(reader))
                     }
-                    None => line,
+                    _ => line,
                 }
             }
-            // A moment is one frame, so what the node keeps is said as the
-            // recording it adds up to, of the recording it scored: what
-            // training gets, rather than a count of frames.
-            CurationNodeKind::ScoreProgress(_) => match (counts, reader) {
-                (Some((input, _)), Some(reader)) if Self::unmeasured(node, reader) => {
-                    Self::unrun(input.len())
-                }
-                (Some((input, output)), Some(reader)) => Self::stale(
-                    format!(
-                        "{} of {} · keeps {} of {}",
-                        PreviewProgress::of(reader, node.id()).read().len(),
-                        Counted::episodes(input.len()),
-                        Self::recorded(&output, reader.sample()),
-                        Self::recorded(&reader.judged(node.id()), reader.sample()),
-                    ),
-                    node,
-                    reader,
-                ),
-                _ => "Stretches progressing fast enough".to_owned(),
-            },
-            // What it tracks, then how many of the episodes it counted have
-            // the number its rule keeps.
+            CurationNodeKind::ScoreProgress(_) => reader
+                .map(measured)
+                .unwrap_or_else(|| "Progress rate of every moment".to_owned()),
+            // What it tracks, then how far it has got.
             CurationNodeKind::TrackObjects(tracking) => {
                 let tracked = match tracking.prompt() {
                     "" => "Nothing named yet".to_owned(),
-                    prompt => format!("“{prompt}”"),
+                    _ => format!("{} at {}/s", tracking.plural(), tracking.rate()),
                 };
-                match (counts, reader) {
-                    (Some((input, _)), Some(reader)) if Self::unmeasured(node, reader) => {
-                        format!("{tracked} · {}", Self::unrun(input.len()))
-                    }
-                    (Some((input, output)), Some(reader)) => Self::stale(
-                        format!(
-                            "{tracked} · {} of {}",
-                            output.len(),
-                            Counted::episodes(input.len())
-                        ),
-                        node,
-                        reader,
-                    ),
-                    _ => tracked,
+                match reader {
+                    Some(reader) => format!("{tracked} · {}", measured(reader)),
+                    None => tracked,
                 }
             }
-            CurationNodeKind::Select => {
-                let sentence = node.keeps().map(Selection::sentence).unwrap_or_default();
+            CurationNodeKind::Select(selection) => {
+                let sentence = selection.sentence(payload);
                 match counts {
                     Some((input, output)) => format!(
                         "{sentence} · {} of {}",
                         output.len(),
-                        Counted::of_kind(payload.population_kind(node.id()), input.len())
+                        Counted::episodes(input.len())
                     ),
                     None => sentence,
                 }
             }
-        }
-    }
-    /// How much recording a population adds up to, on the clock.
-    fn recorded(population: &Population, sample: &EpisodeSample) -> String {
-        population
-            .slices(sample)
-            .iter()
-            .map(Slice::seconds)
-            .sum::<f64>()
-            .clock_label()
-    }
-    /// Whether a measurement has read nothing of what reaches it yet.
-    fn unmeasured(node: &CurationNode, reader: &PopulationReader<'_>) -> bool {
-        PreviewProgress::of(reader, node.id()).is_unmeasured()
-    }
-    /// A measurement's line before its first run: what is waiting for it,
-    /// rather than zeros that read as a result.
-    fn unrun(reaching: usize) -> String {
-        format!("Not run yet · {}", Counted::episodes(reaching))
-    }
-    /// A measurement's line, saying when what reaches it changed since its
-    /// preview ran.
-    fn stale(line: String, node: &CurationNode, reader: &PopulationReader<'_>) -> String {
-        if PreviewProgress::of(reader, node.id()).is_stale() {
-            format!("{line} · out of date")
-        } else {
-            line
         }
     }
     pub(super) fn with_order(mut self, order: usize) -> Self {
@@ -363,9 +270,9 @@ impl NodeCard {
     pub(super) fn is_running(&self) -> bool {
         matches!(self.line, CardLine::Running(_))
     }
-    /// Whether this node is one of the curation's outputs, and published.
-    pub(super) fn output(&self) -> Option<&OutputFlag> {
-        self.output.as_ref()
+    /// The view the node is published as, when it is.
+    pub(super) fn published(&self) -> Option<&PublishedOutput> {
+        self.published.as_ref()
     }
     pub(super) fn menu(&self) -> Option<&ChildMenu> {
         self.menu.as_ref()
@@ -383,10 +290,11 @@ impl NodeCard {
 mod tests {
     use super::super::super::annotate::SubtaskRow;
     use super::super::super::document::{
-        Comparison, EpisodeCondition, EpisodeFact, SubtaskAnnotation, SubtaskCategory,
-        SubtaskGrouping, SubtaskSearch,
+        Comparison, EpisodeFact, Selection, SubtaskAnnotation, SubtaskCategory, SubtaskGrouping,
+        SubtaskSearch,
     };
-    use super::super::super::preview::{PreviewReads, PreviewRows, ReadInput};
+    use super::super::super::path::CurationPath;
+    use super::super::super::preview::{PreviewReads, PreviewRows};
     use super::*;
     use crate::activities::episode::Episode;
     use spiral_robotics_common::datasets::EpisodeId;
@@ -396,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_graph_asks_for_a_dataset_and_offers_every_measurement() {
+    fn a_new_graph_asks_for_a_dataset_and_offers_every_node() {
         let payload = CurationGraph::new(None);
         let cards = NodeCard::all(&payload, None);
         let dataset = card(&cards, DATASET_NODE_ID);
@@ -421,25 +329,26 @@ mod tests {
     fn each_kind_says_what_it_holds_in_one_line() {
         let mut payload =
             CurationGraph::new(DatasetSelection::new(vec!["cloth_fold_demo".to_owned()]).ok());
+        let mut annotation = SubtaskAnnotation::default();
+        annotation.set_camera(Some("/camera/top".to_owned()));
         let annotate = payload
             .add_child(
                 DATASET_NODE_ID,
-                CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
+                CurationNodeKind::BreakDownSubtasks(annotation),
             )
             .unwrap();
         let sample = EpisodeSample::fixture(vec![
             Episode::fixture(&EpisodeId::fixture(1), 30_000_000_000),
             Episode::fixture(&EpisodeId::fixture(2), 10_000_000_000),
         ]);
+        let column = CurationPath::to(&payload, &annotate)
+            .unwrap()
+            .answer_column()
+            .unwrap();
         let mut reads = PreviewReads::default();
-        let input = ReadInput::current(
-            &PopulationReader::new(&payload, &sample, &reads),
-            &annotate,
-            &EpisodeId::fixture(1),
-        );
         reads.record(
-            payload.node(&annotate).unwrap(),
-            (&EpisodeId::fixture(1), input),
+            (&annotate, &column),
+            &EpisodeId::fixture(1),
             Ok(PreviewRows::Subtasks(vec![
                 SubtaskRow::new(EpisodeId::fixture(1), (0.0, 8.0), "grasp").unwrap(),
             ])),
@@ -457,18 +366,15 @@ mod tests {
             )
             .unwrap();
         let long = payload
-            .add_child(DATASET_NODE_ID, CurationNodeKind::Select)
+            .add_child(
+                DATASET_NODE_ID,
+                CurationNodeKind::Select(Selection::keeping_everything()),
+            )
             .unwrap();
         payload
-            .set_rule(
+            .set_selection(
                 &long,
-                Selection::Episodes {
-                    conditions: vec![EpisodeCondition::new(
-                        EpisodeFact::DurationSeconds,
-                        Comparison::AtLeast,
-                        20.0,
-                    )],
-                },
+                Selection::episodes_where(EpisodeFact::DurationSeconds, Comparison::AtLeast, 20.0),
             )
             .unwrap();
         let reader = PopulationReader::new(&payload, &sample, &reads);
@@ -487,65 +393,37 @@ mod tests {
             card(&cards, &long).summary(),
             "Duration at least 20 s · 1 of 2 episodes"
         );
-        assert_eq!(card(&cards, &long).output(), Some(&OutputFlag::Unpublished));
-        // A search and a grouping are outputs too; Break down's free text is
-        // not something to train on until one of them has read it.
-        assert_eq!(
-            card(&cards, &search).output(),
-            Some(&OutputFlag::Unpublished)
-        );
-        assert_eq!(
-            card(&cards, &group).output(),
-            Some(&OutputFlag::Unpublished)
-        );
-        assert_eq!(card(&cards, &annotate).output(), None);
+        assert_eq!(card(&cards, &long).published(), None);
         assert_eq!(card(&cards, &long).face(), NodeFace::Select);
-        assert_eq!(
-            card(&cards, &annotate).menu().expect("menu").labels(),
-            ["Find similar subtasks", "Group similar subtasks"]
-        );
-        // A grouping keeps its own categories, so what follows it reads the
-        // subtasks it kept.
-        assert_eq!(
-            card(&cards, &group).menu().expect("menu").labels(),
-            ["Find similar subtasks", "Group similar subtasks"]
-        );
         assert!(card(&cards, &annotate).removable());
 
-        if let CurationNodeKind::BreakDownSubtasks(annotation) =
-            payload.node_mut(&annotate).unwrap().kind_mut()
-        {
-            annotation.set_camera(Some("/camera/top".to_owned()));
-        }
         if let CurationNodeKind::FindSimilarSubtasks(config) =
             payload.node_mut(&search).unwrap().kind_mut()
         {
             config.set_query("make the first fold");
         }
         payload
-            .node_mut(&group)
-            .unwrap()
-            .propose_categories(vec![
-                SubtaskCategory::new("Grasp", "Take hold.").unwrap(),
-                SubtaskCategory::new("Fold", "Bring over.").unwrap(),
-            ])
-            .unwrap();
-        payload
-            .set_rule(
+            .propose_categories(
                 &group,
-                Selection::Categories {
-                    names: vec!["Fold".into()],
-                },
+                vec![
+                    SubtaskCategory::new("Grasp", "Take hold.").unwrap(),
+                    SubtaskCategory::new("Fold", "Bring over.").unwrap(),
+                ],
             )
             .unwrap();
         let cards = NodeCard::all(&payload, None);
-        assert_eq!(card(&cards, &group).summary(), "1 of 2 categories");
+        assert_eq!(card(&cards, &group).summary(), "2 categories");
         assert_eq!(
             card(&cards, &annotate).summary(),
             "Subtasks of every episode"
         );
         assert_eq!(card(&cards, &search).summary(), "“make the first fold”");
         // With another camera the node has read nothing, as the preview says.
+        if let CurationNodeKind::BreakDownSubtasks(annotation) =
+            payload.node_mut(&annotate).unwrap().kind_mut()
+        {
+            annotation.set_camera(Some("/camera/wrist".to_owned()));
+        }
         let reader = PopulationReader::new(&payload, &sample, &reads);
         let cards = NodeCard::all(&payload, Some(&reader));
         assert_eq!(

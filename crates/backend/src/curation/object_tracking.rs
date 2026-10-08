@@ -1,10 +1,11 @@
 //! The Modal service that tracks objects, as Track objects asks it: one
-//! episode's camera packets and a prompt naming the objects, tracked with a
-//! checkpoint on a service revision, and answered as a row per sampled
-//! picture (five a second) in display order — its `timestamp_ns` from the
-//! episode's first message, and the `objects` tracked in it: each its track
-//! `id`, its `score`, and its box, `x` and `y` its top-left corner and
-//! `width` and `height`, all as fractions of the picture.
+//! episode's camera packets, a prompt naming the objects, and how many
+//! pictures a second to sample, tracked with a checkpoint on a service
+//! revision, and answered as a row per sampled picture in display order —
+//! its `timestamp_ns` from the episode's first message, and the `objects`
+//! tracked in it: each its track `id`, its `score`, and its box, `x` and `y`
+//! its top-left corner and `width` and `height`, all as fractions of the
+//! picture.
 use super::video_service::{VideoContract, VideoQuestion, VideoService};
 use arrow_schema::{DataType, Field, Fields};
 use spiral_robotics_storage::ProviderKeys;
@@ -27,18 +28,18 @@ impl ObjectTrackingService {
         .map(Self)
     }
 
-    /// Tracking the objects `prompt` names with the checkpoint `model` on the
-    /// service `revision`.
-    pub(super) fn tracking<'a>(
-        &'a self,
-        prompt: &'a str,
-        model: &'a str,
-        revision: &'a str,
-    ) -> VideoQuestion<'a> {
+    /// Tracking the objects `prompt` names, `rate` pictures a second, with
+    /// the checkpoint `model` on the service `revision`.
+    pub(super) fn tracking(
+        &self,
+        (prompt, rate): (&str, u32),
+        (model, revision): (&str, &str),
+    ) -> VideoQuestion<'_> {
         self.0.question(vec![
-            ("model", model),
-            ("implementation", revision),
-            ("prompt", prompt),
+            ("model", model.to_owned()),
+            ("implementation", revision.to_owned()),
+            ("prompt", prompt.to_owned()),
+            ("rate", rate.to_string()),
         ])
     }
 

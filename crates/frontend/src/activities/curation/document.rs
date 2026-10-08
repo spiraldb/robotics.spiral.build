@@ -1,25 +1,20 @@
-//! The curation payload: the graph, per-node configuration, and the outputs
+//! The curation payload: the graph, per-node configuration, and the nodes
 //! published as catalog views, encoded as JSON text in
 //! `CurationDocument::payload`. It is the recipe only: what a node reads is a
 //! preview held for the session, restored from the answers stored with the
 //! dataset when the curation opens (see `preview`). Node positions are not
 //! stored; the canvas lays the graph out from its edges every time.
 //!
-//! The graph's grammar lives here too. Every node hands on a population of
-//! one kind — episodes, subtasks, or moments (see `population`) — and what
-//! may follow a node is decided by that kind and by the node itself.
-//!
-//! A node is what it asks, its kind, and what it keeps of the answer, its
-//! rule: Score progress keeps the moments progressing fast enough, Track
-//! objects the episodes showing the right number of what it tracks, Find
-//! similar the subtasks close enough, Group similar the subtasks in the
-//! categories chosen, and a Select the episodes whose recorded facts pass its
-//! conditions. The rule is the node's knob, so moving it re-reads nothing the
-//! preview holds. Every node that ends in something to train on is an
-//! output, and publishes as its own view.
+//! The graph's grammar lives here too. Every edge carries the same table, one
+//! row per episode with the time ranges it keeps of it: a model node adds
+//! columns to it, and a Select keeps part of it by conditions on the columns
+//! above it (`selection`). So anything may follow anything, except that a
+//! judgment of subtasks needs a Break down above it. Every node but the
+//! dataset may be published as its own view.
 //!
 //! This is the contract every Curation view shares. Add fields and helpers;
 //! never rename or remove what is here without checking the other views.
+mod grouping;
 mod publication;
 mod selection;
 #[cfg(test)]
@@ -28,14 +23,18 @@ mod tests;
 use super::annotate::SubtaskRow;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::sql::UnquotedSqlIdentifier;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) use grouping::{CategoryId, SubtaskCategory, SubtaskGrouping};
 pub(crate) use publication::PublishedOutput;
-pub(crate) use selection::{Comparison, EpisodeCondition, EpisodeFact, Selection, SelectionBasis};
+pub(crate) use selection::{
+    Comparison, EpisodeCondition, EpisodeFact, EpisodeNumber, SelectCondition, Selection,
+};
 
 /// The payload's encoding. A payload of any other encoding is refused, not
 /// converted.
-pub(crate) const CURATION_ENCODING_VERSION: u32 = 4;
+pub(crate) const CURATION_ENCODING_VERSION: u32 = 5;
 /// The root node every curation starts with.
 pub(crate) const DATASET_NODE_ID: &str = "dataset";
 /// OpenRouter id of the newest Gemini Flash as of 2026-09-21; it accepts image
@@ -57,15 +56,12 @@ pub(crate) struct CurationGraph {
     published: Vec<PublishedOutput>,
 }
 
-/// One node: what it asks, and the rule it keeps part of the answer by when
-/// its kind keeps by one.
+/// One node: its id, which also names the columns it adds, and what it is.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CurationNode {
     id: String,
     kind: CurationNodeKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    keeps: Option<Selection>,
 }
 impl CurationNode {
     pub(crate) fn id(&self) -> &str {
@@ -77,105 +73,10 @@ impl CurationNode {
     pub(crate) fn kind_mut(&mut self) -> &mut CurationNodeKind {
         &mut self.kind
     }
-    /// The rule the node keeps what it measured by; `None` for a node that
-    /// hands on everything it measured.
-    pub(crate) fn keeps(&self) -> Option<&Selection> {
-        self.keeps.as_ref()
-    }
-    /// Group by a list of categories proposed afresh, keeping every one.
-    pub(crate) fn propose_categories(
-        &mut self,
-        categories: Vec<SubtaskCategory>,
-    ) -> Result<(), String> {
-        let kept = categories
-            .iter()
-            .map(|category| category.name().to_owned())
-            .collect();
-        self.regroup(|_| Ok((categories, kept)))
-    }
-    /// Rename or redefine the category called `original`. It stays kept or
-    /// left out, under its new name.
-    pub(crate) fn edit_category(
-        &mut self,
-        original: &str,
-        edited: SubtaskCategory,
-    ) -> Result<(), String> {
-        self.regroup(|(grouping, kept)| {
-            let name = edited.name().to_owned();
-            let categories = grouping.renamed(original, edited)?;
-            let kept = kept
-                .iter()
-                .map(|kept| {
-                    if kept == original {
-                        name.clone()
-                    } else {
-                        kept.clone()
-                    }
-                })
-                .collect();
-            Ok((categories, kept))
-        })
-    }
-    /// Fold the category called `merged` into `into`: its subtasks join
-    /// `into`, which stays kept or left out as it was.
-    pub(crate) fn merge_category(&mut self, merged: &str, into: &str) -> Result<(), String> {
-        self.regroup(|(grouping, kept)| {
-            let categories = grouping.merged(merged, into)?;
-            let kept = kept
-                .iter()
-                .filter(|kept| *kept != merged)
-                .cloned()
-                .collect();
-            Ok((categories, kept))
-        })
-    }
-    /// Replace a grouping's categories and what it keeps of them together,
-    /// from what it groups by and keeps now, so the two never disagree.
-    fn regroup(
-        &mut self,
-        change: impl FnOnce(
-            (&SubtaskGrouping, &[String]),
-        ) -> Result<(Vec<SubtaskCategory>, Vec<String>), String>,
-    ) -> Result<(), String> {
-        let (
-            CurationNodeKind::GroupSimilarSubtasks(grouping),
-            Some(Selection::Categories { names }),
-        ) = (&self.kind, &self.keeps)
-        else {
-            return Err("This node no longer groups subtasks.".into());
-        };
-        let (categories, kept) = change((grouping, names))?;
-        let mut candidate = self.clone();
-        if let CurationNodeKind::GroupSimilarSubtasks(grouping) = &mut candidate.kind {
-            grouping.set_categories(categories)?;
-        }
-        candidate.keeps = Some(Selection::Categories { names: kept });
-        candidate.validate()?;
-        *self = candidate;
-        Ok(())
-    }
-    /// Its configuration, its rule, and that its rule names only what the
-    /// node measures: a grouping keeps only categories it groups by.
-    fn validate(&self) -> Result<(), String> {
-        self.kind.validate()?;
-        let Some(rule) = &self.keeps else {
-            return Ok(());
-        };
-        rule.validate()?;
-        match (&self.kind, rule) {
-            (CurationNodeKind::GroupSimilarSubtasks(grouping), Selection::Categories { names }) => {
-                match names.iter().find(|name| {
-                    !grouping
-                        .categories()
-                        .iter()
-                        .any(|category| category.name() == name.as_str())
-                }) {
-                    Some(name) => Err(format!("The grouping has no category “{name}” to keep.")),
-                    None => Ok(()),
-                }
-            }
-            _ => Ok(()),
-        }
+    /// The name the node's columns and steps take in a statement: its id as
+    /// one plain identifier (`track_objects-1` is `track_objects_1`).
+    pub(crate) fn stem(&self) -> String {
+        self.id.replace('-', "_")
     }
 }
 
@@ -195,9 +96,9 @@ impl CurationEdge {
     }
 }
 
-/// What a node asks, with the configuration its kind needs. The dataset hands
-/// on its episodes, a measurement what it measured over its input, and a
-/// Select asks nothing: its rule keeps part of its input.
+/// What a node is, with the configuration its kind needs. The dataset starts
+/// the table, a model node adds what it asks a model about each episode, and
+/// a Select keeps part of the table by its conditions.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum CurationNodeKind {
@@ -207,7 +108,7 @@ pub(crate) enum CurationNodeKind {
     GroupSimilarSubtasks(SubtaskGrouping),
     ScoreProgress(ProgressScoring),
     TrackObjects(ObjectTracking),
-    Select,
+    Select(Selection),
 }
 impl CurationNodeKind {
     pub(crate) fn key(&self) -> &'static str {
@@ -218,7 +119,7 @@ impl CurationNodeKind {
             Self::GroupSimilarSubtasks(_) => "group_similar_subtasks",
             Self::ScoreProgress(_) => "score_progress",
             Self::TrackObjects(_) => "track_objects",
-            Self::Select => "select",
+            Self::Select(_) => "select",
         }
     }
     pub(crate) fn label(&self) -> &'static str {
@@ -229,85 +130,30 @@ impl CurationNodeKind {
             Self::GroupSimilarSubtasks(_) => "Group similar subtasks",
             Self::ScoreProgress(_) => "Score progress",
             Self::TrackObjects(_) => "Track objects",
-            Self::Select => "Select",
+            Self::Select(_) => "Select",
         }
     }
-    /// Whether what the node hands on is something to train on, and so
-    /// publishes as a view. Break down's descriptions are free text that
-    /// differs from episode to episode until a search or a grouping makes
-    /// them one vocabulary, and the dataset is where every curation starts.
-    pub(crate) fn is_output(&self) -> bool {
-        match self {
-            Self::ScoreProgress(_)
-            | Self::TrackObjects(_)
-            | Self::FindSimilarSubtasks(_)
-            | Self::GroupSimilarSubtasks(_)
-            | Self::Select => true,
-            Self::Dataset | Self::BreakDownSubtasks(_) => false,
-        }
+    /// Whether the node asks a model about each episode and adds what it
+    /// answered as columns.
+    pub(crate) fn is_model(&self) -> bool {
+        !matches!(self, Self::Dataset | Self::Select(_))
     }
-    /// What a Select after this node keeps by: the dataset's recorded facts
-    /// of each episode. A Select reads nothing a model answered; every
-    /// measure keeps by its own rule, or has nothing to keep by.
-    fn select_basis(&self) -> Option<SelectionBasis> {
-        match self {
-            Self::Dataset => Some(SelectionBasis::EpisodeFacts),
-            Self::BreakDownSubtasks(_)
-            | Self::FindSimilarSubtasks(_)
-            | Self::GroupSimilarSubtasks(_)
-            | Self::ScoreProgress(_)
-            | Self::TrackObjects(_)
-            | Self::Select => None,
-        }
-    }
-    /// What this node's rule keeps by, below a node of kind `parent`; `None`
-    /// for a kind that keeps everything it measured.
-    fn rule_basis(&self, parent: &Self) -> Option<SelectionBasis> {
-        match self {
-            Self::ScoreProgress(_) => Some(SelectionBasis::Progress),
-            Self::TrackObjects(_) => Some(SelectionBasis::ObjectCount),
-            Self::FindSimilarSubtasks(_) => Some(SelectionBasis::Similarity),
-            Self::GroupSimilarSubtasks(_) => Some(SelectionBasis::Categories),
-            Self::Select => parent.select_basis(),
-            Self::Dataset | Self::BreakDownSubtasks(_) => None,
-        }
-    }
-    /// The rule a new node of this kind starts with below a node of kind
-    /// `parent`: the one that keeps everything it measures, which for a
-    /// grouping is every category it has.
-    fn first_rule(&self, parent: &Self) -> Option<Selection> {
-        let basis = self.rule_basis(parent)?;
-        Some(match self {
-            Self::GroupSimilarSubtasks(grouping) => Selection::Categories {
-                names: grouping
-                    .categories()
-                    .iter()
-                    .map(|category| category.name().to_owned())
-                    .collect(),
-            },
-            _ => Selection::for_basis(basis),
-        })
+    /// Whether a judgment of subtasks, which reads the Break down above it.
+    fn judges_subtasks(&self) -> bool {
+        matches!(
+            self,
+            Self::FindSimilarSubtasks(_) | Self::GroupSimilarSubtasks(_)
+        )
     }
     fn validate(&self) -> Result<(), String> {
         match self {
             Self::BreakDownSubtasks(annotation) => annotation.validate(),
             Self::GroupSimilarSubtasks(grouping) => grouping.validate(),
-            Self::Dataset
-            | Self::FindSimilarSubtasks(_)
-            | Self::ScoreProgress(_)
-            | Self::TrackObjects(_)
-            | Self::Select => Ok(()),
+            Self::TrackObjects(tracking) => tracking.validate(),
+            Self::Select(selection) => selection.validate(),
+            Self::Dataset | Self::FindSimilarSubtasks(_) | Self::ScoreProgress(_) => Ok(()),
         }
     }
-}
-
-/// What a node hands on: whole episodes, the subtasks of some, or their
-/// moments. It decides what may follow the node.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PopulationKind {
-    Episodes,
-    Subtasks,
-    Moments,
 }
 
 /// Configuration of one Break down subtasks node.
@@ -364,15 +210,15 @@ impl SubtaskAnnotation {
 }
 
 /// What one Score progress node asks. Its scorer is pinned, so there is
-/// nothing to configure; how fast is fast enough is the node's rule, and
-/// what it reads is the preview's, never the document's.
+/// nothing to configure, and what it reads is the preview's, never the
+/// document's.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProgressScoring {}
 
-/// What one Track objects node asks: what to track, and on which camera. How
-/// many is the right number is the node's rule.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+/// What one Track objects node asks: what to track, on which camera, and how
+/// many pictures a second the tracker samples.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObjectTracking {
     /// Camera topic to track on; unset until one is chosen.
@@ -382,8 +228,25 @@ pub(crate) struct ObjectTracking {
     /// one is named.
     #[serde(default)]
     prompt: String,
+    /// Pictures a second the tracker samples.
+    rate: u32,
+}
+impl Default for ObjectTracking {
+    fn default() -> Self {
+        Self {
+            camera: None,
+            prompt: String::new(),
+            rate: Self::DEFAULT_RATE,
+        }
+    }
 }
 impl ObjectTracking {
+    /// Five pictures a second follows a hand's work without tracking every
+    /// frame.
+    pub(crate) const DEFAULT_RATE: u32 = 5;
+    /// The most pictures a second: every picture of a 30 Hz camera.
+    pub(crate) const MAX_RATE: u32 = 30;
+
     pub(crate) fn camera(&self) -> Option<&str> {
         self.camera.as_deref()
     }
@@ -396,11 +259,51 @@ impl ObjectTracking {
     pub(crate) fn set_prompt(&mut self, prompt: &str) {
         prompt.trim().clone_into(&mut self.prompt);
     }
+    pub(crate) fn rate(&self) -> u32 {
+        self.rate
+    }
+    pub(crate) fn set_rate(&mut self, rate: u32) -> Result<(), String> {
+        let candidate = Self {
+            rate,
+            ..self.clone()
+        };
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+    /// What it tracks, several of them: "bottles", "boxes", "cherries".
+    pub(crate) fn plural(&self) -> String {
+        let prompt = match self.prompt.as_str() {
+            "" => "object",
+            prompt => prompt,
+        };
+        let consonant_y = prompt.ends_with('y')
+            && !prompt
+                .chars()
+                .rev()
+                .nth(1)
+                .is_some_and(|before| "aeiou".contains(before));
+        if consonant_y {
+            format!("{}ies", &prompt[..prompt.len() - 1])
+        } else if ["s", "x", "z", "ch", "sh"]
+            .iter()
+            .any(|ending| prompt.ends_with(ending))
+        {
+            format!("{prompt}es")
+        } else {
+            format!("{prompt}s")
+        }
+    }
+    fn validate(&self) -> Result<(), String> {
+        if !(1..=Self::MAX_RATE).contains(&self.rate) {
+            return Err(format!("Track 1 to {} pictures a second.", Self::MAX_RATE));
+        }
+        Ok(())
+    }
 }
 
-/// The query of one Find similar subtasks node, which its step asks about
-/// every subtask that reaches it. How close is close enough is the node's
-/// rule.
+/// The query of one Find similar subtasks node, which it asks about every
+/// subtask of the Break down above it.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubtaskSearch {
@@ -454,137 +357,6 @@ impl SubtaskKey {
     }
 }
 
-/// One category: a short name and the definition the classifier reads.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SubtaskCategory {
-    name: String,
-    definition: String,
-}
-impl SubtaskCategory {
-    pub(crate) fn new(
-        name: impl Into<String>,
-        definition: impl Into<String>,
-    ) -> Result<Self, String> {
-        let category = Self {
-            name: name.into().trim().to_owned(),
-            definition: definition.into().trim().to_owned(),
-        };
-        if category.name.is_empty() || category.definition.is_empty() {
-            return Err("A category needs a name and a definition.".into());
-        }
-        Ok(category)
-    }
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-    pub(crate) fn definition(&self) -> &str {
-        &self.definition
-    }
-}
-
-/// How many categories one grouping may name: what `spql.ai.classify` takes.
-const MAX_CATEGORIES: usize = 255;
-
-/// The categories one Group similar subtasks node puts every subtask that
-/// reaches it in. A model proposes them in the browser and the operator may
-/// rename or merge them; either way they are the node's configuration, and
-/// its step names them in the statement.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SubtaskGrouping {
-    #[serde(default)]
-    categories: Vec<SubtaskCategory>,
-}
-impl SubtaskGrouping {
-    pub(crate) fn categories(&self) -> &[SubtaskCategory] {
-        &self.categories
-    }
-    /// Replace the categories, refusing a list the classifier would.
-    fn set_categories(&mut self, categories: Vec<SubtaskCategory>) -> Result<(), String> {
-        let candidate = Self { categories };
-        candidate.validate()?;
-        *self = candidate;
-        Ok(())
-    }
-    /// The list with the category called `original` replaced by `edited`,
-    /// refusing a name another category already holds.
-    fn renamed(
-        &self,
-        original: &str,
-        edited: SubtaskCategory,
-    ) -> Result<Vec<SubtaskCategory>, String> {
-        if self
-            .categories
-            .iter()
-            .any(|category| category.name() != original && category.name() == edited.name())
-        {
-            return Err(format!("A category is already called “{}”.", edited.name()));
-        }
-        let mut categories = self.categories.clone();
-        let place = categories
-            .iter()
-            .position(|category| category.name() == original)
-            .ok_or("That category is no longer part of this grouping.")?;
-        categories[place] = edited;
-        Ok(categories)
-    }
-    /// The list with `merged` gone into `into`, which keeps its name and
-    /// gains the other definition: the union of two groups is not described
-    /// by either sentence alone, and the operator can trim it afterwards.
-    fn merged(&self, merged: &str, into: &str) -> Result<Vec<SubtaskCategory>, String> {
-        if merged == into {
-            return Err("Merge a category into a different one.".into());
-        }
-        let gone = "That category is no longer part of this grouping.";
-        let absorbed = self
-            .categories
-            .iter()
-            .find(|category| category.name() == merged)
-            .ok_or(gone)?;
-        if !self
-            .categories
-            .iter()
-            .any(|category| category.name() == into)
-        {
-            return Err(gone.into());
-        }
-        self.categories
-            .iter()
-            .filter(|category| category.name() != merged)
-            .map(|category| {
-                if category.name() == into {
-                    SubtaskCategory::new(
-                        category.name(),
-                        format!("{} {}", category.definition(), absorbed.definition()),
-                    )
-                } else {
-                    Ok(category.clone())
-                }
-            })
-            .collect()
-    }
-    /// No categories yet, or up to 255 distinct names, each with its
-    /// definition.
-    fn validate(&self) -> Result<(), String> {
-        if self.categories.len() > MAX_CATEGORIES {
-            return Err(format!(
-                "A grouping names at most {MAX_CATEGORIES} categories."
-            ));
-        }
-        let mut names = BTreeSet::new();
-        for category in &self.categories {
-            if category.name.trim().is_empty() || category.definition.trim().is_empty() {
-                return Err("A category needs a name and a definition.".into());
-            }
-            if !names.insert(category.name.as_str()) {
-                return Err(format!("Category “{}” appears twice.", category.name));
-            }
-        }
-        Ok(())
-    }
-}
-
 impl CurationGraph {
     /// A graph with only its dataset node.
     pub(crate) fn new(dataset: Option<DatasetSelection>) -> Self {
@@ -593,7 +365,6 @@ impl CurationGraph {
             nodes: vec![CurationNode {
                 id: DATASET_NODE_ID.to_owned(),
                 kind: CurationNodeKind::Dataset,
-                keeps: None,
             }],
             edges: Vec::new(),
             published: Vec::new(),
@@ -642,48 +413,41 @@ impl CurationGraph {
             .filter_map(|edge| self.node(&edge.to))
             .collect()
     }
-    /// What `node` hands on. A Select hands on part of what it receives, so
-    /// it hands on what its parent does.
-    pub(crate) fn population_kind(&self, node: &str) -> Option<PopulationKind> {
-        match self.node(node)?.kind() {
-            CurationNodeKind::Dataset | CurationNodeKind::TrackObjects(_) => {
-                Some(PopulationKind::Episodes)
+    /// The nodes above `id`, its parent first and the dataset last. A graph
+    /// with a cycle stops after every node.
+    pub(crate) fn ancestors(&self, id: &str) -> Vec<&CurationNode> {
+        let mut above = Vec::new();
+        let mut current = self.parent_of(id);
+        while let Some(parent) = current.and_then(|parent| self.node(parent)) {
+            if above.len() > self.nodes.len() {
+                break;
             }
-            CurationNodeKind::BreakDownSubtasks(_)
-            | CurationNodeKind::FindSimilarSubtasks(_)
-            | CurationNodeKind::GroupSimilarSubtasks(_) => Some(PopulationKind::Subtasks),
-            CurationNodeKind::ScoreProgress(_) => Some(PopulationKind::Moments),
-            CurationNodeKind::Select => self.population_kind(self.parent_of(node)?),
+            above.push(parent);
+            current = self.parent_of(parent.id());
         }
+        above
     }
     /// What may follow `node`, in menu order, each with its default
-    /// configuration: the measurements that read what it hands on, then a
-    /// Select after the dataset, the one node whose episodes it selects by.
-    /// A Select holds all its conditions, so none follows another; and a node
-    /// that keeps by its own rule is followed by what reads what it kept.
+    /// configuration: the model nodes, the judgments of subtasks once a Break
+    /// down is at or above it, and a Select.
     pub(crate) fn child_kinds(&self, node: &str) -> Vec<CurationNodeKind> {
         let Some(parent) = self.node(node) else {
             return Vec::new();
         };
-        let mut kinds = match (self.population_kind(node), parent.kind()) {
-            (Some(PopulationKind::Episodes), _) => vec![
-                CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
-                CurationNodeKind::ScoreProgress(ProgressScoring::default()),
-                CurationNodeKind::TrackObjects(ObjectTracking::default()),
-            ],
-            // Break down the stretches that progress fast enough.
-            (Some(PopulationKind::Moments), _) => vec![CurationNodeKind::BreakDownSubtasks(
-                SubtaskAnnotation::default(),
-            )],
-            (Some(PopulationKind::Subtasks), _) => vec![
+        let mut kinds = vec![
+            CurationNodeKind::BreakDownSubtasks(SubtaskAnnotation::default()),
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+            CurationNodeKind::TrackObjects(ObjectTracking::default()),
+        ];
+        let described = matches!(parent.kind(), CurationNodeKind::BreakDownSubtasks(_))
+            || self.breakdown_above(node).is_some();
+        if described {
+            kinds.extend([
                 CurationNodeKind::FindSimilarSubtasks(SubtaskSearch::default()),
                 CurationNodeKind::GroupSimilarSubtasks(SubtaskGrouping::default()),
-            ],
-            (None, _) => Vec::new(),
-        };
-        if parent.kind().select_basis().is_some() {
-            kinds.push(CurationNodeKind::Select);
+            ]);
         }
+        kinds.push(CurationNodeKind::Select(Selection::keeping_everything()));
         kinds
     }
     fn accepts_child(&self, parent: &str, child: &CurationNodeKind) -> bool {
@@ -691,77 +455,45 @@ impl CurationGraph {
             .iter()
             .any(|kind| kind.key() == child.key())
     }
-    /// Replace `node`'s rule. The document refuses a rule of another basis,
-    /// so a slip can never re-point a node at something else, and a rule
-    /// naming what the node does not measure.
-    pub(crate) fn set_rule(&mut self, node: &str, rule: Selection) -> Result<(), String> {
-        let target = self
-            .node_mut(node)
-            .ok_or("That node is no longer in the graph.")?;
-        if target.keeps.as_ref().map(Selection::basis) != Some(rule.basis()) {
-            return Err("This node no longer keeps by that measure.".into());
-        }
-        let mut candidate = target.clone();
-        candidate.keeps = Some(rule);
-        candidate.validate()?;
-        *target = candidate;
-        Ok(())
-    }
-    /// The Break down subtasks node whose rows reach `node`: the nearest one
-    /// above it, through any searches and groupings between.
+    /// The Break down subtasks node whose subtasks `node` judges: the nearest
+    /// one above it.
     pub(crate) fn subtask_source(&self, node: &str) -> Option<&str> {
-        let mut current = self.parent_of(node)?;
-        for _ in 0..self.nodes.len() {
-            match self.node(current)?.kind() {
-                CurationNodeKind::BreakDownSubtasks(_) => return Some(current),
-                CurationNodeKind::FindSimilarSubtasks(_)
-                | CurationNodeKind::GroupSimilarSubtasks(_) => current = self.parent_of(current)?,
-                _ => return None,
-            }
-        }
-        None
+        self.breakdown_above(node).map(CurationNode::id)
     }
-    /// The nearest node above `node` that is not a Select: what a Select's
-    /// rule is stated in terms of, and what a measurement's preview reads
-    /// the output of, through any Select between.
+    fn breakdown_above(&self, node: &str) -> Option<&CurationNode> {
+        self.ancestors(node)
+            .into_iter()
+            .find(|above| matches!(above.kind(), CurationNodeKind::BreakDownSubtasks(_)))
+    }
+    /// The nearest node above `node` that is not a Select: the model node, or
+    /// the dataset, whose reads decide what reaches it.
     pub(crate) fn measure_above(&self, node: &str) -> Option<&CurationNode> {
-        let mut current = self.parent_of(node)?;
-        for _ in 0..self.nodes.len() {
-            let node = self.node(current)?;
-            match node.kind() {
-                CurationNodeKind::Select => current = self.parent_of(current)?,
-                _ => return Some(node),
-            }
-        }
-        None
+        self.ancestors(node)
+            .into_iter()
+            .find(|above| !matches!(above.kind(), CurationNodeKind::Select(_)))
     }
-    /// The measurements whose previews read what `node` hands on, through
-    /// any Select between, in graph order.
+    /// The model nodes whose nearest node above, through any Select between,
+    /// is `node`, in graph order: those whose previews read once `node`'s
+    /// have.
     pub(crate) fn measures_below(&self, node: &str) -> Vec<&CurationNode> {
         self.nodes
             .iter()
-            .filter(|below| match below.kind() {
-                CurationNodeKind::Dataset | CurationNodeKind::Select => false,
-                CurationNodeKind::BreakDownSubtasks(_)
-                | CurationNodeKind::FindSimilarSubtasks(_)
-                | CurationNodeKind::GroupSimilarSubtasks(_)
-                | CurationNodeKind::ScoreProgress(_)
-                | CurationNodeKind::TrackObjects(_) => self
-                    .measure_above(below.id())
-                    .is_some_and(|above| above.id() == node),
+            .filter(|below| {
+                below.kind().is_model()
+                    && self
+                        .measure_above(below.id())
+                        .is_some_and(|above| above.id() == node)
             })
             .collect()
     }
-    /// The curation's outputs, in graph order, whatever follows them: each is
-    /// one selection of the data to train on, and may be published as a view.
+    /// The nodes that may be published: every one but the dataset.
     pub(crate) fn outputs(&self) -> Vec<&CurationNode> {
         self.nodes
             .iter()
-            .filter(|node| node.kind().is_output())
+            .filter(|node| !matches!(node.kind(), CurationNodeKind::Dataset))
             .collect()
     }
-    /// Create a child of `parent` and return its id. A kind that keeps by a
-    /// rule starts with the rule that keeps everything it measures.
+    /// Create a child of `parent` and return its id.
     pub(crate) fn add_child(
         &mut self,
         parent: &str,
@@ -775,7 +507,6 @@ impl CurationGraph {
                 parent_node.kind.label()
             ));
         }
-        let keeps = kind.first_rule(parent_node.kind());
         let id = (1_u32..)
             .map(|index| format!("{}-{index}", kind.key()))
             .find(|candidate| self.node(candidate).is_none())
@@ -783,13 +514,25 @@ impl CurationGraph {
         self.nodes.push(CurationNode {
             id: id.clone(),
             kind,
-            keeps,
         });
         self.edges.push(CurationEdge {
             from: parent.to_owned(),
             to: id.clone(),
         });
         Ok(id)
+    }
+    /// Replace a Select's conditions, refusing ones that read what is not
+    /// above it.
+    pub(crate) fn set_selection(&mut self, node: &str, selection: Selection) -> Result<(), String> {
+        let mut candidate = self.clone();
+        match candidate.node_mut(node).map(CurationNode::kind_mut) {
+            Some(CurationNodeKind::Select(current)) => *current = selection,
+            Some(_) => return Err("That node does not select.".into()),
+            None => return Err("That node is no longer in the graph.".into()),
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
     }
     /// Point the annotation's Find similar node at one of its rows, adding the
     /// node if the annotation has none, and return the node's id. The first
@@ -833,9 +576,9 @@ impl CurationGraph {
         }
         branch
     }
-    /// Remove a node and its descendants. A branch
-    /// holding a published output stays until the view is unpublished, so no
-    /// view outlives the recipe it was compiled from.
+    /// Remove a node and its descendants. A branch holding a published node
+    /// stays until the view is unpublished, so no view outlives the recipe it
+    /// was compiled from.
     pub(crate) fn remove_node(&mut self, id: &str) -> Result<(), String> {
         if id == DATASET_NODE_ID {
             return Err("The dataset node cannot be removed.".into());
@@ -860,24 +603,23 @@ impl CurationGraph {
     pub(crate) fn validate(&self) -> Result<(), String> {
         self.validate_nodes()?;
         self.validate_edges()?;
+        self.validate_selections()?;
         self.validate_publications()
     }
     fn validate_nodes(&self) -> Result<(), String> {
         let mut ids = BTreeSet::new();
+        let mut stems = BTreeSet::new();
         for node in &self.nodes {
             if node.id.is_empty()
                 || node.id.len() > MAX_NODE_ID_LEN
-                || node
-                    .id
-                    .chars()
-                    .any(|character| character.is_whitespace() || character.is_control())
+                || UnquotedSqlIdentifier::try_from(node.stem().as_str()).is_err()
             {
                 return Err(format!("Node id “{}” is not valid.", node.id));
             }
-            if !ids.insert(node.id.as_str()) {
+            if !ids.insert(node.id.as_str()) || !stems.insert(node.stem()) {
                 return Err(format!("Node id “{}” appears twice.", node.id));
             }
-            node.validate()?;
+            node.kind.validate()?;
         }
         match self.node(DATASET_NODE_ID).map(CurationNode::kind) {
             Some(CurationNodeKind::Dataset) => {}
@@ -894,10 +636,9 @@ impl CurationGraph {
         }
         Ok(())
     }
-    /// One parent per node, every node reached from the dataset, every edge
-    /// one the grammar allows, and every node keeping by the rule its kind
-    /// keeps by there. The grammar is checked last: it walks up through
-    /// Selects, which only terminates on a graph without cycles.
+    /// One parent per node, every node reached from the dataset, and every
+    /// edge one the grammar allows. The grammar is checked last: it walks up
+    /// the graph, which only terminates on a graph without cycles.
     fn validate_edges(&self) -> Result<(), String> {
         let mut parents = BTreeMap::new();
         for edge in &self.edges {
@@ -939,25 +680,22 @@ impl CurationGraph {
             let (Some(from), Some(to)) = (self.node(&edge.from), self.node(&edge.to)) else {
                 continue;
             };
-            if !self.accepts_child(&edge.from, &to.kind) {
+            if to.kind.judges_subtasks() && self.breakdown_above(&to.id).is_none() {
                 return Err(format!(
-                    "{} cannot follow {}.",
+                    "{} cannot follow {}: it judges the subtasks of a Break down above it.",
                     to.kind.label(),
                     from.kind.label()
                 ));
             }
         }
+        Ok(())
+    }
+    /// Every Select's conditions read nodes above it, of the kind each
+    /// condition reads.
+    fn validate_selections(&self) -> Result<(), String> {
         for node in &self.nodes {
-            let basis = self
-                .parent_of(&node.id)
-                .and_then(|parent| self.node(parent))
-                .and_then(|parent| node.kind.rule_basis(parent.kind()));
-            if node.keeps.as_ref().map(Selection::basis) != basis {
-                return Err(format!(
-                    "{} “{}” keeps by a rule its place does not allow.",
-                    node.kind.label(),
-                    node.id
-                ));
+            if let CurationNodeKind::Select(selection) = node.kind() {
+                selection.validate_against(&self.ancestors(&node.id))?;
             }
         }
         Ok(())
@@ -977,33 +715,5 @@ impl CurationGraph {
         })?;
         decoded.validate()?;
         Ok(decoded)
-    }
-}
-
-#[cfg(test)]
-impl SubtaskGrouping {
-    /// A grouping already holding `categories`, before any node keeps one.
-    pub(crate) fn of(categories: Vec<SubtaskCategory>) -> Self {
-        let mut grouping = Self::default();
-        grouping
-            .set_categories(categories)
-            .expect("categories the classifier takes");
-        grouping
-    }
-}
-
-#[cfg(test)]
-impl CurationGraph {
-    /// Create a child of `parent` keeping by `rule` rather than the rule its
-    /// kind starts with, and return its id.
-    pub(crate) fn add_keeping(
-        &mut self,
-        parent: &str,
-        kind: CurationNodeKind,
-        rule: Selection,
-    ) -> Result<String, String> {
-        let id = self.add_child(parent, kind)?;
-        self.set_rule(&id, rule)?;
-        Ok(id)
     }
 }

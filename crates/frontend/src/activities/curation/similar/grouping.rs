@@ -12,17 +12,15 @@
 //! merging a category runs only the classification again — the LLM pass runs
 //! again only when the operator asks for new categories.
 //!
-//! The node is an output, and what it hands on is the subtasks of the
-//! categories it keeps: all of them once proposed, and each category's card
-//! says whether it is kept and leaves it out when unchecked, which asks
-//! nothing again.
+//! The node adds a column per category, the subtasks it put there; a Select
+//! below it keeps the categories chosen, which asks nothing again.
 use super::categories::{CategoryEdit, DescriptionCounts, ProposedCategories};
 use super::coverage::{CoverageMeasure, EpisodeCoverage, SubtaskList};
 use super::profile::{CategoryProfile, ProfilePanel};
 use super::source::SubtaskSource;
 use crate::activities::curation::annotate::SubtaskRow;
 use crate::activities::curation::document::{
-    CurationNode, CurationNodeKind, DEFAULT_ANNOTATION_MODEL, Selection, SubtaskCategory,
+    CurationNode, CurationNodeKind, DEFAULT_ANNOTATION_MODEL, SubtaskCategory,
 };
 use crate::activities::curation::episode_map::{
     EpisodeLanes, EpisodeMap, EpisodeSpans, MapPaint, MapReveal, SegmentPaint,
@@ -117,48 +115,14 @@ impl GroupingNode {
             .ok_or("The model answered the category prompt without any text.")?;
         Ok(ProposedCategories::parse(text)?.into_categories())
     }
-    /// The names of the categories the node keeps, in its list's order.
-    fn kept(&self) -> Vec<String> {
-        self.controller.with_payload(|payload| {
-            match payload.node(&self.id).and_then(CurationNode::keeps) {
-                Some(Selection::Categories { names }) => names.clone(),
-                _ => Vec::new(),
-            }
-        })
-    }
-    /// Keep the category called `name`, or leave it out. The rows are
-    /// grouped already, so nothing is asked again.
-    fn keep(&self, name: &str, keep: bool) -> Result<(), String> {
-        let kept = self.kept();
-        let names = self
-            .categories()
-            .iter()
-            .map(SubtaskCategory::name)
-            .filter(|category| {
-                if *category == name {
-                    keep
-                } else {
-                    kept.iter().any(|kept| kept == category)
-                }
-            })
-            .map(str::to_owned)
-            .collect();
-        self.controller
-            .set_rule(&self.id, Selection::Categories { names })
-    }
     /// Change the categories, then run the node's step on every episode that
     /// reaches it: a changed list has classified nothing by it yet.
     fn regroup(&self, change: Regroup) -> Result<(), String> {
         let id = self.id.clone();
-        self.controller.edit(|payload| {
-            let node = payload
-                .node_mut(&id)
-                .ok_or("This node is no longer in the graph.")?;
-            match change {
-                Regroup::Proposed(categories) => node.propose_categories(categories),
-                Regroup::Edited { original, edited } => node.edit_category(&original, edited),
-                Regroup::Merged { merged, into } => node.merge_category(&merged, &into),
-            }
+        self.controller.edit(|payload| match change {
+            Regroup::Proposed(categories) => payload.propose_categories(&id, categories),
+            Regroup::Edited { original, edited } => payload.edit_category(&id, &original, edited),
+            Regroup::Merged { merged, into } => payload.merge_category(&id, &merged, &into),
         })?;
         self.run()
     }
@@ -178,9 +142,9 @@ impl GroupingNode {
 }
 
 /// A change to a grouping's categories, each of which groups every subtask
-/// again. What the grouping keeps follows the change: a proposed list is
-/// kept whole, an edited category keeps its standing under its new name, and
-/// a merged one joins the other's.
+/// again. What a Select below chooses follows the change: a proposed list is
+/// chosen whole, an edited category keeps its id, and a merged one's choice
+/// moves to the category it joined.
 #[derive(Clone, Debug, PartialEq)]
 enum Regroup {
     Proposed(Vec<SubtaskCategory>),
@@ -298,16 +262,12 @@ struct CategorySummary {
     /// annotation measured.
     coverage: EpisodeCoverage,
     representatives: Vec<String>,
-    /// Whether the grouping hands its members on.
-    kept: bool,
 }
 
 impl CategorySummary {
-    /// Every category's card, biggest first, over the rows the node judged,
-    /// each saying whether it is among the `kept`.
+    /// Every category's card, biggest first, over the rows the node judged.
     fn all(
         categories: &[SubtaskCategory],
-        kept: &[String],
         rows: &[SubtaskRow],
         source: &SubtaskSource,
     ) -> Vec<Self> {
@@ -345,7 +305,6 @@ impl CategorySummary {
                         .map(|(row, _)| rows[*row].description().to_owned())
                         .collect(),
                     members,
-                    kept: kept.iter().any(|kept| kept == category.name()),
                 }
             })
             .collect::<Vec<_>>();
@@ -412,8 +371,7 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     let mut reveal = use_signal(|| MapReveal::Still);
     let mut generation = use_signal(|| 0_u32);
     let mut workspace = use_signal(|| None::<web_sys::Element>);
-    let kept = grouping.kept();
-    let cards = CategorySummary::all(&categories, &kept, &rows, &source);
+    let cards = CategorySummary::all(&categories, &rows, &source);
     let hues = CategoryHues::of_rows(&categories, &rows);
 
     // A grouping with nothing open is a band of cards over an empty half-pane,
@@ -476,8 +434,8 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     }));
     // Grouping costs one judgment of each subtask, so categories the node has
     // not grouped the subtasks that reach it now by are grouped at once: on
-    // opening a grouping whose answer is gone or out of date. A grouping
-    // whose last run failed waits for Run.
+    // opening a grouping whose answer is gone. A grouping whose last run
+    // failed waits for Run.
     let regroup = grouping.clone();
     use_effect(move || {
         let Some(progress) = controller.progress(&regroup.id) else {
@@ -542,9 +500,9 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
     // proposal that failed waits for Try again.
     let unproposed = grouping.clone();
     use_effect(move || {
-        let arrived = controller
-            .populations(&unproposed.id)
-            .is_some_and(|(input, _)| !input.subtasks().is_empty());
+        let arrived = !SubtaskSource::of(controller, &unproposed.id)
+            .reaching()
+            .is_empty();
         if arrived
             && unproposed.categories().is_empty()
             && !unproposed.subtasks_arriving()
@@ -573,10 +531,6 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         .failed()
         .first()
         .map(|(_, reason)| reason.clone());
-    let stale = source
-        .progress()
-        .is_stale()
-        .then(|| "Out of date: its subtasks changed".to_owned());
     let pending = source.progress().pending().len();
     let open = opened.read().clone();
     let open_card = open
@@ -603,17 +557,13 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         .as_ref()
         .map(|spans| EpisodeLanes::of(measured.episodes(), &slices, spans))
         .unwrap_or_default();
-    // An open category stands out from the rest; otherwise the categories
-    // the node leaves out step back.
+    // An open category stands out from the rest.
     let paint = MapPaint::new(
         rows.iter()
             .map(|row| match row.category() {
                 Some(category) => SegmentPaint::Category {
                     hue: hues.hue(category).unwrap_or_default(),
-                    faded: match open_name.as_deref() {
-                        Some(open) => open != category,
-                        None => !kept.iter().any(|kept| kept == category),
-                    },
+                    faded: open_name.as_deref().is_some_and(|open| open != category),
                 },
                 None => SegmentPaint::Unasked,
             })
@@ -691,12 +641,6 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
         .as_ref()
         .map(CategorySummary::colour)
         .unwrap_or_default();
-    // What the node hands on: the rows of the categories it keeps.
-    let kept_rows = cards
-        .iter()
-        .filter(|card| card.kept)
-        .map(|card| card.members.len())
-        .sum::<usize>();
     rsx! {
         section {
             class: "curation-similar-workspace curation-similar-grouping",
@@ -712,23 +656,17 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
             div { class: "curation-flights", "aria-hidden": "true" }
             if !cards.is_empty() {
                 // How far a proposal or a run has got, and the ways to run
-                // it; at rest the bar holds only what the grouping keeps.
-                // The categories are the band below and their count is on
-                // the card.
+                // it. The categories are the band below and their count is
+                // on the card.
                 NodeBar {
                     lead: rsx! {
                         p { class: "curation-node-bar-reads", role: "status",
                             if let Some(status) = status.clone() { "{status}" }
                         }
                     },
-                    note: NodeNotes::join([stale, FailedEpisodes::note(failed)]),
+                    note: NodeNotes::join([FailedEpisodes::note(failed)]),
                     reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                     actions: rsx! {
-                        if !rows.is_empty() {
-                            p { class: "curation-threshold-tally", role: "status",
-                                "Keeps {kept_rows} of {Counted::subtasks(rows.len())}"
-                            }
-                        }
                         if running {
                             Button {
                                 purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline,
@@ -822,13 +760,6 @@ pub(in crate::activities::curation) fn GroupingWorkspace(
                                 }
                             } else {
                                 CategoryFace::Card
-                            },
-                            on_keep: {
-                                let grouping = grouping.clone();
-                                let name = summary.category.name().to_owned();
-                                EventHandler::new(move |keep: bool| {
-                                    problem.set(grouping.keep(&name, keep).err());
-                                })
                             },
                             on_open: {
                                 let open_row = open_row.clone();
@@ -967,9 +898,8 @@ enum CategoryFace {
     Chip { open: bool },
 }
 
-/// One category: whether the grouping keeps it, what it is, how many rows
-/// joined it, which episodes they came from, and the rows that joined it
-/// most typically.
+/// One category: what it is, how many rows joined it, which episodes they
+/// came from, and the rows that joined it most typically.
 ///
 /// While a category is open the band has no height to spare for six of these,
 /// so every card steps back to its name and its counts alone.
@@ -978,14 +908,9 @@ fn CategoryCard(
     summary: CategorySummary,
     face: CategoryFace,
     on_open: EventHandler<()>,
-    /// The category kept (`true`) or left out of what the node hands on.
-    on_keep: EventHandler<bool>,
 ) -> Element {
     let share = format!("{:.0}%", summary.share * 100.0);
     let counted = summary.counted();
-    let keep = rsx! {
-        KeepCheck { name: summary.category.name().to_owned(), kept: summary.kept, on_keep }
-    };
     let CategoryFace::Chip { open } = face else {
         return rsx! {
             // The examples are a list, and a list may not live inside a
@@ -994,10 +919,8 @@ fn CategoryCard(
             article {
                 class: "curation-similar-category",
                 style: "{summary.tint()}",
-                "data-kept": "{summary.kept}",
                 "data-bin": "{summary.rank}",
                 div { class: "curation-similar-category-head",
-                    {keep}
                     button {
                         r#type: "button",
                         class: "curation-similar-category-open",
@@ -1033,9 +956,7 @@ fn CategoryCard(
             class: "curation-similar-chip",
             style: "{summary.tint()}",
             "data-selected": "{open}",
-            "data-kept": "{summary.kept}",
             "data-bin": "{summary.rank}",
-            {keep}
             button {
                 r#type: "button",
                 class: "curation-similar-chip-open",
@@ -1046,22 +967,6 @@ fn CategoryCard(
                 span { class: "curation-similar-chip-name", "{summary.category.name()}" }
                 span { class: "curation-similar-chip-count", "{summary.members.len()}" }
             }
-        }
-    }
-}
-
-/// Whether a category's subtasks are part of what the grouping hands on: a
-/// checkbox before its name, on its card and on its chip alike.
-#[component]
-fn KeepCheck(name: String, kept: bool, on_keep: EventHandler<bool>) -> Element {
-    rsx! {
-        input {
-            r#type: "checkbox",
-            class: "curation-similar-keep",
-            checked: kept,
-            title: if kept { "Kept in this output; uncheck to leave it out" } else { "Left out of this output; check to keep it" },
-            "aria-label": "Keep {name}",
-            onchange: move |event| on_keep.call(event.checked()),
         }
     }
 }

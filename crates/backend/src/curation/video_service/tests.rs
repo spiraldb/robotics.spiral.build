@@ -154,6 +154,7 @@ impl MockService {
                     .into_response();
             }
             "flaky" if attempt == 0 => return Status::SERVICE_UNAVAILABLE.into_response(),
+            "dropped" if attempt == 0 => return Status::REQUEST_TIMEOUT.into_response(),
             _ => {}
         }
         Self::stream(&(service.answer)(&batches[0]))
@@ -206,7 +207,10 @@ fn service(base_url: &str, token: &str) -> Result<VideoService, String> {
 
 async fn ask(service: &VideoService, model: &str, revision: &str) -> Result<VideoAnswer, String> {
     service
-        .question(vec![("model", model), ("implementation", revision)])
+        .question(vec![
+            ("model", model.to_owned()),
+            ("implementation", revision.to_owned()),
+        ])
         .ask(&MockService::packets(3))
         .await
 }
@@ -299,6 +303,15 @@ async fn an_unavailable_service_is_asked_again_after_a_pause() {
     let mock = MockService::new("/probe", MockService::timed);
     let base = mock.clone().serve().await;
     let answered = ask(&service(&base, "good").unwrap(), "flaky", "rev").await;
+    assert!(matches!(answered, Ok(VideoAnswer::Answered(_))));
+    assert_eq!(mock.requests(), 2);
+}
+
+#[tokio::test]
+async fn a_dropped_upload_is_asked_again_after_a_pause() {
+    let mock = MockService::new("/probe", MockService::timed);
+    let base = mock.clone().serve().await;
+    let answered = ask(&service(&base, "good").unwrap(), "dropped", "rev").await;
     assert!(matches!(answered, Ok(VideoAnswer::Answered(_))));
     assert_eq!(mock.requests(), 2);
 }

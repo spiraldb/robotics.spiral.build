@@ -138,8 +138,8 @@ impl SpiralSql {
     }
 }
 
-/// One interval a curated view keeps: the stretch of an episode between two
-/// absolute log times.
+/// One range of a curated view's `kept`: the stretch of an episode between
+/// two absolute log times.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeptInterval {
     episode_id: EpisodeId,
@@ -251,12 +251,15 @@ impl<'a> ProjectQueries<'a> {
         Ok(records.retain(std::sync::Mutex::new(connection)))
     }
 
-    /// The intervals a curated view keeps: its `episode_id`, `start_ns`, and
-    /// `end_ns`, in episode and time order, leaving out empty ones.
+    /// The intervals a curated view keeps: each row's `episode_id` and every
+    /// range of its `kept` list, in episode and time order, leaving out
+    /// empty ones.
     pub async fn kept_intervals(&self, view: &str) -> Result<Vec<KeptInterval>, String> {
         let sql = format!(
-            "SELECT episode_id, CAST(start_ns AS BIGINT) AS start_ns, CAST(end_ns AS BIGINT) AS end_ns \
-             FROM ({}) kept WHERE end_ns > start_ns ORDER BY episode_id, start_ns",
+            "SELECT episode_id, start_ns, end_ns FROM (\
+             SELECT v.episode_id, CAST(k.start_ns AS BIGINT) AS start_ns, CAST(k.end_ns AS BIGINT) AS end_ns \
+             FROM ({}) v CROSS JOIN LATERAL UNNEST(v.kept) k) kept \
+             WHERE end_ns > start_ns ORDER BY episode_id, start_ns",
             view.trim().trim_end_matches(';')
         );
         SpiralSql::ensure_read_only(&sql)?;

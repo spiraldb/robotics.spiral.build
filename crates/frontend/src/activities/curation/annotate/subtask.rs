@@ -1,17 +1,11 @@
 //! One subtask of one episode, as a preview holds it: the interval Break down
-//! described, and what every Find similar or Group similar node on the way
+//! described, and what the Find similar or Group similar node that read it
 //! judged its description to be.
-//!
-//! A preview reads its subtasks back from the rows Spiral answers with, and
-//! writes them into the next node's preview as `VALUES`, so both directions
-//! of one relation of subtasks live here ([`SubtaskColumns`]).
 use crate::activities::curation::document::SubtaskKey;
-use crate::activities::curation::path::Relation;
 use crate::activities::curation::population::EpisodeSample;
 use serde_json::{Map, Value};
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
-use spiral_robotics_common::sql::SqlLiteral;
 
 /// The most subtasks one preview query answers with: the query endpoint's own
 /// bound. Break down answers a few dozen for a long episode.
@@ -46,7 +40,7 @@ impl CategoryPlacement {
     }
 }
 
-/// What one node judged a subtask to be. A judgment the model could not give
+/// What a node judged a subtask to be. A judgment the model could not give
 /// is `None`.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::activities::curation) enum JudgmentValue {
@@ -54,13 +48,6 @@ pub(in crate::activities::curation) enum JudgmentValue {
     Similarity(Option<f64>),
     /// The category a grouping put the subtask in.
     Category(Option<CategoryPlacement>),
-}
-
-/// One judgment, under the column its node wrote it to.
-#[derive(Clone, Debug, PartialEq)]
-struct Judgment {
-    column: String,
-    value: JudgmentValue,
 }
 
 /// One subtask interval of one episode. `start_time` is inclusive and
@@ -71,39 +58,10 @@ pub(in crate::activities::curation) struct SubtaskRow {
     start_time: f64,
     end_time: f64,
     description: String,
-    /// Its place in the Break down answer it came from, where each stored
-    /// judgment of it is read; known once a preview has read it.
-    index: Option<u64>,
-    /// In path order, so the last of a kind is the nearest node's.
-    judgments: Vec<Judgment>,
+    judgment: Option<JudgmentValue>,
 }
 
 impl SubtaskRow {
-    /// The column a subtask's description travels in, on every edge below
-    /// Break down.
-    pub(in crate::activities::curation) const DESCRIPTION: &'static str = "subtask";
-    /// The measure Find similar writes.
-    pub(in crate::activities::curation) const SIMILARITY: &'static str = "similarity";
-    /// The measure Group similar writes: the category and its probability.
-    pub(in crate::activities::curation) const CATEGORY: &'static str = "subtask_category";
-    /// The column a subtask's place in the Break down answer travels in, by
-    /// which a stored judgment below reads its own answer for it.
-    pub(in crate::activities::curation) const INDEX: &'static str = "subtask_index";
-
-    /// Whether `column` is one a Find similar writes: its own, or a repeat's
-    /// below it on the same path (`similarity_2`).
-    pub(in crate::activities::curation) fn is_similarity(column: &str) -> bool {
-        column == Self::SIMILARITY
-            || column
-                .strip_prefix(Self::SIMILARITY)
-                .and_then(|suffix| suffix.strip_prefix('_'))
-                .is_some_and(|repeat| repeat.parse::<u32>().is_ok())
-    }
-    /// A similarity as every index prints it: a whole percentage.
-    pub(in crate::activities::curation) fn similarity_label(similarity: f64) -> String {
-        format!("{:.0}%", similarity * 100.0)
-    }
-
     pub(in crate::activities::curation) fn new(
         episode: EpisodeId,
         (start_time, end_time): (f64, f64),
@@ -114,8 +72,7 @@ impl SubtaskRow {
             start_time,
             end_time,
             description: description.into().trim().to_owned(),
-            index: None,
-            judgments: Vec::new(),
+            judgment: None,
         };
         if !start_time.is_finite()
             || !end_time.is_finite()
@@ -131,21 +88,9 @@ impl SubtaskRow {
         }
         Ok(row)
     }
-    /// The same subtask, at `index` in the Break down answer it came from.
-    pub(in crate::activities::curation) fn placed_at(mut self, index: u64) -> Self {
-        self.index = Some(index);
-        self
-    }
-    /// The same subtask with one more judgment, written to `column`.
-    pub(in crate::activities::curation) fn judged(
-        mut self,
-        column: impl Into<String>,
-        value: JudgmentValue,
-    ) -> Self {
-        self.judgments.push(Judgment {
-            column: column.into(),
-            value,
-        });
+    /// The same subtask, judged by the node that read it.
+    pub(in crate::activities::curation) fn judged(mut self, value: JudgmentValue) -> Self {
+        self.judgment = Some(value);
         self
     }
     pub(in crate::activities::curation) fn episode(&self) -> &EpisodeId {
@@ -166,28 +111,20 @@ impl SubtaskRow {
     pub(in crate::activities::curation) fn midpoint(&self) -> f64 {
         f64::midpoint(self.start_time, self.end_time)
     }
-    /// How likely the nearest search found this subtask the operation it
-    /// asked about.
+    /// How likely the search that read it found it the operation it asked
+    /// about.
     pub(in crate::activities::curation) fn similarity(&self) -> Option<f64> {
-        self.judgments
-            .iter()
-            .rev()
-            .find_map(|judgment| match &judgment.value {
-                JudgmentValue::Similarity(similarity) => Some(*similarity),
-                JudgmentValue::Category(_) => None,
-            })
-            .flatten()
+        match &self.judgment {
+            Some(JudgmentValue::Similarity(similarity)) => *similarity,
+            _ => None,
+        }
     }
-    /// Where the nearest grouping put this subtask.
+    /// Where the grouping that read it put it.
     pub(in crate::activities::curation) fn placement(&self) -> Option<&CategoryPlacement> {
-        self.judgments
-            .iter()
-            .rev()
-            .find_map(|judgment| match &judgment.value {
-                JudgmentValue::Category(placement) => Some(placement.as_ref()),
-                JudgmentValue::Similarity(_) => None,
-            })
-            .flatten()
+        match &self.judgment {
+            Some(JudgmentValue::Category(placement)) => placement.as_ref(),
+            _ => None,
+        }
     }
     pub(in crate::activities::curation) fn category(&self) -> Option<&str> {
         self.placement().map(CategoryPlacement::category)
@@ -199,55 +136,24 @@ impl SubtaskRow {
     pub(in crate::activities::curation) fn key(&self) -> SubtaskKey {
         SubtaskKey::new(self.episode.clone(), self.start_time)
     }
-    fn judgment(&self, column: &str) -> Option<&JudgmentValue> {
-        self.judgments
-            .iter()
-            .find(|judgment| judgment.column == column)
-            .map(|judgment| &judgment.value)
-    }
 }
 
-/// What one column of a relation of subtasks holds.
+/// What a node's preview answers of each subtask beside its interval and
+/// description: nothing more for Break down, a similarity for Find similar,
+/// and a category with its probability for Group similar.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum SubtaskColumn {
-    Description,
-    /// The subtask's place in its Break down answer, where every stored
-    /// judgment of it is read.
-    Index,
+pub(in crate::activities::curation) enum SubtaskReading {
+    Described,
     Similarity,
     Category,
 }
 
-/// The columns of one relation of subtasks after its interval, in order, as
-/// the path names them: the description, then every judgment made on the way.
-#[derive(Clone, Debug, PartialEq)]
-pub(in crate::activities::curation) struct SubtaskColumns(Vec<(String, SubtaskColumn)>);
-
-impl SubtaskColumns {
-    /// The columns `relation` carries; a relation of anything but subtasks
-    /// has none of these.
-    pub(in crate::activities::curation) fn of(relation: &Relation) -> Result<Self, String> {
-        relation
-            .properties()
-            .map(|(column, measure)| {
-                let kind = match measure {
-                    SubtaskRow::DESCRIPTION => SubtaskColumn::Description,
-                    SubtaskRow::INDEX => SubtaskColumn::Index,
-                    SubtaskRow::SIMILARITY => SubtaskColumn::Similarity,
-                    SubtaskRow::CATEGORY => SubtaskColumn::Category,
-                    other => return Err(format!("A relation of subtasks carries no {other}.")),
-                };
-                Ok((column.to_owned(), kind))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Self)
-    }
-
+impl SubtaskReading {
     /// The subtasks of the rows Spiral answered with, each episode's in time
     /// order. The relation's times are the recording's clock; the browser
     /// reads them from each episode's first message, as `sample` lists it.
     pub(in crate::activities::curation) fn read(
-        &self,
+        self,
         answer: &SpiralQuerySnapshot,
         sample: &EpisodeSample,
     ) -> Result<Vec<SubtaskRow>, String> {
@@ -270,7 +176,7 @@ impl SubtaskColumns {
     }
 
     fn read_row(
-        &self,
+        self,
         row: &Map<String, Value>,
         sample: &EpisodeSample,
     ) -> Result<SubtaskRow, String> {
@@ -288,141 +194,31 @@ impl SubtaskColumns {
                 .map(|nanos| nanos.saturating_sub(origin) as f64 / 1e9)
                 .ok_or_else(|| format!("A subtask of the preview has no {column}."))
         };
-        let (start, end) = (seconds("start_ns")?, seconds("end_ns")?);
-        let mut described = None::<SubtaskRow>;
-        for (column, kind) in &self.0 {
-            let cell = row.get(column).unwrap_or(&Value::Null);
-            described = Some(match (kind, described) {
-                (SubtaskColumn::Index, Some(row)) => row.placed_at(
-                    cell.as_u64()
-                        .ok_or("A subtask of the preview has no place in its Break down.")?,
-                ),
-                (SubtaskColumn::Description, None) => SubtaskRow::new(
-                    episode.clone(),
-                    (start, end),
-                    cell.as_str()
-                        .ok_or("A subtask of the preview has no description.")?,
-                )?,
-                (SubtaskColumn::Similarity, Some(row)) => {
-                    row.judged(column.clone(), JudgmentValue::Similarity(cell.as_f64()))
-                }
-                (SubtaskColumn::Category, Some(row)) => {
-                    let placement = match cell {
-                        Value::Null => None,
-                        placed => Some(CategoryPlacement::new(
-                            placed
-                                .get("category")
-                                .and_then(Value::as_str)
-                                .ok_or("A category of the preview has no name.")?,
-                            placed
-                                .get("probability")
-                                .and_then(Value::as_f64)
-                                .ok_or("A category of the preview has no probability.")?,
-                        )?),
-                    };
-                    row.judged(column.clone(), JudgmentValue::Category(placement))
-                }
-                _ => return Err("A relation of subtasks starts with their description.".into()),
-            });
-        }
-        described.ok_or_else(|| "The preview names no subtask columns.".into())
-    }
-
-    /// The names the `VALUES` of these subtasks list their columns under: a
-    /// category travels as its name and probability, and is put back
-    /// together by [`Self::rebuilt`], since `VALUES` takes literals only.
-    pub(in crate::activities::curation) fn value_names(&self) -> Vec<String> {
-        let mut names = vec![
-            "episode_id".to_owned(),
-            "start_ns".to_owned(),
-            "end_ns".to_owned(),
-        ];
-        for (column, kind) in &self.0 {
-            match kind {
-                SubtaskColumn::Description | SubtaskColumn::Index | SubtaskColumn::Similarity => {
-                    names.push(column.clone())
-                }
-                SubtaskColumn::Category => {
-                    names.push(format!("{column}_category"));
-                    names.push(format!("{column}_probability"));
-                }
+        let described = SubtaskRow::new(
+            episode,
+            (seconds("start_ns")?, seconds("end_ns")?),
+            row.get("description")
+                .and_then(Value::as_str)
+                .ok_or("A subtask of the preview has no description.")?,
+        )?;
+        Ok(match self {
+            Self::Described => described,
+            Self::Similarity => described.judged(JudgmentValue::Similarity(
+                row.get("similarity").and_then(Value::as_f64),
+            )),
+            Self::Category => {
+                let placement = match row.get("category").and_then(Value::as_str) {
+                    None => None,
+                    Some(category) => Some(CategoryPlacement::new(
+                        category,
+                        row.get("probability")
+                            .and_then(Value::as_f64)
+                            .ok_or("A category of the preview has no probability.")?,
+                    )?),
+                };
+                described.judged(JudgmentValue::Category(placement))
             }
-        }
-        names
-    }
-
-    /// Every column of the relation, made from the `VALUES` columns.
-    pub(in crate::activities::curation) fn rebuilt(&self) -> Vec<String> {
-        let mut columns = vec![
-            "episode_id".to_owned(),
-            "start_ns".to_owned(),
-            "end_ns".to_owned(),
-        ];
-        for (column, kind) in &self.0 {
-            columns.push(match kind {
-                SubtaskColumn::Description | SubtaskColumn::Index | SubtaskColumn::Similarity => {
-                    column.clone()
-                }
-                SubtaskColumn::Category => format!(
-                    "CASE WHEN {column}_category IS NULL THEN NULL \
-                     ELSE STRUCT_PACK(category := {column}_category, probability := {column}_probability) END AS {column}"
-                ),
-            });
-        }
-        columns
-    }
-
-    /// One subtask as a `VALUES` row of the episode bound as `$1`, the id its
-    /// stored judgments are joined to.
-    pub(in crate::activities::curation) fn values(
-        &self,
-        row: &SubtaskRow,
-        origin_ns: i64,
-    ) -> Result<String, String> {
-        let nanos = |seconds: f64| {
-            format!(
-                "CAST({} AS BIGINT)",
-                origin_ns + (seconds * 1e9).round() as i64
-            )
-        };
-        let unit = |value: f64| {
-            (0.0..=1.0)
-                .contains(&value)
-                .then(|| SqlLiteral::double(value))
-                .flatten()
-                .ok_or_else(|| format!("A judgment of {value} is not between 0 and 1."))
-        };
-        let mut values = vec!["$1".to_owned(), nanos(row.start_time), nanos(row.end_time)];
-        for (column, kind) in &self.0 {
-            match (kind, row.judgment(column)) {
-                (SubtaskColumn::Description, _) => values.push(SqlLiteral::text(&row.description)),
-                (SubtaskColumn::Index, _) => values.push(format!(
-                    "CAST({} AS BIGINT)",
-                    row.index
-                        .ok_or("A subtask has no place in its Break down to hand on.")?
-                )),
-                (SubtaskColumn::Similarity, Some(JudgmentValue::Similarity(similarity))) => {
-                    values.push(match similarity {
-                        Some(similarity) => unit(*similarity)?,
-                        None => "CAST(NULL AS DOUBLE)".to_owned(),
-                    });
-                }
-                (SubtaskColumn::Category, Some(JudgmentValue::Category(placement))) => {
-                    match placement {
-                        Some(placement) => {
-                            values.push(SqlLiteral::text(placement.category()));
-                            values.push(unit(placement.probability())?);
-                        }
-                        None => {
-                            values.push("CAST(NULL AS VARCHAR)".to_owned());
-                            values.push("CAST(NULL AS DOUBLE)".to_owned());
-                        }
-                    }
-                }
-                _ => return Err(format!("A subtask has no {column} to hand on.")),
-            }
-        }
-        Ok(format!("({})", values.join(", ")))
+        })
     }
 }
 
@@ -431,18 +227,6 @@ mod tests {
     use super::*;
     use crate::activities::episode::Episode;
     use serde_json::json;
-
-    fn columns() -> SubtaskColumns {
-        SubtaskColumns::of(
-            &Relation::new(
-                "breakdown",
-                vec![SubtaskRow::DESCRIPTION, SubtaskRow::INDEX],
-            )
-            .measuring("grouping", SubtaskRow::CATEGORY)
-            .measuring("search", SubtaskRow::SIMILARITY),
-        )
-        .unwrap()
-    }
 
     /// One episode whose first message is at one second of log time.
     fn sample() -> EpisodeSample {
@@ -466,16 +250,16 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_reads_back_as_subtasks_with_every_judgment_on_the_way() {
+    fn an_answer_reads_back_as_subtasks_with_the_judgment_the_node_made() {
         let id = EpisodeId::fixture(1).to_string();
         let start = 1_000_000_000_i64;
-        let rows = columns()
+        let rows = SubtaskReading::Category
             .read(
                 &answer(vec![
-                    json!({"episode_id": id, "start_ns": start + 4_000_000_000_i64, "end_ns": start + 9_000_000_000_i64,
-                           "subtask": "fold the skirt", "subtask_index": 1, "subtask_category": {"category": "fold", "probability": 0.8}, "similarity": 0.9}),
-                    json!({"episode_id": id, "start_ns": start, "end_ns": start + 4_000_000_000_i64,
-                           "subtask": " grasp the hem ", "subtask_index": 0, "subtask_category": null, "similarity": null}),
+                    json!({"episode_id": id, "subtask_index": 1, "start_ns": start + 4_000_000_000_i64, "end_ns": start + 9_000_000_000_i64,
+                           "description": "fold the skirt", "category": "fold", "probability": 0.8}),
+                    json!({"episode_id": id, "subtask_index": 0, "start_ns": start, "end_ns": start + 4_000_000_000_i64,
+                           "description": " grasp the hem ", "category": null, "probability": null}),
                 ]),
                 &sample(),
             )
@@ -484,62 +268,19 @@ mod tests {
         assert_eq!(rows[0].description(), "grasp the hem");
         assert_eq!(rows[0].category(), None, "a row the model could not place");
         assert_eq!(rows[1].category(), Some("fold"));
-        assert_eq!(rows[1].similarity(), Some(0.9));
-        assert_eq!((rows[0].index, rows[1].index), (Some(0), Some(1)));
+        let similar = SubtaskReading::Similarity
+            .read(
+                &answer(vec![json!({"episode_id": id, "subtask_index": 0, "start_ns": start, "end_ns": start + 1_000_000_000_i64,
+                                    "description": "reach", "similarity": 0.9})]),
+                &sample(),
+            )
+            .unwrap();
+        assert_eq!(similar[0].similarity(), Some(0.9));
         assert!(
-            columns()
-                .read(&answer(vec![json!({"episode_id": EpisodeId::fixture(2).to_string(), "start_ns": 0, "end_ns": 1, "subtask": "x"})]), &sample())
+            SubtaskReading::Described
+                .read(&answer(vec![json!({"episode_id": EpisodeId::fixture(2).to_string(), "subtask_index": 0, "start_ns": 0, "end_ns": 1, "description": "x"})]), &sample())
                 .unwrap_err()
                 .contains("does not list")
-        );
-    }
-
-    #[test]
-    fn a_subtask_is_handed_on_as_literals_and_put_back_together() {
-        let row = SubtaskRow::new(EpisodeId::fixture(1), (0.5, 4.0), "fold the towel's edge")
-            .unwrap()
-            .placed_at(3)
-            .judged(
-                "subtask_category",
-                JudgmentValue::Category(Some(CategoryPlacement::new("fold", 0.75).unwrap())),
-            )
-            .judged("similarity", JudgmentValue::Similarity(None));
-        // Its episode is the one the statement is bound to, and its place
-        // is where its stored judgments are read.
-        assert_eq!(
-            columns().values(&row, 1_000_000_000).unwrap(),
-            "($1, CAST(1500000000 AS BIGINT), CAST(5000000000 AS BIGINT), 'fold the towel''s edge', CAST(3 AS BIGINT), 'fold', CAST(0.75 AS DOUBLE), CAST(NULL AS DOUBLE))"
-        );
-        assert_eq!(
-            columns().value_names(),
-            [
-                "episode_id",
-                "start_ns",
-                "end_ns",
-                "subtask",
-                "subtask_index",
-                "subtask_category_category",
-                "subtask_category_probability",
-                "similarity"
-            ]
-        );
-        assert_eq!(
-            columns().rebuilt()[5],
-            "CASE WHEN subtask_category_category IS NULL THEN NULL ELSE STRUCT_PACK(category := subtask_category_category, probability := subtask_category_probability) END AS subtask_category"
-        );
-        // A subtask read before a judgment was made has none to hand on, and
-        // one never read from a preview has no place to.
-        let described = SubtaskRow::new(EpisodeId::fixture(1), (0.0, 1.0), "grasp").unwrap();
-        assert!(
-            columns()
-                .values(&described.clone().placed_at(0), 0)
-                .is_err()
-        );
-        assert!(
-            columns()
-                .values(&described, 0)
-                .unwrap_err()
-                .contains("no place")
         );
     }
 }
