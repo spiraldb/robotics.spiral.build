@@ -12,6 +12,8 @@ use super::population::{EpisodeSample, Population, PopulationReader};
 use super::preview::{PreviewPass, PreviewPlan, PreviewProgress, PreviewReads, PreviewRows};
 use super::select::SelectReading;
 use super::session::{DocumentCommand, DocumentSession};
+use crate::activities::training::TrainingClient;
+use crate::client::CommandError;
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::components::scoped_task::ScopedTask;
 use crate::shell::state::StudioProjectState;
@@ -20,6 +22,7 @@ use dioxus::prelude::*;
 use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::curation::{CurationDocument, CurationSummary};
 use spiral_robotics_common::datasets::EpisodeId;
+use spiral_robotics_common::training::PublishedModel;
 use spiral_robotics_ui::Place;
 use std::collections::BTreeMap;
 
@@ -177,13 +180,15 @@ impl CurationDraft for CurationDocument {
 }
 
 /// What every node is interpreted over: the sample of episodes, read once per
-/// dataset; what the preview has read over it this session; and whether the
-/// curation just opened has yet to read back what its stored answers hold.
+/// dataset; what the preview has read over it this session; whether the
+/// curation just opened has yet to read back what its stored answers hold;
+/// and the progress models the project published, read once per session.
 #[derive(Clone, Copy, PartialEq)]
 struct Interpretation {
     sample: Resource<Result<Option<EpisodeSample>, String>>,
     reads: Signal<PreviewReads>,
     unrestored: Signal<bool>,
+    progress_models: Resource<Result<Vec<PublishedModel>, CommandError>>,
 }
 
 /// Where a curation asks the annotation view to look: one episode of one
@@ -247,6 +252,9 @@ impl CurationController {
                 None => Ok(None),
             }
         });
+        // Read again only when Training publishes another, never polled.
+        let progress_models = QueryPolicy::on_demand(QueryDomain::Training)
+            .use_resource(|| async { TrainingClient::current().published_models().await });
         let controller = use_hook(|| Self {
             session,
             payload,
@@ -258,6 +266,7 @@ impl CurationController {
                 sample,
                 reads: Signal::new(PreviewReads::default()),
                 unrestored: Signal::new(false),
+                progress_models,
             },
         });
         controller.use_stored_publications();
@@ -381,6 +390,15 @@ impl CurationController {
             .as_ref()
             .and_then(|loaded| loaded.as_ref().err())
             .cloned()
+    }
+    /// The progress models the project published, by name: `None` while
+    /// they are read.
+    pub(super) fn progress_models(&self) -> Option<Result<Vec<PublishedModel>, String>> {
+        self.interpretation
+            .progress_models
+            .read()
+            .as_ref()
+            .map(|read| read.clone().map_err(|error| error.to_string()))
     }
     pub(super) fn reload_sample(mut self) {
         self.interpretation.sample.restart();

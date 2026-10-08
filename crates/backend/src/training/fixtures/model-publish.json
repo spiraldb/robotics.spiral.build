@@ -1,0 +1,20 @@
+{
+  "model": "spiral-robotics-models/0f3c5e2b9a7d4c1e8b6a5f4d3c2b1a0e9f8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+  "manifest": {
+    "family": "progress",
+    "manifest": "spiral_robotics.progress.safetensors.v1",
+    "run_id": "train-1791300000000-1",
+    "camera": "/top-camera",
+    "backbone": "facebook/dinov3-vitb16-pretrain-lvd1689m@5931719e67bbdb9737e363e781fb0c67687896bc",
+    "window_size": 32,
+    "feature_stride": 1,
+    "standard_stride_src": 15,
+    "fps": 30,
+    "bins": 30,
+    "bin_range": [-3.0, 3.0],
+    "ablation": "no_abs",
+    "image": { "width": 224, "height": 224 },
+    "crop": "squash",
+    "step": 3
+  }
+}

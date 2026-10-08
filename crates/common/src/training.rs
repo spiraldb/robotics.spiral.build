@@ -1,5 +1,9 @@
 //! Model training: what a run trains on, which model it trains and how that
-//! model sees the data, and what a run reports. See `docs/training.md`.
+//! model sees the data, what a run reports, and the progress models published
+//! from its checkpoints. See `docs/training.md`.
+mod published_model;
+
+pub use published_model::{ModelPublication, PublishedModel};
 
 use serde::{Deserialize, Serialize};
 

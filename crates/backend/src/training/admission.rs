@@ -1,4 +1,5 @@
-//! Whether a training configuration may start a run.
+//! Whether a training configuration may start a run, which run may be
+//! deleted, and which checkpoint may be published as a model.
 //!
 //! The configuration already carries every value an operator can set; these
 //! rules decide whether that combination may start. The training service
@@ -7,9 +8,11 @@ use std::collections::BTreeSet;
 
 use spiral_robotics_common::curation::ViewName;
 use spiral_robotics_common::training::{
-    ActModel, ProgressModel, TrainingConfig, TrainingModel, TrainingRun,
+    ActModel, ModelPublication, ProgressModel, TrainingConfig, TrainingModel, TrainingRun,
+    TrainingRunIdentity,
 };
 
+use super::service::RunStatus;
 use crate::OperationError;
 
 pub(super) trait StartTrainingAdmission: Sized {
@@ -138,6 +141,45 @@ impl RunDeletion {
             )));
         }
         Ok(run_id.to_owned())
+    }
+}
+
+/// Which checkpoint may be published as a model: one a progress run saved,
+/// under a name of its own.
+pub(super) struct ModelPublishing;
+
+impl ModelPublishing {
+    /// `publication` with its name trimmed, when `run` trained a progress
+    /// model and the service reports `status` holding its checkpoint.
+    pub(super) fn admitted(
+        publication: ModelPublication,
+        run: &TrainingRunIdentity,
+        status: Option<&RunStatus>,
+    ) -> Result<ModelPublication, OperationError> {
+        let name = publication.name().trim();
+        if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+            return Err(OperationError::invalid_input(
+                "Name the model in 1 to 80 characters.",
+            ));
+        }
+        let run_name = run.config().run_name();
+        if !matches!(run.config().model(), TrainingModel::Progress(_)) {
+            return Err(OperationError::invalid_input(format!(
+                "Training run {run_name:?} trained no progress model to publish."
+            )));
+        }
+        let step = publication.step();
+        if !status.is_some_and(|status| {
+            status
+                .checkpoints()
+                .iter()
+                .any(|checkpoint| checkpoint.step() == step)
+        }) {
+            return Err(OperationError::NotFound(format!(
+                "Training run {run_name:?} saved no checkpoint at step {step}."
+            )));
+        }
+        Ok(ModelPublication::new(publication.run_id(), step, name))
     }
 }
 

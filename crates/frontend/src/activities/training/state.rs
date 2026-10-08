@@ -9,7 +9,8 @@ use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
 use spiral_robotics_common::training::{
-    ActModel, ImageSize, TrainingConfig, TrainingModel, TrainingModelKind, TrainingSource,
+    ActModel, ImageSize, ModelPublication, TrainingConfig, TrainingModel, TrainingModelKind,
+    TrainingSource,
 };
 
 use super::observation::{ImageScale, SourceSizes};
@@ -46,6 +47,8 @@ struct TrainingCommandSignals {
     starting: Signal<bool>,
     stopping: Signal<Option<String>>,
     deleting: Signal<Option<String>>,
+    /// The checkpoint being published, by run and step.
+    publishing: Signal<Option<(String, u64)>>,
 }
 
 pub(crate) struct TrainingRunIdentity {
@@ -77,6 +80,7 @@ impl TrainingController {
                 starting: Signal::new(false),
                 stopping: Signal::new(None),
                 deleting: Signal::new(None),
+                publishing: Signal::new(None),
             },
             source_sizes: SourceSizes::new(),
         })
@@ -207,6 +211,11 @@ impl TrainingController {
         self.commands.deleting.read().to_owned()
     }
 
+    /// The checkpoint being published, by run and step.
+    pub(super) fn publishing(&self) -> Option<(String, u64)> {
+        self.commands.publishing.read().to_owned()
+    }
+
     pub(super) fn open_run(mut self, id: String) {
         if !self.history.opened_runs.peek().contains(&id) {
             self.history.opened_runs.write().push(id.clone());
@@ -320,6 +329,27 @@ impl TrainingController {
                     selected_run.set(next_selected);
                 }
             }
+            result
+        });
+    }
+
+    /// Publish the checkpoint `publication` names under its name; the
+    /// checkpoint shows it once Training reads the published models again.
+    pub(super) fn publish(mut self, studio: StudioProjectState, publication: ModelPublication) {
+        if self.commands.publishing.peek().is_some() {
+            return;
+        }
+        let checkpoint = (publication.run_id().to_owned(), publication.step());
+        self.commands.publishing.set(Some(checkpoint));
+        let mut publishing = self.commands.publishing;
+        let name = publication.name().trim().to_owned();
+        studio.run_reported(format!("Published “{name}”."), async move {
+            let result = TrainingClient::current()
+                .publish_model(publication)
+                .await
+                .map(drop)
+                .map_err(|error| error.to_string());
+            publishing.set(None);
             result
         });
     }

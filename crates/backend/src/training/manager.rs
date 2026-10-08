@@ -7,15 +7,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use spiral_robotics_common::training::{
-    CheckpointModel, CheckpointPolicy, TrainingCheckpoint, TrainingConfig, TrainingModel,
-    TrainingReadiness, TrainingRun, TrainingRunIdentity, TrainingRunStatus, TrainingSnapshot,
+    CheckpointModel, CheckpointPolicy, ModelPublication, PublishedModel, TrainingCheckpoint,
+    TrainingConfig, TrainingModel, TrainingReadiness, TrainingRun, TrainingRunIdentity,
+    TrainingRunStatus, TrainingSnapshot,
 };
 use spiral_robotics_inference::ModelArtifact;
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 
-use super::admission::{RunDeletion, StartTrainingAdmission as _};
+use super::admission::{ModelPublishing, RunDeletion, StartTrainingAdmission as _};
 use super::input::TrainingInput;
-use super::service::{RunRequest, RunStatus, TrainingService};
+use super::service::{ModelPublishRequest, RunRequest, RunStatus, TrainingService};
 use super::upload::{RunUploads, UploadWork};
 use crate::OperationError;
 use crate::clock::StableIdSequence;
@@ -117,6 +118,54 @@ impl TrainingManager {
             .map_err(OperationError::External)?;
         ModelArtifact::from_bytes(config, weights)
             .map_err(|error| OperationError::Internal(error.to_string()))
+    }
+
+    /// Publish the checkpoint `publication` names under its name, so Score
+    /// progress can score with it: the service keeps the weights, and Studio
+    /// the name. The same weights may be published under another name.
+    pub(super) async fn publish(
+        &self,
+        publication: ModelPublication,
+    ) -> Result<PublishedModel, OperationError> {
+        let run = self.record(publication.run_id()).await?;
+        let service = self.service().map_err(OperationError::External)?;
+        let project = self.project();
+        let statuses = service
+            .statuses(&project, &[run.id().to_owned()])
+            .await
+            .map_err(OperationError::External)?;
+        let status = statuses.iter().find(|status| status.run_id() == run.id());
+        let publication = ModelPublishing::admitted(publication, &run, status)?;
+        let request = ModelPublishRequest::new(&project, run.id(), publication.step());
+        let model = service
+            .publish(&request)
+            .await
+            .map_err(OperationError::External)?
+            .named(publication);
+        let recorded = self
+            .inner
+            .storage
+            .published_models()
+            .insert(&model)
+            .await
+            .map_err(OperationError::External)?;
+        if !recorded {
+            return Err(OperationError::conflict(format!(
+                "A model named “{}” is already published; choose another name.",
+                model.name()
+            )));
+        }
+        Ok(model)
+    }
+
+    /// Every progress model the project published, by name.
+    pub(super) async fn published_models(&self) -> Result<Vec<PublishedModel>, OperationError> {
+        self.inner
+            .storage
+            .published_models()
+            .list()
+            .await
+            .map_err(OperationError::External)
     }
 
     /// Admit `config` as a run, record it, and start uploading its data.
@@ -339,3 +388,6 @@ impl RunReports {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -24,6 +24,7 @@ use super::annotate::SubtaskRow;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_common::sql::UnquotedSqlIdentifier;
+use spiral_robotics_common::training::PublishedModel;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) use grouping::{CategoryId, SubtaskCategory, SubtaskGrouping};
@@ -209,12 +210,52 @@ impl SubtaskAnnotation {
     }
 }
 
-/// What one Score progress node asks. Its scorer is pinned, so there is
-/// nothing to configure, and what it reads is the preview's, never the
-/// document's.
+/// What one Score progress node asks: the progress model it scores with,
+/// the released one unless it names a published one. What it reads is the
+/// preview's, never the document's.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ProgressScoring {}
+pub(crate) struct ProgressScoring {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published: Option<PublishedProgressModel>,
+}
+impl ProgressScoring {
+    /// The published model it scores with; `None` scores with the released
+    /// one.
+    pub(crate) fn published(&self) -> Option<&PublishedProgressModel> {
+        self.published.as_ref()
+    }
+    pub(crate) fn set_published(&mut self, published: Option<PublishedProgressModel>) {
+        self.published = published;
+    }
+}
+
+/// A published progress model as a Score progress node names it: the
+/// selector the scorer reads its weights by, and the camera it was trained
+/// on. The weights fix both, so neither goes stale; the name it is listed by
+/// is the project's, and never stored here.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublishedProgressModel {
+    model: String,
+    camera: String,
+}
+impl From<&PublishedModel> for PublishedProgressModel {
+    fn from(published: &PublishedModel) -> Self {
+        Self {
+            model: published.model().to_owned(),
+            camera: published.camera().to_owned(),
+        }
+    }
+}
+impl PublishedProgressModel {
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+    pub(crate) fn camera(&self) -> &str {
+        &self.camera
+    }
+}
 
 /// What one Track objects node asks: what to track, on which camera, and how
 /// many pictures a second the tracker samples.

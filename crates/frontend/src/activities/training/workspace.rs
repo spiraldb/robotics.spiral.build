@@ -10,6 +10,7 @@ use spiral_robotics_ui::{
     ConfirmationResponse, DeleteIcon, EmptyState, InlineConfirmation,
 };
 
+use super::checkpoint_models::PublishedModels;
 use super::run_detail::{RunCheckpoints, TrainingPresentation, TrainingRunDetail};
 use super::setup::TrainingSetup;
 use crate::shell::state::StudioProjectState;
@@ -21,9 +22,11 @@ fn TrainingPanels(
     project: StudioProjectState,
     controller: super::state::TrainingController,
     training_history: super::history::TrainingHistory,
+    published_models: PublishedModels,
 ) -> Element {
     let snapshot = training_history.snapshot().read().to_owned();
     let checkpoints = training_history.checkpoints().read().to_owned();
+    let published = published_models.listed();
     let run_names = snapshot
         .runs()
         .iter()
@@ -95,9 +98,11 @@ fn TrainingPanels(
                     "training-runs",
                     rsx! {
                         TrainingRunDetail {
+                            controller,
                             details_loaded: training_history.details_loaded(run.id()),
                             run,
                             checkpoints,
+                            published: published.clone(),
                         }
                     },
                 )
@@ -298,5 +303,6 @@ pub(crate) fn TrainingWorkspace(is_active: ReadSignal<bool>) -> Element {
     let controller = super::state::TrainingController::use_controller();
     let history =
         super::history::TrainingHistory::use_history(is_active, move || controller.selected_run());
-    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Training(history), TrainingPanels { project, controller, training_history: history } } }
+    let published_models = PublishedModels::use_models(is_active);
+    rsx! { crate::shell::frame::WorkspaceFrame { workspace, status: crate::shell::frame::WorkspaceStatus::Training(history), TrainingPanels { project, controller, training_history: history, published_models } } }
 }

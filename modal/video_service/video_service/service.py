@@ -28,6 +28,15 @@ class RetryLater(Exception):
     caller asks again."""
 
 
+class UnknownModel(Exception):
+    """A request for a model the service does not hold: a run error, not a rejected video."""
+
+
+class IncompatibleModel(Exception):
+    """A request for a model the service holds but cannot run as it runs: a run error, not a
+    rejected video."""
+
+
 class EpisodeRequest:
     """One request's episode and the schema metadata it came with."""
 
@@ -45,15 +54,19 @@ class EpisodeRequest:
 
 class VideoContract:
     """What one service answers for: H.264 Annex-B packets, read for its pinned `model`, by requests
-    built for its `revision`. Studio stores answers under the revision, so any other is refused."""
+    built for its `revision`. Studio stores answers under the revision, so any other is refused.
 
-    def __init__(self, model: str, revision: str, implementation: str):
-        self._metadata = {"codec": "h264", "framing": "annex_b", "model": model}
+    A service that reads with more than one model pins none: it reads each request's `model` itself.
+    """
+
+    def __init__(self, model: str | None, revision: str, implementation: str):
+        self._model = model
+        self._metadata = {"codec": "h264", "framing": "annex_b"} | ({} if model is None else {"model": model})
         self._revision = revision
         self._implementation = implementation
 
-    def health(self) -> dict[str, str]:
-        return {"model": self._metadata["model"], "implementation": self._implementation, "revision": self._revision}
+    def health(self) -> dict[str, str | None]:
+        return {"model": self._model, "implementation": self._implementation, "revision": self._revision}
 
     def episode(self, body: bytes) -> EpisodeRequest:
         """The episode an Arrow IPC request body describes, if it follows the contract."""
@@ -82,8 +95,8 @@ class VideoService:
 
     The route reads its episode under the `request` stage and hands it to `answer` off the event
     loop, with the request's stage timer; the answer goes back as an Arrow IPC stream, its stages in
-    a `Server-Timing` header. A rejected video is a 422, a request for another revision a 409, and a
-    `RetryLater` a 503.
+    a `Server-Timing` header. A rejected video is a 422, a request for another revision or an
+    `IncompatibleModel` a 409, an `UnknownModel` a 404, and a `RetryLater` a 503.
     """
 
     def __init__(self, contract: VideoContract, token: str):
@@ -94,7 +107,7 @@ class VideoService:
         app = FastAPI()
 
         @app.get("/health")
-        def health() -> dict[str, str]:
+        def health() -> dict[str, str | None]:
             return self._contract.health()
 
         @app.post(route)
@@ -106,7 +119,9 @@ class VideoService:
                 with times.stage("request"):
                     episode = self._contract.episode(await request.body())
                 answers = await run_in_threadpool(answer, episode, times)
-            except RevisionMismatch as mismatch:
+            except UnknownModel as unknown:
+                return JSONResponse({"error": str(unknown)}, status_code=404)
+            except (RevisionMismatch, IncompatibleModel) as mismatch:
                 return JSONResponse({"error": str(mismatch)}, status_code=409)
             except RejectedVideo as rejection:
                 return JSONResponse({"error": str(rejection)}, status_code=422)

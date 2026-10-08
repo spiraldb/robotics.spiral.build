@@ -1,8 +1,10 @@
 use super::*;
 use crate::settings::{StoredStudioPreferences, StudioPreferencePersistence};
-use crate::training::TrainingRunPersistence;
+use crate::training::{PublishedModels, TrainingRunPersistence};
 use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement};
-use spiral_robotics_common::training::{TrainingConfig, TrainingInputSummary, TrainingRunIdentity};
+use spiral_robotics_common::training::{
+    ModelPublication, PublishedModel, TrainingConfig, TrainingInputSummary, TrainingRunIdentity,
+};
 
 struct Fixture;
 impl Fixture {
@@ -477,6 +479,52 @@ async fn runs_recorded_before_model_families_become_act_runs() {
     assert_eq!(document["input"], recorded["input"]);
     let run: TrainingRunIdentity = serde_json::from_value(document).unwrap();
     assert_eq!(run.config().model().cameras().len(), 2);
+}
+
+/// A database from before published models gains their table, empty, and
+/// a name is one name whatever its case, within one project.
+#[tokio::test]
+async fn published_models_start_empty_and_a_name_is_one_name_in_any_case() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("before-published-models.sqlite3");
+    migrated_until(&path, "m20261008_000003_published_models").await;
+    let store = StudioStore::at(path);
+    let project = store.project(&Fixture::connection("models"));
+    let models = PublishedModels::new(&project);
+    assert!(models.list().await.unwrap().is_empty());
+    let published = |name: &str, step| {
+        PublishedModel::new(
+            ModelPublication::new("train-1", step, name),
+            "spiral-robotics-models/0f3c",
+            "/top-camera",
+        )
+    };
+    assert!(
+        models
+            .insert(&published("Bottle experts", 3))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !models
+            .insert(&published("bottle EXPERTS", 6))
+            .await
+            .unwrap()
+    );
+    // The same weights may be published under a second name.
+    assert!(models.insert(&published("Any bottle", 3)).await.unwrap());
+    assert_eq!(
+        models.list().await.unwrap(),
+        [published("Any bottle", 3), published("Bottle experts", 3)]
+    );
+    let other = store.project(&Fixture::connection("other"));
+    assert!(
+        PublishedModels::new(&other)
+            .insert(&published("Bottle experts", 6))
+            .await
+            .unwrap()
+    );
+    assert_eq!(models.list().await.unwrap().len(), 2);
 }
 
 /// A database at `path` with every migration before `name` applied.

@@ -19,7 +19,8 @@ from transformers import DINOv3ViTModel
 from video_service.episode import EpisodeVideo, RejectedVideo
 from video_service.timing import StageTimes
 
-from warp_progress.artifacts import Artifacts
+from warp_progress.artifacts import SELECTOR, Artifacts
+from warp_progress.published import PublishedModels
 
 # Pictures the backbone embeds per batch: fp16 on a T4 takes 5.84 s for 1,817 pictures at 16,
 # 5.58 s at 64 and 5.49 s at 128, which doubles each request's host buffer for 2% more.
@@ -45,28 +46,46 @@ OUTPUT_SCHEMA = pa.schema(
 
 
 class WarpModel:
-    """The official DINOv3 ViT-B/16 backbone and the WARP-RM sim-bottles head on one device.
+    """The official DINOv3 ViT-B/16 backbone and WARP-RM temporal heads on one device: the released
+    sim-bottles head, and each published progress model, loaded the first time a request names it
+    and kept.
 
     Concurrent requests decode on their own threads and take turns on the device, one batch at a
     time, so the device serves one request's work at a time and never holds two batches.
     """
 
-    def __init__(self, artifacts: Artifacts, device: torch.device):
+    def __init__(self, artifacts: Artifacts, published: PublishedModels, device: torch.device):
         self._encoder = PictureEncoder(artifacts.backbone, device)
-        self._temporal = TemporalModel.load(artifacts.head).to(device)
+        self._published = published
+        self._device = device
+        # The heads loaded so far, by the `model` requests name them by.
+        self._heads = {SELECTOR: TemporalModel.load(artifacts.head).to(device)}
+        # Heads load one at a time, so each loads once and the models Volume reloads with none of
+        # its files open.
+        self._loading = threading.Lock()
 
-    @torch.inference_mode()
-    def score(self, video: EpisodeVideo, times: StageTimes) -> pa.RecordBatch:
-        """Every picture's velocity and progress, in display order."""
-        timestamps, embeddings = [], []
-        for batch_times, batch_embeddings in self._encoder.encode(video, times):
-            timestamps.extend(batch_times)
-            embeddings.append(batch_embeddings)
-        clock = PresentationTimes(timestamps)
-        encoder = self._encoder
-        with encoder.device_turn(times), encoder.device_stage("temporal", times), encoder.precision():
-            scores = self._temporal.score(torch.cat(embeddings))
+    def score(self, video: EpisodeVideo, model: str | None, times: StageTimes) -> pa.RecordBatch:
+        """Every picture's velocity and progress by the head `model` names, in display order. A
+        model it cannot score with is refused before the video is decoded."""
+        temporal = self._head(model)
+        with torch.inference_mode():
+            timestamps, embeddings = [], []
+            for batch_times, batch_embeddings in self._encoder.encode(video, times):
+                timestamps.extend(batch_times)
+                embeddings.append(batch_embeddings)
+            clock = PresentationTimes(timestamps)
+            encoder = self._encoder
+            with encoder.device_turn(times), encoder.device_stage("temporal", times), encoder.precision():
+                scores = temporal.score(torch.cat(embeddings))
         return scores.record_batch(clock.nanoseconds())
+
+    def _head(self, model: str | None) -> "TemporalModel":
+        """The released head, or a published one, loaded as the released head is."""
+        with self._loading:
+            if model not in self._heads:
+                tensors = self._published.tensors(model)
+                self._heads[model] = TemporalModel.from_tensors(tensors).to(self._device)
+            return self._heads[model]
 
 
 class PictureEncoder:
@@ -229,9 +248,15 @@ class TemporalModel(nn.Module):
 
     @classmethod
     def load(cls, checkpoint: Path) -> "TemporalModel":
-        tensors = torch.load(checkpoint, map_location="cpu", weights_only=True)["model"]
+        """The released head, from its PyTorch checkpoint."""
+        return cls.from_tensors(torch.load(checkpoint, map_location="cpu", weights_only=True)["model"])
+
+    @classmethod
+    def from_tensors(cls, tensors: dict[str, torch.Tensor]) -> "TemporalModel":
+        """A head from its tensors under upstream `TransformerAggregator` names, as the released head
+        and the published progress models hold them."""
         model = cls()
-        # The checkpoint also carries heads the released scorer never reads.
+        # Checkpoints also carry heads the scorer never reads.
         model.load_state_dict({name: tensors[name] for name in model.state_dict()})
         return model.eval()
 

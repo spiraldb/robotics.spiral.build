@@ -7,6 +7,8 @@ pub(crate) mod curated_views;
 pub(crate) mod curations;
 mod migrations;
 #[allow(unreachable_pub)]
+pub(crate) mod published_models;
+#[allow(unreachable_pub)]
 pub(crate) mod sessions;
 #[allow(unreachable_pub)]
 pub(crate) mod studio_settings;
@@ -177,12 +179,13 @@ impl StudioProject {
     /// Tables whose rows belong to one project, under its key in their
     /// `project` column. Published views are not among them: a project
     /// bundle carries none.
-    pub(crate) const RECORD_TABLES: [&str; 6] = [
+    pub(crate) const RECORD_TABLES: [&str; 7] = [
         "dataset_robots",
         "dataset_joint_roles",
         "dataset_check_reports",
         "curations",
         "training_runs",
+        "published_models",
         "studio_settings",
     ];
 

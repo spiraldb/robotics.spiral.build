@@ -1,4 +1,5 @@
-"""Modal deployment of the WARP-RM progress service on T4s, with the checkpoint baked into the image.
+"""Modal deployment of the WARP-RM progress service on T4s, with the released checkpoint baked into
+the image and the published progress models on a read-only mount of their Volume.
 
     modal deploy app.py
 """
@@ -10,6 +11,8 @@ from pathlib import Path
 import modal
 
 ARTIFACTS = Path("/artifacts")
+# Where the published progress models are mounted: see warp_progress/published.py.
+MODELS = Path("/models")
 # Modal streams each request body into its container, so a slow upload holds an input slot while
 # the GPU idles. At 0.2 MB/s per request (33 Mbit/s shared by 20), a T4 in fp16 is 32% busy with 4
 # requests, 61% with 8 and 84% with 12; 20 requests in flight then spread over about 3 containers.
@@ -35,11 +38,14 @@ image = (
     .run_function(download_artifacts, secrets=[modal.Secret.from_name("spiral-robotics-huggingface")])
 )
 app = modal.App("warp-progress", image=image)
+# The training app's control endpoint publishes progress models to it; this app only reads it.
+models = modal.Volume.from_name("spiral-robotics-models", create_if_missing=True)
 
 with image.imports():
     import torch
 
     from warp_progress.artifacts import Artifacts
+    from warp_progress.published import PublishedModels
     from warp_progress.service import ProgressService
     from warp_progress.warp import WarpModel
 
@@ -47,6 +53,7 @@ with image.imports():
 @app.cls(
     gpu="T4",
     secrets=[modal.Secret.from_name("spiral-robotics-auth")],
+    volumes={MODELS: models.with_mount_options(read_only=True)},
     scaledown_window=120,
     min_containers=0,
     timeout=TIMEOUT_S,
@@ -58,7 +65,8 @@ class WarpProgress:
     @modal.enter()
     def load(self) -> None:
         logging.basicConfig(level=logging.INFO)
-        self._model = WarpModel(Artifacts(ARTIFACTS), torch.device("cuda"))
+        published = PublishedModels(MODELS, models)
+        self._model = WarpModel(Artifacts(ARTIFACTS), published, torch.device("cuda"))
 
     @modal.asgi_app()
     def web(self):

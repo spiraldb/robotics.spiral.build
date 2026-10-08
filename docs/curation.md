@@ -35,7 +35,7 @@ many objects a picture holds, stays inside the cell. Timelines hold one
 | Node | Settings | Adds |
 | --- | --- | --- |
 | Track objects | Track [prompt] on [camera] at [rate] pictures a second (1 to 30, default 5) | One timeline: `List<{timestamp_ns, objects: List<{id, score, x, y, width, height}>}>`, by sampled picture, each object's box as fractions of the picture from its top left |
-| Score progress | none: the scorer is pinned | One timeline: `List<{timestamp_ns, progress_rate}>`; a frame the scorer had no support for has no rate |
+| Score progress | the model it scores with: the released head, or a published progress model by name ([Training](training.md#published-models)) | One timeline: `List<{timestamp_ns, progress_rate}>`; a frame the scorer had no support for has no rate |
 | Break down subtasks | camera, sample interval, instruction topic | `List<{description, start_ns, end_ns}>`, the subtasks of the whole episode |
 | Find similar subtasks | query | `List<{start_ns, end_ns, similarity}>`: every subtask of its Break down with how likely it is what the query names |
 | Group similar subtasks | categories | One column per category: `List<{start_ns, end_ns}>` of the subtasks it put there |
@@ -48,6 +48,17 @@ nearest Break down above them, which they need. A category column is named
 by its node and the category's stable id (`group_similar_subtasks_4_category_2`),
 never by its name, which is only its label: renaming a category leaves every
 Select reading it intact.
+
+Score progress scores with the model its bar names ("Score with"): the
+released head, or a progress model published from Training, listed by name
+and never by id. Its document keeps the published model's string
+(`spiral-robotics-models/<sha256>`) and the camera it was trained on, not the
+name, and the released head when it names none, so older documents decode
+unchanged. Each model and camera is its own stored column, so scores of two
+models never mix and a model's scores are reused wherever it is chosen again.
+A document naming a model this project has not published shows why and
+cannot run. The Modal scorer loads a published head from the models Volume
+the first time it is asked for it; publishing needs no redeploy.
 
 Column names are the compiler's, not found by inspecting types: each node's
 id names its columns (`track_objects-1` writes `track_objects_1`), and
@@ -155,7 +166,7 @@ without asking any model. Unpublishing drops only the view.
 
 | Node | Stored answer, per episode |
 | --- | --- |
-| Score progress | the Modal service's WARP scores of the top camera's packets: `{timestamp_ns, frame_index, velocity, support, …}` per frame, from the episode's first message |
+| Score progress | the Modal service's WARP scores, by the chosen model, of the camera that model was trained on (the released head's: the top camera): `{timestamp_ns, frame_index, velocity, support, …}` per frame, from the episode's first message |
 | Track objects | the Modal object tracking service's SAM 3.1 tracks at the node's rate: `{timestamp_ns, objects}` per sampled picture, from the episode's first message |
 | Break down | `spql.ai.breakdown_task` over the chosen camera's packet video, with the episode's first `/instruction` message as its `task` when the dataset records one: `{description, start_ns, end_ns}` on the video's timeline |
 | Find similar | `spql.ai.similarity(subtask, query)` of every subtask of the Break down above, one list aligned with its subtasks |
@@ -291,11 +302,12 @@ page. For each column in order it reads the episodes that reach the node,
 skips those the column holds, asks about the rest (a statement eight at a
 time; the progress service twenty across runs, its containers each taking in
 eight uploads while the GPU scores; the object tracking service eight, two
-H100 containers' worth; and retries 429s, 5xx, and timeouts with a pause),
+H100 containers' worth; and retries 408s, 429s, 5xx, and timeouts with a pause),
 and holds the answers in memory; then it ingests them into a staging table,
 adds the column the first time, merges it in by `episode_id`, and drops the
 staging table. A rejected video (422) is that episode's failed answer; a
-refused token, a service on another revision (409), or an error ends the run
+refused token, a service on another revision or a model it can't run (409),
+a model it doesn't know (404), or an error ends the run
 once what it answered is written. Once every column is filled it checks that
 each view's statement plans (`LIMIT 0`) and stores it in the Studio SQLite
 table `curated_views`, replacing the statement its name had, so a reader sees

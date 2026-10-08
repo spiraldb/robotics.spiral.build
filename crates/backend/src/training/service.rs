@@ -8,7 +8,9 @@ use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use spiral_robotics_common::training::{TrainingConfig, TrainingRunHistory, TrainingRunStatus};
+use spiral_robotics_common::training::{
+    ModelPublication, PublishedModel, TrainingConfig, TrainingRunHistory, TrainingRunStatus,
+};
 use spiral_robotics_storage::ProviderKeys;
 use url::Url;
 
@@ -18,6 +20,8 @@ const API_VERSION: u32 = 1;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 /// One stream's upload, which may be a few hundred megabytes.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Publishing reads, hashes and copies a checkpoint's weights on the Volume.
+const PUBLISH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ARROW_STREAM: &str = "application/vnd.apache.arrow.stream";
 
 /// The service the provider keys name.
@@ -202,6 +206,28 @@ impl TrainingService {
         Ok((part("config").await?, part("model").await?))
     }
 
+    /// Publish the checkpoint `request` names as a model the scorer reads
+    /// by the selector it answers; the same weights again answer the same
+    /// selector.
+    pub(super) async fn publish(
+        &self,
+        request: &ModelPublishRequest,
+    ) -> Result<PublishedWeights, String> {
+        let context = "Publishing the model";
+        let response = self
+            .authorized(self.client.post(self.url(&["v1", "models"])))
+            .json(request)
+            .timeout(PUBLISH_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| format!("{context}: {error}"))?;
+        Self::checked(response, context)
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("{context}: {error}"))
+    }
+
     /// The service's URL at `segments`, each one escaped.
     fn url(&self, segments: &[&str]) -> Url {
         let mut url = self.base.clone();
@@ -221,20 +247,21 @@ impl TrainingService {
         request: reqwest::RequestBuilder,
         context: &str,
     ) -> Result<T, String> {
-        self.send(request, context)
+        self.send(request.timeout(CONTROL_TIMEOUT), context)
             .await?
             .json()
             .await
             .map_err(|error| format!("{context}: {error}"))
     }
 
+    /// Send `request` with the timeout its caller set: a control call's, or
+    /// an upload's or a checkpoint read's much longer one.
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
         context: &str,
     ) -> Result<reqwest::Response, String> {
         let response = request
-            .timeout(CONTROL_TIMEOUT)
             .send()
             .await
             .map_err(|error| format!("{context}: {error}"))?;
@@ -485,6 +512,48 @@ impl SavedCheckpoint {
     }
 }
 
+/// `POST /v1/models`: which checkpoint to publish.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct ModelPublishRequest {
+    project: String,
+    run_id: String,
+    step: u64,
+}
+
+impl ModelPublishRequest {
+    pub(super) fn new(project: &str, run_id: &str, step: u64) -> Self {
+        Self {
+            project: project.to_owned(),
+            run_id: run_id.to_owned(),
+            step,
+        }
+    }
+}
+
+/// What the service published: the selector the scorer reads the weights by,
+/// and the checkpoint's manifest.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct PublishedWeights {
+    model: String,
+    manifest: ProgressManifest,
+}
+
+impl PublishedWeights {
+    /// The model `publication` names, as the service published it.
+    pub(super) fn named(self, publication: ModelPublication) -> PublishedModel {
+        PublishedModel::new(publication, self.model, self.manifest.camera)
+    }
+}
+
+/// A progress checkpoint's manifest. Studio reads the camera it was trained
+/// on; the rest belongs to the job and the scorer, kept as written.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+struct ProgressManifest {
+    camera: String,
+    #[serde(flatten)]
+    recipe: serde_json::Map<String, serde_json::Value>,
+}
+
 /// A run's status with the metrics and log tail its job keeps.
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct RunHistory {
@@ -544,6 +613,20 @@ mod tests {
             serde_json::to_value(history).unwrap()["metrics"][1]["event"],
             "validation"
         );
+        let request: ModelPublishRequest =
+            round_trips(include_str!("fixtures/model-publish-request.json"));
+        assert_eq!(
+            request,
+            ModelPublishRequest::new("fixture-project", "train-1791300000000-1", 3)
+        );
+        let published: PublishedWeights = round_trips(include_str!("fixtures/model-publish.json"));
+        let model = published.named(ModelPublication::new(
+            "train-1791300000000-1",
+            3,
+            "Bottle experts",
+        ));
+        assert!(model.model().starts_with("spiral-robotics-models/"));
+        assert_eq!(model.camera(), "/top-camera");
     }
 
     #[test]

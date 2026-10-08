@@ -1,5 +1,6 @@
 """Modal deployment of Spiral Robotics training: a CPU control endpoint in front of one GPU function
-per model family, ACT on an L4 and the progress model on an H100, sharing one Volume. See
+per model family, ACT on an L4 and the progress model on an H100, sharing one Volume. The control
+endpoint also publishes progress models to the Volume Score progress reads them from. See
 docs/training.md#the-modal-service.
 
     MODAL_IMAGE_BUILDER_VERSION=2025.06 uv run modal deploy app.py
@@ -11,10 +12,13 @@ from pathlib import Path
 import modal
 
 from spiral_training_runtime.control import GPU, PROGRESS_GPU, ControlService, RunControl
+from spiral_training_runtime.publish import MODELS_VOLUME, ModelPublisher
 from spiral_training_runtime.request import ModelKind
 from spiral_training_runtime.volume import TrainingVolume
 
 VOLUME_ROOT = Path("/training")
+# Where the control endpoint mounts the published progress models.
+MODELS_ROOT = Path("/models")
 # Where the progress image holds Score progress's DINOv3 backbone.
 ARTIFACTS = Path("/artifacts")
 # The longest a Modal function may run.
@@ -71,6 +75,8 @@ progress_image = (
 app = modal.App("spiral-robotics-training", image=image)
 volume = modal.Volume.from_name("spiral-robotics-training", create_if_missing=True)
 stop_flags = modal.Dict.from_name("spiral-robotics-training-stops", create_if_missing=True)
+# Score progress (the `warp-progress` app) mounts it read-only.
+models = modal.Volume.from_name(MODELS_VOLUME, create_if_missing=True)
 job_options = {
     "memory": 32 * 1024,
     "timeout": TIMEOUT_S,
@@ -130,11 +136,11 @@ class ModalCalls:
         modal.FunctionCall.from_id(call_id).cancel()
 
 
-# One container owns the control side of the Volume, so its reloads and commits never race
-# another control container's.
+# One container owns the control side of the Volume, and is the only writer of the models Volume,
+# so its reloads and commits never race another control container's.
 @app.function(
     secrets=[modal.Secret.from_name("spiral-robotics-auth")],
-    volumes={VOLUME_ROOT: volume},
+    volumes={VOLUME_ROOT: volume, MODELS_ROOT: models},
     max_containers=1,
 )
 @modal.concurrent(max_inputs=32)
@@ -142,4 +148,6 @@ class ModalCalls:
 def control():
     training_volume = TrainingVolume(VOLUME_ROOT, volume)
     runs = RunControl(training_volume, ModalCalls(), stop_flags)
-    return ControlService(training_volume, runs, os.environ["MODAL_SERVICE_TOKEN"]).app()
+    publisher = ModelPublisher(training_volume, MODELS_ROOT, models)
+    token = os.environ["MODAL_SERVICE_TOKEN"]
+    return ControlService(training_volume, runs, publisher, token).app()

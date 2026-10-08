@@ -1,6 +1,7 @@
 """A progress model run: its camera embedded as Score progress embeds it, WARP-RM's head trained by
-the sim recipe on CPU with windows drawn in worker processes, and its checkpoint scored by Score
-progress's own `TemporalModel`. A small stand-in takes the place of the gated DINOv3 ViT-B/16."""
+the sim recipe on CPU with windows drawn in worker processes, and its checkpoint published and
+scored by Score progress's own `TemporalModel`. A small stand-in takes the place of the gated
+DINOv3 ViT-B/16."""
 
 from __future__ import annotations
 
@@ -13,9 +14,10 @@ import numpy as np
 import pytest
 import torch
 from fastapi.testclient import TestClient
-from safetensors.torch import load as load_safetensors
 from video_service.episode import EpisodeVideo
 from video_service.timing import StageTimes
+from warp_progress.published import PublishedModels
+from warp_progress.testing import LocalModelsVolume
 from warp_progress.warp import PictureEncoder, TemporalModel, WindowPlan
 
 from spiral_training_runtime import progress
@@ -24,6 +26,7 @@ from spiral_training_runtime.progress import ProgressResources, ProgressTraining
 from spiral_training_runtime.progress_embeddings import CameraEmbeddings
 from spiral_training_runtime.progress_recipe import STANDARD_WINDOW_FRAMES, SimRecipe
 from spiral_training_runtime.progress_windows import ProgressWindows
+from spiral_training_runtime.publish import ModelPublisher
 from spiral_training_runtime.request import ProgressRunRequest, RunRequest
 from spiral_training_runtime.run import TrainingJob
 from spiral_training_runtime.testing import (
@@ -58,14 +61,15 @@ def progress_job(volume: TrainingVolume, backbone: Path) -> TrainingJob:
     return TrainingJob(volume, {}, ProgressTraining(request, volume, resources))
 
 
-def control_client(volume: TrainingVolume, calls: FakeCalls) -> TestClient:
-    return TestClient(ControlService(volume, RunControl(volume, calls, {}), TOKEN).app())
+def control_client(volume: TrainingVolume, calls: FakeCalls, models: Path) -> TestClient:
+    publisher = ModelPublisher(volume, models, LocalSync())
+    return TestClient(ControlService(volume, RunControl(volume, calls, {}), publisher, TOKEN).app())
 
 
-def post_and_train(volume: TrainingVolume, backbone: Path) -> TestClient:
+def post_and_train(volume: TrainingVolume, backbone: Path, models: Path) -> TestClient:
     """The progress fixture run posted to the control endpoint, then run by its job."""
     calls = FakeCalls()
-    client = control_client(volume, calls)
+    client = control_client(volume, calls, models)
     posted = client.post("/v1/runs", json=fixture(REQUEST), headers=AUTHORIZED)
     assert posted.status_code == 201, posted.text
     assert calls.kinds == ["progress"]
@@ -75,11 +79,17 @@ def post_and_train(volume: TrainingVolume, backbone: Path) -> TestClient:
 
 
 @pytest.fixture(scope="module")
-def trained(tmp_path_factory: pytest.TempPathFactory, backbone: Path) -> TestClient:
+def models(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Where the models Volume is mounted."""
+    return tmp_path_factory.mktemp("models")
+
+
+@pytest.fixture(scope="module")
+def trained(tmp_path_factory: pytest.TempPathFactory, backbone: Path, models: Path) -> TestClient:
     """The control endpoint over the progress fixture run, trained to its end."""
     volume = TrainingVolume(tmp_path_factory.mktemp("volume"), LocalSync())
     SyntheticProgressRun.from_fixture(volume).write()
-    return post_and_train(volume, backbone)
+    return post_and_train(volume, backbone, models)
 
 
 def test_a_progress_run_trains_reports_and_checkpoints(trained: TestClient) -> None:
@@ -140,16 +150,15 @@ def test_the_checkpoint_manifest_describes_how_its_inputs_were_made(trained: Tes
     }
 
 
-def test_score_progress_scores_frames_with_a_trained_checkpoint(
-    trained: TestClient, backbone: Path, tmp_path: Path
+def test_score_progress_scores_frames_with_a_published_checkpoint(
+    trained: TestClient, backbone: Path, models: Path
 ) -> None:
-    weights = trained.get(f"{RUN}/checkpoints/6/model", headers=AUTHORIZED)
-    assert weights.status_code == 200
-    tensors = load_safetensors(weights.content)
-    # The scorer reads a head from `torch.load(...)["model"]`.
-    head = tmp_path / "head.pt"
-    torch.save({"model": tensors}, head)
-    scorer = TemporalModel.load(head)
+    request = fixture("model-publish-request.json")
+    published = trained.post("/v1/models", json=request, headers=AUTHORIZED)
+    assert published.status_code == 201
+    # Score progress finds it under the name the endpoint answered, and accepts its manifest.
+    tensors = PublishedModels(models, LocalModelsVolume(models)).tensors(published.json()["model"])
+    scorer = TemporalModel.from_tensors(tensors)
     trainer = SimRecipe.model()
     trainer.load_state_dict(tensors)
     trainer.eval()
@@ -241,10 +250,12 @@ def test_worker_processes_draw_from_the_training_episode(
         assert all((rows == row).all(axis=1).any() for row in features)
 
 
-def test_a_progress_run_needs_30_hz_video(volume: TrainingVolume, backbone: Path) -> None:
+def test_a_progress_run_needs_30_hz_video(
+    volume: TrainingVolume, backbone: Path, models: Path
+) -> None:
     SyntheticProgressRun.from_fixture(volume, rate=15).write()
 
-    client = post_and_train(volume, backbone)
+    client = post_and_train(volume, backbone, models)
 
     status = client.get(RUN, headers=AUTHORIZED).json()
     assert status["phase"] == "failed"
@@ -255,7 +266,7 @@ def test_a_progress_run_needs_30_hz_video(volume: TrainingVolume, backbone: Path
 
 
 def test_a_retried_progress_job_resumes_its_model_and_schedule(
-    volume: TrainingVolume, backbone: Path, monkeypatch: pytest.MonkeyPatch
+    volume: TrainingVolume, backbone: Path, models: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     SyntheticProgressRun.from_fixture(volume).write()
     train_step = progress.ProgressSession.train_step
@@ -267,12 +278,12 @@ def test_a_retried_progress_job_resumes_its_model_and_schedule(
 
     monkeypatch.setattr(progress.ProgressSession, "train_step", preempted_at_step_five)
     with pytest.raises(Preempted):
-        post_and_train(volume, backbone)
+        post_and_train(volume, backbone, models)
     monkeypatch.setattr(progress.ProgressSession, "train_step", train_step)
 
     progress_job(volume, backbone).run()
 
-    history = control_client(volume, FakeCalls()).get(RUN, headers=AUTHORIZED).json()
+    history = control_client(volume, FakeCalls(), models).get(RUN, headers=AUTHORIZED).json()
     assert history["phase"] == "completed"
     assert [metric["step"] for metric in history["metrics"]] == [1, 2, 3, 4, 5, 6]
     assert "Resumed from checkpoint 3." in history["logs"]

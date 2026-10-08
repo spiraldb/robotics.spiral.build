@@ -43,6 +43,7 @@ def post_run(client, request: dict | None = None):
         ("post", f"{RUN}/stop"),
         ("delete", RUN),
         ("get", f"{RUN}/checkpoints/3/model"),
+        ("post", "/v1/models"),
     ],
 )
 @pytest.mark.parametrize("authorization", [None, "Bearer wrong", "secret"])

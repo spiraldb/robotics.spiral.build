@@ -3,7 +3,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from video_service.episode import RejectedVideo
-from video_service.service import ARROW_STREAM, EpisodeRequest, RetryLater, VideoContract, VideoService
+from video_service.service import (
+    ARROW_STREAM,
+    EpisodeRequest,
+    IncompatibleModel,
+    RetryLater,
+    UnknownModel,
+    VideoContract,
+    VideoService,
+)
 from video_service.testing import AUTHORIZED
 from video_service.timing import StageTimes
 
@@ -21,7 +29,7 @@ class Answers:
         self.metadata = []
 
     def __call__(self, episode: EpisodeRequest, times: StageTimes) -> pa.RecordBatch:
-        self.metadata.append(episode.metadata("prompt"))
+        self.metadata.append((episode.metadata("model"), episode.metadata("prompt")))
         if self._failure:
             raise self._failure
         with times.stage("decode"):
@@ -29,8 +37,8 @@ class Answers:
         return pa.record_batch([pa.array(times_ns, pa.uint64())], schema=SCHEMA)
 
 
-def client(answers: Answers) -> TestClient:
-    service = VideoService(VideoContract(MODEL, REVISION, "example 0.1.0 on CPU"), "secret")
+def client(answers: Answers, model: str | None = MODEL) -> TestClient:
+    service = VideoService(VideoContract(model, REVISION, "example 0.1.0 on CPU"), "secret")
     return TestClient(service.app("/answer", answers))
 
 
@@ -45,7 +53,7 @@ def test_answers_an_episode_with_its_stages_timed(episode):
     assert response.status_code == 200 and response.headers["content-type"] == ARROW_STREAM
     rows = pa.ipc.open_stream(response.content).read_all()
     assert rows["timestamp_ns"].to_pylist() == sorted(episode.times_ns)
-    assert answers.metadata == ["x"]
+    assert answers.metadata == [(MODEL, "x")]
     stages = [entry.split(";dur=")[0] for entry in response.headers["server-timing"].split(", ")]
     assert stages == ["request", "decode", "response"]
 
@@ -60,6 +68,16 @@ def test_rejects_a_missing_or_wrong_token(episode, authorization):
 def test_rejects_another_codec_framing_or_model(episode, change):
     response = client(Answers()).post("/answer", content=episode.request(CONTRACT | change), headers=AUTHORIZED)
     assert response.status_code == 422 and "unsupported" in response.json()["error"]
+
+
+def test_a_service_that_pins_no_model_reads_each_requests_own(episode):
+    answers = Answers()
+    service = client(answers, model=None)
+    assert service.get("/health").json()["model"] is None
+    for model in ("example/model@main", None):
+        response = service.post("/answer", content=episode.request(CONTRACT | {"model": model}), headers=AUTHORIZED)
+        assert response.status_code == 200
+    assert answers.metadata == [("example/model@main", None), (None, None)]
 
 
 @pytest.mark.parametrize("revision", [None, "example-0.0.1"])
@@ -81,8 +99,13 @@ def test_rejects_a_body_that_is_not_an_arrow_stream_or_out_of_decode_order(episo
 
 @pytest.mark.parametrize(
     ("failure", "status"),
-    [(RejectedVideo("too short"), 422), (RetryLater("CUDA out of memory"), 503)],
+    [
+        (RejectedVideo("too short"), 422),
+        (RetryLater("CUDA out of memory"), 503),
+        (UnknownModel("no such model"), 404),
+        (IncompatibleModel("made for another backbone"), 409),
+    ],
 )
-def test_reports_a_rejected_video_as_422_and_a_service_failure_as_503(episode, failure, status):
+def test_reports_each_failure_with_its_status(episode, failure, status):
     response = client(Answers(failure)).post("/answer", content=episode.request(CONTRACT), headers=AUTHORIZED)
     assert response.status_code == status and response.json() == {"error": str(failure)}

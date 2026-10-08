@@ -2,8 +2,10 @@ use super::*;
 use crate::curations::CurationPersistence;
 use crate::settings::StudioPreferencePersistence;
 use crate::studio::StudioStore;
-use crate::training::TrainingRunPersistence;
-use spiral_robotics_common::training::{TrainingConfig, TrainingInputSummary, TrainingRunIdentity};
+use crate::training::{PublishedModels, TrainingRunPersistence};
+use spiral_robotics_common::training::{
+    ModelPublication, PublishedModel, TrainingConfig, TrainingInputSummary, TrainingRunIdentity,
+};
 
 struct Fixture;
 impl Fixture {
@@ -68,6 +70,22 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         .insert(&run)
         .await
         .unwrap();
+    let model = PublishedModel::new(
+        ModelPublication::new("run", 3, "Bottle experts"),
+        "spiral-robotics-models/0f3c",
+        "/top-camera",
+    );
+    for (project, name) in [
+        (&source, "Bottle experts"),
+        (&other, "excluded-other-model-456789"),
+    ] {
+        let named = PublishedModel::new(
+            ModelPublication::new("run", 3, name),
+            model.model(),
+            model.camera(),
+        );
+        assert!(PublishedModels::new(project).insert(&named).await.unwrap());
+    }
     StudioPreferencePersistence::new(&source)
         .save(
             &crate::StoredStudioPreferences::default()
@@ -81,6 +99,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
     for excluded in [
         "excluded-refresh-token-456789",
         "excluded-other-curation-456789",
+        "excluded-other-model-456789",
     ] {
         assert!(
             !bytes
@@ -126,6 +145,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         TrainingRunPersistence::new(&target).load().await.unwrap(),
         [run]
     );
+    assert_eq!(PublishedModels::new(&target).list().await.unwrap(), [model]);
     assert_eq!(
         StudioPreferencePersistence::new(&target)
             .load()

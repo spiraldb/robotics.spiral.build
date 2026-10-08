@@ -12,11 +12,14 @@ use charming::element::{
 use charming::series::Line;
 use dioxus::prelude::*;
 use spiral_robotics_common::training::{
-    TrainingCheckpoint, TrainingMetricPoint, TrainingModel, TrainingRun, TrainingRunPhase,
+    PublishedModel, TrainingCheckpoint, TrainingMetricPoint, TrainingModel, TrainingRun,
+    TrainingRunPhase,
 };
 use spiral_robotics_ui::{Disclosure, Fact, FactLayout, FactList};
 
+use super::checkpoint_models::CheckpointModels;
 use super::observation::ImageSizePresentation;
+use super::state::TrainingController;
 use crate::components::charts::{CharmingChart, ChartColor, ChartPoints, MONO_FONT, StudioTooltip};
 use crate::format::{
     ByteCountPresentation, LongDurationPresentation, LossPresentation, MillisecondPresentation,
@@ -26,8 +29,12 @@ const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 
 #[component]
 pub(super) fn TrainingRunDetail(
+    controller: TrainingController,
     run: TrainingRun,
     checkpoints: Vec<TrainingCheckpoint>,
+    /// The progress models the project published, which a progress run's
+    /// checkpoints show they were published as.
+    published: Vec<PublishedModel>,
     details_loaded: bool,
 ) -> Element {
     if !details_loaded {
@@ -36,6 +43,7 @@ pub(super) fn TrainingRunDetail(
     let progress = run.progress_percent();
     let message = run.message().to_owned();
     let logs = run.logs().to_owned();
+    let progress_model = matches!(run.config().model(), TrainingModel::Progress(_));
     let message_class = if run.phase() == TrainingRunPhase::Failed {
         "training-run-message training-run-message-danger"
     } else {
@@ -66,7 +74,7 @@ pub(super) fn TrainingRunDetail(
                         h3 { "Loss" }
                     }
                     div { class: "training-subpanel-body",
-                        TrainingLearning { run: run.clone(), checkpoints }
+                        TrainingLearning { run: run.clone(), checkpoints: checkpoints.clone() }
                     }
                 }
                 section { class: "training-run-region training-run-data-region",
@@ -75,6 +83,16 @@ pub(super) fn TrainingRunDetail(
                     }
                     div { class: "training-subpanel-body",
                         TrainingInputs { run: run.clone() }
+                    }
+                    // A progress model is published from its checkpoints;
+                    // a policy's go to Rollout.
+                    if progress_model {
+                        header { class: "training-subpanel-heading training-checkpoints-heading",
+                            h3 { "Checkpoints" }
+                        }
+                        div { class: "training-subpanel-body",
+                            CheckpointModels { controller, checkpoints, published }
+                        }
                     }
                 }
                 section { class: "training-run-region training-run-throughput-region",

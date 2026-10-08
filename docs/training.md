@@ -54,6 +54,9 @@ Browser ── POST /api/training/runs ──▶ Studio backend ── 1. upload
    resumes from its last checkpoint.
 6. **Monitor.** The browser polls `/api/training/runs`; the backend answers
    from its records, its uploads, and Modal.
+7. **Publish** (progress runs). A progress run's detail lists its
+   checkpoints, latest first; naming one and pressing Publish makes it a
+   [published model](#published-models) that Score progress can score with.
 
 One run per project is active at a time.
 
@@ -185,6 +188,7 @@ All but `/v1/health` need `Authorization: Bearer <token>`. Errors answer
 | DELETE | `/v1/runs/{project}/{run_id}` | | 204; 409 while active |
 | GET | `/v1/runs/{project}/{run_id}/checkpoints/{step}/config` | | the checkpoint's `config.json` |
 | GET | `/v1/runs/{project}/{run_id}/checkpoints/{step}/model` | | the SafeTensors weights |
+| POST | `/v1/models` | `{project, run_id, step}` | `{model, manifest}`, 201 when first published, 200 when those weights already were; 404 for an unknown run or step, 409 for a checkpoint that is not a progress model |
 
 The run request, status, and history are fixed by the fixtures in
 [`crates/backend/src/training/fixtures`](../crates/backend/src/training/fixtures),
@@ -232,3 +236,33 @@ loads, as it loads the released head), and `config.json`, the manifest
 
 Stored runs from before the families were moved into this shape by the Studio
 migration `m20261008_000002_training_models`.
+
+## Published models
+
+A progress checkpoint becomes a model Score progress can score with when it is
+published under a name, such as "Bottle experts".
+
+- **Weights.** The control endpoint (`POST /v1/models`) copies the
+  checkpoint's `model.safetensors` and `config.json` into the Volume
+  `spiral-robotics-models`, at `models/<sha256>/`, keyed by the SHA-256 of the
+  weights. It copies into a `.partial` directory and renames it whole, so a
+  reader never sees half a model, and leaves a model already there as it is:
+  the same weights are one model, however often they are published. Only the
+  control endpoint writes this Volume, and deleting a training run leaves its
+  published models intact.
+- **Identity.** A published model is the string
+  `spiral-robotics-models/<sha256>`, the `model` Score progress's requests
+  carry and its stored answers' column is keyed by.
+- **Record.** Studio keeps each publication in the SQLite table
+  `published_models` (`project`, `name`, `model`, `camera`, `run_id`, `step`,
+  `created_ms`): names are unique in a project in any case, and the same
+  weights may be published under several names. Project bundles carry it.
+  `POST /api/training/models` (`{run_id, step, name}`) checks the run is a
+  progress run with that checkpoint, publishes, and records it;
+  `GET /api/progress-models` lists the project's models.
+- **Scoring.** `warp_progress` mounts the models Volume read-only. Asked for a
+  published model it does not hold, it reloads the Volume, checks the
+  manifest matches what it runs (backbone revision, window, strides, rate,
+  bins, ablation, crop, image size), and keeps the head in memory. An unknown
+  model answers 404 and an incompatible one 409, and either ends Studio's
+  fill without storing an answer.

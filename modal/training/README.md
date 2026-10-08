@@ -10,7 +10,9 @@ and the endpoints.
   `control` in front of one GPU function per family, `train` (ACT, L4) and
   `train_progress` (H100), sharing the Volume `spiral-robotics-training` and the
   stop-flag Dict `spiral-robotics-training-stops`. Each function builds its
-  family's job, in its family's image.
+  family's job, in its family's image. `control` also mounts
+  `spiral-robotics-models`, the Volume it publishes progress models to and
+  [`warp-progress`](../warp_progress/README.md) reads them from.
 - Two environments, as the families pin different PyTorch builds:
   `pyproject.toml` and `uv.lock` here are ACT's, the control endpoint's and the
   policy runtime's; [`../training_progress/`](../training_progress) is the progress job's, Score
@@ -22,6 +24,10 @@ and the endpoints.
     the fixtures in
     [`crates/backend/src/training/fixtures`](../crates/backend/src/training/fixtures).
   - `control.py`: the control endpoint Studio calls.
+  - `publish.py`: publishing a progress checkpoint (`POST /v1/models`): its
+    `model.safetensors` and `config.json` copied to
+    `spiral-robotics-models` at `models/<sha256>/`, the SHA-256 of the weights,
+    renamed into place whole, and left as is when already there.
   - `run.py`: a run's job: prepare, train, report, checkpoint, resume after a
     retry, for either family (`family.py` is what a family gives it).
     `stop.py`: how a stop reaches it. `device.py`: the device and what each
@@ -72,7 +78,7 @@ Studio's backend reads that URL as `TRAINING_SERVICE_URL` and the token as
 `MODAL_SERVICE_TOKEN`. The ACT and control image installs the locked
 dependencies from `uv.lock`, with CUDA PyTorch from the official CUDA 12.8
 index declared in `pyproject.toml`; the progress image installs
-`progress/uv.lock`. Its path dependencies, `warp-progress` and `video-service`,
+`../training_progress/uv.lock`. Its path dependencies, `warp-progress` and `video-service`,
 are skipped by `uv_sync` and their sources added by path, as the deploy runs in
 ACT's environment, where they are not installed.
 
@@ -83,7 +89,7 @@ uv sync --extra dev
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
-(cd progress && uv sync && uv run pytest)
+(cd ../training_progress && uv sync && uv run pytest)
 ```
 
 The tests run whole runs of both families on CPU, each in its own environment:

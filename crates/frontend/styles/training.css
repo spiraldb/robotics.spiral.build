@@ -418,6 +418,41 @@
     @apply col-span-2;
   }
 
+  /* A progress run's checkpoints under its inputs: hairline rows, the step
+     and loss at the left edge, the published name or Publish at the right. */
+  .training-checkpoints-heading {
+    @apply border-t;
+  }
+
+  .training-checkpoint-models {
+    @apply flex min-h-0 w-full flex-col overflow-y-auto bg-surface;
+  }
+
+  .training-checkpoint-model {
+    @apply flex min-h-9 items-center gap-2 border-b px-3 py-1;
+    border-color: var(--tone-line-soft);
+  }
+
+  .training-checkpoint-step {
+    @apply shrink-0 font-mono text-[11px] tabular-nums;
+  }
+
+  .training-checkpoint-loss {
+    @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .training-checkpoint-publish {
+    @apply ml-auto flex min-w-0 items-center gap-1.5;
+  }
+
+  .training-checkpoint-name {
+    @apply w-32 min-w-0;
+  }
+
+  .training-checkpoint-published {
+    @apply ml-auto truncate text-[11px] font-medium;
+  }
+
   .training-resource-grid {
     @apply grid min-h-0 flex-1 grid-cols-5;
   }

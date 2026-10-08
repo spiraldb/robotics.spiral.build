@@ -4,7 +4,8 @@ use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::transport::{CommandError, HttpRequest};
 use spiral_robotics_common::training::{
-    TrainingCheckpoint, TrainingConfig, TrainingRun, TrainingSnapshot,
+    ModelPublication, PublishedModel, TrainingCheckpoint, TrainingConfig, TrainingRun,
+    TrainingSnapshot,
 };
 use std::future::Future;
 
@@ -12,7 +13,7 @@ pub(crate) struct TrainingClient {
     project: ProjectClient,
 }
 impl TrainingClient {
-    pub(super) fn current() -> Self {
+    pub(crate) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
         }
@@ -27,6 +28,24 @@ impl TrainingClient {
         self.project
             .request(HttpRequest::new("GET", "/api/training/checkpoints"))
             .await
+    }
+
+    /// The progress models the project published, by name, which Score
+    /// progress scores with.
+    pub(crate) async fn published_models(&self) -> Result<Vec<PublishedModel>, CommandError> {
+        self.project
+            .request(HttpRequest::new("GET", "/api/progress-models"))
+            .await
+    }
+
+    pub(super) fn publish_model(
+        &self,
+        publication: ModelPublication,
+    ) -> impl Future<Output = Result<PublishedModel, CommandError>> + use<> {
+        self.project.mutate(
+            &[Training],
+            HttpRequest::new("POST", "/api/training/models").json(&publication),
+        )
     }
 
     pub(super) async fn run(&self, id: &str) -> Result<TrainingRun, CommandError> {

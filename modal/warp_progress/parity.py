@@ -19,9 +19,12 @@ import pyarrow as pa
 import torch
 from adbc_driver_manager import dbapi
 from fastapi.testclient import TestClient
+from video_service.service import ARROW_STREAM
 
 from warp_progress.artifacts import SELECTOR, Artifacts
-from warp_progress.service import ARROW_STREAM, REVISION, ProgressService
+from warp_progress.published import PublishedModels
+from warp_progress.service import REVISION, ProgressService
+from warp_progress.testing import LocalModelsVolume
 from warp_progress.warp import WarpModel
 
 DATASET = "dataset_warp_sim_bottles_sample"
@@ -34,6 +37,8 @@ EPISODES = [
     "01a0b63c-856c-778e-9702-d903a0159504",
 ]
 ARTIFACTS = Path.home() / ".cache/warp-progress/artifacts"
+# Parity scores with the released head alone, so no model is ever looked up here.
+MODELS = Path.home() / ".cache/warp-progress/models"
 STUDIO = Path.home() / "coding/spiral-robotics"
 # Studio's packet shape (crates/common/src/datasets/camera_video.rs) for the episode bound to $1.
 PACKETS = f"""packets AS (SELECT r.id, r.value.data AS payload,
@@ -117,7 +122,8 @@ def main():
     parser.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     arguments = parser.parse_args()
     started = time.perf_counter()
-    model = WarpModel(Artifacts(ARTIFACTS), torch.device(arguments.device))
+    published = PublishedModels(MODELS, LocalModelsVolume(MODELS))
+    model = WarpModel(Artifacts(ARTIFACTS), published, torch.device(arguments.device))
     print(f"loaded on {arguments.device} in {time.perf_counter() - started:.1f} s")
     client = TestClient(ProgressService(model, "parity").app())
     project = SpiralProject()

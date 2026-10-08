@@ -1,5 +1,5 @@
 """The control endpoint Studio calls: it takes stream uploads, starts, reports, stops, and deletes
-runs, and serves their checkpoints. See docs/training.md#endpoints.
+runs, serves their checkpoints, and publishes progress models. See docs/training.md#endpoints.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
 from .errors import RuntimeRequestError
+from .publish import ModelPublisher, ModelPublishRequest
 from .report import RunHistory, RunStatus
 from .request import (
     NAME_PATTERN,
@@ -202,9 +203,12 @@ class StreamKeys(WireModel):
 class ControlService:
     """The HTTP contract: a bearer token on everything but health, and `{"error": …}` answers."""
 
-    def __init__(self, volume: TrainingVolume, runs: RunControl, token: str) -> None:
+    def __init__(
+        self, volume: TrainingVolume, runs: RunControl, publisher: ModelPublisher, token: str
+    ) -> None:
         self._volume = volume
         self._runs = runs
+        self._publisher = publisher
         self._authorization = f"Bearer {token}".encode()
 
     def app(self) -> FastAPI:
@@ -274,6 +278,11 @@ class ControlService:
             if copy is None:
                 raise RuntimeRequestError(f"run {run_id} has no checkpoint {step}", 404)
             return FileResponse(copy, media_type=media_type, background=BackgroundTask(copy.unlink))
+
+        @routes.post("/v1/models")
+        def publish_model(body: ModelPublishRequest) -> JSONResponse:
+            published, created = self._publisher.publish(body)
+            return JSONResponse(published.model_dump(), status_code=201 if created else 200)
 
         return routes
 

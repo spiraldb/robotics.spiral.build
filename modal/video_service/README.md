@@ -9,8 +9,11 @@ and [`object-tracking`](../object_tracking/README.md).
   `payload` binary, `decode_index` int64 and `pts_ns` int64, with schema metadata `codec=h264`,
   `framing=annex_b`, the service's `model`, and `implementation`, the revision the request was built
   for. Any revision but the service's gets a 409, so Studio never stores answers from another one; a
-  video the service cannot answer for gets a 422, and a `RetryLater` failure a 503. The answer is one
-  Arrow record batch, with the request's stages in a `Server-Timing` header and the same line logged.
+  video the service cannot answer for gets a 422, and a `RetryLater` failure a 503. A service pinned
+  to one model refuses any other with a 422; one that reads with several pins none and reads each
+  request's `model` itself, answering `UnknownModel` with a 404 and `IncompatibleModel` (one it holds
+  but cannot run) with a 409. The answer is one Arrow record batch, with the request's stages in a
+  `Server-Timing` header and the same line logged.
 - `video_service/episode.py`: `EpisodeVideo` decodes the packets with PyAV into display order, each
   picture carrying its packet's time, and refuses a stream that decodes to fewer pictures than it codes.
 - `video_service/timing.py`: the per-stage timer behind `Server-Timing`.

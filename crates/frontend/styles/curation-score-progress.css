@@ -8,4 +8,14 @@
     @apply flex h-full min-h-0 min-w-0 flex-col;
     background: var(--tone-surface);
   }
+
+  /* "Score with [Bottle experts]": the model the node scores with, read as
+     a phrase, as Track objects' settings are. */
+  .curation-score-progress-settings {
+    @apply flex min-w-0 flex-1 items-center gap-2;
+  }
+
+  .curation-score-progress-label {
+    @apply shrink-0 text-xs text-ink-soft;
+  }
 }

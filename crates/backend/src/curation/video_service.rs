@@ -10,7 +10,8 @@
 //! arguments (the checkpoint, the service revision, …) in its schema
 //! metadata. It answers an Arrow IPC stream of the rows its contract types.
 //! A video it rejects (422) is that episode's failed answer; a service on
-//! another revision (409) or a refused token (401) ends the run; anything
+//! another revision or a model it can't run (409), a model it doesn't know
+//! (404), or a refused token (401) ends the run; anything
 //! that may pass (408, 429, 5xx, a timeout, no connection) is tried again
 //! after a pause: Modal answers 408 when it drops an upload part way.
 use arrow_array::{Array, ArrayRef, RecordBatch, StructArray};
@@ -224,7 +225,7 @@ impl VideoService {
                 }
                 StatusCode::CONFLICT => {
                     return Err(format!(
-                        "The Modal service runs another revision than this Studio stores: {}",
+                        "The Modal service can't answer with this model or revision: {}",
                         Self::rejection(&bytes)
                     ));
                 }

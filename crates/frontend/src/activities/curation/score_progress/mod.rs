@@ -1,16 +1,19 @@
-//! Score progress: score every episode that reaches the node with the pinned
-//! progress model on the Modal service, and add each episode's timeline of
-//! progress rates to the table.
+//! Score progress: score every episode that reaches the node with a progress
+//! model on the Modal service — the released one, or one the project
+//! published from Training — and add each episode's timeline of progress
+//! rates to the table.
 //!
 //! Each scored frame holds the progress rate it made until the next one. The
 //! node keeps nothing by itself: a Select below it keeps the stretches
 //! progressing fast enough. Its workspace lists the episodes it scored, each
-//! drawn with `MomentEvidence`. The scores are stored once scored, and what
-//! the node reads is its own entries of each episode, held for the session.
+//! drawn with `MomentEvidence`. The scores are stored once scored, under the
+//! model that scored them, and what the node reads is its own entries of each
+//! episode, held for the session.
 mod scoring;
 
 pub(super) use scoring::ProgressScorer;
 
+use super::document::{CurationNode, CurationNodeKind, ProgressScoring, PublishedProgressModel};
 use super::measure_run::{
     MeasureInput, MeasureRun, MeasureRunActions, MeasureRunStart, MeasureVerb, MeasuredEpisode,
     MeasuredEpisodes,
@@ -29,31 +32,77 @@ use crate::components::timeline::{
     NumericReading, NumericTrack, TimelineInterval, TimelineSample, TimelineTrack,
 };
 use dioxus::prelude::*;
-use spiral_robotics_ui::{EmptyState, Notice, NoticeTone};
+use spiral_robotics_common::training::PublishedModel;
+use spiral_robotics_ui::{EmptyState, Notice, NoticeTone, Select};
 
-/// The workspace shown for a selected Score progress node: the run on the
-/// node's bar, and the episodes it scored beside the one opened.
+/// One Score progress node of the open curation.
+#[derive(Clone, PartialEq)]
+struct ScoredNode {
+    id: String,
+    controller: CurationController,
+}
+
+impl ScoredNode {
+    /// The node's configuration, or nothing when the selected node does not
+    /// score progress after all.
+    fn settings(&self) -> Option<ProgressScoring> {
+        self.controller.with_payload(|payload| {
+            match payload.node(&self.id).map(CurationNode::kind) {
+                Some(CurationNodeKind::ScoreProgress(scoring)) => Some(scoring.clone()),
+                _ => None,
+            }
+        })
+    }
+    /// Score with `published`, or with the released model.
+    fn score_with(&self, published: Option<PublishedProgressModel>) {
+        let id = self.id.clone();
+        let _ = self.controller.edit(|payload| {
+            match payload.node_mut(&id).map(CurationNode::kind_mut) {
+                Some(CurationNodeKind::ScoreProgress(scoring)) => {
+                    scoring.set_published(published);
+                    Ok(())
+                }
+                _ => Err("That node does not score progress.".to_owned()),
+            }
+        });
+    }
+}
+
+/// The workspace shown for a selected Score progress node: the model it
+/// scores with and the run on the node's bar, and the episodes it scored
+/// beside the one opened.
 #[component]
 pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> Element {
+    let scored = ScoredNode {
+        id: node.clone(),
+        controller,
+    };
     let run = MeasureRun::use_run(controller, &node, MeasureVerb::Score);
     let input = MeasureInput::of(controller, &node);
-    // The scorer reads the camera it was trained on, which only some datasets
-    // record; elsewhere the node says so rather than failing per episode.
-    let camera = ProgressScorer::WarpSimBottles.camera();
-    let thumbnails = Thumbnails::use_camera(controller, Some(camera));
+    let settings = scored.settings();
+    let scorer = settings
+        .as_ref()
+        .map_or(ProgressScorer::Released, ProgressScorer::from);
+    // The scorer reads the camera its model was trained on, which only some
+    // datasets record; elsewhere the node says so rather than failing per
+    // episode.
+    let camera = scorer.camera().to_owned();
+    let thumbnails = Thumbnails::use_camera(controller, Some(&camera));
     let unsupported = StreamCatalog::use_camera_topics(
         input
             .as_ref()
             .and_then(|input| input.episodes().first())
             .map(Episode::selection),
     )
-    .filter(|cameras| !cameras.iter().any(|topic| topic == camera))
+    .filter(|cameras| !cameras.contains(&camera))
     .map(|_| format!("Progress is scored from {camera}, which this dataset does not record"));
+    let models = controller.progress_models();
+    let available = scorer.availability(models.as_ref());
     let uncompiled = controller
         .with_payload(|payload| PreviewPlan::check(payload, &node))
         .err()
         .map(|error| error.message().to_owned());
-    let Some(input) = input else {
+    let (Some(input), Some(_)) = (input, settings) else {
         return rsx! {
             section { class: "curation-score-progress-workspace",
                 match controller.sample_error() {
@@ -65,7 +114,7 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
             }
         };
     };
-    let blocked = unsupported.is_some() || uncompiled.is_some();
+    let blocked = unsupported.is_some() || uncompiled.is_some() || available.is_err();
     // Nothing scored yet: the workspace says what scoring is for, beside the
     // run that starts it, rather than an empty index.
     let unmeasured = input.preview().is_unmeasured();
@@ -80,11 +129,12 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
             Some(MeasuredEpisode::new(episode.clone(), mean))
         })
         .collect::<Vec<_>>();
-    let scored = node.clone();
+    let listed = models.and_then(Result::ok);
     rsx! {
         section { class: "curation-score-progress-workspace", "aria-label": "Score progress",
             NodeBar {
-                note: NodeNotes::join([unsupported, uncompiled, run.problem(), input.failures()]),
+                lead: rsx! { ScoringSettings { scored, scorer, models: listed } },
+                note: NodeNotes::join([unsupported, uncompiled, available.err().flatten(), run.problem(), input.failures()]),
                 reach: NodeReach::of(controller, &node).map(|reach| (controller, reach)),
                 actions: rsx! { MeasureRunActions { run: run.clone(), input: input.clone(), blocked } },
             }
@@ -99,9 +149,59 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
                     meaning: "Mean progress rate; 1× is the expert rate",
                     thumbnails,
                     render: move |(episode, play): (Episode, Option<PlayRequest>)| {
-                        let timeline = controller.timeline(&scored, episode.id()).unwrap_or_default();
+                        let timeline = controller.timeline(&node, episode.id()).unwrap_or_default();
                         rsx! { MomentEvidence { episode, timeline, facts: Vec::new(), cutoff: None, play } }
                     },
+                }
+            }
+        }
+    }
+}
+
+/// "Score with [model]": the released model, or one the project published,
+/// each by its name. `models` is `None` until they are read, or when they
+/// cannot be.
+#[component]
+fn ScoringSettings(
+    scored: ScoredNode,
+    scorer: ProgressScorer,
+    models: Option<Vec<PublishedModel>>,
+) -> Element {
+    const RELEASED: &str = "released";
+    const UNLISTED: &str = "unlisted";
+    let listed = models.clone().unwrap_or_default();
+    let chosen = match scorer {
+        ProgressScorer::Released => RELEASED.to_owned(),
+        ProgressScorer::Published(_) => scorer
+            .listed_in(&listed)
+            .map_or_else(|| UNLISTED.to_owned(), |place| place.to_string()),
+    };
+    let choices = listed.clone();
+    rsx! {
+        div { class: "curation-score-progress-settings",
+            label { class: "curation-score-progress-label", r#for: "curation-score-progress-model", "Score with" }
+            Select {
+                id: "curation-score-progress-model",
+                value: chosen.clone(),
+                disabled: models.is_none(),
+                "aria-label": "Progress model",
+                onchange: move |value: String| {
+                    let published = value
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|place| choices.get(place))
+                        .map(PublishedProgressModel::from);
+                    scored.score_with(published);
+                },
+                option { value: RELEASED, selected: chosen == RELEASED, "Released model" }
+                for (place, model) in listed.iter().enumerate() {
+                    option { key: "{place}", value: "{place}", selected: chosen == place.to_string(),
+                        "{model.name()}" }
+                }
+                if chosen == UNLISTED {
+                    option { value: UNLISTED, disabled: true, selected: true,
+                        if models.is_some() { "Not published" } else { "Published model" }
+                    }
                 }
             }
         }

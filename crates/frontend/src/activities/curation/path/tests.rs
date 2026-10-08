@@ -261,7 +261,7 @@ fn a_progress_rate_narrows_kept_to_the_stretches_progressing_fast_enough() {
     assert_eq!(
         fills[0].source(),
         &AnswerSource::ProgressService {
-            camera: ProgressScorer::WarpSimBottles.camera().to_owned(),
+            camera: ProgressScorer::Released.camera().to_owned(),
             model: "uynitsuj/warp-rm-sim-bottles-sss15@6417be056ed0bc2b2549f7f414fed76d4ca8501f"
                 .to_owned(),
             revision: "warp-progress-0.2.0-fp16".to_owned(),

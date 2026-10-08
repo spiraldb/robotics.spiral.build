@@ -23,6 +23,9 @@ export function installCurationFetch() {
         const path = new URL(request.url).pathname;
         const body = request.method === 'GET' ? null : await request.clone().json();
         requests.push({path, method: request.method, body});
+        if (path === '/api/progress-models') {
+            return Response.json([]);
+        }
         if (path === '/api/curations') {
             return Response.json([{id:'curation-1', name:'Cloth folding curation'}]);
         }
@@ -108,8 +111,10 @@ async fn the_canvas_opens_the_latest_curation_and_grows_the_graph_from_a_nodes_m
     dom.in_scope(ScopeId::ROOT, || controller.open_latest());
     harness.settle(&mut dom).await;
 
-    // The list, then the most recently saved curation on it.
+    // The published progress models, read once as Curation mounts; then the
+    // list, and the most recently saved curation on it.
     let opened = [
+        "/api/progress-models".to_owned(),
         "/api/curations".to_owned(),
         "/api/curations/curation-1".to_owned(),
     ];
