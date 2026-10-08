@@ -9,7 +9,9 @@ checkpoint: `uynitsuj/warp-rm-sim-bottles-sss15@6417be05…` over DINOv3 ViT-B/1
   them (swscale at the decoded size with `FAST_BILINEAR`), the squash resize (integer maths on the model's device), the backbone (transformers' `DINOv3ViTModel`), the temporal
   head, the window plan and the dense scores. On CUDA both models run under fp16 autocast, about 3x
   faster on a T4; velocity moves by at most about 0.02 against fp32. On MPS and CPU they stay in fp32,
-  the closest match to the Rust.
+  the closest match to the Rust. `PictureEncoder`, the pictures through the backbone, is also what the
+  [training job](../training/README.md) embeds a progress model's pictures with, so it trains on them
+  exactly as they are scored; it takes this package as a path dependency.
 - `warp_progress/service.py`: `POST /score_progress` on the [shared video service
   contract](../video_service/README.md), revision `warp-progress-0.2.0-fp16`. Its stages are
   `request`, `decode`, `copy`, `queue`, `squash`, `backbone`, `temporal` and `response`.

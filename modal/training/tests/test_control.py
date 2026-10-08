@@ -6,10 +6,17 @@ import json
 
 import numpy as np
 import pytest
-from conftest import AUTHORIZED, SyntheticRun, arrow_stream, fixture, value_table
 
 from spiral_training_runtime.report import RunStatus
 from spiral_training_runtime.request import RunKey
+from spiral_training_runtime.testing import (
+    AUTHORIZED,
+    SyntheticProgressRun,
+    SyntheticRun,
+    arrow_stream,
+    fixture,
+    value_table,
+)
 
 KEY = "ab" * 32
 RUN = "/v1/runs/fixture-project/train-1791300000000-0"
@@ -89,6 +96,7 @@ def test_posting_a_run_spawns_its_job_once(client, calls, uploaded) -> None:
     assert created.status_code == 201
     assert created.json() == RunStatus.starting(RUN_KEY.run_id).model_dump()
     assert json.loads(calls.spawned[0]) == fixture("run-request.json")
+    assert calls.kinds == ["act"]
 
     again = post_run(client)
     assert again.status_code == 200
@@ -100,6 +108,16 @@ def test_posting_a_run_spawns_its_job_once(client, calls, uploaded) -> None:
     conflict = post_run(client, different)
     assert conflict.status_code == 409
     assert "different request" in conflict.json()["error"]
+
+
+def test_a_progress_run_spawns_on_the_progress_function(client, calls, volume) -> None:
+    SyntheticProgressRun.from_fixture(volume).write()
+
+    created = post_run(client, fixture("progress-run-request.json"))
+
+    assert created.status_code == 201
+    assert calls.kinds == ["progress"]
+    assert json.loads(calls.spawned[0]) == fixture("progress-run-request.json")
 
 
 def test_runs_list_only_the_runs_the_service_holds(client, uploaded) -> None:
@@ -178,5 +196,16 @@ def test_a_malformed_run_request_answers_why(client, calls) -> None:
     response = post_run(client, request)
 
     assert response.status_code == 422
-    assert response.json() == {"error": "joints: Field required"}
+    assert response.json() == {"error": "act.joints: Field required"}
+    assert calls.spawned == []
+
+
+def test_a_run_request_of_no_known_family_answers_why(client, calls) -> None:
+    request = fixture("run-request.json")
+    request["config"]["model"]["kind"] = "diffusion"
+
+    response = post_run(client, request)
+
+    assert response.status_code == 422
+    assert response.json() == {"error": "config.model.kind must be act or progress"}
     assert calls.spawned == []

@@ -1,20 +1,23 @@
 //! What a run trains on, resolved when it starts: the intervals its view
 //! keeps — each episode row's `kept` ranges, unnested — and, for every
-//! episode, the streams that hold them — each camera's packets and each
-//! joint stream's values — named by what is read.
+//! episode, the streams that hold them, named by what is read: each camera's
+//! packets the model reads and, for a policy, each joint stream's values.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use spiral_robotics_common::datasets::{
-    CameraVideo, DatasetJointRoles, DatasetSelection, EpisodeId, EpisodeSelection, NamedValues,
-    RecordedValues, ValueColumns,
+    CameraVideo, DatasetInspection, DatasetJointRoles, DatasetSelection, EpisodeId,
+    EpisodeSelection, NamedValues, RecordedValues, ValueColumns,
 };
 use spiral_robotics_common::sql::SqlLiteral;
-use spiral_robotics_common::training::{TrainingConfig, TrainingInputSummary};
+use spiral_robotics_common::training::{TrainingConfig, TrainingInputSummary, TrainingModel};
 use spiral_robotics_storage::{KeptInterval, StorageManager};
 
-use super::service::{EpisodeStreamKeys, EpisodeStreams, JointNames, RunData, StreamKey};
+use super::service::{
+    ActRunData, ActStreams, EpisodeStreams, JointNames, ProgressRunData, ProgressStreams, RunData,
+    StreamKey,
+};
 use crate::OperationError;
 
 /// What one run trains on.
@@ -26,8 +29,8 @@ pub(super) struct TrainingInput {
 
 impl TrainingInput {
     /// What `config` trains on now: its view's intervals, read from the
-    /// dataset version its dataset resolves to, with the joints its roles
-    /// name.
+    /// dataset version its dataset resolves to, with the cameras its model
+    /// reads and, for a policy, the joints its roles name.
     pub(super) async fn resolve(
         storage: &StorageManager,
         config: &TrainingConfig,
@@ -58,28 +61,9 @@ impl TrainingInput {
             .inspect_dataset(source.dataset().clone())
             .await
             .map_err(OperationError::External)?;
-        let roles = storage
-            .dataset_joint_roles(source.dataset().clone())
-            .await
-            .map_err(OperationError::External)?
-            .ok_or_else(|| {
-                OperationError::invalid_input(
-                    "This dataset's joint roles are not resolved yet; open it in Data first.",
-                )
-            })?;
-        let dataset = DatasetVersion {
-            selection: source.dataset().clone(),
-            identity: (
-                inspection.dataset().resource_id().to_owned(),
-                inspection.dataset().version_id().to_owned(),
-            ),
-        };
-        let reads = StreamReads::new(
-            &dataset.selection.sql_name(),
-            config.observation().cameras(),
-            &roles,
-        )
-        .map_err(OperationError::InvalidInput)?;
+        let dataset = DatasetVersion::of(source.dataset(), &inspection);
+        dataset.records_cameras(&inspection, config.model().cameras())?;
+        let reads = StreamReads::of(storage, config, &dataset.selection.sql_name()).await?;
         Ok(Self {
             dataset,
             reads,
@@ -96,45 +80,48 @@ impl TrainingInput {
             .flat_map(|episode| &episode.intervals)
             .map(|[start, end]| end - start)
             .sum();
-        TrainingInputSummary::new(
+        let summary = TrainingInputSummary::new(
             self.episodes.len(),
             intervals.sum(),
             nanoseconds as f64 / 1e9,
-        )
-        .with_joints(
-            self.reads.joints.state().to_vec(),
-            self.reads.joints.action().to_vec(),
-        )
+        );
+        match &self.reads {
+            StreamReads::Act(reads) => summary.with_joints(
+                reads.joints.state().to_vec(),
+                reads.joints.action().to_vec(),
+            ),
+            StreamReads::Progress(_) => summary,
+        }
     }
 
     /// The run's data as the training service reads it.
     pub(super) fn run_data(&self) -> RunData {
-        let episodes = self
-            .episodes
-            .iter()
-            .map(|episode| {
-                let keys = |reads: &[StreamRead]| {
-                    reads
-                        .iter()
-                        .map(|read| read.key(&self.dataset, &episode.id))
-                        .collect()
-                };
-                EpisodeStreams::new(
-                    episode.id.as_str().to_owned(),
-                    episode.intervals.clone(),
-                    EpisodeStreamKeys::new(
-                        keys(&self.reads.cameras),
-                        keys(&self.reads.state),
-                        keys(&self.reads.action),
-                    ),
-                )
-            })
-            .collect();
-        RunData::new(
-            self.dataset.selection.display_name(),
-            self.reads.joints.clone(),
-            episodes,
-        )
+        let key = |read: &StreamRead, episode: &KeptEpisode| read.key(&self.dataset, &episode.id);
+        let keys = |reads: &[StreamRead], episode: &KeptEpisode| {
+            reads.iter().map(|read| key(read, episode)).collect()
+        };
+        match &self.reads {
+            StreamReads::Act(reads) => RunData::Act(ActRunData::new(
+                self.dataset.selection.display_name(),
+                reads.joints.clone(),
+                self.episodes
+                    .iter()
+                    .map(|episode| {
+                        episode.streams(ActStreams::new(
+                            keys(&reads.cameras, episode),
+                            keys(&reads.state, episode),
+                            keys(&reads.action, episode),
+                        ))
+                    })
+                    .collect(),
+            )),
+            StreamReads::Progress(camera) => RunData::Progress(ProgressRunData::new(
+                self.episodes
+                    .iter()
+                    .map(|episode| episode.streams(ProgressStreams::new(key(camera, episode))))
+                    .collect(),
+            )),
+        }
     }
 
     /// Every stream the run reads, once each.
@@ -164,6 +151,41 @@ struct DatasetVersion {
     identity: (String, String),
 }
 
+impl DatasetVersion {
+    /// The version of `selection` that `inspection` read.
+    fn of(selection: &DatasetSelection, inspection: &DatasetInspection) -> Self {
+        Self {
+            selection: selection.clone(),
+            identity: (
+                inspection.dataset().resource_id().to_owned(),
+                inspection.dataset().version_id().to_owned(),
+            ),
+        }
+    }
+
+    /// Whether the dataset `inspection` read records every one of
+    /// `cameras` as video.
+    fn records_cameras(
+        &self,
+        inspection: &DatasetInspection,
+        cameras: &[String],
+    ) -> Result<(), OperationError> {
+        let missing = cameras.iter().find(|camera| {
+            !inspection
+                .topics()
+                .iter()
+                .any(|topic| topic.is_video() && topic.name() == camera.as_str())
+        });
+        match missing {
+            Some(camera) => Err(OperationError::invalid_input(format!(
+                "{} records no camera {camera}.",
+                self.selection.display_name()
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
 /// One episode and the intervals its view keeps, as `[start_ns, end_ns]`.
 struct KeptEpisode {
     id: EpisodeId,
@@ -188,27 +210,80 @@ impl KeptEpisode {
         }
         episodes
     }
+
+    /// This episode's intervals with `streams`, as the service reads them.
+    fn streams<S>(&self, streams: S) -> EpisodeStreams<S> {
+        EpisodeStreams::new(self.id.as_str().to_owned(), self.intervals.clone(), streams)
+    }
 }
 
-/// The statements reading one episode's streams, `$1` its id, and what each
-/// state and action value is.
-struct StreamReads {
+/// The statements reading one episode's streams, `$1` its id, in the shape
+/// the run's model family reads them.
+enum StreamReads {
+    Act(ActReads),
+    /// A progress model's one camera.
+    Progress(StreamRead),
+}
+
+impl StreamReads {
+    /// The reads `config`'s model makes of dataset `dataset`, a policy's
+    /// with the joints the dataset's roles name.
+    async fn of(
+        storage: &StorageManager,
+        config: &TrainingConfig,
+        dataset: &str,
+    ) -> Result<Self, OperationError> {
+        match config.model() {
+            TrainingModel::Act(act) => {
+                let roles = storage
+                    .dataset_joint_roles(config.source().dataset().clone())
+                    .await
+                    .map_err(OperationError::External)?
+                    .ok_or_else(|| {
+                        OperationError::invalid_input(
+                            "This dataset's joint roles are not resolved yet; open it in Data first.",
+                        )
+                    })?;
+                ActReads::new(dataset, act.observation().cameras(), &roles)
+                    .map(Self::Act)
+                    .map_err(OperationError::InvalidInput)
+            }
+            TrainingModel::Progress(progress) => Ok(Self::Progress(StreamRead::camera(
+                dataset,
+                progress.camera(),
+            ))),
+        }
+    }
+
+    fn all(&self) -> Vec<&StreamRead> {
+        match self {
+            Self::Act(reads) => reads
+                .cameras
+                .iter()
+                .chain(&reads.state)
+                .chain(&reads.action)
+                .collect(),
+            Self::Progress(camera) => vec![camera],
+        }
+    }
+}
+
+/// An ACT policy's reads: each camera's, each state and action value
+/// stream's, and what each state and action value is.
+struct ActReads {
     cameras: Vec<StreamRead>,
     state: Vec<StreamRead>,
     action: Vec<StreamRead>,
     joints: JointNames,
 }
 
-impl StreamReads {
+impl ActReads {
     /// The reads of `cameras`, and of the values a policy trained on
     /// `roles` reads and commands, in dataset `dataset`.
     fn new(dataset: &str, cameras: &[String], roles: &DatasetJointRoles) -> Result<Self, String> {
         let cameras = cameras
             .iter()
-            .map(|camera| StreamRead {
-                statement: CameraVideo::new(dataset, camera).recorded_packets(),
-                shape: StreamShape::Camera,
-            })
+            .map(|camera| StreamRead::camera(dataset, camera))
             .collect();
         let joints = roles.policy_joints()?;
         let reads = |values: &[NamedValues<'_>]| {
@@ -224,10 +299,6 @@ impl StreamReads {
             joints: JointNames::new(joints.state_names(), joints.action_names()),
         })
     }
-
-    fn all(&self) -> impl Iterator<Item = &StreamRead> {
-        self.cameras.iter().chain(&self.state).chain(&self.action)
-    }
 }
 
 /// One statement reading an episode's stream, and the shape it is uploaded in.
@@ -238,6 +309,15 @@ pub(super) struct StreamRead {
 }
 
 impl StreamRead {
+    /// The packets `camera` recorded, as every run of either family reads
+    /// them, so one camera's stream is uploaded once for both.
+    fn camera(dataset: &str, camera: &str) -> Self {
+        Self {
+            statement: CameraVideo::new(dataset, camera).recorded_packets(),
+            shape: StreamShape::Camera,
+        }
+    }
+
     /// The numbers `values` name, one row per message: `log_time_ns`, then
     /// `v0`, `v1`, … as float64.
     fn values(dataset: &str, values: &RecordedValues) -> Self {
@@ -334,6 +414,7 @@ impl PendingStream {
 mod tests {
     use super::*;
     use serde_json::json;
+    use spiral_robotics_common::datasets::{DatasetSummary, DatasetTopic};
 
     fn roles(value: serde_json::Value) -> DatasetJointRoles {
         serde_json::from_value(value).unwrap()
@@ -354,7 +435,7 @@ mod tests {
             {"name": "right", "state": values("/right-arm-state", "position", &[0, 1]),
              "action": values("/right-arm-action", "position", &[0, 1]), "gripper": null}
         ]}));
-        let reads = StreamReads::new("dataset_abc", &["/top-camera".into()], &roles).unwrap();
+        let reads = ActReads::new("dataset_abc", &["/top-camera".into()], &roles).unwrap();
         assert_eq!(
             reads.joints.state(),
             ["left.j1", "left.j2", "left.gripper", "right.j1", "right.j2"]
@@ -377,6 +458,60 @@ mod tests {
             "WITH joint AS (SELECT id, log_time, spql.list.get(\"value\".\"position\", 0) AS v0 FROM spql.mcap.read_topic('dataset_abc', '/left-ee-action') WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0 FROM joint ORDER BY log_time"
         );
         assert_eq!(reads.cameras[0].shape(), StreamShape::Camera);
+    }
+
+    /// A progress run's camera is the stream a policy run of the same
+    /// camera uploaded, so it uploads nothing new.
+    #[test]
+    fn a_progress_camera_is_the_stream_a_policy_reads() {
+        let roles = roles(json!({"arms": [
+            {"name": "left", "state": values("/left-arm-state", "position", &[0]),
+             "action": values("/left-arm-action", "position", &[0]), "gripper": null}
+        ]}));
+        let policy = ActReads::new("dataset_abc", &["/top-camera".into()], &roles).unwrap();
+        let progress = StreamReads::Progress(StreamRead::camera("dataset_abc", "/top-camera"));
+        let dataset = DatasetVersion {
+            selection: DatasetSelection::new(vec!["dataset_abc".into()]).unwrap(),
+            identity: ("resource".into(), "v1".into()),
+        };
+        let episode = EpisodeId::fixture(1);
+        assert_eq!(
+            progress
+                .all()
+                .iter()
+                .map(|read| read.key(&dataset, &episode))
+                .collect::<Vec<_>>(),
+            [policy.cameras[0].key(&dataset, &episode)]
+        );
+    }
+
+    #[test]
+    fn every_camera_a_model_reads_must_be_recorded_video() {
+        let selection = DatasetSelection::new(vec!["dataset_abc".into()]).unwrap();
+        let inspection = DatasetInspection::new(
+            DatasetSummary::new(selection.clone(), ("resource".into(), "v1".into())),
+            None,
+            vec![
+                DatasetTopic::new(
+                    "/top-camera".into(),
+                    vec!["foxglove.CompressedVideo".into()],
+                ),
+                DatasetTopic::new("/joints".into(), vec!["JointState".into()]),
+            ],
+        );
+        let dataset = DatasetVersion::of(&selection, &inspection);
+        assert!(
+            dataset
+                .records_cameras(&inspection, &["/top-camera".into()])
+                .is_ok()
+        );
+        for missing in ["/joints", "/wrist-camera"] {
+            assert!(
+                dataset
+                    .records_cameras(&inspection, &[missing.into()])
+                    .is_err()
+            );
+        }
     }
 
     #[test]

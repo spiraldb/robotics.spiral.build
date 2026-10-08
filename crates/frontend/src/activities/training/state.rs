@@ -8,9 +8,12 @@ use crate::activities::training::TrainingClient;
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use spiral_robotics_common::training::{ImageSize, TrainingConfig, TrainingSource};
+use spiral_robotics_common::training::{
+    ActModel, ImageSize, TrainingConfig, TrainingModel, TrainingModelKind, TrainingSource,
+};
 
 use super::observation::{ImageScale, SourceSizes};
+use crate::activities::episode::StreamCatalog;
 use crate::components::scoped_task::ScopedTask;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
@@ -87,25 +90,61 @@ impl TrainingController {
         edit(&mut self.draft.config.write());
     }
 
-    /// Train on `source`. Its cameras are chosen afresh, all of them once its
-    /// dataset's are known.
+    /// Apply `edit` to the drafted ACT policy, when the draft trains one.
+    pub(super) fn edit_act(mut self, edit: impl FnOnce(&mut ActModel)) {
+        if let TrainingModel::Act(act) = self.draft.config.write().model_mut() {
+            edit(act);
+        }
+    }
+
+    /// Read `camera`, when the draft trains a progress model.
+    pub(super) fn set_progress_camera(mut self, camera: String) {
+        if let TrainingModel::Progress(progress) = self.draft.config.write().model_mut() {
+            progress.set_camera(camera);
+        }
+    }
+
+    /// Train a `kind` model with its family's defaults, its cameras chosen
+    /// afresh and, unless the operator named the run, a name of its family
+    /// among `existing_names`.
+    pub(super) fn choose_model(mut self, kind: TrainingModelKind, existing_names: &[String]) {
+        if self.draft.config.peek().model().kind() == kind {
+            return;
+        }
+        let mut config = self.draft.config.write();
+        config.set_model_kind(kind);
+        if *self.draft.automatic_run_name.peek() {
+            config.set_run_name(existing_names.next_default_run_name(kind));
+        }
+    }
+
+    /// Train on `source`. Its cameras are chosen afresh once its dataset's
+    /// are known.
     pub(super) fn choose_source(mut self, source: TrainingSource) {
         if *self.draft.config.peek().source() == source {
             return;
         }
         let mut config = self.draft.config.write();
         config.set_source(source);
-        config.observation_mut().set_cameras(Vec::new());
+        match config.model_mut() {
+            TrainingModel::Act(act) => act.observation_mut().set_cameras(Vec::new()),
+            TrainingModel::Progress(progress) => progress.set_camera(""),
+        }
     }
 
-    /// Read every one of `cameras` while none is chosen.
+    /// Choose among the dataset's `cameras` while the model reads none: a
+    /// policy reads every one, a progress model the overview.
     pub(super) fn default_cameras(mut self, cameras: &[String]) {
-        if self.draft.config.peek().observation().cameras().is_empty() && !cameras.is_empty() {
-            self.draft
-                .config
-                .write()
-                .observation_mut()
-                .set_cameras(cameras.to_vec());
+        if !self.draft.config.peek().model().cameras().is_empty() || cameras.is_empty() {
+            return;
+        }
+        match self.draft.config.write().model_mut() {
+            TrainingModel::Act(act) => act.observation_mut().set_cameras(cameras.to_vec()),
+            TrainingModel::Progress(progress) => {
+                if let Some(overview) = StreamCatalog::overview_camera(cameras) {
+                    progress.set_camera(overview);
+                }
+            }
         }
     }
 
@@ -117,10 +156,14 @@ impl TrainingController {
         self.draft.image_scale.set(scale);
     }
 
-    /// Resize every frame to `image`.
-    pub(super) fn set_image(mut self, image: ImageSize) {
-        if self.draft.config.peek().observation().image() != image {
-            self.draft.config.write().observation_mut().set_image(image);
+    /// Resize every frame a policy reads to `image`.
+    pub(super) fn set_image(self, image: ImageSize) {
+        let resized = match self.draft.config.peek().model() {
+            TrainingModel::Act(act) => act.observation().image() != image,
+            TrainingModel::Progress(_) => false,
+        };
+        if resized {
+            self.edit_act(|act| act.observation_mut().set_image(image));
         }
     }
 
@@ -136,10 +179,11 @@ impl TrainingController {
 
     pub(super) fn sync_automatic_run_name(mut self, existing_names: &[String]) {
         if self.draft.automatic_run_name.peek().to_owned() {
+            let kind = self.draft.config.peek().model().kind();
             self.draft
                 .config
                 .write()
-                .set_run_name(existing_names.next_default_run_name());
+                .set_run_name(existing_names.next_default_run_name(kind));
         }
     }
 
@@ -220,9 +264,10 @@ impl TrainingController {
                     {
                         existing_names.push(run.config().run_name().to_owned());
                     }
+                    let kind = config_signal.peek().model().kind();
                     config_signal
                         .write()
-                        .set_run_name(existing_names.next_default_run_name());
+                        .set_run_name(existing_names.next_default_run_name(kind));
                     automatic_run_name.set(true);
                     if !opened_runs.peek().iter().any(|id| id == run.id()) {
                         opened_runs.write().push(run.id().to_owned());
@@ -281,22 +326,25 @@ impl TrainingController {
 }
 
 trait TrainingRunNames {
-    fn next_default_run_name(&self) -> String;
+    /// The next unused default name of a `kind` run.
+    fn next_default_run_name(&self, kind: TrainingModelKind) -> String;
 }
 
 impl TrainingRunNames for [String] {
-    fn next_default_run_name(&self) -> String {
-        const PREFIX: &str = "act-run-";
-
+    fn next_default_run_name(&self, kind: TrainingModelKind) -> String {
+        let prefix = match kind {
+            TrainingModelKind::Act => "act-run-",
+            TrainingModelKind::Progress => "progress-run-",
+        };
         let used = self.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let mut number = self
             .iter()
-            .filter_map(|name| name.strip_prefix(PREFIX)?.parse::<u64>().ok())
+            .filter_map(|name| name.strip_prefix(prefix)?.parse::<u64>().ok())
             .max()
             .unwrap_or_default()
             .saturating_add(1);
         loop {
-            let candidate = format!("{PREFIX}{number:03}");
+            let candidate = format!("{prefix}{number:03}");
             if !used.contains(candidate.as_str()) {
                 return candidate;
             }
@@ -326,7 +374,44 @@ impl OpenedTrainingRuns for Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenedTrainingRuns, TrainingRunNames};
+    use super::{OpenedTrainingRuns, TrainingController, TrainingModelKind, TrainingRunNames};
+    use dioxus::prelude::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[derive(Clone, Default)]
+    struct ControllerHarness(Rc<RefCell<Option<TrainingController>>>);
+
+    impl ControllerHarness {
+        fn render(self) -> Element {
+            *self.0.borrow_mut() = Some(TrainingController::use_controller());
+            rsx! {}
+        }
+    }
+
+    /// Switching to a progress model takes its recipe and a name of its
+    /// family, and the dataset's overview camera once its cameras are known.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn a_progress_model_takes_its_family_defaults_and_the_overview_camera() {
+        let harness = ControllerHarness::default();
+        let mut dom = VirtualDom::new_with_props(ControllerHarness::render, harness.clone());
+        dom.rebuild_in_place();
+        let controller = harness.0.borrow().unwrap();
+        dom.in_runtime(|| {
+            controller.choose_model(TrainingModelKind::Progress, &["act-run-001".to_owned()]);
+            let config = controller.config();
+            assert_eq!(config.run_name(), "progress-run-001");
+            assert_eq!((config.steps(), config.batch_size()), (15_000, 1_024));
+            assert!(config.model().cameras().is_empty());
+            controller
+                .default_cameras(&["/left-wrist-camera".to_owned(), "/top-camera".to_owned()]);
+            assert_eq!(controller.config().model().cameras(), ["/top-camera"]);
+            controller.choose_model(TrainingModelKind::Act, &[]);
+            assert_eq!(controller.config().batch_size(), 8);
+            controller
+                .default_cameras(&["/left-wrist-camera".to_owned(), "/top-camera".to_owned()]);
+            assert_eq!(controller.config().model().cameras().len(), 2);
+        });
+    }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn default_run_names_advance_from_history_without_colliding() {
@@ -336,8 +421,18 @@ mod tests {
             "act-run-007".to_owned(),
             "act-run-008".to_owned(),
         ];
-        assert_eq!(names.next_default_run_name(), "act-run-009");
-        assert_eq!(Vec::<String>::new().next_default_run_name(), "act-run-001");
+        assert_eq!(
+            names.next_default_run_name(TrainingModelKind::Act),
+            "act-run-009"
+        );
+        assert_eq!(
+            names.next_default_run_name(TrainingModelKind::Progress),
+            "progress-run-001"
+        );
+        assert_eq!(
+            Vec::<String>::new().next_default_run_name(TrainingModelKind::Act),
+            "act-run-001"
+        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]

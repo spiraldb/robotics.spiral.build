@@ -1,0 +1,36 @@
+[project]
+name = "spiral-training-progress"
+version = "0.1.0"
+description = "The progress-model training job's environment: Score progress's own stack, as warp-progress locks it, plus what the job adds."
+requires-python = "==3.12.*"
+# The job's code is `../training/src/spiral_training_runtime`, whose own environment is ACT's; this one never
+# installs LeRobot. Torch, numpy, transformers, av, fastapi, pyarrow and safetensors come at the
+# versions warp-progress pins, and `uv.lock` began as warp-progress's, so the rest match it too
+# (tests/test_environment.py checks).
+dependencies = [
+    "nvidia-ml-py>=12,<14; sys_platform == 'linux'",
+    "psutil>=7,<8",
+    # The vendored WARP-RM sampler imports it.
+    "scipy>=1.10,<2",
+    "video-service",
+    "warp-progress",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2==2.13.1",
+    "pytest==9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["../training/src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+extend = "../training/pyproject.toml"
+src = ["../training/src"]
+
+[tool.uv.sources]
+# Editable, so a deploy copies the source as it is.
+video-service = { path = "../video_service", editable = true }
+warp-progress = { path = "../warp_progress", editable = true }

@@ -3,20 +3,52 @@
   "run_id": "train-1791300000000-0",
   "robot_type": "fixture_robot",
   "joints": {
-    "state": ["left.j1", "left.j2", "left.gripper"],
-    "action": ["left.j1", "left.j2", "left.gripper"]
+    "state": [
+      "left.j1",
+      "left.j2",
+      "left.gripper"
+    ],
+    "action": [
+      "left.j1",
+      "left.j2",
+      "left.gripper"
+    ]
   },
   "config": {
     "run_name": "fixture-run",
-    "policy": "act",
     "source": {
-      "dataset": { "path": ["dataset_fixture"] },
+      "dataset": {
+        "path": [
+          "dataset_fixture"
+        ]
+      },
       "view": "fixture_view"
     },
-    "observation": {
-      "cameras": ["/top-camera", "/left-wrist-camera"],
-      "image": { "width": 64, "height": 48 },
-      "rate_hz": 10.0
+    "model": {
+      "kind": "act",
+      "observation": {
+        "cameras": [
+          "/top-camera",
+          "/left-wrist-camera"
+        ],
+        "image": {
+          "width": 64,
+          "height": 48
+        },
+        "rate_hz": 10.0
+      },
+      "chunk_size": 4,
+      "architecture": {
+        "hidden_dim": 16,
+        "latent_dim": 4,
+        "encoder_layers": 1,
+        "vae_encoder_layers": 1,
+        "decoder_layers": 1,
+        "attention_heads": 4,
+        "feedforward_dim": 32,
+        "kl_weight": 1.0,
+        "pretrained_backbone": false
+      }
     },
     "optimization": {
       "steps": 6,
@@ -24,25 +56,18 @@
       "validation_split": 0.5,
       "learning_rate": 1e-05,
       "checkpoint_every": 3,
-      "chunk_size": 4,
       "seed": 7
-    },
-    "act": {
-      "hidden_dim": 16,
-      "latent_dim": 4,
-      "encoder_layers": 1,
-      "vae_encoder_layers": 1,
-      "decoder_layers": 1,
-      "attention_heads": 4,
-      "feedforward_dim": 32,
-      "kl_weight": 1.0,
-      "pretrained_backbone": false
     }
   },
   "episodes": [
     {
       "episode_id": "01a0f9c7-0000-7000-8000-000000000001",
-      "intervals": [[1000000000, 3000000000]],
+      "intervals": [
+        [
+          1000000000,
+          3000000000
+        ]
+      ],
       "cameras": [
         "1111111111111111111111111111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222222222222222222222222222"
@@ -58,7 +83,16 @@
     },
     {
       "episode_id": "01a0f9c7-0000-7000-8000-000000000002",
-      "intervals": [[5000000000, 6500000000], [7000000000, 9000000000]],
+      "intervals": [
+        [
+          5000000000,
+          6500000000
+        ],
+        [
+          7000000000,
+          9000000000
+        ]
+      ],
       "cameras": [
         "7777777777777777777777777777777777777777777777777777777777777777",
         "8888888888888888888888888888888888888888888888888888888888888888"

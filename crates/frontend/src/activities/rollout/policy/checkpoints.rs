@@ -1,6 +1,8 @@
 //! The checkpoints a policy can run from, read out of the training history.
 
-use spiral_robotics_common::training::{TrainingCheckpoint, TrainingRun};
+use spiral_robotics_common::training::{
+    CheckpointPolicy as TrainedPolicy, TrainingCheckpoint, TrainingRun,
+};
 
 /// Rollout caps a policy's action chunk; longer chunks drift from the scene.
 const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
@@ -29,11 +31,13 @@ struct CheckpointPolicy {
 }
 
 impl CheckpointChoice {
-    /// Every checkpoint whose run Studio still records, newest step first.
+    /// Every policy checkpoint whose run Studio still records, newest step
+    /// first.
     pub(super) fn listed(runs: &[TrainingRun], checkpoints: &[TrainingCheckpoint]) -> Vec<Self> {
         let mut choices = checkpoints
             .iter()
             .filter_map(|checkpoint| {
+                let policy = checkpoint.policy()?;
                 let run = runs.iter().find(|run| run.id() == checkpoint.run_id())?;
                 Some(Self {
                     identity: CheckpointIdentity {
@@ -44,7 +48,7 @@ impl CheckpointChoice {
                     },
                     step: checkpoint.step(),
                     validation_loss: checkpoint.validation_loss(),
-                    policy: CheckpointPolicy::from(checkpoint),
+                    policy: CheckpointPolicy::from(policy),
                 })
             })
             .collect::<Vec<_>>();
@@ -103,9 +107,8 @@ impl CheckpointChoice {
     }
 }
 
-impl From<&TrainingCheckpoint> for CheckpointPolicy {
-    fn from(checkpoint: &TrainingCheckpoint) -> Self {
-        let policy = checkpoint.policy();
+impl From<&TrainedPolicy> for CheckpointPolicy {
+    fn from(policy: &TrainedPolicy) -> Self {
         // A recorded camera stream is named `{robot}.camera.{role}`; the policy
         // was trained on the roles, in first-seen order.
         let mut camera_roles = Vec::new();
@@ -126,7 +129,7 @@ impl From<&TrainingCheckpoint> for CheckpointPolicy {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_common::training::{
-        CheckpointPolicy as TrainedPolicy, TrainingCheckpoint, TrainingConfig,
+        CheckpointModel, CheckpointPolicy as TrainedPolicy, TrainingCheckpoint, TrainingConfig,
         TrainingInputSummary, TrainingRun, TrainingRunIdentity, TrainingRunPhase,
         TrainingRunStatus,
     };
@@ -134,7 +137,7 @@ mod tests {
     use super::{CheckpointChoice, MAX_ROLLOUT_ACTION_STEPS};
 
     /// A recorded camera stream is `{robot}.camera.{role}`; the policy names
-    /// the roles, once each.
+    /// the roles, once each. A progress model drives no robot.
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn checkpoints_of_recorded_runs_are_listed_newest_first() {
         let run = TrainingRun::new(
@@ -156,9 +159,10 @@ mod tests {
             Some(30.0),
         );
         let checkpoints = [
-            TrainingCheckpoint::new("active-run", 10_000).with_policy(policy.clone()),
-            TrainingCheckpoint::new("active-run", 20_000).with_policy(policy),
-            TrainingCheckpoint::new("deleted-run", 30_000),
+            TrainingCheckpoint::new("active-run", 10_000, CheckpointModel::Act(policy.clone())),
+            TrainingCheckpoint::new("active-run", 20_000, CheckpointModel::Act(policy.clone())),
+            TrainingCheckpoint::new("active-run", 25_000, CheckpointModel::Progress),
+            TrainingCheckpoint::new("deleted-run", 30_000, CheckpointModel::Act(policy)),
         ];
 
         let choices = CheckpointChoice::listed(&[run], &checkpoints);

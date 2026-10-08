@@ -28,10 +28,15 @@ class Artifacts:
 
     def download(self) -> None:
         """Fetch every file at its pinned revision; DINOv3 is gated, so `HF_TOKEN` must be set."""
+        self.download_backbone()
+        hf_hub_download(
+            HEAD_REPOSITORY, HEAD_FILE, revision=HEAD_REVISION, local_dir=self.head.parent
+        )
+
+    def download_backbone(self) -> None:
+        """Fetch the backbone alone at its pinned revision, as the training job's image does; DINOv3 is
+        gated, so `HF_TOKEN` must be set."""
         for name in ("config.json", "model.safetensors"):
             hf_hub_download(
                 BACKBONE_REPOSITORY, name, revision=BACKBONE_REVISION, local_dir=self.backbone
             )
-        hf_hub_download(
-            HEAD_REPOSITORY, HEAD_FILE, revision=HEAD_REVISION, local_dir=self.head.parent
-        )

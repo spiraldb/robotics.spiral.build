@@ -1,12 +1,12 @@
 //! What a run trains on: one published curated view, and what the dataset
-//! that view belongs to offers the model — its cameras, and the joints its
-//! state and action carry.
+//! that view belongs to offers the model — its cameras, and the joints a
+//! policy's state and action carry.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetJointRoles, DatasetSelection, DatasetTopic};
-use spiral_robotics_common::training::TrainingSource;
+use spiral_robotics_common::training::{TrainingModel, TrainingSource};
 use spiral_robotics_ui::{Fact, FactList, Field, FieldLayout, Notice, NoticeTone, Select};
 
 use super::state::TrainingController;
@@ -241,7 +241,7 @@ impl JointSummary {
 }
 
 /// The view a run trains on, the dataset it belongs to, and the joints that
-/// dataset gives the run. `inputs` is the chosen view's dataset, `None`
+/// dataset gives a policy. `inputs` is the chosen view's dataset, `None`
 /// while it is read.
 #[component]
 pub(super) fn TrainingDataSection(
@@ -250,12 +250,19 @@ pub(super) fn TrainingDataSection(
     inputs: Option<Result<DatasetInputs, String>>,
     locked: bool,
 ) -> Element {
-    let source = controller.config().source().clone();
+    let config = controller.config();
+    let source = config.source().clone();
     let listed = matches!(&views, Some(Ok(views)) if views.source(source.view()).is_some());
+    // Only a policy reads the joints.
+    let policy = matches!(config.model(), TrainingModel::Act(_));
     let joints = match &inputs {
-        Some(Ok(inputs)) => Some(inputs.joints().cloned().map_err(str::to_owned)),
-        Some(Err(error)) => Some(Err(format!("Couldn’t read the dataset. {error}"))),
-        None => None,
+        Some(Ok(inputs)) => inputs.joints().ok().cloned(),
+        _ => None,
+    };
+    let problem = match &inputs {
+        Some(Err(error)) => Some(format!("Couldn’t read the dataset. {error}")),
+        Some(Ok(inputs)) if policy => inputs.joints().err().map(str::to_owned),
+        _ => None,
     };
     rsx! {
         section { class: "training-form-section",
@@ -301,22 +308,20 @@ pub(super) fn TrainingDataSection(
             if listed {
                 FactList { class: "training-setup-facts",
                     Fact { label: "Dataset", "{source.dataset().display_name()}" }
-                    match &joints {
-                        Some(Ok(summary)) => rsx! {
+                    if policy {
+                        if let Some(summary) = &joints {
                             Fact { label: "Joints",
                                 span { "{summary.sizes()}" }
                                 small { class: "training-joint-arms", "{summary.arms()}" }
                             }
-                        },
-                        None => rsx! {
+                        } else if inputs.is_none() {
                             Fact { label: "Joints",
                                 span { class: "training-setup-quiet", role: "status", "Reading joint roles…" }
                             }
-                        },
-                        Some(Err(_)) => rsx! {},
+                        }
                     }
                 }
-                if let Some(Err(problem)) = joints {
+                if let Some(problem) = problem {
                     Notice { tone: NoticeTone::Caution, "{problem}" }
                 }
             }

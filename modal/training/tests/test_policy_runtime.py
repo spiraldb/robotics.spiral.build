@@ -10,18 +10,17 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import torch
-from conftest import fixture
 from fastapi.testclient import TestClient
 
 from spiral_training_runtime.act import (
     IMAGENET_MEAN,
     IMAGENET_STD,
     TrainingSession,
-    _gpu_utilization,
     _normalize_hwc_images,
 )
 from spiral_training_runtime.arrow import decode_inference_input
 from spiral_training_runtime.config import PolicyConfig
+from spiral_training_runtime.device import TrainingDevice
 from spiral_training_runtime.request import RunRequest
 from spiral_training_runtime.samples import Normalization
 from spiral_training_runtime.service import (
@@ -29,14 +28,18 @@ from spiral_training_runtime.service import (
     POLICY_ARTIFACT_CONTENT_TYPE,
     create_app,
 )
+from spiral_training_runtime.testing import fixture
 
 
 @pytest.fixture
 def checkpoint(tmp_path: Path) -> Path:
     """An untrained checkpoint of the fixture run, written as a job writes one."""
-    request = RunRequest.model_validate(fixture("run-request.json"))
+    request = RunRequest.model_validate(fixture("run-request.json")).root
     zeros, ones = np.zeros(3, np.float32), np.ones(3, np.float32)
-    TrainingSession(request).save_checkpoint(tmp_path, Normalization(zeros, ones, zeros, ones), 1)
+    normalization = Normalization(zeros, ones, zeros, ones)
+    TrainingSession(request, normalization, TrainingDevice(torch.device("cpu"))).save_checkpoint(
+        tmp_path, 1
+    )
     return tmp_path
 
 
@@ -103,7 +106,7 @@ def test_missing_nvml_never_fails_gpu_telemetry(monkeypatch: pytest.MonkeyPatch)
         raise ModuleNotFoundError("pynvml is unavailable")
 
     monkeypatch.setattr(torch.cuda, "utilization", missing_nvml)
-    assert _gpu_utilization(torch.device("cuda:0")) is None
+    assert TrainingDevice(torch.device("cuda:0")).telemetry()["gpu_percent"] is None
 
 
 def test_hwc_uint8_training_images_match_imagenet_chw_normalization() -> None:

@@ -34,6 +34,10 @@ impl MigratorTrait for Migrator {
                 "m20261008_000001_curations_encoding_5",
                 include_str!("m20261008_000001_curations_encoding_5.sql"),
             )),
+            Box::new(SqlMigration::new(
+                "m20261008_000002_training_models",
+                include_str!("m20261008_000002_training_models.sql"),
+            )),
         ]
     }
 }

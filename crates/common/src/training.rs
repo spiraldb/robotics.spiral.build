@@ -1,22 +1,27 @@
-//! Policy training: what a run trains on, how its model sees the data, and
-//! what a run reports. See `docs/training.md`.
+//! Model training: what a run trains on, which model it trains and how that
+//! model sees the data, and what a run reports. See `docs/training.md`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::datasets::DatasetSelection;
 
-/// The policy family a run trains.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrainingPolicy {
+/// The model families a run can train.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TrainingModelKind {
+    /// An ACT policy that drives a robot from its cameras and joints.
     #[default]
     Act,
+    /// A WARP-RM progress head that scores one camera's video.
+    Progress,
 }
 
-impl TrainingPolicy {
+impl TrainingModelKind {
+    pub const ALL: [Self; 2] = [Self::Act, Self::Progress];
+
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Act => "ACT · vision",
+            Self::Act => "ACT policy",
+            Self::Progress => "Progress model",
         }
     }
 }
@@ -43,7 +48,101 @@ impl TrainingSource {
     }
 }
 
-/// How the model sees the data: which cameras, at what size, on what clock.
+/// The model a run trains, and what only that family of models is set by.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrainingModel {
+    Act(ActModel),
+    Progress(ProgressModel),
+}
+
+impl From<TrainingModelKind> for TrainingModel {
+    /// The family's default model, reading no camera yet.
+    fn from(kind: TrainingModelKind) -> Self {
+        match kind {
+            TrainingModelKind::Act => Self::Act(ActModel::default()),
+            TrainingModelKind::Progress => Self::Progress(ProgressModel::default()),
+        }
+    }
+}
+
+impl TrainingModel {
+    pub const fn kind(&self) -> TrainingModelKind {
+        match self {
+            Self::Act(_) => TrainingModelKind::Act,
+            Self::Progress(_) => TrainingModelKind::Progress,
+        }
+    }
+
+    /// The video topics the model reads, in the order it reads them; none
+    /// while a progress model's camera is unchosen.
+    pub fn cameras(&self) -> &[String] {
+        match self {
+            Self::Act(act) => act.observation.cameras(),
+            Self::Progress(progress) if progress.camera.is_empty() => &[],
+            Self::Progress(progress) => std::slice::from_ref(&progress.camera),
+        }
+    }
+}
+
+/// An ACT policy: how it sees the data, how many actions it predicts at
+/// once, and its architecture.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ActModel {
+    observation: TrainingObservation,
+    /// Actions predicted per observation.
+    chunk_size: usize,
+    architecture: ActArchitecture,
+}
+
+impl Default for ActModel {
+    fn default() -> Self {
+        Self {
+            observation: TrainingObservation::default(),
+            chunk_size: 100,
+            architecture: ActArchitecture::default(),
+        }
+    }
+}
+
+impl ActModel {
+    pub const fn observation(&self) -> &TrainingObservation {
+        &self.observation
+    }
+    pub const fn observation_mut(&mut self) -> &mut TrainingObservation {
+        &mut self.observation
+    }
+    pub const fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
+    pub const fn set_chunk_size(&mut self, chunk_size: usize) {
+        self.chunk_size = chunk_size;
+    }
+    pub const fn architecture(&self) -> &ActArchitecture {
+        &self.architecture
+    }
+}
+
+/// A WARP-RM progress head trained on one camera's video. The recipe's
+/// fixed constants (windows, strides, clock, frame size, backbone) belong to
+/// the training job.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ProgressModel {
+    /// The video topic it reads; empty until one is chosen.
+    camera: String,
+}
+
+impl ProgressModel {
+    pub fn camera(&self) -> &str {
+        &self.camera
+    }
+    pub fn set_camera(&mut self, camera: impl Into<String>) {
+        self.camera = camera.into();
+    }
+}
+
+/// How an ACT policy sees the data: which cameras, at what size, on what
+/// clock.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TrainingObservation {
     /// Video topics, in the order the policy reads them.
@@ -113,47 +212,56 @@ impl ImageSize {
     }
 }
 
-/// How the optimizer runs.
+/// How the optimizer runs, whichever model it trains.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct TrainingOptimizationConfig {
+struct TrainingOptimization {
     steps: u64,
     batch_size: usize,
     /// Fraction of episodes held out from optimizer updates.
     validation_split: f64,
     learning_rate: f64,
     checkpoint_every: u64,
-    /// Actions predicted per observation.
-    chunk_size: usize,
     seed: u64,
 }
 
-impl Default for TrainingOptimizationConfig {
-    fn default() -> Self {
-        Self {
-            steps: 100_000,
-            batch_size: 8,
-            validation_split: 0.1,
-            learning_rate: 1.0e-5,
-            checkpoint_every: 20_000,
-            chunk_size: 100,
-            seed: 1_000,
+impl TrainingOptimization {
+    /// The recipe a `kind` model trains with unless the operator changes it:
+    /// LeRobot's for ACT, and WARP-RM's published one for progress.
+    const fn recipe(kind: TrainingModelKind) -> Self {
+        match kind {
+            TrainingModelKind::Act => Self {
+                steps: 100_000,
+                batch_size: 8,
+                validation_split: 0.1,
+                learning_rate: 1.0e-5,
+                checkpoint_every: 20_000,
+                seed: 1_000,
+            },
+            TrainingModelKind::Progress => Self {
+                steps: 15_000,
+                batch_size: 1_024,
+                validation_split: 0.1,
+                learning_rate: 4.0e-4,
+                checkpoint_every: 2_500,
+                seed: 1_000,
+            },
         }
     }
 }
 
 /// ACT's architecture, kept together so checkpoints stay self-describing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ActTrainingConfig {
+pub struct ActArchitecture {
     #[serde(flatten)]
-    architecture: ActArchitectureConfig,
+    dimensions: ActDimensions,
     #[serde(flatten)]
-    attention: ActAttentionConfig,
+    attention: ActAttention,
     /// Start the vision backbone from its ImageNet weights.
     pretrained_backbone: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ActArchitectureConfig {
+struct ActDimensions {
     hidden_dim: usize,
     latent_dim: usize,
     encoder_layers: usize,
@@ -161,59 +269,17 @@ pub struct ActArchitectureConfig {
     decoder_layers: usize,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ActLayerCounts {
-    encoder: usize,
-    variational_encoder: usize,
-    decoder: usize,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ActAttentionConfig {
+struct ActAttention {
     attention_heads: usize,
     feedforward_dim: usize,
     kl_weight: f64,
 }
 
-impl ActArchitectureConfig {
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn new(hidden_dim: usize, latent_dim: usize, layers: ActLayerCounts) -> Self {
-        Self {
-            hidden_dim,
-            latent_dim,
-            encoder_layers: layers.encoder,
-            vae_encoder_layers: layers.variational_encoder,
-            decoder_layers: layers.decoder,
-        }
-    }
-}
-
-impl ActAttentionConfig {
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn new(attention_heads: usize, feedforward_dim: usize, kl_weight: f64) -> Self {
-        Self {
-            attention_heads,
-            feedforward_dim,
-            kl_weight,
-        }
-    }
-}
-
-impl ActLayerCounts {
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn new(encoder: usize, variational_encoder: usize, decoder: usize) -> Self {
-        Self {
-            encoder,
-            variational_encoder,
-            decoder,
-        }
-    }
-}
-
-impl Default for ActTrainingConfig {
+impl Default for ActArchitecture {
     fn default() -> Self {
         Self {
-            architecture: ActArchitectureConfig {
+            dimensions: ActDimensions {
                 hidden_dim: 512,
                 latent_dim: 32,
                 encoder_layers: 4,
@@ -223,7 +289,7 @@ impl Default for ActTrainingConfig {
                 // effective architecture.
                 decoder_layers: 1,
             },
-            attention: ActAttentionConfig {
+            attention: ActAttention {
                 attention_heads: 8,
                 feedforward_dim: 3_200,
                 kl_weight: 10.0,
@@ -233,45 +299,12 @@ impl Default for ActTrainingConfig {
     }
 }
 
-impl ActTrainingConfig {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn new(
-        architecture: ActArchitectureConfig,
-        attention: ActAttentionConfig,
-        pretrained_backbone: bool,
-    ) -> Self {
-        Self {
-            architecture,
-            attention,
-            pretrained_backbone,
-        }
-    }
+impl ActArchitecture {
     pub const fn hidden_dim(&self) -> usize {
-        self.architecture.hidden_dim
-    }
-    pub const fn latent_dim(&self) -> usize {
-        self.architecture.latent_dim
-    }
-    pub const fn encoder_layers(&self) -> usize {
-        self.architecture.encoder_layers
-    }
-    pub const fn vae_encoder_layers(&self) -> usize {
-        self.architecture.vae_encoder_layers
-    }
-    pub const fn decoder_layers(&self) -> usize {
-        self.architecture.decoder_layers
+        self.dimensions.hidden_dim
     }
     pub const fn attention_heads(&self) -> usize {
         self.attention.attention_heads
-    }
-    pub const fn feedforward_dim(&self) -> usize {
-        self.attention.feedforward_dim
-    }
-    pub const fn kl_weight(&self) -> f64 {
-        self.attention.kl_weight
-    }
-    pub const fn pretrained_backbone(&self) -> bool {
-        self.pretrained_backbone
     }
 }
 
@@ -279,36 +312,34 @@ impl ActTrainingConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TrainingConfig {
     run_name: String,
-    policy: TrainingPolicy,
     source: TrainingSource,
-    observation: TrainingObservation,
-    optimization: TrainingOptimizationConfig,
-    act: ActTrainingConfig,
+    model: TrainingModel,
+    optimization: TrainingOptimization,
 }
 
 impl TrainingConfig {
-    /// The default run of `source`.
-    pub fn new(run_name: impl Into<String>, source: TrainingSource) -> Self {
+    /// A run of `source` training the default `kind` model with its
+    /// family's recipe.
+    pub fn new(
+        run_name: impl Into<String>,
+        source: TrainingSource,
+        kind: TrainingModelKind,
+    ) -> Self {
         Self {
             run_name: run_name.into(),
-            policy: TrainingPolicy::default(),
             source,
-            observation: TrainingObservation::default(),
-            optimization: TrainingOptimizationConfig::default(),
-            act: ActTrainingConfig::default(),
+            model: kind.into(),
+            optimization: TrainingOptimization::recipe(kind),
         }
     }
     pub fn run_name(&self) -> &str {
         &self.run_name
     }
-    pub const fn policy(&self) -> TrainingPolicy {
-        self.policy
-    }
     pub const fn source(&self) -> &TrainingSource {
         &self.source
     }
-    pub const fn observation(&self) -> &TrainingObservation {
-        &self.observation
+    pub const fn model(&self) -> &TrainingModel {
+        &self.model
     }
     pub const fn steps(&self) -> u64 {
         self.optimization.steps
@@ -325,15 +356,6 @@ impl TrainingConfig {
     pub const fn checkpoint_every(&self) -> u64 {
         self.optimization.checkpoint_every
     }
-    pub const fn chunk_size(&self) -> usize {
-        self.optimization.chunk_size
-    }
-    pub const fn seed(&self) -> u64 {
-        self.optimization.seed
-    }
-    pub const fn act(&self) -> &ActTrainingConfig {
-        &self.act
-    }
 
     pub fn set_run_name(&mut self, run_name: impl Into<String>) {
         self.run_name = run_name.into();
@@ -341,8 +363,13 @@ impl TrainingConfig {
     pub fn set_source(&mut self, source: TrainingSource) {
         self.source = source;
     }
-    pub fn observation_mut(&mut self) -> &mut TrainingObservation {
-        &mut self.observation
+    pub const fn model_mut(&mut self) -> &mut TrainingModel {
+        &mut self.model
+    }
+    /// Train the default `kind` model instead, with its family's recipe.
+    pub fn set_model_kind(&mut self, kind: TrainingModelKind) {
+        self.model = kind.into();
+        self.optimization = TrainingOptimization::recipe(kind);
     }
     pub const fn set_steps(&mut self, steps: u64) {
         self.optimization.steps = steps;
@@ -358,9 +385,6 @@ impl TrainingConfig {
     }
     pub const fn set_checkpoint_every(&mut self, checkpoint_every: u64) {
         self.optimization.checkpoint_every = checkpoint_every;
-    }
-    pub const fn set_chunk_size(&mut self, chunk_size: usize) {
-        self.optimization.chunk_size = chunk_size;
     }
 }
 
@@ -538,29 +562,25 @@ impl TrainingMetricPoint {
 }
 
 /// An inference checkpoint a run saved.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TrainingCheckpoint {
     run_id: String,
     step: u64,
     validation_loss: Option<f64>,
-    policy: CheckpointPolicy,
+    model: CheckpointModel,
 }
 
 impl TrainingCheckpoint {
-    pub fn new(run_id: impl Into<String>, step: u64) -> Self {
+    pub fn new(run_id: impl Into<String>, step: u64, model: CheckpointModel) -> Self {
         Self {
             run_id: run_id.into(),
             step,
             validation_loss: None,
-            policy: CheckpointPolicy::default(),
+            model,
         }
     }
     pub const fn with_validation_loss(mut self, validation_loss: Option<f64>) -> Self {
         self.validation_loss = validation_loss;
-        self
-    }
-    pub fn with_policy(mut self, policy: CheckpointPolicy) -> Self {
-        self.policy = policy;
         self
     }
     pub fn run_id(&self) -> &str {
@@ -572,9 +592,23 @@ impl TrainingCheckpoint {
     pub const fn validation_loss(&self) -> Option<f64> {
         self.validation_loss
     }
-    pub const fn policy(&self) -> &CheckpointPolicy {
-        &self.policy
+    /// What the checkpoint expects from the robot it drives, when it is a
+    /// policy.
+    pub const fn policy(&self) -> Option<&CheckpointPolicy> {
+        match &self.model {
+            CheckpointModel::Act(policy) => Some(policy),
+            CheckpointModel::Progress => None,
+        }
     }
+}
+
+/// The family of model a checkpoint holds.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckpointModel {
+    /// An ACT policy, and what it expects from the robot it drives.
+    Act(CheckpointPolicy),
+    Progress,
 }
 
 /// What a checkpoint's policy expects from the robot it drives.
@@ -727,6 +761,7 @@ impl Default for TrainingConfig {
                     .expect("one nonempty name is a dataset path"),
                 "",
             ),
+            TrainingModelKind::Act,
         )
     }
 }
@@ -849,17 +884,62 @@ mod tests {
 
     #[test]
     fn act_defaults_match_current_lerobot_architecture() {
-        let config = ActTrainingConfig::default();
-        assert_eq!(config.hidden_dim(), 512);
-        assert_eq!(config.feedforward_dim(), 3_200);
-        assert_eq!(config.vae_encoder_layers(), 4);
-        assert_eq!(config.decoder_layers(), 1);
         let config = TrainingConfig::default();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["model"],
+            serde_json::json!({
+                "kind": "act",
+                "observation": {"cameras": [], "image": {"width": 320, "height": 240}, "rate_hz": 30.0},
+                "chunk_size": 100,
+                "architecture": {
+                    "hidden_dim": 512, "latent_dim": 32, "encoder_layers": 4,
+                    "vae_encoder_layers": 4, "decoder_layers": 1, "attention_heads": 8,
+                    "feedforward_dim": 3_200, "kl_weight": 10.0, "pretrained_backbone": true
+                }
+            })
+        );
         assert_eq!(config.batch_size(), 8);
         assert_eq!(config.steps(), 100_000);
         assert_eq!(config.checkpoint_every(), 20_000);
         assert_eq!(config.validation_split(), 0.1);
-        assert!(config.observation().cameras().is_empty());
+    }
+
+    /// Switching family takes that family's model and WARP-RM's recipe.
+    #[test]
+    fn a_progress_model_trains_with_the_warp_rm_recipe_on_one_camera() {
+        let mut config = TrainingConfig::default();
+        config.set_model_kind(TrainingModelKind::Progress);
+        assert_eq!(config.model().kind(), TrainingModelKind::Progress);
+        assert!(config.model().cameras().is_empty());
+        if let TrainingModel::Progress(progress) = config.model_mut() {
+            progress.set_camera("/top-camera");
+        }
+        assert_eq!(config.model().cameras(), ["/top-camera"]);
+        let wire = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            wire["model"],
+            serde_json::json!({"kind": "progress", "camera": "/top-camera"})
+        );
+        assert_eq!(
+            wire["optimization"],
+            serde_json::json!({
+                "steps": 15_000, "batch_size": 1_024, "validation_split": 0.1,
+                "learning_rate": 4.0e-4, "checkpoint_every": 2_500, "seed": 1_000
+            })
+        );
+    }
+
+    #[test]
+    fn only_a_policy_checkpoint_exposes_what_it_expects() {
+        let policy = CheckpointPolicy::new(vec!["/top".to_owned()], 10, Some(30.0));
+        let act = TrainingCheckpoint::new("run", 1, CheckpointModel::Act(policy.clone()));
+        assert_eq!(act.policy(), Some(&policy));
+        let progress = TrainingCheckpoint::new("run", 1, CheckpointModel::Progress);
+        assert_eq!(progress.policy(), None);
+        assert_eq!(
+            serde_json::to_value(&progress).unwrap()["model"]["kind"],
+            "progress"
+        );
     }
 
     #[test]

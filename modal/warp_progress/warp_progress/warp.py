@@ -52,26 +52,69 @@ class WarpModel:
     """
 
     def __init__(self, artifacts: Artifacts, device: torch.device):
-        self._device = device
-        self._backbone = DINOv3ViTModel.from_pretrained(artifacts.backbone).to(device).eval()
+        self._encoder = PictureEncoder(artifacts.backbone, device)
         self._temporal = TemporalModel.load(artifacts.head).to(device)
-        self._device_lock = threading.Lock()
-        # Squash tables per picture size, touched only while holding the device.
-        self._squashes: dict[tuple[int, int], SquashPreprocessing] = {}
 
     @torch.inference_mode()
     def score(self, video: EpisodeVideo, times: StageTimes) -> pa.RecordBatch:
         """Every picture's velocity and progress, in display order."""
         timestamps, embeddings = [], []
+        for batch_times, batch_embeddings in self._encoder.encode(video, times):
+            timestamps.extend(batch_times)
+            embeddings.append(batch_embeddings)
+        clock = PresentationTimes(timestamps)
+        encoder = self._encoder
+        with encoder.device_turn(times), encoder.device_stage("temporal", times), encoder.precision():
+            scores = self._temporal.score(torch.cat(embeddings))
+        return scores.record_batch(clock.nanoseconds())
+
+
+class PictureEncoder:
+    """The official DINOv3 ViT-B/16 backbone on one device: each picture of a video as its final-norm
+    CLS embedding, as the scorer reads it. The training job embeds the pictures it trains on with it.
+
+    Callers take turns on the device, one batch at a time, so the device never holds two batches.
+    """
+
+    def __init__(self, backbone: Path, device: torch.device):
+        """The backbone in `backbone`, the directory holding its `config.json` and `model.safetensors`."""
+        self._device = device
+        self._backbone = DINOv3ViTModel.from_pretrained(backbone).to(device).eval()
+        self._device_lock = threading.Lock()
+        # Squash tables per picture size, touched only while holding the device.
+        self._squashes: dict[tuple[int, int], SquashPreprocessing] = {}
+
+    @torch.inference_mode()
+    def encode(self, video: EpisodeVideo, times: StageTimes) -> Iterator[tuple[list[int], torch.Tensor]]:
+        """Every picture in display order, a batch at a time: the batch's presentation times and its
+        `(pictures, 768)` embeddings."""
         pictures = times.timed("decode", self._pictures(video))
         for _, same_size in itertools.groupby(pictures, key=lambda picture: picture[1].shape):
             for batch in itertools.batched(same_size, BATCH_FRAMES):
-                timestamps.extend(time_ns for time_ns, _ in batch)
-                embeddings.append(self._embed([rgb for _, rgb in batch], times))
-        clock = PresentationTimes(timestamps)
-        with self._device_turn(times), self._device_stage("temporal", times), self._precision():
-            scores = self._temporal.score(torch.cat(embeddings))
-        return scores.record_batch(clock.nanoseconds())
+                yield [time_ns for time_ns, _ in batch], self._embed([rgb for _, rgb in batch], times)
+
+    def precision(self) -> torch.autocast:
+        """fp16 autocast on CUDA, about 3x faster on a T4; full precision elsewhere, the closest
+        match to the Rust for local parity runs."""
+        return torch.autocast(self._device.type, dtype=torch.float16, enabled=self._device.type == "cuda")
+
+    @contextmanager
+    def device_turn(self, times: StageTimes) -> Iterator[None]:
+        """Exclusive use of the device; the wait for it is the `queue` stage."""
+        with times.stage("queue"):
+            self._device_lock.acquire()
+        try:
+            yield
+        finally:
+            self._device_lock.release()
+
+    @contextmanager
+    def device_stage(self, name: str, times: StageTimes) -> Iterator[None]:
+        """A stage of device work, timed until the device has finished it."""
+        with times.stage(name):
+            yield
+            if self._device.type != "cpu":
+                torch.accelerator.synchronize(self._device)
 
     @staticmethod
     def _pictures(video: EpisodeVideo) -> Iterator[tuple[int, np.ndarray]]:
@@ -86,39 +129,16 @@ class WarpModel:
         """The backbone's final-norm CLS embedding of each picture, all of one size."""
         with times.stage("copy"):
             rgb = torch.from_numpy(np.stack(pictures))
-        with self._device_turn(times):
-            with self._device_stage("copy", times):
+        with self.device_turn(times):
+            with self.device_stage("copy", times):
                 rgb = rgb.to(self._device)
-            with self._device_stage("squash", times):
+            with self.device_stage("squash", times):
                 size = rgb.shape[1:3]
                 if size not in self._squashes:
                     self._squashes[size] = SquashPreprocessing(size, self._device)
                 inputs = self._squashes[size].apply(rgb)
-            with self._device_stage("backbone", times), self._precision():
+            with self.device_stage("backbone", times), self.precision():
                 return self._backbone(pixel_values=inputs).pooler_output
-
-    def _precision(self) -> torch.autocast:
-        """fp16 autocast on CUDA, about 3x faster on a T4; full precision elsewhere, the closest
-        match to the Rust for local parity runs."""
-        return torch.autocast(self._device.type, dtype=torch.float16, enabled=self._device.type == "cuda")
-
-    @contextmanager
-    def _device_turn(self, times: StageTimes) -> Iterator[None]:
-        """Exclusive use of the device; the wait for it is the `queue` stage."""
-        with times.stage("queue"):
-            self._device_lock.acquire()
-        try:
-            yield
-        finally:
-            self._device_lock.release()
-
-    @contextmanager
-    def _device_stage(self, name: str, times: StageTimes) -> Iterator[None]:
-        """A stage of device work, timed until the device has finished it."""
-        with times.stage(name):
-            yield
-            if self._device.type != "cpu":
-                torch.accelerator.synchronize(self._device)
 
 
 class PresentationTimes:
@@ -129,15 +149,20 @@ class PresentationTimes:
             raise RejectedVideo(
                 f"WARP requires an episode of at least {MIN_FRAMES} pictures, got {len(times_ns)}"
             )
+        self.require_30_hz(times_ns)
+        if times_ns[0] < 0:
+            raise RejectedVideo(f"WARP picture time {times_ns[0]} ns precedes its episode")
+        self._times_ns = times_ns
+
+    @staticmethod
+    def require_30_hz(times_ns: list[int]) -> None:
+        """Rejects pictures in display order that stray from the checkpoint's 30 Hz clock."""
         for index, gap in enumerate(np.diff(times_ns), start=1):
             if abs(gap - FRAME_PERIOD_NS) > FRAME_PERIOD_TOLERANCE_NS:
                 raise RejectedVideo(
                     "Pinned WARP sim-bottles model requires a 30 Hz video; "
                     f"picture {index} follows the previous one by {gap} ns"
                 )
-        if times_ns[0] < 0:
-            raise RejectedVideo(f"WARP picture time {times_ns[0]} ns precedes its episode")
-        self._times_ns = times_ns
 
     def nanoseconds(self) -> np.ndarray:
         return np.array(self._times_ns, np.uint64)

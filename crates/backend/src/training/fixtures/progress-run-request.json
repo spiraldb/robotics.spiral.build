@@ -1,0 +1,53 @@
+{
+  "project": "fixture-project",
+  "run_id": "train-1791300000000-1",
+  "config": {
+    "run_name": "fixture-progress",
+    "source": {
+      "dataset": {
+        "path": [
+          "dataset_fixture"
+        ]
+      },
+      "view": "fixture_experts"
+    },
+    "model": {
+      "kind": "progress",
+      "camera": "/top-camera"
+    },
+    "optimization": {
+      "steps": 6,
+      "batch_size": 4,
+      "validation_split": 0.5,
+      "learning_rate": 0.0004,
+      "checkpoint_every": 3,
+      "seed": 7
+    }
+  },
+  "episodes": [
+    {
+      "episode_id": "01a0f9c7-0000-7000-8000-000000000001",
+      "intervals": [
+        [
+          1000000000,
+          21000000000
+        ]
+      ],
+      "camera": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "episode_id": "01a0f9c7-0000-7000-8000-000000000002",
+      "intervals": [
+        [
+          0,
+          18000000000
+        ],
+        [
+          19000000000,
+          40000000000
+        ]
+      ],
+      "camera": "7777777777777777777777777777777777777777777777777777777777777777"
+    }
+  ]
+}

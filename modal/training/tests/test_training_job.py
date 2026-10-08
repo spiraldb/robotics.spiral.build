@@ -8,12 +8,13 @@ import math
 
 import numpy as np
 import pytest
-from conftest import AUTHORIZED, SyntheticRun, fixture
 
 from spiral_training_runtime import act, stop
-from spiral_training_runtime.act import PolicySession
+from spiral_training_runtime.act import ActTraining, PolicySession
 from spiral_training_runtime.arrow import InferenceArrays
+from spiral_training_runtime.request import ActRunRequest
 from spiral_training_runtime.run import TrainingJob
+from spiral_training_runtime.testing import AUTHORIZED, SyntheticRun, fixture
 
 RUN = "/v1/runs/fixture-project/train-1791300000000-0"
 
@@ -23,14 +24,15 @@ class Preempted(BaseException):
 
 
 @pytest.fixture
-def posted(client, volume) -> str:
-    """The fixture run, posted with its streams uploaded; its job's request."""
+def posted(client, volume) -> ActTraining:
+    """The fixture run, posted with its streams uploaded; its job's family, as the `train`
+    function builds it."""
     SyntheticRun.from_fixture(volume).write()
     assert (
         client.post("/v1/runs", json=fixture("run-request.json"), headers=AUTHORIZED).status_code
         == 201
     )
-    return json.dumps(fixture("run-request.json"))
+    return ActTraining(ActRunRequest.model_validate(fixture("run-request.json")), volume)
 
 
 def test_a_run_trains_reports_and_checkpoints(client, volume, calls, stop_flags, posted) -> None:

@@ -17,7 +17,6 @@ from typing import Any
 
 import draccus
 import numpy as np
-import psutil
 import torch
 from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.act import ACTConfig, ACTPolicy
@@ -26,9 +25,12 @@ from safetensors.torch import save as save_safetensors
 
 from .arrow import InferenceArrays
 from .config import PolicyConfig
+from .device import StepResult, TrainingDevice
 from .errors import RuntimeRequestError
-from .request import RunRequest
-from .samples import Normalization, TrainingBatch
+from .family import PreparedRun
+from .request import ActRunRequest
+from .samples import Normalization, TrainingBatch, TrainingSamples
+from .volume import TrainingVolume
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -68,41 +70,69 @@ def resolve_device(requested: str) -> torch.device:
     return device
 
 
-@dataclass(frozen=True)
-class StepResult:
-    loss: float
-    device_copy_ms: float
-    model_ms: float
+class ActTraining:
+    """An ACT policy's side of a run's job: its samples on the job's disk and its session."""
+
+    def __init__(self, request: ActRunRequest, volume: TrainingVolume) -> None:
+        self._request = request
+        self._volume = volume
+
+    @property
+    def request(self) -> ActRunRequest:
+        return self._request
+
+    def preparing(self) -> str:
+        rate_hz = self._request.config.model.observation.rate_hz
+        return (
+            f"Decoding {len(self._request.episodes)} episodes and sampling them at {rate_hz:g} Hz."
+        )
+
+    def prepare(self, scratch: Path) -> PreparedRun:
+        request = self._request
+        observation = request.config.model.observation
+        samples = TrainingSamples(request, self._volume, scratch)
+        session = TrainingSession(request, samples.normalization, TrainingDevice.available())
+        episodes = len(request.episodes)
+        intervals = sum(len(episode.intervals) for episode in request.episodes)
+        image = observation.image
+        return PreparedRun(
+            samples,
+            session,
+            logs=[
+                f"Prepared {episodes} episodes: {samples.ticks} ticks of "
+                f"{len(observation.cameras)} cameras at {image.width}x{image.height}."
+            ],
+            running=f"Training ACT on {session.device_name}: {episodes} episodes, "
+            f"{intervals} intervals, {samples.ticks} ticks.",
+        )
 
 
 class TrainingSession:
-    """One run's ACT policy and optimizer, trained on normalized batches on the GPU when there
-    is one, and saved as inference checkpoints."""
+    """One run's ACT policy and optimizer, trained on normalized batches on `device`, and saved as
+    inference checkpoints with the normalization the samples were taken with."""
 
-    def __init__(self, request: RunRequest) -> None:
+    def __init__(
+        self, request: ActRunRequest, normalization: Normalization, device: TrainingDevice
+    ) -> None:
         self._request = request
-        self._device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self._normalization = normalization
+        self._device = device
         optimization = request.config.optimization
         torch.manual_seed(optimization.seed)
-        self._policy = ACTPolicy(self._policy_config()).to(self._device)
+        self._policy = ACTPolicy(self._policy_config()).to(device.torch_device)
         self._optimizer = torch.optim.AdamW(
             self._policy.get_optim_params(),
             lr=optimization.learning_rate,
             weight_decay=WEIGHT_DECAY,
         )
-        self._process = psutil.Process()
-        self._process.cpu_percent(interval=None)
         self._image_normalization = (
-            torch.tensor(IMAGENET_MEAN, device=self._device).view(1, 1, 3, 1, 1),
-            torch.tensor(IMAGENET_STD, device=self._device).view(1, 1, 3, 1, 1),
+            torch.tensor(IMAGENET_MEAN, device=device.torch_device).view(1, 1, 3, 1, 1),
+            torch.tensor(IMAGENET_STD, device=device.torch_device).view(1, 1, 3, 1, 1),
         )
 
     @property
     def device_name(self) -> str:
-        if self._device.type == "cuda":
-            index = self._device.index or 0
-            return f"CUDA:{index} ({torch.cuda.get_device_name(index)})"
-        return self._device.type.upper()
+        return self._device.name
 
     @property
     def learning_rate(self) -> float:
@@ -111,8 +141,7 @@ class TrainingSession:
     def train_step(self, batch: TrainingBatch, step: int) -> StepResult:
         device_started = time.perf_counter()
         inputs = self._inputs(batch)
-        _synchronize(self._device)
-        device_copy_ms = _elapsed_ms(device_started)
+        device_copy_ms = self._device.finished_ms(device_started)
         model_started = time.perf_counter()
         self._policy.train()
         self._optimizer.zero_grad(set_to_none=True)
@@ -122,31 +151,29 @@ class TrainingSession:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self._policy.parameters(), GLOBAL_GRADIENT_NORM_LIMIT)
         self._optimizer.step()
-        _synchronize(self._device)
-        return StepResult(float(loss.item()), device_copy_ms, _elapsed_ms(model_started))
+        return StepResult(
+            float(loss.item()), device_copy_ms, self._device.finished_ms(model_started)
+        )
 
     def validate(self, batch: TrainingBatch) -> StepResult:
         with torch.inference_mode():
             device_started = time.perf_counter()
             inputs = self._inputs(batch)
-            _synchronize(self._device)
-            device_copy_ms = _elapsed_ms(device_started)
+            device_copy_ms = self._device.finished_ms(device_started)
             model_started = time.perf_counter()
             self._policy.eval()
             loss, _ = self._policy(inputs)
-            _synchronize(self._device)
-            return StepResult(float(loss.item()), device_copy_ms, _elapsed_ms(model_started))
+            return StepResult(
+                float(loss.item()), device_copy_ms, self._device.finished_ms(model_started)
+            )
 
     def telemetry(self) -> dict[str, Any]:
-        return {
-            "cpu_percent": float(self._process.cpu_percent(interval=None)),
-            "gpu_percent": _gpu_utilization(self._device),
-            "memory_bytes": int(self._process.memory_info().rss),
-        }
+        return self._device.telemetry()
 
-    def save_checkpoint(self, directory: Path, normalization: Normalization, step: int) -> None:
+    def save_checkpoint(self, directory: Path, step: int) -> None:
         """Writes `config.json` and `model.safetensors`: the policy's tensors with the
         normalization buffers, and the manifest in the SafeTensors metadata."""
+        normalization = self._normalization
         cameras = self._request.camera_features()
         tensors = {
             name: tensor.detach().to(device="cpu").contiguous()
@@ -164,7 +191,7 @@ class TrainingSession:
         for (operation, feature, statistic), values in buffers.items():
             name = _normalization_name(operation, feature, statistic)
             tensors[name] = torch.tensor(values, dtype=torch.float32)
-        observation = self._request.config.observation
+        observation = self._request.config.model.observation
         config = json.loads(self._dump_policy_config())
         config["spiral_camera_order"] = cameras
         config["spiral_sample_hz"] = observation.rate_hz
@@ -195,10 +222,10 @@ class TrainingSession:
 
     def _policy_config(self) -> ACTConfig:
         request = self._request
-        image = request.config.observation.image
-        act = request.config.act
+        image = request.config.model.observation.image
+        act = request.config.model.architecture
         learning_rate = request.config.optimization.learning_rate
-        chunk_size = request.config.optimization.chunk_size
+        chunk_size = request.config.model.chunk_size
         return ACTConfig(
             input_features=_input_features(
                 len(request.joints.state),
@@ -207,7 +234,7 @@ class TrainingSession:
                 image.width,
             ),
             output_features=_output_features(len(request.joints.action)),
-            device=str(self._device),
+            device=str(self._device.torch_device),
             chunk_size=chunk_size,
             n_action_steps=chunk_size,
             vision_backbone="resnet18",
@@ -237,12 +264,13 @@ class TrainingSession:
             return draccus.dump(self._policy.config)
 
     def _inputs(self, batch: TrainingBatch) -> dict[str, torch.Tensor]:
-        images = torch.from_numpy(batch.images).to(self._device)
+        device = self._device.torch_device
+        images = torch.from_numpy(batch.images).to(device)
         images = _normalize_hwc_images(images, *self._image_normalization)
         inputs = {
-            STATE_FEATURE: torch.from_numpy(batch.states).to(self._device),
-            ACTION_FEATURE: torch.from_numpy(batch.actions).to(self._device),
-            "action_is_pad": torch.from_numpy(batch.action_is_pad).to(self._device),
+            STATE_FEATURE: torch.from_numpy(batch.states).to(device),
+            ACTION_FEATURE: torch.from_numpy(batch.actions).to(device),
+            "action_is_pad": torch.from_numpy(batch.action_is_pad).to(device),
         }
         for index, camera in enumerate(self._request.camera_features()):
             inputs[camera] = images[:, index]
@@ -510,15 +538,6 @@ def _checkpoint_tensor(
 def _normalization_name(operation: str, feature: str, statistic: str) -> str:
     safe_feature = feature.replace(".", "_").replace("/", "_")
     return f"{operation}.buffer_{safe_feature}.{statistic}"
-
-
-def _gpu_utilization(device: torch.device) -> float | None:
-    if device.type != "cuda":
-        return None
-    try:
-        return float(torch.cuda.utilization(device))
-    except (AttributeError, ImportError, RuntimeError, ValueError):
-        return None
 
 
 def _synchronize(device: torch.device) -> None:

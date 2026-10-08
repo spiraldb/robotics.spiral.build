@@ -5,18 +5,25 @@ each joint stream's value sampled at every tick. See docs/training.md#how-the-mo
 from __future__ import annotations
 
 import math
+import queue
+import threading
+from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 
 import numpy as np
 
-from .request import RunRequest
+from .request import ActRunRequest
 from .streams import CameraStream, ValueStream
+from .validation import EpisodeSplit
 from .video import CameraVideo
 from .volume import TrainingVolume
 
 STD_FLOOR = 1.0e-3
 NANOSECONDS = 1_000_000_000
+PREFETCH_BATCHES = 4
 
 
 @dataclass(frozen=True)
@@ -44,37 +51,6 @@ class EpisodeTicks:
 
     def __len__(self) -> int:
         return len(self.times_ns)
-
-
-@dataclass(frozen=True)
-class EpisodeSplit:
-    """Which ticks train and which validate: whole episodes held out with the run's seed."""
-
-    train: np.ndarray
-    validation: np.ndarray
-
-    @classmethod
-    def choose(cls, episode_ticks: list[int], fraction: float, seed: int) -> EpisodeSplit:
-        episodes = len(episode_ticks)
-        rng = np.random.default_rng(seed)
-        held_out = set(rng.choice(episodes, size=cls.held_out(episodes, fraction), replace=False))
-        offsets = np.cumsum([0, *episode_ticks])
-        spans = [np.arange(offsets[index], offsets[index + 1]) for index in range(episodes)]
-        return cls(
-            train=np.concatenate([span for i, span in enumerate(spans) if i not in held_out]),
-            validation=np.concatenate(
-                [np.empty(0, np.int64)] + [span for i, span in enumerate(spans) if i in held_out]
-            ),
-        )
-
-    @staticmethod
-    def held_out(episodes: int, fraction: float) -> int:
-        """`round(fraction * episodes)` (halves up), at least one when the fraction is above zero
-        and there are two or more episodes, and never every episode."""
-        count = math.floor(fraction * episodes + 0.5)
-        if fraction > 0 and episodes >= 2:
-            count = max(count, 1)
-        return min(count, episodes - 1)
 
 
 @dataclass(frozen=True)
@@ -114,8 +90,8 @@ class TrainingSamples:
     """Every tick of a run's kept intervals, sampled: frames in a uint8 memmap on local disk, the
     normalized state and action in memory."""
 
-    def __init__(self, request: RunRequest, volume: TrainingVolume, directory: Path) -> None:
-        observation = request.config.observation
+    def __init__(self, request: ActRunRequest, volume: TrainingVolume, directory: Path) -> None:
+        observation = request.config.model.observation
         optimization = request.config.optimization
         clocks = [
             EpisodeTicks.over(episode.intervals, observation.rate_hz)
@@ -156,7 +132,7 @@ class TrainingSamples:
         stats = self._normalization
         self._states = ((states - stats.state_mean) / stats.state_std).astype(np.float32)
         self._actions = ((actions - stats.action_mean) / stats.action_std).astype(np.float32)
-        self._chunk_size = optimization.chunk_size
+        self._chunk_size = request.config.model.chunk_size
 
     @property
     def ticks(self) -> int:
@@ -169,6 +145,12 @@ class TrainingSamples:
     @property
     def has_validation(self) -> bool:
         return len(self._split.validation) > 0
+
+    def train_batches(self, seed: np.random.SeedSequence, size: int) -> Iterator[TrainingBatch]:
+        """Training batches assembled on a background thread while the model runs."""
+        with BatchPrefetcher(self, size, np.random.default_rng(seed)) as batches:
+            while True:
+                yield batches.next()
 
     def train_batch(self, rng: np.random.Generator, size: int) -> TrainingBatch:
         return self.batch(rng.choice(self._split.train, size))
@@ -198,3 +180,44 @@ class TrainingSamples:
         if values.shape[1] != len(joints):
             raise ValueError(f"streams carry {values.shape[1]} values for the joints {joints}")
         return values
+
+
+class BatchPrefetcher:
+    """Draws and assembles training batches on a background thread while the model runs."""
+
+    def __init__(self, samples: TrainingSamples, size: int, rng: np.random.Generator) -> None:
+        self._batches: queue.Queue[TrainingBatch | Exception] = queue.Queue(PREFETCH_BATCHES)
+        self._closed = threading.Event()
+        self._thread = threading.Thread(
+            target=self._fill, args=(samples, size, rng), name="batch-prefetch", daemon=True
+        )
+        self._thread.start()
+
+    def __enter__(self) -> BatchPrefetcher:
+        return self
+
+    def __exit__(
+        self,
+        _type: type[BaseException] | None,
+        _error: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self._closed.set()
+        while self._thread.is_alive():
+            # A full queue blocks the thread's put; taking a batch lets it see it is closed.
+            with suppress(queue.Empty):
+                self._batches.get_nowait()
+            self._thread.join(timeout=0.1)
+
+    def next(self) -> TrainingBatch:
+        batch = self._batches.get()
+        if isinstance(batch, Exception):
+            raise batch
+        return batch
+
+    def _fill(self, samples: TrainingSamples, size: int, rng: np.random.Generator) -> None:
+        try:
+            while not self._closed.is_set():
+                self._batches.put(samples.train_batch(rng, size))
+        except Exception as error:
+            self._batches.put(error)

@@ -148,6 +148,11 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  /* The model families side by side, each a plain name. */
+  .training-model-choice {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .training-form-heading {
     @apply flex min-w-0 items-center gap-2;
   }

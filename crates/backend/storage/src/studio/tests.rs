@@ -402,6 +402,83 @@ async fn curations_before_encoding_5_are_dropped_with_the_views_they_published()
     );
 }
 
+/// A run recorded before training models had families trained ACT, and
+/// lists after the migration with its settings under `model`.
+#[tokio::test]
+async fn runs_recorded_before_model_families_become_act_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("before-training-models.sqlite3");
+    let raw = migrated_until(&path, "m20261008_000002_training_models").await;
+    let source =
+        serde_json::json!({"dataset": {"path": ["dataset_fixture"]}, "view": "fixture_view"});
+    let observation = serde_json::json!({
+        "cameras": ["/top-camera", "/left-wrist-camera"],
+        "image": {"width": 64, "height": 48},
+        "rate_hz": 10.0
+    });
+    let architecture = serde_json::json!({
+        "hidden_dim": 16, "latent_dim": 4, "encoder_layers": 1, "vae_encoder_layers": 1,
+        "decoder_layers": 1, "attention_heads": 4, "feedforward_dim": 32, "kl_weight": 1.0,
+        "pretrained_backbone": false
+    });
+    let recorded = serde_json::json!({
+        "id": "train-1",
+        "config": {
+            "run_name": "fixture-run",
+            "policy": "act",
+            "source": source,
+            "observation": observation,
+            "optimization": {
+                "steps": 6, "batch_size": 2, "validation_split": 0.5, "learning_rate": 1e-05,
+                "checkpoint_every": 3, "chunk_size": 4, "seed": 7
+            },
+            "act": architecture
+        },
+        "input": {"episodes": 2, "intervals": 3, "seconds": 5.5, "state": ["left.j1"], "action": ["left.j1"]},
+        "started_ms": 1
+    });
+    raw.execute_unprepared(&format!(
+        "INSERT INTO training_runs VALUES ('p', 'train-1', '{recorded}')"
+    ))
+    .await
+    .unwrap();
+    let store = StudioStore::at(path);
+    store.initialize().await.unwrap();
+    let row = store
+        .connection()
+        .await
+        .unwrap()
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT document FROM training_runs WHERE id = 'train-1'",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let document: serde_json::Value =
+        serde_json::from_str(&row.try_get_by_index::<String>(0).unwrap()).unwrap();
+    assert_eq!(
+        document["config"],
+        serde_json::json!({
+            "run_name": "fixture-run",
+            "source": source,
+            "model": {
+                "kind": "act",
+                "observation": observation,
+                "chunk_size": 4,
+                "architecture": architecture
+            },
+            "optimization": {
+                "steps": 6, "batch_size": 2, "validation_split": 0.5, "learning_rate": 1e-05,
+                "checkpoint_every": 3, "seed": 7
+            }
+        })
+    );
+    assert_eq!(document["input"], recorded["input"]);
+    let run: TrainingRunIdentity = serde_json::from_value(document).unwrap();
+    assert_eq!(run.config().model().cameras().len(), 2);
+}
+
 /// A database at `path` with every migration before `name` applied.
 async fn migrated_until(path: &std::path::Path, name: &str) -> sea_orm::DatabaseConnection {
     use sea_orm_migration::MigratorTrait as _;

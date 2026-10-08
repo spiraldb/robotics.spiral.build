@@ -330,26 +330,47 @@ impl RunRequest {
     }
 }
 
-/// What a run trains on: the robot, what its joints are, and each episode's
-/// intervals and streams.
+/// What a run trains on, in the shape its model family reads.
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
-pub(super) struct RunData {
-    robot_type: String,
-    joints: JointNames,
-    episodes: Vec<EpisodeStreams>,
+#[serde(untagged)]
+pub(super) enum RunData {
+    Act(ActRunData),
+    Progress(ProgressRunData),
 }
 
-impl RunData {
+/// What an ACT run trains on: the robot, what its joints are, and each
+/// episode's intervals and streams.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct ActRunData {
+    robot_type: String,
+    joints: JointNames,
+    episodes: Vec<EpisodeStreams<ActStreams>>,
+}
+
+impl ActRunData {
     pub(super) fn new(
         robot_type: String,
         joints: JointNames,
-        episodes: Vec<EpisodeStreams>,
+        episodes: Vec<EpisodeStreams<ActStreams>>,
     ) -> Self {
         Self {
             robot_type,
             joints,
             episodes,
         }
+    }
+}
+
+/// What a progress run trains on: each episode's intervals and its one
+/// camera stream.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct ProgressRunData {
+    episodes: Vec<EpisodeStreams<ProgressStreams>>,
+}
+
+impl ProgressRunData {
+    pub(super) fn new(episodes: Vec<EpisodeStreams<ProgressStreams>>) -> Self {
+        Self { episodes }
     }
 }
 
@@ -374,19 +395,15 @@ impl JointNames {
 
 /// One episode of a run: the intervals its view keeps, and its streams.
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
-pub(super) struct EpisodeStreams {
+pub(super) struct EpisodeStreams<S> {
     episode_id: String,
     intervals: Vec<[i64; 2]>,
     #[serde(flatten)]
-    streams: EpisodeStreamKeys,
+    streams: S,
 }
 
-impl EpisodeStreams {
-    pub(super) fn new(
-        episode_id: String,
-        intervals: Vec<[i64; 2]>,
-        streams: EpisodeStreamKeys,
-    ) -> Self {
+impl<S> EpisodeStreams<S> {
+    pub(super) fn new(episode_id: String, intervals: Vec<[i64; 2]>, streams: S) -> Self {
         Self {
             episode_id,
             intervals,
@@ -395,16 +412,16 @@ impl EpisodeStreams {
     }
 }
 
-/// An episode's streams: one per camera in the config's order, and the value
-/// streams whose columns concatenate into the state and the action.
-#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
-pub(super) struct EpisodeStreamKeys {
+/// An ACT episode's streams: one per camera in the config's order, and the
+/// value streams whose columns concatenate into the state and the action.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct ActStreams {
     cameras: Vec<StreamKey>,
     state: Vec<StreamKey>,
     action: Vec<StreamKey>,
 }
 
-impl EpisodeStreamKeys {
+impl ActStreams {
     pub(super) fn new(
         cameras: Vec<StreamKey>,
         state: Vec<StreamKey>,
@@ -415,6 +432,18 @@ impl EpisodeStreamKeys {
             state,
             action,
         }
+    }
+}
+
+/// A progress episode's one stream: the config's camera.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct ProgressStreams {
+    camera: StreamKey,
+}
+
+impl ProgressStreams {
+    pub(super) fn new(camera: StreamKey) -> Self {
+        Self { camera }
     }
 }
 
@@ -475,6 +504,7 @@ impl RunHistory {
 mod tests {
     use super::*;
     use serde::de::DeserializeOwned;
+    use spiral_robotics_common::training::TrainingModelKind;
 
     /// A fixture both sides read, unchanged by a round trip through its type.
     fn round_trips<T: DeserializeOwned + Serialize>(fixture: &str) -> T {
@@ -489,14 +519,22 @@ mod tests {
         let health: ServiceHealth = round_trips(include_str!("fixtures/health.json"));
         assert_eq!(health.api_version, API_VERSION);
         let request: RunRequest = round_trips(include_str!("fixtures/run-request.json"));
-        assert_eq!(request.config.observation().cameras().len(), 2);
+        assert_eq!(request.config.model().cameras().len(), 2);
+        let RunData::Act(data) = &request.data else {
+            panic!("an ACT request carries ACT data");
+        };
         assert!(
-            request
-                .data
-                .episodes
+            data.episodes
                 .iter()
                 .all(|episode| episode.streams.cameras.len() == 2)
         );
+        let request: RunRequest = round_trips(include_str!("fixtures/progress-run-request.json"));
+        assert_eq!(request.config.model().kind(), TrainingModelKind::Progress);
+        assert_eq!(request.config.model().cameras(), ["/top-camera"]);
+        let RunData::Progress(data) = &request.data else {
+            panic!("a progress request carries one camera per episode");
+        };
+        assert_eq!(data.episodes.len(), 2);
         let status: RunStatus = round_trips(include_str!("fixtures/run-status.json"));
         assert_eq!(status.checkpoints()[0].step(), 3);
         let history: RunHistory = round_trips(include_str!("fixtures/run-history.json"));

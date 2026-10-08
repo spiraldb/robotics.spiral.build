@@ -9,15 +9,15 @@ from warp_progress.warp import (
     IMAGENET_MEAN,
     IMAGENET_STD,
     DenseScores,
+    PictureEncoder,
     PresentationTimes,
     SquashPreprocessing,
-    WarpModel,
     WindowPlan,
 )
 
 
 def test_pictures_come_in_display_order_as_rgb_with_their_packet_times(episode):
-    pictures = list(WarpModel._pictures(EpisodeVideo(episode.payloads, episode.times_ns)))
+    pictures = list(PictureEncoder._pictures(EpisodeVideo(episode.payloads, episode.times_ns)))
     assert [time_ns for time_ns, _ in pictures] == sorted(episode.times_ns)
     assert pictures[0][1].shape == (48, 64, 3)
 

@@ -1,9 +1,10 @@
-//! How the model sees the data: which of the dataset's cameras it reads, the
-//! size every frame is resized to, and the clock samples are taken on.
+//! How the model sees the data. A policy reads some of the dataset's cameras,
+//! every frame resized to one size, on a clock samples are taken on; a
+//! progress model reads one camera, its recipe fixing the rest.
 //!
-//! The image size is a fraction of the size the first chosen camera records
-//! at, which one decoded frame tells; each camera of each dataset is read
-//! once while Training is open.
+//! A policy's image size is a fraction of the size the first chosen camera
+//! records at, which one decoded frame tells; each camera of each dataset is
+//! read once while Training is open.
 
 use std::collections::HashMap;
 
@@ -11,9 +12,9 @@ use dioxus::prelude::*;
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::SqlLiteral;
-use spiral_robotics_common::training::ImageSize;
+use spiral_robotics_common::training::{ImageSize, TrainingObservation};
 use spiral_robotics_ui::{
-    ActionPurpose, Fact, FactList, Field, FieldLayout, ModeButton, ModeGroup, TextInput,
+    ActionPurpose, Fact, FactList, Field, FieldLayout, ModeButton, ModeGroup, Select, TextInput,
     TextInputKind, Toggle,
 };
 
@@ -178,17 +179,16 @@ impl SourceSizes {
     }
 }
 
-/// The cameras, image size, and rate of the drafted run, over the cameras
-/// of the dataset it trains on.
+/// The cameras, image size, and rate the drafted policy reads, over the
+/// cameras of the dataset it trains on.
 #[component]
-pub(super) fn ObservationSection(
+pub(super) fn ActObservationSection(
     controller: TrainingController,
     dataset: DatasetSelection,
     cameras: DatasetCameras,
+    observation: TrainingObservation,
     locked: bool,
 ) -> Element {
-    let config = controller.config();
-    let observation = config.observation().clone();
     let chosen = observation.cameras().to_vec();
     let first = chosen.first().map(|camera| DatasetCamera {
         dataset: dataset.clone(),
@@ -232,8 +232,8 @@ pub(super) fn ObservationSection(
                                 onchange: {
                                     let (cameras, camera) = (cameras.clone(), camera.clone());
                                     move |on: bool| {
-                                        let chosen = cameras.toggled(controller.config().observation().cameras(), &camera, on);
-                                        controller.edit_config(move |config| config.observation_mut().set_cameras(chosen));
+                                        let chosen = cameras.toggled(controller.config().model().cameras(), &camera, on);
+                                        controller.edit_act(move |act| act.observation_mut().set_cameras(chosen));
                                     }
                                 },
                             }
@@ -274,8 +274,37 @@ pub(super) fn ObservationSection(
                     value: "{observation.rate_hz()}",
                     disabled: locked,
                     oninput: move |value: String| if let Ok(rate) = value.parse::<f64>() && rate > 0.0 {
-                        controller.edit_config(move |config| config.observation_mut().set_rate_hz(rate));
+                        controller.edit_act(move |act| act.observation_mut().set_rate_hz(rate));
                     },
+                }
+            }
+        }
+    }
+}
+
+/// The one camera the drafted progress model reads, among the dataset's.
+#[component]
+pub(super) fn ProgressObservationSection(
+    controller: TrainingController,
+    cameras: DatasetCameras,
+    camera: String,
+    locked: bool,
+) -> Element {
+    rsx! {
+        section { class: "training-form-section",
+            header { class: "training-form-heading", h3 { "Model input" } }
+            if cameras.names().is_empty() {
+                p { class: "training-setup-note training-setup-problem", "This dataset records no video." }
+            } else {
+                Field { label: "Camera", layout: FieldLayout::Inline,
+                    Select {
+                        value: camera.clone(),
+                        disabled: locked,
+                        onchange: move |camera: String| controller.set_progress_camera(camera),
+                        for name in cameras.names().iter().cloned() {
+                            option { key: "{name}", value: "{name}", selected: name == camera, "{name}" }
+                        }
+                    }
                 }
             }
         }

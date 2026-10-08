@@ -1,16 +1,18 @@
-//! The Setup panel: what the next run trains on, how its model sees the
-//! data, and how long it trains; and, while a run is active, how far it has
-//! got and the way to stop it.
+//! The Setup panel: which model the next run trains, what it trains on, how
+//! that model sees the data, and how long it trains; and, while a run is
+//! active, how far it has got and the way to stop it.
 
 use dioxus::prelude::*;
-use spiral_robotics_common::training::{TrainingRun, TrainingRunPhase};
+use spiral_robotics_common::training::{
+    TrainingModel, TrainingModelKind, TrainingRun, TrainingRunPhase,
+};
 use spiral_robotics_ui::{
-    ActionPurpose, Button, ButtonSize, ButtonVariant, Disclosure, Field, FieldLayout, Notice,
-    NoticeTone, TextInput, TextInputKind,
+    ActionPurpose, Button, ButtonSize, ButtonVariant, Disclosure, Field, FieldLayout, ModeButton,
+    ModeGroup, Notice, NoticeTone, TextInput, TextInputKind,
 };
 
 use super::history::TrainingHistory;
-use super::observation::ObservationSection;
+use super::observation::{ActObservationSection, ProgressObservationSection};
 use super::run_detail::TrainingPresentation;
 use super::source::{TrainingDataReads, TrainingDataSection};
 use super::state::TrainingController;
@@ -38,13 +40,20 @@ pub(super) fn TrainingSetup(
     let active_run = snapshot.active_run().cloned();
     let starting = controller.starting();
     let locked = active_run.is_some();
+    let run_names = snapshot
+        .runs()
+        .iter()
+        .map(|run| run.config().run_name().to_owned())
+        .collect::<Vec<_>>();
+    // Only a policy reads the joints.
+    let policy = matches!(config.model(), TrainingModel::Act(_));
     let blocker = if active_run.is_some() {
         Some("Stop the active run first".to_owned())
     } else if !listed {
         Some("Choose a published view first".to_owned())
-    } else if observed.as_ref().is_none_or(|read| read.joints().is_err()) {
+    } else if policy && observed.as_ref().is_none_or(|read| read.joints().is_err()) {
         Some("The dataset’s joints must be identified first".to_owned())
-    } else if config.observation().cameras().is_empty() {
+    } else if config.model().cameras().is_empty() {
         Some("Choose a camera first".to_owned())
     } else if !readiness.ready() {
         Some(readiness.summary().to_owned())
@@ -61,13 +70,27 @@ pub(super) fn TrainingSetup(
                 if let Some(run) = active_run {
                     ActiveRun { project, controller, run }
                 }
+                ModelChoice { controller, run_names, locked }
                 TrainingDataSection { controller, views, inputs: dataset_inputs, locked }
                 if let Some(read) = observed {
-                    ObservationSection {
-                        controller,
-                        dataset: read.dataset().clone(),
-                        cameras: read.cameras().clone(),
-                        locked,
+                    match config.model() {
+                        TrainingModel::Act(act) => rsx! {
+                            ActObservationSection {
+                                controller,
+                                dataset: read.dataset().clone(),
+                                cameras: read.cameras().clone(),
+                                observation: act.observation().clone(),
+                                locked,
+                            }
+                        },
+                        TrainingModel::Progress(progress) => rsx! {
+                            ProgressObservationSection {
+                                controller,
+                                cameras: read.cameras().clone(),
+                                camera: progress.camera().to_owned(),
+                                locked,
+                            }
+                        },
                     }
                 }
                 RunSection { controller, locked }
@@ -140,6 +163,32 @@ fn ActiveRun(
     }
 }
 
+/// Which family of model the next run trains; choosing one takes its
+/// family's defaults.
+#[component]
+fn ModelChoice(controller: TrainingController, run_names: Vec<String>, locked: bool) -> Element {
+    let chosen = controller.config().model().kind();
+    rsx! {
+        section { class: "training-form-section",
+            ModeGroup { label: "Model".to_owned(), class: "training-model-choice".to_owned(),
+                for kind in TrainingModelKind::ALL {
+                    ModeButton {
+                        key: "{kind.label()}",
+                        purpose: ActionPurpose::Select,
+                        checked: kind == chosen,
+                        disabled: locked,
+                        onclick: {
+                            let run_names = run_names.clone();
+                            move |_| controller.choose_model(kind, &run_names)
+                        },
+                        "{kind.label()}"
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The run's name and length, and the optimizer's settings on demand.
 #[component]
 fn RunSection(controller: TrainingController, locked: bool) -> Element {
@@ -189,14 +238,16 @@ fn RunSection(controller: TrainingController, locked: bool) -> Element {
                         },
                     }
                 }
-                Field { label: "Action horizon",
-                    TextInput {
-                        kind: TextInputKind::Number, min: "1", max: "256",
-                        value: "{config.chunk_size()}",
-                        disabled: locked,
-                        oninput: move |value: String| if let Ok(value) = value.parse() {
-                            controller.edit_config(move |config| config.set_chunk_size(value));
-                        },
+                if let TrainingModel::Act(act) = config.model() {
+                    Field { label: "Action horizon",
+                        TextInput {
+                            kind: TextInputKind::Number, min: "1", max: "256",
+                            value: "{act.chunk_size()}",
+                            disabled: locked,
+                            oninput: move |value: String| if let Ok(value) = value.parse() {
+                                controller.edit_act(move |act| act.set_chunk_size(value));
+                            },
+                        }
                     }
                 }
                 Field { label: "Learning rate",

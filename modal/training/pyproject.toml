@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "spiral-training-runtime"
 version = "0.1.0"
-description = "ACT training on Modal and the local policy runtime for Spiral Robotics"
+description = "ACT and progress-model training on Modal, and the local policy runtime for Spiral Robotics"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -45,6 +45,8 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Upstream's code, kept byte for byte.
+extend-exclude = ["src/spiral_training_runtime/warp_rm_upstream"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

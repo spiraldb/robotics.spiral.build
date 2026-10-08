@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use spiral_robotics_common::training::{
-    CheckpointPolicy, TrainingCheckpoint, TrainingConfig, TrainingReadiness, TrainingRun,
-    TrainingRunIdentity, TrainingRunStatus, TrainingSnapshot,
+    CheckpointModel, CheckpointPolicy, TrainingCheckpoint, TrainingConfig, TrainingModel,
+    TrainingReadiness, TrainingRun, TrainingRunIdentity, TrainingRunStatus, TrainingSnapshot,
 };
 use spiral_robotics_inference::ModelArtifact;
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
@@ -101,6 +101,14 @@ impl TrainingManager {
         run_id: &str,
         step: u64,
     ) -> Result<ModelArtifact, OperationError> {
+        if !matches!(
+            self.record(run_id).await?.config().model(),
+            TrainingModel::Act(_)
+        ) {
+            return Err(OperationError::invalid_input(format!(
+                "Training run {run_id:?} trained no policy to roll out."
+            )));
+        }
         let (config, weights) = self
             .service()
             .map_err(OperationError::External)?
@@ -301,7 +309,8 @@ impl RunReports {
         }
     }
 
-    /// Every checkpoint the service reports, with what its policy expects.
+    /// Every checkpoint the service reports, with its model's family and,
+    /// for a policy, what it expects.
     fn checkpoints(&self) -> Vec<TrainingCheckpoint> {
         let Ok(statuses) = &self.service else {
             return Vec::new();
@@ -313,16 +322,17 @@ impl RunReports {
                     .records
                     .iter()
                     .find(|record| record.id() == status.run_id())?;
-                let config = record.config();
-                let policy = CheckpointPolicy::new(
-                    config.observation().cameras().to_vec(),
-                    config.chunk_size(),
-                    Some(config.observation().rate_hz()),
-                );
+                let model = match record.config().model() {
+                    TrainingModel::Act(act) => CheckpointModel::Act(CheckpointPolicy::new(
+                        act.observation().cameras().to_vec(),
+                        act.chunk_size(),
+                        Some(act.observation().rate_hz()),
+                    )),
+                    TrainingModel::Progress(_) => CheckpointModel::Progress,
+                };
                 Some(status.checkpoints().iter().map(move |checkpoint| {
-                    TrainingCheckpoint::new(status.run_id(), checkpoint.step())
+                    TrainingCheckpoint::new(status.run_id(), checkpoint.step(), model.clone())
                         .with_validation_loss(checkpoint.validation_loss())
-                        .with_policy(policy.clone())
                 }))
             })
             .flatten()

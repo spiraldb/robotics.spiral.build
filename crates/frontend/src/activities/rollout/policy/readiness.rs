@@ -101,8 +101,9 @@ mod tests {
         RobotSummary,
     };
     use spiral_robotics_common::training::{
-        CheckpointPolicy, TrainingCheckpoint, TrainingConfig, TrainingInputSummary, TrainingRun,
-        TrainingRunIdentity, TrainingRunPhase, TrainingRunStatus,
+        CheckpointModel, CheckpointPolicy, TrainingCheckpoint, TrainingConfig,
+        TrainingInputSummary, TrainingRun, TrainingRunIdentity, TrainingRunPhase,
+        TrainingRunStatus,
     };
 
     use super::PolicyReadiness;
@@ -149,7 +150,11 @@ mod tests {
             10,
             Some(30.0),
         );
-        let checkpoints = [TrainingCheckpoint::new("run", 1_000).with_policy(policy)];
+        let checkpoints = [TrainingCheckpoint::new(
+            "run",
+            1_000,
+            CheckpointModel::Act(policy),
+        )];
         CheckpointChoice::listed(&[run], &checkpoints).remove(0)
     }
 

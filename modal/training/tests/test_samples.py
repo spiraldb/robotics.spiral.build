@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pytest
-from conftest import NANOSECONDS, SyntheticCamera, SyntheticRun, value_table
 
 from spiral_training_runtime.errors import RuntimeRequestError
 from spiral_training_runtime.samples import (
@@ -18,6 +17,7 @@ from spiral_training_runtime.samples import (
     TrainingSamples,
 )
 from spiral_training_runtime.streams import CameraStream, ValueStream
+from spiral_training_runtime.testing import NANOSECONDS, SyntheticCamera, SyntheticRun, value_table
 from spiral_training_runtime.video import CameraVideo
 
 

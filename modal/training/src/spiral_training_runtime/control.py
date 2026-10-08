@@ -25,13 +25,25 @@ from starlette.exceptions import HTTPException
 
 from .errors import RuntimeRequestError
 from .report import RunHistory, RunStatus
-from .request import NAME_PATTERN, STREAM_KEY_PATTERN, RunKey, RunRequest, StreamKey, WireModel
+from .request import (
+    NAME_PATTERN,
+    STREAM_KEY_PATTERN,
+    ModelKind,
+    RunKey,
+    RunRequest,
+    StreamKey,
+    WireModel,
+)
 from .stop import StopFlags
 from .streams import UploadedStream
 from .volume import TrainingVolume
 
 API_VERSION = 1
+# ACT's GPU, which `/v1/health` reports.
 GPU = "L4"
+# A progress model trains on batches of 1,024 32-step windows in fp32, as upstream does, which need
+# more than an L4's 24 GB.
+PROGRESS_GPU = "H100"
 CHECKPOINT_FILES = {
     "config": ("config.json", "application/json"),
     "model": ("model.safetensors", "application/octet-stream"),
@@ -45,10 +57,10 @@ StreamKeyParameter = Annotated[str, PathParameter(pattern=STREAM_KEY_PATTERN)]
 
 
 class TrainingCalls(Protocol):
-    """The GPU job's function calls; Modal's in production."""
+    """The GPU jobs' function calls, one function per model family; Modal's in production."""
 
-    def spawn(self, request_json: str) -> str:
-        """Starts a run's job and answers its call ID."""
+    def spawn(self, kind: ModelKind, request_json: str) -> str:
+        """Starts a run's job on its family's function and answers its call ID."""
         ...
 
     def ended(self, call_id: str) -> bool:
@@ -78,7 +90,7 @@ class RunControl:
 
     def create(self, body: bytes) -> tuple[RunStatus, bool]:
         """The posted run's status, and whether this post started it."""
-        request = RunRequest.model_validate_json(body)
+        request = RunRequest.model_validate_json(body).root
         key = request.key
         files = self._volume.run(key)
         with self._creating:
@@ -96,7 +108,7 @@ class RunControl:
                     f"the run reads {len(missing)} streams the service lacks: {', '.join(missing)}",
                     422,
                 )
-            call_id = self._calls.spawn(body.decode())
+            call_id = self._calls.spawn(request.config.model.kind, body.decode())
             with self._volume.writing():
                 files.write_request(body)
                 files.write_call_id(call_id)
@@ -288,7 +300,10 @@ class ControlService:
         _request: Request, error: RequestValidationError | ValidationError
     ) -> JSONResponse:
         problems = "; ".join(
-            f"{'.'.join(map(str, problem['loc']))}: {problem['msg']}" for problem in error.errors()
+            f"{'.'.join(map(str, problem['loc']))}: {problem['msg']}"
+            if problem["loc"]
+            else problem["msg"]
+            for problem in error.errors()
         )
         return JSONResponse({"error": problems}, status_code=422)
 

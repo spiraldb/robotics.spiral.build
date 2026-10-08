@@ -12,7 +12,7 @@ use charming::element::{
 use charming::series::Line;
 use dioxus::prelude::*;
 use spiral_robotics_common::training::{
-    TrainingCheckpoint, TrainingMetricPoint, TrainingRun, TrainingRunPhase,
+    TrainingCheckpoint, TrainingMetricPoint, TrainingModel, TrainingRun, TrainingRunPhase,
 };
 use spiral_robotics_ui::{Disclosure, Fact, FactLayout, FactList};
 
@@ -49,7 +49,7 @@ pub(super) fn TrainingRunDetail(
                         h2 { "{run.config().run_name()}" }
                         span { class: run.phase_class(), "{run.phase().label()}" }
                     }
-                    p { "{run.config().policy().label()}" }
+                    p { "{run.config().model().kind().label()}" }
                 }
                 FactList { layout: FactLayout::Strip, mono: true, class: "training-run-facts",
                     Fact { label: "Step", "{run.current_step()} / {run.config().steps()}" }
@@ -185,7 +185,6 @@ fn TrainingLearning(run: TrainingRun, checkpoints: Vec<TrainingCheckpoint>) -> E
 #[component]
 fn TrainingInputs(run: TrainingRun) -> Element {
     let config = run.config();
-    let observation = config.observation();
     let input = run.input();
     let counted =
         |count: usize, noun: &str| format!("{count} {noun}{}", if count == 1 { "" } else { "s" });
@@ -200,7 +199,6 @@ fn TrainingInputs(run: TrainingRun) -> Element {
     } else {
         format!("{:.0}% · episode", config.validation_split() * 100.0)
     };
-    let cameras = observation.cameras().join(", ");
     let joints = format!(
         "State: {}\nAction: {}",
         input.state().join(", "),
@@ -212,15 +210,24 @@ fn TrainingInputs(run: TrainingRun) -> Element {
                 Fact { label: "View", "{config.source().view()}" }
                 Fact { label: "Dataset", "{config.source().dataset().display_name()}" }
                 Fact { label: "Data", class: "training-input-wide", "{data}" }
-                Fact { label: "Cameras", class: "training-input-wide", "{cameras}" }
-                Fact { label: "Image size", "{observation.image().size_label()}" }
-                Fact { label: "Rate", "{observation.rate_hz()} Hz" }
-                Fact { label: "State · action", title: "{joints}",
-                    "{input.state().len()} · {input.action().len()}"
+                match config.model() {
+                    TrainingModel::Act(act) => rsx! {
+                        Fact { label: "Cameras", class: "training-input-wide", {act.observation().cameras().join(", ")} }
+                        Fact { label: "Image size", "{act.observation().image().size_label()}" }
+                        Fact { label: "Rate", "{act.observation().rate_hz()} Hz" }
+                        Fact { label: "State · action", title: "{joints}",
+                            "{input.state().len()} · {input.action().len()}"
+                        }
+                    },
+                    TrainingModel::Progress(progress) => rsx! {
+                        Fact { label: "Camera", "{progress.camera()}" }
+                    },
                 }
                 Fact { label: "Batch", "{config.batch_size()} samples" }
                 Fact { label: "Validation", "{validation}" }
-                Fact { label: "Action horizon", "{config.chunk_size()} steps" }
+                if let TrainingModel::Act(act) = config.model() {
+                    Fact { label: "Action horizon", "{act.chunk_size()} steps" }
+                }
                 Fact { label: "Checkpoint interval", "{config.checkpoint_every()} steps" }
             }
         }
@@ -668,8 +675,8 @@ impl RunCheckpoints for [TrainingCheckpoint] {
 mod tests {
     use super::*;
     use spiral_robotics_common::training::{
-        TrainingConfig, TrainingInputSummary, TrainingRunHistory, TrainingRunIdentity,
-        TrainingRunStatus,
+        CheckpointModel, TrainingConfig, TrainingInputSummary, TrainingRunHistory,
+        TrainingRunIdentity, TrainingRunStatus,
     };
 
     fn run_with(status: TrainingRunStatus, metrics: Vec<TrainingMetricPoint>) -> TrainingRun {
@@ -738,7 +745,11 @@ mod tests {
             TrainingRunStatus::default(),
             vec![TrainingMetricPoint::new(25, 0.5).with_event("loader stall")],
         );
-        let ticks = run.event_ticks(&[TrainingCheckpoint::new("run", 50)]);
+        let ticks = run.event_ticks(&[TrainingCheckpoint::new(
+            "run",
+            50,
+            CheckpointModel::Progress,
+        )]);
         assert_eq!(ticks[0].class, "training-event-checkpoint");
         assert_eq!(ticks[0].label, "Checkpoint saved at step 50");
         assert_eq!(ticks[1].class, "training-event-stall");
