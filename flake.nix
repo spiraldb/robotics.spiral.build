@@ -195,6 +195,9 @@
             contents = [
               # The driver verifies TLS against the system's certificates.
               pkgs.dockerTools.caCertificates
+              # Spiral's engine resolves named time zones, `UTC` included,
+              # through a time zone database (a Location's `last_modified`).
+              pkgs.tzdata
               (pkgs.dockerTools.fakeNss.override {
                 extraPasswdLines = [ "studio:x:10001:10001::${studioHome}:/sbin/nologin" ];
                 extraGroupLines = [ "studio:x:10001:" ];
@@ -215,6 +218,7 @@
               ];
               Env = [
                 "HOME=${studioHome}"
+                "TZDIR=${pkgs.tzdata}/share/zoneinfo"
                 "SPIRAL_ROBOTICS_STUDIO_DB=${studioHome}/studio.sqlite3"
                 # Spiral's sign-in returns browsers to this address's /callback.
                 "SPIRAL_ROBOTICS_PUBLIC_URL=https://robotics.spiraldb.com"
