@@ -18,47 +18,9 @@ A progress model has to learn what good looks like, and that usually means someo
 
 This is the WARP-RM paper's own recipe, which needed no manual labels. It trained on the shortest 25% of demos for each bottle count ([below](#the-expert-rule)).
 
-## Narration and screen action (draft)
+## Narration and screen action
 
-The lines are a first draft for the story, not timed. Beats marked **needs build** depend on [what's missing](#how-far-we-are).
-
-**Opening: Data.** The full dataset, about 2,400 demos (**needs build**: the [full import](#how-far-we-are)). Open the hero and play the turning at 1×.
-
-> These are about 2,400 demos of a robot clearing bottles into a bin. Some are quick and clean. Others drag.
-
-> Watch the left gripper. It keeps turning the bottle instead of letting go.
-
-> A progress model can catch moments like this, but first it has to learn what good looks like. So let's teach it with our best demos.
-
-**Track the bottles.** Curation → Dataset + → **Track objects**, "bottle" on the top camera, 5 per second. The fill eases into a time-lapse, and an episode opens with every bottle boxed.
-
-> Each demo has two to six bottles, so time alone isn't fair. Track objects counts them.
-
-**Pick the experts** (**being built**). Track objects + → **Select** → **Duration per bottle**, **lowest 25%**. The strip shows where the cut lands (on the sample it's 7.2 s per bottle).
-
-> Then I keep the fastest quarter, by time per bottle. Those are my experts.
-
-**Publish** `expert_demos`. Secondary steps, fast.
-
-> I publish them as a view.
-
-**Train** (**needs build**). Training → view `expert_demos` → **Progress model** → Start. Uploading and training ease into a time-lapse of the loss curve.
-
-> In Training, I train a progress model on that view. It runs on a cloud GPU, reading the clips from SpiralDB.
-
-**Publish the model** (**needs build**). On the finished run, **Publish model** → name it "Bottle experts".
-
-> When it's done, I publish the model.
-
-**Use it** (**needs build**). Curation → a curation over the long demos → **Score progress**, scored by **Bottle experts** → **Select**, progress rate at least the cutoff. The hero's left-out stretch replays at 1×.
-
-> Back in Curation, Score progress can use it. And it flags the same moment, the bottle turning in the gripper.
-
-**Data.** Publish and open the view. End on the loaded view, then the end card.
-
-> The demos you trust train the model that cleans up the rest.
-
-Pacing: Track objects at full scale, the upload and the training are long waits, so each becomes a short eased time-lapse. Their answers and the trained model are stored, so later takes run fast, as in the tour.
+The script is [progress-loop.md](progress-loop.md) (October 8): the same loop, extended to clean every demo with the trained model and train the policy on them, in four chapters, about 90 seconds.
 
 ## How far we are
 

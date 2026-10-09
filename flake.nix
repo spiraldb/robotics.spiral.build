@@ -85,11 +85,11 @@
           ];
           # Pin the official standalone release and its archive checksums here.
           # Rust builds never compile the embedded engine.
-          adbcVersion = "0.16.43";
+          adbcVersion = "0.16.45";
           adbcArchiveHashes = {
-            aarch64-apple-darwin = "5bb2c2031c3c1a75d583a67bba134f14a9fabd3ac00b5596b48fdefd1e6d6b25";
-            aarch64-unknown-linux-gnu = "bccecbfc624b8fd3aa1526a600ff071966263e7009e597bd3193297b3ddb8f93";
-            x86_64-unknown-linux-gnu = "537a010fa5216e1446c8b975da35967477cb1ffb5a130e9f5582ae2f7f1c98e0";
+            aarch64-apple-darwin = "812c37d536de251e1c3dc3f56c9bffeb2560adc7559cb8f36e9ca5becadfadee";
+            aarch64-unknown-linux-gnu = "35fb2b2911b3750ba3a54686f99d3266b18edf883c013e5cee4e6a0ed5d0d198";
+            x86_64-unknown-linux-gnu = "cc3e4034ca87f5c9f06c0902f3a3fd2e779b2a066707bc8d24587e69cdc9737d";
           };
           adbcTarget =
             {

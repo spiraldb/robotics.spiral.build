@@ -41,9 +41,11 @@ standalone deployment, include its library beside the server or supply the
 absolute override. The `local-driver` development shell selects an upstream
 validation build without adding a Spiral source dependency to Studio.
 
-The pinned `0.16.43` driver includes the storage-binding client that Spiral
+The pinned `0.16.45` driver includes the storage-binding client that Spiral
 application sessions need (upstream
-[PR #7595](https://github.com/spiraldb/spiraldb/pull/7595)). Move the archive pin
+[PR #7595](https://github.com/spiraldb/spiraldb/pull/7595)) and the LeRobot
+dataset producer, `spql.lerobot.dataset`
+([PR #7688](https://github.com/spiraldb/spiraldb/pull/7688)). Move the archive pin
 only to a published driver that passes the hosted contract below; a source
 release alone does not update the downloaded library.
 
