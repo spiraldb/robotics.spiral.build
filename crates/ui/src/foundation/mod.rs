@@ -17,5 +17,4 @@ pub use icons::{
 };
 pub use motion::{Flight, Motion, Place};
 pub use remount::Remount;
-pub use styles::UiStyles;
 pub(crate) use styles::{AttributeClass, ClassNames};

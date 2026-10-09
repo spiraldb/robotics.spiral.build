@@ -2,9 +2,9 @@
 //!
 //! One design language, spelled once: every Studio surface builds from the
 //! same actions, fields, facts, disclosures, trees, and notices, and the
-//! surface owns only layout and domain content. The
-//! stylesheet ships with the crate; install it once with [`UiStyles`] beside
-//! the application shell. Colours are role tokens (`--ui-*`) that follow the
+//! surface owns only layout and domain content. The stylesheet and its
+//! typefaces ship with the crate, and DX links them from the page head of any
+//! bundle that uses it. Colours are role tokens (`--ui-*`) that follow the
 //! host's `--tone-*` palette when it defines one.
 //!
 //! A [`Button`] names what it does through an [`ActionPurpose`] before it
@@ -39,6 +39,6 @@ pub use display::{
 pub use foundation::{
     BrowserFocus, CheckIcon, ChevronIcon, ChevronIconProps, CloseIcon, CopyIcon, DeleteIcon,
     Flight, Motion, PauseIcon, Place, PlayIcon, RefreshIcon, Remount, SkipToEndIcon,
-    SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon, UiStyles, UnassignIcon,
-    ZoomInIcon, ZoomOutIcon,
+    SkipToStartIcon, SpinnerIcon, StepBackIcon, StepForwardIcon, UnassignIcon, ZoomInIcon,
+    ZoomOutIcon,
 };

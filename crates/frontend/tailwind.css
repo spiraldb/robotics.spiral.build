@@ -623,25 +623,29 @@ button.studio-status-connection[aria-expanded="true"] {
   }
 }
 
-/* Signed out: the mark, the product's name in the brand's two weights, and
-   the one way in, set as a small upright stack on the canvas. */
-.sign-in-gate {
+/* Before a workspace mounts: the mark, the product's name in the brand's two
+   weights, and one line below them, set as a small upright stack on the
+   canvas. The line is a status while the Studio loads or connects and the
+   sign-in button when signed out; both are one button tall, so the stack
+   stays put as one replaces the other. `index.html` sets the same stack. */
+.studio-gate {
+  position: fixed;
+  inset: 0;
   display: flex;
-  height: 100%;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 14px;
-  padding-bottom: 8vh;
+  padding: 0 16px 8vh;
   background: var(--tone-canvas);
 }
 
-.sign-in-gate .spiral-mark {
+.studio-gate .spiral-mark {
   width: 34px;
   height: 34px;
 }
 
-.sign-in-gate h1 {
+.studio-gate h1 {
   margin: 0 0 6px;
   color: var(--tone-ink-faint);
   font-size: 19px;
@@ -649,14 +653,26 @@ button.studio-status-connection[aria-expanded="true"] {
   letter-spacing: -0.03em;
 }
 
-.sign-in-gate .sign-in-brand {
+.studio-gate .studio-gate-brand {
   color: var(--tone-ink);
   font-weight: 560;
 }
 
-.sign-in-gate .ui-button {
+.studio-gate .ui-button {
   min-height: 34px;
   padding-inline: 16px;
+}
+
+.studio-gate-status {
+  display: flex;
+  min-height: 34px;
+  max-width: 48ch;
+  align-items: center;
+  margin: 0;
+  color: var(--tone-ink-faint);
+  font-size: 12px;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 
 /* Every shortcut, grouped by where it works. */

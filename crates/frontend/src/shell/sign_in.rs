@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use spiral_robotics_common::account::SignInRequest;
 use spiral_robotics_ui::{ActionPurpose, ButtonVariant, LinkButton};
 
-use crate::components::icons::SpiralMark;
+use super::gate::StudioGate;
 
 /// The backend's sign-in page, returning to the page this browser shows now.
 struct SignInLink;
@@ -33,19 +33,12 @@ impl SignInLink {
 pub(super) fn SignInGate() -> Element {
     let href = use_hook(SignInLink::here);
     rsx! {
-        div { class: "studio-shell studio-shell-v2",
-            main { class: "sign-in-gate",
-                SpiralMark {}
-                h1 {
-                    span { class: "sign-in-brand", "spiral" }
-                    " robotics studio"
-                }
-                LinkButton {
-                    purpose: ActionPurpose::Navigate,
-                    variant: ButtonVariant::Solid,
-                    href,
-                    "Sign in with Spiral"
-                }
+        StudioGate {
+            LinkButton {
+                purpose: ActionPurpose::Navigate,
+                variant: ButtonVariant::Solid,
+                href,
+                "Sign in with Spiral"
             }
         }
     }

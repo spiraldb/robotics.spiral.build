@@ -9,13 +9,12 @@ use crate::activities::settings::panel::SettingsWorkspace;
 use crate::activities::training::workspace::TrainingWorkspace;
 use crate::shell::activity::Activity;
 use crate::shell::frame::StudioTopBar;
+use crate::shell::gate::StudioGate;
 use crate::shell::project::ProjectSelection;
 use crate::shell::state::StudioProjectState;
 use spiral_robotics_common::project::ProjectKey;
 
-const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const ECHARTS_RUNTIME: &str = "https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js";
-const FAVICON: Asset = asset!("/assets/favicon.svg");
 
 #[derive(Clone, Routable, Debug, PartialEq)]
 pub(crate) enum StudioRoute {
@@ -89,12 +88,11 @@ fn StudioShell() -> Element {
     selection.use_polling();
     let project = selection.selected().filter(|_| !selection.signed_out());
     rsx! {
-        document::Stylesheet { href: TAILWIND }
         if selection.signed_out() {
             super::sign_in::SignInGate {}
         } else if project.is_none() {
-            div { class: "studio-shell studio-shell-v2",
-                div { class: "editor-empty", role: "status", "Connecting to Studio…" }
+            StudioGate {
+                p { class: "studio-gate-status", role: "status", "Connecting to Studio…" }
             }
         }
         for project in project {
@@ -130,8 +128,6 @@ fn ProjectStudioShell(project: ProjectKey) -> Element {
     rsx! {
         document::Script { src: ECHARTS_RUNTIME }
         document::Title { "{title}" }
-        document::Link { rel: "icon", href: FAVICON }
-        document::Meta { name: "color-scheme", content: "light" }
         div { class: "studio-shell studio-shell-v2",
             div { class: "studio-shell-background",
                 main { class: "studio-v2-body studio-route-layout",
