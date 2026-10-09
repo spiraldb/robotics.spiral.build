@@ -11,7 +11,7 @@ safely executes trained policies through the follower's bounded rollout path.
 It runs as two programs. **Studio** (`crates/backend` and `crates/frontend`)
 serves the browser app, keeps Studio state, and reaches SpiralDB; it runs at
 `robotics.spiraldb.com` or on `localhost`. The **robot connector**
-(`crates/robot-connector`) runs next to the arms: it owns their serial buses,
+(`robot-connector`) runs next to the arms: it owns their serial buses,
 cameras, calibration, and control loop, records takes, and rolls out policies.
 The browser talks to the robot connector directly — Studio never reaches it —
 carries each finished take from it to Studio, and writes the checkpoints Studio
@@ -46,7 +46,7 @@ Start the robot connector next to the arms, from the workspace root in the
 Nix shell (which supplies FFmpeg for camera recording):
 
 ```console
-cargo run -p spiral-robotics-robot-connector
+cargo run -p spiral-robotics-connector-desktop
 ```
 
 It listens on `http://127.0.0.1:7070` and keeps its robots, unsent takes, and

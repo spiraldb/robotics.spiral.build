@@ -1,0 +1,245 @@
+//! Open a robot connector on the machine's devices and serve its HTTP API.
+//!
+//! The program around it — a computer's command line or a microcontroller's
+//! firmware — supplies the platform's devices, binds the listener, and decides
+//! when to stop.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::context::{RobotConnectorContext, RobotConnectorDevices};
+use crate::robotics::cameras::{CameraDevices, CameraManager};
+use crate::robotics::video::VideoEncoder;
+use crate::robots::models::RobotModelStore;
+use crate::robots::workspace::RobotWorkspace;
+#[cfg(feature = "simulation")]
+use crate::simulation::{DemoBench, SimulatedWorld};
+use spiral_robotics_hardware::{ControlSettings, HardwareHandle, SerialLines};
+use tokio::sync::watch;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Camera streams are intentionally long lived, so graceful draining
+/// gets a short deadline instead of being allowed to hold process exit open.
+const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+/// Motor and camera cleanup normally completes within one control/frame cycle;
+/// the final encoder segment and recording file need time to finish.
+const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// What the machine running the connector provides: the serial ports arms
+/// are wired to, its cameras, and an H.264 encoder for recordings.
+pub struct ConnectorPlatform {
+    serial_lines: Arc<dyn SerialLines>,
+    cameras: Arc<dyn CameraDevices>,
+    video_encoder: Arc<dyn VideoEncoder>,
+}
+
+impl ConnectorPlatform {
+    pub fn new(
+        serial_lines: Arc<dyn SerialLines>,
+        cameras: Arc<dyn CameraDevices>,
+        video_encoder: Arc<dyn VideoEncoder>,
+    ) -> Self {
+        Self {
+            serial_lines,
+            cameras,
+            video_encoder,
+        }
+    }
+}
+
+/// Where a connector keeps its state, and how it drives arms and policies.
+pub struct ConnectorSettings {
+    data_dir: PathBuf,
+    policy_runtime: String,
+    control: ControlSettings,
+}
+
+impl ConnectorSettings {
+    /// Keep saved robots, unsent takes, and policies under `data_dir`, and
+    /// roll policies out on the runtime at `policy_runtime`.
+    pub fn new(data_dir: PathBuf, policy_runtime: String, control: ControlSettings) -> Self {
+        Self {
+            data_dir,
+            policy_runtime,
+            control,
+        }
+    }
+}
+
+/// A connector with its control loop running and its saved state open,
+/// ready to serve Studio.
+pub struct RobotConnector(RobotConnectorContext);
+
+impl RobotConnector {
+    /// Start the control loop on `platform`'s devices and open the state
+    /// `settings` names.
+    pub fn open(platform: ConnectorPlatform, settings: ConnectorSettings) -> Result<Self> {
+        let ConnectorPlatform {
+            serial_lines,
+            cameras,
+            video_encoder,
+        } = platform;
+        let ConnectorSettings {
+            data_dir,
+            policy_runtime,
+            control,
+        } = settings;
+        tracing::info!(path = %data_dir.display(), "robot connector data directory");
+        let hardware = Arc::new(HardwareHandle::spawn(control, serial_lines.clone()));
+        let workspace = Arc::new(RobotWorkspace::open(
+            data_dir.join("robots.json"),
+            RobotModelStore::new(data_dir.join("models")),
+        )?);
+        // Arms with simulated motors are filmed by drawing them.
+        #[cfg(feature = "simulation")]
+        let simulated = Some(
+            Arc::new(SimulatedWorld::new(workspace.clone(), hardware.clone()))
+                as Arc<dyn CameraDevices>,
+        );
+        #[cfg(not(feature = "simulation"))]
+        let simulated = None;
+        let cameras = Arc::new(CameraManager::new(cameras, simulated));
+        let devices = RobotConnectorDevices::new(hardware, serial_lines, cameras, video_encoder);
+        Ok(Self(RobotConnectorContext::open(
+            devices,
+            workspace,
+            &data_dir,
+            policy_runtime,
+        )))
+    }
+
+    #[cfg(feature = "simulation")]
+    /// Save the simulated demo bench — a hand-guided leader and a filmed
+    /// follower — over whatever this connector held under their names.
+    pub async fn install_demo_bench(&self) -> Result<()> {
+        Ok(DemoBench::install(self.0.workspace()).await?)
+    }
+
+    /// Show the operator a camera problem discovery cannot detect, such as a
+    /// denied permission prompt.
+    pub fn note_camera_issue(&self, message: impl Into<String>) {
+        self.0.cameras().note_issue(message);
+    }
+
+    /// Serve Studio on `listener` until `shutdown` turns true, then release
+    /// motors and cameras.
+    pub async fn serve(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<()> {
+        let connector = self.0;
+        // Cameras and saved robots come up once requests are already being
+        // answered, so a slow probe never delays the API.
+        let bootstrap = tokio::spawn({
+            let connector = connector.clone();
+            async move {
+                crate::robotics::cameras::CameraDiscovery::new(connector.cameras().clone())
+                    .run()
+                    .await;
+                crate::robots::operations::RobotOperations::new(&connector)
+                    .auto_connect_saved()
+                    .await;
+            }
+        });
+        let app = super::routes::RobotConnectorApi::router(connector.clone())
+            .layer(tower_http::trace::TraceLayer::new_for_http());
+
+        // Both the server and this task observe the same edge. The server begins
+        // graceful draining immediately; this task enforces a deadline because
+        // camera connections are designed not to finish on their own.
+        let server_result = {
+            let server = axum::serve(listener, app)
+                .with_graceful_shutdown(ShutdownSignal::requested(shutdown.clone()))
+                .into_future();
+            tokio::pin!(server);
+
+            tokio::select! {
+                result = &mut server => Some(result),
+                () = ShutdownSignal::requested(shutdown) => {
+                    match tokio::time::timeout(SERVER_DRAIN_TIMEOUT, &mut server).await {
+                        Ok(result) => Some(result),
+                        Err(_) => {
+                            tracing::warn!("server drain timed out; closing remaining connections");
+                            None
+                        }
+                    }
+                }
+            }
+        };
+        tracing::info!("releasing motors and cameras");
+        let cleanup = async {
+            connector.rollout().shutdown().await;
+            if let Err(error) = connector.hardware().shutdown().await {
+                tracing::error!("hardware shutdown did not verify every motor release: {error}");
+            }
+            crate::recording::take::TakeOperations::new(&connector)
+                .close_ended(None)
+                .await;
+            let camera_result = tokio::task::spawn_blocking({
+                let cameras = connector.cameras().clone();
+                move || cameras.shutdown()
+            })
+            .await;
+            if let Err(error) = camera_result {
+                tracing::warn!("camera cleanup task failed: {error}");
+            }
+        };
+        if tokio::time::timeout(RESOURCE_SHUTDOWN_TIMEOUT, cleanup)
+            .await
+            .is_err()
+        {
+            tracing::warn!("resource cleanup timed out; the operating system will release devices");
+        }
+        bootstrap.abort();
+        if let Some(result) = server_result {
+            result?;
+        }
+        Ok(())
+    }
+}
+
+/// Waits for a published shutdown request.
+struct ShutdownSignal;
+
+impl ShutdownSignal {
+    async fn requested(mut shutdown: watch::Receiver<bool>) {
+        if *shutdown.borrow() {
+            return;
+        }
+        while shutdown.changed().await.is_ok() {
+            if *shutdown.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_waiters_release_when_the_signal_is_published() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let waiter = tokio::spawn(ShutdownSignal::requested(receiver));
+
+        sender.send(true).expect("the waiter is listening");
+        tokio::time::timeout(std::time::Duration::from_millis(100), waiter)
+            .await
+            .expect("the waiter must not hang")
+            .expect("the waiter task must finish");
+    }
+
+    #[tokio::test]
+    async fn an_already_published_shutdown_does_not_wait_for_another_change() {
+        let (_sender, receiver) = tokio::sync::watch::channel(true);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ShutdownSignal::requested(receiver),
+        )
+        .await
+        .expect("an existing shutdown request is immediately visible");
+    }
+}

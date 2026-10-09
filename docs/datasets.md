@@ -110,7 +110,7 @@ A completed Rollout recording becomes one immutable `.mcap` file: the recording
 header, stream metadata, joint observations and actions, and H.264 camera
 access units. Camera messages use `foxglove.CompressedVideo`; joint and
 metadata messages use the `studio.recording` Protobuf schemas
-(`crates/robot-connector/recording`). On final stop, the robot connector saves
+(`robot-connector/recording`). On final stop, the robot connector saves
 and syncs the file in its data directory, at
 `recordings/<dataset>/<episode-id>.mcap`. The browser then reads it, has Studio
 publish it as above through `POST /datasets/{dataset}/recordings/{episode}`,

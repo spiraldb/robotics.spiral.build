@@ -1,6 +1,6 @@
 # Robot connector API
 
-The robot connector (`crates/robot-connector`) runs next to the arms it drives.
+The robot connector (`robot-connector`) runs next to the arms it drives.
 It owns their serial buses, cameras, calibration, and fixed-rate control loop,
 records takes, and rolls out policies. Studio's browser app is its only client:
 the browser calls it directly at the address saved in **Rollout → Set up**,
@@ -8,7 +8,7 @@ and Studio's server never reaches it. It never reaches Spiral either. The two
 share request and response types through `crates/common`.
 
 ```console
-cargo run -p spiral-robotics-robot-connector -- --help
+cargo run -p spiral-robotics-connector-desktop -- --help
 ```
 
 | Flag | Default | Meaning |
@@ -129,5 +129,5 @@ picture and +Y down it.
 `--demo` saves two such robots over whatever its data directory held for them:
 `sim_leader`, hand-guided, and `sim_follower`, with `wrist` and `front`
 cameras. Both are calibrated to TheRobotStudio's SO-101 model, bundled in
-`crates/robot-connector/src/simulation/so101`, and connect at start, so a take
+`robot-connector/src/simulation/so101`, and connect at start, so a take
 can be recorded as soon as Studio reaches the robot connector.

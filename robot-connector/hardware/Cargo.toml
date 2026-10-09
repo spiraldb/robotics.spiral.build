@@ -1,0 +1,21 @@
+[package]
+name = "spiral-robotics-hardware"
+version.workspace = true
+edition.workspace = true
+description = "Fixed-rate motor control, calibration, and the Feetech protocol for Spiral Robotics"
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+spiral-robotics-common.workspace = true
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+serde_json.workspace = true
+spiral-robotics-common = { workspace = true, features = ["test-support"] }

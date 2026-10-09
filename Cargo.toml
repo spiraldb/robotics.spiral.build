@@ -4,10 +4,11 @@ members = [
     "crates/common",
     "crates/backend/storage",
     "crates/backend",
-    "crates/robot-connector/hardware",
-    "crates/robot-connector/inference",
-    "crates/robot-connector/recording",
-    "crates/robot-connector",
+    "robot-connector/hardware",
+    "robot-connector/inference",
+    "robot-connector/recording",
+    "robot-connector",
+    "robot-connector/desktop",
     "crates/viewport",
     "crates/frontend",
     "crates/ui",
@@ -27,9 +28,10 @@ adbc_core = "0.24.0"
 adbc_driver_manager = "0.24.0"
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }
-spiral-robotics-inference = { path = "crates/robot-connector/inference" }
-spiral-robotics-hardware = { path = "crates/robot-connector/hardware" }
-spiral-robotics-recording = { path = "crates/robot-connector/recording" }
+spiral-robotics-connector = { path = "robot-connector" }
+spiral-robotics-inference = { path = "robot-connector/inference" }
+spiral-robotics-hardware = { path = "robot-connector/hardware" }
+spiral-robotics-recording = { path = "robot-connector/recording" }
 spiral-robotics-storage = { path = "crates/backend/storage" }
 spiral-robotics-ui = { path = "crates/ui" }
 spiral-robotics-viewport = { path = "crates/viewport" }

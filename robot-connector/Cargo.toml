@@ -1,0 +1,46 @@
+[package]
+name = "spiral-robotics-connector"
+version.workspace = true
+edition.workspace = true
+description = "HTTP endpoint that runs next to robot arms: hardware, recording, and policy rollout"
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["simulation"]
+# Simulated cameras draw arms with the GPU renderer the browser's 3D view
+# uses. A microcontroller has no GPU, so its firmware builds without this.
+simulation = ["dep:pollster", "dep:spiral-robotics-viewport"]
+
+[dependencies]
+arrow-array = "58.4.0"
+arrow-ipc = { version = "58.4.0", features = ["zstd"] }
+arrow-schema = "58.4.0"
+axum = "0.8"
+base64.workspace = true
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+image.workspace = true
+pollster = { version = "0.4", optional = true }
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+safetensors = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+spiral-robotics-common.workspace = true
+spiral-robotics-hardware.workspace = true
+spiral-robotics-inference.workspace = true
+spiral-robotics-recording.workspace = true
+spiral-robotics-viewport = { workspace = true, optional = true }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.7", features = ["cors", "set-header", "trace"] }
+tracing = "0.1"
+
+[dev-dependencies]
+spiral-robotics-common = { workspace = true, features = ["test-support"] }
+spiral-robotics-hardware = { workspace = true, features = ["test-support"] }
+spiral-robotics-recording = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }

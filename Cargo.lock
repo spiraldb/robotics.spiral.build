@@ -4528,11 +4528,10 @@ dependencies = [
 
 [[package]]
 name = "redox_users"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
+checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
- "getrandom 0.2.17",
  "libredox",
  "thiserror 2.0.19",
 ]
@@ -4738,7 +4737,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5172,9 +5171,9 @@ dependencies = [
 
 [[package]]
 name = "serialport"
-version = "4.9.0"
+version = "4.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4d91116f97173694f1642263b2ff837f80d933aa837e2314969f6728f661df3"
+checksum = "6ba5f8f29aa20853c4e3e85a33ec580eb66be1f057142e77a333834a318bacf2"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if 1.0.4",
@@ -5381,6 +5380,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "spiral-robotics-connector"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
+ "axum",
+ "base64",
+ "bytes",
+ "futures-util",
+ "image",
+ "pollster",
+ "reqwest",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "spiral-robotics-common",
+ "spiral-robotics-hardware",
+ "spiral-robotics-inference",
+ "spiral-robotics-recording",
+ "spiral-robotics-viewport",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tower-http 0.7.0",
+ "tracing",
+]
+
+[[package]]
+name = "spiral-robotics-connector-desktop"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "dirs",
+ "futures-util",
+ "image",
+ "nokhwa",
+ "serde",
+ "serde_json",
+ "serialport",
+ "spiral-robotics-common",
+ "spiral-robotics-connector",
+ "spiral-robotics-hardware",
+ "spiral-robotics-recording",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "v4l",
+]
+
+[[package]]
 name = "spiral-robotics-frontend"
 version = "0.1.0"
 dependencies = [
@@ -5418,16 +5470,10 @@ dependencies = [
 name = "spiral-robotics-hardware"
 version = "0.1.0"
 dependencies = [
- "image",
- "nokhwa",
- "serde",
  "serde_json",
- "serialport",
  "spiral-robotics-common",
- "tempfile",
  "tokio",
  "tracing",
- "v4l",
 ]
 
 [[package]]
@@ -5452,39 +5498,6 @@ dependencies = [
  "spiral-robotics-hardware",
  "tokio",
  "uuid",
-]
-
-[[package]]
-name = "spiral-robotics-robot-connector"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-ipc",
- "arrow-schema",
- "axum",
- "base64",
- "bytes",
- "clap",
- "dirs",
- "futures-util",
- "image",
- "pollster",
- "reqwest",
- "safetensors",
- "serde",
- "serde_json",
- "serialport",
- "spiral-robotics-common",
- "spiral-robotics-hardware",
- "spiral-robotics-inference",
- "spiral-robotics-recording",
- "spiral-robotics-viewport",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tower-http 0.7.0",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -7030,15 +7043,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]
