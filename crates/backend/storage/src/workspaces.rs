@@ -196,7 +196,7 @@ mod tests {
             .unwrap()
         };
         let preferences = StoredStudioPreferences::default()
-            .with_robot_connector("http://lab-arms.example:7070")
+            .with_policy_runtime("http://gpu-box.example:50051")
             .unwrap();
         for project in ["arms-000001", "bench-000002"] {
             crate::settings::StudioPreferencePersistence::new(
@@ -220,11 +220,11 @@ mod tests {
                     .await
                     .unwrap()
                     .robot_connector()
-                    .address()
+                    .policy_runtime()
                     .to_owned()
             }
         };
-        assert_eq!(kept("arms-000001").await, "http://localhost:7070");
-        assert_eq!(kept("bench-000002").await, "http://lab-arms.example:7070");
+        assert_eq!(kept("arms-000001").await, "http://localhost:50051");
+        assert_eq!(kept("bench-000002").await, "http://gpu-box.example:50051");
     }
 }

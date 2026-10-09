@@ -47,38 +47,38 @@ impl DataSettings {
     }
 }
 
-/// The robot connector a workspace drives: an HTTP endpoint that runs next to
-/// the arms. Every browser in the workspace reaches it at this address, so
-/// `localhost` means each viewer's own machine and a network address is one
-/// connector everyone shares.
+/// The robot connector a workspace drives. It runs next to the arms and links
+/// itself to Studio with the token the workspace issued, so Studio needs no
+/// address for it.
 ///
 /// The connector asks the policy runtime for a policy's actions, so in
 /// `policy_runtime` `localhost` means the robot connector's own machine.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RobotConnectorSettings {
-    address: String,
+    /// Whether the workspace has issued a token a connector can link with.
+    token_issued: bool,
     policy_runtime: String,
 }
 
 impl Default for RobotConnectorSettings {
     fn default() -> Self {
         Self {
-            address: "http://localhost:7070".to_owned(),
+            token_issued: false,
             policy_runtime: DEFAULT_POLICY_RUNTIME.to_owned(),
         }
     }
 }
 
 impl RobotConnectorSettings {
-    pub fn new(address: impl Into<String>, policy_runtime: impl Into<String>) -> Self {
+    pub fn new(token_issued: bool, policy_runtime: impl Into<String>) -> Self {
         Self {
-            address: address.into(),
+            token_issued,
             policy_runtime: policy_runtime.into(),
         }
     }
 
-    pub fn address(&self) -> &str {
-        &self.address
+    pub const fn token_issued(&self) -> bool {
+        self.token_issued
     }
 
     pub fn policy_runtime(&self) -> &str {
@@ -144,4 +144,4 @@ impl SpiralSettings {
 }
 
 mod requests;
-pub use requests::{ConnectionTest, SettingsUpdate};
+pub use requests::{ConnectionTest, PolicyRuntimeUpdate, SettingsUpdate};

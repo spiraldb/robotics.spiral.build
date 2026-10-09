@@ -10,7 +10,7 @@ use axum::{
     routing::{get, post, put},
 };
 use spiral_robotics_common::settings::{
-    ConnectionTest, DataSettings, RobotConnectorSettings, SettingsUpdate, SpiralSettings,
+    ConnectionTest, DataSettings, PolicyRuntimeUpdate, SettingsUpdate, SpiralSettings,
 };
 use spiral_robotics_common::workspace::WorkspaceChoice;
 
@@ -27,7 +27,7 @@ impl SettingsEndpoints {
         Router::new()
             .route("/settings/connection", put(Self::choose_workspace))
             .route("/settings", put(Self::update_data_settings))
-            .route("/settings/robot-connector", put(Self::set_robot_connector))
+            .route("/settings/policy-runtime", put(Self::set_policy_runtime))
     }
     /// The endpoints, and the workspace this browser's session works in.
     async fn connection_settings(
@@ -64,14 +64,14 @@ impl SettingsEndpoints {
                 .await?,
         ))
     }
-    async fn set_robot_connector(
+    async fn set_policy_runtime(
         Project(project): Project,
-        ApiJson(request): ApiJson<RobotConnectorSettings>,
+        ApiJson(request): ApiJson<PolicyRuntimeUpdate>,
     ) -> Result<Json<DataSettings>, OperationError> {
         Ok(Json(
             project
                 .projects()
-                .set_robot_connector(project.project(), request)
+                .set_policy_runtime(project.project(), &request)
                 .await?,
         ))
     }

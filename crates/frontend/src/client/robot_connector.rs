@@ -1,40 +1,37 @@
-//! The robot connector this workspace drives: an HTTP endpoint that runs next
-//! to the arms and owns their hardware, recordings, and rollouts. The browser
-//! talks to it directly, at the address the workspace keeps: `localhost` is
-//! each viewer's own machine, and a network address one robot connector
-//! everyone in the workspace shares.
+//! The robot connector this workspace drives: a program that runs next to the
+//! arms and owns their hardware, recordings, and rollouts. It links itself to
+//! Studio with a token the workspace issues, and the browser reaches it only
+//! through Studio's relay, as it makes any other request of the workspace.
 
 use std::future::Future;
 
 use dioxus::prelude::*;
 use serde::de::DeserializeOwned;
-use spiral_robotics_common::robot_connector::RobotConnectorHealth;
-use spiral_robotics_common::settings::{DataSettings, RobotConnectorSettings};
+use spiral_robotics_common::robot_connector::{
+    RELAY_PREFIX, RobotConnectorHealth, RobotConnectorToken,
+};
+use spiral_robotics_common::settings::{DataSettings, PolicyRuntimeUpdate};
 
 use super::project::ProjectClient;
-use super::queries::{QueryDomain, QueryPolicy, QueryRefresh};
+use super::queries::{QueryDomain, QueryPolicy};
 use super::transport::{CommandError, HttpRequest};
 use crate::shell::workspace::WorkspaceSettings;
 
-const UNREACHABLE: &str = "Could not reach the robot connector. Check that it is running and its address in Rollout's Setup.";
-
 #[derive(Clone, Copy)]
 pub(crate) struct RobotConnector {
-    /// Empty until the workspace's settings are read.
-    address: Memo<String>,
+    /// False until the workspace's settings are read.
+    token_issued: Memo<bool>,
     /// Empty until the workspace's settings are read.
     policy_runtime: Memo<String>,
     health: Signal<Option<Result<RobotConnectorHealth, CommandError>>>,
-    refresh: QueryRefresh,
 }
 
 impl RobotConnector {
-    pub(crate) fn use_provider(settings: WorkspaceSettings, refresh: QueryRefresh) -> Self {
-        let address = use_memo(move || {
+    pub(crate) fn use_provider(settings: WorkspaceSettings) -> Self {
+        let token_issued = use_memo(move || {
             settings
                 .loaded()
-                .map(|settings| settings.robot_connector().address().to_owned())
-                .unwrap_or_default()
+                .is_some_and(|settings| settings.robot_connector().token_issued())
         });
         let policy_runtime = use_memo(move || {
             settings
@@ -42,25 +39,11 @@ impl RobotConnector {
                 .map(|settings| settings.robot_connector().policy_runtime().to_owned())
                 .unwrap_or_default()
         });
-        let mut health = use_signal(|| None);
-        // Another address is another robot connector: nothing heard from the
-        // last one holds.
-        use_effect(move || {
-            let _ = address.read();
-            health.set(None);
-            refresh.invalidate(&[
-                QueryDomain::RobotConnector,
-                QueryDomain::RobotSetup,
-                QueryDomain::Telemetry,
-                QueryDomain::Recording,
-                QueryDomain::Rollout,
-            ]);
-        });
+        let health = use_signal(|| None);
         use_context_provider(|| Self {
-            address,
+            token_issued,
             policy_runtime,
             health,
-            refresh,
         })
     }
 
@@ -68,13 +51,12 @@ impl RobotConnector {
         consume_context()
     }
 
-    /// Ask whether the robot connector answers while `active`. Only views that
-    /// drive hardware ask, so a browser that never opens one never reaches for
-    /// a local network address.
+    /// Ask whether a robot connector is linked while `active`. Only views that
+    /// drive hardware ask.
     pub(crate) fn use_health(self, active: ReadSignal<bool>) {
         let response = QueryPolicy::new(QueryDomain::RobotConnector, 2_000).use_when(
-            move || *active.read() && !self.address.read().is_empty(),
-            move || self.request(HttpRequest::new("GET", "/api/health")),
+            move || *active.read(),
+            move || self.request(HttpRequest::new("GET", "/health")),
         );
         let mut health = self.health;
         use_effect(move || {
@@ -88,8 +70,22 @@ impl RobotConnector {
         });
     }
 
-    pub(crate) fn address(self) -> String {
-        self.address.read().clone()
+    /// Whether the workspace has issued a token a robot connector can link
+    /// with.
+    pub(crate) fn token_issued(self) -> bool {
+        *self.token_issued.read()
+    }
+
+    /// Issue a token for a robot connector to link with. It replaces the
+    /// workspace's last one, unlinking the robot connector that used it, and
+    /// this answer is the only one that holds it.
+    pub(crate) fn issue_token(
+        self,
+    ) -> impl Future<Output = Result<RobotConnectorToken, CommandError>> + use<> {
+        ProjectClient::current().mutate(
+            &[QueryDomain::Settings, QueryDomain::RobotConnector],
+            HttpRequest::new("POST", "/api/settings/robot-connector/token"),
+        )
     }
 
     /// The policy runtime a rollout asks for actions, as the robot connector
@@ -98,72 +94,47 @@ impl RobotConnector {
         self.policy_runtime.read().clone()
     }
 
-    /// Drive the robot connector at `address`, and have it ask the policy
-    /// runtime at `policy_runtime` for actions, from now on, from every
-    /// browser in this workspace.
-    pub(crate) fn save_settings(
+    /// Have the robot connector ask the policy runtime at `policy_runtime`
+    /// for actions, from now on, for everyone in this workspace.
+    pub(crate) fn save_policy_runtime(
         self,
-        address: &str,
         policy_runtime: &str,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         let saved = ProjectClient::current().mutate::<DataSettings>(
             &[QueryDomain::Settings],
-            HttpRequest::new("PUT", "/api/settings/robot-connector").json(
-                &RobotConnectorSettings::new(address.trim(), policy_runtime.trim()),
-            ),
+            HttpRequest::new("PUT", "/api/settings/policy-runtime")
+                .json(&PolicyRuntimeUpdate::new(policy_runtime.trim())),
         );
         async move { saved.await.map(|_| ()) }
     }
 
-    /// Ask again now rather than at the next poll.
-    pub(crate) fn check_again(self) {
-        self.refresh.invalidate(&[QueryDomain::RobotConnector]);
-    }
-
-    /// Whether this page may need the browser's permission to reach the robot
-    /// connector: a secure page calling a plain-HTTP address on the local
-    /// network.
-    pub(crate) fn needs_local_network_permission(self) -> bool {
-        let secure_page = web_sys::window()
-            .and_then(|window| window.location().protocol().ok())
-            .is_some_and(|protocol| protocol == "https:");
-        secure_page && self.address.read().starts_with("http://")
-    }
-
-    /// The robot connector's build when it last answered, or why it did not.
+    /// The linked robot connector's build when it last answered, or why none
+    /// did.
     pub(crate) fn health(self) -> Option<Result<RobotConnectorHealth, CommandError>> {
         self.health.read().clone()
     }
 
-    pub(crate) fn reachable(self) -> bool {
+    pub(crate) fn linked(self) -> bool {
         matches!(*self.health.read(), Some(Ok(_)))
     }
 
-    /// A browser-native URL on the robot connector, such as a camera stream.
-    pub(crate) fn url(self, path: &str) -> String {
-        format!("{}{path}", self.address.read())
-    }
-
+    /// Relay `request` to the robot connector. Its path is the robot
+    /// connector's own below `/api`, such as `/robots`.
     pub(crate) fn request<T: DeserializeOwned + 'static>(
         self,
         request: HttpRequest,
     ) -> impl Future<Output = Result<T, CommandError>> + use<T> {
-        self.addressed(request).send()
+        ProjectClient::current().request(request.under(RELAY_PREFIX))
     }
 
+    /// Relay `request`, then refetch `domains`: a failure may follow partial
+    /// robot connector work.
     pub(crate) fn mutate<T: DeserializeOwned + 'static>(
         self,
         domains: &'static [QueryDomain],
         request: HttpRequest,
     ) -> impl Future<Output = Result<T, CommandError>> + use<T> {
-        let request = self.request(request);
-        let refresh = self.refresh;
-        async move {
-            let result = request.await;
-            // A failure may follow partial robot connector work. Refetch either way.
-            refresh.invalidate(domains);
-            result
-        }
+        ProjectClient::current().mutate(domains, request.under(RELAY_PREFIX))
     }
 
     /// A binary response of `media_type`, kept as a browser blob.
@@ -172,10 +143,6 @@ impl RobotConnector {
         request: HttpRequest,
         media_type: &'static str,
     ) -> impl Future<Output = Result<web_sys::Blob, CommandError>> + use<> {
-        self.addressed(request).blob_response(media_type)
-    }
-
-    fn addressed(self, request: HttpRequest) -> HttpRequest {
-        request.at(&self.address.peek()).unreachable(UNREACHABLE)
+        ProjectClient::current().request_blob(request.under(RELAY_PREFIX), media_type)
     }
 }

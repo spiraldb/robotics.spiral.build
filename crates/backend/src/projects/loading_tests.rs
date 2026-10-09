@@ -58,7 +58,7 @@ impl LoadingFixture {
 async fn studio_loads_and_saves_without_opening_spiral() {
     let fixture = LoadingFixture::new().await;
     let preferences = spiral_robotics_storage::StoredStudioPreferences::default()
-        .with_robot_connector("http://127.0.0.1:9")
+        .with_policy_runtime("http://127.0.0.1:9")
         .unwrap();
     fixture
         .session
@@ -76,7 +76,7 @@ async fn studio_loads_and_saves_without_opening_spiral() {
             .await
             .unwrap()
             .robot_connector()
-            .address(),
+            .policy_runtime(),
         "http://127.0.0.1:9"
     );
     assert!(

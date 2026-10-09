@@ -2,31 +2,56 @@
 
 The robot connector (`robot-connector`) runs next to the arms it drives.
 It owns their serial buses, cameras, calibration, and fixed-rate control loop,
-records takes, and rolls out policies. Studio's browser app is its only client:
-the browser calls it directly at the address saved in **Rollout → Set up**,
-and Studio's server never reaches it. It never reaches Spiral either. The two
-share request and response types through `crates/common`.
+records takes, and rolls out policies. It listens on no port: it links itself
+to Studio over plain HTTP, presenting the token its workspace issued in
+**Rollout → Set up**, so a robot needs no public address or certificate. The
+browser reaches it only through Studio. It never reaches Spiral. The two share
+request and response types through `crates/common`.
 
 ```console
-cargo run -p spiral-robotics-connector-os -- --help
+cargo run -p spiral-robotics-connector-os -- --studio https://robotics.spiraldb.com --token rc_…
 ```
 
-The flags configure the computer's device drivers only. Everything the
-connector does is configured from Studio: the policy runtime a rollout calls
-travels with each rollout, each robot carries its own motion limits, and the
-simulated demo bench is installed from Rollout → Set up. A microcontroller
-build has no command line and serves the same API.
+The flags name the Studio to link to and configure the computer's device
+drivers. Everything the connector does is configured from Studio: the policy
+runtime a rollout calls travels with each rollout, each robot carries its own
+motion limits, and the simulated demo bench is installed from Rollout → Set
+up. A microcontroller build has no command line and links the same way.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--bind` | `127.0.0.1:7070` | Address the API listens on |
+| `--studio` | `http://localhost:3000` | Studio's web address; also `SPIRAL_ROBOTICS_STUDIO` |
+| `--token` | | The workspace's token; also `SPIRAL_ROBOTICS_CONNECTOR_TOKEN` |
 | `--data-dir` | platform data dir`/spiral-robotics/robot-connector` | Saved robots, unsent takes, and policies; also `SPIRAL_ROBOTICS_ROBOT_CONNECTOR_DATA` |
 | `--no-cameras` | off | Skip camera discovery |
 | `--ffmpeg`, `--video-codec` | `ffmpeg`, `libx264` | Camera recording encoder |
 
-Every origin may call it (CORS), since Studio runs at `robotics.spiraldb.com` or
-on `localhost`. A page served over HTTPS can reach it at `http://localhost` or
-`http://127.0.0.1`; a robot connector on another machine needs HTTPS.
+## The link
+
+Every link request carries `Authorization: Bearer <token>`; Studio knows the
+workspace from the token. The paths and headers are constants in
+`spiral_robotics_common::robot_connector`.
+
+- `GET /api/robot-connector/link/next` is a long poll Studio holds for up to
+  25 seconds. It carries `X-Robot-Connector-Health` (the connector's version
+  and whether it simulates arms). Every answer carries
+  `X-Robot-Connector-Watch`, the live streams someone watches now. A `200`
+  hands over one browser request: `X-Robot-Connector-Request`
+  (`{id, method, path}`), its content type, and its body. A `204` hands over
+  none; Studio answers early when the watched streams change. The connector
+  polls again at once, and backs off up to 30 seconds while Studio is
+  unreachable.
+- `POST /api/robot-connector/link/answers/{id}` returns a request's answer:
+  `X-Robot-Connector-Status`, its content type, and its body.
+- While watched, `POST /api/robot-connector/link/telemetry` takes the latest
+  telemetry about ten times a second, and
+  `POST /api/robot-connector/link/cameras?id=…` a camera's latest JPEG about
+  five times a second. Takes record every frame; the preview only frames and
+  checks a camera.
+
+Studio serves the browser the endpoints below under `/api/robot-connector`
+(`/api/robots` is `/api/robot-connector/robots`), answering health, telemetry,
+and camera previews from what the connector last sent.
 
 ## Conventions
 
@@ -47,14 +72,15 @@ generation change or offset gap means replace the local window.
 
 ## Endpoints
 
-- `GET /health`: `{"version": …, "simulates_arms": …}`, the build that
-  answers and whether it can simulate arms (it draws their cameras with a
-  GPU, so a microcontroller cannot).
+- Health is Studio's: `GET /api/robot-connector/health` answers the linked
+  connector's `{"version": …, "simulates_arms": …}`, or 503 when none is
+  linked. A connector draws simulated arms' cameras with a GPU, so a
+  microcontroller does not simulate arms.
 
 Robots, saved in the robot connector's `robots.json`:
 
-- `GET /robots`, `GET /hardware/status`, `GET /robots/telemetry`,
-  `GET /serial-ports`.
+- `GET /robots`, `GET /hardware/status`, `GET /serial-ports`. Studio answers
+  `GET /robots/telemetry` from the samples the connector posts.
 - `POST /robots/save`: `{document, expected}`. `document` is the complete
   robot JSON object. `expected: null` creates a new robot; otherwise it is the
   revision the editor started from, and a later save fails with 409. Saving
@@ -73,9 +99,10 @@ Robots, saved in the robot connector's `robots.json`:
   few kilobytes however large their meshes.
 - `DELETE /robots/{id}`; `POST /robots/{id}/{connect,disconnect,hold,release,goal}`;
   `POST /robots/{id}/calibration/{start,finish,cancel}`; `PUT /mode`.
-- `POST /cameras/refresh`; `GET /cameras/stream.mjpeg?id=…`, a live MJPEG
-  stream for an `<img>`. Camera IDs may contain device-path separators and must
-  be percent-encoded.
+- `POST /cameras/refresh`. Studio serves `GET /cameras/stream.mjpeg?id=…`, an
+  MJPEG preview for an `<img>`, from the frames the connector posts; an
+  `<img>` sends no headers, so it names the project in its query too. Camera
+  IDs may contain device-path separators and must be percent-encoded.
 
 Takes:
 
@@ -129,7 +156,7 @@ contact.
 
 Every mounted camera on a simulated robot with a model is a simulated camera:
 it appears in `GET /hardware/status` under its configured ID at 640×480 and
-30 fps, streams from `GET /cameras/stream.mjpeg` like a device, and records
+30 fps, previews like a device, and records
 into takes. Its pictures draw every simulated robot with a model, posed from
 telemetry, with the renderer the browser's 3D view uses. A mount follows the
 optical convention: the camera looks along its +Z, with +X to the right of the

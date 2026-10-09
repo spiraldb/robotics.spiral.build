@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 
 use crate::activities::rollout::recording_review::EpisodePreview;
 use crate::client::http::CameraApiPath;
+use crate::client::project::ProjectClient;
 use crate::components::icons::CameraStreamIcon;
 use crate::format::ClockPresentation;
 use crate::panels::recorded_source::{LoadState, RecordedSource};
@@ -146,8 +147,7 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
             if workspace.is_active() && panel.geometry().visible() {
             img {
                 class: "camera-stream-image",
-                src: crate::client::robot_connector::RobotConnector::current()
-                    .url(&device.camera_stream_path()),
+                src: device.camera_stream_path(ProjectClient::current().project()),
                 alt: "Live view from the {role} camera on {robot}",
                 loading: "eager",
                 decoding: "sync",

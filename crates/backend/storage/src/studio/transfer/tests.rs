@@ -89,12 +89,31 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
     StudioPreferencePersistence::new(&source)
         .save(
             &crate::StoredStudioPreferences::default()
-                .with_robot_connector("http://localhost:9000")
+                .with_policy_runtime("http://localhost:9000")
                 .unwrap(),
         )
         .await
         .unwrap();
+    let workspace = spiral_robotics_common::workspace::Workspace::new("source", "Source");
+    crate::WorkspaceStore::new(store.clone(), "http://localhost:1")
+        .insert(&workspace)
+        .await
+        .unwrap();
+    crate::RobotConnectorTokens::new(store.clone(), "http://localhost:1")
+        .replace("source", "rc_excluded")
+        .await
+        .unwrap();
     let snapshot = StudioSnapshot::capture(&source).await.unwrap();
+    let tokens = snapshot
+        .database
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT count(*) AS count FROM robot_connector_tokens",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tokens.try_get::<i64>("", "count").unwrap(), 0);
     let bytes = snapshot.bytes().unwrap();
     for excluded in [
         "excluded-refresh-token-456789",
@@ -152,7 +171,7 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
             .await
             .unwrap()
             .robot_connector()
-            .address(),
+            .policy_runtime(),
         "http://localhost:9000"
     );
 }

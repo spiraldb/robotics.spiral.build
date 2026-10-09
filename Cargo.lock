@@ -5389,6 +5389,7 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "image",
  "pollster",
@@ -5403,7 +5404,7 @@ dependencies = [
  "spiral-robotics-viewport",
  "tempfile",
  "tokio",
- "tokio-stream",
+ "tower",
  "tower-http 0.7.0",
  "tracing",
 ]
@@ -5416,8 +5417,10 @@ dependencies = [
  "clap",
  "dirs",
  "futures-util",
+ "http",
  "image",
  "nokhwa",
+ "reqwest",
  "serde",
  "serde_json",
  "serialport",
@@ -6053,7 +6056,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

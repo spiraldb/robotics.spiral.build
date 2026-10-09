@@ -170,7 +170,7 @@ pub(crate) fn ArmSetupGuide(
     on_skip: EventHandler<()>,
 ) -> Element {
     let connector = crate::client::robot_connector::RobotConnector::current();
-    let answering = connector.reachable();
+    let linked = connector.linked();
     let robots = telemetry.snapshot().read().robots().to_owned();
     let port_catalog = PortCatalogState::use_catalog();
     let arms = ArmSteps {
@@ -184,17 +184,10 @@ pub(crate) fn ArmSetupGuide(
     let follower_ready = follower.as_ref().is_some_and(RobotSummary::ready_to_drive);
     let leader_ready = leader.as_ref().is_some_and(RobotSummary::ready_to_drive);
     let connector_summary = match connector.health() {
-        Some(Ok(health)) => Some(format!(
-            "{} · {}",
-            connector
-                .address()
-                .trim_start_matches("http://")
-                .trim_start_matches("https://"),
-            health.version()
-        )),
+        Some(Ok(health)) => Some(health.version().to_owned()),
         _ => None,
     };
-    let arm_state = |ready: bool, reachable: bool| match (ready, reachable) {
+    let arm_state = |ready: bool, linked: bool| match (ready, linked) {
         (true, _) => StepState::Done,
         (false, true) => StepState::Current,
         (false, false) => StepState::Pending,
@@ -222,7 +215,7 @@ pub(crate) fn ArmSetupGuide(
                     GuideStep {
                         number: 1,
                         title: "Start the robot connector",
-                        state: if answering { StepState::Done } else { StepState::Current },
+                        state: if linked { StepState::Done } else { StepState::Current },
                         summary: connector_summary,
                         p { class: "arm-guide-purpose",
                             "It runs on the computer your arms are plugged into, and keeps their ports, calibration, and recordings."
@@ -232,14 +225,14 @@ pub(crate) fn ArmSetupGuide(
                     GuideStep {
                         number: 2,
                         title: ArmRole::Follower.title(),
-                        state: arm_state(follower_ready, answering),
+                        state: arm_state(follower_ready, linked),
                         summary: follower.as_ref().filter(|_| follower_ready).map(ArmSummary::summary),
                         ArmStep { arms, role: ArmRole::Follower, robot: follower.clone() }
                     }
                     GuideStep {
                         number: 3,
                         title: ArmRole::Leader.title(),
-                        state: arm_state(leader_ready, answering),
+                        state: arm_state(leader_ready, linked),
                         summary: leader.as_ref().filter(|_| leader_ready).map(ArmSummary::summary),
                         ArmStep { arms, role: ArmRole::Leader, robot: leader.clone() }
                     }

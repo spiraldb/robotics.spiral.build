@@ -111,10 +111,7 @@ fn ProjectStudioShell(project: ProjectKey) -> Element {
     let chosen = project.is_chosen();
     use_context_provider(|| ProjectSelection::current().client(project));
     let settings = crate::shell::workspace::WorkspaceSettings::use_provider();
-    crate::client::robot_connector::RobotConnector::use_provider(
-        settings,
-        crate::client::queries::QueryRefresh::current(),
-    );
+    crate::client::robot_connector::RobotConnector::use_provider(settings);
     crate::activities::episode::EpisodeStills::use_provider();
     crate::activities::data::DatasetOverviewMemory::use_provider();
     crate::activities::data::DatasetChecks::use_provider();

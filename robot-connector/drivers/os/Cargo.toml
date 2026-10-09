@@ -13,8 +13,10 @@ bytes = "1"
 clap.workspace = true
 dirs = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1.2"
 image.workspace = true
 nokhwa.workspace = true
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 serialport.workspace = true
@@ -22,7 +24,7 @@ spiral-robotics-common.workspace = true
 spiral-robotics-connector.workspace = true
 spiral-robotics-hardware.workspace = true
 tempfile.workspace = true
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

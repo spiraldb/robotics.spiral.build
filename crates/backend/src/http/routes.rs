@@ -2,6 +2,7 @@
 use super::delivery::HttpFailure;
 use crate::OperationError;
 use crate::projects::context::StudioContext;
+use crate::robot_connector::http::RobotConnectorEndpoints;
 use axum::{
     Router,
     extract::Request,
@@ -16,7 +17,8 @@ impl StudioApi {
     /// covers both: a read stays in its request, so Axum cancels it when the
     /// caller disconnects; a command runs to completion regardless, so a
     /// dropped connection never leaves a write half done.
-    /// Every request must carry a live Spiral session.
+    /// Every request must carry a live Spiral session, except a robot
+    /// connector's, which presents its workspace's token instead.
     pub(crate) fn router(studio: StudioContext) -> Router {
         let reads = Router::new()
             .merge(crate::account::http::AccountEndpoints::reads())
@@ -26,7 +28,8 @@ impl StudioApi {
             .merge(crate::curation::http::CurationEndpoints::reads())
             .merge(crate::data::settings_http::SettingsEndpoints::reads())
             .merge(crate::data::http::DatasetQueryEndpoints::reads())
-            .merge(crate::data::project_download::ProjectDownload::reads());
+            .merge(crate::data::project_download::ProjectDownload::reads())
+            .merge(RobotConnectorEndpoints::reads());
         let commands = Router::new()
             .merge(crate::account::http::AccountEndpoints::commands())
             .merge(crate::projects::http::ProjectEndpoints::commands())
@@ -35,6 +38,7 @@ impl StudioApi {
             .merge(crate::curation::http::CurationEndpoints::commands())
             .merge(crate::data::settings_http::SettingsEndpoints::commands())
             .merge(crate::data::http::DatasetQueryEndpoints::commands())
+            .merge(RobotConnectorEndpoints::commands())
             .layer(middleware::from_fn(Self::run_to_completion));
         reads
             .merge(commands)
@@ -44,7 +48,9 @@ impl StudioApi {
                 studio.clone(),
                 crate::account::http::AccountEndpoints::require_session,
             ))
-            .layer(SetResponseHeaderLayer::overriding(
+            .merge(RobotConnectorEndpoints::link())
+            // Responses are live state unless an endpoint says otherwise.
+            .layer(SetResponseHeaderLayer::if_not_present(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("no-store"),
             ))

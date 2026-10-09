@@ -1,4 +1,4 @@
-/* Robots › arm setup: reaching the robot connector, and Live's first-run
+/* Robots › arm setup: linking the robot connector, and Live's first-run
    guide through a follower and a leader. Prefix every class with `arm-guide`
    or `robot-connector`. Use @layer components like tailwind.css.
 
@@ -242,11 +242,19 @@
     flex: 1;
   }
 
-  /* One label column wide enough for "Policy runtime", so both inputs
-     start on the same line. */
+  /* A quiet label column wide enough for "Policy runtime". */
   .robot-connector-endpoint .ui-field-label {
     flex-basis: 6rem;
     color: var(--tone-ink-faint);
+  }
+
+  /* Whether a robot connector is linked on the left, the token that links
+     one on the right. */
+  .robot-connector-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
 
   .robot-connector-status {
@@ -270,13 +278,6 @@
   .robot-connector-status[data-tone="waiting"] .robot-connector-status-dot {
     background: var(--tone-info);
     animation: robot-connector-wait 1.6s ease-in-out infinite;
-  }
-
-  .robot-connector-permission {
-    margin: -4px 0 0 15px;
-    color: var(--tone-ink-faint);
-    font-size: 11.5px;
-    line-height: 1.45;
   }
 
   @keyframes arm-guide-check {

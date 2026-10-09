@@ -44,7 +44,7 @@ impl PolicyControl {
         let control = Self::use_state(training);
         let connector = RobotConnector::current();
         let request = QueryPolicy::new(QueryDomain::Rollout, 500).use_when(
-            move || is_active() && connector.reachable(),
+            move || is_active() && connector.linked(),
             || async { PolicyClient::current().run().await },
         );
         control.use_response(request);

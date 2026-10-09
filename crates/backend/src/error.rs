@@ -11,6 +11,9 @@ pub(crate) enum OperationError {
     Conflict(String),
     StaleProject(String),
     External(String),
+    /// Something Studio relays to cannot be reached now, such as a robot
+    /// connector that is not linked.
+    Unavailable(String),
     Internal(String),
 }
 
@@ -31,6 +34,7 @@ impl OperationError {
             | Self::Conflict(message)
             | Self::StaleProject(message)
             | Self::External(message)
+            | Self::Unavailable(message)
             | Self::Internal(message) => message,
         }
     }
@@ -43,6 +47,7 @@ impl OperationError {
             Self::Conflict(_) => CommandFailureCode::Conflict,
             Self::StaleProject(_) => CommandFailureCode::StaleProject,
             Self::External(_) => CommandFailureCode::External,
+            Self::Unavailable(_) => CommandFailureCode::Transport,
             Self::Internal(_) => CommandFailureCode::Internal,
         }
     }
@@ -84,6 +89,11 @@ mod tests {
                 OperationError::External("arbitrary text".into()),
                 CommandFailureCode::External,
                 500,
+            ),
+            (
+                OperationError::Unavailable("arbitrary text".into()),
+                CommandFailureCode::Transport,
+                503,
             ),
         ] {
             let failure = CommandFailure::from(error);

@@ -119,10 +119,6 @@ impl ServiceEndpoint {
         Self::parse(endpoint, "Spiral SpFS endpoint")
     }
 
-    fn robot_connector(address: &str) -> Result<Self, String> {
-        Self::parse(address, "Robot connector address")
-    }
-
     fn policy_runtime(address: &str) -> Result<Self, String> {
         Self::parse(address, "Policy runtime")
     }
@@ -179,7 +175,9 @@ impl ServiceEndpoint {
 /// `video` preference, and those written before training moved to Modal a
 /// `training` one; reads ignore both. Documents written before workspaces
 /// kept a robot connector read as the default one, and those written before
-/// they kept a policy runtime read as the default runtime.
+/// they kept a policy runtime read as the default runtime. Documents written
+/// before the robot connector linked itself to Studio also hold the
+/// `robot_connector.address` browsers reached it at; reads ignore it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StoredStudioPreferences {
     #[serde(default)]
@@ -187,12 +185,6 @@ pub struct StoredStudioPreferences {
 }
 
 impl StoredStudioPreferences {
-    /// These preferences with the robot connector at `address`, validated.
-    pub fn with_robot_connector(mut self, address: &str) -> Result<Self, String> {
-        self.robot_connector.address = ServiceEndpoint::robot_connector(address)?.into_string();
-        Ok(self)
-    }
-
     /// These preferences with the robot connector asking the policy runtime
     /// at `address` for actions, validated.
     pub fn with_policy_runtime(mut self, address: &str) -> Result<Self, String> {
@@ -204,12 +196,8 @@ impl StoredStudioPreferences {
     /// These preferences, refused unless every endpoint in them is valid: a
     /// document from an imported snapshot is untrusted.
     pub(crate) fn validated(self) -> Result<Self, String> {
-        let StoredRobotConnectorPreference {
-            address,
-            policy_runtime,
-        } = self.robot_connector.clone();
-        self.with_robot_connector(&address)?
-            .with_policy_runtime(&policy_runtime)
+        let policy_runtime = self.robot_connector.policy_runtime.clone();
+        self.with_policy_runtime(&policy_runtime)
     }
 
     pub const fn robot_connector(&self) -> &StoredRobotConnectorPreference {
@@ -217,12 +205,10 @@ impl StoredStudioPreferences {
     }
 }
 
-/// Persisted robot connector preference: the address every browser in the
-/// workspace drives, and the policy runtime that robot connector asks for
-/// actions.
+/// Persisted robot connector preference: the policy runtime the workspace's
+/// robot connector asks for actions.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StoredRobotConnectorPreference {
-    address: String,
     #[serde(default = "StoredRobotConnectorPreference::default_policy_runtime")]
     policy_runtime: String,
 }
@@ -230,17 +216,12 @@ pub struct StoredRobotConnectorPreference {
 impl Default for StoredRobotConnectorPreference {
     fn default() -> Self {
         Self {
-            address: "http://localhost:7070".to_owned(),
             policy_runtime: Self::default_policy_runtime(),
         }
     }
 }
 
 impl StoredRobotConnectorPreference {
-    pub fn address(&self) -> &str {
-        &self.address
-    }
-
     pub fn policy_runtime(&self) -> &str {
         &self.policy_runtime
     }
@@ -264,15 +245,8 @@ mod tests {
     }
 
     #[test]
-    fn the_robot_connector_and_policy_runtime_require_http_or_https_endpoints() {
+    fn the_policy_runtime_requires_an_http_or_https_endpoint() {
         let preferences = StoredStudioPreferences::default();
-        assert!(
-            preferences
-                .clone()
-                .with_robot_connector("lab-arms:7070")
-                .unwrap_err()
-                .contains("http:// or https://")
-        );
         assert!(
             preferences
                 .clone()
@@ -282,13 +256,8 @@ mod tests {
         );
 
         let staged = preferences
-            .with_robot_connector("http://lab-arms.example:7070/")
-            .and_then(|staged| staged.with_policy_runtime("http://gpu-box.example:50051/"))
+            .with_policy_runtime("http://gpu-box.example:50051/")
             .expect("HTTP endpoints are accepted");
-        assert_eq!(
-            staged.robot_connector().address(),
-            "http://lab-arms.example:7070"
-        );
         assert_eq!(
             staged.robot_connector().policy_runtime(),
             "http://gpu-box.example:50051"
@@ -302,7 +271,7 @@ mod tests {
         let json = serde_json::to_string(&StoredStudioPreferences::default()).unwrap();
         assert_eq!(
             json,
-            r#"{"robot_connector":{"address":"http://localhost:7070","policy_runtime":"http://localhost:50051"}}"#
+            r#"{"robot_connector":{"policy_runtime":"http://localhost:50051"}}"#
         );
         let earlier: StoredStudioPreferences = serde_json::from_str(
             r#"{"training":{"endpoint":"http://runtime.example"},"video":{"enabled":false}}"#,
@@ -317,12 +286,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            without_runtime.robot_connector().address(),
-            "http://lab-arms.example:7070"
+            without_runtime.robot_connector(),
+            &StoredRobotConnectorPreference::default()
         );
+        let addressed: StoredStudioPreferences = serde_json::from_str(
+            r#"{"robot_connector":{"address":"http://lab-arms.example:7070","policy_runtime":"http://gpu-box.example:50051"}}"#,
+        )
+        .unwrap();
         assert_eq!(
-            without_runtime.robot_connector().policy_runtime(),
-            StoredRobotConnectorPreference::default().policy_runtime()
+            addressed.robot_connector().policy_runtime(),
+            "http://gpu-box.example:50051"
         );
     }
 
@@ -333,7 +306,6 @@ mod tests {
 
         let stored = StoredRobotConnectorPreference::default();
         let wire = RobotConnectorSettings::default();
-        assert_eq!(stored.address(), wire.address());
         assert_eq!(stored.policy_runtime(), wire.policy_runtime());
     }
 }

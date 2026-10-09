@@ -496,7 +496,7 @@ impl PortCatalogState {
     fn use_catalog() -> Self {
         let connector = RobotConnector::current();
         let ports = use_resource(move || {
-            let available = connector.reachable();
+            let available = connector.linked();
             async move {
                 if !available {
                     return std::future::pending().await;
@@ -1007,8 +1007,8 @@ fn CameraSection(
                         class: "aspect-video w-full bg-camera object-contain",
                         src: {
                             use crate::client::http::CameraApiPath;
-                            crate::client::robot_connector::RobotConnector::current()
-                                .url(&camera.id().camera_stream_path())
+                            let project = crate::client::project::ProjectClient::current();
+                            camera.id().camera_stream_path(project.project())
                         },
                         alt: "Live preview from {camera.name()}",
                     }

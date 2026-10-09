@@ -24,7 +24,7 @@ impl RecordingClient {
         self.connector.request(
             HttpRequest::new(
                 "POST",
-                format!("/api/recording/takes/{}/camera", episode.url_component()),
+                format!("/recording/takes/{}/camera", episode.url_component()),
             )
             .json(&spiral_robotics_common::recording::RecordingCameraRequest::new(stream)),
         )
@@ -36,7 +36,7 @@ impl RecordingClient {
     ) -> impl Future<Output = Result<EpisodeInspectionSnapshot, CommandError>> + use<> {
         self.connector.request(HttpRequest::new(
             "GET",
-            format!("/api/recording/takes/{id}", id = id.url_component()),
+            format!("/recording/takes/{id}", id = id.url_component()),
         ))
     }
 
@@ -52,7 +52,7 @@ impl RecordingClient {
         Output = Result<spiral_robotics_common::recording_signals::RecordingWindow, CommandError>,
     > + use<> {
         self.connector
-            .request(HttpRequest::new("GET", "/api/recording/signals").query(&cursor))
+            .request(HttpRequest::new("GET", "/recording/signals").query(&cursor))
     }
 
     pub(super) fn start_recording(
@@ -61,7 +61,7 @@ impl RecordingClient {
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
         self.connector.mutate(
             &[Telemetry, Recording, RobotSetup],
-            HttpRequest::new("POST", "/api/recording").json(&request),
+            HttpRequest::new("POST", "/recording").json(&request),
         )
     }
 
@@ -71,7 +71,7 @@ impl RecordingClient {
     ) -> impl Future<Output = Result<EpisodeInfo, CommandError>> + use<> {
         self.connector.mutate(
             &[Telemetry, Recording, Catalog, RobotSetup],
-            HttpRequest::new("POST", "/api/recording/stop").json(&RecordingFinish::new(keep)),
+            HttpRequest::new("POST", "/recording/stop").json(&RecordingFinish::new(keep)),
         )
     }
 
@@ -81,7 +81,7 @@ impl RecordingClient {
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.connector.mutate(
             &[Telemetry, Recording],
-            HttpRequest::new("PATCH", "/api/recording").json(&PauseUpdate::new(paused)),
+            HttpRequest::new("PATCH", "/recording").json(&PauseUpdate::new(paused)),
         )
     }
 }
@@ -106,12 +106,12 @@ impl RecordingTransfer {
         &self,
     ) -> impl Future<Output = Result<Vec<SavedRecording>, CommandError>> + use<> {
         self.connector
-            .request(HttpRequest::new("GET", "/api/recordings"))
+            .request(HttpRequest::new("GET", "/recordings"))
     }
 
     pub(super) async fn carry(&self, dataset: &str, episode: &str) -> Result<(), CommandError> {
         let (dataset, episode) = (dataset.url_component(), episode.url_component());
-        let saved = format!("/api/recordings/{dataset}/{episode}");
+        let saved = format!("/recordings/{dataset}/{episode}");
         let recording = self
             .connector
             .request_blob(

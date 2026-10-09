@@ -28,7 +28,7 @@ pub(super) fn BenchSetupView(session: RolloutSession) -> Element {
             section { class: "rollout-setup-connector",
                 RobotConnectorSetup {}
             }
-            if RobotConnector::current().reachable() {
+            if RobotConnector::current().linked() {
                 section { class: "rollout-setup-arms",
                     RobotPanel {
                         project: session.project(),

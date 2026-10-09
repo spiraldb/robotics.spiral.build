@@ -7,24 +7,27 @@
 mod cameras;
 mod ffmpeg;
 mod serial_ports;
+mod studio_link;
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use spiral_robotics_connector::{CameraDriver, DeviceDrivers, NoCameraDriver, RobotConnector};
+use spiral_robotics_connector::{
+    CameraDriver, DeviceDrivers, NoCameraDriver, RobotConnector, StudioLink,
+};
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 use crate::cameras::{CameraRuntime, SystemCameras};
 use crate::ffmpeg::FfmpegEncoder;
 use crate::serial_ports::SystemSerialPorts;
+use crate::studio_link::HttpLink;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const DEFAULT_BIND: &str = "127.0.0.1:7070";
+const DEFAULT_STUDIO: &str = "http://localhost:3000";
 const DEFAULT_FFMPEG: &str = "ffmpeg";
 const DEFAULT_VIDEO_CODEC: &str = "libx264";
 
@@ -36,12 +39,21 @@ const DEFAULT_VIDEO_CODEC: &str = "libx264";
 #[command(
     version,
     about = "Drive SO-ARM101 arms for Spiral Robotics Studio",
-    long_about = "Runs next to the robot arms: owns their serial buses and cameras, records takes, and rolls out policies. Studio, in a browser, connects to this server and configures it."
+    long_about = "Runs next to the robot arms: owns their serial buses and cameras, records takes, and rolls out policies. It links itself to Studio, which configures it and relays the browser to it."
 )]
 struct RobotConnectorArguments {
-    /// Address the robot connector API listens on.
-    #[arg(long, default_value = DEFAULT_BIND, value_name = "ADDR:PORT")]
-    bind: SocketAddr,
+    /// The Studio to link to, by its web address.
+    #[arg(long, env = "SPIRAL_ROBOTICS_STUDIO", default_value = DEFAULT_STUDIO, value_name = "URL")]
+    studio: String,
+
+    /// The token the workspace issued in Rollout → Set up.
+    #[arg(
+        long,
+        env = "SPIRAL_ROBOTICS_CONNECTOR_TOKEN",
+        hide_env_values = true,
+        value_name = "TOKEN"
+    )]
+    token: String,
 
     /// Where saved robots, finished recordings, and policies live.
     #[arg(
@@ -72,7 +84,7 @@ struct VideoArguments {
 
 /// Everything the connector needs before it listens.
 struct ConnectorStartup {
-    bind: SocketAddr,
+    studio: StudioLink,
     data_dir: PathBuf,
     drivers: DeviceDrivers,
     camera_access_error: Option<String>,
@@ -109,7 +121,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(startup.serve_until_ctrl_c()) {
+    match runtime.block_on(startup.run_until_ctrl_c()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -129,10 +141,12 @@ impl ConnectorStartup {
 
     fn from_arguments(arguments: RobotConnectorArguments) -> Result<Self> {
         let RobotConnectorArguments {
-            bind,
+            studio,
+            token,
             data_dir,
             video,
         } = arguments;
+        let studio = StudioLink::new(&studio, token)?;
         let data_dir = data_dir
             .or_else(Self::default_data_dir)
             .ok_or("cannot locate a data directory; pass --data-dir")?;
@@ -145,9 +159,10 @@ impl ConnectorStartup {
             Arc::new(SystemSerialPorts),
             camera_driver,
             Arc::new(FfmpegEncoder::new(video.ffmpeg, video.video_codec)?),
+            Arc::new(HttpLink::new()?),
         );
         Ok(Self {
-            bind,
+            studio,
             data_dir,
             drivers,
             camera_access_error,
@@ -171,10 +186,10 @@ impl ConnectorStartup {
         Some(error)
     }
 
-    /// Serve until the first Ctrl+C, then release the hardware.
-    async fn serve_until_ctrl_c(self) -> Result<()> {
+    /// Run linked to Studio until the first Ctrl+C, then release the hardware.
+    async fn run_until_ctrl_c(self) -> Result<()> {
         let Self {
-            bind,
+            studio,
             data_dir,
             drivers,
             camera_access_error,
@@ -183,16 +198,11 @@ impl ConnectorStartup {
         if let Some(error) = camera_access_error {
             connector.note_camera_issue(format!("camera previews will stay blank: {error}"));
         }
-        let listener = tokio::net::TcpListener::bind(bind).await?;
-        println!(
-            "Spiral Robotics robot connector is running at http://{}",
-            listener.local_addr()?
-        );
         let (shutdown, requested) = watch::channel(false);
         let signal_task = tokio::spawn(CtrlC::listen(shutdown));
-        let served = connector.serve(listener, requested).await;
+        let ran = connector.run(studio, requested).await;
         signal_task.abort();
-        served
+        ran
     }
 }
 

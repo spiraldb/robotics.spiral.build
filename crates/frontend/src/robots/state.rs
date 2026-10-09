@@ -19,11 +19,11 @@ impl HardwareViewState {
     pub(crate) fn use_state(project: StudioProjectState, is_active: ReadSignal<bool>) -> Self {
         let connector = crate::client::robot_connector::RobotConnector::current();
         connector.use_health(is_active);
-        let connected = use_memo(move || connector.reachable());
-        // Only the health check reaches for a robot connector that is not
-        // answering; everything else waits until it does.
-        let reachable_and_active = use_memo(move || is_active() && connected());
-        let setup = super::RobotSetupState::use_state(reachable_and_active.into());
+        let connected = use_memo(move || connector.linked());
+        // Only the health check asks after a robot connector that is not
+        // linked; everything else waits until one is.
+        let linked_and_active = use_memo(move || is_active() && connected());
+        let setup = super::RobotSetupState::use_state(linked_and_active.into());
         let telemetry = use_hook(|| Self {
             setup,
             telemetry: Signal::new(TelemetryFrame::default()),
@@ -32,7 +32,7 @@ impl HardwareViewState {
             connected,
             is_active,
         });
-        telemetry.use_hardware_polling(reachable_and_active.into());
+        telemetry.use_hardware_polling(linked_and_active.into());
         telemetry
     }
     pub(crate) fn setup(self) -> super::RobotSetupState {

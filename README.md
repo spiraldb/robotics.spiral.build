@@ -13,9 +13,10 @@ serves the browser app, keeps Studio state, and reaches SpiralDB; it runs at
 `robotics.spiraldb.com` or on `localhost`. The **robot connector**
 (`robot-connector`) runs next to the arms: it owns their serial buses,
 cameras, calibration, and control loop, records takes, and rolls out policies.
-The browser talks to the robot connector directly — Studio never reaches it —
-carries each finished take from it to Studio, and writes the checkpoints Studio
-trained to it.
+The connector links itself to Studio over plain HTTP, and the browser reaches
+it only through Studio, which relays the browser's requests and serves the
+live data the connector posts. The browser carries each finished take from it
+to Studio and writes the checkpoints Studio trained to it.
 
 Studio stores its control-plane state in persistent backend-local SQLite
 (SeaORM and versioned migrations). SpiralDB stores datasets and model artifacts.
@@ -46,14 +47,14 @@ Start the robot connector next to the arms, from the workspace root in the
 Nix shell (which supplies FFmpeg for camera recording):
 
 ```console
-cargo run -p spiral-robotics-connector-os
+cargo run -p spiral-robotics-connector-os -- --studio http://localhost:3000 --token rc_…
 ```
 
-It listens on `http://127.0.0.1:7070` and keeps its robots, unsent takes, and
-policies under the platform's local data directory (`--data-dir` chooses
-another). In Studio, **Rollout → Set up** sets the address
-the workspace drives, for everyone in it: `localhost` means each person's own
-machine, and a network address one robot connector they share.
+The token comes from **Rollout → Set up**, which issues one per workspace and
+shows this command with it. The connector links itself to that Studio — it
+listens on no port, so a robot needs no public address — and keeps its robots,
+unsent takes, and policies under the platform's local data directory
+(`--data-dir` chooses another).
 
 Start the studio from the workspace root with:
 

@@ -17,7 +17,6 @@ use spiral_robotics_common::robots::config::RobotConfigSave;
 use spiral_robotics_common::robots::visualization::{RobotModelFiles, RobotModelId};
 use spiral_robotics_common::robots::{
     CameraStatus, HardwareStatus, ModeSelection, RobotGoal, RobotSummary, SerialPortSummary,
-    TelemetryFrame,
 };
 
 /// A robot model's meshes, base64-encoded, stay well inside this.
@@ -30,7 +29,6 @@ impl RobotEndpoints {
         Router::new()
             .route("/api/serial-ports", get(Self::list_serial_ports))
             .route("/api/hardware/status", get(Self::fetch_hardware_status))
-            .route("/api/robots/telemetry", get(Self::fetch_telemetry))
             .route("/api/robots", get(Self::list_robots))
             .route("/api/robots/models/{model}", get(Self::fetch_model))
     }
@@ -74,11 +72,6 @@ impl RobotEndpoints {
         State(connector): State<RobotConnectorContext>,
     ) -> Result<Json<Vec<CameraStatus>>, OperationError> {
         Ok(Json(connector.cameras().refresh().await?))
-    }
-    async fn fetch_telemetry(
-        State(connector): State<RobotConnectorContext>,
-    ) -> Json<TelemetryFrame> {
-        Json(connector.hardware().state().telemetry().clone())
     }
     async fn fetch_hardware_status(
         State(connector): State<RobotConnectorContext>,

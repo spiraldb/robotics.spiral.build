@@ -210,7 +210,7 @@ impl ProjectRegistry {
 mod tests {
     use spiral_robotics_common::project::ProjectKey;
     use spiral_robotics_common::settings::{
-        DEFAULT_POLICY_RUNTIME, RobotConnectorSettings, SettingsUpdate,
+        PolicyRuntimeUpdate, RobotConnectorSettings, SettingsUpdate,
     };
     use spiral_robotics_common::workspace::{NewWorkspace, Workspace};
 
@@ -330,37 +330,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(renamed.name(), "Lab arms");
+        registry
+            .robot_connector_tokens()
+            .replace("project_a", "rc_lab_arms")
+            .await
+            .unwrap();
         let connected = registry
-            .set_robot_connector(
+            .set_policy_runtime(
                 &project,
-                RobotConnectorSettings::new(
-                    "http://lab-arms.example:7070/",
-                    "http://gpu-box.example:50051/",
-                ),
+                &PolicyRuntimeUpdate::new("http://gpu-box.example:50051/"),
             )
             .await
             .unwrap();
         assert_eq!(
             connected.robot_connector(),
-            &RobotConnectorSettings::new(
-                "http://lab-arms.example:7070",
-                "http://gpu-box.example:50051"
-            )
+            &RobotConnectorSettings::new(true, "http://gpu-box.example:50051")
         );
         assert_eq!(connected.name(), "Lab arms");
-        for refused in [
-            RobotConnectorSettings::new("lab-arms:7070", DEFAULT_POLICY_RUNTIME),
-            RobotConnectorSettings::new("http://lab-arms.example:7070", "gpu-box:50051"),
-        ] {
-            assert!(matches!(
-                registry.set_robot_connector(&project, refused).await,
-                Err(OperationError::InvalidInput(_))
-            ));
-        }
+        assert!(matches!(
+            registry
+                .set_policy_runtime(&project, &PolicyRuntimeUpdate::new("gpu-box:50051"))
+                .await,
+            Err(OperationError::InvalidInput(_))
+        ));
         let unchosen = fixture.open("").await;
         assert!(matches!(
             registry
-                .set_robot_connector(&unchosen, RobotConnectorSettings::default())
+                .set_policy_runtime(
+                    &unchosen,
+                    &PolicyRuntimeUpdate::new("http://gpu-box.example:50051")
+                )
                 .await,
             Err(OperationError::InvalidInput(_))
         ));
@@ -392,8 +391,8 @@ mod tests {
             registry.delete_workspace(&session, "project_a").await,
             Err(OperationError::StaleProject(_))
         ));
-        // The project's Studio records went with it: made a workspace again,
-        // it starts fresh.
+        // The project's Studio records and its robot connector token went
+        // with it: made a workspace again, it starts fresh.
         let again = fixture.open("project_a").await;
         let settings = registry.settings(&again).await.unwrap();
         assert_eq!(settings.name(), "project_a");

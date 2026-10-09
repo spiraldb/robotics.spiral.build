@@ -1,13 +1,23 @@
 //! URLs for media and download surfaces.
 
+use spiral_robotics_common::project::ProjectKey;
+use spiral_robotics_common::robot_connector::RELAY_PREFIX;
+
 pub(crate) trait CameraApiPath {
-    /// Path of this camera's live MJPEG stream on the robot connector.
-    fn camera_stream_path(&self) -> String;
+    /// Path of this camera's live MJPEG stream, relayed by Studio from the
+    /// robot connector of `project`'s workspace. An `<img>` sends no project
+    /// headers, so the query names the project, as Studio's scoped URLs do.
+    fn camera_stream_path(&self, project: &ProjectKey) -> String;
 }
 
 impl CameraApiPath for str {
-    fn camera_stream_path(&self) -> String {
-        format!("/api/cameras/stream.mjpeg?id={}", self.url_component())
+    fn camera_stream_path(&self, project: &ProjectKey) -> String {
+        format!(
+            "{RELAY_PREFIX}/cameras/stream.mjpeg?id={}&endpoint={}&project_id={}",
+            self.url_component(),
+            project.endpoint().url_component(),
+            project.project_id().url_component(),
+        )
     }
 }
 
@@ -41,9 +51,11 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn device_paths_survive_the_query_string() {
         assert_eq!("/dev/video0".url_component(), "%2Fdev%2Fvideo0");
+        let project = ProjectKey::new("https://spiral.example/api", "bench 1");
         assert_eq!(
-            "/dev/video0".camera_stream_path(),
-            "/api/cameras/stream.mjpeg?id=%2Fdev%2Fvideo0"
+            "/dev/video0".camera_stream_path(&project),
+            "/api/robot-connector/cameras/stream.mjpeg?id=%2Fdev%2Fvideo0\
+             &endpoint=https%3A%2F%2Fspiral.example%2Fapi&project_id=bench%201"
         );
         // macOS reports opaque identifiers that may contain anything at all.
         assert_eq!("cam 1&x=2".url_component(), "cam%201%26x%3D2");

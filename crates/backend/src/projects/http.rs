@@ -46,6 +46,8 @@ impl WorkspaceEndpoints {
         ))
     }
 
+    /// The workspace's robot connector token goes with it, and so does the
+    /// connector that linked with it.
     async fn delete(
         State(state): State<StudioContext>,
         SignedIn(session): SignedIn,
@@ -55,6 +57,7 @@ impl WorkspaceEndpoints {
             .projects()
             .delete_workspace(&session, &project_id)
             .await?;
+        state.robot_connectors().disconnect(&project_id);
         Ok(Json(()))
     }
 }

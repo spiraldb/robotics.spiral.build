@@ -158,7 +158,7 @@ async fn local_state_survives_reopening() {
     StudioPreferencePersistence::new(&project)
         .save(
             &StoredStudioPreferences::default()
-                .with_robot_connector("http://localhost:9")
+                .with_policy_runtime("http://localhost:9")
                 .unwrap(),
         )
         .await
@@ -190,7 +190,7 @@ async fn local_state_survives_reopening() {
             .await
             .unwrap()
             .robot_connector()
-            .address(),
+            .policy_runtime(),
         "http://localhost:9"
     );
     assert_eq!(

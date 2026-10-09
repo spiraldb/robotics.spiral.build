@@ -3,18 +3,20 @@ use crate::account::{SpiralSession, SpiralSessions};
 use crate::curation::manager::CurationManager;
 use crate::data::lerobot_import::LeRobotImports;
 use crate::projects::{OpenProject, ProjectRegistry};
+use crate::robot_connector::RobotConnectors;
 use crate::training::manager::TrainingManager;
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::sync::Arc;
 
 /// Services shared by every request: the open projects, the browsers' Spiral
-/// sessions, and the provider keys.
+/// sessions, the provider keys, and the workspaces' linked robot connectors.
 #[derive(Clone)]
 pub(crate) struct StudioContext {
     projects: Arc<ProjectRegistry>,
     sessions: Arc<SpiralSessions>,
     keys: Arc<ProviderKeys>,
+    robot_connectors: Arc<RobotConnectors>,
 }
 
 impl StudioContext {
@@ -23,10 +25,14 @@ impl StudioContext {
         sessions: Arc<SpiralSessions>,
         keys: Arc<ProviderKeys>,
     ) -> Self {
+        let robot_connectors = Arc::new(RobotConnectors::new(
+            projects.robot_connector_tokens().clone(),
+        ));
         Self {
             projects,
             sessions,
             keys,
+            robot_connectors,
         }
     }
 
@@ -61,6 +67,9 @@ impl StudioContext {
     pub(crate) fn keys(&self) -> &ProviderKeys {
         &self.keys
     }
+    pub(crate) fn robot_connectors(&self) -> &RobotConnectors {
+        &self.robot_connectors
+    }
 }
 
 /// A request or task retains the project it named, and the session that
@@ -81,6 +90,11 @@ impl ProjectContext {
     }
     pub(crate) fn studio(&self) -> &StudioContext {
         &self.studio
+    }
+    /// The project of the workspace the request names; refused before one
+    /// is chosen.
+    pub(crate) fn workspace_project_id(&self) -> Result<String, crate::OperationError> {
+        ProjectRegistry::chosen(&self.project)
     }
     pub(crate) fn projects(&self) -> &Arc<ProjectRegistry> {
         self.studio.projects()

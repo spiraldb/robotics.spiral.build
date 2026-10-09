@@ -1,14 +1,15 @@
-//! Open a robot connector on the machine's device drivers and serve its HTTP
-//! API.
+//! Open a robot connector on the machine's device drivers and link it to
+//! Studio.
 //!
 //! The program around it — a computer's command line or a microcontroller's
-//! firmware — supplies the device drivers, binds the listener, and decides
-//! when to stop.
+//! firmware — supplies the device drivers, names the Studio to link to, and
+//! decides when to stop. The connector listens on no port: it dials out.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::context::{RobotConnectorContext, RobotConnectorDevices};
+use crate::link::{LinkDriver, StudioLink, StudioLinkLoop};
 use crate::robotics::cameras::{CameraDriver, CameraManager};
 use crate::robotics::video::EncoderDriver;
 use crate::robots::models::RobotModelStore;
@@ -20,21 +21,19 @@ use tokio::sync::watch;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Camera streams are intentionally long lived, so graceful draining
-/// gets a short deadline instead of being allowed to hold process exit open.
-const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 /// Motor and camera cleanup normally completes within one control/frame cycle;
 /// the final encoder segment and recording file need time to finish.
 const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// The device drivers of the machine running the connector: the serial
-/// ports arms are wired to, its cameras, and an H.264 encoder for recordings.
-/// A computer drives them through its operating system; a microcontroller
-/// through its own peripherals.
+/// ports arms are wired to, its cameras, an H.264 encoder for recordings, and
+/// the network it links to Studio over. A computer drives them through its
+/// operating system; a microcontroller through its own peripherals.
 pub struct DeviceDrivers {
     serial_driver: Arc<dyn SerialDriver>,
     camera_driver: Arc<dyn CameraDriver>,
     encoder_driver: Arc<dyn EncoderDriver>,
+    link_driver: Arc<dyn LinkDriver>,
 }
 
 impl DeviceDrivers {
@@ -42,18 +41,23 @@ impl DeviceDrivers {
         serial_driver: Arc<dyn SerialDriver>,
         camera_driver: Arc<dyn CameraDriver>,
         encoder_driver: Arc<dyn EncoderDriver>,
+        link_driver: Arc<dyn LinkDriver>,
     ) -> Self {
         Self {
             serial_driver,
             camera_driver,
             encoder_driver,
+            link_driver,
         }
     }
 }
 
 /// A connector with its control loop running and its saved state open,
-/// ready to serve Studio.
-pub struct RobotConnector(RobotConnectorContext);
+/// ready to link to Studio.
+pub struct RobotConnector {
+    context: RobotConnectorContext,
+    link_driver: Arc<dyn LinkDriver>,
+}
 
 impl RobotConnector {
     /// Start the control loop on `drivers` and open the saved robots, unsent
@@ -64,6 +68,7 @@ impl RobotConnector {
             serial_driver,
             camera_driver,
             encoder_driver,
+            link_driver,
         } = drivers;
         tracing::info!(path = %data_dir.display(), "robot connector data directory");
         let hardware = Arc::new(HardwareHandle::spawn(serial_driver.clone()));
@@ -81,27 +86,28 @@ impl RobotConnector {
         let simulated = None;
         let cameras = Arc::new(CameraManager::new(camera_driver, simulated));
         let devices = RobotConnectorDevices::new(hardware, serial_driver, cameras, encoder_driver);
-        Ok(Self(RobotConnectorContext::open(
-            devices, workspace, &data_dir,
-        )))
+        Ok(Self {
+            context: RobotConnectorContext::open(devices, workspace, &data_dir),
+            link_driver,
+        })
     }
 
     /// Show the operator a camera problem discovery cannot detect, such as a
     /// denied permission prompt.
     pub fn note_camera_issue(&self, message: impl Into<String>) {
-        self.0.cameras().note_issue(message);
+        self.context.cameras().note_issue(message);
     }
 
-    /// Serve Studio on `listener` until `shutdown` turns true, then release
-    /// motors and cameras.
-    pub async fn serve(
-        self,
-        listener: tokio::net::TcpListener,
-        shutdown: watch::Receiver<bool>,
-    ) -> Result<()> {
-        let connector = self.0;
-        // Cameras and saved robots come up once requests are already being
-        // answered, so a slow probe never delays the API.
+    /// Link to `studio` and serve it until `shutdown` turns true, then
+    /// release motors and cameras. A lost link is dialed again; the arms keep
+    /// their state meanwhile.
+    pub async fn run(self, studio: StudioLink, shutdown: watch::Receiver<bool>) -> Result<()> {
+        let Self {
+            context: connector,
+            link_driver,
+        } = self;
+        // Cameras and saved robots come up while the link is dialed, so a
+        // slow probe never delays it.
         let bootstrap = tokio::spawn({
             let connector = connector.clone();
             async move {
@@ -113,31 +119,13 @@ impl RobotConnector {
                     .await;
             }
         });
-        let app = super::routes::RobotConnectorApi::router(connector.clone())
+        let api = super::routes::RobotConnectorApi::router(connector.clone())
             .layer(tower_http::trace::TraceLayer::new_for_http());
-
-        // Both the server and this task observe the same edge. The server begins
-        // graceful draining immediately; this task enforces a deadline because
-        // camera connections are designed not to finish on their own.
-        let server_result = {
-            let server = axum::serve(listener, app)
-                .with_graceful_shutdown(ShutdownSignal::requested(shutdown.clone()))
-                .into_future();
-            tokio::pin!(server);
-
-            tokio::select! {
-                result = &mut server => Some(result),
-                () = ShutdownSignal::requested(shutdown) => {
-                    match tokio::time::timeout(SERVER_DRAIN_TIMEOUT, &mut server).await {
-                        Ok(result) => Some(result),
-                        Err(_) => {
-                            tracing::warn!("server drain timed out; closing remaining connections");
-                            None
-                        }
-                    }
-                }
-            }
-        };
+        let link = StudioLinkLoop::new(connector.clone(), api, studio, link_driver);
+        tokio::select! {
+            () = link.run() => {}
+            () = ShutdownSignal::requested(shutdown) => {}
+        }
         tracing::info!("releasing motors and cameras");
         let cleanup = async {
             connector.rollout().shutdown().await;
@@ -163,9 +151,6 @@ impl RobotConnector {
             tracing::warn!("resource cleanup timed out; the operating system will release devices");
         }
         bootstrap.abort();
-        if let Some(result) = server_result {
-            result?;
-        }
         Ok(())
     }
 }

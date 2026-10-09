@@ -205,10 +205,10 @@ pub(crate) fn WorkspaceFrame(
     rsx! {
         div { class: "studio-route-content", style: "grid-template-rows: auto minmax(0, 1fr)",
             div {
-                // A robot connector that is not answering is the status line's
-                // to report; until it answers there is no setup to load.
+                // A robot connector that is not linked is the status line's to
+                // report; until one is there is no setup to load.
                 if let WorkspaceStatus::Hardware(hardware) = status
-                    && crate::client::robot_connector::RobotConnector::current().reachable()
+                    && crate::client::robot_connector::RobotConnector::current().linked()
                 {
                     if let Some(error) = hardware.setup().error() {
                         div { class: "flex items-center gap-2 px-3 py-2 text-xs text-danger", role: "alert",
@@ -353,10 +353,7 @@ impl StatusFacts {
                 StatusTone::Caution,
             )
         } else if hardware.is_some() && matches!(connector, Some(Err(_))) {
-            (
-                "Robot connector unreachable".to_owned(),
-                StatusTone::Caution,
-            )
+            ("No robot connector linked".to_owned(), StatusTone::Caution)
         } else if hardware.is_some_and(|hardware| hardware.setup().error().is_some()) {
             ("Robot setup unavailable".to_owned(), StatusTone::Caution)
         } else if hardware.is_some_and(|hardware| !hardware.setup().available()) {

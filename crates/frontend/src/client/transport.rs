@@ -51,13 +51,7 @@ pub(crate) struct HttpRequest {
     project: Option<spiral_robotics_common::project::ProjectKey>,
     body: Result<Option<RequestBody>, CommandError>,
     headers: Vec<(String, String)>,
-    delivery: RequestDelivery,
-}
-
-/// How long a request may take, and what a failure to reach its server says.
-struct RequestDelivery {
     timeout_ms: Option<u32>,
-    unreachable: &'static str,
 }
 
 enum RequestBody {
@@ -68,6 +62,8 @@ enum RequestBody {
 }
 
 impl HttpRequest {
+    const UNREACHABLE: &str = "Could not reach Studio. Check the server connection and retry.";
+
     pub(crate) fn new(method: &'static str, url: impl Into<String>) -> Self {
         Self {
             method,
@@ -75,22 +71,13 @@ impl HttpRequest {
             project: None,
             body: Ok(None),
             headers: Vec::new(),
-            delivery: RequestDelivery {
-                timeout_ms: None,
-                unreachable: "Could not reach Studio. Check the server connection and retry.",
-            },
+            timeout_ms: None,
         }
     }
 
-    /// Send this request to the server at `origin` rather than to Studio.
-    pub(crate) fn at(mut self, origin: &str) -> Self {
-        self.url = self.url.map(|path| format!("{origin}{path}"));
-        self
-    }
-
-    /// What a failure to reach this request's server tells the operator.
-    pub(crate) fn unreachable(mut self, message: &'static str) -> Self {
-        self.delivery.unreachable = message;
+    /// Send this request below `prefix` on Studio, such as a relay's.
+    pub(crate) fn under(mut self, prefix: &str) -> Self {
+        self.url = self.url.map(|path| format!("{prefix}{path}"));
         self
     }
 
@@ -112,7 +99,7 @@ impl HttpRequest {
     }
 
     pub(crate) fn timeout(mut self, milliseconds: u32) -> Self {
-        self.delivery.timeout_ms = Some(milliseconds);
+        self.timeout_ms = Some(milliseconds);
         self
     }
 
@@ -200,7 +187,7 @@ impl HttpRequest {
         accept: &str,
     ) -> Result<(gloo_net::http::Response, RequestCancellation), CommandError> {
         use gloo_net::http::{Method, RequestBuilder};
-        let abort = RequestCancellation::new(self.delivery.timeout_ms)?;
+        let abort = RequestCancellation::new(self.timeout_ms)?;
         let mut request = RequestBuilder::new(&self.url?)
             .method(self.method.parse::<Method>().expect("declared HTTP method"))
             .header("Accept", accept)
@@ -239,11 +226,10 @@ impl HttpRequest {
             None => request.build(),
         }
         .map_err(CommandError::transport)?;
-        let unreachable = self.delivery.unreachable;
         let response = request
             .send()
             .await
-            .map_err(|error| CommandError::transport(format!("{unreachable} ({error})")))?;
+            .map_err(|error| CommandError::transport(format!("{} ({error})", Self::UNREACHABLE)))?;
         Ok((response, abort))
     }
 }

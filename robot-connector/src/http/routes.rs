@@ -3,16 +3,11 @@ use super::delivery::HttpFailure;
 use crate::OperationError;
 use crate::context::RobotConnectorContext;
 use axum::{
-    Json, Router,
+    Router,
     extract::Request,
-    http::{HeaderValue, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
 };
-use spiral_robotics_common::robot_connector::RobotConnectorHealth;
-use tower_http::cors::CorsLayer;
-use tower_http::set_header::SetResponseHeaderLayer;
 
 pub(super) struct RobotConnectorApi;
 impl RobotConnectorApi {
@@ -21,13 +16,11 @@ impl RobotConnectorApi {
     /// caller disconnects; a command runs to completion regardless, so a
     /// dropped connection never leaves a write or a hardware change half done.
     ///
-    /// Studio runs on another origin — its hosted site or a developer's
-    /// localhost — so every origin may call the connector.
+    /// The router answers the browser requests Studio relays down the link;
+    /// the connector listens on no port.
     pub(super) fn router(connector: RobotConnectorContext) -> Router {
         let reads = Router::new()
-            .route("/api/health", get(Self::health))
             .merge(crate::robots::http::RobotEndpoints::reads())
-            .merge(crate::robots::camera_preview::CameraPreview::reads())
             .merge(crate::recording::http::RecordingEndpoints::reads())
             .merge(crate::policies::http::PolicyEndpoints::reads())
             .merge(crate::rollout::http::RolloutEndpoints::reads());
@@ -41,20 +34,7 @@ impl RobotConnectorApi {
             .merge(commands)
             .fallback(HttpFailure::not_found)
             .method_not_allowed_fallback(HttpFailure::method_not_allowed)
-            // Responses are live state unless an endpoint says otherwise.
-            .layer(SetResponseHeaderLayer::if_not_present(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("no-store"),
-            ))
-            .layer(CorsLayer::very_permissive())
             .with_state(connector)
-    }
-
-    async fn health() -> Json<RobotConnectorHealth> {
-        Json(RobotConnectorHealth::new(
-            env!("CARGO_PKG_VERSION"),
-            cfg!(feature = "simulation"),
-        ))
     }
 
     async fn run_to_completion(request: Request, next: Next) -> Response {

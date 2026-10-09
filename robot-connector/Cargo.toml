@@ -22,6 +22,7 @@ axum = "0.8"
 base64.workspace = true
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+form_urlencoded = "1.2"
 image.workspace = true
 pollster = { version = "0.4", optional = true }
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -34,8 +35,8 @@ spiral-robotics-inference.workspace = true
 spiral-robotics-recording.workspace = true
 spiral-robotics-viewport = { workspace = true, optional = true }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-tower-http = { version = "0.7", features = ["cors", "set-header", "trace"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 
 [dev-dependencies]

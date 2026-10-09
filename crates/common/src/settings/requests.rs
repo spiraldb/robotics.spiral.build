@@ -17,6 +17,23 @@ impl SettingsUpdate {
     }
 }
 
+/// Points the workspace's robot connector at another policy runtime.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyRuntimeUpdate {
+    policy_runtime: String,
+}
+impl PolicyRuntimeUpdate {
+    pub fn new(policy_runtime: impl Into<String>) -> Self {
+        Self {
+            policy_runtime: policy_runtime.into(),
+        }
+    }
+    pub fn policy_runtime(&self) -> &str {
+        &self.policy_runtime
+    }
+}
+
 /// Named HTTP response fields for ConnectionTest.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionTest {

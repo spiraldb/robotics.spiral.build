@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::settings::{
-    DataSettings, RobotConnectorSettings, SettingsUpdate, SpiralSettings,
+    DataSettings, PolicyRuntimeUpdate, RobotConnectorSettings, SettingsUpdate, SpiralSettings,
 };
 use spiral_robotics_storage::{
-    ProjectStore, ProviderKeys, SpiralAccess, SpiralConnection, SpiralConnectionSettings,
-    StorageManager, StoredStudioPreferences, WorkspaceStore,
+    ProjectStore, ProviderKeys, RobotConnectorTokens, SpiralAccess, SpiralConnection,
+    SpiralConnectionSettings, StorageManager, StoredStudioPreferences, WorkspaceStore,
 };
 
 use crate::OperationError;
@@ -61,6 +61,11 @@ impl ProjectFactory {
     /// The workspaces kept beside these projects' Studio records.
     fn workspaces(&self, endpoint: &str) -> WorkspaceStore {
         WorkspaceStore::new(self.data.studio.clone(), endpoint)
+    }
+
+    /// The tokens those workspaces' robot connectors link with.
+    fn robot_connector_tokens(&self, endpoint: &str) -> RobotConnectorTokens {
+        RobotConnectorTokens::new(self.data.studio.clone(), endpoint)
     }
 
     /// A project that reaches Spiral with `access`.
@@ -168,6 +173,7 @@ pub(crate) struct ProjectRegistry {
     /// The Spiral endpoints every project reaches, fixed while Studio runs.
     endpoints: SpiralConnectionSettings,
     workspaces: WorkspaceStore,
+    robot_connector_tokens: RobotConnectorTokens,
     opened: Mutex<Vec<SessionProject>>,
 }
 
@@ -175,6 +181,7 @@ impl ProjectRegistry {
     pub(crate) fn new(factory: ProjectFactory, endpoints: SpiralConnectionSettings) -> Arc<Self> {
         Arc::new(Self {
             workspaces: factory.workspaces(endpoints.endpoint()),
+            robot_connector_tokens: factory.robot_connector_tokens(endpoints.endpoint()),
             factory,
             endpoints: endpoints.without_project(),
             opened: Mutex::new(Vec::new()),
@@ -254,25 +261,36 @@ impl ProjectRegistry {
             .collect()
     }
 
-    /// The name and preferences of `project`'s workspace; an empty name
-    /// before a workspace is chosen.
+    /// The tokens the workspaces' robot connectors link with.
+    pub(crate) fn robot_connector_tokens(&self) -> &RobotConnectorTokens {
+        &self.robot_connector_tokens
+    }
+
+    /// The name and preferences of `project`'s workspace, and whether it
+    /// issued a robot connector token; an empty name and no token before a
+    /// workspace is chosen.
     pub(crate) async fn settings(
         &self,
         project: &OpenProject,
     ) -> Result<DataSettings, OperationError> {
         let connection = project.connection();
-        let name = match connection.project_id() {
-            Some(project_id) => self.workspace(project_id).await?.name().to_owned(),
-            None => String::new(),
+        let (name, token_issued) = match connection.project_id() {
+            Some(project_id) => (
+                self.workspace(project_id).await?.name().to_owned(),
+                self.robot_connector_tokens
+                    .issued(project_id)
+                    .await
+                    .map_err(OperationError::Internal)?,
+            ),
+            None => (String::new(), false),
         };
         let preferences = project.preferences().await?;
-        let robot_connector = preferences.robot_connector();
         Ok(DataSettings::new(
             OpenProject::present(&connection),
             name,
             RobotConnectorSettings::new(
-                robot_connector.address(),
-                robot_connector.policy_runtime(),
+                token_issued,
+                preferences.robot_connector().policy_runtime(),
             ),
         ))
     }
@@ -288,21 +306,18 @@ impl ProjectRegistry {
         self.settings(project).await
     }
 
-    /// Drive the robot connector at `robot_connector`, asking its policy
-    /// runtime for actions, from every browser in `project`'s workspace.
-    pub(crate) async fn set_robot_connector(
+    /// Have the robot connector of `project`'s workspace ask the policy
+    /// runtime `update` names for actions.
+    pub(crate) async fn set_policy_runtime(
         &self,
         project: &OpenProject,
-        robot_connector: RobotConnectorSettings,
+        update: &PolicyRuntimeUpdate,
     ) -> Result<DataSettings, OperationError> {
         Self::chosen(project)?;
         let preferences = project
             .preferences()
             .await?
-            .with_robot_connector(robot_connector.address())
-            .and_then(|preferences| {
-                preferences.with_policy_runtime(robot_connector.policy_runtime())
-            })
+            .with_policy_runtime(update.policy_runtime())
             .map_err(OperationError::InvalidInput)?;
         project.apply_preferences(preferences).await?;
         self.settings(project).await
@@ -638,14 +653,14 @@ pub(crate) mod tests {
         let fixture = ProjectFixture::new().await;
         let project = fixture.open("").await;
         let preferences = StoredStudioPreferences::default()
-            .with_robot_connector("http://127.0.0.1:5050")
+            .with_policy_runtime("http://127.0.0.1:5050")
             .unwrap();
         project.apply_preferences(preferences).await.unwrap();
         assert!(Arc::ptr_eq(&project, &fixture.open("").await));
         let settings = fixture.projects.settings(&project).await.unwrap();
         assert_eq!(
-            settings.robot_connector().address(),
-            "http://127.0.0.1:5050"
+            settings.robot_connector(),
+            &RobotConnectorSettings::new(false, "http://127.0.0.1:5050")
         );
         assert_eq!(settings.name(), "");
     }
@@ -667,7 +682,7 @@ pub(crate) mod tests {
             .create(connection, fixture.session().await.access())
             .unwrap();
         let preferences = StoredStudioPreferences::default()
-            .with_robot_connector("http://127.0.0.1:5050")
+            .with_policy_runtime("http://127.0.0.1:5050")
             .unwrap();
         project
             .storage()
@@ -684,7 +699,7 @@ pub(crate) mod tests {
         );
         assert_eq!(settings.name(), "configured_project");
         assert_eq!(
-            settings.robot_connector().address(),
+            settings.robot_connector().policy_runtime(),
             "http://127.0.0.1:5050"
         );
     }

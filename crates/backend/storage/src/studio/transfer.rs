@@ -42,11 +42,14 @@ impl StudioSnapshot {
             .begin()
             .await
             .map_err(|error| error.to_string())?;
-        // No browser's Spiral sign-in leaves this backend.
-        transaction
-            .execute_unprepared("DELETE FROM sessions")
-            .await
-            .map_err(|error| error.to_string())?;
+        // No browser's Spiral sign-in leaves this backend, and no robot
+        // connector's token, even hashed.
+        for credentials in ["sessions", "robot_connector_tokens"] {
+            transaction
+                .execute_unprepared(&format!("DELETE FROM {credentials}"))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         // A bundle carries no model answers, so no view that reads them.
         transaction
             .execute_unprepared("DELETE FROM curated_views")

@@ -5,7 +5,7 @@ use crate::projects::context::{ProjectContext, StudioContext};
 use axum::{
     Json,
     body::Bytes,
-    extract::{FromRequest, FromRequestParts, Path, Request},
+    extract::{FromRequest, FromRequestParts, Path, Query, Request},
     http::{StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
@@ -151,6 +151,17 @@ impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for ApiPath
         Path::<T>::from_request_parts(parts, state)
             .await
             .map(|Path(value)| Self(value))
+            .map_err(|error| HttpFailure::rejection(error.status(), error.body_text()))
+    }
+}
+
+pub(crate) struct ApiQuery<T>(pub(crate) T);
+impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for ApiQuery<T> {
+    type Rejection = HttpFailure;
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Query(value)| Self(value))
             .map_err(|error| HttpFailure::rejection(error.status(), error.body_text()))
     }
 }

@@ -5,6 +5,7 @@ mod datasets;
 mod db;
 mod manager;
 mod provider_keys;
+mod robot_connector_tokens;
 mod sessions;
 mod settings;
 mod spiral_access;
@@ -45,6 +46,7 @@ pub use db::{
 pub use db::{KeptInterval, SCHEMA_VERSION};
 pub use manager::StorageManager;
 pub use provider_keys::ProviderKeys;
+pub use robot_connector_tokens::RobotConnectorTokens;
 pub use sessions::{SessionStore, StoredSession};
 pub use settings::{
     ServiceEndpoint, SpiralConnectionSettings, StoredRobotConnectorPreference,

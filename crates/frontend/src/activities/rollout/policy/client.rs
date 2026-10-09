@@ -24,7 +24,7 @@ impl PolicyClient {
     /// The current policy run, or an idle snapshot before the first one.
     pub(super) async fn run(&self) -> Result<RolloutSnapshot, CommandError> {
         self.connector
-            .request(HttpRequest::new("GET", "/api/rollout"))
+            .request(HttpRequest::new("GET", "/rollout"))
             .await
     }
 
@@ -37,7 +37,7 @@ impl PolicyClient {
         self.connector
             .mutate::<RolloutSnapshot>(
                 &[Rollout, RobotSetup, Telemetry],
-                HttpRequest::new("POST", "/api/rollout").json(&config),
+                HttpRequest::new("POST", "/rollout").json(&config),
             )
             .await
             .map(|_| ())
@@ -51,7 +51,7 @@ impl PolicyClient {
     ) -> Result<(), CommandError> {
         let stored: Vec<StoredPolicy> = self
             .connector
-            .request(HttpRequest::new("GET", "/api/policies"))
+            .request(HttpRequest::new("GET", "/policies"))
             .await?;
         if stored.iter().any(|policy| {
             policy.run_id() == config.run_id()
@@ -75,11 +75,8 @@ impl PolicyClient {
             .await?;
         self.connector
             .request::<StoredPolicy>(
-                HttpRequest::new(
-                    "PUT",
-                    format!("/api/policies/{}/{step}", run.url_component()),
-                )
-                .blob(envelope),
+                HttpRequest::new("PUT", format!("/policies/{}/{step}", run.url_component()))
+                    .blob(envelope),
             )
             .await
             .map(|_| ())
@@ -92,7 +89,7 @@ impl PolicyClient {
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         self.connector.mutate(
             &[Rollout, RobotSetup, Telemetry],
-            HttpRequest::new("POST", format!("/api/rollout/{}/stop", id.url_component())),
+            HttpRequest::new("POST", format!("/rollout/{}/stop", id.url_component())),
         )
     }
 }

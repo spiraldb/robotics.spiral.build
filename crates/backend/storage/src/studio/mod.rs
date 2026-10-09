@@ -9,6 +9,8 @@ mod migrations;
 #[allow(unreachable_pub)]
 pub(crate) mod published_models;
 #[allow(unreachable_pub)]
+pub(crate) mod robot_connector_tokens;
+#[allow(unreachable_pub)]
 pub(crate) mod sessions;
 #[allow(unreachable_pub)]
 pub(crate) mod studio_settings;

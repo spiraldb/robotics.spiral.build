@@ -32,7 +32,7 @@ const DEFAULT_PUBLIC_URL: &str = "http://localhost:3000";
 #[command(
     version,
     about = "Curate and train on robot datasets in SpiralDB from a browser",
-    long_about = "Serves the Spiral Robotics Studio web UI, stores Studio state in local SQLite and datasets in SpiralDB. Robot arms are driven by the robot connector, which browsers reach directly."
+    long_about = "Serves the Spiral Robotics Studio web UI, stores Studio state in local SQLite and datasets in SpiralDB. Robot arms are driven by the robot connector, which links itself to Studio with its workspace's token."
 )]
 struct StudioServerArguments {
     /// Address the web UI is served on.
