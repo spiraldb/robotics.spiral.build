@@ -61,7 +61,7 @@ pub struct RobotConnector {
 
 impl RobotConnector {
     /// Start the control loop on `drivers` and open the saved robots and
-    /// unsent takes kept under `data_dir`. Everything else a connector
+    /// unsent episodes kept under `data_dir`. Everything else a connector
     /// does is configured from Studio.
     pub fn open(drivers: DeviceDrivers, data_dir: PathBuf) -> Result<Self> {
         let DeviceDrivers {
@@ -131,7 +131,7 @@ impl RobotConnector {
             if let Err(error) = connector.hardware().shutdown().await {
                 tracing::error!("hardware shutdown did not verify every motor release: {error}");
             }
-            crate::recording::take::TakeOperations::new(&connector)
+            crate::recording::episode::EpisodeOperations::new(&connector)
                 .close_ended(None)
                 .await;
             let camera_result = tokio::task::spawn_blocking({

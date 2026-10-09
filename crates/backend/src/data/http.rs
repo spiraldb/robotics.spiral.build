@@ -2,12 +2,11 @@
 
 use super::query::QueryCommand;
 use crate::OperationError;
-use crate::http::delivery::{ApiBytes, ApiJson, ApiPath, ArrowResponse, Project};
+use crate::http::delivery::{ApiJson, ApiPath, ArrowResponse, Project};
 use crate::projects::context::StudioContext;
 
 use axum::{
     Json, Router,
-    extract::DefaultBodyLimit,
     routing::{get, post},
 };
 use spiral_robotics_common::datasets::{
@@ -18,10 +17,6 @@ use spiral_robotics_common::datasets::{
 };
 use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest, SpiralQuerySnapshot};
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
-
-/// A recording travels as one Spiral row, which stays below Spiral's 256 MiB
-/// operation limit.
-const MAX_RECORDING_BYTES: usize = 256 * 1024 * 1024;
 
 pub(crate) struct DatasetQueryEndpoints;
 
@@ -72,24 +67,6 @@ impl DatasetQueryEndpoints {
                 "/datasets/lerobot/imports",
                 post(Self::import_lerobot_dataset),
             )
-            .route(
-                "/datasets/{dataset}/recordings/{episode}",
-                post(Self::store_recording).layer(DefaultBodyLimit::max(MAX_RECORDING_BYTES)),
-            )
-    }
-    /// Store a take the browser carried from the robot connector, creating
-    /// its dataset with the first.
-    async fn store_recording(
-        Project(project): Project,
-        ApiPath((dataset, episode)): ApiPath<(String, String)>,
-        ApiBytes(recording): ApiBytes,
-    ) -> Result<Json<()>, OperationError> {
-        project
-            .storage()
-            .store_recording(&dataset, &episode, &recording)
-            .await
-            .map_err(OperationError::External)?;
-        Ok(Json(()))
     }
     async fn project_resources(
         Project(project): Project,

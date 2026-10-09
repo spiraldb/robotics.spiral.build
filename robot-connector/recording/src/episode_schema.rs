@@ -5,12 +5,12 @@ use prost_reflect::Value;
 
 use spiral_robotics_common::robots::MotorLimits;
 
-use super::capture::{EpisodeCompletion, EpisodeError, EpisodeStart, FullEpisode, Sample};
+use super::capture::{EpisodeCompletion, EpisodeError, EpisodeStart, EpisodeSummary, Sample};
 use super::mcap_schema::{McapMessage, RecordingSchema};
 use crate::SCHEMA_VERSION;
 
-impl FullEpisode {
-    /// The `Episode` message: identity, timing, and how the take ended.
+impl EpisodeSummary {
+    /// The `Episode` message: identity, timing, and how the episode ended.
     pub(super) fn episode_message(
         &self,
         schema: &RecordingSchema,
@@ -41,7 +41,7 @@ impl FullEpisode {
             .set("started_ms", Value::I64(start.started_ms()))
             .set("sample_hz", Value::F64(start.sample_hz()))
             .set("source", Value::String(start.source().to_owned()))
-            .set("frames", Value::U64(self.samples().len() as u64))
+            .set("frames", Value::U64(self.frames()))
             .set("duration_ns", Value::U64(duration))
             .set_optional(
                 "max_follow_error_degrees",
@@ -56,7 +56,7 @@ impl FullEpisode {
 
 impl EpisodeStart {
     /// One joint `Stream` message per arm, in arm order: the order its values
-    /// take in every sample. Motor readings that measured nothing stay absent.
+    /// episode in every sample. Motor readings that measured nothing stay absent.
     pub(super) fn joint_stream_messages(
         &self,
         completion: &EpisodeCompletion,

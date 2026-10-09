@@ -2,6 +2,7 @@
 //! and its Dataset copies every topic of them into Spiral at each refresh, so
 //! reads never reopen the files.
 use super::StudioDataset;
+use crate::EpisodeName;
 use crate::ProjectConnection;
 use crate::StorageManager;
 use arrow_array::{
@@ -78,25 +79,16 @@ impl<'a> McapFile<'a> {
     }
 }
 impl StorageManager {
-    /// Store one take the robot connector recorded as `episode`'s file in the
-    /// MCAP dataset `dataset`, creating the dataset with its first take. The
-    /// same take stored again only refreshes the dataset.
-    pub async fn store_recording(
-        &self,
-        dataset: &str,
-        episode: &str,
-        bytes: &[u8],
-    ) -> Result<(), String> {
-        if episode.is_empty()
-            || episode.len() > 64
-            || !episode
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err("episode ID must use 1–64 letters, numbers, '_' or '-' characters".into());
-        }
-        self.append_mcap_file(McapFile::new(dataset, &format!("{episode}.mcap"), bytes))
-            .await
+    /// Store one episode the robot connector recorded as its episode's file in
+    /// its MCAP dataset, creating the dataset with its first episode. The same
+    /// episode stored again only refreshes the dataset.
+    pub async fn store_recording(&self, name: &EpisodeName, bytes: &[u8]) -> Result<(), String> {
+        self.append_mcap_file(McapFile::new(
+            name.dataset(),
+            &format!("{}.mcap", name.episode()),
+            bytes,
+        ))
+        .await
     }
 
     pub(crate) async fn append_mcap_file(&self, file: McapFile<'_>) -> Result<(), String> {

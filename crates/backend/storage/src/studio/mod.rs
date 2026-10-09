@@ -13,6 +13,10 @@ pub(crate) mod robot_connector_tokens;
 #[allow(unreachable_pub)]
 pub(crate) mod sessions;
 #[allow(unreachable_pub)]
+pub(crate) mod staged_episode_parts;
+#[allow(unreachable_pub)]
+pub(crate) mod staged_episodes;
+#[allow(unreachable_pub)]
 pub(crate) mod training_runs;
 mod transfer;
 #[allow(unreachable_pub)]

@@ -15,7 +15,7 @@ use spiral_robotics_common::settings::{
 };
 use spiral_robotics_storage::{
     ProjectStore, ProviderKeys, RobotConnectorTokens, SpiralAccess, SpiralConnection,
-    SpiralConnectionSettings, StorageManager, WorkspaceStore,
+    SpiralConnectionSettings, StagedEpisodes, StorageManager, WorkspaceStore,
 };
 
 use crate::OperationError;
@@ -66,6 +66,11 @@ impl ProjectFactory {
     /// The tokens those workspaces' robot connectors link with.
     fn robot_connector_tokens(&self, endpoint: &str) -> RobotConnectorTokens {
         RobotConnectorTokens::new(self.data.studio.clone(), endpoint)
+    }
+
+    /// The takes those workspaces' robot connectors uploaded.
+    fn staged_episodes(&self, endpoint: &str) -> StagedEpisodes {
+        StagedEpisodes::new(self.data.studio.clone(), endpoint)
     }
 
     /// A project that reaches Spiral with `access`.
@@ -155,6 +160,7 @@ pub(crate) struct ProjectRegistry {
     endpoints: SpiralConnectionSettings,
     workspaces: WorkspaceStore,
     robot_connector_tokens: RobotConnectorTokens,
+    staged_episodes: StagedEpisodes,
     opened: Mutex<Vec<SessionProject>>,
 }
 
@@ -163,6 +169,7 @@ impl ProjectRegistry {
         Arc::new(Self {
             workspaces: factory.workspaces(endpoints.endpoint()),
             robot_connector_tokens: factory.robot_connector_tokens(endpoints.endpoint()),
+            staged_episodes: factory.staged_episodes(endpoints.endpoint()),
             factory,
             endpoints: endpoints.without_project(),
             opened: Mutex::new(Vec::new()),
@@ -245,6 +252,11 @@ impl ProjectRegistry {
     /// The tokens the workspaces' robot connectors link with.
     pub(crate) fn robot_connector_tokens(&self) -> &RobotConnectorTokens {
         &self.robot_connector_tokens
+    }
+
+    /// The takes the workspaces' robot connectors uploaded.
+    pub(crate) fn staged_episodes(&self) -> &StagedEpisodes {
+        &self.staged_episodes
     }
 
     /// The name and preferences of `project`'s workspace, and whether it

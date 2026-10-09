@@ -12,11 +12,11 @@ It runs as two programs. **Studio** (`crates/backend` and `crates/frontend`)
 serves the browser app, keeps Studio state, and reaches SpiralDB; it runs at
 `robotics.spiraldb.com` or on `localhost`. The **robot connector**
 (`robot-connector`) runs next to the arms: it owns their serial buses,
-cameras, calibration, and control loop, and records takes.
+cameras, calibration, and control loop, and records episodes.
 The connector links itself to Studio over plain HTTP, and the browser reaches
 it only through Studio, which relays the browser's requests and serves the
-live data the connector posts. The browser carries each finished take from it
-to Studio.
+live data the connector posts. The connector uploads each finished episode to
+Studio, and the browser stores it in its dataset.
 
 Studio stores its control-plane state in persistent backend-local SQLite
 (SeaORM and versioned migrations). SpiralDB stores datasets and model artifacts.
@@ -53,7 +53,7 @@ cargo run -p spiral-robotics-connector-os -- --studio http://localhost:3000 --to
 The token comes from **Rollout → Set up**, which issues one per workspace and
 shows this command with it. The connector links itself to that Studio — it
 listens on no port, so a robot needs no public address — and keeps its robots
-and unsent takes under the platform's local data directory
+and unsent episodes under the platform's local data directory
 (`--data-dir` chooses another).
 
 Start the studio from the workspace root with:

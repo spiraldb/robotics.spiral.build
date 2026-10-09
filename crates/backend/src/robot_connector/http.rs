@@ -20,14 +20,14 @@ use spiral_robotics_common::robot_connector::{
 };
 
 use super::RobotConnectors;
+use super::episodes::EpisodeEndpoints;
 use super::link::{ConnectorLink, RelayedAnswer, RelayedRequest};
 use super::live::CameraViewer;
 use crate::OperationError;
 use crate::http::delivery::{ApiBytes, ApiPath, ApiQuery, HttpFailure, Project, SignedIn};
 use crate::projects::context::StudioContext;
 
-/// Relayed requests and their answers carry policy checkpoints and
-/// recordings whole.
+/// Relayed requests and their answers carry an episode's camera preview whole.
 const RELAYED_BODY_LIMIT: usize = 512 * 1024 * 1024;
 
 pub(crate) struct RobotConnectorEndpoints;
@@ -47,12 +47,15 @@ impl RobotConnectorEndpoints {
                 post(Self::publish_telemetry),
             )
             .route("/robot-connector/link/cameras", post(Self::publish_frame))
+            .merge(EpisodeEndpoints::link())
     }
 
-    /// The workspace's connector, as its browsers reach it: its health and
-    /// live data from Studio, and every other request relayed to it.
+    /// The workspace's connector, as its browsers reach it: its health, live
+    /// data, and uploaded episodes from Studio, and every other request relayed
+    /// to it.
     pub(crate) fn reads() -> Router<StudioContext> {
         Router::new()
+            .merge(EpisodeEndpoints::reads())
             .route("/robot-connector/health", get(Self::health))
             .route("/robot-connector/robots/telemetry", get(Self::telemetry))
             .route(
@@ -66,7 +69,9 @@ impl RobotConnectorEndpoints {
     }
 
     pub(crate) fn commands() -> Router<StudioContext> {
-        Router::new().route("/settings/robot-connector/token", post(Self::issue_token))
+        Router::new()
+            .route("/settings/robot-connector/token", post(Self::issue_token))
+            .merge(EpisodeEndpoints::commands())
     }
 
     /// The connector's long poll, which reports its health. Every answer
@@ -222,13 +227,23 @@ impl FromRequestParts<StudioContext> for LinkedConnector {
         parts: &mut Parts,
         state: &StudioContext,
     ) -> Result<Self, Self::Rejection> {
-        let token = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|authorization| authorization.to_str().ok())
-            .and_then(|authorization| authorization.strip_prefix("Bearer "))
-            .ok_or_else(RobotConnectors::refused)?;
+        let token = RobotConnectors::presented_token(parts)?;
         Ok(Self(state.robot_connectors().authenticate(token).await?))
+    }
+}
+
+/// The project of the workspace whose token a connector's request presents.
+pub(super) struct LinkedWorkspace(pub(super) String);
+
+impl FromRequestParts<StudioContext> for LinkedWorkspace {
+    type Rejection = HttpFailure;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &StudioContext,
+    ) -> Result<Self, Self::Rejection> {
+        let token = RobotConnectors::presented_token(parts)?;
+        Ok(Self(state.robot_connectors().workspace(token).await?))
     }
 }
 

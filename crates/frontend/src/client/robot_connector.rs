@@ -106,13 +106,4 @@ impl RobotConnector {
     ) -> impl Future<Output = Result<T, CommandError>> + use<T> {
         ProjectClient::current().mutate(domains, request.under(RELAY_PREFIX))
     }
-
-    /// A binary response of `media_type`, kept as a browser blob.
-    pub(crate) fn request_blob(
-        self,
-        request: HttpRequest,
-        media_type: &'static str,
-    ) -> impl Future<Output = Result<web_sys::Blob, CommandError>> + use<> {
-        ProjectClient::current().request_blob(request.under(RELAY_PREFIX), media_type)
-    }
 }

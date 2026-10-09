@@ -24,6 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 sha2 = "0.10"
+tempfile.workspace = true
 
 [build-dependencies]
 serde_json.workspace = true

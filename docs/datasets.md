@@ -10,7 +10,7 @@ producer that turns their source files into episodes:
   Hugging Face, each of its episodes one member and each feature one topic.
 
 ```text
-Rollout capture on the robot connector → browser → complete MCAP bytes ─┐
+Rollout capture on the robot connector → Studio → browser stores the episode ─┐
                                                                     ├→ dataset_files_<name> (Table) ──→ dataset_<name> → Data, Curation, Training
 Hugging Face → pinned Blob URIs of .mcap files ─────────────────────┘
 Hugging Face LeRobot v3 repository @ commit → dataset_files_<name> (Location) → dataset_<name>
@@ -110,33 +110,36 @@ A completed Rollout recording becomes one immutable `.mcap` file: the recording
 header, stream metadata, joint observations and actions, and H.264 camera
 access units. Camera messages use `foxglove.CompressedVideo`; joint and
 metadata messages use the `studio.recording` Protobuf schemas
-(`robot-connector/recording`). On final stop, the robot connector saves
-and syncs the file in its data directory, at
-`recordings/<dataset>/<episode-id>.mcap`. The browser then reads it, has Studio
-publish it as above through `POST /datasets/{dataset}/recordings/{episode}`,
-and only then has the robot connector delete it. A take that fails to reach
-Studio stays on the robot connector; Rollout lists waiting takes and stores them on
-request. A stop with `keep: false` marks the take discarded; it is stored the
-same way.
+(`robot-connector/recording`). The robot connector writes the file in its
+data directory while the episode records, one thread taking joint samples and
+camera access units as they arrive, so an episode of any length holds little in
+memory. Stopping writes the messages that sum the episode up (the episode
+header and the stream metadata, last in the file; readers place messages by
+log time), saves it at `recordings/<dataset>/<episode-id>.mcap`, and uploads
+it to Studio part by part. Once Studio holds it whole, the connector keeps it
+only for review, until the next episode opens. Studio keeps the episode until a
+browser publishes it as above with its user's Spiral access: Rollout does so
+as each episode arrives, and lists an episode whose store failed, to try again. A
+stop with `keep: false` marks the episode discarded; it is stored the same way.
 
-Pausing ends the current encoder segment without publishing an incomplete
-member; resuming keeps the episode's elapsed clock, excluding the pause. Frame
+Pausing ends the current encoder segment and puts everything written on
+disk, so the paused episode's file ends at a whole chunk; resuming keeps the
+episode's elapsed clock, excluding the pause. Frame
 timestamps use capture time, not frame number. Every keyframe carries its
 decoder parameters, so seeking starts from the preceding keyframe. Calibration
 changes affect future recordings only: a recording keeps the normalized values
 captured with it, and angles in degrees need a calibration snapshot.
 
-Rollout reviews the current take from the robot connector's session, never from
-files.
-`RecordingBuffer` holds only the current session's capture and review, and
-camera preview keeps that session's encoded packets, at most 18,000 packets and
-64 MiB per camera, until a new capture starts. `RecordingSession` holds the one
-open take and the last one kept for review: an operation that changes the take
-(start, pause, stop, or closing a take the control loop ended) holds it
-throughout, operations never interleave, and a cancelled one leaves the take
-as it was. These routes live under `/recording/takes/{id}`, whose IDs name
+Rollout reviews the paused or last episode from its file on the robot connector,
+read a chunk at a time: the joint positions for the Timeline, and one
+camera's packets, at most 18,000 and 64 MiB, for its preview.
+`RecordingBuffer` holds only the last episode's summary. `RecordingSession` holds
+the one open episode and its file: an operation that changes the episode
+(start, pause, stop, or closing an episode the control loop ended) holds it
+throughout, operations never interleave, and a cancelled one leaves the episode
+as it was. These routes live under `/recording/episodes/{id}`, whose IDs name
 session captures, not dataset members. Once the session is replaced or the
-robot connector restarts, the take is read through Data like any other episode.
+robot connector restarts, the episode is read through Data like any other episode.
 
 Automated tests never move hardware; physical capture still needs a smoke
 test with a real robot and camera.

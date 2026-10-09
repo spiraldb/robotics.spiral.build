@@ -13,7 +13,7 @@ use super::SimulatedWorld;
 use super::world::ParsedModels;
 use crate::robotics::cameras::{CameraDevice, DEFAULT_JPEG_QUALITY};
 
-/// A webcam's picture, so a simulated take records like a real one.
+/// A webcam's picture, so a simulated episode records like a real one.
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
 const FPS: u32 = 30;

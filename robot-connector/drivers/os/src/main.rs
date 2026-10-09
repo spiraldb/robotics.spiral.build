@@ -39,7 +39,7 @@ const DEFAULT_VIDEO_CODEC: &str = "libx264";
 #[command(
     version,
     about = "Drive SO-ARM101 arms for Spiral Robotics Studio",
-    long_about = "Runs next to the robot arms: owns their serial buses and cameras, records takes, and rolls out policies. It links itself to Studio, which configures it and relays the browser to it."
+    long_about = "Runs next to the robot arms: owns their serial buses and cameras, and records episodes. It links itself to Studio, which configures it and relays the browser to it."
 )]
 struct RobotConnectorArguments {
     /// The Studio to link to, by its web address.

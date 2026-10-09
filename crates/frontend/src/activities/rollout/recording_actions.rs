@@ -4,7 +4,7 @@
 //! this module to translate consequential intent into admitted commands. The
 //! robot connector remains authoritative for recording, hardware, and safety.
 
-use super::next_take::ControlKind;
+use super::next_episode::ControlKind;
 use super::policy::PolicyControl;
 use crate::activities::rollout::RecordingClient;
 use dioxus::prelude::*;
@@ -14,10 +14,10 @@ use crate::activities::rollout::session::RolloutSession;
 use crate::shell::notifications::MessageSource;
 
 impl RolloutSession {
-    /// Why Record cannot start a take with its control source now, if it cannot.
+    /// Why Record cannot start an episode with its control source now, if it cannot.
     pub(super) fn recording_blocker(self) -> Option<String> {
         if !spiral_robotics_common::identity::DatasetId::is_canonical(
-            self.next_take().dataset().read().trim(),
+            self.next_episode().dataset().read().trim(),
         ) {
             return Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned());
         }
@@ -40,7 +40,7 @@ impl RolloutSession {
         }
     }
 
-    /// Start the next take's control source and record it: the leader and
+    /// Start the next episode's control source and record it: the leader and
     /// follower for Teleop. Recording a policy is not supported yet.
     pub(super) fn start_recording(self) {
         if let Some(reason) = self.recording_blocker() {
@@ -64,16 +64,16 @@ impl RolloutSession {
                 return;
             }
         };
-        let next_take = self.next_take();
+        let next_episode = self.next_episode();
         let request = RecordingStart::new(
-            next_take.dataset().read().trim().to_owned(),
+            next_episode.dataset().read().trim().to_owned(),
             control,
-            *next_take.video().read(),
+            *next_episode.video().read(),
         );
         self.commands().run("", async move {
-            next_take.set_starting(true);
+            next_episode.set_starting(true);
             let started = RecordingClient::current().start_recording(request).await;
-            next_take.set_starting(false);
+            next_episode.set_starting(false);
             started.map(|_| ()).map_err(|error| error.to_string())
         });
     }
@@ -131,15 +131,10 @@ impl RolloutSession {
                 self.project()
                     .report_success_from(MessageSource::Rollout, "Recording discarded.");
             }
-            let (dataset, episode) = (summary.dataset_id().to_owned(), summary.id().to_owned());
+            // The robot connector uploads the episode, a discarded one too,
+            // marked as discarded; Rollout stores it once Studio holds it.
             (completion.on_completed)(summary);
-            // A discarded take is stored too, marked as discarded.
-            self.storing_takes()
-                .carry(&dataset, &episode)
-                .await
-                .map_err(|error| {
-                    format!("The take stays on the robot connector until Studio stores it: {error}")
-                })
+            Ok(())
         });
     }
 }

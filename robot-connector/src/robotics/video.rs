@@ -1,4 +1,5 @@
-//! Camera capture into timestamped H.264 access units for the recording MCAP.
+//! Camera capture into timestamped H.264 access units, written to the episode's
+//! file as the encoder produces them.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -6,7 +7,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use spiral_robotics_hardware::CaptureClock;
-pub(crate) use spiral_robotics_recording::CameraRecording;
+use spiral_robotics_recording::{AccessUnits, CameraStream, VideoSink, VideoUnit};
 use tokio::sync::{mpsc, watch};
 
 use crate::robotics::cameras::{CameraManager, Frame};
@@ -34,12 +35,22 @@ impl CameraCaptureSpec {
             fps: format.2,
         }
     }
+
+    /// The rate the camera's encoder runs at.
+    fn encoder_fps(&self) -> u32 {
+        self.fps.clamp(1, 120)
+    }
+
+    /// The camera's stream, as the episode's file records it.
+    pub(crate) fn stream(&self) -> CameraStream {
+        CameraStream::new(
+            &self.stream_id,
+            &self.camera_id,
+            (self.width, self.height, self.encoder_fps()),
+        )
+    }
 }
 
-/// Hard ceiling for one take's video. Camera bytes are transient transaction
-/// state until the episode is committed to Spiral, never a local persistence
-/// layer.
-const MAX_VIDEO_TRANSACTION_BYTES: usize = 1024 * 1024 * 1024;
 /// Frames waiting for a camera's encoder. A slow encoder makes capture skip
 /// frames, as the preview does, rather than queue them without bound.
 const ENCODER_QUEUE_FRAMES: usize = 4;
@@ -49,14 +60,16 @@ const ENCODER_QUEUE_FRAMES: usize = 4;
 /// A computer runs FFmpeg; a microcontroller drives its hardware encoder.
 pub trait EncoderDriver: Send + Sync {
     /// Encode each JPEG frame `frames` yields, at `fps`, until the channel
-    /// closes. Answers an Annex B H.264 stream without B-frames whose every
-    /// keyframe carries its parameter sets, so a recording decodes from any
-    /// keyframe.
+    /// closes, sending the Annex B H.264 stream to `output` as it is produced:
+    /// no B-frames, an access unit delimiter before every frame, and every
+    /// keyframe carrying its parameter sets, so a recording decodes from any
+    /// keyframe. Resolves once the stream is complete.
     fn encode(
         &self,
         fps: u32,
         frames: mpsc::Receiver<Bytes>,
-    ) -> BoxFuture<'static, Result<Vec<u8>, String>>;
+        output: mpsc::UnboundedSender<Bytes>,
+    ) -> BoxFuture<'static, Result<(), String>>;
 }
 
 pub(crate) struct VideoCapture {
@@ -70,12 +83,12 @@ struct VideoCaptureSource {
     specs: Vec<CameraCaptureSpec>,
     encoder: Arc<dyn EncoderDriver>,
     clock: CaptureClock,
+    sink: VideoSink,
 }
 
 struct VideoCaptureProgress {
     next_segment: u32,
     active: Option<VideoCaptureRun>,
-    completed: Vec<CameraRecording>,
 }
 
 pub(crate) struct VideoCaptureRequest {
@@ -108,7 +121,7 @@ impl VideoCaptureRequest {
 
 struct VideoCaptureRun {
     control: watch::Sender<CaptureState>,
-    tasks: VecDeque<tokio::task::JoinHandle<Result<CameraRecording, String>>>,
+    tasks: VecDeque<tokio::task::JoinHandle<Result<(), String>>>,
     failures: Vec<String>,
 }
 
@@ -119,35 +132,43 @@ struct PreparedCameraSegment {
 }
 
 impl PreparedCameraSegment {
-    async fn record(
-        self,
-        mut control: watch::Receiver<CaptureState>,
-    ) -> Result<CameraRecording, String> {
+    /// Encode the camera's frames until the capture finishes, writing each
+    /// encoded frame to the episode's file as the encoder produces it.
+    async fn record(self, mut control: watch::Receiver<CaptureState>) -> Result<(), String> {
         let Self {
             spec,
             mut frames,
             segment,
         } = self;
-        let encoder_fps = spec.fps.clamp(1, 120);
         let (encoder_input, encoder_frames) = mpsc::channel(ENCODER_QUEUE_FRAMES);
-        let encoding = tokio::spawn(segment.encoder.encode(encoder_fps, encoder_frames));
-
-        let mut timestamps = Vec::new();
+        // Unbounded, so the encoder never waits on the frames it produced
+        // while this loop waits on its input: at most a few frames are in
+        // flight.
+        let (encoded, mut encoder_output) = mpsc::unbounded_channel();
+        let encoding = tokio::spawn(segment.encoder.encode(
+            spec.encoder_fps(),
+            encoder_frames,
+            encoded,
+        ));
+        let mut output = EncodedFrames::new(spec.stream_id.clone(), segment.sink);
+        let mut input = Some(encoder_input);
         let mut last_sequence = 0_u64;
+        let mut last_timestamp = None;
         loop {
-            if *control.borrow() == CaptureState::Finish {
-                break;
+            if input.is_some() && *control.borrow() == CaptureState::Finish {
+                input = None;
             }
             tokio::select! {
                 biased;
-                changed = control.changed() => {
-                    if changed.is_err() || *control.borrow() == CaptureState::Finish {
-                        break;
+                changed = control.changed(), if input.is_some() => {
+                    if changed.is_err() {
+                        input = None;
                     }
                 }
-                changed = frames.changed() => {
+                changed = frames.changed(), if input.is_some() => {
                     if changed.is_err() {
-                        break;
+                        input = None;
+                        continue;
                     }
                     let frame = frames.borrow_and_update().clone();
                     let Some(frame) = frame else { continue };
@@ -155,34 +176,99 @@ impl PreparedCameraSegment {
                         continue;
                     }
                     let Some(timestamp) = segment.clock.timestamp_ns(frame.captured_at()) else { continue; };
-                    if timestamps.last().is_some_and(|previous| *previous >= timestamp) { continue; }
+                    if last_timestamp.is_some_and(|previous| previous >= timestamp) { continue; }
+                    let Some(sender) = input.as_ref() else { continue };
                     // A closed queue means the encoder stopped; its result says why.
-                    if encoder_input.send(frame.bytes().clone()).await.is_err() {
-                        break;
+                    if sender.send(frame.bytes().clone()).await.is_err() {
+                        input = None;
+                        continue;
                     }
                     last_sequence = frame.sequence();
-                    timestamps.push(timestamp);
+                    last_timestamp = Some(timestamp);
+                    output.expect(timestamp);
                 }
+                bytes = encoder_output.recv() => match bytes {
+                    Some(bytes) => output.push(&bytes)?,
+                    None => break,
+                },
             }
         }
-        drop(encoder_input);
-
-        let payload = encoding
+        encoding
             .await
             .map_err(|error| format!("camera {} encoder task failed: {error}", spec.stream_id))?
             .map_err(|error| format!("camera {}: {error}", spec.stream_id))?;
-        if timestamps.is_empty() || payload.is_empty() {
+        output.finish()
+    }
+}
+
+/// One camera segment's encoder output, cut into frames, each stamped with
+/// the time its picture was captured, on its way to the episode's file.
+struct EncodedFrames {
+    stream: String,
+    sink: VideoSink,
+    units: AccessUnits,
+    /// Capture times of the frames the encoder took but has not yet emitted.
+    times: VecDeque<u64>,
+    written: u64,
+}
+
+impl EncodedFrames {
+    fn new(stream: String, sink: VideoSink) -> Self {
+        Self {
+            stream,
+            sink,
+            units: AccessUnits::default(),
+            times: VecDeque::new(),
+            written: 0,
+        }
+    }
+
+    /// The encoder took a frame captured at `timestamp`.
+    fn expect(&mut self, timestamp: u64) {
+        self.times.push_back(timestamp);
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Result<(), String> {
+        for unit in self.units.push(bytes) {
+            self.write(unit)?;
+        }
+        Ok(())
+    }
+
+    /// Write the stream's last frame, once the encoder finished.
+    fn finish(mut self) -> Result<(), String> {
+        if let Some(unit) = std::mem::take(&mut self.units).finish() {
+            self.write(unit)?;
+        }
+        if self.written == 0 {
+            return Err(format!("camera {} delivered no video frames", self.stream));
+        }
+        if !self.times.is_empty() {
             return Err(format!(
-                "camera {} delivered no video frames",
-                spec.stream_id
+                "camera {} encoded {} of {} frames",
+                self.stream,
+                self.written,
+                self.written + self.times.len() as u64
             ));
         }
-        CameraRecording::from_annex_b(
-            spec.stream_id,
-            (spec.width, spec.height, encoder_fps),
-            (payload, timestamps),
-        )
-        .map(|recording| recording.with_camera_id(spec.camera_id))
+        Ok(())
+    }
+
+    fn write(&mut self, unit: Vec<u8>) -> Result<(), String> {
+        let time = self.times.pop_front().ok_or_else(|| {
+            format!(
+                "camera {} encoded more frames than it was given",
+                self.stream
+            )
+        })?;
+        if !self.sink.send(VideoUnit::new(&self.stream, time, unit)) {
+            return Err(format!(
+                "camera {}: the episode's file stopped taking frames",
+                self.stream
+            ));
+        }
+        self.written += 1;
+        Ok(())
     }
 }
 
@@ -190,6 +276,7 @@ impl PreparedCameraSegment {
 struct CameraSegment {
     encoder: Arc<dyn EncoderDriver>,
     clock: CaptureClock,
+    sink: VideoSink,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,10 +286,13 @@ enum CaptureState {
 }
 
 impl VideoCapture {
+    /// Start filming `request`'s cameras into the episode's file through
+    /// `sink`.
     pub(crate) async fn start(
         cameras: Arc<CameraManager>,
         request: VideoCaptureRequest,
         encoder: &Arc<dyn EncoderDriver>,
+        sink: VideoSink,
     ) -> Result<Option<Self>, String> {
         if request.cameras.is_empty() {
             return Ok(None);
@@ -220,11 +310,11 @@ impl VideoCapture {
                 specs: request.cameras,
                 encoder: encoder.clone(),
                 clock: request.clock,
+                sink,
             },
             progress: VideoCaptureProgress {
                 next_segment: 0,
                 active: None,
-                completed: Vec::new(),
             },
         };
         capture.start_segment(0.0)?;
@@ -233,10 +323,6 @@ impl VideoCapture {
 
     pub(crate) fn episode_id(&self) -> &str {
         &self.source.episode_id
-    }
-
-    pub(crate) fn completed_assets(&self) -> Vec<CameraRecording> {
-        self.progress.completed.clone()
     }
 
     fn start_segment(&mut self, timeline_offset_seconds: f64) -> Result<(), String> {
@@ -290,6 +376,7 @@ impl VideoCapture {
                 segment: CameraSegment {
                     encoder: self.source.encoder.clone(),
                     clock: self.source.clock.clone(),
+                    sink: self.source.sink.clone(),
                 },
             });
         }
@@ -308,15 +395,16 @@ impl VideoCapture {
         Ok(())
     }
 
-    /// Stop feeding the current encoders immediately. Their encoded H.264 packets are
-    /// collected after the joint-writer pause barrier has completed.
+    /// Stop feeding the current encoders immediately. Their last frames are
+    /// written after the joint-writer pause barrier has completed.
     pub(crate) fn request_pause(&self) {
         if let Some(active) = &self.progress.active {
             active.control.send_replace(CaptureState::Finish);
         }
     }
 
-    /// Finalize the current in-memory segment for paused review.
+    /// Finish the current segment, its last frames written, for paused
+    /// review.
     pub(crate) async fn finish_pause(&mut self) -> Vec<String> {
         self.finish_active().await
     }
@@ -331,28 +419,11 @@ impl VideoCapture {
             return Vec::new();
         };
         active.control.send_replace(CaptureState::Finish);
-        let mut total = self
-            .progress
-            .completed
-            .iter()
-            .map(|asset| asset.encoded_bytes())
-            .sum::<usize>();
         while let Some(task) = active.tasks.front_mut() {
             let result = task.await;
             active.tasks.pop_front();
             match result {
-                Ok(Ok(asset)) => {
-                    let next = total.saturating_add(asset.encoded_bytes());
-                    if next > MAX_VIDEO_TRANSACTION_BYTES {
-                        active.failures.push(format!(
-                            "episode video exceeded the {} MiB in-memory transaction limit",
-                            MAX_VIDEO_TRANSACTION_BYTES / (1024 * 1024)
-                        ));
-                    } else {
-                        total = next;
-                        self.progress.completed.push(asset);
-                    }
-                }
+                Ok(Ok(())) => {}
                 Ok(Err(error)) => active.failures.push(error),
                 Err(error) => active
                     .failures
@@ -366,14 +437,17 @@ impl VideoCapture {
             .failures
     }
 
-    pub(crate) async fn finish(mut self) -> (Vec<CameraRecording>, Vec<String>) {
-        let failures = self.finish_active().await;
-        (self.progress.completed, failures)
+    /// Finish filming; the failures of its last segment.
+    pub(crate) async fn finish(mut self) -> Vec<String> {
+        self.finish_active().await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use spiral_robotics_common::recording::EpisodeArm;
+    use spiral_robotics_recording::{EpisodeFile, EpisodeRecordingRequest, RecordingBuffer};
+
     use super::*;
 
     /// Stands in for a platform encoder in tests that never start one.
@@ -384,12 +458,29 @@ mod tests {
             &self,
             _fps: u32,
             _frames: mpsc::Receiver<Bytes>,
-        ) -> BoxFuture<'static, Result<Vec<u8>, String>> {
+            _output: mpsc::UnboundedSender<Bytes>,
+        ) -> BoxFuture<'static, Result<(), String>> {
             Box::pin(async { Err("these tests never start an encoder".to_owned()) })
         }
     }
 
-    fn capture(specs: Vec<CameraCaptureSpec>) -> VideoCapture {
+    /// The file of a one-arm episode filmed by `cameras`.
+    fn episode_file(directory: &std::path::Path, cameras: &[CameraCaptureSpec]) -> EpisodeFile {
+        let request = EpisodeRecordingRequest::new("data".to_owned(), "test".to_owned(), 60.0)
+            .with_arms(
+                vec![EpisodeArm::new("arm", None, vec!["joint".into()])],
+                vec![],
+            );
+        let start = RecordingBuffer::new().begin(request).unwrap();
+        EpisodeFile::create(
+            directory.join("episode.mcap"),
+            &start,
+            cameras.iter().map(CameraCaptureSpec::stream).collect(),
+        )
+        .unwrap()
+    }
+
+    fn capture(specs: Vec<CameraCaptureSpec>, sink: VideoSink) -> VideoCapture {
         VideoCapture {
             source: VideoCaptureSource {
                 episode_id: "episode_000001".to_owned(),
@@ -397,36 +488,26 @@ mod tests {
                 specs,
                 encoder: Arc::new(UnusedEncoder),
                 clock: CaptureClock::default(),
+                sink,
             },
             progress: VideoCaptureProgress {
                 next_segment: 0,
                 active: None,
-                completed: Vec::new(),
             },
         }
     }
 
     #[tokio::test]
-    async fn cancelled_pause_preserves_finished_packets_errors_and_pending_encoders() {
+    async fn a_cancelled_pause_keeps_every_failure_and_the_encoders_still_pending() {
         use std::future::Future as _;
         use std::task::{Context, Waker};
 
-        let camera = CameraRecording::from_annex_b(
-            "wrist".into(),
-            (32, 32, 30),
-            (
-                include_bytes!(
-                    "../../../crates/frontend/src/activities/episode/fixtures/seek.h264"
-                )
-                .to_vec(),
-                (0..8).map(|index| index * 33_333_333).collect(),
-            ),
-        )
-        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let file = episode_file(directory.path(), &[]);
         let (ready, finished) = tokio::sync::oneshot::channel();
         let encoded = tokio::spawn(async move {
             ready.send(()).unwrap();
-            Ok(camera)
+            Ok(())
         });
         finished.await.unwrap();
         let (ready, finished) = tokio::sync::oneshot::channel();
@@ -441,7 +522,7 @@ mod tests {
             Err("last encoder failed".to_owned())
         });
         let (control, _) = watch::channel(CaptureState::Recording);
-        let mut capture = capture(Vec::new());
+        let mut capture = capture(Vec::new(), file.video_sink());
         capture.progress.active = Some(VideoCaptureRun {
             control,
             tasks: VecDeque::from([encoded, failed, waiting]),
@@ -456,17 +537,55 @@ mod tests {
         );
         // Cancel after collecting two results but while the last encoder waits.
         drop(finish);
-        assert_eq!(
-            CameraRecording::preview(&capture.completed_assets(), "wrist")
-                .unwrap()
-                .packets()
-                .len(),
-            8
-        );
         release.send(()).unwrap();
         let failures = capture.finish_pause().await;
         assert_eq!(failures, ["first encoder failed", "last encoder failed"]);
-        assert_eq!(capture.completed_assets().len(), 1);
+    }
+
+    #[test]
+    fn each_encoded_frame_carries_the_capture_time_of_the_picture_it_encodes() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = CameraCaptureSpec::new("wrist", "camera-1", (32, 32, 30));
+        let file = episode_file(directory.path(), std::slice::from_ref(&spec));
+        let stream =
+            include_bytes!("../../../crates/frontend/src/activities/episode/fixtures/seek.h264");
+        let frames = || {
+            let mut frames = EncodedFrames::new("wrist".to_owned(), file.video_sink());
+            for index in 0..8 {
+                frames.expect(index * 33_333_333);
+            }
+            frames
+        };
+        let mut whole = frames();
+        for piece in stream.chunks(100) {
+            whole.push(piece).unwrap();
+        }
+        assert_eq!(whole.finish(), Ok(()));
+
+        let mut short = frames();
+        short.expect(8 * 33_333_333);
+        short.push(stream).unwrap();
+        assert!(
+            short
+                .finish()
+                .unwrap_err()
+                .contains("encoded 8 of 9 frames")
+        );
+
+        let mut unstamped = EncodedFrames::new("wrist".to_owned(), file.video_sink());
+        unstamped.expect(0);
+        assert!(
+            unstamped
+                .push(stream)
+                .unwrap_err()
+                .contains("more frames than it was given")
+        );
+        assert!(
+            EncodedFrames::new("wrist".to_owned(), file.video_sink())
+                .finish()
+                .unwrap_err()
+                .contains("no video frames")
+        );
     }
 
     #[test]
@@ -486,22 +605,27 @@ mod tests {
 
     #[test]
     fn subscription_failure_starts_no_encoder() {
-        let mut capture = capture(vec![
-            CameraCaptureSpec {
-                stream_id: "first".to_owned(),
-                camera_id: "camera-1".to_owned(),
-                width: 640,
-                height: 480,
-                fps: 30,
-            },
-            CameraCaptureSpec {
-                stream_id: "second".to_owned(),
-                camera_id: "camera-2".to_owned(),
-                width: 640,
-                height: 480,
-                fps: 30,
-            },
-        ]);
+        let directory = tempfile::tempdir().unwrap();
+        let file = episode_file(directory.path(), &[]);
+        let mut capture = capture(
+            vec![
+                CameraCaptureSpec {
+                    stream_id: "first".to_owned(),
+                    camera_id: "camera-1".to_owned(),
+                    width: 640,
+                    height: 480,
+                    fps: 30,
+                },
+                CameraCaptureSpec {
+                    stream_id: "second".to_owned(),
+                    camera_id: "camera-2".to_owned(),
+                    width: 640,
+                    height: 480,
+                    fps: 30,
+                },
+            ],
+            file.video_sink(),
+        );
         let (_, receiver) = watch::channel(None::<Arc<Frame>>);
         let mut subscriptions = 0;
         let error = capture

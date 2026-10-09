@@ -1,4 +1,4 @@
-//! The mounted take Timeline: one subject, assembled once per render and read
+//! The mounted recording Timeline: one subject, assembled once per render and read
 //! by the Timeline panel, the scene, and every camera.
 
 use std::sync::Arc;
@@ -8,24 +8,24 @@ use dioxus::prelude::*;
 use super::recording_review::EpisodePreview;
 use super::session::RolloutSession;
 use super::signals::{RecordingTimeline, SignalStore};
-use super::timeline::{SignalSource, TakeTimelinePanel, TimelineSignals, TimelineSubject};
-use super::transport::{TakeClock, TakePreview, TakeTransport};
+use super::timeline::{RolloutTimelinePanel, SignalSource, TimelineSignals, TimelineSubject};
+use super::transport::{RolloutClock, RolloutPreview, RolloutTransport};
 use crate::components::time_series::TimelineSignalLane;
 use crate::panels::camera::{CameraEditorSource, RecordedCameraSourceRequest};
 use crate::panels::camera_panel::AssignedCamera;
 use crate::panels::recorded_source::RecordedSource;
 use crate::panels::scene::SceneSource;
 
-pub(super) struct TakeTimeline {
+pub(super) struct RolloutTimeline {
     source: Option<RecordedSource<EpisodePreview>>,
-    transport: TakeTransport,
+    transport: RolloutTransport,
     signals: TimelineSignals,
 }
 
-impl TakeTimeline {
+impl RolloutTimeline {
     pub(super) fn use_timeline(session: RolloutSession) -> Self {
         let controller = session.timeline_controller();
-        let preview = TakePreview::use_preview(session);
+        let preview = RolloutPreview::use_preview(session);
         let subject = session
             .telemetry()
             .recording()
@@ -37,9 +37,9 @@ impl TakeTimeline {
             Self::signal_lanes(session, &subject, source.as_ref()),
             Self::signal_source(&subject, source.as_ref()),
         );
-        let clock = TakeClock::new(controller.playhead_signal()(), controller.previewing())
+        let clock = RolloutClock::new(controller.playhead_signal()(), controller.previewing())
             .with_follow_live(controller.follow_live_signal()());
-        let transport = TakeTransport::new(preview, subject, clock);
+        let transport = RolloutTransport::new(preview, subject, clock);
         Self {
             source,
             transport,
@@ -104,11 +104,11 @@ impl TakeTimeline {
     }
 
     pub(super) fn render(&self) -> Element {
-        rsx! { TakeTimelinePanel { transport: self.transport.clone(), signals: self.signals.clone() } }
+        rsx! { RolloutTimelinePanel { transport: self.transport.clone(), signals: self.signals.clone() } }
     }
 
     /// The transport the workspace binds its recording shortcuts to.
-    pub(super) fn transport(&self) -> TakeTransport {
+    pub(super) fn transport(&self) -> RolloutTransport {
         self.transport.clone()
     }
 }

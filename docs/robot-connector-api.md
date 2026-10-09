@@ -2,7 +2,7 @@
 
 The robot connector (`robot-connector`) runs next to the arms it drives.
 It owns their serial buses, cameras, calibration, and fixed-rate control loop,
-and records takes. It listens on no port: it links itself
+and records episodes. It listens on no port: it links itself
 to Studio over plain HTTP, presenting the token its workspace issued in
 **Rollout → Set up**, so a robot needs no public address or certificate. The
 browser reaches it only through Studio. It never reaches Spiral. The two share
@@ -21,7 +21,7 @@ Rollout → Set up. A microcontroller build has no command line and links the sa
 | --- | --- | --- |
 | `--studio` | `http://localhost:3000` | Studio's web address; also `SPIRAL_ROBOTICS_STUDIO` |
 | `--token` | | The workspace's token; also `SPIRAL_ROBOTICS_CONNECTOR_TOKEN` |
-| `--data-dir` | platform data dir`/spiral-robotics/robot-connector` | Saved robots and unsent takes; also `SPIRAL_ROBOTICS_ROBOT_CONNECTOR_DATA` |
+| `--data-dir` | platform data dir`/spiral-robotics/robot-connector` | Saved robots and unsent episodes; also `SPIRAL_ROBOTICS_ROBOT_CONNECTOR_DATA` |
 | `--no-cameras` | off | Skip camera discovery |
 | `--ffmpeg`, `--video-codec` | `ffmpeg`, `libx264` | Camera recording encoder |
 
@@ -45,12 +45,21 @@ workspace from the token. The paths and headers are constants in
 - While watched, `POST /api/robot-connector/link/telemetry` takes the latest
   telemetry about ten times a second, and
   `POST /api/robot-connector/link/cameras?id=…` a camera's latest JPEG about
-  five times a second. Takes record every frame; the preview only frames and
+  five times a second. Episodes record every frame; the preview only frames and
   checks a camera.
+- `PUT /api/robot-connector/link/episodes/{dataset}/{episode}?offset=…&size=…`
+  uploads a finished episode in parts of at most 4 MiB, each under Cloudflare's
+  100 MB request cap. Studio answers `{received}`, the bytes it holds: `200`
+  once it kept the part, `409` when the part starts elsewhere, so an upload
+  that stopped resumes where Studio's bytes end. Once Studio holds the whole
+  episode, the connector deletes its file; an episode Studio refuses (`4xx`) stays
+  until the connector restarts. An episode holds at most 256 MiB, one Spiral row.
 
 Studio serves the browser the endpoints below under `/api/robot-connector`
 (`/api/robots` is `/api/robot-connector/robots`), answering health, telemetry,
-and camera previews from what the connector last sent.
+and camera previews from what the connector last sent. It answers
+`/episodes`, the whole episodes it holds, itself; `/episodes/{dataset}/{episode}/store`
+stores one in its dataset with the browser's Spiral access.
 
 ## Conventions
 
@@ -103,26 +112,21 @@ Robots, saved in the robot connector's `robots.json`:
   `<img>` sends no headers, so it names the project in its query too. Camera
   IDs may contain device-path separators and must be percent-encoded.
 
-Takes:
+Episodes:
 
 - `POST /recording`: `{dataset_id, control, video}` starts the control source
-  and records a take of the arms it moves, with their cameras when `video` is
-  true. Answers 201 with the take. `control` is
+  and records an episode of the arms it moves, with their cameras when `video` is
+  true. Answers 201 with the episode. `control` is
   `{"teleoperate": {"leader": …, "follower": …}}`: teleoperate the pair and
   record both arms.
-- `PATCH /recording` (`{"paused": …}`) pauses or resumes the take.
-  `POST /recording/stop` (`{"keep": …}`) stops the take and its control source:
-  teleoperation returns to idle. Stopping saves the take as an MCAP file; a discarded take
-  is saved too, marked as discarded.
-- `GET /recording/signals`, `GET /recording/takes/{id}`, and
-  `POST /recording/takes/{id}/camera` review the current session's takes.
-- `GET /recordings`: the saved takes, each `{dataset_id, episode_id, bytes}`.
-- `GET /recordings/{dataset}/{episode}`: one take's MCAP bytes.
-- `DELETE /recordings/{dataset}/{episode}`: forget a take Studio has stored.
-
-The browser carries each take to Studio's
-`POST /datasets/{dataset}/recordings/{episode}`, then deletes it here, so a
-take that fails to reach Studio stays until it does.
+- `PATCH /recording` (`{"paused": …}`) pauses or resumes the episode.
+  `POST /recording/stop` (`{"keep": …}`) stops the episode and its control source:
+  teleoperation returns to idle. The episode's MCAP file is written while it
+  records; stopping saves it, and the connector uploads it on the link. A
+  discarded episode is saved too, marked as discarded.
+- `GET /recording/signals`, `GET /recording/episodes/{id}`, and
+  `POST /recording/episodes/{id}/camera` review the paused or last episode, read
+  from its file.
 
 A restarted robot connector starts idle and never resumes motion.
 
@@ -130,7 +134,7 @@ A restarted robot connector starts idle and never resumes motion.
 
 A robot saved with `"simulated": {}` in place of a `port` has motors the robot
 connector simulates. They report encoder counts and follow goals at a bounded
-speed, so calibration, the control loop, teleoperation, and takes treat the
+speed, so calibration, the control loop, teleoperation, and episodes treat the
 arm exactly like a real one. With `"simulated": {"hand_guided": true}`
 a simulated hand sweeps the arm through its calibrated travel whenever its
 torque is released, the way an operator moves a leader. There is no gravity or
@@ -139,7 +143,7 @@ contact.
 Every mounted camera on a simulated robot with a model is a simulated camera:
 it appears in `GET /hardware/status` under its configured ID at 640×480 and
 30 fps, previews like a device, and records
-into takes. Its pictures draw every simulated robot with a model, posed from
+into episodes. Its pictures draw every simulated robot with a model, posed from
 telemetry, with the renderer the browser's 3D view uses. A mount follows the
 optical convention: the camera looks along its +Z, with +X to the right of the
 picture and +Y down it.
@@ -148,5 +152,5 @@ picture and +Y down it.
 `simulates_arms`) saves two such robots over any robots of their names and
 connects them: `sim_leader`, hand-guided, and `sim_follower`, with `wrist` and
 `front` cameras. Both are calibrated to TheRobotStudio's SO-101 model, bundled
-in `robot-connector/src/simulation/so101`, so a take can be recorded right
+in `robot-connector/src/simulation/so101`, so an episode can be recorded right
 away.

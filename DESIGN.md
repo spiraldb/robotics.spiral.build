@@ -878,7 +878,7 @@ Every node's workspace has the same anatomy, top to bottom:
   on its last frame; two sentences, the problem in ink and the answer in
   soft ink; and the run itself ("Break down 100 episodes", "Score 100
   episodes"), which the node bar leaves out until then. Break down's drawing
-  splits one take into reach · grasp · fold · place, lines three takes up on
+  splits one episode into reach · grasp · fold · place, lines three episodes up on
   their fold, and picks every fold in lime; Score progress's draws the
   progress-rate lane as the timeline does (1× reference, dashed cutoff) with
   a regrasp dipping under the cutoff, which takes the graphite left-out wash
@@ -1053,7 +1053,7 @@ Rollout, Data, review, loading, and empty states. Unavailable actions remain
 part of the interface and are disabled with a specific reason.
 
 The Timeline owns the visible episode clock and playhead; pointer drag and
-keyboard seek; Record, Pause/Resume (Teleop takes only), Stop, and Discard
+keyboard seek; Record, Pause/Resume, Stop, and Discard
 capture transport;
 one icon-only Play/Pause with an accessible name; Follow Live while an
 episode is growing; and stream rows and explicit recording gaps.
@@ -1071,7 +1071,7 @@ Plots, and the Timeline itself.
 |---|---|---|
 | Active activity | `StudioShell` / top bar | Activity nav, active controller, status line |
 | Rollout robot and camera selection | Rollout Activity Controller | Rollout Workbench, Scene, live camera registry |
-| Rollout recording and review subject, next take's dataset and driver | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, Timeline, status line |
+| Rollout recording and review subject, next episode's dataset and driver | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, Timeline, status line |
 | Catalog, Overview dataset, opened episode tabs, front tab | Data workspace selection | Catalog rail, subject tabs, episode inspection |
 | Curation saved graph and published outputs, draft, runs, episode sample, preview reads, selected node | Curation Controller (browser-owned passes; the graph saved and views published through the backend; preview reads held for the session) | Graph, node workspace, document bar, status line |
 | Curation open episode tabs, chosen row, index filter, listed side | The node workspace that shows them | Index, episode tabs, timeline tracks |
@@ -1097,9 +1097,8 @@ checkpoint, follower, camera binding, calibration, and fresh control stream
 are available; choosing it then, or Record policy, says that running a policy
 on a robot is not supported yet.
 
-**Record a take:** `Timeline → Record → start the next take's driver and the
-take together`. A policy's take answers once the policy has taken the
-follower, begins with its first action, and ends with its run.
+**Record an episode:** `Timeline → Record → start the next episode's driver
+and the episode together`.
 
 ### Named Rules
 
@@ -1486,8 +1485,8 @@ row, and the playing span's words in the timeline's readout.
   Rise, Supply, Load) are one instrument of hairline-divided cells, label
   over a 13px mono value, the first cell of each row on the section's edge;
   out of range tints the reading, not the cell. A chosen joint's motor
-  detail is a section under a hairline, never a card. Takes the connector
-  still holds are one caution row: the count left, Store in Studio right.
+  detail is a section under a hairline, never a card. Episodes Studio could
+  not store are one caution row: the count left, Store in Studio right.
   An empty Timeline adds no sentence: "No episode" and Record say it.
   The 3D scene's gesture key appears only while the pointer or keyboard is
   in the scene. A mounted camera is drawn as the eight edges of its view

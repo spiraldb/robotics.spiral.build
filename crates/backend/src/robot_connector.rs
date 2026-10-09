@@ -2,9 +2,10 @@
 //! to the arms, which rarely have a public address or a certificate, so it
 //! dials out over plain HTTP with the token its workspace issued: it
 //! long-polls Studio for the next browser request to answer, posts each
-//! answer back, and posts the telemetry and camera frames someone watches.
-//! Browsers only ever talk to Studio.
+//! answer back, posts the telemetry and camera frames someone watches, and
+//! uploads each finished episode. Browsers only ever talk to Studio.
 
+mod episodes;
 pub(crate) mod http;
 mod link;
 mod live;
@@ -14,30 +15,38 @@ mod tests;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use axum::http::{header, request::Parts};
 use base64::Engine as _;
 use spiral_robotics_common::robot_connector::RobotConnectorToken;
-use spiral_robotics_storage::RobotConnectorTokens;
+use spiral_robotics_storage::{RobotConnectorTokens, StagedEpisodes};
 
 use crate::OperationError;
 use crate::projects::context::ProjectContext;
 use crate::sync::MutexRecovery as _;
 use link::ConnectorLink;
 
-/// Every workspace's link to its robot connector, and the tokens the
-/// connectors link with.
+/// Every workspace's link to its robot connector, the tokens the connectors
+/// link with, and the episodes they uploaded.
 pub(crate) struct RobotConnectors {
     tokens: RobotConnectorTokens,
+    episodes: StagedEpisodes,
     /// Each workspace's link, by its project, from its connector's first
     /// request on.
     links: Mutex<HashMap<String, Arc<ConnectorLink>>>,
 }
 
 impl RobotConnectors {
-    pub(crate) fn new(tokens: RobotConnectorTokens) -> Self {
+    pub(crate) fn new(tokens: RobotConnectorTokens, episodes: StagedEpisodes) -> Self {
         Self {
             tokens,
+            episodes,
             links: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The episodes the workspaces' connectors uploaded, until they are stored.
+    fn episodes(&self) -> &StagedEpisodes {
+        &self.episodes
     }
 
     /// A new token for the robot connector of the workspace on `project_id`.
@@ -102,6 +111,16 @@ impl RobotConnectors {
 
     fn unlinked() -> OperationError {
         OperationError::Unavailable("No robot connector is linked to this workspace".to_owned())
+    }
+
+    /// The token a connector's request presents.
+    fn presented_token(parts: &Parts) -> Result<&str, OperationError> {
+        parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|authorization| authorization.to_str().ok())
+            .and_then(|authorization| authorization.strip_prefix("Bearer "))
+            .ok_or_else(Self::refused)
     }
 
     /// The failure of a connector request without the workspace's current token.

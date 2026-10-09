@@ -1,4 +1,4 @@
-//! The paused take's recorded preview for Rollout: the episode's joint timeline,
+//! The paused episode's recorded preview for Rollout: the episode's joint timeline,
 //! loaded once in a compact columnar form, and the frame nearest the playhead
 //! picked from it in the browser.
 
@@ -159,7 +159,7 @@ impl EpisodePreviewRequest {
     }
 }
 
-/// The one recorded preview the take Timeline is showing, and the ticket that
+/// The one recorded preview the episode Timeline is showing, and the ticket that
 /// tells a completing read whether it is still the read anyone is waiting for.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct EpisodePreviewSignals {
@@ -573,7 +573,7 @@ mod tests {
 
     fn snapshot_with_normalized(normalized: Vec<Option<f64>>) -> EpisodeInspectionSnapshot {
         let joints = vec!["shoulder_pan".to_owned(), "gripper".to_owned()];
-        let episode = EpisodeInfo::new("take-1", "default")
+        let episode = EpisodeInfo::new("episode-1", "default")
             .with_arms(vec![EpisodeArm::new("follower", None, joints.clone())])
             .with_frames(3);
         let arm = EpisodeInspectionArm::new("follower", joints, normalized);

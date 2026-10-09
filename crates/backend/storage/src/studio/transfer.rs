@@ -50,6 +50,12 @@ impl StudioSnapshot {
                 .await
                 .map_err(|error| error.to_string())?;
         }
+        // Episodes waiting to be stored are this backend's, on their way to
+        // Spiral, which the bundle carries anyway.
+        transaction
+            .execute_unprepared("DELETE FROM staged_episodes")
+            .await
+            .map_err(|error| error.to_string())?;
         // A bundle carries no model answers, so no view that reads them.
         transaction
             .execute_unprepared("DELETE FROM curated_views")

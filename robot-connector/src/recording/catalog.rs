@@ -1,13 +1,11 @@
-//! The takes this recording session produced: Live review of the recording
-//! buffer and their camera previews.
+//! The review of the last episode, paused or stopped: its joint positions and
+//! camera frames, read back from its file.
 
 use crate::OperationError;
 use crate::context::RobotConnectorContext;
 use spiral_robotics_common::datasets::EpisodeVideo;
-use spiral_robotics_common::recording::{
-    EpisodeInspectionArm, EpisodeInspectionSnapshot, RecordingCameraRequest,
-};
-use spiral_robotics_recording::{EpisodeId, EpisodeInspection};
+use spiral_robotics_common::recording::{EpisodeInspectionSnapshot, RecordingCameraRequest};
+use spiral_robotics_recording::{EpisodeFileReader, EpisodeId, EpisodeSummary};
 
 pub(crate) struct EpisodeCatalog<'a> {
     state: &'a RobotConnectorContext,
@@ -18,33 +16,48 @@ impl<'a> EpisodeCatalog<'a> {
         Self { state }
     }
 
-    pub(super) fn inspection(
+    pub(super) async fn inspection(
         &self,
         episode: String,
     ) -> Result<EpisodeInspectionSnapshot, OperationError> {
-        let episode = Self::episode_id(&episode)?;
-        self.state
-            .recording_buffer()
-            .inspection(episode.as_str())
-            .map_err(OperationError::from)
-            .map(InspectionProjection::into_snapshot)
+        let (summary, reader) = self.review(&episode)?;
+        tokio::task::spawn_blocking(move || reader.inspection(&summary))
+            .await
+            .map_err(|error| OperationError::Internal(error.to_string()))?
+            .map_err(OperationError::Internal)
     }
 
-    pub(super) fn camera_preview(
+    pub(super) async fn camera_preview(
         &self,
         episode: String,
         request: RecordingCameraRequest,
     ) -> Result<EpisodeVideo, OperationError> {
-        let episode = Self::episode_id(&episode)?;
-        self.state
-            .recording_session()
-            .camera_preview(&episode, request.stream())
-            .ok_or_else(|| {
-                OperationError::NotFound(
-                    "This take is not available in the current recording session. Open its dataset in Data.".into(),
-                )
-            })?
+        let (summary, reader) = self.review(&episode)?;
+        tokio::task::spawn_blocking(move || reader.camera(&summary, request.stream()))
+            .await
+            .map_err(|error| OperationError::Internal(error.to_string()))?
             .map_err(OperationError::InvalidInput)
+    }
+
+    /// The last episode, paused or stopped, and its file, when it is `episode`.
+    fn review(&self, episode: &str) -> Result<(EpisodeSummary, EpisodeFileReader), OperationError> {
+        let episode = Self::episode_id(episode)?;
+        let unavailable = || {
+            OperationError::NotFound(
+                "This episode is not available in the current recording session. Open its dataset in Data.".into(),
+            )
+        };
+        let summary = self
+            .state
+            .recording_buffer()
+            .summary(&episode)
+            .map_err(|_| unavailable())?;
+        let path = self
+            .state
+            .recording_files()
+            .review_path(summary.info().dataset_id(), &episode)
+            .ok_or_else(unavailable)?;
+        Ok((summary, EpisodeFileReader::new(path)))
     }
 
     fn episode_id(episode: &str) -> Result<String, OperationError> {
@@ -53,41 +66,6 @@ impl<'a> EpisodeCatalog<'a> {
                 "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
             )
         })
-    }
-}
-
-/// Projects a stored inspection into the wire snapshot.
-///
-/// Both types are foreign to this crate, so the row-major to frame-major
-/// transposition hangs off the stored value as a local extension trait rather
-/// than a `From` impl.
-trait InspectionProjection {
-    fn into_snapshot(self) -> EpisodeInspectionSnapshot;
-}
-
-impl InspectionProjection for EpisodeInspection {
-    fn into_snapshot(self) -> EpisodeInspectionSnapshot {
-        let inspection = self;
-        let (episode, summary) = inspection.into_parts();
-        let samples = episode.samples();
-        let arms = episode
-            .start()
-            .arms()
-            .iter()
-            .enumerate()
-            .map(|(arm_index, arm)| {
-                let normalized = samples
-                    .iter()
-                    .flat_map(|sample| sample.normalized()[arm_index].iter().copied())
-                    .collect();
-                EpisodeInspectionArm::new(arm.id(), arm.joints().to_vec(), normalized)
-            })
-            .collect();
-        EpisodeInspectionSnapshot::new(
-            summary,
-            samples.iter().map(|sample| sample.seconds()).collect(),
-            arms,
-        )
     }
 }
 

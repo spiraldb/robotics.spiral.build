@@ -1,10 +1,12 @@
-//! Recording requests and their query invalidation policy. Takes are
-//! recorded on the robot connector; finished ones are carried to Studio.
+//! Recording requests and their query invalidation policy. Episodes are
+//! recorded on the robot connector, which uploads each finished one to
+//! Studio; a browser stores it in its dataset.
 use crate::client::http::UrlComponent;
-use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
+use crate::client::queries::QueryPolicy;
 use crate::client::robot_connector::RobotConnector;
 use crate::client::transport::{CommandError, HttpRequest};
+use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::{
     EpisodeInfo, EpisodeInspectionSnapshot, PauseUpdate, RecordingFinish, RecordingStart,
@@ -26,7 +28,7 @@ impl RecordingClient {
         self.connector.request(
             HttpRequest::new(
                 "POST",
-                format!("/recording/takes/{}/camera", episode.url_component()),
+                format!("/recording/episodes/{}/camera", episode.url_component()),
             )
             .json(&spiral_robotics_common::recording::RecordingCameraRequest::new(stream)),
         )
@@ -38,7 +40,7 @@ impl RecordingClient {
     ) -> impl Future<Output = Result<EpisodeInspectionSnapshot, CommandError>> + use<> {
         self.connector.request(HttpRequest::new(
             "GET",
-            format!("/recording/takes/{id}", id = id.url_component()),
+            format!("/recording/episodes/{id}", id = id.url_component()),
         ))
     }
 
@@ -88,75 +90,101 @@ impl RecordingClient {
     }
 }
 
-/// The finished takes being carried to Studio right now, by episode. The robot
-/// connector still lists each until Studio stores it, and a take on its way is
-/// no take left behind.
+/// How often Rollout asks Studio for the episodes the robot connector uploaded.
+const WAITING_EPISODES_POLL_MS: u32 = 2_000;
+
+/// The finished episodes Studio holds until a browser stores each in its
+/// dataset. While Rollout is active this browser stores each as it arrives,
+/// once; one that fails waits for the operator to try again.
 #[derive(Clone, Copy, PartialEq)]
-pub(super) struct StoringTakes(Signal<BTreeSet<String>>);
-impl StoringTakes {
-    pub(super) fn use_storing_takes() -> Self {
-        Self(use_signal(BTreeSet::new))
+pub(super) struct EpisodeStorage {
+    waiting: Resource<Result<Vec<SavedRecording>, CommandError>>,
+    /// Being stored by this browser now, by episode.
+    storing: Signal<BTreeSet<String>>,
+    /// Stored or tried by this browser, by episode.
+    tried: Signal<BTreeSet<String>>,
+}
+impl EpisodeStorage {
+    pub(super) fn use_storage(project: StudioProjectState, is_active: ReadSignal<bool>) -> Self {
+        let waiting = QueryPolicy::new(Recording, WAITING_EPISODES_POLL_MS).use_when(
+            move || *is_active.read(),
+            || RecordingTransfer::current().waiting(),
+        );
+        let storage = use_hook(|| Self {
+            waiting,
+            storing: Signal::new(BTreeSet::new()),
+            tried: Signal::new(BTreeSet::new()),
+        });
+        use_effect(move || {
+            let Some(Ok(waiting)) = &*waiting.read() else {
+                return;
+            };
+            for saved in waiting {
+                if !storage.tried.peek().contains(saved.episode_id()) {
+                    storage.store(project, saved.clone());
+                }
+            }
+        });
+        storage
     }
 
-    /// Carry `episode` of `dataset` to Studio, counting it as on its way
-    /// meanwhile.
-    pub(super) async fn carry(mut self, dataset: &str, episode: &str) -> Result<(), CommandError> {
-        self.0.write().insert(episode.to_owned());
-        let carried = RecordingTransfer::current().carry(dataset, episode).await;
-        self.0.write().remove(episode);
-        carried
+    /// The episodes that wait and that this browser is not storing now: each
+    /// one it tried failed. None until Studio has answered.
+    pub(super) fn unstored(self) -> Option<Vec<SavedRecording>> {
+        let waiting = self.waiting.read();
+        let Some(Ok(saved)) = &*waiting else {
+            return None;
+        };
+        let storing = self.storing.read();
+        Some(
+            saved
+                .iter()
+                .filter(|saved| !storing.contains(saved.episode_id()))
+                .cloned()
+                .collect(),
+        )
     }
 
-    pub(super) fn includes(self, episode: &str) -> bool {
-        self.0.read().contains(episode)
+    /// Store `saved` in its dataset, reporting a failure.
+    pub(super) fn store(mut self, project: StudioProjectState, saved: SavedRecording) {
+        let episode = saved.episode_id().to_owned();
+        self.storing.write().insert(episode.clone());
+        self.tried.write().insert(episode.clone());
+        project.run_reported("", async move {
+            let stored = RecordingTransfer::current()
+                .store(saved.dataset_id(), &episode)
+                .await;
+            self.storing.write().remove(&episode);
+            stored.map_err(|error| format!("Could not store episode {episode} in Studio: {error}"))
+        });
     }
 }
 
-/// Carries finished takes from the robot connector into their Studio datasets:
-/// each is read from the robot connector, stored by Studio, and only then
-/// forgotten by the robot connector.
-pub(super) struct RecordingTransfer {
+/// Studio's side of finished episodes: the ones the robot connector uploaded,
+/// and storing one in its dataset with this browser's Spiral access.
+struct RecordingTransfer {
     connector: RobotConnector,
-    project: ProjectClient,
 }
 impl RecordingTransfer {
-    pub(super) fn current() -> Self {
+    fn current() -> Self {
         Self {
             connector: RobotConnector::current(),
-            project: ProjectClient::current(),
         }
     }
 
-    /// The takes the robot connector still holds.
-    pub(super) fn waiting(
-        &self,
-    ) -> impl Future<Output = Result<Vec<SavedRecording>, CommandError>> + use<> {
-        self.connector
-            .request(HttpRequest::new("GET", "/recordings"))
+    fn waiting(&self) -> impl Future<Output = Result<Vec<SavedRecording>, CommandError>> + use<> {
+        self.connector.request(HttpRequest::new("GET", "/episodes"))
     }
 
-    pub(super) async fn carry(&self, dataset: &str, episode: &str) -> Result<(), CommandError> {
+    fn store(
+        &self,
+        dataset: &str,
+        episode: &str,
+    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         let (dataset, episode) = (dataset.url_component(), episode.url_component());
-        let saved = format!("/recordings/{dataset}/{episode}");
-        let recording = self
-            .connector
-            .request_blob(
-                HttpRequest::new("GET", saved.clone()),
-                "application/octet-stream",
-            )
-            .await?;
-        self.project
-            .mutate::<()>(
-                &[Catalog],
-                HttpRequest::new(
-                    "POST",
-                    format!("/api/datasets/{dataset}/recordings/{episode}"),
-                )
-                .blob(recording),
-            )
-            .await?;
-        self.connector
-            .mutate(&[Recording], HttpRequest::new("DELETE", saved))
-            .await
+        self.connector.mutate(
+            &[Recording, Catalog],
+            HttpRequest::new("POST", format!("/episodes/{dataset}/{episode}/store")),
+        )
     }
 }

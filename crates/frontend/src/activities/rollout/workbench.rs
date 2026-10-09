@@ -1,4 +1,4 @@
-//! Rollout's workbench: who controls the arms, where takes go, and the
+//! Rollout's workbench: who controls the arms, where episodes go, and the
 //! selected arm's motors.
 
 use dioxus::prelude::*;
@@ -9,13 +9,12 @@ use spiral_robotics_ui::{
     TextInput, Toggle,
 };
 
-use super::next_take::NextTake;
+use super::next_episode::NextEpisode;
 use super::policy::PolicySection;
 use super::session::RolloutSession;
 use crate::activities::rollout::actions::RolloutAction;
 use crate::activities::rollout::joints::JointPanel;
-use crate::activities::rollout::recording_client::{RecordingTransfer, StoringTakes};
-use crate::client::queries::{QueryDomain, QueryPolicy};
+use crate::activities::rollout::recording_client::EpisodeStorage;
 use crate::robots::RobotSelection;
 use crate::robots::Selection;
 use crate::shell::routes::StudioRoute;
@@ -34,8 +33,8 @@ pub(super) fn RolloutWorkbench(session: RolloutSession) -> Element {
     rsx! {
         div { class: "studio-workbench-scroll rollout-workbench",
             ControlSection { session }
-            CaptureSection { next_take: session.next_take(), recording: hardware.recording() }
-            WaitingTakes { project, storing: session.storing_takes() }
+            CaptureSection { next_episode: session.next_episode(), recording: hardware.recording() }
+            WaitingEpisodes { project, storage: session.episode_storage() }
 
             section { class: "workbench-section rollout-motors",
                 header { class: "workbench-section-heading",
@@ -65,11 +64,11 @@ pub(super) fn RolloutWorkbench(session: RolloutSession) -> Element {
 }
 
 #[component]
-fn CaptureSection(next_take: NextTake, recording: Option<RecordingProgress>) -> Element {
-    let mut dataset = next_take.dataset();
-    let mut video = next_take.video();
-    let dataset_ids = next_take.suggestions();
-    let catalog = next_take.catalog();
+fn CaptureSection(next_episode: NextEpisode, recording: Option<RecordingProgress>) -> Element {
+    let mut dataset = next_episode.dataset();
+    let mut video = next_episode.video();
+    let dataset_ids = next_episode.suggestions();
+    let catalog = next_episode.catalog();
 
     rsx! {
         section { class: "workbench-section capture-destination",
@@ -120,58 +119,35 @@ fn CaptureSection(next_take: NextTake, recording: Option<RecordingProgress>) -> 
     }
 }
 
-/// Finished takes the robot connector still holds because carrying them to
-/// Studio failed, with a way to try again. A take on its way is not one of
-/// them.
+/// Finished episodes Studio holds whose store failed, with a way to try again.
+/// An episode being stored is not one of them.
 #[component]
-fn WaitingTakes(project: StudioProjectState, storing: StoringTakes) -> Element {
-    let waiting = QueryPolicy::on_demand(QueryDomain::Recording)
-        .use_resource(|| RecordingTransfer::current().waiting());
-    let mut carrying = use_signal(|| false);
-    let takes = match &*waiting.read() {
-        Some(Ok(takes)) => takes
-            .iter()
-            .filter(|take| !storing.includes(take.episode_id()))
-            .cloned()
-            .collect::<Vec<_>>(),
-        _ => return rsx! {},
+fn WaitingEpisodes(project: StudioProjectState, storage: EpisodeStorage) -> Element {
+    let Some(episodes) = storage.unstored() else {
+        return rsx! {};
     };
-    if takes.is_empty() {
+    if episodes.is_empty() {
         return rsx! {};
     }
-    let count = takes.len();
+    let count = episodes.len();
     rsx! {
-        section { class: "workbench-section waiting-takes", role: "status",
+        section { class: "workbench-section waiting-episodes", role: "status",
             p {
                 if count == 1 {
-                    "1 take not stored yet"
+                    "1 episode not stored yet"
                 } else {
-                    "{count} takes not stored yet"
+                    "{count} episodes not stored yet"
                 }
             }
             Button {
                 purpose: ActionPurpose::Retry,
                 variant: ButtonVariant::Outline,
-                disabled: carrying(),
-                aria_busy: carrying(),
                 onclick: move |_| {
-                    carrying.set(true);
-                    let takes = takes.clone();
-                    let transfer = RecordingTransfer::current();
-                    spawn(async move {
-                        for take in &takes {
-                            if let Err(error) = transfer.carry(take.dataset_id(), take.episode_id()).await {
-                                project.report_from(
-                                    crate::shell::notifications::MessageSource::Rollout,
-                                    format!("Could not store take {} in Studio: {error}", take.episode_id()),
-                                );
-                                break;
-                            }
-                        }
-                        carrying.set(false);
-                    });
+                    for episode in episodes.clone() {
+                        storage.store(project, episode);
+                    }
                 },
-                if carrying() { "Storing…" } else { "Store in Studio" }
+                "Store in Studio"
             }
         }
     }

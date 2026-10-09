@@ -23,7 +23,7 @@ impl RecordingStart {
     }
 }
 
-/// What moves the follower while a take records. A take starts its control
+/// What moves the follower while an episode records. An episode starts its control
 /// source and ends with it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

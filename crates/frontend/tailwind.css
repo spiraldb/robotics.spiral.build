@@ -967,13 +967,13 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply -mx-3.5 mb-1;
   }
 
-  /* Takes the robot connector still holds: the count on the left edge, the
-     way to store them on the right. */
-  .waiting-takes {
+  /* Episodes Studio could not store: the count on the left edge, the way to
+     store them on the right. */
+  .waiting-episodes {
     @apply flex items-center gap-3 px-3.5 py-2.5;
   }
 
-  .waiting-takes p {
+  .waiting-episodes p {
     @apply min-w-0 flex-1 text-[12px] text-caution;
   }
 

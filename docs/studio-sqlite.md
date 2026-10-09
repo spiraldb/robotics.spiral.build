@@ -3,8 +3,9 @@
 The backend owns two persistence boundaries:
 
 - **SQLite / SeaORM:** each browser's Spiral session (its application OAuth tokens and
-  chosen workspace), the workspaces and their robot connector tokens, each
-  dataset's robot model, joint roles and check report, saved
+  chosen workspace), the workspaces and their robot connector tokens, the
+  episodes those connectors uploaded until a browser stores them, each dataset's
+  robot model, joint roles and check report, saved
   curation recipes and the statements of the views they publish, and a record
   of each training run Studio started (its configuration and what it was
   given).
@@ -95,7 +96,7 @@ Version **5** `.spiral-project` bundles are ZIP archives containing:
 
 - `studio.sqlite3`: a native SQLite snapshot of the selected project's Studio
   records. SQLite's `VACUUM INTO` captures committed state, including WAL data.
-  The export removes Spiral sessions, workspaces, published curation views
+  The export removes Spiral sessions, workspaces, waiting episodes, published curation views
   (a bundle carries no model answers for them to read), and other projects,
   then vacuums again to remove their deleted bytes. Project keys are neutralized so
   the snapshot can be restored into another project.

@@ -215,11 +215,16 @@ delete one; `GET /training/checkpoints` lists every saved checkpoint.
 
 ### Recordings
 
-Takes are recorded on the robot connector. The browser carries each finished
-one to Studio: `POST /datasets/{dataset}/recordings/{episode}` takes the take's
-MCAP bytes (at most 256 MiB, one Spiral row) and stores them as
-`{episode}.mcap` in the MCAP dataset `dataset`, creating it with its first
-take. Storing the same take again only refreshes the dataset. Published
+Episodes are recorded on the robot connector, which uploads each finished one to
+Studio in parts ([the link](robot-connector-api.md#the-link)). Studio keeps a
+whole episode (at most 256 MiB, one Spiral row) in its SQLite database until a
+browser stores it: `GET /robot-connector/episodes` lists them, each
+`{dataset_id, episode_id, bytes}`, and
+`POST /robot-connector/episodes/{dataset}/{episode}/store` stores one as
+`{episode}.mcap` in the MCAP dataset `dataset` with the browser's Spiral
+access, creating the dataset with its first episode, then forgets it. Storing the
+same episode again only refreshes the dataset. Rollout stores each episode as it
+arrives. Published
 dataset content uses `/datasets/episode-topics` and episode queries with
 explicit dataset/member identities; no recording-header fallback exists.
 
@@ -298,8 +303,6 @@ the view, and answers `null`; its stored answers stay. See
   backend credentials) and the project's MCAP sources.
   Import accepts only this version and also bounds total uncompressed contents
   to 256 MiB. See [project transfer](studio-sqlite.md#project-transfer).
-- `POST /datasets/{dataset}/recordings/{episode}`: one take's MCAP bytes, carried
-  from the robot connector; see [Recordings](#recordings).
 
 Existing media/download error responses can contain plain text; JSON commands,
 reads, and uploads consistently use the structured failure above.

@@ -1,11 +1,10 @@
-//! Current-session recording samples; no persisted dataset reads.
+//! The episode being recorded: what it records, how its samples reach its file,
+//! and what it was once it stopped.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use spiral_robotics_common::recording::{EpisodeArm, EpisodeInfo, RecordingGap};
@@ -18,11 +17,8 @@ use spiral_robotics_hardware::{
     EpisodeCheckpoint, RecordingCompletion, RecordingWriter,
 };
 
-use super::episode_schema::EpisodeSample as _;
+use super::episode_file::{EpisodeFile, EpisodeSink};
 
-const SAMPLE_QUEUE_DEPTH: usize = 2_048;
-/// Hard storage limit for a single recorded episode.
-const MAX_EPISODE_FRAMES: u64 = 1_000_000;
 const NO_SAMPLE_TIMESTAMP_BITS: u64 = u64::MAX;
 
 #[derive(Debug)]
@@ -53,7 +49,7 @@ impl fmt::Display for EpisodeError {
 
 impl std::error::Error for EpisodeError {}
 
-/// What one arm's motors were like as a take opened.
+/// What one arm's motors were like as an episode opened.
 ///
 /// Every vector is parallel to the arm's declared joint order, so a value at
 /// index `j` belongs to joint `j`.
@@ -172,10 +168,10 @@ impl EpisodeStart {
         self
     }
 
-    pub(super) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.identity.id
     }
-    pub(super) fn dataset_id(&self) -> &str {
+    pub fn dataset_id(&self) -> &str {
         &self.identity.dataset_id
     }
     pub(super) const fn started_ms(&self) -> i64 {
@@ -191,7 +187,7 @@ impl EpisodeStart {
         &self.arms
     }
     /// Opening motor readings, at most one entry per arm and only for arms
-    /// whose hardware answered while the take was opening.
+    /// whose hardware answered while the episode was opening.
     pub(super) fn condition(&self) -> &[ArmCondition] {
         &self.condition
     }
@@ -234,7 +230,7 @@ pub(super) struct EpisodeCompletion {
     condition: Vec<ArmConditionSummary>,
 }
 
-/// The extremes one arm's motors reached across a whole take.
+/// The extremes one arm's motors reached across a whole episode.
 ///
 /// Every vector is parallel to the arm's declared joint order.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -351,6 +347,49 @@ impl EpisodeCompletion {
     }
 }
 
+/// What an episode was once it stopped, or as of its last pause: how it started,
+/// how it ended, and how many samples it holds.
+#[derive(Clone, Debug)]
+pub struct EpisodeSummary {
+    start: EpisodeStart,
+    completion: EpisodeCompletion,
+    frames: u64,
+}
+
+impl EpisodeSummary {
+    pub(super) const fn new(
+        start: EpisodeStart,
+        completion: EpisodeCompletion,
+        frames: u64,
+    ) -> Self {
+        Self {
+            start,
+            completion,
+            frames,
+        }
+    }
+
+    pub const fn start(&self) -> &EpisodeStart {
+        &self.start
+    }
+
+    pub(super) const fn completion(&self) -> &EpisodeCompletion {
+        &self.completion
+    }
+
+    pub(super) const fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    pub fn info(&self) -> EpisodeInfo {
+        EpisodeInfo::new(self.start.id(), self.start.dataset_id())
+            .with_arms(self.start.arms().to_vec())
+            .with_frames(self.frames)
+    }
+}
+
+/// An episode built whole, for tests that need a recording file.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
 pub struct FullEpisode {
     start: EpisodeStart,
@@ -358,8 +397,8 @@ pub struct FullEpisode {
     completion: EpisodeCompletion,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl FullEpisode {
-    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn from_recording(
         start: EpisodeStart,
         samples: Vec<Sample>,
@@ -377,35 +416,16 @@ impl FullEpisode {
     pub fn samples(&self) -> &[Sample] {
         &self.samples
     }
-
-    pub fn summary(&self) -> EpisodeInfo {
-        EpisodeInfo::new(self.start.id(), self.start.dataset_id())
-            .with_arms(self.start.arms().to_vec())
-            .with_frames(self.samples.len() as u64)
-    }
-
     pub(super) const fn completion(&self) -> &EpisodeCompletion {
         &self.completion
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct EpisodeInspection {
-    episode: FullEpisode,
-    summary: EpisodeInfo,
-}
-
-impl EpisodeInspection {
-    pub fn into_parts(self) -> (FullEpisode, EpisodeInfo) {
-        (self.episode, self.summary)
-    }
-}
-
-/// Current-session capture and review only. Persisted datasets are read through
-/// dataset/member/topic APIs, never through this buffer.
+/// The summary of the episode this connector recorded last, for its review.
+/// Recorded episodes are read from their files, never from here.
 #[derive(Default)]
 pub struct RecordingBuffer {
-    completed: Arc<Mutex<Option<FullEpisode>>>,
+    completed: Arc<Mutex<Option<EpisodeSummary>>>,
 }
 
 impl RecordingBuffer {
@@ -415,56 +435,53 @@ impl RecordingBuffer {
         }
     }
 
-    pub fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
-        let episode = self.completed_episode(id)?;
-        let summary = episode.summary();
-        Ok(EpisodeInspection { episode, summary })
-    }
-
-    pub fn begin(&self, request: EpisodeRecordingRequest) -> Result<EpisodeWriter, EpisodeError> {
+    /// A new episode's identity and start.
+    pub fn begin(&self, request: EpisodeRecordingRequest) -> Result<EpisodeStart, EpisodeError> {
         if request.arms.is_empty() {
             return Err(EpisodeError::Invalid(
-                "a take needs at least one connected arm to sample".to_owned(),
+                "an episode needs at least one connected arm to sample".to_owned(),
             ));
         }
-        let start = EpisodeStart::new(uuid::Uuid::new_v4().to_string(), request.dataset_id)
-            .with_current_timing(request.sample_hz)
-            .with_source(request.source)
-            .with_arms(request.arms, request.condition);
-        EpisodeWriter::start(start, Arc::clone(&self.completed))
+        Ok(
+            EpisodeStart::new(uuid::Uuid::new_v4().to_string(), request.dataset_id)
+                .with_current_timing(request.sample_hz)
+                .with_source(request.source)
+                .with_arms(request.arms, request.condition),
+        )
     }
 
-    /// Read a completed capture before its MCAP publication finishes.
-    pub fn completed_episode(&self, id: &str) -> Result<FullEpisode, EpisodeError> {
+    /// The writer the control loop records `start`'s samples into `file` with.
+    pub fn writer(&self, start: EpisodeStart, file: &EpisodeFile) -> EpisodeWriter {
+        EpisodeWriter {
+            start,
+            clock: CaptureClock::default(),
+            sink: file.sink(),
+            completed: Arc::clone(&self.completed),
+            accepted: AtomicU64::new(0),
+            last_queued_seconds: AtomicU64::new(NO_SAMPLE_TIMESTAMP_BITS),
+        }
+    }
+
+    /// The summary of episode `id`, once it stopped or paused.
+    pub fn summary(&self, id: &str) -> Result<EpisodeSummary, EpisodeError> {
         EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.into()))?;
         self.completed
             .lock_unpoisoned()
             .as_ref()
-            .filter(|episode| episode.start.id() == id)
+            .filter(|summary| summary.start.id() == id)
             .cloned()
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
     }
 }
 
-struct WriterShared {
-    written: AtomicU64,
-    failure: Mutex<Option<String>>,
-}
-enum WriterMessage {
-    Sample(Sample),
-    Checkpoint {
-        completion: EpisodeCompletion,
-        complete: tokio::sync::oneshot::Sender<Result<(), String>>,
-    },
-}
-
+/// How the control loop records one episode: each sample it pushes queues for
+/// the episode's file, and its summary is kept once it pauses or stops.
 pub struct EpisodeWriter {
     start: EpisodeStart,
     clock: CaptureClock,
-    sender: Option<mpsc::SyncSender<WriterMessage>>,
-    thread: Option<JoinHandle<Result<Vec<Sample>, String>>>,
-    completed: Arc<Mutex<Option<FullEpisode>>>,
-    shared: Arc<WriterShared>,
+    sink: EpisodeSink,
+    completed: Arc<Mutex<Option<EpisodeSummary>>>,
+    accepted: AtomicU64,
     last_queued_seconds: AtomicU64,
 }
 
@@ -472,70 +489,22 @@ impl EpisodeWriter {
     pub fn clock(&self) -> CaptureClock {
         self.clock.clone()
     }
-    fn start(
-        start: EpisodeStart,
-        completed: Arc<Mutex<Option<FullEpisode>>>,
-    ) -> Result<Self, EpisodeError> {
-        let (sender, receiver) = mpsc::sync_channel(SAMPLE_QUEUE_DEPTH);
-        let shared = Arc::new(WriterShared {
-            written: AtomicU64::new(0),
-            failure: Mutex::new(None),
-        });
-        let worker_shared = shared.clone();
-        let worker_completed = Arc::clone(&completed);
-        let validation_start = start.clone();
-        let thread = std::thread::Builder::new()
-            .name("spiral-episode-encoder".to_owned())
-            .spawn(move || {
-                EpisodeDrain {
-                    start: &validation_start,
-                    completed: &worker_completed,
-                    shared: &worker_shared,
-                }
-                .run(receiver)
-            })
-            .map_err(|source| {
-                EpisodeError::Invalid(format!("could not start the episode encoder: {source}"))
-            })?;
-        Ok(Self {
-            start,
-            clock: CaptureClock::default(),
-            sender: Some(sender),
-            thread: Some(thread),
-            completed,
-            shared,
-            last_queued_seconds: AtomicU64::new(NO_SAMPLE_TIMESTAMP_BITS),
-        })
-    }
     pub fn id(&self) -> &str {
         self.start.id()
     }
     fn fail(&self, message: &str) -> bool {
-        let mut failure = self.shared.failure.lock_unpoisoned();
-        if failure.is_none() {
-            *failure = Some(message.to_owned());
-        }
+        self.sink.fail(message.to_owned());
         false
     }
-    fn finish(mut self, completion: EpisodeCompletion) -> Result<EpisodeInfo, EpisodeError> {
-        self.sender.take();
-        let samples = self
-            .thread
-            .take()
-            .expect("episode worker exists")
-            .join()
-            .map_err(|_| EpisodeError::Invalid("episode encoder worker panicked".to_owned()))?
-            .map_err(EpisodeError::Invalid)?;
-        if let Some(error) = self.failure() {
-            return Err(EpisodeError::Invalid(error));
-        }
-        let full_episode = FullEpisode {
-            start: self.start.clone(),
-            samples,
+    /// Keep the episode's summary as of `completion`.
+    fn summarize(&self, completion: EpisodeCompletion) -> EpisodeSummary {
+        let summary = EpisodeSummary::new(
+            self.start.clone(),
             completion,
-        };
-        *self.completed.lock_unpoisoned() = Some(full_episode.clone());
-        Ok(full_episode.summary())
+            self.accepted.load(Ordering::Relaxed),
+        );
+        *self.completed.lock_unpoisoned() = Some(summary.clone());
+        summary
     }
 }
 
@@ -569,92 +538,30 @@ impl RecordingWriter for EpisodeWriter {
                 Err(actual) => previous = actual,
             }
         }
-        let Some(sender) = &self.sender else {
-            return false;
-        };
-        match sender.try_send(WriterMessage::Sample(sample)) {
-            Ok(()) => true,
-            Err(error) => self.fail(&format!(
-                "Spiral recording queue could not accept a sample: {error}"
-            )),
+        let queued = self.sink.sample(sample);
+        if queued {
+            self.accepted.fetch_add(1, Ordering::Relaxed);
         }
+        queued
     }
+    /// Keep the episode's summary, and put every sample pushed before this on
+    /// disk, for a review of the paused episode.
     fn checkpoint(&self, completion: RecordingCompletion) -> Result<EpisodeCheckpoint, String> {
-        let (complete, receiver) = tokio::sync::oneshot::channel();
-        self.sender
-            .as_ref()
-            .ok_or_else(|| "episode encoder is closed".to_owned())?
-            .try_send(WriterMessage::Checkpoint {
-                completion: EpisodeCompletion::from(&completion),
-                complete,
-            })
-            .map_err(|error| error.to_string())?;
-        Ok(receiver)
+        self.summarize(EpisodeCompletion::from(&completion));
+        self.sink.flush()
     }
     fn failure(&self) -> Option<String> {
-        self.shared.failure.lock_unpoisoned().clone()
+        self.sink.failure()
     }
     fn finish(
         self: Box<Self>,
         completion: RecordingCompletion,
     ) -> Result<CompletedRecording, String> {
-        EpisodeWriter::finish(*self, EpisodeCompletion::from(&completion))
-            .map(|summary| CompletedRecording::new(summary.id(), summary.frames()))
-            .map_err(|error| error.to_string())
-    }
-}
-
-impl Drop for EpisodeWriter {
-    fn drop(&mut self) {
-        self.sender.take();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(failure) = self.failure() {
+            return Err(failure);
         }
-    }
-}
-
-struct EpisodeDrain<'a> {
-    start: &'a EpisodeStart,
-    completed: &'a Mutex<Option<FullEpisode>>,
-    shared: &'a WriterShared,
-}
-
-impl EpisodeDrain<'_> {
-    fn run(self, receiver: mpsc::Receiver<WriterMessage>) -> Result<Vec<Sample>, String> {
-        let mut samples = Vec::new();
-        for message in receiver {
-            match message {
-                WriterMessage::Sample(sample) => {
-                    if self.shared.written.load(Ordering::Relaxed) >= MAX_EPISODE_FRAMES {
-                        let error = format!(
-                            "recording reached the supported {MAX_EPISODE_FRAMES}-sample limit"
-                        );
-                        *self.shared.failure.lock_unpoisoned() = Some(error.clone());
-                        return Err(error);
-                    }
-                    sample.validate_for(self.start).map_err(|error| {
-                        let error = error.to_string();
-                        *self.shared.failure.lock_unpoisoned() = Some(error.clone());
-                        error
-                    })?;
-                    samples.push(sample);
-                    self.shared.written.fetch_add(1, Ordering::Relaxed);
-                }
-                WriterMessage::Checkpoint {
-                    completion,
-                    complete,
-                } => {
-                    let full_episode = FullEpisode {
-                        start: self.start.clone(),
-                        samples: samples.clone(),
-                        completion,
-                    };
-                    *self.completed.lock_unpoisoned() = Some(full_episode);
-                    let _ = complete.send(Ok(()));
-                }
-            }
-        }
-        Ok(samples)
+        let summary = self.summarize(EpisodeCompletion::from(&completion));
+        Ok(CompletedRecording::new(summary.start.id(), summary.frames))
     }
 }
 
@@ -680,7 +587,7 @@ impl EpisodeArmCollection for EpisodeArm {
             .collect()
     }
 }
-trait UnpoisonedMutex<T> {
+pub(super) trait UnpoisonedMutex<T> {
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T>;
 }
 
@@ -696,44 +603,29 @@ mod recording_buffer_tests {
     use super::*;
 
     #[test]
-    fn review_is_scoped_to_current_session_without_storage_fallback() {
+    fn only_the_last_episode_is_reviewable_once_its_summary_is_kept() {
+        let directory = tempfile::tempdir().unwrap();
         let buffer = RecordingBuffer::new();
         assert!(matches!(
-            buffer.completed_episode("unknown-take"),
+            buffer.summary("unknown-episode"),
             Err(EpisodeError::NotFound(_))
         ));
         let arms = vec![EpisodeArm::new("arm", None, vec!["joint".into()])];
         for id in ["first", "second"] {
-            let writer = EpisodeWriter::start(
-                EpisodeStart::new(id.into(), "destination".into()).with_arms(arms.clone(), vec![]),
-                buffer.completed.clone(),
-            )
-            .unwrap();
+            let start =
+                EpisodeStart::new(id.into(), "destination".into()).with_arms(arms.clone(), vec![]);
+            let file = EpisodeFile::create(directory.path().join(id), &start, vec![]).unwrap();
+            let writer = buffer.writer(start, &file);
             assert!(writer.push(Sample::new(0.0, vec![vec![Some(0.25)]], vec![vec![123]])));
-            writer
-                .finish(EpisodeCompletion::new(0.1, vec![], vec![]))
-                .unwrap();
-            assert_eq!(buffer.completed_episode(id).unwrap().start.id(), id);
-            assert_eq!(
-                buffer
-                    .inspection(id)
-                    .unwrap()
-                    .into_parts()
-                    .0
-                    .samples()
-                    .len(),
-                1
-            );
+            let summary = writer.summarize(EpisodeCompletion::new(0.1, vec![], vec![]));
+            file.finish(summary).unwrap();
+            assert_eq!(buffer.summary(id).unwrap().info().frames(), 1);
         }
         assert!(matches!(
-            buffer.completed_episode("first"),
+            buffer.summary("first"),
             Err(EpisodeError::NotFound(_))
         ));
-        assert!(buffer.completed_episode("second").is_ok());
-        assert!(matches!(
-            RecordingBuffer::new().completed_episode("second"),
-            Err(EpisodeError::NotFound(_))
-        ));
+        assert!(buffer.summary("second").is_ok());
     }
 }
 
@@ -742,7 +634,7 @@ mod recording_golden_tests {
     use super::*;
     use sha2::Digest as _;
 
-    /// One deterministic take touching every recorded field and presence case.
+    /// One deterministic episode touching every recorded field and presence case.
     fn episode() -> FullEpisode {
         let arms = vec![
             EpisodeArm::new(
@@ -863,20 +755,27 @@ mod recording_golden_tests {
     }
 
     #[test]
-    fn recording_messages_match_the_golden_take() {
+    fn recording_messages_match_the_golden_episode() {
         let cameras = [
             camera("follower.camera.wrist", "camera-1"),
             camera("leader.camera.top", "camera-2"),
         ];
         let bytes = crate::McapRecording::encode(&episode(), &cameras).unwrap();
-        let rendering = messages(&bytes);
+        // Messages are written as the episode produces them, so the rendering
+        // is sorted: the golden episode pins what is recorded, not its order.
+        let mut lines = messages(&bytes)
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        lines.sort();
+        let rendering = lines.join("\n");
         let digest = sha2::Sha256::digest(rendering.as_bytes())
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
             digest,
-            "af8f79ce60bbf5e62a10c8a3c1aed9a927faea1d1a224d096b2b4cdf8792c778"
+            "1201ceed88b8a833ffc64107bfa97ec08d6e8312e65ca65c42240153fabc43f3"
         );
     }
 }

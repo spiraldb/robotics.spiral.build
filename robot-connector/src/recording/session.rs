@@ -1,123 +1,93 @@
-//! The one take a robot connector may have open, and the last one kept for review.
+//! The one episode a robot connector may have open.
 //!
-//! Whichever operation changes the take — start, pause, stop, or closing a
-//! take the control loop ended — holds it for the whole operation. Operations
-//! never interleave, and one that is cancelled leaves the take as it was.
+//! Whichever operation changes the episode — start, pause, stop, or closing a
+//! episode the control loop ended — holds it for the whole operation. Operations
+//! never interleave, and one that is cancelled leaves the episode as it was.
+use spiral_robotics_recording::EpisodeFile;
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::OperationError;
-use crate::robotics::video::{CameraRecording, VideoCapture};
-use crate::sync::MutexRecovery;
+use crate::robotics::video::VideoCapture;
 
 #[derive(Default)]
 pub(crate) struct RecordingSession {
-    open: Mutex<Option<OpenTake>>,
-    review: std::sync::Mutex<Option<ReviewedTake>>,
+    open: Mutex<Option<RecordingEpisode>>,
 }
 
-/// A take the control loop is recording, until its episode and media are
-/// saved.
-pub(crate) struct OpenTake {
+/// An episode the control loop is recording, until its file is saved.
+pub(crate) struct RecordingEpisode {
     episode: String,
     capture: Option<VideoCapture>,
+    file: EpisodeFile,
 }
 
-struct ReviewedTake {
-    episode: String,
-    cameras: Vec<CameraRecording>,
+/// One operation's exclusive hold on the session's episode.
+pub(crate) struct EpisodeChange<'a> {
+    open: MutexGuard<'a, Option<RecordingEpisode>>,
 }
 
-/// One operation's exclusive hold on the session's take.
-pub(crate) struct TakeChange<'a> {
-    open: MutexGuard<'a, Option<OpenTake>>,
-    review: &'a std::sync::Mutex<Option<ReviewedTake>>,
-}
-
-impl OpenTake {
-    pub(crate) fn new(episode: String, capture: Option<VideoCapture>) -> Self {
+impl RecordingEpisode {
+    pub(crate) fn new(episode: String, capture: Option<VideoCapture>, file: EpisodeFile) -> Self {
         debug_assert!(
             capture
                 .as_ref()
                 .is_none_or(|capture| capture.episode_id() == episode)
         );
-        Self { episode, capture }
+        Self {
+            episode,
+            capture,
+            file,
+        }
     }
 }
 
 impl RecordingSession {
-    /// Hold the take for a command, refusing while another operation holds it.
-    pub(crate) fn try_change(&self) -> Result<TakeChange<'_>, OperationError> {
+    /// Hold the episode for a command, refusing while another operation holds it.
+    pub(crate) fn try_change(&self) -> Result<EpisodeChange<'_>, OperationError> {
         let open = self.open.try_lock().map_err(|_| {
             OperationError::conflict(
                 "another recording operation is in progress; wait for it to finish",
             )
         })?;
-        Ok(TakeChange {
-            open,
-            review: &self.review,
-        })
+        Ok(EpisodeChange { open })
     }
 
-    /// Hold the take once the operation holding it now has finished.
-    pub(crate) async fn change(&self) -> TakeChange<'_> {
-        TakeChange {
+    /// Hold the episode once the operation holding it now has finished.
+    pub(crate) async fn change(&self) -> EpisodeChange<'_> {
+        EpisodeChange {
             open: self.open.lock().await,
-            review: &self.review,
         }
-    }
-
-    pub(crate) fn camera_preview(
-        &self,
-        episode: &str,
-        stream: &str,
-    ) -> Option<Result<spiral_robotics_common::datasets::EpisodeVideo, String>> {
-        let live = self.open.try_lock().ok().and_then(|open| {
-            let take = open.as_ref().filter(|take| take.episode == episode)?;
-            Some(take.capture.as_ref()?.completed_assets())
-        });
-        let cameras = match live {
-            Some(cameras) => cameras,
-            None => self
-                .review
-                .recover_lock()
-                .as_ref()
-                .filter(|review| review.episode == episode)?
-                .cameras
-                .clone(),
-        };
-        Some(CameraRecording::preview(&cameras, stream))
     }
 }
 
-impl TakeChange<'_> {
+impl EpisodeChange<'_> {
     pub(crate) fn is_open(&self) -> bool {
         self.open.is_some()
     }
 
     pub(crate) fn episode(&self) -> Option<&str> {
-        self.open.as_ref().map(|take| take.episode.as_str())
+        self.open.as_ref().map(|open| open.episode.as_str())
     }
 
-    /// The open take's camera capture; `None` without a take or cameras.
+    /// The open episode's file.
+    pub(crate) fn file(&self) -> Option<&EpisodeFile> {
+        self.open.as_ref().map(|open| &open.file)
+    }
+
+    /// The open episode's camera capture; `None` without an episode or cameras.
     pub(crate) fn capture(&mut self) -> Option<&mut VideoCapture> {
         self.open.as_mut()?.capture.as_mut()
     }
 
-    /// Hold `take` as the open one; the previous take's review is gone.
-    pub(crate) fn open(&mut self, take: OpenTake) {
-        debug_assert!(self.open.is_none(), "one take is open at a time");
-        *self.review.recover_lock() = None;
-        *self.open = Some(take);
+    /// Hold `episode` as the open one.
+    pub(crate) fn open(&mut self, episode: RecordingEpisode) {
+        debug_assert!(self.open.is_none(), "one episode is open at a time");
+        *self.open = Some(episode);
     }
 
-    /// Close the open take for review: its media stays previewable.
-    pub(crate) fn close(mut self, cameras: Vec<CameraRecording>) {
-        if let Some(take) = self.open.take() {
-            *self.review.recover_lock() = Some(ReviewedTake {
-                episode: take.episode,
-                cameras,
-            });
-        }
+    /// Close the open episode, handing over its file to finish.
+    pub(crate) fn close(mut self) -> Option<EpisodeFile> {
+        self.open.take().map(|take| take.file)
     }
 }
 
@@ -125,32 +95,47 @@ impl TakeChange<'_> {
 mod tests {
     use std::sync::Arc;
 
+    use spiral_robotics_common::recording::EpisodeArm;
+    use spiral_robotics_recording::{EpisodeRecordingRequest, RecordingBuffer};
+
     use super::*;
 
-    fn take(episode: &str) -> OpenTake {
-        OpenTake::new(episode.to_owned(), None)
+    fn open_episode(directory: &tempfile::TempDir, episode: &str) -> RecordingEpisode {
+        let request = EpisodeRecordingRequest::new("data".to_owned(), "test".to_owned(), 60.0)
+            .with_arms(
+                vec![EpisodeArm::new("arm", None, vec!["joint".into()])],
+                vec![],
+            );
+        let start = RecordingBuffer::new().begin(request).unwrap();
+        let file = EpisodeFile::create(directory.path().join(episode), &start, Vec::new()).unwrap();
+        RecordingEpisode::new(episode.to_owned(), None, file)
     }
 
     #[test]
-    fn an_open_take_stays_active_until_it_closes_for_review() {
+    fn an_open_episode_stays_open_until_it_closes_with_its_file() {
+        let directory = tempfile::tempdir().unwrap();
         let session = RecordingSession::default();
         let mut change = session.try_change().unwrap();
-        change.open(take("take-one"));
+        change.open(open_episode(&directory, "episode-one"));
         assert!(
             session.try_change().is_err(),
-            "one operation holds the take"
+            "one operation holds the episode"
         );
         drop(change);
         let change = session.try_change().unwrap();
-        assert_eq!(change.episode(), Some("take-one"));
-        change.close(Vec::new());
+        assert_eq!(change.episode(), Some("episode-one"));
+        assert!(change.close().is_some());
         assert!(!session.try_change().unwrap().is_open());
     }
 
     #[tokio::test]
-    async fn a_cancelled_operation_leaves_the_take_open() {
+    async fn a_cancelled_operation_leaves_the_episode_open() {
+        let directory = tempfile::tempdir().unwrap();
         let session = Arc::new(RecordingSession::default());
-        session.try_change().unwrap().open(take("take-one"));
+        session
+            .try_change()
+            .unwrap()
+            .open(open_episode(&directory, "episode-one"));
         let (held, ready) = tokio::sync::oneshot::channel();
         let task = tokio::spawn({
             let session = session.clone();
@@ -164,37 +149,6 @@ mod tests {
         assert!(session.try_change().is_err());
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(session.change().await.episode(), Some("take-one"));
-    }
-
-    #[test]
-    fn completed_preview_belongs_to_the_take_and_is_replaced_on_next_open() {
-        let session = RecordingSession::default();
-        session.try_change().unwrap().open(take("take-one"));
-        let camera = CameraRecording::from_annex_b(
-            "wrist".into(),
-            (32, 32, 30),
-            (
-                include_bytes!(
-                    "../../../crates/frontend/src/activities/episode/fixtures/seek.h264"
-                )
-                .to_vec(),
-                (0..8).map(|index| index * 33_333_333).collect(),
-            ),
-        )
-        .unwrap();
-        session.try_change().unwrap().close(vec![camera]);
-        assert!(session.camera_preview("another", "wrist").is_none());
-        assert_eq!(
-            session
-                .camera_preview("take-one", "wrist")
-                .unwrap()
-                .unwrap()
-                .packets()
-                .len(),
-            8
-        );
-        session.try_change().unwrap().open(take("take-two"));
-        assert!(session.camera_preview("take-one", "wrist").is_none());
+        assert_eq!(session.change().await.episode(), Some("episode-one"));
     }
 }

@@ -2,12 +2,13 @@
 //!
 //! A robot rarely has a public address or a certificate, so the connector
 //! dials out: it long-polls Studio for the next browser request to answer,
-//! posts each answer back, and while someone watches it posts telemetry and
-//! camera snapshots. Live data travels at display rates; the control loop and
-//! teleoperation never wait on the link. The machine's [`LinkDriver`] sends
+//! posts each answer back, while someone watches it posts telemetry and camera
+//! snapshots, and it uploads each finished episode. Live data travels at display
+//! rates; the control loop and teleoperation never wait on the link. The machine's [`LinkDriver`] sends
 //! the requests — a computer's TLS stack or a microcontroller's — and
 //! everything above it is shared.
 
+mod episodes;
 mod live;
 mod relay;
 
@@ -24,6 +25,7 @@ use spiral_robotics_common::robot_connector::{
 };
 
 use crate::context::RobotConnectorContext;
+use episodes::EpisodeUploads;
 use live::LivePublishers;
 use relay::RelayedRequest;
 
@@ -101,7 +103,8 @@ struct Poll {
     request: Option<RelayedRequest>,
 }
 
-/// Keeps the connector linked: poll, hand the request off, poll again.
+/// Keeps the connector linked: poll, hand the request off, poll again; and
+/// uploads each finished episode meanwhile.
 pub(crate) struct StudioLinkLoop {
     connector: RobotConnectorContext,
     api: Router,
@@ -127,6 +130,14 @@ impl StudioLinkLoop {
 
     /// Never returns; the caller stops it by dropping the future.
     pub(crate) async fn run(self) {
+        let uploads = EpisodeUploads::new(
+            self.connector.recording_files().clone(),
+            self.client.clone(),
+        );
+        tokio::join!(self.poll_forever(), uploads.run());
+    }
+
+    async fn poll_forever(&self) {
         let mut live = LivePublishers::new(self.connector.clone(), self.client.clone());
         let mut linked = false;
         let mut retry = FIRST_RETRY;

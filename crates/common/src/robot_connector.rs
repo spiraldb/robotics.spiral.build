@@ -3,9 +3,10 @@
 //!
 //! A robot rarely has a public address or a certificate, so the connector
 //! dials out over plain HTTP: it long-polls Studio for the next browser
-//! request to answer and posts each answer back, and while someone watches it
-//! posts telemetry and camera snapshots. Every link request presents the
-//! workspace's token as `Authorization: Bearer <token>`.
+//! request to answer and posts each answer back, while someone watches it
+//! posts telemetry and camera snapshots, and it uploads each finished episode.
+//! Every link request presents the workspace's token as
+//! `Authorization: Bearer <token>`.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,16 @@ pub const LINK_ANSWERS_PATH: &str = "/api/robot-connector/link/answers";
 pub const LINK_TELEMETRY_PATH: &str = "/api/robot-connector/link/telemetry";
 /// `{LINK_CAMERAS_PATH}?id=<camera>` takes that camera's latest JPEG frame.
 pub const LINK_CAMERAS_PATH: &str = "/api/robot-connector/link/cameras";
+/// `PUT {LINK_EPISODES_PATH}/{dataset}/{episode}?offset=…&size=…` takes the next
+/// part of a finished episode, as a [`EpisodePart`] places it, and answers a
+/// [`EpisodeUpload`]: 200 once Studio keeps the part, 409 when Studio holds
+/// another count of bytes, from which the connector resumes. Studio keeps a
+/// whole episode until a browser stores it in its dataset.
+pub const LINK_EPISODES_PATH: &str = "/api/robot-connector/link/episodes";
+/// The most bytes one part of an episode carries.
+pub const EPISODE_PART_BYTES: usize = 4 * 1024 * 1024;
+/// The largest episode Studio stores: one Spiral row holds it.
+pub const MAX_EPISODE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The connector's [`RobotConnectorHealth`], as JSON, on every poll.
 pub const HEALTH_HEADER: &str = "X-Robot-Connector-Health";
@@ -75,6 +86,43 @@ impl RobotConnectorToken {
 
     pub fn token(&self) -> &str {
         &self.token
+    }
+}
+
+/// Where one part of an episode starts, and how many bytes the whole episode has.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EpisodePart {
+    offset: u64,
+    size: u64,
+}
+
+impl EpisodePart {
+    pub const fn new(offset: u64, size: u64) -> Self {
+        Self { offset, size }
+    }
+
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// How many bytes of an episode Studio holds: all of them once it has the episode.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EpisodeUpload {
+    received: u64,
+}
+
+impl EpisodeUpload {
+    pub const fn new(received: u64) -> Self {
+        Self { received }
+    }
+
+    pub const fn received(&self) -> u64 {
+        self.received
     }
 }
 

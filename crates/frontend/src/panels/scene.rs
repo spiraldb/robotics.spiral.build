@@ -1103,7 +1103,7 @@ mod source_tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn a_missing_recorded_scene_source_never_falls_back_to_live() {
         assert!(
-            matches!(SceneSource::recorded("take-1", None), SceneSource::Recorded(source) if matches!(source.state(), LoadState::Loading { previous: None }))
+            matches!(SceneSource::recorded("episode-1", None), SceneSource::Recorded(source) if matches!(source.state(), LoadState::Loading { previous: None }))
         );
     }
 }

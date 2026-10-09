@@ -1,7 +1,7 @@
 //! The robot connector: the program that runs next to the arms it drives.
 //!
 //! It owns everything physical — serial buses, cameras, calibration, the
-//! fixed-rate control loop — along with the takes recorded from it. It links
+//! fixed-rate control loop — along with the episodes recorded from it. It links
 //! itself to Studio over plain HTTP
 //! ([`StudioLink`]): it polls Studio for the browser requests to answer and
 //! posts live data while someone watches, so it needs no public address. The

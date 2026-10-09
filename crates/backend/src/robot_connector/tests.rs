@@ -8,12 +8,12 @@ use axum::{
     response::Response,
 };
 use futures_util::StreamExt as _;
-use serde_json::Value;
+use serde_json::{Value, json};
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::robot_connector::{
-    HEALTH_HEADER, LINK_ANSWERS_PATH, LINK_CAMERAS_PATH, LINK_NEXT_PATH, LINK_TELEMETRY_PATH,
-    LiveStream, RELAY_PREFIX, REQUEST_HEADER, RelayedRequestHead, RobotConnectorHealth,
-    STATUS_HEADER, WATCH_HEADER,
+    EpisodePart, HEALTH_HEADER, LINK_ANSWERS_PATH, LINK_CAMERAS_PATH, LINK_EPISODES_PATH,
+    LINK_NEXT_PATH, LINK_TELEMETRY_PATH, LiveStream, RELAY_PREFIX, REQUEST_HEADER,
+    RelayedRequestHead, RobotConnectorHealth, STATUS_HEADER, WATCH_HEADER,
 };
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -446,4 +446,61 @@ async fn a_camera_is_watched_while_its_mjpeg_response_is_open() {
     let polled = fixture.poll(&token).await.unwrap();
     assert_eq!(polled.status(), StatusCode::NO_CONTENT);
     assert!(LinkFixture::watched(&polled).is_empty());
+}
+
+#[tokio::test]
+async fn a_connector_uploads_an_episode_in_parts_that_then_waits_to_be_stored() {
+    let fixture = LinkFixture::new().await;
+    let token = fixture.issue_token().await;
+    let upload = |token: &str, offset: u64, bytes: &'static [u8]| {
+        let part = serde_urlencoded::to_string(EpisodePart::new(offset, 6)).unwrap();
+        LinkFixture::connector(
+            token,
+            Request::put(format!("{LINK_EPISODES_PATH}/pick_place/episode-1?{part}")),
+        )
+        .body(Body::from(bytes))
+        .unwrap()
+    };
+    let waiting = async || {
+        let request = fixture
+            .browser(Request::get(format!("{RELAY_PREFIX}/episodes")))
+            .body(Body::empty())
+            .unwrap();
+        LinkFixture::json(fixture.send(request).await).await
+    };
+
+    assert_eq!(
+        fixture.send(upload("rc_unknown", 0, b"abc")).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        LinkFixture::json(fixture.send(upload(&token, 0, b"abc")).await).await,
+        (StatusCode::OK, json!({"received": 3}))
+    );
+    // A part sent again says where the upload resumes.
+    assert_eq!(
+        LinkFixture::json(fixture.send(upload(&token, 0, b"abc")).await).await,
+        (StatusCode::CONFLICT, json!({"received": 3}))
+    );
+    // Half an episode waits for nothing, and cannot be stored.
+    assert_eq!(waiting().await, (StatusCode::OK, json!([])));
+    let store = fixture
+        .browser(Request::post(format!(
+            "{RELAY_PREFIX}/episodes/pick_place/episode-1/store"
+        )))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(fixture.send(store).await.status(), StatusCode::NOT_FOUND);
+
+    assert_eq!(
+        LinkFixture::json(fixture.send(upload(&token, 3, b"def")).await).await,
+        (StatusCode::OK, json!({"received": 6}))
+    );
+    assert_eq!(
+        waiting().await,
+        (
+            StatusCode::OK,
+            json!([{"dataset_id": "pick_place", "episode_id": "episode-1", "bytes": 6}])
+        )
+    );
 }

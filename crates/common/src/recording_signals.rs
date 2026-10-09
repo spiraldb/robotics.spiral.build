@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Thirty minutes at the hardware's 20 Hz publication rate.
 const MAX_SAMPLES: usize = 36_000;
 const TRIM_CHUNK: usize = 3_600;
-/// One joint's measured angle at every sample in a take.
+/// One joint's measured angle at every sample in an episode.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct JointSignal {
     name: String,
@@ -39,13 +39,13 @@ impl ArmSignals {
     }
 }
 
-/// Samples for the active take, or the last take after recording stops.
+/// Samples for the active episode, or the last episode after recording stops.
 ///
 /// All arms share one time column because the control loop samples them on the
 /// same frame. Every joint vector is kept index-aligned with that column.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecordingSignals {
-    take: Option<String>,
+    episode: Option<String>,
     times: Vec<f32>,
     arms: Vec<ArmSignals>,
     live: bool,
@@ -64,10 +64,10 @@ impl RecordingSignals {
         &self.times
     }
 
-    /// Fold one telemetry frame into the active take.
+    /// Fold one telemetry frame into the active episode.
     //
     // A single idle frame can be a publication race between recorder state and
-    // telemetry. Two consecutive idle frames end the take while preserving it
+    // telemetry. Two consecutive idle frames end the episode while preserving it
     // for inspection in the Timeline.
     pub fn observe(&mut self, frame: &TelemetryFrame) {
         let Some(recording) = frame.recording() else {
@@ -80,14 +80,14 @@ impl RecordingSignals {
         self.idle = 0;
 
         // Episode ids can repeat after a server restart, so the clock and live
-        // transition also participate in take identity.
-        let different_take = self.take.as_deref() != Some(recording.episode());
+        // transition also participate in episode identity.
+        let different_episode = self.episode.as_deref() != Some(recording.episode());
         let resumed = !self.live;
         let rewound = self
             .times
             .last()
             .is_some_and(|last| (recording.elapsed_seconds() as f32) < *last);
-        if different_take || resumed || rewound {
+        if different_episode || resumed || rewound {
             self.reset(recording.episode());
         }
         self.live = true;
@@ -117,7 +117,7 @@ impl RecordingSignals {
                     None => {
                         arm.joints.push(JointSignal {
                             name: joint.name().to_owned(),
-                            // An arm or joint appearing mid-take begins with a
+                            // An arm or joint appearing mid-episode begins with a
                             // gap; its first reading is never backdated.
                             values: vec![None; sample_count - 1],
                         });
@@ -143,10 +143,10 @@ impl RecordingSignals {
         }
     }
 
-    fn reset(&mut self, take: &str) {
+    fn reset(&mut self, episode: &str) {
         self.generation += 1;
         self.offset = 0;
-        self.take = Some(take.to_owned());
+        self.episode = Some(episode.to_owned());
         self.times.clear();
         self.arms.clear();
         self.idle = 0;
@@ -163,7 +163,7 @@ impl RecordingSignals {
     }
 }
 
-/// The next sample wanted by a client, scoped to a take generation.
+/// The next sample wanted by a client, scoped to an episode generation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecordingCursor {
     generation: u64,
@@ -179,7 +179,7 @@ impl RecordingWindow {
     /// Empty polls must not invalidate an unchanged chart projection.
     pub fn changes(&self, current: &RecordingSignals) -> bool {
         self.0.cursor() != current.cursor()
-            || self.0.take != current.take
+            || self.0.episode != current.episode
             || self.0.live != current.live
     }
 }
@@ -202,7 +202,7 @@ impl RecordingSignals {
         };
         let end = (start + 1_000).min(self.times.len());
         RecordingWindow(Self {
-            take: self.take.clone(),
+            episode: self.episode.clone(),
             times: self.times[start..end].to_vec(),
             arms: self
                 .arms
@@ -232,7 +232,7 @@ impl RecordingSignals {
             return;
         }
         let previous_len = self.times.len();
-        self.take = next.take;
+        self.episode = next.episode;
         self.live = next.live;
         self.idle = next.idle;
         self.times.extend(next.times);
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_take_stays_available_and_the_next_one_replaces_it() {
+    fn a_finished_episode_stays_available_and_the_next_one_replaces_it() {
         let mut store = RecordingSignals::default();
         store.observe(&frame(
             Some("episode_000001"),
@@ -364,15 +364,15 @@ mod tests {
             vec![("leader", vec![joint("gripper", Some(9.0))])],
         ));
         assert_eq!(store.times.len(), 1);
-        assert_eq!(store.take.as_deref(), Some("episode_000002"));
+        assert_eq!(store.episode.as_deref(), Some("episode_000002"));
     }
 
     #[test]
-    fn one_idle_frame_does_not_split_a_take() {
+    fn one_idle_frame_does_not_split_an_episode() {
         let mut store = RecordingSignals::default();
         for sample in 0..4 {
             store.observe(&frame(
-                Some("take"),
+                Some("episode"),
                 f64::from(sample),
                 vec![("leader", vec![joint("gripper", Some(1.0))])],
             ));
@@ -380,7 +380,7 @@ mod tests {
         store.observe(&frame(None, 0.0, vec![]));
         assert!(store.live);
         store.observe(&frame(
-            Some("take"),
+            Some("episode"),
             4.0,
             vec![("leader", vec![joint("gripper", Some(1.0))])],
         ));
@@ -391,12 +391,12 @@ mod tests {
     fn a_rewound_clock_replaces_samples_even_when_the_id_repeats() {
         let mut store = RecordingSignals::default();
         store.observe(&frame(
-            Some("take"),
+            Some("episode"),
             9.0,
             vec![("leader", vec![joint("gripper", Some(1.0))])],
         ));
         store.observe(&frame(
-            Some("take"),
+            Some("episode"),
             0.1,
             vec![("leader", vec![joint("gripper", Some(2.0))])],
         ));
@@ -405,15 +405,15 @@ mod tests {
     }
 
     #[test]
-    fn a_joint_arriving_mid_take_is_padded_not_backdated() {
+    fn a_joint_arriving_mid_episode_is_padded_not_backdated() {
         let mut store = RecordingSignals::default();
         store.observe(&frame(
-            Some("take"),
+            Some("episode"),
             0.0,
             vec![("leader", vec![joint("gripper", Some(1.0))])],
         ));
         store.observe(&frame(
-            Some("take"),
+            Some("episode"),
             0.05,
             vec![
                 ("leader", vec![joint("gripper", Some(2.0))]),
@@ -429,7 +429,7 @@ mod tests {
     fn a_missing_joint_reading_leaves_an_aligned_gap() {
         let mut store = RecordingSignals::default();
         store.observe(&frame(
-            Some("take"),
+            Some("episode"),
             0.0,
             vec![(
                 "leader",
@@ -437,7 +437,7 @@ mod tests {
             )],
         ));
         store.observe(&frame(
-            Some("take"),
+            Some("episode"),
             0.05,
             vec![("leader", vec![joint("gripper", Some(2.0))])],
         ));
@@ -454,11 +454,11 @@ mod tests {
     }
 
     #[test]
-    fn a_long_take_is_trimmed_from_the_front() {
+    fn a_long_episode_is_trimmed_from_the_front() {
         let mut store = RecordingSignals::default();
         for sample in 0..=MAX_SAMPLES {
             store.observe(&frame(
-                Some("take"),
+                Some("episode"),
                 sample as f64 * 0.05,
                 vec![("leader", vec![joint("gripper", Some(sample as f64))])],
             ));
@@ -471,12 +471,12 @@ mod tests {
         );
     }
     #[test]
-    fn a_disconnected_browser_catches_up_in_bounded_pages_and_keeps_the_finished_take() {
+    fn a_disconnected_browser_catches_up_in_bounded_pages_and_keeps_the_finished_episode() {
         let mut backend = RecordingSignals::default();
         let mut frontend = RecordingSignals::default();
         for sample in 0..2_500 {
             backend.observe(&frame(
-                Some("take"),
+                Some("episode"),
                 sample as f64 * 0.05,
                 vec![("leader", vec![joint("gripper", Some(sample as f64))])],
             ));
@@ -495,18 +495,18 @@ mod tests {
     }
 
     #[test]
-    fn cursor_gaps_and_new_take_generations_replace_the_old_chart() {
+    fn cursor_gaps_and_new_episode_generations_replace_the_old_chart() {
         let mut backend = RecordingSignals::default();
         let mut frontend = RecordingSignals::default();
-        backend.observe(&frame(Some("take"), 0.0, vec![]));
+        backend.observe(&frame(Some("episode"), 0.0, vec![]));
         frontend.apply_window(backend.window(frontend.cursor()));
         for sample in 1..=MAX_SAMPLES {
-            backend.observe(&frame(Some("take"), sample as f64 * 0.05, vec![]));
+            backend.observe(&frame(Some("episode"), sample as f64 * 0.05, vec![]));
         }
         frontend.apply_window(backend.window(frontend.cursor()));
         assert_eq!(frontend.times().first(), backend.times().first());
         assert_eq!(frontend.offset, backend.offset);
-        backend.observe(&frame(Some("next take"), 0.0, vec![]));
+        backend.observe(&frame(Some("next episode"), 0.0, vec![]));
         frontend.apply_window(backend.window(frontend.cursor()));
         assert_eq!(frontend.times(), &[0.0]);
     }

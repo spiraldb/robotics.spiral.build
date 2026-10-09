@@ -1,97 +1,49 @@
-//! One self-contained MCAP recording: joint messages, metadata, and H.264 access units.
-use super::capture::FullEpisode;
+//! One episode's MCAP recording, written while the episode records: joint samples
+//! and camera access units in the order they arrive, then the messages that
+//! sum the episode up once it ends. Readers place every message by its log time,
+//! so summary messages written last still open the recording.
+use super::capture::{EpisodeCompletion, EpisodeError, EpisodeStart, EpisodeSummary, Sample};
 use super::mcap_schema::{McapMessage, RecordingSchema};
 use base64::Engine as _;
 use mcap::records::MessageHeader;
 use prost::Message as _;
-use prost_reflect::{DescriptorPool, DynamicMessage, Value};
+use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value};
 use spiral_robotics_common::datasets::{EpisodeVideo, H264AccessUnit, VideoPacket};
 use std::collections::BTreeMap;
-use std::io::Cursor;
+use std::io::{Seek, Write};
 
-/// Timestamped camera access units, before they are multiplexed into the MCAP file.
+/// Hard storage limit for a single recorded episode.
+const MAX_EPISODE_FRAMES: u64 = 1_000_000;
+const COMPRESSED_VIDEO_SCHEMA: &[u8] = include_bytes!("schemas/compressed-video.bin");
+
+/// One camera an episode films: its stream, the camera behind it, and the
+/// width, height, and rate it is encoded at.
 #[derive(Clone, Debug)]
-pub struct CameraRecording {
+pub struct CameraStream {
     stream: String,
     camera_id: String,
     dimensions: (u32, u32, u32),
-    frames: Vec<CameraAccessUnit>,
 }
 
-#[derive(Clone, Debug)]
-struct CameraAccessUnit {
-    elapsed_ns: u64,
-    data: Vec<u8>,
-}
-impl CameraRecording {
-    pub fn preview(
-        cameras: &[Self],
-        stream: &str,
-    ) -> Result<spiral_robotics_common::datasets::EpisodeVideo, String> {
-        let mut packets = CameraPackets::default();
-        for camera in cameras.iter().filter(|camera| camera.stream == stream) {
-            for frame in &camera.frames {
-                packets.push(frame.elapsed_ns, &frame.data)?;
-            }
-        }
-        packets.finish()
-    }
-
-    pub fn from_annex_b(
-        stream: String,
+impl CameraStream {
+    pub fn new(
+        stream: impl Into<String>,
+        camera_id: impl Into<String>,
         dimensions: (u32, u32, u32),
-        encoded: (Vec<u8>, Vec<u64>),
-    ) -> Result<Self, String> {
-        let (bytes, times) = encoded;
-        let mut boundaries = Vec::new();
-        let mut index = 0;
-        while index + 3 < bytes.len() {
-            let prefix = if bytes[index..].starts_with(&[0, 0, 0, 1]) {
-                4
-            } else if bytes[index..].starts_with(&[0, 0, 1]) {
-                3
-            } else {
-                index += 1;
-                continue;
-            };
-            if index + prefix < bytes.len() && bytes[index + prefix] & 31 == 9 {
-                boundaries.push(index);
-            }
-            index += prefix;
-        }
-        if boundaries.len() != times.len() || times.is_empty() {
-            return Err(format!(
-                "Camera {stream} encoded {} access units for {} timestamps",
-                boundaries.len(),
-                times.len()
-            ));
-        }
-        if !times.windows(2).all(|pair| pair[0] < pair[1]) {
-            return Err("Camera timestamps must increase strictly".into());
-        }
-        boundaries[0] = 0;
-        boundaries.push(bytes.len());
-        let frames = times
-            .into_iter()
-            .zip(boundaries.windows(2))
-            .map(|(elapsed_ns, range)| CameraAccessUnit {
-                elapsed_ns,
-                data: bytes[range[0]..range[1]].to_vec(),
-            })
-            .collect();
-        Ok(Self {
-            camera_id: stream.clone(),
-            stream,
+    ) -> Self {
+        Self {
+            stream: stream.into(),
+            camera_id: camera_id.into(),
             dimensions,
-            frames,
-        })
+        }
     }
-    pub fn with_camera_id(mut self, camera_id: String) -> Self {
-        self.camera_id = camera_id;
-        self
+
+    pub fn stream(&self) -> &str {
+        &self.stream
     }
-    pub fn encoded_bytes(&self) -> usize {
-        self.frames.iter().map(|frame| frame.data.len()).sum()
+
+    fn topic(&self) -> String {
+        format!("/camera/{}/video", self.stream)
     }
 
     /// The camera's video `Stream` message. Each is written alone, so every
@@ -112,50 +64,216 @@ impl CameraRecording {
     }
 }
 
-pub struct McapRecording {
-    writer: mcap::Writer<Cursor<Vec<u8>>>,
-    origin_ns: u64,
+/// One encoded frame of a camera stream, at its time since the episode began.
+#[derive(Clone, Debug)]
+pub struct VideoUnit {
+    stream: String,
+    elapsed_ns: u64,
+    data: Vec<u8>,
 }
-impl McapRecording {
-    pub fn encode(episode: &FullEpisode, cameras: &[CameraRecording]) -> Result<Vec<u8>, String> {
-        let origin_ns = u64::try_from(episode.start().started_ms())
+
+impl VideoUnit {
+    pub fn new(stream: impl Into<String>, elapsed_ns: u64, data: Vec<u8>) -> Self {
+        Self {
+            stream: stream.into(),
+            elapsed_ns,
+            data,
+        }
+    }
+}
+
+/// Splits an Annex B H.264 byte stream into access units as its bytes arrive.
+/// Each access unit begins with a delimiter, which the encoder writes before
+/// every frame.
+#[derive(Default)]
+pub struct AccessUnits {
+    pending: Vec<u8>,
+    /// Where scanning resumes; every start code before it is accounted for.
+    scanned: usize,
+}
+
+impl AccessUnits {
+    /// Take `bytes`, and answer every access unit they complete.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        self.pending.extend_from_slice(bytes);
+        let mut units = Vec::new();
+        let mut index = self.scanned;
+        while index + 3 < self.pending.len() {
+            let prefix = if self.pending[index..].starts_with(&[0, 0, 0, 1]) {
+                4
+            } else if self.pending[index..].starts_with(&[0, 0, 1]) {
+                3
+            } else {
+                index += 1;
+                continue;
+            };
+            if index + prefix >= self.pending.len() {
+                // The unit type is in bytes still to come.
+                break;
+            }
+            if index > 0 && self.pending[index + prefix] & 31 == 9 {
+                units.push(self.pending.drain(..index).collect());
+                index = 0;
+            }
+            index += prefix;
+        }
+        self.scanned = index;
+        units
+    }
+
+    /// The last access unit, once the stream ends.
+    pub fn finish(self) -> Option<Vec<u8>> {
+        (!self.pending.is_empty()).then_some(self.pending)
+    }
+}
+
+/// An episode's recording as it is written to `W`.
+pub(crate) struct EpisodeRecording<W: Write + Seek> {
+    writer: mcap::Writer<W>,
+    start: EpisodeStart,
+    origin_ns: u64,
+    schema: RecordingSchema,
+    video: VideoChannels,
+    frames: u64,
+}
+
+/// The channel each camera's frames are written on, and the frames' schema.
+struct VideoChannels {
+    frame: MessageDescriptor,
+    clock: MessageDescriptor,
+    /// By stream: the channel, and the next frame's sequence number.
+    channels: BTreeMap<String, (u16, u32)>,
+}
+
+impl<W: Write + Seek> EpisodeRecording<W> {
+    /// Start `start`'s recording in `target`, with a channel for each of
+    /// `cameras`.
+    pub(crate) fn new(
+        target: W,
+        start: EpisodeStart,
+        cameras: &[CameraStream],
+    ) -> Result<Self, String> {
+        let origin_ns = u64::try_from(start.started_ms())
             .map_err(|_| "Recording time predates Unix epoch")?
             .checked_mul(1_000_000)
             .ok_or("Recording origin overflows nanoseconds")?;
-        let mut recording = Self {
-            writer: mcap::WriteOptions::new()
-                .compression(Some(mcap::Compression::Lz4))
-                .create(Cursor::new(Vec::new()))
-                .map_err(|e| e.to_string())?,
-            origin_ns,
+        let mut writer = mcap::WriteOptions::new()
+            .compression(Some(mcap::Compression::Lz4))
+            .create(target)
+            .map_err(|e| e.to_string())?;
+        let pool = DescriptorPool::decode(COMPRESSED_VIDEO_SCHEMA).map_err(|e| e.to_string())?;
+        let message = |name: &str| {
+            pool.get_message_by_name(name)
+                .ok_or_else(|| format!("{name} schema is missing"))
         };
-        let schema = RecordingSchema::load()?;
-        let start = episode.start();
-        recording.write(
-            &episode
-                .episode_message(&schema)
+        let mut video = VideoChannels {
+            frame: message("foxglove.CompressedVideo")?,
+            clock: message("google.protobuf.Timestamp")?,
+            channels: BTreeMap::new(),
+        };
+        let schema_id = writer
+            .add_schema(
+                "foxglove.CompressedVideo",
+                "protobuf",
+                COMPRESSED_VIDEO_SCHEMA,
+            )
+            .map_err(|e| e.to_string())?;
+        for camera in cameras {
+            let (width, height, _) = camera.dimensions;
+            let metadata = BTreeMap::from([
+                ("width".into(), width.to_string()),
+                ("height".into(), height.to_string()),
+            ]);
+            let channel = writer
+                .add_channel(schema_id, &camera.topic(), "protobuf", &metadata)
+                .map_err(|e| e.to_string())?;
+            video.channels.insert(camera.stream.clone(), (channel, 0));
+        }
+        Ok(Self {
+            writer,
+            start,
+            origin_ns,
+            schema: RecordingSchema::load()?,
+            video,
+            frames: 0,
+        })
+    }
+
+    /// Write the episode's next joint sample.
+    pub(crate) fn sample(&mut self, sample: &Sample) -> Result<(), String> {
+        if self.frames >= MAX_EPISODE_FRAMES {
+            return Err(format!(
+                "recording reached the supported {MAX_EPISODE_FRAMES}-sample limit"
+            ));
+        }
+        let messages = self
+            .start
+            .joint_sample_messages(sample, self.frames, &self.schema)
+            .map_err(|error: EpisodeError| error.to_string())?;
+        for message in &messages {
+            self.write(message)?;
+        }
+        self.frames += 1;
+        Ok(())
+    }
+
+    /// Write one camera's next encoded frame.
+    pub(crate) fn video(&mut self, unit: &VideoUnit) -> Result<(), String> {
+        let (channel, sequence) = self
+            .video
+            .channels
+            .get_mut(&unit.stream)
+            .ok_or_else(|| format!("the episode films no camera {}", unit.stream))?;
+        let timestamp = self
+            .origin_ns
+            .checked_add(unit.elapsed_ns)
+            .ok_or("Camera timestamp overflow")?;
+        let mut time = DynamicMessage::new(self.video.clock.clone());
+        time.set_field_by_name("seconds", Value::I64((timestamp / 1_000_000_000) as i64));
+        time.set_field_by_name("nanos", Value::I32((timestamp % 1_000_000_000) as i32));
+        let mut message = DynamicMessage::new(self.video.frame.clone());
+        message.set_field_by_name("timestamp", Value::Message(time));
+        message.set_field_by_name("frame_id", Value::String(unit.stream.clone()));
+        message.set_field_by_name("format", Value::String("h264".into()));
+        message.set_field_by_name("data", Value::Bytes(unit.data.clone().into()));
+        let header = MessageHeader {
+            channel_id: *channel,
+            sequence: *sequence,
+            log_time: timestamp,
+            publish_time: timestamp,
+        };
+        *sequence = sequence.checked_add(1).ok_or("Camera sequence overflow")?;
+        self.writer
+            .write_to_known_channel(&header, &message.encode_to_vec())
+            .map_err(|e| e.to_string())
+    }
+
+    /// End the chunk being written, so everything written so far is in the
+    /// target for a reader.
+    pub(crate) fn flush(&mut self) -> Result<(), String> {
+        self.writer.flush().map_err(|e| e.to_string())
+    }
+
+    /// Write the messages that sum the episode up and close the recording.
+    pub(crate) fn finish(
+        mut self,
+        completion: &EpisodeCompletion,
+        cameras: &[CameraStream],
+    ) -> Result<W, String> {
+        let summary = EpisodeSummary::new(self.start.clone(), completion.clone(), self.frames);
+        self.write(
+            &summary
+                .episode_message(&self.schema)
                 .map_err(|e| e.to_string())?,
         )?;
-        for message in start.joint_stream_messages(episode.completion(), &schema) {
-            recording.write(&message)?;
+        for message in self.start.joint_stream_messages(completion, &self.schema) {
+            self.write(&message)?;
         }
-        for (index, sample) in (0_u64..).zip(episode.samples()) {
-            for message in start
-                .joint_sample_messages(sample, index, &schema)
-                .map_err(|e| e.to_string())?
-            {
-                recording.write(&message)?;
-            }
-        }
-        let mut streams = std::collections::BTreeSet::new();
         for camera in cameras {
-            if streams.insert(camera.stream.clone()) {
-                recording.write(&camera.stream_message(start.id(), &schema))?;
-            }
-            recording.camera(camera)?;
+            self.write(&camera.stream_message(self.start.id(), &self.schema))?;
         }
-        recording.writer.finish().map_err(|e| e.to_string())?;
-        Ok(recording.writer.into_inner().into_inner())
+        self.writer.finish().map_err(|e| e.to_string())?;
+        Ok(self.writer.into_inner())
     }
 
     fn write(&mut self, message: &McapMessage) -> Result<(), String> {
@@ -181,71 +299,97 @@ impl McapRecording {
             .write_to_known_channel(&header, &message.encode())
             .map_err(|e| e.to_string())
     }
-    fn camera(&mut self, camera: &CameraRecording) -> Result<(), String> {
-        let schema = include_bytes!("schemas/compressed-video.bin");
-        let pool = DescriptorPool::decode(schema.as_slice()).map_err(|e| e.to_string())?;
-        let descriptor = pool
-            .get_message_by_name("foxglove.CompressedVideo")
-            .ok_or("CompressedVideo schema is missing")?;
-        let clock = pool
-            .get_message_by_name("google.protobuf.Timestamp")
-            .ok_or("Timestamp schema is missing")?;
-        let schema_id = self
-            .writer
-            .add_schema("foxglove.CompressedVideo", "protobuf", schema)
-            .map_err(|e| e.to_string())?;
-        let metadata = BTreeMap::from([
-            ("width".into(), camera.dimensions.0.to_string()),
-            ("height".into(), camera.dimensions.1.to_string()),
-        ]);
-        let channel_id = self
-            .writer
-            .add_channel(
-                schema_id,
-                &format!("/camera/{}/video", camera.stream),
-                "protobuf",
-                &metadata,
-            )
-            .map_err(|e| e.to_string())?;
-        for (sequence, frame) in camera.frames.iter().enumerate() {
-            let timestamp = self
-                .origin_ns
-                .checked_add(frame.elapsed_ns)
-                .ok_or("Camera timestamp overflow")?;
-            let mut time = DynamicMessage::new(clock.clone());
-            time.set_field_by_name("seconds", Value::I64((timestamp / 1_000_000_000) as i64));
-            time.set_field_by_name("nanos", Value::I32((timestamp % 1_000_000_000) as i32));
-            let mut message = DynamicMessage::new(descriptor.clone());
-            message.set_field_by_name("timestamp", Value::Message(time));
-            message.set_field_by_name("frame_id", Value::String(camera.stream.clone()));
-            message.set_field_by_name("format", Value::String("h264".into()));
-            message.set_field_by_name("data", Value::Bytes(frame.data.clone().into()));
-            let header = MessageHeader {
-                channel_id,
-                sequence: u32::try_from(sequence).map_err(|_| "Camera sequence overflow")?,
-                log_time: timestamp,
-                publish_time: timestamp,
-            };
-            self.writer
-                .write_to_known_channel(&header, &message.encode_to_vec())
-                .map_err(|e| e.to_string())?;
+}
+
+/// Timestamped camera access units, for tests that build a recording file.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug)]
+pub struct CameraRecording {
+    camera: CameraStream,
+    frames: Vec<VideoUnit>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl CameraRecording {
+    /// `encoded`'s access units, one for each of its timestamps.
+    pub fn from_annex_b(
+        stream: String,
+        dimensions: (u32, u32, u32),
+        encoded: (Vec<u8>, Vec<u64>),
+    ) -> Result<Self, String> {
+        let (bytes, times) = encoded;
+        let mut units = AccessUnits::default();
+        let mut data = units.push(&bytes);
+        data.extend(units.finish());
+        if data.len() != times.len() || times.is_empty() {
+            return Err(format!(
+                "Camera {stream} encoded {} access units for {} timestamps",
+                data.len(),
+                times.len()
+            ));
         }
-        Ok(())
+        let frames = times
+            .into_iter()
+            .zip(data)
+            .map(|(elapsed_ns, data)| VideoUnit::new(stream.clone(), elapsed_ns, data))
+            .collect();
+        Ok(Self {
+            camera: CameraStream::new(stream.clone(), stream, dimensions),
+            frames,
+        })
+    }
+
+    pub fn with_camera_id(mut self, camera_id: String) -> Self {
+        self.camera.camera_id = camera_id;
+        self
+    }
+}
+
+/// Recording files built whole, for tests.
+#[cfg(any(test, feature = "test-support"))]
+pub struct McapRecording;
+
+#[cfg(any(test, feature = "test-support"))]
+impl McapRecording {
+    /// `episode`'s samples and `cameras`' frames as one recording file.
+    pub fn encode(
+        episode: &crate::FullEpisode,
+        cameras: &[CameraRecording],
+    ) -> Result<Vec<u8>, String> {
+        let streams = cameras
+            .iter()
+            .map(|camera| camera.camera.clone())
+            .collect::<Vec<_>>();
+        let mut recording = EpisodeRecording::new(
+            std::io::Cursor::new(Vec::new()),
+            episode.start().clone(),
+            &streams,
+        )?;
+        for sample in episode.samples() {
+            recording.sample(sample)?;
+        }
+        for frame in cameras.iter().flat_map(|camera| &camera.frames) {
+            recording.video(frame)?;
+        }
+        Ok(recording
+            .finish(episode.completion(), &streams)?
+            .into_inner())
     }
 }
 
 const MAX_PACKETS: usize = 18_000;
 const MAX_ENCODED_BYTES: usize = 64 * 1024 * 1024;
 
+/// A camera's frames as a review plays them.
 #[derive(Default)]
-struct CameraPackets {
+pub(crate) struct CameraPackets {
     packets: Vec<VideoPacket>,
     codec: Option<String>,
     previous_time: Option<u64>,
     encoded_bytes: usize,
 }
 impl CameraPackets {
-    fn push(&mut self, timestamp: u64, bytes: &[u8]) -> Result<(), String> {
+    pub(crate) fn push(&mut self, timestamp: u64, bytes: &[u8]) -> Result<(), String> {
         if self.packets.len() >= MAX_PACKETS {
             return Err("Camera exceeds the 18,000-packet playback limit".into());
         }
@@ -282,7 +426,7 @@ impl CameraPackets {
         Ok(())
     }
 
-    fn finish(self) -> Result<EpisodeVideo, String> {
+    pub(crate) fn finish(self) -> Result<EpisodeVideo, String> {
         if self.packets.is_empty() {
             return Err("This camera has no video in the selected episode".into());
         }
@@ -328,5 +472,24 @@ mod camera_packet_tests {
                 .unwrap_err()
                 .contains("increase strictly")
         );
+    }
+
+    #[test]
+    fn access_units_split_at_each_delimiter_however_the_bytes_arrive() {
+        let key: &[u8] = &[
+            0, 0, 0, 1, 9, 0xf0, 0, 0, 0, 1, 0x67, 0x64, 0, 0x1e, 0, 0, 1, 0x68, 0x88, 0, 0, 1,
+            0x65, 0x88,
+        ];
+        let delta: &[u8] = &[0, 0, 0, 1, 9, 0xf0, 0, 0, 1, 0x41, 0x88];
+        let stream = [key, delta, delta].concat();
+        for size in [1, 2, 3, 5, stream.len()] {
+            let mut units = AccessUnits::default();
+            let mut split = stream
+                .chunks(size)
+                .flat_map(|bytes| units.push(bytes))
+                .collect::<Vec<_>>();
+            split.extend(units.finish());
+            assert_eq!(split, [key, delta, delta], "{size}-byte pieces");
+        }
     }
 }

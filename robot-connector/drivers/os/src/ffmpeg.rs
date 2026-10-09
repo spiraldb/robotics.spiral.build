@@ -9,10 +9,6 @@ use spiral_robotics_connector::EncoderDriver;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
-/// Hard ceiling for one camera segment's encoded bytes. Camera bytes are
-/// transient transaction state until the episode is committed to Spiral,
-/// never a local persistence layer.
-const MAX_VIDEO_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 /// Repeat the parameter sets at every keyframe and delimit access units, so a
 /// recording decodes from any keyframe.
 const H264_PACKET_FILTER: &str = "dump_extra=freq=keyframe,h264_metadata=aud=insert";
@@ -42,7 +38,8 @@ impl EncoderDriver for FfmpegEncoder {
         &self,
         fps: u32,
         mut frames: mpsc::Receiver<Bytes>,
-    ) -> BoxFuture<'static, Result<Vec<u8>, String>> {
+        output: mpsc::UnboundedSender<Bytes>,
+    ) -> BoxFuture<'static, Result<(), String>> {
         let executable = self.executable.clone();
         let codec = self.codec.clone();
         Box::pin(async move {
@@ -95,8 +92,8 @@ impl EncoderDriver for FfmpegEncoder {
                 .stdout
                 .take()
                 .ok_or_else(|| "FFmpeg did not open its output pipe".to_owned())?;
+            // FFmpeg's H.264 goes on as it comes out.
             let output_task = tokio::spawn(async move {
-                let mut payload = Vec::new();
                 let mut buffer = vec![0_u8; 64 * 1024];
                 loop {
                     let read = stdout
@@ -104,17 +101,15 @@ impl EncoderDriver for FfmpegEncoder {
                         .await
                         .map_err(|error| format!("could not read FFmpeg H.264 output: {error}"))?;
                     if read == 0 {
-                        break;
+                        return Ok::<_, String>(());
                     }
-                    if payload.len().saturating_add(read) > MAX_VIDEO_SEGMENT_BYTES {
-                        return Err(format!(
-                            "segment exceeded the {} MiB in-memory transaction limit",
-                            MAX_VIDEO_SEGMENT_BYTES / (1024 * 1024)
-                        ));
+                    if output
+                        .send(Bytes::copy_from_slice(&buffer[..read]))
+                        .is_err()
+                    {
+                        return Err("the recording stopped taking H.264".to_owned());
                     }
-                    payload.extend_from_slice(&buffer[..read]);
                 }
-                Ok::<_, String>(payload)
             });
             let stderr_task = tokio::spawn(async move {
                 let mut bytes = Vec::new();
@@ -157,7 +152,8 @@ impl EncoderDriver for FfmpegEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_recording::CameraRecording;
+    use spiral_robotics_common::datasets::H264AccessUnit;
+    use spiral_robotics_recording::AccessUnits;
 
     #[test]
     #[ignore = "requires FFmpeg with libx264"]
@@ -195,24 +191,16 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let camera = CameraRecording::from_annex_b(
-            "wrist".into(),
-            (32, 32, 5),
-            (
-                output.stdout,
-                (0..5).map(|index| index * 200_000_000).collect(),
-            ),
-        )
-        .unwrap();
-        let preview = CameraRecording::preview(&[camera], "wrist").unwrap();
-        assert_eq!(preview.packets().len(), 5);
-        assert_eq!(
-            preview
-                .packets()
-                .iter()
-                .filter(|packet| packet.keyframe())
-                .count(),
-            3
-        );
+        let mut units = AccessUnits::default();
+        let mut frames = units.push(&output.stdout);
+        frames.extend(units.finish());
+        assert_eq!(frames.len(), 5);
+        let keyframes = frames
+            .iter()
+            .map(|frame| H264AccessUnit::parse(frame).unwrap())
+            .filter(|frame| frame.keyframe())
+            .collect::<Vec<_>>();
+        assert_eq!(keyframes.len(), 3);
+        assert!(keyframes.iter().all(|frame| frame.codec().is_some()));
     }
 }

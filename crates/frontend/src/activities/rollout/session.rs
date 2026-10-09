@@ -1,8 +1,8 @@
 //! State owned by the mounted Rollout workspace and shared by its panels.
 use super::RecordingClient;
-use super::next_take::{ControlKind, NextTake};
+use super::next_episode::{ControlKind, NextEpisode};
 use super::policy::{PolicyControl, PolicyReadiness};
-use super::recording_client::StoringTakes;
+use super::recording_client::EpisodeStorage;
 use super::signals::SignalStore;
 use super::transport::TimelineController;
 use crate::client::queries::{QueryDomain, QueryPolicy};
@@ -10,11 +10,11 @@ use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 
-/// The take Record starts next, and the finished ones on their way to Studio.
+/// The episode Record starts next, and the finished ones waiting to be stored.
 #[derive(Clone, Copy, PartialEq)]
-struct RolloutTakes {
-    next: NextTake,
-    storing: StoringTakes,
+struct RolloutEpisodes {
+    next: NextEpisode,
+    storage: EpisodeStorage,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -22,7 +22,7 @@ pub(crate) struct RolloutSession {
     project: StudioProjectState,
     telemetry: HardwareViewState,
     selection: RobotSelection,
-    takes: RolloutTakes,
+    episodes: RolloutEpisodes,
     policy: PolicyControl,
     timeline: TimelineController,
     recording_signals: Signal<SignalStore>,
@@ -34,9 +34,9 @@ impl RolloutSession {
         selection: RobotSelection,
     ) -> Self {
         let is_active = telemetry.is_active_signal();
-        let takes = RolloutTakes {
-            next: NextTake::use_next_take(),
-            storing: StoringTakes::use_storing_takes(),
+        let episodes = RolloutEpisodes {
+            next: NextEpisode::use_next_episode(),
+            storage: EpisodeStorage::use_storage(project, is_active),
         };
         let policy = PolicyControl::use_control(is_active);
         let timeline = TimelineController::use_controller();
@@ -45,7 +45,7 @@ impl RolloutSession {
             project,
             telemetry,
             selection,
-            takes,
+            episodes,
             policy,
             timeline,
             recording_signals,
@@ -84,11 +84,11 @@ impl RolloutSession {
     pub(super) fn commands(self) -> HardwareCommands {
         HardwareCommands::new(self.project, self.telemetry)
     }
-    pub(super) fn next_take(self) -> NextTake {
-        self.takes.next
+    pub(super) fn next_episode(self) -> NextEpisode {
+        self.episodes.next
     }
-    pub(super) fn storing_takes(self) -> StoringTakes {
-        self.takes.storing
+    pub(super) fn episode_storage(self) -> EpisodeStorage {
+        self.episodes.storage
     }
     pub(super) fn policy(self) -> PolicyControl {
         self.policy
@@ -115,7 +115,7 @@ impl RolloutSession {
         } else {
             ControlKind::Policy
         };
-        self.takes.next.control(default)
+        self.episodes.next.control(default)
     }
 
     /// Why the chosen checkpoint cannot drive the follower now, if it cannot.

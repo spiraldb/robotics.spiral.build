@@ -352,7 +352,7 @@ pub struct HardwareState {
     /// Keyed robot then motor. These ride the snapshot rather than every live
     /// joint sample because they do not change while an arm runs.
     limits: BTreeMap<String, BTreeMap<String, MotorLimits>>,
-    /// Why the last take stopped on its own, kept until another one starts.
+    /// Why the last episode stopped on its own, kept until another one starts.
     recording_issue: Option<String>,
 }
 
@@ -506,10 +506,10 @@ enum Command {
     },
 }
 
-/// A take being captured by the control loop.
+/// An episode being captured by the control loop.
 struct Recording {
     writer: Box<dyn RecordingWriter>,
-    /// Arms sampled, fixed when the take started so every frame has one shape.
+    /// Arms sampled, fixed when the episode started so every frame has one shape.
     arms: Vec<EpisodeArm>,
     /// Control mode suspended for review and restored when capture resumes.
     resume_mode: ModeSelection,
@@ -519,8 +519,8 @@ struct Recording {
     tracking: RecordingTrackingSummary,
     /// The worst each motor has seen so far, in the arms' joint order.
     ///
-    /// Accumulated as the take runs so the footer can state it without a second
-    /// pass over a take that may contain a hundred thousand samples.
+    /// Accumulated as the episode runs so the footer can state it without a second
+    /// pass over an episode that may contain a hundred thousand samples.
     condition: Vec<ArmConditionSummary>,
 }
 
@@ -531,7 +531,7 @@ struct RecordingClock {
     paused_at: Option<Instant>,
     /// Completed pause time omitted from the active sample clock.
     paused_duration: Duration,
-    /// Deliberate wall-clock omissions, persisted with the finished take.
+    /// Deliberate wall-clock omissions, persisted with the finished episode.
     gaps: Vec<RecordingGap>,
 }
 
@@ -542,8 +542,8 @@ struct RecordingTrackingSummary {
     ///
     /// A recording almost always opens with the arm travelling — to a fresh
     /// manual goal, or to wherever the leader is standing. That transient is
-    /// real, stays in the recorded samples, and says nothing about how well the take
-    /// tracked. Summarising it would rank every take by how far its arm had to
+    /// real, stays in the recorded samples, and says nothing about how well the episode
+    /// tracked. Summarising it would rank every episode by how far its arm had to
     /// move before the work started, which is why measurement waits until the
     /// arm has been inside [`CAUTION_FOLLOW_ERROR_DEGREES`] at least once.
     max_follow_error: Option<f64>,
@@ -551,9 +551,9 @@ struct RecordingTrackingSummary {
     settled: bool,
     /// The worst reading from before that happened.
     ///
-    /// Reported only if the arm never caught up at all: a take that never
+    /// Reported only if the arm never caught up at all: an episode that never
     /// tracked has no settled period to measure, and saying nothing about it
-    /// would make the worst takes look like the ones with no measurement.
+    /// would make the worst episodes look like the ones with no measurement.
     unsettled_peak: Option<f64>,
 }
 
@@ -603,7 +603,7 @@ impl RecordingClock {
 }
 
 impl RecordingTrackingSummary {
-    /// Fold one instant's tracking error into the take's summary.
+    /// Fold one instant's tracking error into the episode's summary.
     fn observe_follow_error(&mut self, error: f64) {
         if !self.settled && error < CAUTION_FOLLOW_ERROR_DEGREES {
             self.settled = true;
@@ -777,10 +777,10 @@ impl HardwareHandle {
         .await
     }
 
-    /// Begin sampling the named arms into an already-opened take.
+    /// Begin sampling the named arms into an already-opened episode.
     ///
     /// The writer is created by the caller at the Spiral storage boundary
-    /// and handed over whole because only this thread runs at the rate a take
+    /// and handed over whole because only this thread runs at the rate an episode
     /// has to be sampled at.
     pub async fn start_recording<W: RecordingWriter + 'static>(
         &self,
@@ -795,13 +795,13 @@ impl HardwareHandle {
         .await
     }
 
-    /// Finish the take in progress and return what was stored.
+    /// Finish the episode in progress and return what was stored.
     pub async fn stop_recording(&self, keep: bool) -> Result<CompletedRecording, String> {
         self.request(|reply| Command::StopRecording { keep, reply })
             .await
     }
 
-    /// Pause or resume sampling while keeping the same open take and ID.
+    /// Pause or resume sampling while keeping the same open episode and ID.
     pub async fn set_recording_paused(&self, paused: bool) -> Result<f64, String> {
         let (checkpoint, elapsed_seconds) = self
             .request(|reply| Command::SetRecordingPaused { paused, reply })
@@ -1092,7 +1092,7 @@ impl ConnectedRobot {
     /// This instant's positions for the named joints, normalized and raw.
     ///
     /// The caller supplies the order, which comes from published telemetry, so a
-    /// sample in the take lines up with the joint rows the operator was watching
+    /// sample in the episode lines up with the joint rows the operator was watching
     /// while it was captured.
     fn sample(&self, joints: &[String]) -> (Vec<Option<f64>>, Vec<i64>) {
         let calibration = self.spec.calibration.as_ref();
@@ -1139,7 +1139,7 @@ impl ConnectedRobot {
     ///
     /// Both come back in the caller's order, and both are `None` per joint on a
     /// bus that does not publish them — the caller decides what an incomplete
-    /// frame means for the take as a whole.
+    /// frame means for the episode as a whole.
     fn sample_proprioception(&self, joints: &[String]) -> (Vec<Option<f64>>, Vec<Option<f64>>) {
         joints
             .iter()
@@ -1301,9 +1301,9 @@ struct Controller {
     published: PublishedControllerState,
     state: watch::Sender<HardwareState>,
     recording_signals: Arc<RwLock<RecordingSignals>>,
-    /// The take being captured, if any. Recording is deliberately not a mode:
-    /// an operator records *while* teleoperating, and a take of an idle arm
-    /// being moved by hand is a legitimate take too.
+    /// The episode being captured, if any. Recording is deliberately not a mode:
+    /// an operator records *while* teleoperating, and an episode of an idle arm
+    /// being moved by hand is a legitimate episode too.
     recording: Option<Recording>,
 }
 
@@ -1501,11 +1501,11 @@ impl Controller {
     ) -> Result<(), String> {
         if let Some(existing) = &self.recording {
             return Err(format!(
-                "take {} is already recording; stop it first",
+                "episode {} is already recording; stop it first",
                 existing.writer.id()
             ));
         }
-        // Every named arm has to be open right now, or the take would begin
+        // Every named arm has to be open right now, or the episode would begin
         // with a hole in it.
         for arm in &arms {
             if !self.robots.contains_key(arm.id()) {
@@ -1539,7 +1539,7 @@ impl Controller {
         let mut recording = self
             .recording
             .take()
-            .ok_or_else(|| "no take is being recorded".to_owned())?;
+            .ok_or_else(|| "no episode is being recorded".to_owned())?;
         let now = Instant::now();
         recording.writer.update_clock(now, None);
         recording.close_pause(now);
@@ -1569,7 +1569,7 @@ impl Controller {
                 let recording = self
                     .recording
                     .as_mut()
-                    .ok_or_else(|| "no take is being recorded".to_owned())?;
+                    .ok_or_else(|| "no episode is being recorded".to_owned())?;
                 let now = Instant::now();
                 recording.clock.pause(now);
                 recording.writer.update_clock(now, None);
@@ -1590,7 +1590,7 @@ impl Controller {
         let resume_mode = self
             .recording
             .as_ref()
-            .ok_or_else(|| "no take is being recorded".to_owned())?
+            .ok_or_else(|| "no episode is being recorded".to_owned())?
             .resume_mode
             .clone();
         self.set_mode(resume_mode)?;
@@ -1611,14 +1611,14 @@ impl Controller {
         Ok((None, elapsed_seconds))
     }
 
-    /// Append this cycle's positions to the take in progress.
+    /// Append this cycle's positions to the episode in progress.
     fn capture_sample(&mut self) {
         let Some(recording) = self.recording.as_mut() else {
             return;
         };
 
-        // An arm that left mid-take ends the take. Recording zeros in its place
-        // would produce a take that looks complete and describes motion that
+        // An arm that left mid-episode ends the episode. Recording zeros in its place
+        // would produce an episode that looks complete and describes motion that
         // never happened.
         let missing = recording
             .arms
@@ -1647,7 +1647,7 @@ impl Controller {
         }
 
         let seconds = recording.active_elapsed(Instant::now()).as_secs_f64();
-        // Cloned once so the loop below can fold this frame into the take's
+        // Cloned once so the loop below can fold this frame into the episode's
         // running extremes while it reads. It is two arms of six joint names.
         let arms = recording.arms.clone();
         let mut normalized = Vec::with_capacity(arms.len());
@@ -1656,8 +1656,8 @@ impl Controller {
         let mut effort = Vec::with_capacity(arms.len());
         let mut action = Vec::with_capacity(arms.len());
         let mut instant_error: Option<f64> = None;
-        // A take is one shape from its first frame to its last. If any joint on
-        // any arm cannot report velocity or effort, the take records neither,
+        // An episode is one shape from its first frame to its last. If any joint on
+        // any arm cannot report velocity or effort, the episode records neither,
         // rather than a column of nulls a reader would have to learn to
         // distrust partway down.
         let mut proprioception = true;
@@ -1699,12 +1699,12 @@ impl Controller {
             return;
         }
 
-        // The writer refused the sample, which means the take is already
+        // The writer refused the sample, which means the episode is already
         // failing. Close it rather than spinning against a dead queue.
         let reason = recording
             .writer
             .failure()
-            .unwrap_or_else(|| "the take could not be written".to_owned());
+            .unwrap_or_else(|| "the episode could not be written".to_owned());
         match self.stop_recording(true) {
             Ok(summary) => {
                 self.published.recording_issue =
@@ -2271,7 +2271,7 @@ impl Controller {
         }
     }
 
-    /// Finish any take involving `id`, leave its control mode, establish
+    /// Finish any episode involving `id`, leave its control mode, establish
     /// torque-off, and only then drop the bus. A failed release keeps the bus
     /// owned by the controller so later cycles can retry rather than turning an
     /// unknown physical state into a successful detach.
@@ -2288,7 +2288,7 @@ impl Controller {
             .flatten();
         if let Some(error) = &recording_error {
             self.published.recording_issue = Some(format!(
-                "stopped recording because robot {id:?} detached, but finalizing the take failed: {error}"
+                "stopped recording because robot {id:?} detached, but finalizing the episode failed: {error}"
             ));
         }
 
@@ -2315,7 +2315,7 @@ impl Controller {
             && let Err(error) = self.stop_recording(true)
         {
             self.published.recording_issue = Some(format!(
-                "shutdown could not finalize the active take: {error}"
+                "shutdown could not finalize the active episode: {error}"
             ));
             failures.push(format!("could not finalize active recording: {error}"));
         }

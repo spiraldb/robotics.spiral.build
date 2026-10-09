@@ -1,30 +1,28 @@
-//! Opening, pausing, and closing the one take a robot connector records: each
+//! Opening, pausing, and closing the one episode a robot connector records: each
 //! consequential step in order, with the rollback its failure owes.
 use std::collections::BTreeSet;
 
 use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::recording::{ControlSource, EpisodeArm, EpisodeInfo, RecordingStart};
-use spiral_robotics_hardware::{CaptureClock, HardwareState, ModeSelection};
+use spiral_robotics_hardware::{HardwareState, ModeSelection};
 use spiral_robotics_recording::{
-    ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter, McapRecording,
+    ArmCondition, EpisodeArmCollection as _, EpisodeFile, EpisodeRecordingRequest, EpisodeStart,
 };
 
-use super::session::{OpenTake, TakeChange};
+use super::session::{EpisodeChange, RecordingEpisode};
 use crate::OperationError;
 use crate::context::RobotConnectorContext;
-use crate::robotics::video::{
-    CameraCaptureSpec, CameraRecording, VideoCapture, VideoCaptureRequest,
-};
+use crate::robotics::video::{CameraCaptureSpec, VideoCapture, VideoCaptureRequest};
 
-/// What a new take records: the dataset it joins, what drives its arms, and
+/// What a new episode records: the dataset it joins, what drives its arms, and
 /// whether their cameras too.
-pub(super) struct TakeRequest {
+pub(super) struct EpisodeRequest {
     dataset_id: String,
     control: ControlSource,
     video: bool,
 }
 
-impl From<RecordingStart> for TakeRequest {
+impl From<RecordingStart> for EpisodeRequest {
     fn from(request: RecordingStart) -> Self {
         let (dataset_id, control, video) = request.into_parts();
         Self {
@@ -35,7 +33,7 @@ impl From<RecordingStart> for TakeRequest {
     }
 }
 
-impl TakeRequest {
+impl EpisodeRequest {
     fn validated(self) -> Result<Self, OperationError> {
         let dataset_id = DatasetId::try_from(self.dataset_id.as_str())
             .map(String::from)
@@ -49,55 +47,58 @@ impl TakeRequest {
         Ok(Self { dataset_id, ..self })
     }
 
-    /// The arms the take records: the pair a teleoperation moves.
+    /// The arms the episode records: the pair a teleoperation moves.
     fn arms(&self) -> Vec<String> {
         let ControlSource::Teleoperate { leader, follower } = &self.control;
         vec![leader.clone(), follower.clone()]
     }
 
-    /// Where the take came from, as its episode says it.
+    /// Where the episode came from, as its episode says it.
     fn source(&self) -> String {
         let ControlSource::Teleoperate { leader, follower } = &self.control;
         format!("Teleoperation — {leader} → {follower}")
     }
 }
 
-/// A take's episode writer before the control loop accepts it.
-struct TakeDraft {
-    writer: EpisodeWriter,
+/// An episode before the control loop accepts it.
+struct EpisodeDraft {
+    start: EpisodeStart,
     arms: Vec<EpisodeArm>,
     summary: EpisodeInfo,
 }
 
-pub(crate) struct TakeOperations<'a> {
+pub(crate) struct EpisodeOperations<'a> {
     state: &'a RobotConnectorContext,
 }
 
-impl<'a> TakeOperations<'a> {
+impl<'a> EpisodeOperations<'a> {
     pub(crate) fn new(state: &'a RobotConnectorContext) -> Self {
         Self { state }
     }
 
-    /// Start the request's control, then open one take, and close it whenever
+    /// Start the request's control, then open one episode, and close it whenever
     /// the control loop ends it on its own. Once the control source runs, any
     /// failure stops it again; a failed rollback is reported, because an
     /// unnoticed live control source is safety-relevant.
-    pub(super) async fn start(&self, request: TakeRequest) -> Result<EpisodeInfo, OperationError> {
-        let mut take = self.state.recording_session().try_change()?;
-        if take.is_open() || self.state.hardware().state().recording().is_some() {
+    pub(super) async fn start(
+        &self,
+        request: EpisodeRequest,
+    ) -> Result<EpisodeInfo, OperationError> {
+        let mut change = self.state.recording_session().try_change()?;
+        if change.is_open() || self.state.hardware().state().recording().is_some() {
             return Err(OperationError::conflict(
-                "a take is already recording; stop it first",
+                "an episode is already recording; stop it first",
             ));
         }
         let request = request.validated()?;
         let sample_hz = self.admitted_sample_hz(&request)?;
         self.start_control(&request.control).await?;
         match self.open(&request, sample_hz).await {
-            Ok((summary, capture)) => {
-                take.open(OpenTake::new(summary.id().to_owned(), capture));
+            Ok((summary, open)) => {
+                change.open(open);
                 let (state, episode) = (self.state.clone(), summary.id().to_owned());
                 tokio::spawn(async move {
-                    TakeOperations::new(&state)
+                    EpisodeOperations::new(&state)
                         .close_when_the_loop_ends(&episode)
                         .await;
                 });
@@ -112,19 +113,19 @@ impl<'a> TakeOperations<'a> {
         }
     }
 
-    /// Stop the take and its control source whatever happens, then save its media.
-    /// The take is held throughout, so the control loop ending it on its own
+    /// Stop the episode and its control source whatever happens, then save its media.
+    /// The episode is held throughout, so the control loop ending it on its own
     /// cannot race this stop.
     pub(super) async fn stop(&self, keep: bool) -> Result<EpisodeInfo, OperationError> {
-        let take = self.state.recording_session().try_change()?;
-        if !take.is_open() {
+        let change = self.state.recording_session().try_change()?;
+        if !change.is_open() {
             return Err(OperationError::conflict(
                 "no recording is available to stop",
             ));
         }
         let recording = self.stopped_episode(keep).await;
         let stopped = self.stop_control().await;
-        self.close(take).await?;
+        self.close(change).await?;
         match (recording, stopped) {
             (Ok(summary), Ok(())) => Ok(summary),
             (Ok(_), Err(control_error)) => Err(OperationError::Conflict(format!(
@@ -139,29 +140,39 @@ impl<'a> TakeOperations<'a> {
 
     /// Pause joint and media capture in a fail-safe order, or resume both.
     pub(super) async fn set_paused(&self, paused: bool) -> Result<(), OperationError> {
-        let mut take = self.state.recording_session().try_change()?;
-        if !take.is_open() {
+        let mut change = self.state.recording_session().try_change()?;
+        if !change.is_open() {
             return Err(OperationError::conflict(
                 "recording is not available for pause",
             ));
         }
         let hardware = self.state.hardware();
         if paused {
-            if let Some(capture) = take.capture() {
+            if let Some(capture) = change.capture() {
                 capture.request_pause();
             }
             let paused = hardware.set_recording_paused(true).await;
-            self.finish_media_segment(&mut take).await;
-            paused.map(|_| ()).map_err(OperationError::conflict)
+            self.finish_media_segment(&mut change).await;
+            // The cameras' last frames follow the samples' pause barrier: put
+            // them on disk too, so the paused episode's file ends at a whole
+            // chunk for its review.
+            let flushed = match change.file() {
+                Some(file) => file.flush().await,
+                None => Ok(()),
+            };
+            paused
+                .map(|_| ())
+                .and(flushed)
+                .map_err(OperationError::conflict)
         } else {
             // A cancelled pause may have left encoder work behind. Drain it
             // before hardware and camera clocks resume.
-            self.finish_media_segment(&mut take).await;
+            self.finish_media_segment(&mut change).await;
             let active_seconds = hardware
                 .set_recording_paused(false)
                 .await
                 .map_err(OperationError::conflict)?;
-            if let Some(capture) = take.capture()
+            if let Some(capture) = change.capture()
                 && let Err(error) = capture.resume(active_seconds)
             {
                 self.state
@@ -190,7 +201,7 @@ impl<'a> TakeOperations<'a> {
                 .is_some_and(|recording| recording.episode() == episode)
         };
         let mut hardware = self.state.hardware().subscribe();
-        // The loop publishes an accepted take at the end of its cycle, so the
+        // The loop publishes an accepted episode at the end of its cycle, so the
         // first publish after this subscription shows it unless it has ended.
         if !shown(&hardware.borrow_and_update()) && hardware.changed().await.is_err() {
             return false;
@@ -198,14 +209,14 @@ impl<'a> TakeOperations<'a> {
         hardware.wait_for(|state| !shown(state)).await.is_ok()
     }
 
-    /// Commit a take the control loop has already ended: `episode`, or at
-    /// shutdown whichever take is open.
+    /// Commit an episode the control loop has already ended: `episode`, or at
+    /// shutdown whichever episode is open.
     pub(crate) async fn close_ended(&self, episode: Option<&str>) {
-        let take = self.state.recording_session().change().await;
-        if episode.is_some_and(|episode| take.episode() != Some(episode)) {
+        let change = self.state.recording_session().change().await;
+        if episode.is_some_and(|episode| change.episode() != Some(episode)) {
             return;
         }
-        if let Err(error) = self.close(take).await {
+        if let Err(error) = self.close(change).await {
             tracing::error!("could not save automatically stopped episode media: {error}");
             self.state
                 .cameras()
@@ -214,7 +225,7 @@ impl<'a> TakeOperations<'a> {
     }
 
     /// The control loop's sample rate, once both arms are connected.
-    fn admitted_sample_hz(&self, request: &TakeRequest) -> Result<f64, OperationError> {
+    fn admitted_sample_hz(&self, request: &EpisodeRequest) -> Result<f64, OperationError> {
         let hardware = self.state.hardware().state();
         let sample_hz = if hardware.target_hz() > 0.0 {
             (hardware.target_hz() * 1_000.0).round() / 1_000.0
@@ -263,24 +274,42 @@ impl<'a> TakeOperations<'a> {
             .map_err(OperationError::conflict)
     }
 
-    /// Draft the episode, start its cameras, and hand the take to the control
-    /// loop. Cameras started for a take the loop refuses are finished again.
+    /// Draft the episode, create its file, start its cameras, and hand the
+    /// episode to the control loop. An episode the loop refuses leaves no file.
     async fn open(
         &self,
-        request: &TakeRequest,
+        request: &EpisodeRequest,
         sample_hz: f64,
-    ) -> Result<(EpisodeInfo, Option<VideoCapture>), OperationError> {
+    ) -> Result<(EpisodeInfo, RecordingEpisode), OperationError> {
         let draft = self.draft(request, sample_hz).await?;
-        let capture = if request.video {
-            self.capture(draft.summary.id(), &request.arms(), draft.writer.clock())
-                .await?
+        let cameras = if request.video {
+            self.cameras(&request.arms()).await?
         } else {
-            None
+            Vec::new()
         };
+        let files = self.state.recording_files();
+        // The episode before this one stays for review only until this one opens.
+        files.forget_uploaded();
+        let file = EpisodeFile::create(
+            files.partial_path(draft.start.dataset_id(), draft.start.id())?,
+            &draft.start,
+            cameras.iter().map(CameraCaptureSpec::stream).collect(),
+        )
+        .map_err(OperationError::Internal)?;
+        let episode = draft.start.id().to_owned();
+        let writer = self.state.recording_buffer().writer(draft.start, &file);
+        let capture = VideoCapture::start(
+            self.state.cameras().clone(),
+            VideoCaptureRequest::new(&episode, cameras, writer.clock()),
+            self.state.encoder_driver(),
+            file.video_sink(),
+        )
+        .await
+        .map_err(OperationError::InvalidInput)?;
         if let Err(error) = self
             .state
             .hardware()
-            .start_recording(draft.writer, draft.arms)
+            .start_recording(writer, draft.arms)
             .await
         {
             if let Some(capture) = capture {
@@ -288,7 +317,7 @@ impl<'a> TakeOperations<'a> {
             }
             return Err(OperationError::conflict(error));
         }
-        Ok((draft.summary, capture))
+        Ok((draft.summary, RecordingEpisode::new(episode, capture, file)))
     }
 
     async fn stopped_episode(&self, keep: bool) -> Result<EpisodeInfo, OperationError> {
@@ -300,39 +329,33 @@ impl<'a> TakeOperations<'a> {
             .map_err(OperationError::conflict)?;
         self.state
             .recording_buffer()
-            .completed_episode(completion.episode())
-            .map(|episode| episode.summary())
+            .summary(completion.episode())
+            .map(|summary| summary.info())
             .map_err(OperationError::from)
     }
 
-    /// Save the take's episode and media as its recording file, then keep its
-    /// media for review. Media stays reviewable when saving fails.
-    async fn close(&self, mut take: TakeChange<'_>) -> Result<(), OperationError> {
-        let Some(episode) = take.episode().map(str::to_owned) else {
+    /// Finish the episode's cameras, then its file, and save the file for the
+    /// upload to Studio. The file stays for review until the next episode.
+    async fn close(&self, mut change: EpisodeChange<'_>) -> Result<(), OperationError> {
+        let Some(episode) = change.episode().map(str::to_owned) else {
             return Ok(());
         };
-        self.finish_media_segment(&mut take).await;
-        let cameras = take
-            .capture()
-            .map(|capture| capture.completed_assets())
-            .unwrap_or_default();
-        let saved = self.save(&episode, &cameras);
-        take.close(cameras);
-        saved
-    }
-
-    fn save(&self, episode: &str, cameras: &[CameraRecording]) -> Result<(), OperationError> {
-        let episode = self.state.recording_buffer().completed_episode(episode)?;
-        let summary = episode.summary();
-        let bytes = McapRecording::encode(&episode, cameras).map_err(OperationError::Internal)?;
+        self.finish_media_segment(&mut change).await;
+        let file = change.close().expect("an open episode has its file");
+        let summary = self.state.recording_buffer().summary(&episode)?;
+        let dataset = summary.info().dataset_id().to_owned();
+        tokio::task::spawn_blocking(move || file.finish(summary))
+            .await
+            .map_err(|error| OperationError::Internal(error.to_string()))?
+            .map_err(OperationError::Internal)?;
         self.state
             .recording_files()
-            .save(summary.dataset_id(), summary.id(), &bytes)
+            .publish(&dataset, &episode)
             .map_err(OperationError::Internal)
     }
 
-    async fn finish_media_segment(&self, take: &mut TakeChange<'_>) {
-        if let Some(capture) = take.capture() {
+    async fn finish_media_segment(&self, change: &mut EpisodeChange<'_>) {
+        if let Some(capture) = change.capture() {
             for failure in capture.finish_pause().await {
                 self.state.cameras().note_issue(failure);
             }
@@ -340,12 +363,12 @@ impl<'a> TakeOperations<'a> {
     }
 
     /// Draft the episode from live telemetry: the arms' joints and the
-    /// motors' condition as the take opens.
+    /// motors' condition as the episode opens.
     async fn draft(
         &self,
-        request: &TakeRequest,
+        request: &EpisodeRequest,
         sample_hz: f64,
-    ) -> Result<TakeDraft, OperationError> {
+    ) -> Result<EpisodeDraft, OperationError> {
         let hardware = self.state.hardware().state();
         let connected = hardware
             .robots()
@@ -391,7 +414,7 @@ impl<'a> TakeOperations<'a> {
             })
             .collect::<Vec<_>>();
 
-        // What the motors were like as the take opened. Recorded once here rather
+        // What the motors were like as the episode opened. Recorded once here rather
         // than on every frame: these move over seconds, and the footer's extremes
         // close the story the header starts.
         let condition = arms
@@ -429,7 +452,7 @@ impl<'a> TakeOperations<'a> {
             })
             .collect();
 
-        let writer = self
+        let start = self
             .state
             .recording_buffer()
             .begin(
@@ -441,22 +464,17 @@ impl<'a> TakeOperations<'a> {
                 .with_arms(arms.clone(), condition),
             )
             .map_err(OperationError::from)?;
-        let summary = EpisodeInfo::new(writer.id().to_owned(), request.dataset_id.clone())
+        let summary = EpisodeInfo::new(start.id().to_owned(), request.dataset_id.clone())
             .with_arms(arms.clone());
-        Ok(TakeDraft {
-            writer,
+        Ok(EpisodeDraft {
+            start,
             arms,
             summary,
         })
     }
 
-    /// Start the cameras bound to the take's robots.
-    async fn capture(
-        &self,
-        episode: &str,
-        arms: &[String],
-        clock: CaptureClock,
-    ) -> Result<Option<VideoCapture>, OperationError> {
+    /// The cameras bound to the episode's robots that are filming now.
+    async fn cameras(&self, arms: &[String]) -> Result<Vec<CameraCaptureSpec>, OperationError> {
         let records = self
             .state
             .workspace()
@@ -488,13 +506,7 @@ impl<'a> TakeOperations<'a> {
                 ));
             }
         }
-        VideoCapture::start(
-            self.state.cameras().clone(),
-            VideoCaptureRequest::new(episode, cameras, clock),
-            self.state.encoder_driver(),
-        )
-        .await
-        .map_err(|error| OperationError::InvalidInput(error.to_string()))
+        Ok(cameras)
     }
 }
 
@@ -502,22 +514,22 @@ impl<'a> TakeOperations<'a> {
 mod tests {
     use spiral_robotics_common::recording::{ControlSource, RecordingStart};
 
-    use super::TakeRequest;
+    use super::EpisodeRequest;
 
-    fn request(control: ControlSource) -> TakeRequest {
-        TakeRequest::from(RecordingStart::new("pick-place".to_owned(), control, true))
+    fn request(control: ControlSource) -> EpisodeRequest {
+        EpisodeRequest::from(RecordingStart::new("pick-place".to_owned(), control, true))
     }
 
     #[test]
-    fn a_teleoperation_take_records_both_arms_it_pairs() {
-        let take = request(ControlSource::Teleoperate {
+    fn a_teleoperation_episode_records_both_arms_it_pairs() {
+        let episode = request(ControlSource::Teleoperate {
             leader: "leader".to_owned(),
             follower: "follower".to_owned(),
         })
         .validated()
         .unwrap();
-        assert_eq!(take.arms(), ["leader", "follower"]);
-        assert_eq!(take.source(), "Teleoperation — leader → follower");
+        assert_eq!(episode.arms(), ["leader", "follower"]);
+        assert_eq!(episode.source(), "Teleoperation — leader → follower");
 
         let same_arm = request(ControlSource::Teleoperate {
             leader: "follower".to_owned(),

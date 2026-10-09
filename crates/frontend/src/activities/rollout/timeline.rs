@@ -14,7 +14,7 @@ use spiral_robotics_ui::{
     ConfirmationResponse, InlineConfirmation,
 };
 
-use super::transport::TakeTransport;
+use super::transport::RolloutTransport;
 use crate::components::charts::{CharmingChart, ChartPresentation};
 use crate::components::time_series::{TimelineSignalLane, TimelineSignalLanes, TraceChartLayout};
 use crate::components::timeline::{
@@ -28,14 +28,14 @@ const TIMELINE_CHART_ID: &str = "studio-timeline-signal-chart";
 /// The semantic subject of the canonical Timeline.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TimelineSubject {
-    /// No take on the clock. The transport's own "No episode" and Record say
+    /// No episode on the clock. The transport's own "No episode" and Record say
     /// so; a resting Timeline adds no sentence of its own.
     Empty,
     Recording(RecordingProgress),
 }
 
 impl TimelineSubject {
-    /// The take on the clock; its identity is stable across pause and resume.
+    /// The episode on the clock; its identity is stable across pause and resume.
     pub(super) fn episode_id(&self) -> Option<&str> {
         self.recording().map(RecordingProgress::episode)
     }
@@ -57,7 +57,7 @@ impl TimelineSubject {
         }
     }
 
-    /// What went wrong with the take on the clock, if anything did.
+    /// What went wrong with the episode on the clock, if anything did.
     fn problem(&self) -> Option<&str> {
         self.recording().and_then(RecordingProgress::error)
     }
@@ -122,7 +122,10 @@ impl TimelineSignals {
 }
 
 #[component]
-pub(super) fn TakeTimelinePanel(transport: TakeTransport, signals: TimelineSignals) -> Element {
+pub(super) fn RolloutTimelinePanel(
+    transport: RolloutTransport,
+    signals: TimelineSignals,
+) -> Element {
     let TimelineSignals { lanes, source } = signals;
     let subject = transport.subject();
     let recording = subject.recording().cloned();
@@ -182,13 +185,13 @@ pub(super) fn TakeTimelinePanel(transport: TakeTransport, signals: TimelineSigna
         }
     })
     .with_notice(rsx! { TimelineNotice { transport: transport.clone(), source } });
-    rsx! { div { class: "studio-timeline", "aria-label": "Take Timeline", Timeline { interaction, content } } }
+    rsx! { div { class: "studio-timeline", "aria-label": "Recording Timeline", Timeline { interaction, content } } }
 }
 
-/// The take being recorded, or the control that starts one.
+/// The episode being recorded, or the control that starts one.
 #[component]
 fn CaptureControls(
-    transport: TakeTransport,
+    transport: RolloutTransport,
     recording: Option<RecordingProgress>,
     confirm_discard: Signal<bool>,
 ) -> Element {
@@ -199,7 +202,7 @@ fn CaptureControls(
             return rsx! {
                 Button {
                     purpose: ActionPurpose::Start, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
-                    class: "take-action", disabled: true, aria_busy: true,
+                    class: "episode-action", disabled: true, aria_busy: true,
                     "Starting…"
                 }
             };
@@ -211,7 +214,7 @@ fn CaptureControls(
         return rsx! {
             Button {
                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
-                class: "take-action", disabled: blocker.is_some(), title: "{title}",
+                class: "episode-action", disabled: blocker.is_some(), title: "{title}",
                 aria_label: match blocker { Some(reason) => format!("{label} — {reason}"), None => label.to_owned() },
                 onclick: move |_| transport.start_capture(),
                 "{label}"
@@ -222,7 +225,7 @@ fn CaptureControls(
     rsx! {
         Button {
             purpose: ActionPurpose::Stop, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
-            class: "take-action take-action-live",
+            class: "episode-action episode-action-live",
             onclick: { let transport = transport.clone(); move |_| transport.finish_capture(true) },
             "Stop"
         }
@@ -233,18 +236,18 @@ fn CaptureControls(
         }
         if confirm_discard() {
             InlineConfirmation {
-                id: "discard-take-confirmation", class: "timeline-discard-confirmation",
-                copy: ConfirmationCopy::new("Discard this take? The current recording will not be saved.", "Discard take", "Keep recording"),
+                id: "discard-episode-confirmation", class: "timeline-discard-confirmation",
+                copy: ConfirmationCopy::new("Discard this episode? The current recording will not be saved.", "Discard episode", "Keep recording"),
                 response: ConfirmationResponse::new(ActionPurpose::Discard, move |_| {
                     confirm_discard.set(false);
                     transport.finish_capture(false);
                 }, move |_| confirm_discard.set(false)),
-                dismissal: ConfirmationDismissal::new("discard-take"),
+                dismissal: ConfirmationDismissal::new("discard-episode"),
             }
         } else {
             Button {
-                id: "discard-take", purpose: ActionPurpose::Discard, variant: ButtonVariant::Link,
-                aria_label: "Discard this take without saving", onclick: move |_| confirm_discard.set(true),
+                id: "discard-episode", purpose: ActionPurpose::Discard, variant: ButtonVariant::Link,
+                aria_label: "Discard this episode without saving", onclick: move |_| confirm_discard.set(true),
                 "Discard"
             }
         }
@@ -253,7 +256,7 @@ fn CaptureControls(
 
 /// Returning the playhead to the newest recorded sample.
 #[component]
-fn FollowLiveControl(transport: TakeTransport) -> Element {
+fn FollowLiveControl(transport: RolloutTransport) -> Element {
     let follow_live = transport.follow_live();
     rsx! {
         Button {
@@ -266,7 +269,7 @@ fn FollowLiveControl(transport: TakeTransport) -> Element {
     }
 }
 
-/// The take number, with the full episode id beside it.
+/// The episode number, with the full episode id beside it.
 #[component]
 fn TimelineIdentity(subject: TimelineSubject) -> Element {
     let full = subject.episode_id().map(str::to_owned);
@@ -283,7 +286,7 @@ fn TimelineIdentity(subject: TimelineSubject) -> Element {
 
 /// Why this Timeline is in trouble or drawing nothing.
 #[component]
-fn TimelineNotice(transport: TakeTransport, source: SignalSource) -> Element {
+fn TimelineNotice(transport: RolloutTransport, source: SignalSource) -> Element {
     let problem = transport.subject().problem().map(str::to_owned);
     rsx! {
         if let Some(problem) = problem {
@@ -399,7 +402,7 @@ mod tests {
     fn capture_pause_and_resume_change_media_source_without_changing_transport_identity() {
         let recording = |paused| {
             TimelineSubject::Recording(RecordingProgress::new(
-                RecordingIdentity::new("take-1", "default"),
+                RecordingIdentity::new("episode-1", "default"),
                 RecordingClock::new(60, 1.0),
                 RecordingState::new(paused, None),
             ))
@@ -408,7 +411,7 @@ mod tests {
         let paused = recording(true);
         assert_eq!(active.episode_id(), paused.episode_id());
         assert_eq!(active.recorded_episode(), None);
-        assert_eq!(paused.recorded_episode(), Some("take-1"));
+        assert_eq!(paused.recorded_episode(), Some("episode-1"));
         assert_eq!(paused.duration_seconds(), 1.0);
         assert_eq!(paused.frames(), 60);
     }
@@ -423,7 +426,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn generated_episode_ids_read_as_take_numbers() {
+    fn generated_episode_ids_read_as_episode_numbers() {
         assert_eq!("episode_000024".short_episode_id(), "#24");
         assert_eq!("imported-pass".short_episode_id(), "imported-pass");
     }

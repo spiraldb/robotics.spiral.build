@@ -1,5 +1,5 @@
 //! What a connector request can reach: the devices this machine drives, and
-//! what the connector keeps for Studio — saved robots, the take being recorded,
+//! what the connector keeps for Studio — saved robots, the episode being recorded,
 //! and finished recordings.
 use std::path::Path;
 use std::sync::Arc;
@@ -37,8 +37,8 @@ impl RobotConnectorDevices {
     }
 }
 
-/// The one take a connector records, and the files finished takes leave.
-struct ConnectorTakes {
+/// The one episode a connector records, and the files finished episodes leave.
+struct ConnectorEpisodes {
     buffer: Arc<RecordingBuffer>,
     session: Arc<RecordingSession>,
     files: Arc<RecordingFiles>,
@@ -47,7 +47,7 @@ struct ConnectorTakes {
 struct ConnectorState {
     devices: RobotConnectorDevices,
     workspace: Arc<RobotWorkspace>,
-    takes: ConnectorTakes,
+    episodes: ConnectorEpisodes,
 }
 
 /// Every request and background task shares one connector.
@@ -55,7 +55,7 @@ struct ConnectorState {
 pub(crate) struct RobotConnectorContext(Arc<ConnectorState>);
 
 impl RobotConnectorContext {
-    /// Serve `workspace`'s robots and the takes kept under `data_dir`.
+    /// Serve `workspace`'s robots and the episodes kept under `data_dir`.
     pub(crate) fn open(
         devices: RobotConnectorDevices,
         workspace: Arc<RobotWorkspace>,
@@ -64,7 +64,7 @@ impl RobotConnectorContext {
         Self(Arc::new(ConnectorState {
             devices,
             workspace,
-            takes: ConnectorTakes {
+            episodes: ConnectorEpisodes {
                 buffer: Arc::new(RecordingBuffer::new()),
                 session: Arc::new(RecordingSession::default()),
                 files: Arc::new(RecordingFiles::new(data_dir.join("recordings"))),
@@ -88,12 +88,12 @@ impl RobotConnectorContext {
         &self.0.workspace
     }
     pub(crate) fn recording_buffer(&self) -> &Arc<RecordingBuffer> {
-        &self.0.takes.buffer
+        &self.0.episodes.buffer
     }
     pub(crate) fn recording_session(&self) -> &Arc<RecordingSession> {
-        &self.0.takes.session
+        &self.0.episodes.session
     }
     pub(crate) fn recording_files(&self) -> &Arc<RecordingFiles> {
-        &self.0.takes.files
+        &self.0.episodes.files
     }
 }

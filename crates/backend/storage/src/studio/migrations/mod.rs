@@ -50,6 +50,10 @@ impl MigratorTrait for Migrator {
                 "m20261009_000002_drop_studio_settings",
                 include_str!("m20261009_000002_drop_studio_settings.sql"),
             )),
+            Box::new(SqlMigration::new(
+                "m20261009_000003_staged_episodes",
+                include_str!("m20261009_000003_staged_episodes.sql"),
+            )),
         ]
     }
 }

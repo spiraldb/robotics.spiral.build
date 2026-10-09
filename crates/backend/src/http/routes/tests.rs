@@ -93,7 +93,7 @@ async fn scoped_routes_reject_a_missing_or_stale_project_before_reading_the_body
     let fixture = HttpFixture::new().await;
     for (method, path) in [
         ("GET", "/training/runs"),
-        ("POST", "/datasets/demo/recordings/take-1"),
+        ("POST", "/robot-connector/episodes/demo/take-1/store"),
     ] {
         for endpoint in [None, Some("https://stale.spiraldb.dev")] {
             let mut request = Request::builder().method(method).uri(path);

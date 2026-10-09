@@ -393,7 +393,7 @@ pub struct TelemetryFrame {
     /// its motor buses.
     target_hz: f64,
     robots: Vec<RobotTelemetry>,
-    /// Present only while a take is being captured.
+    /// Present only while an episode is being captured.
     recording: Option<RecordingProgress>,
 }
 

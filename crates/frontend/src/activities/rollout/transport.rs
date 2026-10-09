@@ -1,9 +1,9 @@
 //! What Rollout's Timeline controls do, and how the recorded frames behind
 //! them are asked for.
 //!
-//! While a take records, the elapsed time arrives from the server; once it is
+//! While an episode records, the elapsed time arrives from the server; once it is
 //! paused, this workspace previews the recorded frames on its own clock.
-//! [`TakeTransport`] turns a press on a shared control into the one recording
+//! [`RolloutTransport`] turns a press on a shared control into the one recording
 //! or preview consequence the current phase implies.
 
 use dioxus::prelude::*;
@@ -86,16 +86,16 @@ impl TimelineController {
     }
 }
 
-/// The take's clock as one render sees it: where the playhead is, whether the
+/// The episode's clock as one render sees it: where the playhead is, whether the
 /// preview is driving it, and whether it follows the newest recorded sample.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct TakeClock {
+pub(super) struct RolloutClock {
     seconds: f64,
     previewing: bool,
     follow_live: bool,
 }
 
-impl TakeClock {
+impl RolloutClock {
     pub(super) const fn new(seconds: f64, previewing: bool) -> Self {
         Self {
             seconds,
@@ -113,14 +113,14 @@ impl TakeClock {
 /// The recorded frames behind the Timeline, and the two throttles that keep a
 /// scrubbing playhead from asking for one snapshot per rendered frame.
 #[derive(Clone, Copy, PartialEq)]
-pub(super) struct TakePreview {
+pub(super) struct RolloutPreview {
     session: RolloutSession,
     signals: EpisodePreviewSignals,
     sampled: Signal<Option<(String, u64)>>,
     interactive: Signal<Option<(String, u64)>>,
 }
 
-impl TakePreview {
+impl RolloutPreview {
     pub(super) fn use_preview(session: RolloutSession) -> Self {
         let signals = EpisodePreviewSignals::use_signals();
         // Throttling is local to the mounted screen; remounting must sample again.
@@ -231,7 +231,7 @@ impl TakePreview {
         ));
     }
 
-    /// The take these frames came from is finished; nothing in flight is wanted.
+    /// The episode these frames came from is finished; nothing in flight is wanted.
     fn forget_recorded(mut self) {
         self.signals.discard();
         self.interactive.set(None);
@@ -243,14 +243,18 @@ impl TakePreview {
 /// own consequence and the only check left is that the recording has not moved
 /// on since the render that drew the control.
 #[derive(Clone, PartialEq)]
-pub(super) struct TakeTransport {
-    preview: TakePreview,
+pub(super) struct RolloutTransport {
+    preview: RolloutPreview,
     subject: TimelineSubject,
-    clock: TakeClock,
+    clock: RolloutClock,
 }
 
-impl TakeTransport {
-    pub(super) fn new(preview: TakePreview, subject: TimelineSubject, clock: TakeClock) -> Self {
+impl RolloutTransport {
+    pub(super) fn new(
+        preview: RolloutPreview,
+        subject: TimelineSubject,
+        clock: RolloutClock,
+    ) -> Self {
         Self {
             preview,
             subject,
@@ -292,7 +296,7 @@ impl TakeTransport {
 
     /// Whether Record is waiting for its control source to take the follower.
     pub(super) fn starting(&self) -> bool {
-        self.session().next_take().starting()
+        self.session().next_episode().starting()
     }
 
     pub(super) fn seek_blocker(&self) -> Option<String> {
@@ -309,7 +313,7 @@ impl TakeTransport {
 
     /// The subject this panel was rendered for, if the robot is still on it.
     ///
-    /// A take can finish between the render that drew a control and the click
+    /// An episode can finish between the render that drew a control and the click
     /// that presses it; a stale click must not reach whatever replaced it.
     fn subject_now(&self) -> Option<&TimelineSubject> {
         let recording = self.session().telemetry().recording();
@@ -345,7 +349,7 @@ impl TakeTransport {
         }
     }
 
-    /// Finish the take on the clock, keeping it or throwing it away.
+    /// Finish the episode on the clock, keeping it or throwing it away.
     pub(super) fn finish_capture(&self, keep: bool) {
         let Some(episode) = self.recording_episode() else {
             return;
@@ -444,7 +448,7 @@ impl TakeTransport {
                 } else {
                     self.session()
                         .project()
-                        .report_rollout_info("Press Shift+X to discard this take.");
+                        .report_rollout_info("Press Shift+X to discard this episode.");
                 }
             }
             _ => {}

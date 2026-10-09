@@ -30,7 +30,7 @@ The project shell owns the selected workspace and its settings
 liveness, the robot connector, notifications, and cross-activity navigation. Data owns
 its resource selection and queries; Curation owns its graph draft and preview;
 Training owns configuration and selected history; Rollout owns capture state,
-the next take, checkpoint and robot selection, and calibration state; Settings
+the next episode, checkpoint and robot selection, and calibration state; Settings
 owns its unsaved configuration.
 
 ## Requests and refresh
@@ -72,11 +72,10 @@ with its baseline. `RobotDraft` owns creation, import, edits, and validation;
 `RobotClient` only transports resources and invalidates queries. The robot
 connector performs the comparison and persistence.
 Recording requests name their driver: the frontend-selected leader/follower
-identities for teleoperation, or the chosen checkpoint on the follower for a
-policy, whose envelope the browser writes to the robot connector first. After a
-take stops, the browser carries its MCAP file from the robot connector to
-Studio and then has the robot connector forget it; Rollout lists takes still
-waiting and stores them on request.
+identities for teleoperation. After an episode stops, the robot connector uploads
+its MCAP file to Studio; Rollout polls Studio's waiting episodes while it is
+active, stores each as it arrives, and lists one whose store failed, to try
+again.
 
 Training reads the run catalog and fetches bounded details by ID; selected tabs
 never appear in backend requests.

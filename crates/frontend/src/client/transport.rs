@@ -57,7 +57,6 @@ pub(crate) struct HttpRequest {
 enum RequestBody {
     Json(String),
     Raw(Vec<u8>),
-    Blob(web_sys::Blob),
     Upload(dioxus::html::FileData),
 }
 
@@ -78,13 +77,6 @@ impl HttpRequest {
     /// Send this request below `prefix` on Studio, such as a relay's.
     pub(crate) fn under(mut self, prefix: &str) -> Self {
         self.url = self.url.map(|path| format!("{prefix}{path}"));
-        self
-    }
-
-    /// Send a body the browser already holds, without copying it into
-    /// WebAssembly memory.
-    pub(crate) fn blob(mut self, body: web_sys::Blob) -> Self {
-        self.body = Ok(Some(RequestBody::Blob(body)));
         self
     }
 
@@ -148,22 +140,6 @@ impl HttpRequest {
         response.binary().await.map_err(CommandError::transport)
     }
 
-    /// The response body as a browser blob, which stays out of WebAssembly
-    /// memory until something reads it.
-    pub(crate) async fn blob_response(
-        self,
-        media_type: &str,
-    ) -> Result<web_sys::Blob, CommandError> {
-        let (response, _abort) = self.binary_response(media_type).await?;
-        let blob = web_sys::Response::from(response)
-            .blob()
-            .map_err(CommandError::transport_js)?;
-        wasm_bindgen_futures::JsFuture::from(blob)
-            .await
-            .map(Into::into)
-            .map_err(CommandError::transport_js)
-    }
-
     async fn binary_response(
         self,
         media_type: &str,
@@ -206,7 +182,6 @@ impl HttpRequest {
                 .header("Content-Type", "application/json")
                 .body(body),
             Some(RequestBody::Raw(body)) => request.body(js_sys::Uint8Array::from(body.as_slice())),
-            Some(RequestBody::Blob(body)) => request.body(body),
             Some(RequestBody::Upload(document)) => {
                 // Hand the browser its native File. It streams the upload without
                 // allocating another project-sized buffer in WebAssembly.
@@ -237,14 +212,6 @@ impl HttpRequest {
 impl CommandError {
     pub(crate) fn transport(error: impl std::fmt::Display) -> Self {
         Self::new(CommandFailureCode::Transport, error.to_string())
-    }
-
-    fn transport_js(error: wasm_bindgen::JsValue) -> Self {
-        Self::transport(
-            error
-                .as_string()
-                .unwrap_or_else(|| "The browser could not read the response.".to_owned()),
-        )
     }
 
     fn decode_response<T: serde::de::DeserializeOwned>(status: u16, body: &str) -> Result<T, Self> {

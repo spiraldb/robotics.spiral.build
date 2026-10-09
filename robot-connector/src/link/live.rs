@@ -18,7 +18,7 @@ use crate::context::RobotConnectorContext;
 
 /// Enough for a smooth joint readout and 3D arm in the browser.
 const TELEMETRY_PERIOD: Duration = Duration::from_millis(100);
-/// A preview to frame and check a camera by; takes record every frame.
+/// A preview to frame and check a camera by; episodes record every frame.
 const CAMERA_PERIOD: Duration = Duration::from_millis(200);
 
 pub(super) struct LivePublishers {

@@ -44,7 +44,8 @@ impl EncoderDriver for NoEncoder {
         &self,
         _fps: u32,
         _frames: tokio::sync::mpsc::Receiver<bytes::Bytes>,
-    ) -> BoxFuture<'static, Result<Vec<u8>, String>> {
+        _output: tokio::sync::mpsc::UnboundedSender<bytes::Bytes>,
+    ) -> BoxFuture<'static, Result<(), String>> {
         Box::pin(async { Err("this connector films nothing".to_owned()) })
     }
 }

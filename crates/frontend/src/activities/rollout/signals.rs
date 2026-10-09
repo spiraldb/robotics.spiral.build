@@ -33,7 +33,7 @@ impl SignalNamePresentation for str {
     }
 }
 
-/// Convert the studio's existing take signal store into the timeline's fixed
+/// Convert the studio's existing episode signal store into the timeline's fixed
 /// six-lane view model. Each lane overlays the arms that reported that joint.
 pub(crate) trait RecordingTimeline {
     fn timeline_lanes(&self) -> [TimelineSignalLane; 6];

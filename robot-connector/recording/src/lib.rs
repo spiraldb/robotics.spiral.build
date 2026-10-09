@@ -1,11 +1,17 @@
-//! Studio's episode recordings: the capture buffer a control loop writes, and
-//! the self-contained MCAP file each take becomes. Studio datasets ingest these
-//! files unchanged.
+//! Studio's episode recordings: the self-contained MCAP file each episode
+//! becomes, written while the episode records and read back for its review.
+//! Studio datasets ingest these files unchanged.
 
 mod capture;
+mod episode_file;
+mod episode_review;
 mod episode_schema;
 mod mcap_recording;
 mod mcap_schema;
+pub use episode_file::{EpisodeFile, VideoSink};
+pub use episode_review::EpisodeFileReader;
+pub use mcap_recording::{AccessUnits, CameraStream, VideoUnit};
+#[cfg(any(test, feature = "test-support"))]
 pub use mcap_recording::{CameraRecording, McapRecording};
 mod identity;
 

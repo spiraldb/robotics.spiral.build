@@ -1,7 +1,7 @@
 //! Rollout owns the control sources, recording controls, scene, cameras, timeline,
 //! and docking, and, until a follower is ready, the guide that gets it there.
 
-use super::playback::TakeTimeline;
+use super::playback::RolloutTimeline;
 use super::session::RolloutSession;
 use super::setup::BenchSetupView;
 use super::workbench::RolloutWorkbench;
@@ -110,7 +110,7 @@ impl BenchGate {
 
 #[component]
 fn RolloutPanels(session: RolloutSession, setup_open: bool) -> Element {
-    let timeline = TakeTimeline::use_timeline(session);
+    let timeline = RolloutTimeline::use_timeline(session);
     let transport = timeline.transport();
     let selection = session.selection().selected();
     let cameras = session

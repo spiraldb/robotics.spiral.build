@@ -5471,6 +5471,7 @@ dependencies = [
  "sha2",
  "spiral-robotics-common",
  "spiral-robotics-hardware",
+ "tempfile",
  "tokio",
  "uuid",
 ]

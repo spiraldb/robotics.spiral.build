@@ -175,7 +175,7 @@ fn ToolReadout(arm: ConnectedArm) -> Element {
                 details: ReadoutDetails::new("% open"),
             }
             // One name for one number, in every mode. This is the same quantity
-            // the session timeline records for a whole take; calling it
+            // the session timeline records for a whole episode; calling it
             // `Target Δ` here and `Follow Δ` there would make two readings of
             // the same measurement look like two measurements.
             //

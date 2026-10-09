@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One take in the current Studio recording session.
+/// One episode in the current Studio recording session.
 ///
-/// An episode is one take: the operator arms the recorder, performs the task
+/// An episode is one episode: the operator arms the recorder, performs the task
 /// once, and stops. Raw observations and actions are immutable; the operator's
 /// judgement may change. Historical values are never recalculated using current
 /// calibration. Published dataset members use datasets::EpisodeSelection.
@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 pub struct EpisodeInfo {
     /// Stable identifier for the episode and all of its related rows.
     id: String,
-    /// Explicit destination for publishing this take as an MCAP source.
+    /// Explicit destination for publishing this episode as an MCAP source.
     dataset_id: String,
-    /// Arms sampled in this take, in the order their joints appear in a frame.
+    /// Arms sampled in this episode, in the order their joints appear in a frame.
     arms: Vec<EpisodeArm>,
     frames: u64,
 }
@@ -56,8 +56,7 @@ impl EpisodeInfo {
     }
 }
 
-/// A finished take the connector keeps as an MCAP file until Studio has
-/// stored it in its dataset.
+/// A finished episode, one MCAP file, waiting to be stored in its dataset.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SavedRecording {
     dataset_id: String,
@@ -87,7 +86,7 @@ impl SavedRecording {
     }
 }
 
-/// Current-session take review; published datasets use topic messages and member identities.
+/// Current-session episode review; published datasets use topic messages and member identities.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeInspectionSnapshot {
     episode: EpisodeInfo,
@@ -148,7 +147,7 @@ impl EpisodeInspectionArm {
     }
 }
 
-/// One arm's presence in a take.
+/// One arm's presence in an episode.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EpisodeArm {
     id: String,
@@ -182,7 +181,7 @@ impl EpisodeArm {
     }
 }
 
-/// A take being captured right now.
+/// An episode being captured right now.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RecordingProgress {
     #[serde(flatten)]
@@ -195,9 +194,9 @@ pub struct RecordingProgress {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordingIdentity {
-    /// Identifier the finished take will have.
+    /// Identifier the finished episode will have.
     episode: String,
-    /// Logical dataset row this take will reference when it completes.
+    /// Logical dataset row this episode will reference when it completes.
     dataset_id: String,
 }
 
@@ -231,7 +230,7 @@ pub struct RecordingState {
     /// Whether samples and camera frames are currently being omitted.
     paused: bool,
     /// Set when the capture stopped itself — a full disk, or an arm that went
-    /// away mid-take.
+    /// away mid-episode.
     error: Option<String>,
 }
 

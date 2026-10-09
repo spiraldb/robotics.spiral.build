@@ -27,6 +27,7 @@ impl StudioContext {
     ) -> Self {
         let robot_connectors = Arc::new(RobotConnectors::new(
             projects.robot_connector_tokens().clone(),
+            projects.staged_episodes().clone(),
         ));
         Self {
             projects,

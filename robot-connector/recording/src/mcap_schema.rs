@@ -1,7 +1,8 @@
 //! Self-describing, presence-preserving Protobuf messages inside MCAP.
 use prost::Message as _;
 use prost_reflect::{
-    DescriptorPool, DynamicMessage, FieldDescriptor, Kind, ReflectMessage as _, Value,
+    DescriptorPool, DynamicMessage, FieldDescriptor, Kind, MessageDescriptor, ReflectMessage as _,
+    Value,
 };
 
 /// The recording's Protobuf message types, written into every MCAP file.
@@ -20,16 +21,58 @@ impl RecordingSchema {
 
     /// An empty `name` message on `topic`, placed at the recording's start.
     pub(super) fn message(&self, name: &str, topic: String) -> McapMessage {
-        let descriptor = self
-            .pool
-            .get_message_by_name(&format!("studio.recording.{name}"))
-            .unwrap_or_else(|| panic!("the recording schema defines {name}"));
         McapMessage {
             topic,
             elapsed_ns: 0,
             sequence: 0,
-            message: DynamicMessage::new(descriptor),
+            message: DynamicMessage::new(self.descriptor(name)),
         }
+    }
+
+    pub(super) fn descriptor(&self, name: &str) -> MessageDescriptor {
+        self.pool
+            .get_message_by_name(&format!("studio.recording.{name}"))
+            .unwrap_or_else(|| panic!("the recording schema defines {name}"))
+    }
+}
+
+/// One recording message read back from a file.
+pub(super) struct RecordedMessage(DynamicMessage);
+
+impl RecordedMessage {
+    pub(super) fn decode(descriptor: MessageDescriptor, bytes: &[u8]) -> Result<Self, String> {
+        DynamicMessage::decode(descriptor, bytes)
+            .map(Self)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(super) fn u64(&self, name: &str) -> Option<u64> {
+        self.0.get_field_by_name(name)?.as_u64()
+    }
+
+    /// A list of floats as [`McapMessage::set_floats`] wrote it: an item
+    /// without a `value` is `None`.
+    pub(super) fn floats(&self, name: &str) -> Vec<Option<f64>> {
+        let Some(list) = self.0.get_field_by_name(name) else {
+            return Vec::new();
+        };
+        let Some(items) = list
+            .as_message()
+            .and_then(|list| list.get_field_by_name("values"))
+        else {
+            return Vec::new();
+        };
+        items
+            .as_list()
+            .unwrap_or_default()
+            .iter()
+            .map(|item| {
+                let item = item.as_message()?;
+                item.has_field_by_name("value")
+                    .then(|| item.get_field_by_name("value")?.as_f64())
+                    .flatten()
+            })
+            .collect()
     }
 }
 
