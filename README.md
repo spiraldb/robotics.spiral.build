@@ -179,8 +179,8 @@ Training runs on the Modal app in
 [`modal/training/`](modal/training/README.md), which Studio reaches through
 `TRAINING_SERVICE_URL` and `MODAL_SERVICE_TOKEN`.
 The same Python project is the policy runtime for rollout inference: start it
-next to the robot connector, which calls it (`--policy-runtime`,
-`http://127.0.0.1:50051` by default):
+next to the robot connector, which calls it at the workspace's policy runtime
+address (Rollout → Set up, `http://localhost:50051` by default):
 
 ```console
 cd modal/training
@@ -224,8 +224,8 @@ the entire `.studio/` directory is Git-ignored.
 `SPIRAL_ROBOTICS_STUDIO_DB` overrides the SQLite file path for development
 and deployment isolation.
 
-Start the robot connector with `--demo` for a simulated SO-101 leader and
-follower filmed by simulated cameras, no hardware needed; see
+Add simulated arms from Rollout → Set up for an SO-101 leader and follower
+filmed by simulated cameras, no hardware needed; see
 [the robot connector API](docs/robot-connector-api.md#simulated-robots). Start
 it with `--no-cameras` only when camera discovery is intentionally unavailable. Settings may switch the SpiralDB
 project only while training is stopped. Project preferences live in Studio's

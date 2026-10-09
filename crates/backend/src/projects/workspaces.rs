@@ -209,7 +209,9 @@ impl ProjectRegistry {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_common::project::ProjectKey;
-    use spiral_robotics_common::settings::{RobotConnectorSettings, SettingsUpdate};
+    use spiral_robotics_common::settings::{
+        DEFAULT_POLICY_RUNTIME, RobotConnectorSettings, SettingsUpdate,
+    };
     use spiral_robotics_common::workspace::{NewWorkspace, Workspace};
 
     use crate::OperationError;
@@ -331,21 +333,30 @@ mod tests {
         let connected = registry
             .set_robot_connector(
                 &project,
-                RobotConnectorSettings::new("http://lab-arms.example:7070/"),
+                RobotConnectorSettings::new(
+                    "http://lab-arms.example:7070/",
+                    "http://gpu-box.example:50051/",
+                ),
             )
             .await
             .unwrap();
         assert_eq!(
-            connected.robot_connector().address(),
-            "http://lab-arms.example:7070"
+            connected.robot_connector(),
+            &RobotConnectorSettings::new(
+                "http://lab-arms.example:7070",
+                "http://gpu-box.example:50051"
+            )
         );
         assert_eq!(connected.name(), "Lab arms");
-        assert!(matches!(
-            registry
-                .set_robot_connector(&project, RobotConnectorSettings::new("lab-arms:7070"))
-                .await,
-            Err(OperationError::InvalidInput(_))
-        ));
+        for refused in [
+            RobotConnectorSettings::new("lab-arms:7070", DEFAULT_POLICY_RUNTIME),
+            RobotConnectorSettings::new("http://lab-arms.example:7070", "gpu-box:50051"),
+        ] {
+            assert!(matches!(
+                registry.set_robot_connector(&project, refused).await,
+                Err(OperationError::InvalidInput(_))
+            ));
+        }
         let unchosen = fixture.open("").await;
         assert!(matches!(
             registry

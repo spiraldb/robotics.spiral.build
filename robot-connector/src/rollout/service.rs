@@ -404,7 +404,8 @@ mod tests {
             let admitted = RolloutAdmission::new(
                 "session-1".to_owned(),
                 100,
-                RolloutConfig::new("run-1", 10, "follower").with_duration(30),
+                RolloutConfig::new("run-1", 10, "follower", "http://localhost:50051")
+                    .with_duration(30),
             )
             .into_snapshot()
             .unwrap();
@@ -435,9 +436,16 @@ mod tests {
         let admit = |session: &str, config| {
             RolloutAdmission::new(session.to_owned(), 100, config).into_snapshot()
         };
-        let config = RolloutConfig::new("run-1", 10, "follower").with_duration(30);
+        let config =
+            RolloutConfig::new("run-1", 10, "follower", "http://localhost:50051").with_duration(30);
         assert!(admit(" session", config.clone()).is_err());
-        assert!(admit("session", RolloutConfig::new("run-1", 0, "follower")).is_err());
+        assert!(
+            admit(
+                "session",
+                RolloutConfig::new("run-1", 0, "follower", "http://localhost:50051")
+            )
+            .is_err()
+        );
         assert!(admit("session", config.clone().with_duration(0)).is_err());
         let admitted = admit("session", config).unwrap();
         assert_eq!(admitted.phase(), RolloutPhase::Loading);

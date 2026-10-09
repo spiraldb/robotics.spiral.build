@@ -13,15 +13,24 @@ pub struct RolloutConfig {
     robot: String,
     /// Time spent actively applying policy actions, excluding load and warm-up.
     duration_seconds: u32,
+    /// The policy runtime the robot connector asks for actions, as the
+    /// workspace names it.
+    policy_runtime: String,
 }
 
 impl RolloutConfig {
-    pub fn new(run_id: impl Into<String>, checkpoint_step: u64, robot: impl Into<String>) -> Self {
+    pub fn new(
+        run_id: impl Into<String>,
+        checkpoint_step: u64,
+        robot: impl Into<String>,
+        policy_runtime: impl Into<String>,
+    ) -> Self {
         Self {
             run_id: run_id.into(),
             checkpoint_step,
             robot: robot.into(),
             duration_seconds: DEFAULT_ROLLOUT_DURATION_SECONDS,
+            policy_runtime: policy_runtime.into(),
         }
     }
     pub const fn with_duration(mut self, duration_seconds: u32) -> Self {
@@ -39,6 +48,9 @@ impl RolloutConfig {
     }
     pub const fn duration_seconds(&self) -> u32 {
         self.duration_seconds
+    }
+    pub fn policy_runtime(&self) -> &str {
+        &self.policy_runtime
     }
 }
 

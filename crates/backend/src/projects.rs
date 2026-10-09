@@ -266,10 +266,14 @@ impl ProjectRegistry {
             None => String::new(),
         };
         let preferences = project.preferences().await?;
+        let robot_connector = preferences.robot_connector();
         Ok(DataSettings::new(
             OpenProject::present(&connection),
             name,
-            RobotConnectorSettings::new(preferences.robot_connector().address()),
+            RobotConnectorSettings::new(
+                robot_connector.address(),
+                robot_connector.policy_runtime(),
+            ),
         ))
     }
 
@@ -284,8 +288,8 @@ impl ProjectRegistry {
         self.settings(project).await
     }
 
-    /// Drive the robot connector at `robot_connector` from every browser in
-    /// `project`'s workspace.
+    /// Drive the robot connector at `robot_connector`, asking its policy
+    /// runtime for actions, from every browser in `project`'s workspace.
     pub(crate) async fn set_robot_connector(
         &self,
         project: &OpenProject,
@@ -296,6 +300,9 @@ impl ProjectRegistry {
             .preferences()
             .await?
             .with_robot_connector(robot_connector.address())
+            .and_then(|preferences| {
+                preferences.with_policy_runtime(robot_connector.policy_runtime())
+            })
             .map_err(OperationError::InvalidInput)?;
         project.apply_preferences(preferences).await?;
         self.settings(project).await

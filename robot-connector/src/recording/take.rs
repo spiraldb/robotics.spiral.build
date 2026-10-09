@@ -650,7 +650,10 @@ mod tests {
     #[test]
     fn a_policy_take_records_the_arm_it_drives_and_names_its_checkpoint() {
         let take = request(ControlSource::Policy(RolloutConfig::new(
-            "act-run", 20_000, "follower",
+            "act-run",
+            20_000,
+            "follower",
+            "http://localhost:50051",
         )))
         .validated()
         .unwrap();

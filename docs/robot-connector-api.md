@@ -11,15 +11,18 @@ share request and response types through `crates/common`.
 cargo run -p spiral-robotics-connector-os -- --help
 ```
 
+The flags configure the computer's device drivers only. Everything the
+connector does is configured from Studio: the policy runtime a rollout calls
+travels with each rollout, each robot carries its own motion limits, and the
+simulated demo bench is installed from Rollout → Set up. A microcontroller
+build has no command line and serves the same API.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--bind` | `127.0.0.1:7070` | Address the API listens on |
 | `--data-dir` | platform data dir`/spiral-robotics/robot-connector` | Saved robots, unsent takes, and policies; also `SPIRAL_ROBOTICS_ROBOT_CONNECTOR_DATA` |
-| `--policy-runtime` | `http://127.0.0.1:50051` | Python runtime that computes rollout actions |
 | `--no-cameras` | off | Skip camera discovery |
-| `--demo` | off | Start with the simulated demo bench below; its data directory defaults to `…/robot-connector-demo` and no physical camera is looked for |
 | `--ffmpeg`, `--video-codec` | `ffmpeg`, `libx264` | Camera recording encoder |
-| `--max-step`, `--teleop-max-step` | | Largest per-cycle joint change |
 
 Every origin may call it (CORS), since Studio runs at `robotics.spiraldb.com` or
 on `localhost`. A page served over HTTPS can reach it at `http://localhost` or
@@ -44,7 +47,9 @@ generation change or offset gap means replace the local window.
 
 ## Endpoints
 
-- `GET /health`: `{"version": …}`, the build that answers.
+- `GET /health`: `{"version": …, "simulates_arms": …}`, the build that
+  answers and whether it can simulate arms (it draws their cameras with a
+  GPU, so a microcontroller cannot).
 
 Robots, saved in the robot connector's `robots.json`:
 
@@ -53,7 +58,11 @@ Robots, saved in the robot connector's `robots.json`:
 - `POST /robots/save`: `{document, expected}`. `document` is the complete
   robot JSON object. `expected: null` creates a new robot; otherwise it is the
   revision the editor started from, and a later save fails with 409. Saving
-  does not connect hardware.
+  does not connect hardware. A robot's `motion`
+  (`{"manual_step_counts", "following_step_counts"}`, 20 and 40 when absent)
+  bounds how far the control loop moves it per cycle: gently for a goal set by
+  hand, faster while it follows a leader or a policy. A connected robot's
+  port, motors, calibration, and motion cannot change; disconnect it first.
 - `POST /robots/models`: a robot model, `{urdf, meshes}` with each mesh
   base64-encoded under the filename the URDF uses, saved under its content
   address. Answers that address, the SHA-256 of the model's JSON. A robot's
@@ -104,8 +113,8 @@ Policies and rollout:
   `GET /training/runs/{run}/checkpoints/{step}/policy` serves it.
 - `DELETE /policies/{run}/{step}`.
 - `POST /rollout` (`RolloutConfig`: `run_id`, `checkpoint_step`, `robot`,
-  `duration_seconds`) rolls out a written policy; loading it is what proves it
-  is here. `GET /rollout` reads the current session; `POST /rollout/{id}/stop`
+  `duration_seconds`, and `policy_runtime`, the runtime the connector asks for
+  actions) rolls out a written policy; loading it is what proves it is here. `GET /rollout` reads the current session; `POST /rollout/{id}/stop`
   stops it. A restarted robot connector starts idle and never resumes motion.
 
 ## Simulated robots
@@ -126,8 +135,9 @@ telemetry, with the renderer the browser's 3D view uses. A mount follows the
 optical convention: the camera looks along its +Z, with +X to the right of the
 picture and +Y down it.
 
-`--demo` saves two such robots over whatever its data directory held for them:
-`sim_leader`, hand-guided, and `sim_follower`, with `wrist` and `front`
-cameras. Both are calibrated to TheRobotStudio's SO-101 model, bundled in
-`robot-connector/src/simulation/so101`, and connect at start, so a take
-can be recorded as soon as Studio reaches the robot connector.
+`POST /demo-bench` (Rollout → Set up → Add simulated arms, offered when
+`simulates_arms`) saves two such robots over any robots of their names and
+connects them: `sim_leader`, hand-guided, and `sim_follower`, with `wrist` and
+`front` cameras. Both are calibrated to TheRobotStudio's SO-101 model, bundled
+in `robot-connector/src/simulation/so101`, so a take can be recorded right
+away.

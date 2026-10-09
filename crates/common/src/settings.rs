@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SPIRAL_ENDPOINT: &str = "https://api.spiraldb.dev";
 pub const DEFAULT_SPIRAL_SPFS_ENDPOINT: &str = "https://spfs.spiraldb.dev";
+/// The policy runtime on the robot connector's own machine.
+pub const DEFAULT_POLICY_RUNTIME: &str = "http://localhost:50051";
 
 /// The immutable Spiral destination plus what one workspace keeps: its name
 /// and robot connector.
@@ -49,28 +51,38 @@ impl DataSettings {
 /// the arms. Every browser in the workspace reaches it at this address, so
 /// `localhost` means each viewer's own machine and a network address is one
 /// connector everyone shares.
+///
+/// The connector asks the policy runtime for a policy's actions, so in
+/// `policy_runtime` `localhost` means the robot connector's own machine.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RobotConnectorSettings {
     address: String,
+    policy_runtime: String,
 }
 
 impl Default for RobotConnectorSettings {
     fn default() -> Self {
         Self {
             address: "http://localhost:7070".to_owned(),
+            policy_runtime: DEFAULT_POLICY_RUNTIME.to_owned(),
         }
     }
 }
 
 impl RobotConnectorSettings {
-    pub fn new(address: impl Into<String>) -> Self {
+    pub fn new(address: impl Into<String>, policy_runtime: impl Into<String>) -> Self {
         Self {
             address: address.into(),
+            policy_runtime: policy_runtime.into(),
         }
     }
 
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    pub fn policy_runtime(&self) -> &str {
+        &self.policy_runtime
     }
 }
 

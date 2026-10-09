@@ -29,8 +29,7 @@ mod state;
 
 pub use calibration::{CalibrationError, NormalizedPosition};
 pub use control::{
-    ArmConditionSummary, CONTROL_HZ, ControlSettings, DEFAULT_MAX_STEP_COUNTS,
-    DEFAULT_TELEOP_MAX_STEP_COUNTS, EpisodeCheckpoint, HardwareHandle, HardwareState, JointGoals,
+    ArmConditionSummary, CONTROL_HZ, EpisodeCheckpoint, HardwareHandle, HardwareState, JointGoals,
     PolicyGoals, RecordingCompletion, RecordingWriter, RobotSpec, Sample,
 };
 #[cfg(any(test, feature = "test-support"))]

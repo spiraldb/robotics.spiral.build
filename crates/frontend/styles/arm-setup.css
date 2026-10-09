@@ -231,18 +231,21 @@
     user-select: none;
   }
 
-  .robot-connector-address {
+  .robot-connector-endpoint {
     display: flex;
     max-width: 440px;
     align-items: center;
     gap: 6px;
   }
 
-  .robot-connector-address > .ui-field {
+  .robot-connector-endpoint > .ui-field {
     flex: 1;
   }
 
-  .robot-connector-address .ui-field-label {
+  /* One label column wide enough for "Policy runtime", so both inputs
+     start on the same line. */
+  .robot-connector-endpoint .ui-field-label {
+    flex-basis: 6rem;
     color: var(--tone-ink-faint);
   }
 

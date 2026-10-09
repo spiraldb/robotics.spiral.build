@@ -1,7 +1,9 @@
 //! Spiral destinations and project-owned Studio preferences in SQLite.
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::settings::{DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT};
+use spiral_robotics_common::settings::{
+    DEFAULT_POLICY_RUNTIME, DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT,
+};
 use url::Url;
 
 /// Project-owned Studio preference persistence.
@@ -121,6 +123,10 @@ impl ServiceEndpoint {
         Self::parse(address, "Robot connector address")
     }
 
+    fn policy_runtime(address: &str) -> Result<Self, String> {
+        Self::parse(address, "Policy runtime")
+    }
+
     pub fn environment_spiral() -> Self {
         Self(
             std::env::var("SPIRAL__SERVER__URL")
@@ -172,7 +178,8 @@ impl ServiceEndpoint {
 /// Documents written before cameras moved to the robot connector also hold a
 /// `video` preference, and those written before training moved to Modal a
 /// `training` one; reads ignore both. Documents written before workspaces
-/// kept a robot connector read as the default one.
+/// kept a robot connector read as the default one, and those written before
+/// they kept a policy runtime read as the default runtime.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StoredStudioPreferences {
     #[serde(default)]
@@ -186,11 +193,23 @@ impl StoredStudioPreferences {
         Ok(self)
     }
 
+    /// These preferences with the robot connector asking the policy runtime
+    /// at `address` for actions, validated.
+    pub fn with_policy_runtime(mut self, address: &str) -> Result<Self, String> {
+        self.robot_connector.policy_runtime =
+            ServiceEndpoint::policy_runtime(address)?.into_string();
+        Ok(self)
+    }
+
     /// These preferences, refused unless every endpoint in them is valid: a
     /// document from an imported snapshot is untrusted.
     pub(crate) fn validated(self) -> Result<Self, String> {
-        let robot_connector = self.robot_connector.address.clone();
-        self.with_robot_connector(&robot_connector)
+        let StoredRobotConnectorPreference {
+            address,
+            policy_runtime,
+        } = self.robot_connector.clone();
+        self.with_robot_connector(&address)?
+            .with_policy_runtime(&policy_runtime)
     }
 
     pub const fn robot_connector(&self) -> &StoredRobotConnectorPreference {
@@ -199,16 +218,20 @@ impl StoredStudioPreferences {
 }
 
 /// Persisted robot connector preference: the address every browser in the
-/// workspace drives.
+/// workspace drives, and the policy runtime that robot connector asks for
+/// actions.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StoredRobotConnectorPreference {
     address: String,
+    #[serde(default = "StoredRobotConnectorPreference::default_policy_runtime")]
+    policy_runtime: String,
 }
 
 impl Default for StoredRobotConnectorPreference {
     fn default() -> Self {
         Self {
             address: "http://localhost:7070".to_owned(),
+            policy_runtime: Self::default_policy_runtime(),
         }
     }
 }
@@ -216,6 +239,14 @@ impl Default for StoredRobotConnectorPreference {
 impl StoredRobotConnectorPreference {
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    pub fn policy_runtime(&self) -> &str {
+        &self.policy_runtime
+    }
+
+    fn default_policy_runtime() -> String {
+        DEFAULT_POLICY_RUNTIME.to_owned()
     }
 }
 
@@ -233,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn the_robot_connector_requires_an_http_or_https_endpoint() {
+    fn the_robot_connector_and_policy_runtime_require_http_or_https_endpoints() {
         let preferences = StoredStudioPreferences::default();
         assert!(
             preferences
@@ -242,13 +273,25 @@ mod tests {
                 .unwrap_err()
                 .contains("http:// or https://")
         );
+        assert!(
+            preferences
+                .clone()
+                .with_policy_runtime("gpu-box:50051")
+                .unwrap_err()
+                .contains("http:// or https://")
+        );
 
         let staged = preferences
             .with_robot_connector("http://lab-arms.example:7070/")
+            .and_then(|staged| staged.with_policy_runtime("http://gpu-box.example:50051/"))
             .expect("HTTP endpoints are accepted");
         assert_eq!(
             staged.robot_connector().address(),
             "http://lab-arms.example:7070"
+        );
+        assert_eq!(
+            staged.robot_connector().policy_runtime(),
+            "http://gpu-box.example:50051"
         );
     }
 
@@ -259,15 +302,27 @@ mod tests {
         let json = serde_json::to_string(&StoredStudioPreferences::default()).unwrap();
         assert_eq!(
             json,
-            r#"{"robot_connector":{"address":"http://localhost:7070"}}"#
+            r#"{"robot_connector":{"address":"http://localhost:7070","policy_runtime":"http://localhost:50051"}}"#
         );
         let earlier: StoredStudioPreferences = serde_json::from_str(
             r#"{"training":{"endpoint":"http://runtime.example"},"video":{"enabled":false}}"#,
         )
         .unwrap();
         assert_eq!(
-            earlier.robot_connector().address(),
-            StoredRobotConnectorPreference::default().address()
+            earlier.robot_connector(),
+            &StoredRobotConnectorPreference::default()
+        );
+        let without_runtime: StoredStudioPreferences = serde_json::from_str(
+            r#"{"robot_connector":{"address":"http://lab-arms.example:7070"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            without_runtime.robot_connector().address(),
+            "http://lab-arms.example:7070"
+        );
+        assert_eq!(
+            without_runtime.robot_connector().policy_runtime(),
+            StoredRobotConnectorPreference::default().policy_runtime()
         );
     }
 
@@ -276,9 +331,9 @@ mod tests {
     fn stored_preference_defaults_match_the_wire_defaults() {
         use spiral_robotics_common::settings::RobotConnectorSettings;
 
-        assert_eq!(
-            StoredRobotConnectorPreference::default().address(),
-            RobotConnectorSettings::default().address()
-        );
+        let stored = StoredRobotConnectorPreference::default();
+        let wire = RobotConnectorSettings::default();
+        assert_eq!(stored.address(), wire.address());
+        assert_eq!(stored.policy_runtime(), wire.policy_runtime());
     }
 }

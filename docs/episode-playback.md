@@ -90,8 +90,8 @@ Robots on the robot connector carry their own `visualization`: the content
 address of a model the robot connector stores (URDF and mesh assets), joint
 telemetry coordinates, and an optional tool link. The browser fetches each
 model once. Live poses and Studio-recorded ones use that configuration. The only
-SO-ARM101 definition in the repository is the robot connector's `--demo`
-bench; nothing inserts it into new robot configurations.
+SO-ARM101 definition in the repository is the robot connector's simulated
+demo bench; nothing inserts it into new robot configurations.
 
 Selecting fields loads a complete bounded time window, following every page.
 Changing the window or selection replaces that read. Playback uses the loaded

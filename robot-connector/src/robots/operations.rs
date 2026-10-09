@@ -77,7 +77,8 @@ impl<'a> RobotOperations<'a> {
             let saved = self.connector.workspace().get(config.id()).await?;
             if config.changes_control_configuration(saved.config()) {
                 return Err(OperationError::Conflict(
-                    "Disconnect the robot before changing its port, motors, or calibration".into(),
+                    "Disconnect the robot before changing its port, motors, calibration, or motion limits"
+                        .into(),
                 ));
             }
         }
@@ -101,6 +102,24 @@ impl<'a> RobotOperations<'a> {
             .connect(specification)
             .await
             .map_err(OperationError::conflict)
+    }
+
+    /// Save the simulated demo bench over any robots of its names, then
+    /// connect it, so a demo always starts from the bench defined here.
+    #[cfg(feature = "simulation")]
+    pub(super) async fn install_demo_bench(&self) -> Result<(), OperationError> {
+        let hardware = self.connector.hardware();
+        for robot in crate::simulation::DemoBench::ROBOTS {
+            hardware
+                .forget(robot)
+                .await
+                .map_err(OperationError::conflict)?;
+        }
+        crate::simulation::DemoBench::install(self.connector.workspace()).await?;
+        for robot in crate::simulation::DemoBench::ROBOTS {
+            self.connect(robot).await?;
+        }
+        Ok(())
     }
 
     /// Forget live hardware before removing its durable configuration.

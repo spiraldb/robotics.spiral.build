@@ -46,7 +46,7 @@ use spiral_robotics_common::robots::{
     CalibrationJointProgress, CalibrationProgress, ConnectionStatus, JointDiagnostics,
     JointIdentity, JointKinematics, JointTelemetry, ModeSelection, ModeStatus,
     MotorElectricalReadings, MotorFault, MotorLimits, RobotTelemetry, TelemetryFrame,
-    config::{MotorAccess, MotorConfig, MotorRange, RobotConfig},
+    config::{MotionLimits, MotorAccess, MotorConfig, MotorRange, RobotConfig},
 };
 use tokio::sync::{oneshot, watch};
 
@@ -275,19 +275,6 @@ pub trait RecordingWriter: Send {
 pub const CONTROL_HZ: u64 = 60;
 const CONTROL_PERIOD: Duration = Duration::from_nanos(1_000_000_000 / CONTROL_HZ);
 
-/// Default ceiling on how far one joint may be commanded to move per cycle.
-///
-/// At the control rate above this is roughly 100 degrees per second, which is
-/// brisk enough for teleoperation and slow enough to stay in front of.
-pub const DEFAULT_MAX_STEP_COUNTS: i64 = 20;
-
-/// Default teleoperation ceiling on follower movement per control cycle.
-///
-/// Manual slider moves stay deliberately gentle. A follower has to keep up
-/// with ordinary hand motion, so it gets a faster, still-bounded ramp instead
-/// of accumulating a large pose error behind the leader.
-pub const DEFAULT_TELEOP_MAX_STEP_COUNTS: i64 = 40;
-
 /// Consecutive failed transfers before a bus is considered lost.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
@@ -323,6 +310,11 @@ impl RobotSpec {
         self.config.id()
     }
 
+    /// How far the control loop may move this arm in one cycle.
+    fn motion(&self) -> MotionLimits {
+        self.config.motion()
+    }
+
     fn motor_access(&self) -> MotorAccess<'_> {
         self.config
             .motor_access()
@@ -344,45 +336,6 @@ impl RobotSpec {
     /// Adopt a freshly measured sweep, which must cover exactly this arm's motors.
     fn with_calibration(self, ranges: BTreeMap<String, MotorRange>) -> Result<Self, String> {
         Self::try_from(self.config.with_calibration(ranges)?).map_err(|error| error.to_string())
-    }
-}
-
-/// Tuning for the control loop.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ControlSettings {
-    period: Duration,
-    /// Largest change in encoder counts applied to a joint in one cycle.
-    max_step_counts: i64,
-    /// Largest per-cycle change while an arm is the teleoperation follower.
-    teleop_max_step_counts: i64,
-}
-
-impl ControlSettings {
-    /// Override the ordinary and teleoperation motion limits while preserving
-    /// the requirement that every control-cycle step is positive.
-    pub fn with_motion_limits(
-        mut self,
-        max_step_counts: i64,
-        teleop_max_step_counts: i64,
-    ) -> Result<Self, HardwareInputError> {
-        if max_step_counts <= 0 || teleop_max_step_counts <= 0 {
-            return Err(HardwareInputError::new(
-                "control-cycle motion limits must be greater than zero",
-            ));
-        }
-        self.max_step_counts = max_step_counts;
-        self.teleop_max_step_counts = teleop_max_step_counts;
-        Ok(self)
-    }
-}
-
-impl Default for ControlSettings {
-    fn default() -> Self {
-        Self {
-            period: CONTROL_PERIOD,
-            max_step_counts: DEFAULT_MAX_STEP_COUNTS,
-            teleop_max_step_counts: DEFAULT_TELEOP_MAX_STEP_COUNTS,
-        }
     }
 }
 
@@ -726,10 +679,10 @@ pub struct HardwareHandle {
 impl HardwareHandle {
     /// Start the control thread, reaching real motor buses through
     /// `serial_driver`.
-    pub fn spawn(settings: ControlSettings, serial_driver: Arc<dyn SerialDriver>) -> Self {
+    pub fn spawn(serial_driver: Arc<dyn SerialDriver>) -> Self {
         let (commands, requests) = mpsc::channel();
         let (state, receiver) = watch::channel(HardwareState::default());
-        let controller = Controller::new(settings, serial_driver, state);
+        let controller = Controller::new(serial_driver, state);
         let recording_signals = controller.recording_signals.clone();
         let thread = thread::Builder::new()
             .name("spiral-robotics-control".to_owned())
@@ -1397,7 +1350,6 @@ impl From<ControlMode> for ModeSelection {
 }
 
 struct Controller {
-    settings: ControlSettings,
     /// How this machine opens the serial ports real arms are wired to.
     serial_driver: Arc<dyn SerialDriver>,
     robots: BTreeMap<String, ConnectedRobot>,
@@ -1425,13 +1377,8 @@ struct PublishedControllerState {
 }
 
 impl Controller {
-    fn new(
-        settings: ControlSettings,
-        serial_driver: Arc<dyn SerialDriver>,
-        state: watch::Sender<HardwareState>,
-    ) -> Self {
+    fn new(serial_driver: Arc<dyn SerialDriver>, state: watch::Sender<HardwareState>) -> Self {
         Self {
-            settings,
             serial_driver,
             robots: BTreeMap::new(),
             published: PublishedControllerState::default(),
@@ -1448,7 +1395,7 @@ impl Controller {
         // macOS that made an empty fixed-rate loop run noticeably slow).
         // Carrying the deadline forward lets the following sleep absorb that
         // overshoot.
-        let mut next_tick = Instant::now() + self.settings.period;
+        let mut next_tick = Instant::now() + CONTROL_PERIOD;
         loop {
             let started = Instant::now();
             if let Some(previous) = previous_tick.replace(started) {
@@ -1516,7 +1463,7 @@ impl Controller {
                 // lower measured rate honestly.
                 next_tick = now;
             }
-            next_tick += self.settings.period;
+            next_tick += CONTROL_PERIOD;
         }
     }
 
@@ -2305,12 +2252,13 @@ impl Controller {
             _ => None,
         };
         for (id, robot) in &mut self.robots {
+            let motion = robot.spec.motion();
             let max_step = if quick == Some(id.as_str()) {
-                self.settings.teleop_max_step_counts
+                motion.following_step_counts()
             } else {
-                self.settings.max_step_counts
+                motion.manual_step_counts()
             };
-            robot.drive(max_step);
+            robot.drive(i64::from(max_step));
         }
     }
 
@@ -2482,7 +2430,7 @@ impl Controller {
             telemetry: TelemetryFrame::new(
                 self.published.sequence,
                 self.published.loop_hz,
-                1.0 / self.settings.period.as_secs_f64(),
+                1.0 / CONTROL_PERIOD.as_secs_f64(),
             )
             .with_robots(
                 self.robots
@@ -2594,7 +2542,7 @@ mod tests {
 
     fn controller() -> Controller {
         let (state, _receiver) = watch::channel(HardwareState::default());
-        Controller::new(ControlSettings::default(), Arc::new(NoSerialDriver), state)
+        Controller::new(Arc::new(NoSerialDriver), state)
     }
 
     struct FailingEnableBus {
@@ -2931,7 +2879,7 @@ mod tests {
             "the admitted policy target reaches the motor ramp"
         );
         assert!(
-            after.abs_diff(before) <= controller.settings.teleop_max_step_counts.unsigned_abs(),
+            after.abs_diff(before) <= u64::from(MotionLimits::default().following_step_counts()),
             "policy motion stays inside the fast control-path step bound"
         );
 
@@ -2964,6 +2912,40 @@ mod tests {
     }
 
     #[test]
+    fn an_arm_ramps_at_its_own_motion_limits() {
+        let mut controller = controller();
+        let arm = spec("arm", Some(calibration(2048, 500)));
+        let slow = MotionLimits::new(5, 7).expect("positive limits");
+        controller
+            .connect(RobotSpec::try_from(arm.config.with_motion(slow)).expect("specification"))
+            .expect("connect");
+        controller
+            .set_mode(ModeSelection::Manual {
+                robot: "arm".to_owned(),
+            })
+            .expect("manual mode");
+        controller.set_torque("arm", true).expect("torque on");
+        let robot = controller.robots.get_mut("arm").unwrap();
+        robot.motion.positions = robot
+            .spec
+            .motors()
+            .keys()
+            .map(|name| (name.clone(), 2048))
+            .collect();
+        robot.follow_measured_positions();
+        controller
+            .set_goals("arm", &BTreeMap::from([("gripper".to_owned(), 1.0)]))
+            .expect("goal");
+
+        controller.drive_robots();
+
+        assert_eq!(
+            controller.robots["arm"].motion.commanded["gripper"] - 2048,
+            5
+        );
+    }
+
+    #[test]
     fn commanded_positions_ramp_toward_their_target() {
         let mut controller = controller();
         controller
@@ -2988,7 +2970,7 @@ mod tests {
             .set_goals("arm", &BTreeMap::from([("gripper".to_owned(), 1.0)]))
             .expect("goal");
 
-        let max_step = controller.settings.max_step_counts;
+        let max_step = i64::from(MotionLimits::default().manual_step_counts());
         controller.robots.get_mut("arm").unwrap().drive(max_step);
         let after_one_step = controller.robots["arm"].motion.commanded["gripper"];
 
@@ -3023,10 +3005,11 @@ mod tests {
 
         assert_eq!(
             controller.robots["follower"].motion.commanded["gripper"] - 2048,
-            controller.settings.teleop_max_step_counts
+            i64::from(MotionLimits::default().following_step_counts())
         );
         assert!(
-            controller.settings.teleop_max_step_counts > controller.settings.max_step_counts,
+            MotionLimits::default().following_step_counts()
+                > MotionLimits::default().manual_step_counts(),
             "teleoperation should catch up faster than a manual slider move"
         );
     }

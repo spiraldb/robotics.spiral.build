@@ -24,8 +24,8 @@ use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
 /// The most entries a listed repository may hold. It also bounds the listing:
-/// Hugging Face answers about 50 expanded entries a page, and a page that adds
-/// none ends it.
+/// Hugging Face answers about 1,000 entries a page, and a page that adds none
+/// ends it.
 const MAX_REPOSITORY_FILES: usize = 50_000;
 #[derive(Debug, Deserialize)]
 struct RepositoryInfo {
@@ -115,9 +115,11 @@ impl HuggingFaceRepository {
         revision: &str,
     ) -> Result<Vec<TreeEntry>, String> {
         let mut first_page = self.api_url("tree", revision)?;
+        // Without `expand`: it adds each file's last commit, which nothing reads,
+        // and cuts pages to 50 entries.
         first_page
             .query_pairs_mut()
-            .extend_pairs([("recursive", "true"), ("expand", "true")]);
+            .append_pair("recursive", "true");
         let mut next = Some(first_page);
         let mut files = Vec::new();
         while let Some(url) = next.take() {

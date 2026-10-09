@@ -31,6 +31,8 @@ struct RobotConfigFields {
     cameras: BTreeMap<String, CameraConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     visualization: Option<RobotVisualization>,
+    #[serde(default)]
+    motion: MotionLimits,
 }
 
 impl TryFrom<RobotConfigFields> for RobotConfig {
@@ -80,6 +82,7 @@ impl RobotConfigFields {
                     .map_err(|error| format!("Motor {name:?}: {error}"))?;
             }
         }
+        self.motion.validate()?;
         for (role, camera) in &self.cameras {
             Self::validate_identifier("Camera role", role)?;
             if camera.id.trim().is_empty() || camera.id.contains('\0') {
@@ -117,6 +120,7 @@ impl RobotConfig {
             motors: MotorConfig::so101_arm(),
             cameras: BTreeMap::new(),
             visualization: None,
+            motion: MotionLimits::default(),
         })
     }
 
@@ -152,6 +156,9 @@ impl RobotConfig {
     pub const fn visualization(&self) -> Option<&RobotVisualization> {
         self.0.visualization.as_ref()
     }
+    pub const fn motion(&self) -> MotionLimits {
+        self.0.motion
+    }
 
     /// Every motor has a measured range.
     pub fn calibrated(&self) -> bool {
@@ -159,6 +166,11 @@ impl RobotConfig {
             .motors
             .values()
             .all(|motor| motor.calibration.is_some())
+    }
+
+    pub fn with_motion(mut self, motion: MotionLimits) -> Self {
+        self.0.motion = motion;
+        self
     }
 
     pub fn with_port(mut self, port: PortSettings) -> Result<Self, String> {
@@ -216,7 +228,58 @@ impl RobotConfig {
 
     /// Whether saving `self` over `saved` changes what a connected motor bus uses.
     pub fn changes_control_configuration(&self, saved: &Self) -> bool {
-        self.motor_access() != saved.motor_access() || self.0.motors != saved.0.motors
+        self.motor_access() != saved.motor_access()
+            || self.0.motors != saved.0.motors
+            || self.0.motion != saved.0.motion
+    }
+}
+
+/// How far the control loop moves an arm toward its goal in one cycle, in
+/// encoder counts. A slider move ramps gently; an arm following a leader or a
+/// policy ramps faster, so it keeps up with motion produced at human speed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MotionLimits {
+    manual_step_counts: u32,
+    following_step_counts: u32,
+}
+
+impl Default for MotionLimits {
+    /// At the 60 Hz control rate, 20 counts of an STS3215 is roughly 100
+    /// degrees per second: brisk, and slow enough to stay in front of.
+    fn default() -> Self {
+        Self {
+            manual_step_counts: 20,
+            following_step_counts: 40,
+        }
+    }
+}
+
+impl MotionLimits {
+    pub fn new(manual_step_counts: u32, following_step_counts: u32) -> Result<Self, String> {
+        let limits = Self {
+            manual_step_counts,
+            following_step_counts,
+        };
+        limits.validate()?;
+        Ok(limits)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.manual_step_counts == 0 || self.following_step_counts == 0 {
+            return Err("An arm must move at least one count per control cycle".into());
+        }
+        Ok(())
+    }
+
+    /// The largest step toward a goal set by hand.
+    pub const fn manual_step_counts(&self) -> u32 {
+        self.manual_step_counts
+    }
+
+    /// The largest step while the arm follows a leader or a policy.
+    pub const fn following_step_counts(&self) -> u32 {
+        self.following_step_counts
     }
 }
 
@@ -447,6 +510,22 @@ mod tests {
         assert!(!config.calibrated());
         assert_eq!(config.motors()["joint"].direction(), MotorDirection::Normal);
         assert_eq!(config.motor_access(), None);
+    }
+
+    #[test]
+    fn motion_limits_default_when_absent_and_must_move_the_arm() {
+        let motors = json!({"joint": {"id": 1}});
+        let config = decode(json!({"robot_id": "arm", "motors": motors})).unwrap();
+        assert_eq!(config.motion(), MotionLimits::default());
+        assert!(MotionLimits::new(0, 40).is_err());
+        let still = json!({"manual_step_counts": 0, "following_step_counts": 40});
+        assert!(decode(json!({"robot_id": "arm", "motors": motors, "motion": still})).is_err());
+
+        // A connected arm keeps the limits it connected with.
+        let brisk = config
+            .clone()
+            .with_motion(MotionLimits::new(30, 60).unwrap());
+        assert!(brisk.changes_control_configuration(&config));
     }
 
     #[test]

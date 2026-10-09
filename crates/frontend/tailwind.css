@@ -2322,6 +2322,17 @@ button.studio-status-connection[aria-expanded="true"] {
     @apply min-w-0 flex-1;
   }
 
+  /* A motion limit: its name hard left, its count hard right. */
+  .device-motion-field > .ui-field-label {
+    flex: 1 1 auto;
+    color: var(--tone-ink-faint);
+  }
+
+  .device-motion-field > .ui-input {
+    flex: 0 0 4.5rem;
+    text-align: right;
+  }
+
   .device-camera-row {
     @apply flex min-h-8 items-center gap-2 border-b pr-1 text-[12.5px];
     border-color: var(--tone-line-soft);

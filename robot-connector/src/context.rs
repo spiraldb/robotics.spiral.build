@@ -13,7 +13,7 @@ use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::EncoderDriver;
 use crate::robots::workspace::RobotWorkspace;
-use crate::rollout::manager::{RolloutHardwareResources, RolloutManager, RolloutPolicies};
+use crate::rollout::manager::{RolloutHardwareResources, RolloutManager};
 
 /// The physical devices one connector process owns.
 pub(crate) struct RobotConnectorDevices {
@@ -60,12 +60,11 @@ pub(crate) struct RobotConnectorContext(Arc<ConnectorState>);
 
 impl RobotConnectorContext {
     /// Serve `workspace`'s robots and the takes and policies kept under
-    /// `data_dir`, rolling policies out on the runtime at `policy_runtime`.
+    /// `data_dir`.
     pub(crate) fn open(
         devices: RobotConnectorDevices,
         workspace: Arc<RobotWorkspace>,
         data_dir: &Path,
-        policy_runtime: String,
     ) -> Self {
         let policies = Arc::new(PolicyStore::new(data_dir.join("policies")));
         let rollout = RolloutManager::new(
@@ -74,7 +73,7 @@ impl RobotConnectorContext {
                 devices.cameras.clone(),
                 workspace.clone(),
             ),
-            RolloutPolicies::new(policies.clone(), policy_runtime),
+            policies.clone(),
         );
         Self(Arc::new(ConnectorState {
             devices,

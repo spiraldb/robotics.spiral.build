@@ -51,7 +51,10 @@ impl RobotConnectorApi {
     }
 
     async fn health() -> Json<RobotConnectorHealth> {
-        Json(RobotConnectorHealth::new(env!("CARGO_PKG_VERSION")))
+        Json(RobotConnectorHealth::new(
+            env!("CARGO_PKG_VERSION"),
+            cfg!(feature = "simulation"),
+        ))
     }
 
     async fn run_to_completion(request: Request, next: Next) -> Response {

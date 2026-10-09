@@ -14,8 +14,8 @@ use crate::robotics::video::EncoderDriver;
 use crate::robots::models::RobotModelStore;
 use crate::robots::workspace::RobotWorkspace;
 #[cfg(feature = "simulation")]
-use crate::simulation::{DemoBench, SimulatedWorld};
-use spiral_robotics_hardware::{ControlSettings, HardwareHandle, SerialDriver};
+use crate::simulation::SimulatedWorld;
+use spiral_robotics_hardware::{HardwareHandle, SerialDriver};
 use tokio::sync::watch;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -51,45 +51,22 @@ impl DeviceDrivers {
     }
 }
 
-/// Where a connector keeps its state, and how it drives arms and policies.
-pub struct ConnectorSettings {
-    data_dir: PathBuf,
-    policy_runtime: String,
-    control: ControlSettings,
-}
-
-impl ConnectorSettings {
-    /// Keep saved robots, unsent takes, and policies under `data_dir`, and
-    /// roll policies out on the runtime at `policy_runtime`.
-    pub fn new(data_dir: PathBuf, policy_runtime: String, control: ControlSettings) -> Self {
-        Self {
-            data_dir,
-            policy_runtime,
-            control,
-        }
-    }
-}
-
 /// A connector with its control loop running and its saved state open,
 /// ready to serve Studio.
 pub struct RobotConnector(RobotConnectorContext);
 
 impl RobotConnector {
-    /// Start the control loop on `drivers` and open the state `settings`
-    /// names.
-    pub fn open(drivers: DeviceDrivers, settings: ConnectorSettings) -> Result<Self> {
+    /// Start the control loop on `drivers` and open the saved robots, unsent
+    /// takes, and policies kept under `data_dir`. Everything else a connector
+    /// does is configured from Studio.
+    pub fn open(drivers: DeviceDrivers, data_dir: PathBuf) -> Result<Self> {
         let DeviceDrivers {
             serial_driver,
             camera_driver,
             encoder_driver,
         } = drivers;
-        let ConnectorSettings {
-            data_dir,
-            policy_runtime,
-            control,
-        } = settings;
         tracing::info!(path = %data_dir.display(), "robot connector data directory");
-        let hardware = Arc::new(HardwareHandle::spawn(control, serial_driver.clone()));
+        let hardware = Arc::new(HardwareHandle::spawn(serial_driver.clone()));
         let workspace = Arc::new(RobotWorkspace::open(
             data_dir.join("robots.json"),
             RobotModelStore::new(data_dir.join("models")),
@@ -105,18 +82,8 @@ impl RobotConnector {
         let cameras = Arc::new(CameraManager::new(camera_driver, simulated));
         let devices = RobotConnectorDevices::new(hardware, serial_driver, cameras, encoder_driver);
         Ok(Self(RobotConnectorContext::open(
-            devices,
-            workspace,
-            &data_dir,
-            policy_runtime,
+            devices, workspace, &data_dir,
         )))
-    }
-
-    #[cfg(feature = "simulation")]
-    /// Save the simulated demo bench — a hand-guided leader and a filmed
-    /// follower — over whatever this connector held under their names.
-    pub async fn install_demo_bench(&self) -> Result<()> {
-        Ok(DemoBench::install(self.0.workspace()).await?)
     }
 
     /// Show the operator a camera problem discovery cannot detect, such as a

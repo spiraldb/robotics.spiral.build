@@ -1,14 +1,15 @@
 //! Creating robot instances and getting them ready to move.
 //!
 //! One arm is one robot instance on the robot connector. Everything here—the
-//! port, cameras, motors, and calibration—is one durable configuration
-//! document.
+//! port, cameras, motors, calibration, and motion limits—is one durable
+//! configuration document.
 //!
 //! Rollout's Setup shows the whole panel, the durable owner of ports, camera
 //! assignments, and calibration, in its workbench beside the scene and cameras
 //! it configures. Until a follower is ready Rollout shows the first-run guide
 //! built from the same sections instead.
 
+use dioxus::dioxus_core::CapturedError;
 use dioxus::prelude::*;
 use spiral_robotics_common::robots::config::{MotorAccess, RobotConfig, RobotConfigSave};
 use spiral_robotics_common::robots::{PortSettings, RobotSummary, SerialPortSummary};
@@ -17,6 +18,7 @@ use spiral_robotics_ui::{
     TextInput, UnassignIcon,
 };
 
+use crate::client::robot_connector::RobotConnector;
 use crate::panels::scene::ScenePalette;
 use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection, Selection};
 use crate::shell::state::StudioProjectState;
@@ -26,11 +28,13 @@ mod connector;
 mod delete;
 mod discovery;
 mod guide;
+mod motion;
 use calibration::CalibrationSection;
 pub(crate) use connector::RobotConnectorSetup;
 use delete::DeleteRobotAction;
 use discovery::IdentifiedSerialPort;
 pub(crate) use guide::{ArmSetupGuide, BenchSetup, BenchStage};
+use motion::MotionSection;
 
 /// Robot types offered when creating an instance.
 const ROBOT_TYPES: [(&str, &str); 2] = [
@@ -47,6 +51,10 @@ pub(crate) fn RobotPanel(
     let robots = telemetry.snapshot().read().robots().to_owned();
     let focused = selection.focused(&robots);
     let port_catalog = PortCatalogState::use_catalog();
+    let simulates_arms = matches!(
+        RobotConnector::current().health(),
+        Some(Ok(health)) if health.simulates_arms()
+    );
 
     rsx! {
         div { class: "flex flex-col",
@@ -67,6 +75,9 @@ pub(crate) fn RobotPanel(
             div { class: "device-list-actions",
                 NewRobotForm { selection, project }
                 ImportRobotConfiguration { selection, project }
+                if simulates_arms {
+                    AddSimulatedArms { project }
+                }
             }
         }
     }
@@ -343,6 +354,34 @@ fn ImportRobotConfiguration(project: StudioProjectState, selection: RobotSelecti
     }
 }
 
+/// Save the robot connector's simulated leader and follower over any arms of
+/// their names, and connect both.
+#[component]
+fn AddSimulatedArms(project: StudioProjectState) -> Element {
+    let mut add_demo_bench = use_action(move || async move {
+        project
+            .execute_utility("", async move {
+                RobotClient::current()
+                    .add_demo_bench()
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+    });
+
+    rsx! {
+        Button {
+            purpose: ActionPurpose::Create,
+            variant: ButtonVariant::Row,
+            class: "device-list-action",
+            disabled: add_demo_bench.pending(),
+            aria_busy: add_demo_bench.pending(),
+            onclick: move |_| { add_demo_bench.call(); },
+            if add_demo_bench.pending() { "Adding…" } else { "Add simulated arms" }
+        }
+    }
+}
+
 /// Everything about one arm stored in its local Studio configuration row.
 #[component]
 fn RobotSetup(
@@ -399,6 +438,9 @@ fn RobotSetup(
             div { class: "device-setup-section",
                 CalibrationSection { project, telemetry, robot: robot.clone() }
             }
+            div { class: "device-setup-section",
+                MotionSection { project, telemetry, robot: robot.clone() }
+            }
             div { class: "device-file-row",
                 span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Saved on the robot connector" }
                 DeleteRobotAction { project, telemetry, robot: robot.clone() }
@@ -452,7 +494,7 @@ struct PortCatalogState {
 
 impl PortCatalogState {
     fn use_catalog() -> Self {
-        let connector = crate::client::robot_connector::RobotConnector::current();
+        let connector = RobotConnector::current();
         let ports = use_resource(move || {
             let available = connector.reachable();
             async move {
@@ -716,8 +758,20 @@ fn PortOption(port: SerialPortSummary, owner: String, selected: bool) -> Element
     }
 }
 
-/// Record a serial port on a robot, keeping its existing baud rate.
 impl HardwareCommands {
+    /// Save `request`, reporting why the robot connector refused it.
+    async fn save_robot(self, request: RobotConfigSave) -> Result<(), CapturedError> {
+        self.execute("", async move {
+            RobotClient::current()
+                .save_robot(request)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Record a serial port on a robot, keeping its existing baud rate.
     fn assign_port(self, assignment: PortAssignment) {
         let port = PortSettings::new(assignment.path.trim(), assignment.baud_rate);
         let request = assignment
@@ -849,16 +903,8 @@ fn CameraSection(
     let available = telemetry.snapshot().read().cameras().to_owned();
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);
-    let mut save_cameras = use_action(move |request: RobotConfigSave| async move {
-        HardwareCommands::new(project, telemetry)
-            .execute("", async move {
-                RobotClient::current()
-                    .save_robot(request)
-                    .await
-                    .map_err(|error| error.to_string())
-                    .map(|_| ())
-            })
-            .await
+    let mut save_cameras = use_action(move |request: RobotConfigSave| {
+        HardwareCommands::new(project, telemetry).save_robot(request)
     });
     let chosen = available
         .iter()

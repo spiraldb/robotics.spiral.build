@@ -22,6 +22,8 @@ const UNREACHABLE: &str = "Could not reach the robot connector. Check that it is
 pub(crate) struct RobotConnector {
     /// Empty until the workspace's settings are read.
     address: Memo<String>,
+    /// Empty until the workspace's settings are read.
+    policy_runtime: Memo<String>,
     health: Signal<Option<Result<RobotConnectorHealth, CommandError>>>,
     refresh: QueryRefresh,
 }
@@ -32,6 +34,12 @@ impl RobotConnector {
             settings
                 .loaded()
                 .map(|settings| settings.robot_connector().address().to_owned())
+                .unwrap_or_default()
+        });
+        let policy_runtime = use_memo(move || {
+            settings
+                .loaded()
+                .map(|settings| settings.robot_connector().policy_runtime().to_owned())
                 .unwrap_or_default()
         });
         let mut health = use_signal(|| None);
@@ -50,6 +58,7 @@ impl RobotConnector {
         });
         use_context_provider(|| Self {
             address,
+            policy_runtime,
             health,
             refresh,
         })
@@ -83,16 +92,25 @@ impl RobotConnector {
         self.address.read().clone()
     }
 
-    /// Drive the robot connector at `address` from now on, from every
+    /// The policy runtime a rollout asks for actions, as the robot connector
+    /// reaches it: `localhost` is the robot connector's own machine.
+    pub(crate) fn policy_runtime(self) -> String {
+        self.policy_runtime.read().clone()
+    }
+
+    /// Drive the robot connector at `address`, and have it ask the policy
+    /// runtime at `policy_runtime` for actions, from now on, from every
     /// browser in this workspace.
-    pub(crate) fn save_address(
+    pub(crate) fn save_settings(
         self,
         address: &str,
+        policy_runtime: &str,
     ) -> impl Future<Output = Result<(), CommandError>> + use<> {
         let saved = ProjectClient::current().mutate::<DataSettings>(
             &[QueryDomain::Settings],
-            HttpRequest::new("PUT", "/api/settings/robot-connector")
-                .json(&RobotConnectorSettings::new(address.trim())),
+            HttpRequest::new("PUT", "/api/settings/robot-connector").json(
+                &RobotConnectorSettings::new(address.trim(), policy_runtime.trim()),
+            ),
         );
         async move { saved.await.map(|_| ()) }
     }

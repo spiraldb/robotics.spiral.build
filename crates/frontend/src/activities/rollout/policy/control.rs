@@ -13,6 +13,7 @@ use super::checkpoints::CheckpointChoice;
 use crate::activities::training::history::TrainingHistory;
 use crate::client::CommandError;
 use crate::client::queries::{QueryDomain, QueryPolicy, QueryRefresh};
+use crate::client::robot_connector::RobotConnector;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(in crate::activities::rollout) struct PolicyControl {
@@ -41,7 +42,7 @@ impl PolicyControl {
     pub(in crate::activities::rollout) fn use_control(is_active: ReadSignal<bool>) -> Self {
         let training = TrainingHistory::use_history(is_active, || None);
         let control = Self::use_state(training);
-        let connector = crate::client::robot_connector::RobotConnector::current();
+        let connector = RobotConnector::current();
         let request = QueryPolicy::new(QueryDomain::Rollout, 500).use_when(
             move || is_active() && connector.reachable(),
             || async { PolicyClient::current().run().await },
@@ -147,12 +148,18 @@ impl PolicyControl {
         self.draft.duration.set(draft);
     }
 
-    /// The run the operator has chosen, on `follower`, if it is complete.
+    /// The run the operator has chosen, on `follower`, if it is complete. It
+    /// asks the workspace's policy runtime for actions.
     pub(in crate::activities::rollout) fn next_run(self, follower: &str) -> Option<RolloutConfig> {
         let checkpoint = self.selected()?;
         Some(
-            RolloutConfig::new(checkpoint.run_id(), checkpoint.step(), follower)
-                .with_duration(self.duration_seconds()?),
+            RolloutConfig::new(
+                checkpoint.run_id(),
+                checkpoint.step(),
+                follower,
+                RobotConnector::current().policy_runtime(),
+            )
+            .with_duration(self.duration_seconds()?),
         )
     }
 }

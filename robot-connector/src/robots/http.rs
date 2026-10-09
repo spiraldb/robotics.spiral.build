@@ -35,7 +35,7 @@ impl RobotEndpoints {
             .route("/api/robots/models/{model}", get(Self::fetch_model))
     }
     pub(crate) fn commands() -> Router<RobotConnectorContext> {
-        Router::new()
+        let commands = Router::new()
             .route("/api/cameras/refresh", post(Self::refresh_cameras))
             .route("/api/robots/save", post(Self::save_robot))
             .route(
@@ -60,7 +60,10 @@ impl RobotEndpoints {
                 "/api/robots/{id}/calibration/cancel",
                 post(Self::cancel_calibration),
             )
-            .route("/api/mode", put(Self::set_mode))
+            .route("/api/mode", put(Self::set_mode));
+        #[cfg(feature = "simulation")]
+        let commands = commands.route("/api/demo-bench", post(Self::install_demo_bench));
+        commands
     }
     async fn list_serial_ports(
         State(connector): State<RobotConnectorContext>,
@@ -127,6 +130,15 @@ impl RobotEndpoints {
         ApiPath(id): ApiPath<String>,
     ) -> Result<Json<()>, OperationError> {
         RobotOperations::new(&connector).delete(&id).await?;
+        Ok(Json(()))
+    }
+    #[cfg(feature = "simulation")]
+    async fn install_demo_bench(
+        State(connector): State<RobotConnectorContext>,
+    ) -> Result<Json<()>, OperationError> {
+        RobotOperations::new(&connector)
+            .install_demo_bench()
+            .await?;
         Ok(Json(()))
     }
     async fn connect_robot(

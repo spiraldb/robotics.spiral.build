@@ -26,7 +26,7 @@ mod simulation;
 mod sync;
 
 pub(crate) use error::OperationError;
-pub use http::server::{ConnectorSettings, DeviceDrivers, RobotConnector};
+pub use http::server::{DeviceDrivers, RobotConnector};
 pub use robotics::cameras::{
     CameraDevice, CameraDriver, DEFAULT_JPEG_QUALITY, DiscoveredCameras, NoCameraDriver,
 };

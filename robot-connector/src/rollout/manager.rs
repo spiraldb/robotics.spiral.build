@@ -419,18 +419,6 @@ impl RolloutHardwareResources {
     }
 }
 
-/// The policies Studio wrote here, and the runtime that computes their actions.
-pub(crate) struct RolloutPolicies {
-    store: Arc<PolicyStore>,
-    runtime: String,
-}
-
-impl RolloutPolicies {
-    pub(crate) fn new(store: Arc<PolicyStore>, runtime: String) -> Self {
-        Self { store, runtime }
-    }
-}
-
 /// The current rollout lives in `state`, written by its task. Only the
 /// current session is kept; a restarted robot connector starts idle.
 struct RolloutLifecycle {
@@ -446,13 +434,15 @@ impl RolloutLifecycle {
 }
 
 pub(crate) struct RolloutManager {
-    policies: RolloutPolicies,
+    /// The policies Studio wrote here; each rollout names the runtime that
+    /// computes its actions.
+    policies: Arc<PolicyStore>,
     hardware: RolloutHardwareResources,
     lifecycle: RolloutLifecycle,
 }
 
 impl RolloutManager {
-    pub(crate) fn new(hardware: RolloutHardwareResources, policies: RolloutPolicies) -> Arc<Self> {
+    pub(crate) fn new(hardware: RolloutHardwareResources, policies: Arc<PolicyStore>) -> Arc<Self> {
         // The robot connector owns execution even while no browser watches it.
         Arc::new(Self {
             policies,
@@ -574,7 +564,6 @@ impl RolloutManager {
         let (session, config) = (run.session.as_str(), &run.config);
         let artifact = self
             .policies
-            .store
             .load(config.run_id(), config.checkpoint_step())
             .await;
         if progress.stop_requested() {
@@ -583,7 +572,7 @@ impl RolloutManager {
         let artifact = artifact?;
         let manifest = artifact.manifest()?;
         manifest.validate_for(config, artifact.config())?;
-        let policy_loader = HttpPolicyLoader::new(self.policies.runtime.clone());
+        let policy_loader = HttpPolicyLoader::new(config.policy_runtime());
         let policy = tokio::task::spawn_blocking(move || policy_loader.load(artifact))
             .await
             .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?
@@ -1591,7 +1580,8 @@ mod tests {
     #[test]
     fn rollout_accepts_the_native_training_artifact_contract() {
         let model_config = serde_json::json!({"type": "act"});
-        let rollout_config = RolloutConfig::new("run-1", 10, "follower").with_duration(30);
+        let rollout_config =
+            RolloutConfig::new("run-1", 10, "follower", "http://localhost:50051").with_duration(30);
         let manifest = ArtifactManifest {
             format: ACT_ARTIFACT_FORMAT.to_owned(),
             artifact: "inference".to_owned(),

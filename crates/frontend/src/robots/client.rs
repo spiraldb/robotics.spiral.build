@@ -79,6 +79,15 @@ impl RobotClient {
         )
     }
 
+    /// Save the simulated leader and follower over any robots of their names,
+    /// and connect both. Only a robot connector that simulates arms offers it.
+    pub(crate) fn add_demo_bench(&self) -> impl Future<Output = Result<(), CommandError>> + use<> {
+        self.connector.mutate(
+            &[RobotSetup, Catalog, Telemetry],
+            HttpRequest::new("POST", "/api/demo-bench"),
+        )
+    }
+
     pub(crate) fn delete_robot(
         &self,
         id: String,

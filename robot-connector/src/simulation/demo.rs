@@ -1,4 +1,4 @@
-//! The bench `--demo` starts with: a simulated SO-101 leader a simulated hand
+//! The demo bench Studio installs: a simulated SO-101 leader a simulated hand
 //! moves, and a follower filmed by a wrist camera and a front camera.
 //!
 //! Both are ordinary saved robots, so everything Studio does with real arms —
@@ -93,6 +93,9 @@ const CENTER_COUNTS: i64 = 2048;
 pub(crate) struct DemoBench;
 
 impl DemoBench {
+    /// The robots the bench saves: a hand-guided leader and a filmed follower.
+    pub(crate) const ROBOTS: [&'static str; 2] = [DemoArm::LEADER.id, DemoArm::FOLLOWER.id];
+
     /// Save the demo arms and their models over whatever this data directory
     /// held for them, so a demo always starts from the bench defined here.
     pub(crate) async fn install(workspace: &RobotWorkspace) -> Result<(), WorkspaceError> {

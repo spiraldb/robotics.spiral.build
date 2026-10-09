@@ -429,7 +429,7 @@ mod tests {
         }
 
         fn answering() -> Result<RobotConnectorHealth, CommandError> {
-            Ok(RobotConnectorHealth::new("0.1.0"))
+            Ok(RobotConnectorHealth::new("0.1.0", false))
         }
     }
 
