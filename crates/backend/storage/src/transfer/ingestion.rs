@@ -23,7 +23,9 @@ use crate::datasets::{
 use crate::manager::StorageManager;
 
 const HUGGING_FACE_ORIGIN: &str = "https://huggingface.co";
-const MAX_TREE_PAGES: usize = 100;
+/// The most entries a listed repository may hold. It also bounds the listing:
+/// Hugging Face answers about 50 expanded entries a page, and a page that adds
+/// none ends it.
 const MAX_REPOSITORY_FILES: usize = 50_000;
 #[derive(Debug, Deserialize)]
 struct RepositoryInfo {
@@ -118,10 +120,7 @@ impl HuggingFaceRepository {
             .extend_pairs([("recursive", "true"), ("expand", "true")]);
         let mut next = Some(first_page);
         let mut files = Vec::new();
-        for _ in 0..MAX_TREE_PAGES {
-            let Some(url) = next.take() else {
-                return Ok(files);
-            };
+        while let Some(url) = next.take() {
             let response = client
                 .get(url)
                 .send()
@@ -138,6 +137,9 @@ impl HuggingFaceRepository {
                 .json::<Vec<TreeEntry>>()
                 .await
                 .map_err(|error| format!("decoding the Hugging Face file tree: {error}"))?;
+            if page.is_empty() && link.is_some() {
+                return Err("Hugging Face returned an empty page of the file listing".to_owned());
+            }
             files.append(&mut page);
             if files.len() > MAX_REPOSITORY_FILES {
                 return Err(format!(
@@ -150,9 +152,7 @@ impl HuggingFaceRepository {
                 .transpose()?
                 .flatten();
         }
-        Err(format!(
-            "Hugging Face file listing exceeded {MAX_TREE_PAGES} pages"
-        ))
+        Ok(files)
     }
 
     fn parse_next_link(value: &str) -> Result<Option<Url>, String> {
