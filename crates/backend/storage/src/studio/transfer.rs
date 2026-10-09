@@ -1,7 +1,7 @@
 //! Native SQLite snapshots contain one project's records and no backend secrets.
 use super::{
     StudioProject, curations, dataset_check_reports, dataset_joint_roles, dataset_robots,
-    published_models, studio_settings, training_runs,
+    published_models, training_runs,
 };
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -230,15 +230,6 @@ impl StudioSnapshot {
         {
             crate::training::TrainingRunPersistence::validate_record(&row.id, row.document)?;
         }
-        for row in studio_settings::Entity::find()
-            .all(&self.database)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            serde_json::from_value::<crate::StoredStudioPreferences>(row.document)
-                .map_err(|error| error.to_string())?
-                .validated()?;
-        }
         Ok(())
     }
 
@@ -312,17 +303,6 @@ impl StudioSnapshot {
                 .map_err(|error| error.to_string())?;
         }
         for mut row in published_models::Entity::find()
-            .all(&self.database)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            row.project = project.key().to_owned();
-            row.into_active_model()
-                .insert(&transaction)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        for mut row in studio_settings::Entity::find()
             .all(&self.database)
             .await
             .map_err(|error| error.to_string())?

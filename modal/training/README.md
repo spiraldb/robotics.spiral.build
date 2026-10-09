@@ -1,8 +1,8 @@
 # Spiral training runtime
 
-`training/` trains two model families on Modal: ACT policies, whose checkpoints
-it also serves for rollout, and progress models, WARP-RM's progress head for
-Score progress. `config.model.kind` in the run request names the family.
+`training/` trains two model families on Modal: ACT policies, and progress
+models, WARP-RM's progress head for Score progress. `config.model.kind` in the
+run request names the family.
 [`docs/training.md`](../docs/training.md) describes a run, the Volume, the streams,
 and the endpoints.
 
@@ -14,8 +14,8 @@ and the endpoints.
   `spiral-robotics-models`, the Volume it publishes progress models to and
   [`warp-progress`](../warp_progress/README.md) reads them from.
 - Two environments, as the families pin different PyTorch builds:
-  `pyproject.toml` and `uv.lock` here are ACT's, the control endpoint's and the
-  policy runtime's; [`../training_progress/`](../training_progress) is the progress job's, Score
+  `pyproject.toml` and `uv.lock` here are ACT's and the control endpoint's;
+  [`../training_progress/`](../training_progress) is the progress job's, Score
   progress's own stack as `warp-progress` locks it (its lock began as that one,
   and `training_progress/tests/test_environment.py` checks it still matches), with no
   LeRobot. Both run the code in `src/`.
@@ -35,8 +35,7 @@ and the endpoints.
   - `volume.py`: the Volume's layout and when each side commits and reloads.
   - ACT: `samples.py`, `video.py`, `streams.py`, the prepare step from uploaded
     streams to training samples on the job's local disk; `act.py`, LeRobot's
-    ACT, shared by training and inference, so a checkpoint the job writes loads
-    for rollout.
+    ACT and the checkpoints the job writes.
   - Progress: `progress_embeddings.py`, the prepare step, which embeds the
     camera with [`warp-progress`](../warp_progress/README.md)'s own decoding,
     squash and DINOv3 backbone, so training sees pictures exactly as Score
@@ -46,7 +45,6 @@ and the endpoints.
   - `warp_rm_upstream/`: the WARP-RM authors' model, sampler, labeler and loss,
     copied unchanged (MIT) at the commit Score progress was verified against;
     its `__init__.py` says why it is vendored rather than a dependency.
-  - `service.py`: the local policy runtime the robot connector calls.
   - `testing.py`: the synthetic streams and fakes both environments' tests use.
 
 ## Deploy
@@ -97,19 +95,3 @@ synthetic H.264 and joint streams on a local directory, the control endpoint
 with fake function calls, and the jobs themselves. A one-layer DINOv3 stands in
 for the gated backbone, two worker processes draw the progress windows, and a
 trained progress checkpoint is scored by warp-progress's own `TemporalModel`.
-
-## Policy runtime for rollout
-
-```sh
-uv run spiral-training-runtime --host 127.0.0.1 --port 50051
-```
-
-The robot connector loads a checkpoint with `POST /v1/policies`, then calls
-`POST /v1/policies/{id}/warm-up` and `POST /v1/policies/{id}/infer`.
-Inference bodies contain one `application/vnd.apache.arrow.stream` record
-batch. Tensor columns are non-null `FixedSizeList` arrays: `Float32` state and
-packed HWC RGB `UInt8` images, which PyArrow exposes as zero-copy NumPy views.
-The runtime moves image bytes to the device, then permutes to CHW, converts to
-`Float32`, divides by 255, and applies ImageNet normalization. It refuses
-non-loopback listeners unless `--allow-remote-access` is passed;
-`SPIRAL_POLICY_DEVICE` selects its device.

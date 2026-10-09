@@ -10,7 +10,6 @@ workspace = true
 
 [dependencies]
 spiral-robotics-common.workspace = true
-spiral-robotics-inference.workspace = true
 spiral-robotics-storage.workspace = true
 base64.workspace = true
 clap.workspace = true

@@ -4,13 +4,12 @@ use std::collections::BTreeSet;
 
 use spiral_robotics_common::identity::DatasetId;
 use spiral_robotics_common::recording::{ControlSource, EpisodeArm, EpisodeInfo, RecordingStart};
-use spiral_robotics_common::rollout::RolloutPhase;
 use spiral_robotics_hardware::{CaptureClock, HardwareState, ModeSelection};
 use spiral_robotics_recording::{
     ArmCondition, EpisodeArmCollection as _, EpisodeRecordingRequest, EpisodeWriter, McapRecording,
 };
 
-use super::session::{OpenTake, TakeChange, TakeControl};
+use super::session::{OpenTake, TakeChange};
 use crate::OperationError;
 use crate::context::RobotConnectorContext;
 use crate::robotics::video::{
@@ -41,9 +40,8 @@ impl TakeRequest {
         let dataset_id = DatasetId::try_from(self.dataset_id.as_str())
             .map(String::from)
             .map_err(|error| OperationError::invalid_input(error.to_string()))?;
-        if let ControlSource::Teleoperate { leader, follower } = &self.control
-            && (leader.is_empty() || follower.is_empty() || leader == follower)
-        {
+        let ControlSource::Teleoperate { leader, follower } = &self.control;
+        if leader.is_empty() || follower.is_empty() || leader == follower {
             return Err(OperationError::invalid_input(
                 "Recording needs distinct leader and follower identities",
             ));
@@ -51,30 +49,16 @@ impl TakeRequest {
         Ok(Self { dataset_id, ..self })
     }
 
-    /// The arms the take records: the pair a teleoperation moves, or the one
-    /// arm a policy drives.
+    /// The arms the take records: the pair a teleoperation moves.
     fn arms(&self) -> Vec<String> {
-        match &self.control {
-            ControlSource::Teleoperate { leader, follower } => {
-                vec![leader.clone(), follower.clone()]
-            }
-            ControlSource::Policy(config) => vec![config.robot().to_owned()],
-        }
+        let ControlSource::Teleoperate { leader, follower } = &self.control;
+        vec![leader.clone(), follower.clone()]
     }
 
     /// Where the take came from, as its episode says it.
     fn source(&self) -> String {
-        match &self.control {
-            ControlSource::Teleoperate { leader, follower } => {
-                format!("Teleoperation — {leader} → {follower}")
-            }
-            ControlSource::Policy(config) => format!(
-                "Policy — {} step {} → {}",
-                config.run_id(),
-                config.checkpoint_step(),
-                config.robot()
-            ),
-        }
+        let ControlSource::Teleoperate { leader, follower } = &self.control;
+        format!("Teleoperation — {leader} → {follower}")
     }
 }
 
@@ -95,9 +79,9 @@ impl<'a> TakeOperations<'a> {
     }
 
     /// Start the request's control, then open one take, and close it whenever
-    /// its run or the control loop ends it on their own. Once the control source
-    /// runs, any failure stops it again; a failed rollback is reported,
-    /// because an unnoticed live control source is safety-relevant.
+    /// the control loop ends it on its own. Once the control source runs, any
+    /// failure stops it again; a failed rollback is reported, because an
+    /// unnoticed live control source is safety-relevant.
     pub(super) async fn start(&self, request: TakeRequest) -> Result<EpisodeInfo, OperationError> {
         let mut take = self.state.recording_session().try_change()?;
         if take.is_open() || self.state.hardware().state().recording().is_some() {
@@ -107,75 +91,59 @@ impl<'a> TakeOperations<'a> {
         }
         let request = request.validated()?;
         let sample_hz = self.admitted_sample_hz(&request)?;
-        let control = self.start_control(&request.control).await?;
+        self.start_control(&request.control).await?;
         match self.open(&request, sample_hz).await {
             Ok((summary, capture)) => {
-                take.open(OpenTake::new(
-                    summary.id().to_owned(),
-                    capture,
-                    control.clone(),
-                ));
+                take.open(OpenTake::new(summary.id().to_owned(), capture));
                 let (state, episode) = (self.state.clone(), summary.id().to_owned());
                 tokio::spawn(async move {
                     TakeOperations::new(&state)
-                        .close_when_its_run_ends(&episode, &control)
+                        .close_when_the_loop_ends(&episode)
                         .await;
                 });
                 Ok(summary)
             }
-            Err(error) => match self.stop_control(&control).await {
+            Err(error) => match self.stop_control().await {
                 Ok(()) => Err(error),
                 Err(rollback) => Err(OperationError::Conflict(format!(
-                    "{error} {} also could not stop: {rollback}",
-                    control.name()
+                    "{error} Teleoperation also could not stop: {rollback}"
                 ))),
             },
         }
     }
 
     /// Stop the take and its control source whatever happens, then save its media.
-    /// The take is held throughout, so its run or the control loop ending it
-    /// on their own cannot race this stop.
+    /// The take is held throughout, so the control loop ending it on its own
+    /// cannot race this stop.
     pub(super) async fn stop(&self, keep: bool) -> Result<EpisodeInfo, OperationError> {
         let take = self.state.recording_session().try_change()?;
-        let Some(control) = take.control().cloned() else {
+        if !take.is_open() {
             return Err(OperationError::conflict(
                 "no recording is available to stop",
             ));
-        };
+        }
         let recording = self.stopped_episode(keep).await;
-        let stopped = self.stop_control(&control).await;
+        let stopped = self.stop_control().await;
         self.close(take).await?;
         match (recording, stopped) {
             (Ok(summary), Ok(())) => Ok(summary),
             (Ok(_), Err(control_error)) => Err(OperationError::Conflict(format!(
-                "the recording ended, but {} could not stop: {control_error}",
-                control.name()
+                "the recording ended, but teleoperation could not stop: {control_error}"
             ))),
             (Err(recording_error), Ok(())) => Err(recording_error),
             (Err(recording_error), Err(control_error)) => Err(OperationError::Conflict(format!(
-                "{recording_error}; {} also could not stop: {control_error}",
-                control.name()
+                "{recording_error}; teleoperation also could not stop: {control_error}"
             ))),
         }
     }
 
     /// Pause joint and media capture in a fail-safe order, or resume both.
-    /// A policy's take cannot pause: its run has a duration, not a break.
     pub(super) async fn set_paused(&self, paused: bool) -> Result<(), OperationError> {
         let mut take = self.state.recording_session().try_change()?;
-        match take.control() {
-            None => {
-                return Err(OperationError::conflict(
-                    "recording is not available for pause",
-                ));
-            }
-            Some(TakeControl::Policy(_)) => {
-                return Err(OperationError::conflict(
-                    "a policy take cannot pause; stop it instead",
-                ));
-            }
-            Some(TakeControl::Teleoperation) => {}
+        if !take.is_open() {
+            return Err(OperationError::conflict(
+                "recording is not available for pause",
+            ));
         }
         let hardware = self.state.hardware();
         if paused {
@@ -205,21 +173,11 @@ impl<'a> TakeOperations<'a> {
     }
 
     /// Close `episode` when the control loop ends it on its own — a robot
-    /// detaches, or the writer fails — or, for a policy's take, when the
-    /// policy's run ends. An explicit stop closes it first, which makes this a
-    /// no-op.
-    async fn close_when_its_run_ends(&self, episode: &str, control: &TakeControl) {
-        let run_ended = async {
-            match control {
-                TakeControl::Policy(session) => self.policy_run_ended(session).await,
-                TakeControl::Teleoperation => std::future::pending().await,
-            }
-        };
-        tokio::select! {
-            ended = self.control_loop_ended(episode) => if ended {
-                self.close_ended(Some(episode)).await;
-            },
-            () = run_ended => self.close_after_run(episode).await,
+    /// detaches, or the writer fails. An explicit stop closes it first, which
+    /// makes this a no-op.
+    async fn close_when_the_loop_ends(&self, episode: &str) {
+        if self.control_loop_ended(episode).await {
+            self.close_ended(Some(episode)).await;
         }
     }
 
@@ -238,33 +196,6 @@ impl<'a> TakeOperations<'a> {
             return false;
         }
         hardware.wait_for(|state| !shown(state)).await.is_ok()
-    }
-
-    /// Wait until policy `session` is no longer running: it reached its
-    /// duration, was stopped, or failed, and the follower holds.
-    async fn policy_run_ended(&self, session: &str) {
-        let mut rollout = self.state.rollout().subscribe();
-        let _ = rollout
-            .wait_for(|snapshot| {
-                snapshot.session_id() != Some(session) || !snapshot.phase().active()
-            })
-            .await;
-    }
-
-    /// Save a policy's take once its run ended: the run's last action and the
-    /// hold after it end the episode.
-    async fn close_after_run(&self, episode: &str) {
-        let take = self.state.recording_session().change().await;
-        if take.episode() != Some(episode) {
-            return;
-        }
-        let recording = self.stopped_episode(true).await.map(|_| ());
-        if let Err(error) = recording.and(self.close(take).await) {
-            tracing::error!("could not save the policy's take: {error}");
-            self.state
-                .cameras()
-                .note_issue(format!("the policy's take could not be saved: {error}"));
-        }
     }
 
     /// Commit a take the control loop has already ended: `episode`, or at
@@ -309,70 +240,19 @@ impl<'a> TakeOperations<'a> {
         Ok(sample_hz)
     }
 
-    /// Start `control`. A policy has loaded, warmed up, and taken the follower
-    /// once this returns, so its take begins with the policy's first action.
-    async fn start_control(&self, control: &ControlSource) -> Result<TakeControl, OperationError> {
-        let config = match control {
-            ControlSource::Teleoperate { leader, follower } => {
-                self.set_mode(ModeSelection::Teleoperate {
-                    leader: leader.clone(),
-                    follower: follower.clone(),
-                })
-                .await?;
-                return Ok(TakeControl::Teleoperation);
-            }
-            ControlSource::Policy(config) => config,
-        };
-        let rollout = self.state.rollout();
-        let admitted = rollout
-            .start(config.clone())
-            .await
-            .map_err(OperationError::External)?;
-        let session = admitted
-            .session_id()
-            .ok_or_else(|| OperationError::Internal("the rollout has no session".to_owned()))?
-            .to_owned();
-        let mut updates = rollout.subscribe();
-        // A run that fails on the way passes through its cleanup's Stopping
-        // before it settles, so only Running or the settled end decides.
-        let reached = updates
-            .wait_for(|snapshot| {
-                snapshot.session_id() != Some(session.as_str())
-                    || snapshot.phase() == RolloutPhase::Running
-                    || !snapshot.phase().active()
-            })
-            .await
-            .map_err(|_| OperationError::Internal("the rollout stopped reporting".to_owned()))?
-            .clone();
-        let own = reached.session_id() == Some(session.as_str());
-        if own && reached.phase() == RolloutPhase::Running {
-            return Ok(TakeControl::Policy(session));
-        }
-        Err(OperationError::conflict(
-            reached
-                .message()
-                .filter(|_| own)
-                .unwrap_or("the policy stopped before it moved the follower"),
-        ))
+    /// Start `control`: the follower mirrors the leader.
+    async fn start_control(&self, control: &ControlSource) -> Result<(), OperationError> {
+        let ControlSource::Teleoperate { leader, follower } = control;
+        self.set_mode(ModeSelection::Teleoperate {
+            leader: leader.clone(),
+            follower: follower.clone(),
+        })
+        .await
     }
 
-    /// Stop `control`: leave teleoperation for idle, or stop the policy's run
-    /// so the follower holds. A run that already ended has nothing to stop.
-    async fn stop_control(&self, control: &TakeControl) -> Result<(), OperationError> {
-        match control {
-            TakeControl::Teleoperation => self.set_mode(ModeSelection::Idle).await,
-            TakeControl::Policy(session) => {
-                let rollout = self.state.rollout();
-                let current = rollout.snapshot();
-                if current.session_id() != Some(session.as_str()) || !current.phase().active() {
-                    return Ok(());
-                }
-                rollout
-                    .stop(session)
-                    .await
-                    .map_err(OperationError::conflict)
-            }
-        }
+    /// Stop the control source: leave teleoperation for idle.
+    async fn stop_control(&self) -> Result<(), OperationError> {
+        self.set_mode(ModeSelection::Idle).await
     }
 
     async fn set_mode(&self, mode: ModeSelection) -> Result<(), OperationError> {
@@ -621,7 +501,6 @@ impl<'a> TakeOperations<'a> {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_common::recording::{ControlSource, RecordingStart};
-    use spiral_robotics_common::rollout::RolloutConfig;
 
     use super::TakeRequest;
 
@@ -645,19 +524,5 @@ mod tests {
             follower: "follower".to_owned(),
         });
         assert!(same_arm.validated().is_err());
-    }
-
-    #[test]
-    fn a_policy_take_records_the_arm_it_drives_and_names_its_checkpoint() {
-        let take = request(ControlSource::Policy(RolloutConfig::new(
-            "act-run",
-            20_000,
-            "follower",
-            "http://localhost:50051",
-        )))
-        .validated()
-        .unwrap();
-        assert_eq!(take.arms(), ["follower"]);
-        assert_eq!(take.source(), "Policy — act-run step 20000 → follower");
     }
 }

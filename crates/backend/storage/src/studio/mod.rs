@@ -13,8 +13,6 @@ pub(crate) mod robot_connector_tokens;
 #[allow(unreachable_pub)]
 pub(crate) mod sessions;
 #[allow(unreachable_pub)]
-pub(crate) mod studio_settings;
-#[allow(unreachable_pub)]
 pub(crate) mod training_runs;
 mod transfer;
 #[allow(unreachable_pub)]
@@ -181,14 +179,13 @@ impl StudioProject {
     /// Tables whose rows belong to one project, under its key in their
     /// `project` column. Published views are not among them: a project
     /// bundle carries none.
-    pub(crate) const RECORD_TABLES: [&str; 7] = [
+    pub(crate) const RECORD_TABLES: [&str; 6] = [
         "dataset_robots",
         "dataset_joint_roles",
         "dataset_check_reports",
         "curations",
         "training_runs",
         "published_models",
-        "studio_settings",
     ];
 
     pub(crate) fn key(&self) -> &str {

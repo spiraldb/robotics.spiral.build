@@ -1,5 +1,5 @@
 """The control endpoint Studio calls: it takes stream uploads, starts, reports, stops, and deletes
-runs, serves their checkpoints, and publishes progress models. See docs/training.md#endpoints.
+runs, and publishes progress models. See docs/training.md#endpoints.
 """
 
 from __future__ import annotations
@@ -7,19 +7,17 @@ from __future__ import annotations
 import hmac
 import json
 import re
-import shutil
 import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Protocol
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Request, Response
 from fastapi import Path as PathParameter
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
@@ -45,10 +43,6 @@ GPU = "L4"
 # A progress model trains on batches of 1,024 32-step windows in fp32, as upstream does, which need
 # more than an L4's 24 GB.
 PROGRESS_GPU = "H100"
-CHECKPOINT_FILES = {
-    "config": ("config.json", "application/json"),
-    "model": ("model.safetensors", "application/octet-stream"),
-}
 DEAD_CALL_MESSAGE = "The training job ended without reporting why; its Modal logs say."
 STOPPING_MESSAGE = "Stopping: the job saves a checkpoint after its current step."
 
@@ -152,16 +146,6 @@ class RunControl:
         with self._volume.writing():
             self._volume.run(key).delete()
         self._stop_flags.pop(key.flag, None)
-
-    def checkpoint_copy(self, key: RunKey, step: int, name: str) -> Path | None:
-        """A copy of one checkpoint file off the mount, so serving it holds no Volume file open."""
-        with self._volume.reading():
-            source = self._volume.run(key).checkpoint(step) / name
-            if not source.is_file():
-                return None
-            with tempfile.NamedTemporaryFile(delete=False) as copy, source.open("rb") as original:
-                shutil.copyfileobj(original, copy)
-        return Path(copy.name)
 
     def _observe(self, keys: list[RunKey]) -> dict[RunKey, RunStatus]:
         """Each held run's status as Studio should see it."""
@@ -268,16 +252,6 @@ class ControlService:
         def delete_run(project: ProjectId, run_id: RunId) -> Response:
             self._runs.delete(RunKey(project, run_id))
             return Response(status_code=204)
-
-        @routes.get("/v1/runs/{project}/{run_id}/checkpoints/{step}/{part}")
-        def checkpoint(
-            project: ProjectId, run_id: RunId, step: int, part: Literal["config", "model"]
-        ) -> FileResponse:
-            name, media_type = CHECKPOINT_FILES[part]
-            copy = self._runs.checkpoint_copy(RunKey(project, run_id), step, name)
-            if copy is None:
-                raise RuntimeRequestError(f"run {run_id} has no checkpoint {step}", 404)
-            return FileResponse(copy, media_type=media_type, background=BackgroundTask(copy.unlink))
 
         @routes.post("/v1/models")
         def publish_model(body: ModelPublishRequest) -> JSONResponse:

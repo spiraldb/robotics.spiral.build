@@ -67,7 +67,7 @@ One run per project is active at a time.
 - **Cameras**: video topics, in the order the policy reads them.
 - **Image size**: every camera's frames are resized to one width × height
   with swscale bilinear (PyAV `to_ndarray(width=, height=, format="rgb24")`),
-  so a rollout can resize live frames the same way.
+  so a robot running the policy can resize live frames the same way.
 - **Rate**: the training clock, in Hz. Each kept interval `[start, end)` gets
   ticks `start + k / rate` for every `k` with the tick before `end`.
 - **At each tick**, every camera shows its latest frame presented at or before
@@ -188,8 +188,6 @@ All but `/v1/health` need `Authorization: Bearer <token>`. Errors answer
 | GET | `/v1/runs/{project}/{run_id}` | | run history; 404 when unknown |
 | POST | `/v1/runs/{project}/{run_id}/stop` | | run status |
 | DELETE | `/v1/runs/{project}/{run_id}` | | 204; 409 while active |
-| GET | `/v1/runs/{project}/{run_id}/checkpoints/{step}/config` | | the checkpoint's `config.json` |
-| GET | `/v1/runs/{project}/{run_id}/checkpoints/{step}/model` | | the SafeTensors weights |
 | POST | `/v1/models` | `{project, run_id, step}` | `{model, manifest}`, 201 when first published, 200 when those weights already were; 404 for an unknown run or step, 409 for a checkpoint that is not a progress model |
 
 The run request, status, and history are fixed by the fixtures in
@@ -217,7 +215,8 @@ run whose function call ended while its status still says active reads
 ### Checkpoints
 
 Studio lists every run's checkpoints with their family; only an ACT
-checkpoint has a policy, and only it is offered to Rollout.
+checkpoint has a policy, and only it is offered to Rollout, which cannot run
+it on a robot yet.
 
 An ACT checkpoint is `config.json`, the LeRobot ACT policy config plus
 `spiral_camera_order` and `spiral_sample_hz`, and `model.safetensors`, the

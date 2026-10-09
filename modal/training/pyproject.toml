@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "spiral-training-runtime"
 version = "0.1.0"
-description = "ACT and progress-model training on Modal, and the local policy runtime for Spiral Robotics"
+description = "ACT and progress-model training on Modal for Spiral Robotics"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -22,7 +22,6 @@ dependencies = [
     "torch>=2.7,<2.8",
     "torchvision>=0.22,<0.23",
     "triton==3.3.1; sys_platform == 'linux'",
-    "uvicorn[standard]>=0.35,<1",
 ]
 
 [project.optional-dependencies]
@@ -32,9 +31,6 @@ dev = [
     "pytest>=8.4,<10",
     "ruff>=0.12,<1",
 ]
-
-[project.scripts]
-spiral-training-runtime = "spiral_training_runtime.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spiral_training_runtime"]

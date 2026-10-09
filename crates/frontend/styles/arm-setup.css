@@ -201,12 +201,14 @@
     margin-bottom: 20px;
   }
 
+  /* The command wraps rather than hides its end: the token is the part an
+     operator checks. */
   .robot-connector-command {
     display: flex;
-    height: 32px;
-    align-items: center;
+    min-height: 32px;
+    align-items: flex-start;
     gap: 6px;
-    padding: 0 3px 0 10px;
+    padding: 2px 3px 2px 10px;
     border: 1px solid var(--tone-line);
     border-radius: 6px;
     background: var(--tone-sunken);
@@ -215,13 +217,13 @@
   .robot-connector-command code {
     min-width: 0;
     flex: 1;
-    overflow-x: auto;
+    padding: 5px 0;
     color: var(--tone-ink);
     font-family: var(--font-mono);
     font-size: 12px;
-    white-space: nowrap;
+    line-height: 16px;
+    overflow-wrap: anywhere;
     user-select: all;
-    scrollbar-width: none;
   }
 
   /* The prompt is drawn, not copied. */
@@ -229,23 +231,6 @@
     content: "$ ";
     color: var(--tone-ink-faint);
     user-select: none;
-  }
-
-  .robot-connector-endpoint {
-    display: flex;
-    max-width: 440px;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .robot-connector-endpoint > .ui-field {
-    flex: 1;
-  }
-
-  /* A quiet label column wide enough for "Policy runtime". */
-  .robot-connector-endpoint .ui-field-label {
-    flex-basis: 6rem;
-    color: var(--tone-ink-faint);
   }
 
   /* Whether a robot connector is linked on the left, the token that links

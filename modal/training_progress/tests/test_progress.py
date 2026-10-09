@@ -5,6 +5,7 @@ DINOv3 ViT-B/16."""
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from contextlib import closing
@@ -47,7 +48,7 @@ INTERVAL_FRAMES = [600, 540, 630]
 # Enough to draw windows in more than one spawned process.
 SAMPLING_WORKERS = 2
 # The ACT side of the package, which the progress job must never import.
-ACT_MODULES = ["act", "samples", "video", "config", "arrow", "service"]
+ACT_MODULES = ["act", "samples", "video"]
 
 
 class Preempted(BaseException):
@@ -85,11 +86,17 @@ def models(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def trained(tmp_path_factory: pytest.TempPathFactory, backbone: Path, models: Path) -> TestClient:
-    """The control endpoint over the progress fixture run, trained to its end."""
+def trained_volume(tmp_path_factory: pytest.TempPathFactory) -> TrainingVolume:
+    """The Volume the progress fixture run is trained on."""
     volume = TrainingVolume(tmp_path_factory.mktemp("volume"), LocalSync())
     SyntheticProgressRun.from_fixture(volume).write()
-    return post_and_train(volume, backbone, models)
+    return volume
+
+
+@pytest.fixture(scope="module")
+def trained(trained_volume: TrainingVolume, backbone: Path, models: Path) -> TestClient:
+    """The control endpoint over the progress fixture run, trained to its end."""
+    return post_and_train(trained_volume, backbone, models)
 
 
 def test_a_progress_run_trains_reports_and_checkpoints(trained: TestClient) -> None:
@@ -125,11 +132,14 @@ def test_the_learning_rate_follows_upstreams_warmup(trained: TestClient) -> None
     np.testing.assert_allclose([metric["learning_rate"] for metric in metrics], expected)
 
 
-def test_the_checkpoint_manifest_describes_how_its_inputs_were_made(trained: TestClient) -> None:
-    config = trained.get(f"{RUN}/checkpoints/6/config", headers=AUTHORIZED)
+def test_the_checkpoint_manifest_describes_how_its_inputs_were_made(
+    trained: TestClient, trained_volume: TrainingVolume
+) -> None:
+    assert trained.get(RUN, headers=AUTHORIZED).json()["phase"] == "completed"
+    key = SyntheticProgressRun.from_fixture(trained_volume).request.key
+    config = trained_volume.run(key).checkpoint(6) / "config.json"
 
-    assert config.status_code == 200
-    assert config.json() == {
+    assert json.loads(config.read_text()) == {
         "family": "progress",
         "manifest": "spiral_robotics.progress.safetensors.v1",
         "run_id": "train-1791300000000-1",

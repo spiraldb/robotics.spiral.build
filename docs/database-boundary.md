@@ -158,13 +158,10 @@ report connection failures at use time. Saving another project and Settings →
 SpiralDB → Test connection validate and provision the model-artifact relation
 only; Studio control tables are never created in Spiral. See the SQLite guide for persistence and project transfer.
 
-Robot configuration, hardware, and rollout live on the robot connector, which
-reconnects its saved robots when it starts; see
-[robot connector API](robot-connector-api.md). Its rollout keeps only its
-current session, in memory; a restarted robot connector starts idle and motion
-is never resumed. The Rollout view owns loading/error feedback and retains its
-last successful snapshot if polling fails. Its execution remains owned by the
-robot connector after navigating away.
+Robot configuration, hardware, and recording live on the robot connector,
+which reconnects its saved robots when it starts; see
+[robot connector API](robot-connector-api.md). A restarted robot connector
+starts idle and motion is never resumed.
 
 The shell owns only the selected project, backend liveness, the robot
 connector's address, its clock, and notifications. The robot connector's

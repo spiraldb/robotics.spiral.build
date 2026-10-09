@@ -226,13 +226,10 @@ fn CaptureControls(
             onclick: { let transport = transport.clone(); move |_| transport.finish_capture(true) },
             "Stop"
         }
-        // A policy's take is its whole run; it stops, it does not pause.
-        if transport.pausable() {
-            Button {
-                purpose: ActionPurpose::Toggle, variant: ButtonVariant::Outline,
-                onclick: { let transport = transport.clone(); move |_| transport.set_capture_paused(!paused) },
-                if paused { "Resume recording" } else { "Pause recording" }
-            }
+        Button {
+            purpose: ActionPurpose::Toggle, variant: ButtonVariant::Outline,
+            onclick: { let transport = transport.clone(); move |_| transport.set_capture_paused(!paused) },
+            if paused { "Resume recording" } else { "Pause recording" }
         }
         if confirm_discard() {
             InlineConfirmation {

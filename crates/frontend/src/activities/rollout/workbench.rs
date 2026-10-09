@@ -14,7 +14,7 @@ use super::policy::PolicySection;
 use super::session::RolloutSession;
 use crate::activities::rollout::actions::RolloutAction;
 use crate::activities::rollout::joints::JointPanel;
-use crate::activities::rollout::recording_client::RecordingTransfer;
+use crate::activities::rollout::recording_client::{RecordingTransfer, StoringTakes};
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::robots::RobotSelection;
 use crate::robots::Selection;
@@ -35,7 +35,7 @@ pub(super) fn RolloutWorkbench(session: RolloutSession) -> Element {
         div { class: "studio-workbench-scroll rollout-workbench",
             ControlSection { session }
             CaptureSection { next_take: session.next_take(), recording: hardware.recording() }
-            WaitingTakes { project }
+            WaitingTakes { project, storing: session.storing_takes() }
 
             section { class: "workbench-section rollout-motors",
                 header { class: "workbench-section-heading",
@@ -121,16 +121,24 @@ fn CaptureSection(next_take: NextTake, recording: Option<RecordingProgress>) -> 
 }
 
 /// Finished takes the robot connector still holds because carrying them to
-/// Studio failed, with a way to try again.
+/// Studio failed, with a way to try again. A take on its way is not one of
+/// them.
 #[component]
-fn WaitingTakes(project: StudioProjectState) -> Element {
+fn WaitingTakes(project: StudioProjectState, storing: StoringTakes) -> Element {
     let waiting = QueryPolicy::on_demand(QueryDomain::Recording)
         .use_resource(|| RecordingTransfer::current().waiting());
     let mut carrying = use_signal(|| false);
     let takes = match &*waiting.read() {
-        Some(Ok(takes)) if !takes.is_empty() => takes.clone(),
+        Some(Ok(takes)) => takes
+            .iter()
+            .filter(|take| !storing.includes(take.episode_id()))
+            .cloned()
+            .collect::<Vec<_>>(),
         _ => return rsx! {},
     };
+    if takes.is_empty() {
+        return rsx! {};
+    }
     let count = takes.len();
     rsx! {
         section { class: "workbench-section waiting-takes", role: "status",
@@ -241,9 +249,9 @@ fn RobotRoster(
     }
 }
 
-/// Who controls the arms: Studio holds or releases the selected arm, the
-/// leader drives the follower, or a checkpoint does. Hold ends whichever
-/// drives.
+/// Who controls the arms: Studio holds or releases the selected arm, or the
+/// leader drives the follower. Hold ends teleoperation. A checkpoint cannot
+/// drive yet.
 #[component]
 fn ControlSection(session: RolloutSession) -> Element {
     let (hardware, selection, policy) =
@@ -256,8 +264,6 @@ fn ControlSection(session: RolloutSession) -> Element {
     let holding = telemetry.as_ref().is_some_and(|robot| robot.torque());
     let teleop =
         matches!(hardware.mode(), ModeSelection::Teleoperate { .. }) && hardware.mode_active();
-    let policy_running = policy.active_session().is_some();
-    let driven = teleop || policy_running;
     let pair = hardware.snapshot().read().default_teleoperation_pair();
     let policy_blocker = session.policy_blocker();
     let mut confirm_release = use_signal(|| false);
@@ -268,20 +274,18 @@ fn ControlSection(session: RolloutSession) -> Element {
                 h3 { "Control" }
                 if teleop {
                     span { "Leader → follower" }
-                } else if policy_running {
-                    span { "Policy → follower" }
                 }
             }
             ModeGroup { class: "control-segmented", label: "Who controls the arms",
                 ModeButton {
                     purpose: ActionPurpose::Hold,
-                    checked: holding && !driven,
+                    checked: holding && !teleop,
                     class: "control-segment",
                     disabled: focused.is_none() || telemetry.is_none(),
-                    title: if policy_running { "Stop the policy and hold the follower where it is" } else { "Hold the arm where it is" },
+                    title: "Hold the arm where it is",
                     onclick: {
                         let id = focused.as_ref().map(|robot| robot.id().to_owned());
-                        move |_| if (!holding || driven)
+                        move |_| if (!holding || teleop)
                             && let Some(id) = id.clone()
                         {
                             on_action(RolloutAction::Hold(id));
@@ -293,11 +297,11 @@ fn ControlSection(session: RolloutSession) -> Element {
                     id: "motor-mode-release",
                     purpose: ActionPurpose::Release,
                     // An arm the Studio cannot hear from is in no known mode.
-                    checked: telemetry.is_some() && !holding && !driven,
+                    checked: telemetry.is_some() && !holding && !teleop,
                     class: "control-segment",
                     aria_label: "Release motor torque",
                     disabled: focused.is_none() || telemetry.is_none(),
-                    onclick: move |_| if holding || driven { confirm_release.set(true) },
+                    onclick: move |_| if holding || teleop { confirm_release.set(true) },
                     "Release"
                 }
                 ModeButton {
@@ -315,11 +319,11 @@ fn ControlSection(session: RolloutSession) -> Element {
                 }
                 ModeButton {
                     purpose: ActionPurpose::Start,
-                    checked: policy_running,
+                    checked: false,
                     class: "control-segment",
-                    disabled: !policy_running && policy_blocker.is_some(),
+                    disabled: policy_blocker.is_some(),
                     title: policy_blocker.clone().unwrap_or_else(|| "Run the checkpoint on the follower".to_owned()),
-                    onclick: move |_| if !policy_running { on_action(RolloutAction::RunPolicy) },
+                    onclick: move |_| on_action(RolloutAction::RunPolicy),
                     "Policy"
                 }
             }

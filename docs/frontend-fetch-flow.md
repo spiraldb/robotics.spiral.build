@@ -40,7 +40,7 @@ project on every request and rejects responses that arrive after another project
 was selected. Catalog-dependent reads wait until Studio is reachable and a
 workspace is chosen.
 [`client/robot_connector.rs`](../crates/frontend/src/client/robot_connector.rs)
-sends robot, recording, and rollout requests to the robot connector at the
+sends robot and recording requests to the robot connector at the
 address the workspace keeps, and asks whether it answers only while a hardware
 view is active, so a browser that never opens one never reaches for a local
 network address.
@@ -79,7 +79,7 @@ Studio and then has the robot connector forget it; Rollout lists takes still
 waiting and stores them on request.
 
 Training reads the run catalog and fetches bounded details by ID; selected tabs
-never appear in backend requests. Rollout observes and stops executions by ID.
+never appear in backend requests.
 Configuration drafts remain independent of submitted jobs. Recording charts
 use cursor-based pages and a bounded retained sample window. Backend jobs and
 recovery own their lifetime independently of the browser activity. Every

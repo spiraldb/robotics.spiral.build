@@ -1,12 +1,10 @@
-//! Linking the robot connector: how to start it, the token it links with,
-//! whether it is linked, and the policy runtime it asks for actions.
+//! Linking the robot connector: how to start it, the token it links with, and
+//! whether it is linked.
 
 use dioxus::prelude::*;
-use spiral_robotics_common::settings::DEFAULT_POLICY_RUNTIME;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
-    ConfirmationResponse, CopyIcon, Field, FieldLayout, InlineConfirmation, Notice, NoticeTone,
-    TextInput,
+    ConfirmationResponse, CopyIcon, InlineConfirmation, Notice, NoticeTone,
 };
 
 use crate::client::CommandError;
@@ -17,9 +15,8 @@ use crate::client::robot_connector::RobotConnector;
 const START_COMMAND: &str = "cargo run -p spiral-robotics-connector-os";
 
 /// Until a robot connector is linked, or while a fresh token is on screen:
-/// the command that starts one. Always: whether one is linked, the token it
-/// links with, and the policy runtime its rollouts ask for actions. Both are
-/// the workspace's, for everyone in it.
+/// the command that starts one. Always: whether one is linked, and the token
+/// it links with, which is the workspace's, for everyone in it.
 #[component]
 pub(crate) fn RobotConnectorSetup() -> Element {
     // Studio shows a token only when it issues it, so this view holds it
@@ -32,7 +29,6 @@ pub(crate) fn RobotConnectorSetup() -> Element {
                 StartCommand { token: fresh_token() }
             }
             RobotConnectorLink { on_issued: move |token| fresh_token.set(Some(token)) }
-            PolicyRuntimeField {}
         }
     }
 }
@@ -144,64 +140,6 @@ fn RobotConnectorLink(on_issued: EventHandler<String>) -> Element {
                     move |_| confirming.set(false),
                 ),
                 dismissal: ConfirmationDismissal::new(REPLACE_ID).with_pending(issuing()),
-            }
-        }
-        if let Some(error) = failure() {
-            Notice { tone: NoticeTone::Danger, "{error} {error.recovery_guidance()}" }
-        }
-    }
-}
-
-/// The policy runtime the robot connector asks for actions. Saving keeps it
-/// for everyone in the workspace.
-#[component]
-fn PolicyRuntimeField() -> Element {
-    let connector = RobotConnector::current();
-    let mut draft = use_signal(|| connector.policy_runtime());
-    let mut saving = use_signal(|| false);
-    let mut failure = use_signal(|| None::<CommandError>);
-    // The draft moves with a save here or in another browser.
-    use_effect(move || draft.set(connector.policy_runtime()));
-    let changed = draft.read().trim().trim_end_matches('/') != connector.policy_runtime();
-    let mut save = move || {
-        if *saving.peek() {
-            return;
-        }
-        saving.set(true);
-        failure.set(None);
-        let saved = connector.save_policy_runtime(&draft.peek());
-        ProjectClient::current().spawn(async move {
-            if let Err(error) = saved.await {
-                failure.set(Some(error));
-            }
-            saving.set(false);
-        });
-    };
-    rsx! {
-        div { class: "robot-connector-endpoint",
-            Field { label: "Policy runtime", layout: FieldLayout::Inline,
-                TextInput {
-                    value: draft(),
-                    placeholder: DEFAULT_POLICY_RUNTIME,
-                    title: "The robot connector asks it for actions, so localhost is the robot connector's machine",
-                    oninput: move |value| draft.set(value),
-                    onkeydown: move |event: KeyboardEvent| {
-                        if event.key() == Key::Enter && changed {
-                            save();
-                        }
-                    },
-                }
-            }
-            if changed {
-                Button {
-                    purpose: ActionPurpose::Apply,
-                    variant: ButtonVariant::Outline,
-                    disabled: saving(),
-                    aria_busy: saving(),
-                    title: "Saves the policy runtime for everyone in this workspace",
-                    onclick: move |_| save(),
-                    "Save"
-                }
             }
         }
         if let Some(error) = failure() {

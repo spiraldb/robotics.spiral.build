@@ -7,11 +7,8 @@ use crate::projects::context::StudioContext;
 
 use axum::{
     Json, Router,
-    http::header,
-    response::IntoResponse,
     routing::{delete, get, post},
 };
-use spiral_robotics_common::rollout::POLICY_ENVELOPE_MEDIA_TYPE;
 use spiral_robotics_common::training::{
     ModelPublication, PublishedModel, TrainingCheckpoint, TrainingConfig, TrainingRun,
     TrainingSnapshot,
@@ -25,10 +22,6 @@ impl TrainingEndpoints {
             .route("/training/runs", get(Self::fetch_training))
             .route("/training/runs/{id}", get(Self::fetch_run))
             .route("/training/checkpoints", get(Self::fetch_checkpoints))
-            .route(
-                "/training/runs/{id}/checkpoints/{step}/policy",
-                get(Self::fetch_policy),
-            )
             .route("/progress-models", get(Self::fetch_published_models))
     }
     pub(crate) fn commands() -> Router<StudioContext> {
@@ -67,18 +60,6 @@ impl TrainingEndpoints {
         Project(project): Project,
     ) -> Result<Json<Vec<TrainingCheckpoint>>, OperationError> {
         Ok(Json(project.training().checkpoints().await?))
-    }
-    /// The checkpoint as a policy envelope, which the browser writes to the
-    /// robot connector unchanged.
-    async fn fetch_policy(
-        Project(project): Project,
-        ApiPath((id, step)): ApiPath<(String, u64)>,
-    ) -> Result<impl IntoResponse, OperationError> {
-        let policy = project.training().policy(&id, step).await?;
-        Ok((
-            [(header::CONTENT_TYPE, POLICY_ENVELOPE_MEDIA_TYPE)],
-            policy.envelope(),
-        ))
     }
     async fn publish_model(
         Project(project): Project,

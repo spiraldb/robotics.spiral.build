@@ -60,8 +60,8 @@ pub struct RobotConnector {
 }
 
 impl RobotConnector {
-    /// Start the control loop on `drivers` and open the saved robots, unsent
-    /// takes, and policies kept under `data_dir`. Everything else a connector
+    /// Start the control loop on `drivers` and open the saved robots and
+    /// unsent takes kept under `data_dir`. Everything else a connector
     /// does is configured from Studio.
     pub fn open(drivers: DeviceDrivers, data_dir: PathBuf) -> Result<Self> {
         let DeviceDrivers {
@@ -128,7 +128,6 @@ impl RobotConnector {
         }
         tracing::info!("releasing motors and cameras");
         let cleanup = async {
-            connector.rollout().shutdown().await;
             if let Err(error) = connector.hardware().shutdown().await {
                 tracing::error!("hardware shutdown did not verify every motor release: {error}");
             }

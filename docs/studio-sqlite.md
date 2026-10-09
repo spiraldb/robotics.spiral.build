@@ -3,8 +3,8 @@
 The backend owns two persistence boundaries:
 
 - **SQLite / SeaORM:** each browser's Spiral session (its application OAuth tokens and
-  chosen workspace), the workspaces, project preferences (the robot connector
-  address), each dataset's robot model, joint roles and check report, saved
+  chosen workspace), the workspaces and their robot connector tokens, each
+  dataset's robot model, joint roles and check report, saved
   curation recipes and the statements of the views they publish, and a record
   of each training run Studio started (its configuration and what it was
   given).
@@ -130,7 +130,7 @@ cache of the replaced data survives.
 ## Availability and verification
 
 Studio features are independent of a chosen or reachable Spiral project.
-Preferences, curations, and training run records load locally. Data queries,
+Curations and training run records load locally. Data queries,
 recording storage, training data access, and artifact reads still require
 Spiral and report their own connection errors.
 

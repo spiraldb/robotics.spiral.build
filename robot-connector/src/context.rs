@@ -1,19 +1,17 @@
 //! What a connector request can reach: the devices this machine drives, and
 //! what the connector keeps for Studio — saved robots, the take being recorded,
-//! finished recordings, and policies.
+//! and finished recordings.
 use std::path::Path;
 use std::sync::Arc;
 
 use spiral_robotics_hardware::{HardwareHandle, SerialDriver};
 use spiral_robotics_recording::RecordingBuffer;
 
-use crate::policies::PolicyStore;
 use crate::recording::files::RecordingFiles;
 use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::EncoderDriver;
 use crate::robots::workspace::RobotWorkspace;
-use crate::rollout::manager::{RolloutHardwareResources, RolloutManager};
 
 /// The physical devices one connector process owns.
 pub(crate) struct RobotConnectorDevices {
@@ -50,8 +48,6 @@ struct ConnectorState {
     devices: RobotConnectorDevices,
     workspace: Arc<RobotWorkspace>,
     takes: ConnectorTakes,
-    policies: Arc<PolicyStore>,
-    rollout: Arc<RolloutManager>,
 }
 
 /// Every request and background task shares one connector.
@@ -59,22 +55,12 @@ struct ConnectorState {
 pub(crate) struct RobotConnectorContext(Arc<ConnectorState>);
 
 impl RobotConnectorContext {
-    /// Serve `workspace`'s robots and the takes and policies kept under
-    /// `data_dir`.
+    /// Serve `workspace`'s robots and the takes kept under `data_dir`.
     pub(crate) fn open(
         devices: RobotConnectorDevices,
         workspace: Arc<RobotWorkspace>,
         data_dir: &Path,
     ) -> Self {
-        let policies = Arc::new(PolicyStore::new(data_dir.join("policies")));
-        let rollout = RolloutManager::new(
-            RolloutHardwareResources::new(
-                devices.hardware.clone(),
-                devices.cameras.clone(),
-                workspace.clone(),
-            ),
-            policies.clone(),
-        );
         Self(Arc::new(ConnectorState {
             devices,
             workspace,
@@ -83,8 +69,6 @@ impl RobotConnectorContext {
                 session: Arc::new(RecordingSession::default()),
                 files: Arc::new(RecordingFiles::new(data_dir.join("recordings"))),
             },
-            policies,
-            rollout,
         }))
     }
 
@@ -111,11 +95,5 @@ impl RobotConnectorContext {
     }
     pub(crate) fn recording_files(&self) -> &Arc<RecordingFiles> {
         &self.0.takes.files
-    }
-    pub(crate) fn policies(&self) -> &Arc<PolicyStore> {
-        &self.0.policies
-    }
-    pub(crate) fn rollout(&self) -> &Arc<RolloutManager> {
-        &self.0.rollout
     }
 }

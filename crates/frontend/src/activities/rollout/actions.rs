@@ -1,11 +1,11 @@
 //! Semantic actions and robot connector consequences for the Rollout screen.
 
 use crate::robots::RobotClient;
-use dioxus::prelude::{ReadableExt, WritableExt};
+use dioxus::prelude::WritableExt;
 use spiral_robotics_common::robots::ModeSelection;
 
 use super::next_take::ControlKind;
-use super::policy::PolicyClient;
+use super::policy::PolicyControl;
 use crate::activities::rollout::session::RolloutSession;
 use crate::robots::Selection;
 use crate::shell::notifications::MessageSource;
@@ -14,14 +14,14 @@ use crate::shell::notifications::MessageSource;
 pub(crate) enum RolloutAction {
     Select(Option<Selection>),
     Point(Option<Selection>),
-    /// Hold an arm where it is; while a policy drives, hold stops the policy.
+    /// Hold an arm where it is.
     Hold(String),
     Release(String),
     Teleoperate {
         leader: String,
         follower: String,
     },
-    /// Run the chosen checkpoint on the follower.
+    /// Run the chosen checkpoint on the follower; not supported yet.
     RunPolicy,
 }
 
@@ -30,10 +30,7 @@ impl RolloutSession {
         match action {
             RolloutAction::Select(selection) => self.selection().selected().set(selection),
             RolloutAction::Point(selection) => self.selection().pointed().set(selection),
-            RolloutAction::Hold(robot) => match self.policy().active_session() {
-                Some(session) => self.stop_policy(session),
-                None => self.hold_robot(robot),
-            },
+            RolloutAction::Hold(robot) => self.hold_robot(robot),
             RolloutAction::Release(robot) => self.release_robot(robot),
             RolloutAction::Teleoperate { leader, follower } => self.teleoperate(leader, follower),
             RolloutAction::RunPolicy => self.run_policy(),
@@ -68,42 +65,9 @@ impl RolloutSession {
         });
     }
 
-    /// Run the chosen checkpoint on the follower, which the scene and cameras
-    /// then follow.
+    /// Running a checkpoint on the follower is not supported yet.
     fn run_policy(self) {
-        if let Some(reason) = self.policy_blocker() {
-            self.project().report_from(MessageSource::Rollout, reason);
-            return;
-        }
-        let follower = self
-            .telemetry()
-            .snapshot()
-            .read()
-            .follower()
-            .map(|robot| robot.id().to_owned());
-        let Some((follower, config)) =
-            follower.and_then(|id| Some((id.clone(), self.policy().next_run(&id)?)))
-        else {
-            return;
-        };
-        self.next_take().choose_control(ControlKind::Policy);
-        self.selection()
-            .selected()
-            .set(Some(Selection::Robot(follower)));
-        self.commands().run("", async move {
-            PolicyClient::current()
-                .start(config)
-                .await
-                .map_err(|error| error.to_string())
-        });
-    }
-
-    fn stop_policy(self, session: String) {
-        self.project().run_reported("", async move {
-            PolicyClient::current()
-                .stop(session)
-                .await
-                .map_err(|error| error.to_string())
-        });
+        self.project()
+            .report_from(MessageSource::Rollout, PolicyControl::UNSUPPORTED);
     }
 }

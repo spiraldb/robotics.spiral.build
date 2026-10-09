@@ -18,7 +18,6 @@ pub(in crate::activities::rollout) struct CheckpointChoice {
 #[derive(Clone, Debug, PartialEq)]
 struct CheckpointIdentity {
     key: String,
-    run_id: String,
     run_name: String,
     run_active: bool,
 }
@@ -42,7 +41,6 @@ impl CheckpointChoice {
                 Some(Self {
                     identity: CheckpointIdentity {
                         key: format!("{}::{}", run.id(), checkpoint.step()),
-                        run_id: run.id().to_owned(),
                         run_name: run.config().run_name().to_owned(),
                         run_active: run.phase().active(),
                     },
@@ -59,14 +57,6 @@ impl CheckpointChoice {
     /// The key the checkpoint picker stores.
     pub(super) fn key(&self) -> &str {
         &self.identity.key
-    }
-
-    pub(super) fn run_id(&self) -> &str {
-        &self.identity.run_id
-    }
-
-    pub(super) const fn step(&self) -> u64 {
-        self.step
     }
 
     /// The checkpoint as the picker lists it.
@@ -168,7 +158,7 @@ mod tests {
         let choices = CheckpointChoice::listed(&[run], &checkpoints);
 
         assert_eq!(choices.len(), 2);
-        assert_eq!(choices[0].step(), 20_000);
+        assert_eq!(choices[0].key(), "active-run::20000");
         assert_eq!(choices[0].camera_roles(), ["gripper", "top"]);
         assert!(choices[0].run_active());
         assert_eq!(choices[0].action_steps(), MAX_ROLLOUT_ACTION_STEPS);

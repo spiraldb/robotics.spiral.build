@@ -209,9 +209,7 @@ impl ProjectRegistry {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_common::project::ProjectKey;
-    use spiral_robotics_common::settings::{
-        PolicyRuntimeUpdate, RobotConnectorSettings, SettingsUpdate,
-    };
+    use spiral_robotics_common::settings::{RobotConnectorSettings, SettingsUpdate};
     use spiral_robotics_common::workspace::{NewWorkspace, Workspace};
 
     use crate::OperationError;
@@ -335,34 +333,12 @@ mod tests {
             .replace("project_a", "rc_lab_arms")
             .await
             .unwrap();
-        let connected = registry
-            .set_policy_runtime(
-                &project,
-                &PolicyRuntimeUpdate::new("http://gpu-box.example:50051/"),
-            )
-            .await
-            .unwrap();
+        let connected = registry.settings(&project).await.unwrap();
         assert_eq!(
             connected.robot_connector(),
-            &RobotConnectorSettings::new(true, "http://gpu-box.example:50051")
+            &RobotConnectorSettings::new(true)
         );
         assert_eq!(connected.name(), "Lab arms");
-        assert!(matches!(
-            registry
-                .set_policy_runtime(&project, &PolicyRuntimeUpdate::new("gpu-box:50051"))
-                .await,
-            Err(OperationError::InvalidInput(_))
-        ));
-        let unchosen = fixture.open("").await;
-        assert!(matches!(
-            registry
-                .set_policy_runtime(
-                    &unchosen,
-                    &PolicyRuntimeUpdate::new("http://gpu-box.example:50051")
-                )
-                .await,
-            Err(OperationError::InvalidInput(_))
-        ));
 
         let elsewhere = fixture.another_session().await;
         registry

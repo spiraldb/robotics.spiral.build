@@ -342,8 +342,6 @@ pub enum ModeSelection {
     Manual { robot: String },
     /// A leader arm's measured pose is mirrored onto a follower arm.
     Teleoperate { leader: String, follower: String },
-    /// A backend-owned remote policy session commands one calibrated arm.
-    Policy { robot: String, session: String },
 }
 
 /// The selected mode plus whatever went wrong entering or running it.
@@ -906,13 +904,6 @@ mod tests {
                     follower: "right".to_owned(),
                 },
                 r#"{"mode":"teleoperate","leader":"left","follower":"right"}"#,
-            ),
-            (
-                ModeSelection::Policy {
-                    robot: "right".to_owned(),
-                    session: "rollout-1".to_owned(),
-                },
-                r#"{"mode":"policy","robot":"right","session":"rollout-1"}"#,
             ),
         ];
 

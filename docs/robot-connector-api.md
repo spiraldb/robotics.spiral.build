@@ -2,7 +2,7 @@
 
 The robot connector (`robot-connector`) runs next to the arms it drives.
 It owns their serial buses, cameras, calibration, and fixed-rate control loop,
-records takes, and rolls out policies. It listens on no port: it links itself
+and records takes. It listens on no port: it links itself
 to Studio over plain HTTP, presenting the token its workspace issued in
 **Rollout → Set up**, so a robot needs no public address or certificate. The
 browser reaches it only through Studio. It never reaches Spiral. The two share
@@ -13,16 +13,15 @@ cargo run -p spiral-robotics-connector-os -- --studio https://robotics.spiraldb.
 ```
 
 The flags name the Studio to link to and configure the computer's device
-drivers. Everything the connector does is configured from Studio: the policy
-runtime a rollout calls travels with each rollout, each robot carries its own
-motion limits, and the simulated demo bench is installed from Rollout → Set
-up. A microcontroller build has no command line and links the same way.
+drivers. Everything the connector does is configured from Studio: each robot
+carries its own motion limits, and the simulated demo bench is installed from
+Rollout → Set up. A microcontroller build has no command line and links the same way.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--studio` | `http://localhost:3000` | Studio's web address; also `SPIRAL_ROBOTICS_STUDIO` |
 | `--token` | | The workspace's token; also `SPIRAL_ROBOTICS_CONNECTOR_TOKEN` |
-| `--data-dir` | platform data dir`/spiral-robotics/robot-connector` | Saved robots, unsent takes, and policies; also `SPIRAL_ROBOTICS_ROBOT_CONNECTOR_DATA` |
+| `--data-dir` | platform data dir`/spiral-robotics/robot-connector` | Saved robots and unsent takes; also `SPIRAL_ROBOTICS_ROBOT_CONNECTOR_DATA` |
 | `--no-cameras` | off | Skip camera discovery |
 | `--ffmpeg`, `--video-codec` | `ffmpeg`, `libx264` | Camera recording encoder |
 
@@ -108,19 +107,12 @@ Takes:
 
 - `POST /recording`: `{dataset_id, control, video}` starts the control source
   and records a take of the arms it moves, with their cameras when `video` is
-  true. Answers 201 with the take. `control` is one of:
-  - `{"teleoperate": {"leader": …, "follower": …}}`: teleoperate the pair and
-    record both arms.
-  - `{"policy": RolloutConfig}`: roll the policy out on its `robot` and record
-    that arm. The request answers once the policy has loaded, warmed up, and
-    taken the follower, so the take begins with its first action; it ends when
-    the run does (its duration, a stop, or a failure), and the episode's
-    `source` names the run and step. A run that ends before it moves the
-    follower answers 409 with its reason, and no take is opened.
-- `PATCH /recording` (`{"paused": …}`) pauses or resumes a teleoperation take;
-  a policy's take cannot pause. `POST /recording/stop` (`{"keep": …}`) stops
-  the take and its control source: teleoperation returns to idle, a policy stops and
-  the follower holds. Stopping saves the take as an MCAP file; a discarded take
+  true. Answers 201 with the take. `control` is
+  `{"teleoperate": {"leader": …, "follower": …}}`: teleoperate the pair and
+  record both arms.
+- `PATCH /recording` (`{"paused": …}`) pauses or resumes the take.
+  `POST /recording/stop` (`{"keep": …}`) stops the take and its control source:
+  teleoperation returns to idle. Stopping saves the take as an MCAP file; a discarded take
   is saved too, marked as discarded.
 - `GET /recording/signals`, `GET /recording/takes/{id}`, and
   `POST /recording/takes/{id}/camera` review the current session's takes.
@@ -132,24 +124,14 @@ The browser carries each take to Studio's
 `POST /datasets/{dataset}/recordings/{episode}`, then deletes it here, so a
 take that fails to reach Studio stays until it does.
 
-Policies and rollout:
-
-- `GET /policies`: the policies written here, each
-  `{run_id, checkpoint_step, bytes}`.
-- `PUT /policies/{run}/{step}`: a policy envelope as Studio's
-  `GET /training/runs/{run}/checkpoints/{step}/policy` serves it.
-- `DELETE /policies/{run}/{step}`.
-- `POST /rollout` (`RolloutConfig`: `run_id`, `checkpoint_step`, `robot`,
-  `duration_seconds`, and `policy_runtime`, the runtime the connector asks for
-  actions) rolls out a written policy; loading it is what proves it is here. `GET /rollout` reads the current session; `POST /rollout/{id}/stop`
-  stops it. A restarted robot connector starts idle and never resumes motion.
+A restarted robot connector starts idle and never resumes motion.
 
 ## Simulated robots
 
 A robot saved with `"simulated": {}` in place of a `port` has motors the robot
 connector simulates. They report encoder counts and follow goals at a bounded
-speed, so calibration, the control loop, teleoperation, takes, and rollout
-treat the arm exactly like a real one. With `"simulated": {"hand_guided": true}`
+speed, so calibration, the control loop, teleoperation, and takes treat the
+arm exactly like a real one. With `"simulated": {"hand_guided": true}`
 a simulated hand sweeps the arm through its calibrated travel whenever its
 torque is released, the way an operator moves a leader. There is no gravity or
 contact.

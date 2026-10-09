@@ -1,1 +1,1 @@
-"""ACT training on Modal, and the local policy runtime that serves its checkpoints for rollout."""
+"""ACT and progress-model training on Modal."""

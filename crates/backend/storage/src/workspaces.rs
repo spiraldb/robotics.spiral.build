@@ -124,7 +124,11 @@ impl From<table::Model> for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SpiralConnectionSettings, StoredStudioPreferences};
+    use crate::SpiralConnectionSettings;
+    use crate::training::TrainingRunPersistence;
+    use spiral_robotics_common::training::{
+        TrainingConfig, TrainingInputSummary, TrainingRunIdentity,
+    };
 
     const ENDPOINT: &str = "https://api.spiraldb.dev";
 
@@ -195,16 +199,16 @@ mod tests {
             .with_project(project)
             .unwrap()
         };
-        let preferences = StoredStudioPreferences::default()
-            .with_policy_runtime("http://gpu-box.example:50051")
-            .unwrap();
         for project in ["arms-000001", "bench-000002"] {
-            crate::settings::StudioPreferencePersistence::new(
-                &studio.project(&connection(project)),
-            )
-            .save(&preferences)
-            .await
-            .unwrap();
+            TrainingRunPersistence::new(&studio.project(&connection(project)))
+                .insert(&TrainingRunIdentity::new(
+                    "run",
+                    TrainingConfig::default(),
+                    TrainingInputSummary::new(1, 1, 2.0),
+                    1,
+                ))
+                .await
+                .unwrap();
         }
         assert!(workspaces.delete("arms-000001").await.unwrap());
         assert!(!workspaces.delete("arms-000001").await.unwrap());
@@ -215,16 +219,14 @@ mod tests {
         let kept = |project: &str| {
             let project = studio.project(&connection(project));
             async move {
-                crate::settings::StudioPreferencePersistence::new(&project)
+                TrainingRunPersistence::new(&project)
                     .load()
                     .await
                     .unwrap()
-                    .robot_connector()
-                    .policy_runtime()
-                    .to_owned()
+                    .len()
             }
         };
-        assert_eq!(kept("arms-000001").await, "http://localhost:50051");
-        assert_eq!(kept("bench-000002").await, "http://gpu-box.example:50051");
+        assert_eq!(kept("arms-000001").await, 0);
+        assert_eq!(kept("bench-000002").await, 1);
     }
 }

@@ -203,7 +203,7 @@ Provider-specific request construction, response parsing, error handling, and
 retries belong to frontend clients. Native dataset queries and persistence keep
 their existing project APIs.
 
-### Training and rollout
+### Training
 
 A training run fits a policy to a published curated view on the Modal
 training service; [Training](training.md) describes the run end to end.
@@ -212,10 +212,6 @@ uploading its data; `GET /training/runs` lists every run with whether a new one
 could start; `GET /training/runs/{id}` adds one run's metrics and log tail;
 `POST /training/runs/{id}/stop` and `DELETE /training/runs/{id}` stop and
 delete one; `GET /training/checkpoints` lists every saved checkpoint.
-Rollouts run on the robot connector. `GET /training/runs/{id}/checkpoints/{step}/policy`
-answers that checkpoint as a policy envelope
-(`application/vnd.spiral.policy-artifact`), which the browser writes to the robot
-connector unchanged before starting a rollout of it.
 
 ### Recordings
 
@@ -304,8 +300,6 @@ the view, and answers `null`; its stored answers stay. See
   to 256 MiB. See [project transfer](studio-sqlite.md#project-transfer).
 - `POST /datasets/{dataset}/recordings/{episode}`: one take's MCAP bytes, carried
   from the robot connector; see [Recordings](#recordings).
-- `GET /training/runs/{id}/checkpoints/{step}/policy`: one checkpoint as a policy
-  envelope, for the robot connector.
 
 Existing media/download error responses can contain plain text; JSON commands,
 reads, and uploads consistently use the structured failure above.

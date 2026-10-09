@@ -42,7 +42,6 @@ def post_run(client, request: dict | None = None):
         ("get", RUN),
         ("post", f"{RUN}/stop"),
         ("delete", RUN),
-        ("get", f"{RUN}/checkpoints/3/model"),
         ("post", "/v1/models"),
     ],
 )
@@ -179,15 +178,6 @@ def test_an_active_run_cannot_be_deleted(client, volume, uploaded) -> None:
     assert client.delete(RUN, headers=AUTHORIZED).status_code == 204
     assert client.get(RUN, headers=AUTHORIZED).status_code == 404
     assert client.delete(RUN, headers=AUTHORIZED).status_code == 204
-
-
-def test_a_missing_checkpoint_is_not_found(client, uploaded) -> None:
-    post_run(client)
-
-    response = client.get(f"{RUN}/checkpoints/3/config", headers=AUTHORIZED)
-
-    assert response.status_code == 404
-    assert response.json() == {"error": "run train-1791300000000-0 has no checkpoint 3"}
 
 
 def test_a_malformed_run_request_answers_why(client, calls) -> None:

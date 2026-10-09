@@ -5,7 +5,6 @@ members = [
     "crates/backend/storage",
     "crates/backend",
     "robot-connector/hardware",
-    "robot-connector/inference",
     "robot-connector/recording",
     "robot-connector",
     "robot-connector/drivers/os",
@@ -29,7 +28,6 @@ adbc_driver_manager = "0.24.0"
 base64 = "0.22"
 spiral-robotics-common = { path = "crates/common" }
 spiral-robotics-connector = { path = "robot-connector" }
-spiral-robotics-inference = { path = "robot-connector/inference" }
 spiral-robotics-hardware = { path = "robot-connector/hardware" }
 spiral-robotics-recording = { path = "robot-connector/recording" }
 spiral-robotics-storage = { path = "crates/backend/storage" }

@@ -2,7 +2,6 @@
 use crate::OperationError;
 use axum::{
     Json,
-    body::Bytes,
     extract::{FromRequest, FromRequestParts, Path, Query, Request},
     http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
@@ -68,17 +67,6 @@ impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequest<S> for ApiJson<T> {
         Json::<T>::from_request(request, state)
             .await
             .map(|Json(value)| Self(value))
-            .map_err(|error| HttpFailure::rejection(error.status(), error.body_text()))
-    }
-}
-/// A raw body, bounded by the route's `DefaultBodyLimit`.
-pub(crate) struct ApiBytes(pub(crate) Bytes);
-impl<S: Send + Sync> FromRequest<S> for ApiBytes {
-    type Rejection = HttpFailure;
-    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        Bytes::from_request(request, state)
-            .await
-            .map(Self)
             .map_err(|error| HttpFailure::rejection(error.status(), error.body_text()))
     }
 }

@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SPIRAL_ENDPOINT: &str = "https://api.spiraldb.dev";
 pub const DEFAULT_SPIRAL_SPFS_ENDPOINT: &str = "https://spfs.spiraldb.dev";
-/// The policy runtime on the robot connector's own machine.
-pub const DEFAULT_POLICY_RUNTIME: &str = "http://localhost:50051";
 
 /// The immutable Spiral destination plus what one workspace keeps: its name
 /// and robot connector.
@@ -50,39 +48,19 @@ impl DataSettings {
 /// The robot connector a workspace drives. It runs next to the arms and links
 /// itself to Studio with the token the workspace issued, so Studio needs no
 /// address for it.
-///
-/// The connector asks the policy runtime for a policy's actions, so in
-/// `policy_runtime` `localhost` means the robot connector's own machine.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RobotConnectorSettings {
     /// Whether the workspace has issued a token a connector can link with.
     token_issued: bool,
-    policy_runtime: String,
-}
-
-impl Default for RobotConnectorSettings {
-    fn default() -> Self {
-        Self {
-            token_issued: false,
-            policy_runtime: DEFAULT_POLICY_RUNTIME.to_owned(),
-        }
-    }
 }
 
 impl RobotConnectorSettings {
-    pub fn new(token_issued: bool, policy_runtime: impl Into<String>) -> Self {
-        Self {
-            token_issued,
-            policy_runtime: policy_runtime.into(),
-        }
+    pub fn new(token_issued: bool) -> Self {
+        Self { token_issued }
     }
 
     pub const fn token_issued(&self) -> bool {
         self.token_issued
-    }
-
-    pub fn policy_runtime(&self) -> &str {
-        &self.policy_runtime
     }
 }
 
@@ -144,4 +122,4 @@ impl SpiralSettings {
 }
 
 mod requests;
-pub use requests::{ConnectionTest, PolicyRuntimeUpdate, SettingsUpdate};
+pub use requests::{ConnectionTest, SettingsUpdate};

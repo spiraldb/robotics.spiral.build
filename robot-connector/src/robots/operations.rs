@@ -224,14 +224,10 @@ impl<'a> RobotOperations<'a> {
         JointGoals::new(normalized).map_err(|error| OperationError::conflict(error.to_string()))
     }
 
-    /// Modes an operator may enter directly. A policy session is absent: its
-    /// rollout must load and validate a checkpoint before control can change.
+    /// Modes an operator may enter directly.
     fn admit_operator_mode(selection: &ModeSelection) -> Result<(), OperationError> {
         let refusal = match selection {
             ModeSelection::Idle => None,
-            ModeSelection::Policy { .. } => Some(
-                "start policy control with POST /api/rollout, which validates and warms the checkpoint first",
-            ),
             ModeSelection::Manual { robot } if robot.trim().is_empty() => {
                 Some("manual control requires a robot")
             }
@@ -303,10 +299,6 @@ mod tests {
             },
             teleoperate("arm", "arm"),
             teleoperate("", "follower"),
-            ModeSelection::Policy {
-                robot: "arm".to_owned(),
-                session: "rollout-1".to_owned(),
-            },
         ] {
             assert!(matches!(
                 RobotOperations::admit_operator_mode(&refused),

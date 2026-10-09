@@ -20,26 +20,6 @@ pub(crate) struct RecordingSession {
 pub(crate) struct OpenTake {
     episode: String,
     capture: Option<VideoCapture>,
-    control: TakeControl,
-}
-
-/// What moves the arms an open take records, which is what its end stops.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TakeControl {
-    /// Teleoperation the take entered; ending the take returns to idle.
-    Teleoperation,
-    /// The policy session whose run the take is; it ends when the run does.
-    Policy(String),
-}
-
-impl TakeControl {
-    /// The control source as an error message names it.
-    pub(crate) const fn name(&self) -> &'static str {
-        match self {
-            Self::Teleoperation => "teleoperation",
-            Self::Policy(_) => "the policy",
-        }
-    }
 }
 
 struct ReviewedTake {
@@ -54,21 +34,13 @@ pub(crate) struct TakeChange<'a> {
 }
 
 impl OpenTake {
-    pub(crate) fn new(
-        episode: String,
-        capture: Option<VideoCapture>,
-        control: TakeControl,
-    ) -> Self {
+    pub(crate) fn new(episode: String, capture: Option<VideoCapture>) -> Self {
         debug_assert!(
             capture
                 .as_ref()
                 .is_none_or(|capture| capture.episode_id() == episode)
         );
-        Self {
-            episode,
-            capture,
-            control,
-        }
+        Self { episode, capture }
     }
 }
 
@@ -126,10 +98,6 @@ impl TakeChange<'_> {
         self.open.as_ref().map(|take| take.episode.as_str())
     }
 
-    pub(crate) fn control(&self) -> Option<&TakeControl> {
-        self.open.as_ref().map(|take| &take.control)
-    }
-
     /// The open take's camera capture; `None` without a take or cameras.
     pub(crate) fn capture(&mut self) -> Option<&mut VideoCapture> {
         self.open.as_mut()?.capture.as_mut()
@@ -160,7 +128,7 @@ mod tests {
     use super::*;
 
     fn take(episode: &str) -> OpenTake {
-        OpenTake::new(episode.to_owned(), None, TakeControl::Teleoperation)
+        OpenTake::new(episode.to_owned(), None)
     }
 
     #[test]

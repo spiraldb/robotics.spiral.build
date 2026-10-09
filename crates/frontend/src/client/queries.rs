@@ -12,14 +12,13 @@ pub(crate) enum QueryDomain {
     Telemetry,
     Recording,
     Training,
-    Rollout,
     Settings,
     Catalog,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct QueryRefresh {
-    revisions: [Signal<u64>; 9],
+    revisions: [Signal<u64>; 8],
 }
 impl QueryRefresh {
     pub(crate) fn use_provider() -> Self {

@@ -81,15 +81,6 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
-    #[cfg(test)]
-    pub(crate) fn new(bytes: Bytes, sequence: u64, captured_at: Instant) -> Self {
-        Self {
-            bytes,
-            sequence,
-            captured_at,
-        }
-    }
-
     pub(crate) fn bytes(&self) -> &Bytes {
         &self.bytes
     }

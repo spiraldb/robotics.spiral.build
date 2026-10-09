@@ -51,12 +51,6 @@ impl TrainingHistory {
         history
     }
 
-    /// History that never loads, for components tested without a project.
-    #[cfg(test)]
-    pub(crate) fn use_unloaded() -> Self {
-        Self::use_response(use_resource(std::future::pending))
-    }
-
     fn use_response(
         request: Resource<Result<TrainingHistoryResponse, crate::client::CommandError>>,
     ) -> Self {

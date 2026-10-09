@@ -31,9 +31,6 @@ pub enum ControlSource {
     /// The operator moves the leader and the follower mirrors it; both arms
     /// are recorded.
     Teleoperate { leader: String, follower: String },
-    /// A checkpoint's policy drives the follower for its duration; the take
-    /// records the follower from the policy's first action to its last.
-    Policy(crate::rollout::RolloutConfig),
 }
 
 /// Chooses whether stopping a recording retains its episode.

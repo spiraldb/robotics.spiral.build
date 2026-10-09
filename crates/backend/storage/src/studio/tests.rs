@@ -1,5 +1,4 @@
 use super::*;
-use crate::settings::{StoredStudioPreferences, StudioPreferencePersistence};
 use crate::training::{PublishedModels, TrainingRunPersistence};
 use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement};
 use spiral_robotics_common::training::{
@@ -155,14 +154,6 @@ async fn local_state_survives_reopening() {
     let store = StudioStore::at(path.clone());
     let connection = Fixture::connection("bench");
     let project = store.project(&connection);
-    StudioPreferencePersistence::new(&project)
-        .save(
-            &StoredStudioPreferences::default()
-                .with_policy_runtime("http://localhost:9")
-                .unwrap(),
-        )
-        .await
-        .unwrap();
     for (run, started_ms) in [("run", 2), ("second_run", 1)] {
         let identity = TrainingRunIdentity::new(
             run,
@@ -184,15 +175,6 @@ async fn local_state_survives_reopening() {
     }
     let reopened = StudioStore::at(path);
     let recovered = reopened.project(&connection);
-    assert_eq!(
-        StudioPreferencePersistence::new(&recovered)
-            .load()
-            .await
-            .unwrap()
-            .robot_connector()
-            .policy_runtime(),
-        "http://localhost:9"
-    );
     assert_eq!(
         TrainingRunPersistence::new(&recovered)
             .load()
@@ -304,8 +286,13 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
             .await
             .unwrap()
     };
-    StudioPreferencePersistence::new(&source)
-        .save(&StoredStudioPreferences::default())
+    TrainingRunPersistence::new(&source)
+        .insert(&TrainingRunIdentity::new(
+            "run",
+            TrainingConfig::default(),
+            TrainingInputSummary::new(1, 1, 2.0),
+            1,
+        ))
         .await
         .unwrap();
     let archive = StudioSnapshot::capture(&source).await.unwrap();
@@ -322,7 +309,7 @@ async fn project_restore_is_atomic_and_preserves_other_projects() {
     let document = document.with_revision(1);
     assert_eq!(saved(&target).await, Some(document.clone()));
     // A later feature failure must undo earlier curation deletion/insertion too.
-    Fixture::sql(&store, "CREATE TRIGGER reject_preferences BEFORE INSERT ON studio_settings BEGIN SELECT RAISE(ABORT, 'restore failed'); END;").await.unwrap();
+    Fixture::sql(&store, "CREATE TRIGGER reject_training_runs BEFORE INSERT ON training_runs BEGIN SELECT RAISE(ABORT, 'restore failed'); END;").await.unwrap();
     let failed = imported.stage(&target).await;
     assert!(failed.is_err());
     assert_eq!(saved(&target).await, Some(document.clone()));

@@ -11,7 +11,6 @@ use spiral_robotics_common::training::{
     TrainingConfig, TrainingModel, TrainingReadiness, TrainingRun, TrainingRunIdentity,
     TrainingRunStatus, TrainingSnapshot,
 };
-use spiral_robotics_inference::ModelArtifact;
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 
 use super::admission::{ModelPublishing, RunDeletion, StartTrainingAdmission as _};
@@ -93,31 +92,6 @@ impl TrainingManager {
     /// Every checkpoint any run saved.
     pub(super) async fn checkpoints(&self) -> Result<Vec<TrainingCheckpoint>, OperationError> {
         Ok(self.reports().await?.checkpoints())
-    }
-
-    /// Checkpoint `step` of `run_id` as a policy, for the robot connector to
-    /// roll out. Loading it is what proves it exists.
-    pub(super) async fn policy(
-        &self,
-        run_id: &str,
-        step: u64,
-    ) -> Result<ModelArtifact, OperationError> {
-        if !matches!(
-            self.record(run_id).await?.config().model(),
-            TrainingModel::Act(_)
-        ) {
-            return Err(OperationError::invalid_input(format!(
-                "Training run {run_id:?} trained no policy to roll out."
-            )));
-        }
-        let (config, weights) = self
-            .service()
-            .map_err(OperationError::External)?
-            .checkpoint(&self.project(), run_id, step)
-            .await
-            .map_err(OperationError::External)?;
-        ModelArtifact::from_bytes(config, weights)
-            .map_err(|error| OperationError::Internal(error.to_string()))
     }
 
     /// Publish the checkpoint `publication` names under its name, so Score

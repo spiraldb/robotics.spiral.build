@@ -295,15 +295,6 @@ impl TakeTransport {
         self.session().next_take().starting()
     }
 
-    /// Whether the take on the clock can pause: teleoperation can, a
-    /// policy's run cannot.
-    pub(super) fn pausable(&self) -> bool {
-        !matches!(
-            self.session().telemetry().mode(),
-            spiral_robotics_common::robots::ModeSelection::Policy { .. }
-        )
-    }
-
     pub(super) fn seek_blocker(&self) -> Option<String> {
         self.subject.preview_blocker()
     }

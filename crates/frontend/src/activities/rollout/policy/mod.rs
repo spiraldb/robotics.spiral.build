@@ -1,14 +1,12 @@
-//! The Policy control source: a trained checkpoint drives the follower for a set
-//! time. The robot connector runs the policy; Studio picks the checkpoint,
-//! writes it there, and watches the run.
+//! The Policy control source: a trained checkpoint to drive the follower for
+//! a set time. Studio lists the checkpoints and keeps the operator's choice;
+//! running one on a robot is not supported yet.
 
 mod checkpoints;
-mod client;
 mod control;
 mod readiness;
 mod section;
 
-pub(super) use client::PolicyClient;
 pub(super) use control::PolicyControl;
 pub(super) use readiness::PolicyReadiness;
 pub(super) use section::PolicySection;

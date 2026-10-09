@@ -5,8 +5,7 @@
 //! robot connector remains authoritative for recording, hardware, and safety.
 
 use super::next_take::ControlKind;
-use super::policy::PolicyClient;
-use super::recording_client::RecordingTransfer;
+use super::policy::PolicyControl;
 use crate::activities::rollout::RecordingClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::recording::{ControlSource, EpisodeInfo, RecordingStart};
@@ -37,36 +36,32 @@ impl RolloutSession {
                 Some("Recording is paused while telemetry reconnects.".to_owned())
             }
             ControlKind::Teleop => None,
-            // A take is a whole run: it starts with the policy, not partway in.
-            ControlKind::Policy if self.policy().active_session().is_some() => {
-                Some("Recording starts with the next policy run.".to_owned())
-            }
             ControlKind::Policy => self.policy_blocker(),
         }
     }
 
-    /// Start the next take's control source and record it: the leader and follower
-    /// for Teleop, or the chosen checkpoint on the follower for Policy, whose
-    /// take begins with its first action once it has loaded.
+    /// Start the next take's control source and record it: the leader and
+    /// follower for Teleop. Recording a policy is not supported yet.
     pub(super) fn start_recording(self) {
         if let Some(reason) = self.recording_blocker() {
             self.project().report(reason);
             return;
         }
-        let setup = self.telemetry().snapshot();
-        let (control, policy) = match self.record_control() {
+        let control = match self.record_control() {
             ControlKind::Teleop => {
-                let Some((leader, follower)) = setup.read().default_teleoperation_pair() else {
+                let pair = self
+                    .telemetry()
+                    .snapshot()
+                    .read()
+                    .default_teleoperation_pair();
+                let Some((leader, follower)) = pair else {
                     return;
                 };
-                (ControlSource::Teleoperate { leader, follower }, None)
+                ControlSource::Teleoperate { leader, follower }
             }
             ControlKind::Policy => {
-                let follower = setup.read().follower().map(|robot| robot.id().to_owned());
-                let Some(config) = follower.and_then(|id| self.policy().next_run(&id)) else {
-                    return;
-                };
-                (ControlSource::Policy(config.clone()), Some(config))
+                self.project().report(PolicyControl::UNSUPPORTED);
+                return;
             }
         };
         let next_take = self.next_take();
@@ -77,13 +72,7 @@ impl RolloutSession {
         );
         self.commands().run("", async move {
             next_take.set_starting(true);
-            let started = async {
-                if let Some(config) = policy.as_ref() {
-                    PolicyClient::current().store(config).await?;
-                }
-                RecordingClient::current().start_recording(request).await
-            }
-            .await;
+            let started = RecordingClient::current().start_recording(request).await;
             next_take.set_starting(false);
             started.map(|_| ()).map_err(|error| error.to_string())
         });
@@ -145,7 +134,7 @@ impl RolloutSession {
             let (dataset, episode) = (summary.dataset_id().to_owned(), summary.id().to_owned());
             (completion.on_completed)(summary);
             // A discarded take is stored too, marked as discarded.
-            RecordingTransfer::current()
+            self.storing_takes()
                 .carry(&dataset, &episode)
                 .await
                 .map_err(|error| {

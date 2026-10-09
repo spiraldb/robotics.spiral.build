@@ -2,7 +2,7 @@
 //! moves, and a follower filmed by a wrist camera and a front camera.
 //!
 //! Both are ordinary saved robots, so everything Studio does with real arms —
-//! teleoperation, takes with video, rollout — works on them unchanged. The
+//! teleoperation, takes with video — works on them unchanged. The
 //! model files are TheRobotStudio's SO-101 description; see `so101/README.md`.
 
 use std::collections::BTreeMap;

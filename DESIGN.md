@@ -347,7 +347,7 @@ episodes, ending in the parts worth training on),
 (everything that drives the real arms: Studio, a leader, or a trained policy
 controls the robot, and Studio shows it and records it). Training and
 Rollout's Policy driver are parked until Spiral decodes MCAP video into
-training images. Everything else is a panel in a session-owned
+training images; Policy cannot run on a robot yet and says so when chosen. Everything else is a panel in a session-owned
 tab-and-tile workspace (`dioxus-workbench`) that docks, tabs, splits, and
 resizes with pointer and keyboard. The layout is powerful; the chrome stays
 quiet.
@@ -1092,12 +1092,10 @@ Controller → one synchronized recorded projection`.
 **Receive live telemetry:** `Backend event → Rollout Activity Controller →
 live projection → Scene + Cameras + Signals + Timeline`.
 
-**Run a policy:** `Control → Policy → Rollout Activity Controller → write the
-checkpoint to the robot connector → run on the fixed follower → Policy status
-line + live Scene + follower cameras`. Policy remains disabled until the
+**Run a policy:** not supported yet. Policy remains disabled until the
 checkpoint, follower, camera binding, calibration, and fresh control stream
-are available; the robot connector revalidates the complete contract before
-motion. Hold stops the run.
+are available; choosing it then, or Record policy, says that running a policy
+on a robot is not supported yet.
 
 **Record a take:** `Timeline → Record → start the next take's driver and the
 take together`. A policy's take answers once the policy has taken the

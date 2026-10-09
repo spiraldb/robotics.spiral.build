@@ -1,4 +1,4 @@
-"""A camera stream decoded onto the training clock, resized as a rollout resizes live frames."""
+"""A camera stream decoded onto the training clock and resized to the policy's image size."""
 
 from __future__ import annotations
 

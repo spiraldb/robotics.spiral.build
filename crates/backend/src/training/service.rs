@@ -180,32 +180,6 @@ impl TrainingService {
         Self::checked(response, "Deleting the run").await.map(drop)
     }
 
-    /// Checkpoint `step` of run `id`: its policy config and its weights.
-    pub(super) async fn checkpoint(
-        &self,
-        project: &str,
-        id: &str,
-        step: u64,
-    ) -> Result<(Vec<u8>, Vec<u8>), String> {
-        let step = step.to_string();
-        let part = |name: &'static str| {
-            let url = self.url(&["v1", "runs", project, id, "checkpoints", &step, name]);
-            async move {
-                self.send(
-                    self.authorized(self.client.get(url))
-                        .timeout(UPLOAD_TIMEOUT),
-                    "Reading the checkpoint",
-                )
-                .await?
-                .bytes()
-                .await
-                .map(|bytes| bytes.to_vec())
-                .map_err(|error| format!("Reading the checkpoint: {error}"))
-            }
-        };
-        Ok((part("config").await?, part("model").await?))
-    }
-
     /// Publish the checkpoint `request` names as a model the scorer reads
     /// by the selector it answers; the same weights again answer the same
     /// selector.

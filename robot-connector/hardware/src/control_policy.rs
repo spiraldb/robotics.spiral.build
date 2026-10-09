@@ -13,7 +13,6 @@ pub(crate) enum ControlMode {
     Idle,
     Manual { robot: String },
     Teleoperate { leader: String, follower: String },
-    Policy { robot: String, session: String },
 }
 
 impl ControlMode {
@@ -22,14 +21,13 @@ impl ControlMode {
             Self::Idle => "Idle",
             Self::Manual { .. } => "Manual",
             Self::Teleoperate { .. } => "Teleoperation",
-            Self::Policy { .. } => "Policy",
         }
     }
 
     fn involves(&self, robot: &str) -> bool {
         match self {
             Self::Idle => false,
-            Self::Manual { robot: owner } | Self::Policy { robot: owner, .. } => owner == robot,
+            Self::Manual { robot: owner } => owner == robot,
             Self::Teleoperate { leader, follower } => leader == robot || follower == robot,
         }
     }
@@ -69,7 +67,6 @@ pub(crate) enum Intent {
     Hold { robot: String },
     Release { robot: String },
     AuthorizeManualCommand { robot: String },
-    AuthorizePolicyCommand { robot: String, session: String },
     StartCalibration { robot: String },
 }
 
@@ -127,7 +124,6 @@ pub(crate) enum AdmissionError {
     SameTeleoperationRobot,
     NoSharedCalibratedJoints { leader: String, follower: String },
     ManualCommandNotOwned(String),
-    PolicyCommandNotOwned { robot: String, session: String },
 }
 
 impl fmt::Display for AdmissionError {
@@ -152,10 +148,6 @@ impl fmt::Display for AdmissionError {
             Self::ManualCommandNotOwned(robot) => write!(
                 formatter,
                 "switch to manual mode for robot {robot:?} before commanding its joints"
-            ),
-            Self::PolicyCommandNotOwned { robot, session } => write!(
-                formatter,
-                "policy session {session:?} is not allowed to command robot {robot:?}"
             ),
         }
     }
@@ -197,19 +189,6 @@ impl ControlState {
                     })
                 } else {
                     Err(AdmissionError::ManualCommandNotOwned(robot))
-                }
-            }
-            Intent::AuthorizePolicyCommand { robot, session } => {
-                if matches!(
-                    &self.mode,
-                    ControlMode::Policy { robot: owner, session: active }
-                        if owner == &robot && active == &session
-                ) {
-                    Ok(Decision {
-                        effects: Vec::new(),
-                    })
-                } else {
-                    Err(AdmissionError::PolicyCommandNotOwned { robot, session })
                 }
             }
             Intent::StartCalibration { robot } => Ok(self.decide_calibration_start(robot)),
@@ -274,7 +253,7 @@ impl ControlState {
 
         match &mode {
             ControlMode::Idle => {}
-            ControlMode::Manual { robot } | ControlMode::Policy { robot, .. } => {
+            ControlMode::Manual { robot } => {
                 self.ready_joints(robot)?;
             }
             ControlMode::Teleoperate { leader, follower } => {
@@ -305,13 +284,6 @@ impl ControlState {
                 });
                 effects.push(Effect::SetTorque {
                     robot: follower.clone(),
-                    engaged: true,
-                    on_failure: FailureAction::AbandonTransition,
-                });
-            }
-            ControlMode::Policy { robot, .. } => {
-                effects.push(Effect::SetTorque {
-                    robot: robot.clone(),
                     engaged: true,
                     on_failure: FailureAction::AbandonTransition,
                 });
@@ -506,20 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn policy_engages_its_exclusive_owner_before_commit() {
-        let mode = ControlMode::Policy {
-            robot: "leader".to_owned(),
-            session: "run".to_owned(),
-        };
-        let decision = state().decide(Intent::Select(mode.clone())).unwrap();
-        assert_eq!(decision.effects.last(), Some(&Effect::CommitMode(mode)));
-        assert!(decision.effects.iter().any(|effect| matches!(
-            effect,
-            Effect::SetTorque { robot, engaged: true, .. } if robot == "leader"
-        )));
-    }
-
-    #[test]
     fn a_calibration_sweep_blocks_every_non_idle_owner() {
         let mut state = state();
         state
@@ -531,9 +489,9 @@ mod tests {
             ControlMode::Manual {
                 robot: "leader".to_owned(),
             },
-            ControlMode::Policy {
-                robot: "leader".to_owned(),
-                session: "run".to_owned(),
+            ControlMode::Teleoperate {
+                leader: "leader".to_owned(),
+                follower: "follower".to_owned(),
             },
         ] {
             assert!(matches!(
@@ -581,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn command_authorization_requires_the_exact_owner_and_session() {
+    fn manual_command_authorization_requires_the_owner() {
         let mut state = state();
         state.mode = ControlMode::Manual {
             robot: "leader".to_owned(),
@@ -600,29 +558,6 @@ mod tests {
             }),
             Err(AdmissionError::ManualCommandNotOwned("follower".to_owned()))
         );
-
-        state.mode = ControlMode::Policy {
-            robot: "leader".to_owned(),
-            session: "run-1".to_owned(),
-        };
-        assert_eq!(
-            state.decide(Intent::AuthorizePolicyCommand {
-                robot: "leader".to_owned(),
-                session: "run-1".to_owned(),
-            }),
-            Ok(Decision {
-                effects: Vec::new()
-            })
-        );
-        for (robot, session) in [("follower", "run-1"), ("leader", "run-2")] {
-            assert!(matches!(
-                state.decide(Intent::AuthorizePolicyCommand {
-                    robot: robot.to_owned(),
-                    session: session.to_owned(),
-                }),
-                Err(AdmissionError::PolicyCommandNotOwned { .. })
-            ));
-        }
     }
 
     #[test]

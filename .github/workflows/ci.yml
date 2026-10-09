@@ -22,7 +22,6 @@ jobs:
         -p spiral-robotics-backend
         -p spiral-robotics-frontend
         -p spiral-robotics-hardware
-        -p spiral-robotics-inference
         -p spiral-robotics-recording
         -p spiral-robotics-connector
         -p spiral-robotics-connector-os

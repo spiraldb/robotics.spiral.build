@@ -1,5 +1,6 @@
 use super::*;
 use futures_util::FutureExt as _;
+use spiral_robotics_common::training::{TrainingConfig, TrainingInputSummary, TrainingRunIdentity};
 use spiral_robotics_storage::{
     Database, DatabaseConnection, DatabaseError, DatabaseErrorKind, DatabaseFuture,
 };
@@ -57,37 +58,28 @@ impl LoadingFixture {
 #[tokio::test]
 async fn studio_loads_and_saves_without_opening_spiral() {
     let fixture = LoadingFixture::new().await;
-    let preferences = spiral_robotics_storage::StoredStudioPreferences::default()
-        .with_policy_runtime("http://127.0.0.1:9")
-        .unwrap();
+    let run = TrainingRunIdentity::new(
+        "run",
+        TrainingConfig::default(),
+        TrainingInputSummary::new(1, 1, 2.0),
+        1,
+    );
     fixture
         .session
         .storage()
-        .preferences()
-        .save(&preferences)
+        .training_runs()
+        .insert(&run)
         .await
         .unwrap();
     assert_eq!(
         fixture
             .session
             .storage()
-            .preferences()
-            .load()
-            .await
-            .unwrap()
-            .robot_connector()
-            .policy_runtime(),
-        "http://127.0.0.1:9"
-    );
-    assert!(
-        fixture
-            .session
-            .storage()
             .training_runs()
             .load()
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [run]
     );
     assert!(
         fixture

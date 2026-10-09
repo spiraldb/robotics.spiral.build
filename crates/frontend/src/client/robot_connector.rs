@@ -1,5 +1,5 @@
 //! The robot connector this workspace drives: a program that runs next to the
-//! arms and owns their hardware, recordings, and rollouts. It links itself to
+//! arms and owns their hardware and recordings. It links itself to
 //! Studio with a token the workspace issues, and the browser reaches it only
 //! through Studio's relay, as it makes any other request of the workspace.
 
@@ -10,7 +10,6 @@ use serde::de::DeserializeOwned;
 use spiral_robotics_common::robot_connector::{
     RELAY_PREFIX, RobotConnectorHealth, RobotConnectorToken,
 };
-use spiral_robotics_common::settings::{DataSettings, PolicyRuntimeUpdate};
 
 use super::project::ProjectClient;
 use super::queries::{QueryDomain, QueryPolicy};
@@ -21,8 +20,6 @@ use crate::shell::workspace::WorkspaceSettings;
 pub(crate) struct RobotConnector {
     /// False until the workspace's settings are read.
     token_issued: Memo<bool>,
-    /// Empty until the workspace's settings are read.
-    policy_runtime: Memo<String>,
     health: Signal<Option<Result<RobotConnectorHealth, CommandError>>>,
 }
 
@@ -33,16 +30,9 @@ impl RobotConnector {
                 .loaded()
                 .is_some_and(|settings| settings.robot_connector().token_issued())
         });
-        let policy_runtime = use_memo(move || {
-            settings
-                .loaded()
-                .map(|settings| settings.robot_connector().policy_runtime().to_owned())
-                .unwrap_or_default()
-        });
         let health = use_signal(|| None);
         use_context_provider(|| Self {
             token_issued,
-            policy_runtime,
             health,
         })
     }
@@ -86,26 +76,6 @@ impl RobotConnector {
             &[QueryDomain::Settings, QueryDomain::RobotConnector],
             HttpRequest::new("POST", "/api/settings/robot-connector/token"),
         )
-    }
-
-    /// The policy runtime a rollout asks for actions, as the robot connector
-    /// reaches it: `localhost` is the robot connector's own machine.
-    pub(crate) fn policy_runtime(self) -> String {
-        self.policy_runtime.read().clone()
-    }
-
-    /// Have the robot connector ask the policy runtime at `policy_runtime`
-    /// for actions, from now on, for everyone in this workspace.
-    pub(crate) fn save_policy_runtime(
-        self,
-        policy_runtime: &str,
-    ) -> impl Future<Output = Result<(), CommandError>> + use<> {
-        let saved = ProjectClient::current().mutate::<DataSettings>(
-            &[QueryDomain::Settings],
-            HttpRequest::new("PUT", "/api/settings/policy-runtime")
-                .json(&PolicyRuntimeUpdate::new(policy_runtime.trim())),
-        );
-        async move { saved.await.map(|_| ()) }
     }
 
     /// The linked robot connector's build when it last answered, or why none

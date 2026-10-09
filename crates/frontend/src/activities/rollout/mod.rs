@@ -1,6 +1,6 @@
-//! Rollout: everything that drives the real arms. Studio (Hold and Release),
-//! a leader (Teleop), or a policy controls the robot; the scene, cameras, and
-//! Timeline show it; Record keeps it as a take. Setting the arms up lives
+//! Rollout: everything that drives the real arms. Studio (Hold and Release)
+//! or a leader (Teleop) controls the robot; a policy cannot yet. The scene,
+//! cameras, and Timeline show it; Record keeps it as a take. Setting the arms up lives
 //! here too.
 
 pub(crate) mod actions;

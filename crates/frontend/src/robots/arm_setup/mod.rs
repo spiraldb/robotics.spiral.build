@@ -19,6 +19,7 @@ use spiral_robotics_ui::{
 };
 
 use crate::client::robot_connector::RobotConnector;
+use crate::panels::camera::LiveCameraImage;
 use crate::panels::scene::ScenePalette;
 use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection, Selection};
 use crate::shell::state::StudioProjectState;
@@ -1003,13 +1004,9 @@ fn CameraSection(
             // answerable once you can see what the camera is looking at.
             if let Some(camera) = chosen {
                 div { class: "mt-1 overflow-hidden rounded border border-line",
-                    img {
+                    LiveCameraImage {
+                        camera: camera.id().to_owned(),
                         class: "aspect-video w-full bg-camera object-contain",
-                        src: {
-                            use crate::client::http::CameraApiPath;
-                            let project = crate::client::project::ProjectClient::current();
-                            camera.id().camera_stream_path(project.project())
-                        },
                         alt: "Live preview from {camera.name()}",
                     }
                     div { class: "flex items-center gap-1 p-1",

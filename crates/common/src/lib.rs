@@ -18,7 +18,6 @@ pub mod recording_signals;
 pub mod relations;
 pub mod robot_connector;
 pub mod robots;
-pub mod rollout;
 pub mod settings;
 pub mod sql;
 pub mod training;

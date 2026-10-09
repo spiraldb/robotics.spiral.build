@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::settings::{
-    DataSettings, PolicyRuntimeUpdate, RobotConnectorSettings, SettingsUpdate, SpiralSettings,
+    DataSettings, RobotConnectorSettings, SettingsUpdate, SpiralSettings,
 };
 use spiral_robotics_storage::{
     ProjectStore, ProviderKeys, RobotConnectorTokens, SpiralAccess, SpiralConnection,
-    SpiralConnectionSettings, StorageManager, StoredStudioPreferences, WorkspaceStore,
+    SpiralConnectionSettings, StorageManager, WorkspaceStore,
 };
 
 use crate::OperationError;
@@ -126,25 +126,6 @@ impl OpenProject {
     }
     fn lerobot_imports(&self) -> &Arc<LeRobotImports> {
         &self.lerobot_imports
-    }
-
-    async fn preferences(&self) -> Result<StoredStudioPreferences, OperationError> {
-        self.storage()
-            .preferences()
-            .load()
-            .await
-            .map_err(OperationError::External)
-    }
-
-    async fn apply_preferences(
-        &self,
-        preferences: StoredStudioPreferences,
-    ) -> Result<(), OperationError> {
-        self.storage()
-            .preferences()
-            .save(&preferences)
-            .await
-            .map_err(OperationError::External)
     }
 
     /// Whether training is active.
@@ -284,14 +265,10 @@ impl ProjectRegistry {
             ),
             None => (String::new(), false),
         };
-        let preferences = project.preferences().await?;
         Ok(DataSettings::new(
             OpenProject::present(&connection),
             name,
-            RobotConnectorSettings::new(
-                token_issued,
-                preferences.robot_connector().policy_runtime(),
-            ),
+            RobotConnectorSettings::new(token_issued),
         ))
     }
 
@@ -303,23 +280,6 @@ impl ProjectRegistry {
     ) -> Result<DataSettings, OperationError> {
         let project_id = Self::chosen(project)?;
         self.rename_workspace(&project_id, update.name()).await?;
-        self.settings(project).await
-    }
-
-    /// Have the robot connector of `project`'s workspace ask the policy
-    /// runtime `update` names for actions.
-    pub(crate) async fn set_policy_runtime(
-        &self,
-        project: &OpenProject,
-        update: &PolicyRuntimeUpdate,
-    ) -> Result<DataSettings, OperationError> {
-        Self::chosen(project)?;
-        let preferences = project
-            .preferences()
-            .await?
-            .with_policy_runtime(update.policy_runtime())
-            .map_err(OperationError::InvalidInput)?;
-        project.apply_preferences(preferences).await?;
         self.settings(project).await
     }
 
@@ -649,24 +609,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn preference_changes_apply_in_place() {
-        let fixture = ProjectFixture::new().await;
-        let project = fixture.open("").await;
-        let preferences = StoredStudioPreferences::default()
-            .with_policy_runtime("http://127.0.0.1:5050")
-            .unwrap();
-        project.apply_preferences(preferences).await.unwrap();
-        assert!(Arc::ptr_eq(&project, &fixture.open("").await));
-        let settings = fixture.projects.settings(&project).await.unwrap();
-        assert_eq!(
-            settings.robot_connector(),
-            &RobotConnectorSettings::new(false, "http://127.0.0.1:5050")
-        );
-        assert_eq!(settings.name(), "");
-    }
-
-    #[tokio::test]
-    async fn settings_present_the_project_connection_and_preferences() {
+    async fn settings_present_the_project_connection() {
         let fixture = ProjectFixture::new().await;
         let connection = SpiralConnectionSettings::new(
             ENDPOINT.to_owned(),
@@ -681,15 +624,6 @@ pub(crate) mod tests {
             .factory
             .create(connection, fixture.session().await.access())
             .unwrap();
-        let preferences = StoredStudioPreferences::default()
-            .with_policy_runtime("http://127.0.0.1:5050")
-            .unwrap();
-        project
-            .storage()
-            .preferences()
-            .save(&preferences)
-            .await
-            .unwrap();
         let settings = fixture.projects.settings(&project).await.unwrap();
         assert_eq!(settings.spiral().project_id(), "configured_project");
         assert_eq!(settings.spiral().endpoint(), "https://api.spiraldb.dev");
@@ -698,10 +632,6 @@ pub(crate) mod tests {
             "https://spfs.spiraldb.dev"
         );
         assert_eq!(settings.name(), "configured_project");
-        assert_eq!(
-            settings.robot_connector().policy_runtime(),
-            "http://127.0.0.1:5050"
-        );
     }
 }
 

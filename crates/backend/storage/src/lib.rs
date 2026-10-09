@@ -48,9 +48,6 @@ pub use manager::StorageManager;
 pub use provider_keys::ProviderKeys;
 pub use robot_connector_tokens::RobotConnectorTokens;
 pub use sessions::{SessionStore, StoredSession};
-pub use settings::{
-    ServiceEndpoint, SpiralConnectionSettings, StoredRobotConnectorPreference,
-    StoredStudioPreferences,
-};
+pub use settings::{ServiceEndpoint, SpiralConnectionSettings};
 pub use spiral_access::{SpiralAccess, SpiralAccessPublisher, SpiralConnection};
 pub use workspaces::WorkspaceStore;

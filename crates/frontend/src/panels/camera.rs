@@ -95,6 +95,50 @@ pub(super) fn CameraEditor(element_id: String, source: CameraEditorSource) -> El
     rsx! { div { class: "camera-editor-content", {content} } }
 }
 
+/// How often a preview checks that its stream still shows a picture.
+const STREAM_CHECK_MS: u32 = 2_000;
+
+/// A camera's live preview, relayed by Studio. When its MJPEG stream breaks —
+/// Studio restarted, or no robot connector was linked yet — an `<img>` fires
+/// no event and never reopens it: it just stops showing a picture. So the
+/// preview looks, and starts the image over when it has none.
+#[component]
+pub(crate) fn LiveCameraImage(camera: String, class: String, alt: String) -> Element {
+    let mut attempts = use_signal(|| 0_u32);
+    let mut image = use_signal(|| None::<web_sys::HtmlImageElement>);
+    use_future(move || async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(STREAM_CHECK_MS).await;
+            let broken = image
+                .peek()
+                .as_ref()
+                .is_some_and(|image| image.complete() && image.natural_width() == 0);
+            if broken {
+                image.set(None);
+                attempts += 1;
+            }
+        }
+    });
+    let src = camera.camera_stream_path(ProjectClient::current().project());
+    rsx! {
+        Remount { identity: format!("{camera}#{attempts}"),
+            img {
+                class,
+                src,
+                alt,
+                loading: "eager",
+                decoding: "sync",
+                draggable: "false",
+                onmounted: move |event| {
+                    if let Some(element) = event.data().downcast::<web_sys::Element>() {
+                        image.set(Some(element.clone().unchecked_into()));
+                    }
+                },
+            }
+        }
+    }
+}
+
 #[component]
 fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
     let setup = crate::robots::RobotSetupState::current();
@@ -145,13 +189,10 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
     rsx! {
         div { class: "camera-editor-frame camera-live-frame",
             if workspace.is_active() && panel.geometry().visible() {
-            img {
+            LiveCameraImage {
+                camera: device.clone(),
                 class: "camera-stream-image",
-                src: device.camera_stream_path(ProjectClient::current().project()),
                 alt: "Live view from the {role} camera on {robot}",
-                loading: "eager",
-                decoding: "sync",
-                draggable: "false",
             }
             }
             if let Some(problem) = problem {

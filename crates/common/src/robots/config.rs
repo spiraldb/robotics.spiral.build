@@ -235,8 +235,8 @@ impl RobotConfig {
 }
 
 /// How far the control loop moves an arm toward its goal in one cycle, in
-/// encoder counts. A slider move ramps gently; an arm following a leader or a
-/// policy ramps faster, so it keeps up with motion produced at human speed.
+/// encoder counts. A slider move ramps gently; an arm following a leader ramps
+/// faster, so it keeps up with motion produced at human speed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MotionLimits {
@@ -277,7 +277,7 @@ impl MotionLimits {
         self.manual_step_counts
     }
 
-    /// The largest step while the arm follows a leader or a policy.
+    /// The largest step while the arm follows a leader.
     pub const fn following_step_counts(&self) -> u32 {
         self.following_step_counts
     }
@@ -294,7 +294,7 @@ pub enum MotorAccess<'a> {
 ///
 /// A simulated motor reports encoder counts and follows goals the way a real
 /// one does, so everything above the bus — calibration, the control loop,
-/// recording, rollout — runs unchanged.
+/// recording — runs unchanged.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimulatedMotors {

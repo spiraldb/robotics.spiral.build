@@ -123,7 +123,10 @@ impl McapRecording {
             .checked_mul(1_000_000)
             .ok_or("Recording origin overflows nanoseconds")?;
         let mut recording = Self {
-            writer: mcap::Writer::new(Cursor::new(Vec::new())).map_err(|e| e.to_string())?,
+            writer: mcap::WriteOptions::new()
+                .compression(Some(mcap::Compression::Lz4))
+                .create(Cursor::new(Vec::new()))
+                .map_err(|e| e.to_string())?,
             origin_ns,
         };
         let schema = RecordingSchema::load()?;

@@ -143,8 +143,9 @@ impl LiveStreams {
         }
     }
 
-    /// Keep `frame` as `camera`'s latest, while someone views it. A frame
-    /// like the last one is no new frame.
+    /// Keep `frame` as `camera`'s latest, while someone views it. Every post
+    /// is a new frame, even of a still scene: a browser shows an MJPEG frame
+    /// only once the next one starts.
     pub(super) fn publish_frame(&self, camera: &str, frame: Bytes) {
         if let Some(feed) = self
             .state
@@ -152,13 +153,7 @@ impl LiveStreams {
             .as_ref()
             .and_then(|state| state.cameras.get(camera))
         {
-            feed.latest.send_if_modified(|latest| {
-                let fresh = latest.as_ref() != Some(&frame);
-                if fresh {
-                    *latest = Some(frame);
-                }
-                fresh
-            });
+            feed.latest.send_replace(Some(frame));
         }
     }
 

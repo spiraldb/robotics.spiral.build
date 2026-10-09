@@ -8,7 +8,7 @@ use axum::{
     response::Response,
 };
 use futures_util::StreamExt as _;
-use serde_json::{Value, json};
+use serde_json::Value;
 use spiral_robotics_common::project::ProjectKey;
 use spiral_robotics_common::robot_connector::{
     HEALTH_HEADER, LINK_ANSWERS_PATH, LINK_CAMERAS_PATH, LINK_NEXT_PATH, LINK_TELEMETRY_PATH,
@@ -193,30 +193,6 @@ async fn a_connector_links_with_its_workspaces_current_token_only() {
     let poll = fixture.poll(&reissued);
     fixture.until_linked().await;
     poll.abort();
-}
-
-#[tokio::test]
-async fn the_policy_runtime_is_a_workspace_setting() {
-    let fixture = LinkFixture::new().await;
-    let update = |policy_runtime: &str| {
-        fixture
-            .browser(Request::put("/api/settings/policy-runtime"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                json!({"policy_runtime": policy_runtime}).to_string(),
-            ))
-            .unwrap()
-    };
-    let (status, settings) =
-        LinkFixture::json(fixture.send(update("http://gpu-box.example:50051/")).await).await;
-    assert_eq!(status, StatusCode::OK, "{settings}");
-    assert_eq!(
-        settings["robot_connector"],
-        json!({"token_issued": false, "policy_runtime": "http://gpu-box.example:50051"})
-    );
-    let (status, failure) = LinkFixture::json(fixture.send(update("gpu-box:50051")).await).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(failure["code"], "invalid_input");
 }
 
 #[tokio::test]
@@ -458,10 +434,11 @@ async fn a_camera_is_watched_while_its_mjpeg_response_is_open() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(parts.next().await.unwrap().unwrap(), part(first));
-    // A repeated frame is no new frame.
-    for frame in [first, second] {
-        fixture.send(publish(frame)).await;
-    }
+    // A still scene posts the same picture again. It is still a new part: a
+    // browser shows a frame only once the next one starts.
+    fixture.send(publish(first)).await;
+    assert_eq!(parts.next().await.unwrap().unwrap(), part(first));
+    fixture.send(publish(second)).await;
     assert_eq!(parts.next().await.unwrap().unwrap(), part(second));
 
     // Closing the response unwatches the camera, and the next poll says so.

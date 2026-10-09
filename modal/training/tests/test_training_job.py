@@ -1,17 +1,22 @@
-"""A whole run: posted to the control endpoint, prepared and trained by the job on CPU, its
-checkpoints served and loaded for inference."""
+"""A whole run: posted to the control endpoint, prepared and trained by the job on CPU, and
+checkpointed to the Volume."""
 
 from __future__ import annotations
 
 import json
 import math
 
-import numpy as np
 import pytest
+import torch
 
 from spiral_training_runtime import act, stop
-from spiral_training_runtime.act import ActTraining, PolicySession
-from spiral_training_runtime.arrow import InferenceArrays
+from spiral_training_runtime.act import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    ActTraining,
+    _normalize_hwc_images,
+)
+from spiral_training_runtime.device import TrainingDevice
 from spiral_training_runtime.request import ActRunRequest
 from spiral_training_runtime.run import TrainingJob
 from spiral_training_runtime.testing import AUTHORIZED, SyntheticRun, fixture
@@ -58,28 +63,17 @@ def test_a_run_trains_reports_and_checkpoints(client, volume, calls, stop_flags,
     assert listed.json()[0]["message"] == "Completed 6 steps."
 
 
-def test_a_saved_checkpoint_loads_for_inference(client, volume, stop_flags, posted) -> None:
+def test_a_saved_checkpoint_config_names_its_cameras_and_rate(volume, stop_flags, posted) -> None:
     TrainingJob(volume, stop_flags, posted).run()
+    checkpoint = volume.run(SyntheticRun.from_fixture(volume).request.key).checkpoint(3)
 
-    config = client.get(f"{RUN}/checkpoints/3/config", headers=AUTHORIZED)
-    model = client.get(f"{RUN}/checkpoints/3/model", headers=AUTHORIZED)
-    assert config.status_code == model.status_code == 200
-    assert config.json()["spiral_camera_order"] == [
+    assert (checkpoint / "model.safetensors").is_file()
+    config = json.loads((checkpoint / "config.json").read_text())
+    assert config["spiral_camera_order"] == [
         "observation.images.top_camera",
         "observation.images.left_wrist_camera",
     ]
-    assert config.json()["spiral_sample_hz"] == 10.0
-
-    policy = PolicySession.from_artifact(config.content, model.content, "cpu")
-
-    assert policy.specification["action_chunk_size"] == 4
-    assert [image["name"] for image in policy.specification["image_inputs"]] == config.json()[
-        "spiral_camera_order"
-    ]
-    images = tuple(np.zeros((1, 48 * 64 * 3), np.uint8) for _ in range(2))
-    inferred = policy.infer(InferenceArrays(None, np.zeros((1, 3), np.float32), images))
-    assert len(inferred["values"]) == 4 * 3
-    assert all(math.isfinite(value) for value in inferred["values"])
+    assert config["spiral_sample_hz"] == 10.0
 
 
 def test_the_checkpoint_manifest_carries_the_data_contract(volume, stop_flags, posted) -> None:
@@ -173,3 +167,27 @@ def test_a_job_that_cannot_read_its_streams_fails_with_why(
     status = client.get(RUN, headers=AUTHORIZED).json()
     assert status["phase"] == "failed"
     assert status["message"].startswith("episode 01a0f9c7-0000-7000-8000-000000000002:")
+
+
+def test_missing_nvml_never_fails_gpu_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_nvml(_device: torch.device) -> int:
+        raise ModuleNotFoundError("pynvml is unavailable")
+
+    monkeypatch.setattr(torch.cuda, "utilization", missing_nvml)
+    assert TrainingDevice(torch.device("cuda:0")).telemetry()["gpu_percent"] is None
+
+
+def test_hwc_uint8_training_images_match_imagenet_chw_normalization() -> None:
+    images = torch.tensor([255, 128, 0, 0, 64, 255], dtype=torch.uint8).reshape(1, 1, 1, 2, 3)
+    mean = torch.tensor(IMAGENET_MEAN).reshape(1, 1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD).reshape(1, 1, 3, 1, 1)
+
+    actual = _normalize_hwc_images(images, mean, std).reshape(3, 2)
+    expected = torch.tensor(
+        [
+            [(1.0 - 0.485) / 0.229, (0.0 - 0.485) / 0.229],
+            [(128.0 / 255.0 - 0.456) / 0.224, (64.0 / 255.0 - 0.456) / 0.224],
+            [(0.0 - 0.406) / 0.225, (1.0 - 0.406) / 0.225],
+        ]
+    )
+    torch.testing.assert_close(actual, expected, rtol=1.0e-6, atol=1.0e-6)

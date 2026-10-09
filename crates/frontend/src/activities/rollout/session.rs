@@ -2,6 +2,7 @@
 use super::RecordingClient;
 use super::next_take::{ControlKind, NextTake};
 use super::policy::{PolicyControl, PolicyReadiness};
+use super::recording_client::StoringTakes;
 use super::signals::SignalStore;
 use super::transport::TimelineController;
 use crate::client::queries::{QueryDomain, QueryPolicy};
@@ -9,12 +10,19 @@ use crate::robots::{HardwareCommands, HardwareViewState, RobotSelection};
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 
+/// The take Record starts next, and the finished ones on their way to Studio.
+#[derive(Clone, Copy, PartialEq)]
+struct RolloutTakes {
+    next: NextTake,
+    storing: StoringTakes,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct RolloutSession {
     project: StudioProjectState,
     telemetry: HardwareViewState,
     selection: RobotSelection,
-    next_take: NextTake,
+    takes: RolloutTakes,
     policy: PolicyControl,
     timeline: TimelineController,
     recording_signals: Signal<SignalStore>,
@@ -26,7 +34,10 @@ impl RolloutSession {
         selection: RobotSelection,
     ) -> Self {
         let is_active = telemetry.is_active_signal();
-        let next_take = NextTake::use_next_take();
+        let takes = RolloutTakes {
+            next: NextTake::use_next_take(),
+            storing: StoringTakes::use_storing_takes(),
+        };
         let policy = PolicyControl::use_control(is_active);
         let timeline = TimelineController::use_controller();
         let recording_signals = use_signal(SignalStore::default);
@@ -34,7 +45,7 @@ impl RolloutSession {
             project,
             telemetry,
             selection,
-            next_take,
+            takes,
             policy,
             timeline,
             recording_signals,
@@ -74,7 +85,10 @@ impl RolloutSession {
         HardwareCommands::new(self.project, self.telemetry)
     }
     pub(super) fn next_take(self) -> NextTake {
-        self.next_take
+        self.takes.next
+    }
+    pub(super) fn storing_takes(self) -> StoringTakes {
+        self.takes.storing
     }
     pub(super) fn policy(self) -> PolicyControl {
         self.policy
@@ -101,7 +115,7 @@ impl RolloutSession {
         } else {
             ControlKind::Policy
         };
-        self.next_take.control(default)
+        self.takes.next.control(default)
     }
 
     /// Why the chosen checkpoint cannot drive the follower now, if it cannot.
@@ -118,7 +132,7 @@ impl RolloutSession {
             self.policy.duration_seconds().is_none().then(|| {
                 format!(
                     "Set a whole-number duration from 1 to {} seconds.",
-                    spiral_robotics_common::rollout::MAX_ROLLOUT_DURATION_SECONDS
+                    PolicyControl::MAX_DURATION_SECONDS
                 )
             })
         })

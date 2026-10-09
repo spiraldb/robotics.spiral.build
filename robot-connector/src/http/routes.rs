@@ -21,14 +21,10 @@ impl RobotConnectorApi {
     pub(super) fn router(connector: RobotConnectorContext) -> Router {
         let reads = Router::new()
             .merge(crate::robots::http::RobotEndpoints::reads())
-            .merge(crate::recording::http::RecordingEndpoints::reads())
-            .merge(crate::policies::http::PolicyEndpoints::reads())
-            .merge(crate::rollout::http::RolloutEndpoints::reads());
+            .merge(crate::recording::http::RecordingEndpoints::reads());
         let commands = Router::new()
             .merge(crate::robots::http::RobotEndpoints::commands())
             .merge(crate::recording::http::RecordingEndpoints::commands())
-            .merge(crate::policies::http::PolicyEndpoints::commands())
-            .merge(crate::rollout::http::RolloutEndpoints::commands())
             .layer(middleware::from_fn(Self::run_to_completion));
         reads
             .merge(commands)

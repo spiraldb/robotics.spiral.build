@@ -4,19 +4,19 @@ Spiral Robotics is a Rust-native robotics toolkit and browser studio inspired by
 [LeRobot](https://github.com/huggingface/lerobot) and
 [Rerun](https://github.com/rerun-io/rerun). It sets up, calibrates, and operates
 SO-ARM101 arms; records synchronized robot and camera data directly in SpiralDB;
-queries and curates that data; trains vision-conditioned ACT policies on
-Modal GPUs from curated views ([docs/training.md](docs/training.md)); and
-safely executes trained policies through the follower's bounded rollout path.
+queries and curates that data; and trains vision-conditioned ACT policies on
+Modal GPUs from curated views ([docs/training.md](docs/training.md)). Running a
+trained policy on a robot is not supported yet.
 
 It runs as two programs. **Studio** (`crates/backend` and `crates/frontend`)
 serves the browser app, keeps Studio state, and reaches SpiralDB; it runs at
 `robotics.spiraldb.com` or on `localhost`. The **robot connector**
 (`robot-connector`) runs next to the arms: it owns their serial buses,
-cameras, calibration, and control loop, records takes, and rolls out policies.
+cameras, calibration, and control loop, and records takes.
 The connector links itself to Studio over plain HTTP, and the browser reaches
 it only through Studio, which relays the browser's requests and serves the
 live data the connector posts. The browser carries each finished take from it
-to Studio and writes the checkpoints Studio trained to it.
+to Studio.
 
 Studio stores its control-plane state in persistent backend-local SQLite
 (SeaORM and versioned migrations). SpiralDB stores datasets and model artifacts.
@@ -52,8 +52,8 @@ cargo run -p spiral-robotics-connector-os -- --studio http://localhost:3000 --to
 
 The token comes from **Rollout → Set up**, which issues one per workspace and
 shows this command with it. The connector links itself to that Studio — it
-listens on no port, so a robot needs no public address — and keeps its robots,
-unsent takes, and policies under the platform's local data directory
+listens on no port, so a robot needs no public address — and keeps its robots
+and unsent takes under the platform's local data directory
 (`--data-dir` chooses another).
 
 Start the studio from the workspace root with:
@@ -179,19 +179,6 @@ remains an optional developer override of the endpoint.
 Training runs on the Modal app in
 [`modal/training/`](modal/training/README.md), which Studio reaches through
 `TRAINING_SERVICE_URL` and `MODAL_SERVICE_TOKEN`.
-The same Python project is the policy runtime for rollout inference: start it
-next to the robot connector, which calls it at the workspace's policy runtime
-address (Rollout → Set up, `http://localhost:50051` by default):
-
-```console
-cd modal/training
-uv sync --extra dev
-uv run spiral-training-runtime --port 50051
-```
-
-The policy runtime refuses non-loopback listeners by default. Its
-`--allow-remote-access` is reserved for deployments placed behind an
-authenticated TLS proxy.
 
 Every browser signs in through a registered Spiral application. Choose **Sign in
 with Spiral**, approve access on Spiral's consent page, then choose an existing

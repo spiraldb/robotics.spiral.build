@@ -5,10 +5,12 @@ use crate::client::project::ProjectClient;
 use crate::client::queries::QueryDomain::*;
 use crate::client::robot_connector::RobotConnector;
 use crate::client::transport::{CommandError, HttpRequest};
+use dioxus::prelude::*;
 use spiral_robotics_common::recording::{
     EpisodeInfo, EpisodeInspectionSnapshot, PauseUpdate, RecordingFinish, RecordingStart,
     SavedRecording,
 };
+use std::collections::BTreeSet;
 use std::future::Future;
 
 pub(crate) struct RecordingClient {
@@ -83,6 +85,30 @@ impl RecordingClient {
             &[Telemetry, Recording],
             HttpRequest::new("PATCH", "/recording").json(&PauseUpdate::new(paused)),
         )
+    }
+}
+
+/// The finished takes being carried to Studio right now, by episode. The robot
+/// connector still lists each until Studio stores it, and a take on its way is
+/// no take left behind.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct StoringTakes(Signal<BTreeSet<String>>);
+impl StoringTakes {
+    pub(super) fn use_storing_takes() -> Self {
+        Self(use_signal(BTreeSet::new))
+    }
+
+    /// Carry `episode` of `dataset` to Studio, counting it as on its way
+    /// meanwhile.
+    pub(super) async fn carry(mut self, dataset: &str, episode: &str) -> Result<(), CommandError> {
+        self.0.write().insert(episode.to_owned());
+        let carried = RecordingTransfer::current().carry(dataset, episode).await;
+        self.0.write().remove(episode);
+        carried
+    }
+
+    pub(super) fn includes(self, episode: &str) -> bool {
+        self.0.read().contains(episode)
     }
 }
 

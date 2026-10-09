@@ -441,30 +441,6 @@ impl TryFrom<BTreeMap<String, f64>> for JointGoals {
     }
 }
 
-/// One normalized command admitted under a specific policy session.
-#[derive(Debug, PartialEq)]
-pub struct PolicyGoals {
-    robot: String,
-    session: String,
-    normalized: JointGoals,
-}
-
-impl PolicyGoals {
-    pub fn new(
-        robot: String,
-        session: String,
-        normalized: JointGoals,
-    ) -> Result<Self, HardwareInputError> {
-        HardwareInputError::validate_name("robot identifier", &robot)?;
-        HardwareInputError::validate_name("policy session identifier", &session)?;
-        Ok(Self {
-            robot,
-            session,
-            normalized,
-        })
-    }
-}
-
 enum Command {
     Connect {
         spec: Box<RobotSpec>,
@@ -485,14 +461,6 @@ enum Command {
     SetGoals {
         id: String,
         normalized: JointGoals,
-        reply: Reply<()>,
-    },
-    SetPolicyGoals {
-        goals: Box<PolicyGoals>,
-        reply: Reply<()>,
-    },
-    StopPolicySession {
-        session: String,
         reply: Reply<()>,
     },
     SetMode {
@@ -755,24 +723,6 @@ impl HardwareHandle {
         self.request(|reply| Command::SetGoals {
             id: id.to_owned(),
             normalized,
-            reply,
-        })
-        .await
-    }
-
-    /// Command normalized targets for the currently admitted policy session.
-    pub async fn set_policy_goals(&self, goals: PolicyGoals) -> Result<(), String> {
-        self.request(|reply| Command::SetPolicyGoals {
-            goals: Box::new(goals),
-            reply,
-        })
-        .await
-    }
-
-    /// Leave policy mode only when the named session still owns it.
-    pub async fn stop_policy_session(&self, session: &str) -> Result<(), String> {
-        self.request(|reply| Command::StopPolicySession {
-            session: session.to_owned(),
             reply,
         })
         .await
@@ -1327,10 +1277,6 @@ impl From<&ModeSelection> for ControlMode {
                 leader: leader.clone(),
                 follower: follower.clone(),
             },
-            ModeSelection::Policy { robot, session } => ControlMode::Policy {
-                robot: robot.clone(),
-                session: session.clone(),
-            },
         }
     }
 }
@@ -1344,7 +1290,6 @@ impl From<ControlMode> for ModeSelection {
             ControlMode::Teleoperate { leader, follower } => {
                 ModeSelection::Teleoperate { leader, follower }
             }
-            ControlMode::Policy { robot, session } => ModeSelection::Policy { robot, session },
         }
     }
 }
@@ -1493,20 +1438,6 @@ impl Controller {
                 reply,
             } => {
                 let _ = reply.send(self.set_goals(&id, normalized.values()));
-            }
-            Command::SetPolicyGoals { goals, reply } => {
-                let _ = reply.send(self.set_policy_goals(&goals));
-            }
-            Command::StopPolicySession { session, reply } => {
-                let result = if matches!(
-                    self.published.mode.selection(),
-                    ModeSelection::Policy { session: active, .. } if active == &session
-                ) {
-                    self.set_mode(ModeSelection::Idle)
-                } else {
-                    Ok(())
-                };
-                let _ = reply.send(result);
             }
             Command::SetMode { mode, reply } => {
                 let _ = reply.send(self.set_mode(mode));
@@ -1966,14 +1897,6 @@ impl Controller {
         self.set_normalized_goals(id, normalized)
     }
 
-    fn set_policy_goals(&mut self, goals: &PolicyGoals) -> Result<(), String> {
-        self.authorize(ControlIntent::AuthorizePolicyCommand {
-            robot: goals.robot.clone(),
-            session: goals.session.clone(),
-        })?;
-        self.set_normalized_goals(&goals.robot, goals.normalized.values())
-    }
-
     fn set_normalized_goals(
         &mut self,
         id: &str,
@@ -2244,11 +2167,10 @@ impl Controller {
     }
 
     fn drive_robots(&mut self) {
-        // An arm chasing a live leader or a policy needs a faster ramp than a
-        // manual slider move: the motion it follows is produced at human speed.
+        // An arm chasing a live leader needs a faster ramp than a manual
+        // slider move: the motion it follows is produced at human speed.
         let quick = match self.published.mode.selection() {
             ModeSelection::Teleoperate { follower, .. } => Some(follower.as_str()),
-            ModeSelection::Policy { robot, .. } => Some(robot.as_str()),
             _ => None,
         };
         for (id, robot) in &mut self.robots {
@@ -2529,15 +2451,6 @@ mod tests {
             None => config,
         };
         RobotSpec::try_from(config).expect("robot specification")
-    }
-
-    fn policy_goals(robot: &str, session: &str, goals: BTreeMap<String, f64>) -> PolicyGoals {
-        PolicyGoals::new(
-            robot.to_owned(),
-            session.to_owned(),
-            JointGoals::try_from(goals).expect("valid joint goals"),
-        )
-        .expect("valid policy goals")
     }
 
     fn controller() -> Controller {
@@ -2836,79 +2749,6 @@ mod tests {
             assert!(error.contains("normalized [-1, 1]"), "{error}");
             assert_eq!(controller.robots["arm"].motion.target, before);
         }
-    }
-
-    #[test]
-    fn policy_commands_are_scoped_to_the_admitted_session() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller
-            .set_mode(ModeSelection::Policy {
-                robot: "arm".to_owned(),
-                session: "rollout-1".to_owned(),
-            })
-            .expect("policy mode");
-        assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Engaged);
-        let robot = controller.robots.get_mut("arm").unwrap();
-        robot.motion.positions = robot
-            .spec
-            .motors()
-            .keys()
-            .map(|name| (name.clone(), 2048))
-            .collect();
-        robot.follow_measured_positions();
-
-        let goals = BTreeMap::from([("gripper".to_owned(), 0.5)]);
-        assert!(
-            controller
-                .set_policy_goals(&policy_goals("arm", "old-rollout", goals.clone()))
-                .expect_err("stale session")
-                .contains("not allowed")
-        );
-        controller
-            .set_policy_goals(&policy_goals("arm", "rollout-1", goals.clone()))
-            .expect("active session may command");
-        assert_eq!(controller.robots["arm"].motion.target["gripper"], 2298);
-        let before = controller.robots["arm"].motion.commanded["gripper"];
-        controller.drive_robots();
-        let after = controller.robots["arm"].motion.commanded["gripper"];
-        assert_ne!(
-            after, before,
-            "the admitted policy target reaches the motor ramp"
-        );
-        assert!(
-            after.abs_diff(before) <= u64::from(MotionLimits::default().following_step_counts()),
-            "policy motion stays inside the fast control-path step bound"
-        );
-
-        let measured = after.saturating_sub(1);
-        controller
-            .robots
-            .get_mut("arm")
-            .unwrap()
-            .motion
-            .positions
-            .insert("gripper".to_owned(), measured);
-
-        controller
-            .set_mode(ModeSelection::Idle)
-            .expect("stop policy");
-        assert!(
-            controller.robots["arm"].motion.torque.is_engaged(),
-            "stopping policy control must not release the arm"
-        );
-        assert_eq!(
-            controller.robots["arm"].motion.target["gripper"], measured,
-            "stopping policy control holds the arm at its measured position"
-        );
-        assert!(
-            controller
-                .set_policy_goals(&policy_goals("arm", "rollout-1", goals.clone()))
-                .expect_err("finished session")
-                .contains("not allowed")
-        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! depend on physical devices. The machine's serial driver opens the lines buses
 //! hang off ([`SerialDriver`]), so this crate builds for a computer and a
 //! microcontroller alike. HTTP contracts, operator workflow, episode schemas,
-//! persistence, and policy inference remain in the composing application.
+//! and persistence remain in the composing application.
 //!
 //! Source modules are private. Their layout is an implementation detail rather
 //! than a second API alongside this reviewed, flat boundary.
@@ -30,7 +30,7 @@ mod state;
 pub use calibration::{CalibrationError, NormalizedPosition};
 pub use control::{
     ArmConditionSummary, CONTROL_HZ, EpisodeCheckpoint, HardwareHandle, HardwareState, JointGoals,
-    PolicyGoals, RecordingCompletion, RecordingWriter, RobotSpec, Sample,
+    RecordingCompletion, RecordingWriter, RobotSpec, Sample,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use serial_driver::NoSerialDriver;

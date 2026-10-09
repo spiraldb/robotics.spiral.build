@@ -1,6 +1,5 @@
 use super::*;
 use crate::curations::CurationPersistence;
-use crate::settings::StudioPreferencePersistence;
 use crate::studio::StudioStore;
 use crate::training::{PublishedModels, TrainingRunPersistence};
 use spiral_robotics_common::training::{
@@ -86,14 +85,6 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         );
         assert!(PublishedModels::new(project).insert(&named).await.unwrap());
     }
-    StudioPreferencePersistence::new(&source)
-        .save(
-            &crate::StoredStudioPreferences::default()
-                .with_policy_runtime("http://localhost:9000")
-                .unwrap(),
-        )
-        .await
-        .unwrap();
     let workspace = spiral_robotics_common::workspace::Workspace::new("source", "Source");
     crate::WorkspaceStore::new(store.clone(), "http://localhost:1")
         .insert(&workspace)
@@ -165,15 +156,6 @@ async fn snapshot_restores_all_features_without_credentials_or_other_projects() 
         [run]
     );
     assert_eq!(PublishedModels::new(&target).list().await.unwrap(), [model]);
-    assert_eq!(
-        StudioPreferencePersistence::new(&target)
-            .load()
-            .await
-            .unwrap()
-            .robot_connector()
-            .policy_runtime(),
-        "http://localhost:9000"
-    );
 }
 
 #[tokio::test]

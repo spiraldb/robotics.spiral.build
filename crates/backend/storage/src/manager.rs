@@ -14,7 +14,6 @@ use crate::curations::{CuratedViews, CurationPersistence};
 use crate::db::ProjectDatabasePersistence;
 use crate::db::ProjectQueries;
 use crate::db::ProjectStore;
-use crate::settings::StudioPreferencePersistence;
 use crate::training::{PublishedModels, TrainingRunPersistence};
 use crate::transfer::TransferPersistence;
 
@@ -46,10 +45,6 @@ impl StorageManager {
 
     pub fn transfer(&self) -> TransferPersistence<'_> {
         TransferPersistence::new(&self.project_store, &self.studio)
-    }
-
-    pub fn preferences(&self) -> StudioPreferencePersistence<'_> {
-        StudioPreferencePersistence::new(&self.studio)
     }
 
     pub fn training_runs(&self) -> TrainingRunPersistence<'_> {
