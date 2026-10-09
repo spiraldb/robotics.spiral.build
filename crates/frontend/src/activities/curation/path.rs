@@ -35,6 +35,7 @@ pub(super) use table::{ColumnMeaning, TableColumn, TableColumns};
 use super::document::{CurationGraph, CurationNode, CurationNodeKind};
 use super::graph::DatasetStep;
 use super::select::SelectStep;
+use crate::activities::episode::EpisodeListing;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, ColumnFill, FillEpisodes};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 
@@ -367,8 +368,13 @@ impl<'a> CurationPath<'a> {
     }
 
     fn dataset(&self) -> Result<&'a DatasetSelection, PathError> {
+        Ok(self.listing()?.dataset())
+    }
+
+    /// How the dataset lists its episodes, which the path starts from.
+    fn listing(&self) -> Result<&'a EpisodeListing, PathError> {
         self.graph
-            .dataset()
+            .listing()
             .ok_or_else(|| PathError::new("Choose the dataset this curation reads."))
     }
 
@@ -412,9 +418,9 @@ impl<'a> CurationPath<'a> {
         for (node, model, stored) in &models {
             model.episode_columns(&mut row, &Self::step(node, stored))?;
         }
-        let mut entries = vec![DatasetStep::new(dataset).entry()];
+        let mut entries = vec![DatasetStep::new(self.listing()?).entry()];
         entries.extend(row.entries()?);
-        let mut table = TableColumns::facts();
+        let mut table = TableColumns::facts(self.listing()?);
         let mut reach = DatasetStep::NAME.to_owned();
         for (depth, node) in self.nodes.iter().enumerate() {
             match (

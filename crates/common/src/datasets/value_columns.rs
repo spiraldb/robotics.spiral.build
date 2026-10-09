@@ -19,7 +19,7 @@ impl<'a> ValueColumns<'a> {
     }
     /// How many numbers each message holds.
     pub fn count(&self) -> usize {
-        self.values.indices().len().max(1)
+        self.values.count()
     }
     pub fn names(&self) -> Vec<String> {
         (0..self.count())
@@ -33,6 +33,25 @@ impl<'a> ValueColumns<'a> {
     pub fn ctes(&self, name: &str, read: &str) -> Vec<String> {
         let field = Self::path("value", self.values.field());
         let names = self.names();
+        if !self.values.members().is_empty() {
+            let members = self
+                .values
+                .members()
+                .iter()
+                .zip(&names)
+                .map(|(member, column)| {
+                    let path = self.values.field().iter().chain([member]).cloned();
+                    format!(
+                        "{} AS {column}",
+                        Self::path("value", &path.collect::<Vec<_>>())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return vec![format!(
+                "{name} AS (SELECT id, log_time, {members} FROM {read})"
+            )];
+        }
         if self.values.indices().is_empty() {
             return vec![format!(
                 "{name} AS (SELECT id, log_time, {field} AS {} FROM {read})",
@@ -110,6 +129,22 @@ mod tests {
         assert_eq!(
             ValueColumns::new(&scalar, "q").ctes("grip", "READ"),
             ["grip AS (SELECT id, log_time, \"value\".\"opening\" AS q0 FROM READ)"]
+        );
+    }
+
+    #[test]
+    fn named_members_read_as_one_column_each_however_they_are_spelled() {
+        let named = values(json!({
+            "topic": "observation.state", "schema": null, "field": [], "element": [], "indices": [],
+            "members": ["shoulder_pan.pos", "left_joint1"]
+        }));
+        let columns = ValueColumns::new(&named, "q");
+        assert_eq!(columns.count(), 2);
+        assert_eq!(
+            columns.ctes("state", "READ"),
+            [
+                "state AS (SELECT id, log_time, \"value\".\"shoulder_pan.pos\" AS q0, \"value\".\"left_joint1\" AS q1 FROM READ)"
+            ]
         );
     }
 }

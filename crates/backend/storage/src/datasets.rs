@@ -2,16 +2,21 @@
 mod answers;
 #[cfg(test)]
 mod catalog_tests;
+mod lerobot;
+mod managed;
 mod sources;
 mod topics;
 pub use answers::{ColumnAnswers, DatasetAnswers, EpisodeAnswer};
+pub(crate) use lerobot::LeRobotDatasetDefinition;
+pub(crate) use managed::StudioDataset;
 pub(crate) use sources::{McapDatasetDefinition, McapFile, McapSourceBlob, McapSources};
 
 use crate::{SpiralAccess, SpiralConnection, StorageManager};
 use serde::Deserialize;
 use serde_json::json;
 use spiral_robotics_common::datasets::{
-    DatasetInspection, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeId, ProjectResource,
+    DatasetInspection, DatasetProducer, DatasetSelection, DatasetSummary, DatasetTopic, EpisodeId,
+    ProjectResource,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -103,8 +108,9 @@ impl DatasetCatalogClient {
             .ok_or_else(|| "Dataset no longer exists in this project; refresh the catalog".into())
     }
 
-    async fn inspect(&self, selection: DatasetSelection) -> Result<DatasetInspection, String> {
-        let dataset = self.resolve(&selection).await?;
+    /// The version of `dataset` the catalog names: its definition and its
+    /// data.
+    async fn version(&self, dataset: &DatasetSummary) -> Result<DatasetVersion, String> {
         let response: DatasetVersionResponse = self
             .request(self.client.get(format!(
                 "{}/datasets/{}/versions/{}",
@@ -113,8 +119,15 @@ impl DatasetCatalogClient {
                 dataset.version_id()
             )))
             .await?;
-        let Some(revision) = response.version.data_revision else {
-            return Ok(DatasetInspection::new(dataset, None, vec![]));
+        Ok(response.version)
+    }
+
+    async fn inspect(&self, selection: DatasetSelection) -> Result<DatasetInspection, String> {
+        let dataset = self.resolve(&selection).await?;
+        let version = self.version(&dataset).await?;
+        let producer = DatasetProducer::from_id(&version.definition.producer_id)?;
+        let Some(revision) = version.data_revision else {
+            return Ok(DatasetInspection::new(dataset, producer, None, vec![]));
         };
         let mut topics = revision
             .data
@@ -126,6 +139,7 @@ impl DatasetCatalogClient {
         topics.sort_by(|left, right| left.name().cmp(right.name()));
         Ok(DatasetInspection::new(
             dataset,
+            producer,
             Some(revision.data.member_count),
             topics,
         ))
@@ -243,7 +257,27 @@ struct DatasetVersionResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DatasetVersion {
+    definition: DatasetDefinition,
     data_revision: Option<DatasetRevision>,
+}
+/// How a Dataset is made: the producer, and its options as Spiral keeps them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DatasetDefinition {
+    producer_id: String,
+    canonical_payload: Option<String>,
+}
+impl DatasetDefinition {
+    /// The definition's source relation and options, as Spiral normalized
+    /// them.
+    fn payload(&self) -> Result<serde_json::Value, String> {
+        serde_json::from_str(
+            self.canonical_payload
+                .as_deref()
+                .ok_or("Dataset has no source definition")?,
+        )
+        .map_err(|error| error.to_string())
+    }
 }
 #[derive(Deserialize)]
 struct DatasetRevision {
@@ -271,6 +305,7 @@ struct DatasetObservation {
 #[serde(rename_all = "camelCase")]
 struct NativeVariant {
     native_schema_name: Option<String>,
+    message_encoding: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -298,6 +333,13 @@ impl DatasetObservation {
         } else {
             self.name
         };
+        let encodings = self
+            .variants
+            .iter()
+            .map(|variant| variant.message_encoding.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let schemas = self
             .variants
             .into_iter()
@@ -306,6 +348,7 @@ impl DatasetObservation {
             .into_iter()
             .collect();
         Ok(DatasetTopic::new(name, schemas)
+            .with_encodings(encodings)
             .with_revision(spiral_robotics_common::datasets::TopicRevision::new(
                 variant,
             ))
@@ -587,7 +630,7 @@ mod tests {
     #[test]
     fn mcap_topic_labels_come_from_the_versioned_native_locator() {
         let observation: DatasetObservation = serde_json::from_value(json!({
-            "name":"mcap.opaque", "variants":[{"nativeSchemaName":"foxglove.CompressedVideo"}],
+            "name":"mcap.opaque", "variants":[{"nativeSchemaName":"foxglove.CompressedVideo", "messageEncoding":"protobuf"}],
             "coverage":{"memberCount":52,"sampleCount":10937},
             "scanLocator":{"codec":"spiral.mcap.topic-scan","codecVersion":1,"payload":"{\"topic\":\"/camera/top/video\"}"}
         })).unwrap();
@@ -595,5 +638,52 @@ mod tests {
         assert_eq!(topic.name(), "/camera/top/video");
         assert_eq!(topic.samples(), Some(10937));
         assert_eq!(topic.members(), 52);
+        assert!(topic.is_video());
+    }
+
+    /// The observations `spql.lerobot.dataset` records for
+    /// `lerobot/svla_so101_pickplace`: every feature a topic of every
+    /// episode, a camera's messages encoded `mp4` and no schema names.
+    #[test]
+    fn lerobot_features_are_topics_and_its_video_features_cameras() {
+        let observation = |topic: &str, encoding: &str, variant: &str| -> DatasetObservation {
+            serde_json::from_value(json!({
+                "name": format!("lerobot.{variant}"),
+                "variants": [{"variant": "native.x", "nativeSchemaName": null, "schemaEncoding": "lerobot.feature", "messageEncoding": encoding}],
+                "coverage": {"memberCount": 50, "sampleCount": 11939},
+                "scanLocator": {"codec": "spiral.mcap.topic-scan", "codecVersion": 1,
+                    "payload": json!({"topic": topic, "variant": variant}).to_string()}
+            }))
+            .unwrap()
+        };
+        let camera = observation("observation.images.up", "mp4", "f5a617c5")
+            .topic()
+            .unwrap();
+        assert_eq!(camera.name(), "observation.images.up");
+        assert!(camera.schemas().is_empty() && camera.is_video());
+        assert_eq!(camera.revision().unwrap().variant(), "f5a617c5");
+        let state = observation("observation.state", "parquet", "1c1ce639")
+            .topic()
+            .unwrap();
+        assert!(!state.is_video());
+        assert_eq!((state.members(), state.samples()), (50, Some(11939)));
+    }
+
+    #[test]
+    fn a_dataset_version_names_its_producer() {
+        let version: DatasetVersion = serde_json::from_value(json!({
+            "definition": {"producerId": "spql.lerobot.dataset",
+                "canonicalPayload": "{\"sourceRelation\":[\"dataset_files_pick\"],\"options\":{\"key\":\"path\",\"blob\":\"file\"}}"},
+            "dataRevision": null
+        }))
+        .unwrap();
+        assert_eq!(
+            DatasetProducer::from_id(&version.definition.producer_id),
+            Ok(DatasetProducer::LeRobot)
+        );
+        assert_eq!(
+            version.definition.payload().unwrap()["sourceRelation"],
+            json!(["dataset_files_pick"])
+        );
     }
 }

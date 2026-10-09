@@ -13,15 +13,15 @@ use super::episode_tabs::OpenEpisodes;
 use super::state::CurationController;
 use super::thumbnail::{Thumbnail, ThumbnailMoment, Thumbnails};
 use crate::activities::episode::{
-    Episode, EpisodeHeading, EpisodeInspection, EpisodeRows, FeaturedCamera, HeadingSubject,
-    PlayRequest, RowFace, RowFaceView,
+    Episode, EpisodeHeading, EpisodeInspection, EpisodeListing, EpisodeRows, FeaturedCamera,
+    HeadingSubject, PlayRequest, RowFace, RowFaceView,
 };
 use crate::components::icons::FindSimilarIcon;
 use crate::components::page_keys::PageKeys;
 use crate::components::timeline::{IntervalTrack, TimelineInterval};
 use crate::format::ClockPresentation as _;
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
+use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, Notice, NoticeTone, Place, SplitColumns,
 };
@@ -123,14 +123,14 @@ impl EpisodeOrder {
 /// live, which camera the measurement read, and the order episodes list in.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct SubtaskContext {
-    dataset: Option<DatasetSelection>,
+    dataset: Option<EpisodeListing>,
     camera: Option<String>,
     order: EpisodeOrder,
 }
 
 impl SubtaskContext {
     pub(super) fn new(
-        dataset: Option<DatasetSelection>,
+        dataset: Option<EpisodeListing>,
         camera: Option<String>,
         order: EpisodeOrder,
     ) -> Self {
@@ -140,7 +140,8 @@ impl SubtaskContext {
             order,
         }
     }
-    pub(super) fn dataset(&self) -> Option<&DatasetSelection> {
+    /// How the dataset whose episodes the rows are lists them.
+    pub(super) fn dataset(&self) -> Option<&EpisodeListing> {
         self.dataset.as_ref()
     }
     pub(super) fn camera(&self) -> Option<&str> {
@@ -611,8 +612,11 @@ pub(super) fn SubtaskEvidence(
             }
         };
     };
-    let selection = EpisodeSelection::new(dataset, row.episode().clone());
-    let opened = use_resource(use_reactive(&selection, Episode::open));
+    let selection = EpisodeSelection::new(dataset.dataset().clone(), row.episode().clone());
+    let opened = use_resource(use_reactive(
+        (&dataset, &selection),
+        |(dataset, selection)| async move { dataset.open(selection).await },
+    ));
     let span = (row.start_time(), row.end_time());
     rsx! {
         EpisodeHeading {

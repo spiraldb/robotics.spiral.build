@@ -20,57 +20,56 @@ use super::super::session::UNTITLED;
 use super::super::state::CurationController;
 use super::super::thumbnail::Thumbnails;
 use crate::activities::data::{CheckedEpisode, DatasetLedger, DatasetOverview};
-use crate::activities::episode::{Episode, EpisodeRows, FeaturedCamera};
+use crate::activities::episode::{Episode, EpisodeListing, EpisodeRows, FeaturedCamera};
 use crate::components::dataset_catalog::DatasetCatalog;
 use crate::components::icons::SpinnerIcon;
 use crate::format::ClockPresentation as _;
 
 /// The step every path starts with: every episode of the dataset as one row,
-/// with the facts Spiral records for it, its first message as `origin_ns`,
-/// and `kept` of one range, from its first message to its last, through the
-/// episode listing `Episode` uses everywhere.
-pub(in crate::activities::curation) struct DatasetStep<'a>(&'a DatasetSelection);
+/// with the facts its producer records for it, its first message as
+/// `origin_ns`, and `kept` of one range, from its first message to its last,
+/// through the episode listing `Episode` uses everywhere.
+pub(in crate::activities::curation) struct DatasetStep<'a>(&'a EpisodeListing);
 
 impl<'a> DatasetStep<'a> {
     /// The entry holding it, which the facts of the table are read from.
     pub(in crate::activities::curation) const NAME: &'static str = "dataset";
 
-    pub(in crate::activities::curation) fn new(dataset: &'a DatasetSelection) -> Self {
-        Self(dataset)
+    pub(in crate::activities::curation) fn new(listing: &'a EpisodeListing) -> Self {
+        Self(listing)
     }
     pub(in crate::activities::curation) fn entry(&self) -> String {
-        let facts = EpisodeFact::ALL
+        let listed = EpisodeFact::listed_by(self.0);
+        let facts = listed
             .iter()
-            .map(|fact| format!("{} AS {}", fact.expression(), fact.key()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let keys = EpisodeFact::ALL
+            .map(|fact| format!(", {} AS {}", fact.expression(), fact.key()))
+            .collect::<String>();
+        let keys = listed
             .iter()
-            .map(|fact| fact.key())
-            .collect::<Vec<_>>()
-            .join(", ");
+            .map(|fact| format!(", {}", fact.key()))
+            .collect::<String>();
         format!(
             "{} AS (SELECT episode_id, start_ns AS origin_ns, \
-             [STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)] AS kept, {keys} \
+             [STRUCT_PACK(start_ns := start_ns, end_ns := end_ns)] AS kept{keys} \
              FROM (SELECT id AS episode_id, CAST(message_start_time AS BIGINT) AS start_ns, \
-             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns, {facts} FROM ({}) listed) spans)",
+             CAST(message_start_time + duration_ns AS BIGINT) AS end_ns{facts} FROM ({}) listed) spans)",
             Self::NAME,
-            Episode::listing_sql(self.0),
+            self.0.sql(),
         )
     }
 }
 
 #[component]
 pub(super) fn DatasetWorkspace(controller: CurationController) -> Element {
-    let dataset = controller.with_payload(|payload| payload.dataset().cloned());
+    let listing = controller.with_payload(|payload| payload.listing().cloned());
     // The graph is configured on one camera, so the recording leads with it
     // here too rather than with whichever topic sorts first.
     let featured = controller.with_payload(CurationGraph::configured_camera);
-    match dataset {
+    match listing {
         None => rsx! { DatasetChoice { controller } },
-        Some(dataset) => rsx! {
-            Remount { identity: dataset.label(),
-                DatasetEpisodes { controller, dataset, featured }
+        Some(listing) => rsx! {
+            Remount { identity: listing.dataset().label(),
+                DatasetEpisodes { controller, listing, featured }
             }
         },
     }
@@ -83,22 +82,25 @@ pub(super) fn DatasetWorkspace(controller: CurationController) -> Element {
 fn DatasetChoice(controller: CurationController) -> Element {
     let catalog = DatasetCatalog::use_catalog();
     let mut problem = use_signal(|| None::<String>);
+    // The graph keeps the dataset with the producer that made it, which
+    // decides how its episodes are listed, so choosing one asks for it.
     let choose = move |selection: DatasetSelection| {
-        let label = selection.display_name();
-        problem.set(
-            controller
-                .edit(|payload| {
-                    payload.set_dataset(Some(selection));
+        spawn(async move {
+            let label = selection.display_name();
+            let chosen = EpisodeListing::read(&selection).await.and_then(|listing| {
+                controller.edit(|payload| {
+                    payload.set_dataset(Some(listing));
                     Ok(())
                 })
-                .err(),
-        );
-        // A graph that has never been named takes its dataset's name. Five
-        // saved curations all called "Untitled curation" are five nobody can
-        // tell apart in the list that offers them.
-        if controller.name() == UNTITLED {
-            controller.set_name(label);
-        }
+            });
+            problem.set(chosen.err());
+            // A graph that has never been named takes its dataset's name.
+            // Five saved curations all called "Untitled curation" are five
+            // nobody can tell apart in the list that offers them.
+            if problem.peek().is_none() && controller.name() == UNTITLED {
+                controller.set_name(label);
+            }
+        });
     };
     let datasets = catalog
         .datasets()
@@ -133,7 +135,7 @@ fn DatasetChoice(controller: CurationController) -> Element {
 #[component]
 fn DatasetEpisodes(
     controller: CurationController,
-    dataset: DatasetSelection,
+    listing: EpisodeListing,
     featured: FeaturedCamera,
 ) -> Element {
     let sample = controller.sample();
@@ -143,7 +145,7 @@ fn DatasetEpisodes(
                 (Some(sample), _) => rsx! {
                     DatasetEpisodeList {
                         controller,
-                        dataset: dataset.clone(),
+                        listing: listing.clone(),
                         episodes: sample.episodes().to_vec(),
                         partial: sample.is_partial(),
                         featured: featured.clone(),
@@ -167,7 +169,7 @@ fn DatasetEpisodes(
 #[component]
 fn DatasetEpisodeList(
     controller: CurationController,
-    dataset: DatasetSelection,
+    listing: EpisodeListing,
     episodes: Vec<Episode>,
     /// Whether the dataset holds more episodes than the curation reads.
     partial: bool,
@@ -248,7 +250,7 @@ fn DatasetEpisodeList(
                 EpisodeTabs {
                     open: tabs,
                     leading: LeadingTab::dataset(rsx! {
-                        DatasetOverview { dataset: dataset.clone(),
+                        DatasetOverview { listing: listing.clone(),
                             on_open: move |checked: CheckedEpisode| {
                                 tabs.open(checked.episode().id(), checked.moment().map(|moment| (moment, moment)));
                             },

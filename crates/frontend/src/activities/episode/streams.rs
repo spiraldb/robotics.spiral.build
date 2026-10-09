@@ -1,8 +1,9 @@
 //! The recorded streams of one episode: what each one is and how to read it.
 //!
-//! A stream is one topic/schema revision inside one MCAP member. Its kind is
-//! decided from recorded schema names only; nothing here reads meaning into
-//! topic or field names.
+//! A stream is one topic/schema revision inside one member: an MCAP file's
+//! channel, or a LeRobot episode's feature. Its kind is decided from what its
+//! producer recorded — a `foxglove.CompressedVideo` schema, or a LeRobot
+//! video feature — never from topic or field names.
 use crate::activities::data::DatasetClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{

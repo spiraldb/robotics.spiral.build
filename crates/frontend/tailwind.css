@@ -2388,6 +2388,8 @@ button.studio-status-connection[aria-expanded="true"] {
 .data-import-pane h2 { font-size: 19px; font-weight: 600; letter-spacing: -0.025em; }
 .data-import-pane p { font-size: 13px; color: var(--tone-ink-soft); line-height: 1.6; margin-top: 8px; overflow-wrap: anywhere; }
 .data-import-pane fieldset { display: flex; flex-direction: column; gap: 16px; margin: 24px 0; }
+/* The two kinds of repository side by side, each a plain name. */
+.data-import-format { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 16px; }
 .data-import-pane footer { display: flex; align-items: center; gap: 16px; margin-top: 20px; }
 /* What an inspected source holds, read off under the fields as label and
    value on the pane itself; each dataset it creates on a line of its own. */

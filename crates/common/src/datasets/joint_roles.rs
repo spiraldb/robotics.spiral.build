@@ -44,12 +44,12 @@ impl DatasetJointRoles {
                 return Err("Every arm needs a distinct name".into());
             }
             arm.state.validate()?;
-            if arm.state.indices.is_empty() {
+            if arm.state.indices.is_empty() && arm.state.members.is_empty() {
                 return Err(format!("The {} arm's state names no joints", arm.name));
             }
             if let Some(action) = &arm.action {
                 action.validate()?;
-                if action.indices.len() != arm.state.indices.len() {
+                if action.count() != arm.state.count() {
                     return Err(format!(
                         "The {} arm's action must command the same joints as its state",
                         arm.name
@@ -82,7 +82,7 @@ impl DatasetJointRoles {
                 .action
                 .as_ref()
                 .ok_or_else(|| format!("The {} arm records no commanded positions.", arm.name))?;
-            let names = (1..=arm.state.indices.len().max(1))
+            let names = (1..=arm.state.count())
                 .map(|joint| format!("{}.j{joint}", arm.name))
                 .collect::<Vec<_>>();
             joints
@@ -205,7 +205,7 @@ impl GripperRoles {
     fn validate(&self, arm: &str) -> Result<(), String> {
         self.state.validate()?;
         self.action.validate()?;
-        if self.state.indices.len() > 1 || self.action.indices.len() > 1 {
+        if self.state.count() > 1 || self.action.count() > 1 {
             return Err(format!("The {arm} gripper is one number, not several"));
         }
         if !self.open.is_finite() || !self.closed.is_finite() || self.open == self.closed {
@@ -218,26 +218,34 @@ impl GripperRoles {
 }
 
 /// Numbers recorded in one field of one stream: positions `indices` of the
-/// list at `field` — each item's number at `element` below it — or, with no
-/// indices, the number at `field` itself.
+/// list at `field` — each item's number at `element` below it — the
+/// `members` of the struct at `field`, or, with neither, the number at
+/// `field` itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedValues {
     topic: String,
-    schema: String,
-    /// Structured path below the recorded message's value.
+    /// The schema the stream was recorded with; null for a topic recorded
+    /// without one, such as a LeRobot feature.
+    schema: Option<String>,
+    /// Structured path below the recorded message's value; empty when
+    /// `members` name fields of the value itself.
     field: Vec<String>,
     /// Path below each list item to its number; empty when items are numbers.
     element: Vec<String>,
     indices: Vec<usize>,
+    /// Fields of the struct at `field`, one number each, in order: the
+    /// names a LeRobot feature gives its elements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    members: Vec<String>,
 }
 
 impl RecordedValues {
     pub fn topic(&self) -> &str {
         &self.topic
     }
-    pub fn schema(&self) -> &str {
-        &self.schema
+    pub fn schema(&self) -> Option<&str> {
+        self.schema.as_deref()
     }
     pub fn field(&self) -> &[String] {
         &self.field
@@ -247,6 +255,16 @@ impl RecordedValues {
     }
     pub fn indices(&self) -> &[usize] {
         &self.indices
+    }
+    pub fn members(&self) -> &[String] {
+        &self.members
+    }
+    /// How many numbers each recorded message holds.
+    pub fn count(&self) -> usize {
+        match (self.members.len(), self.indices.len()) {
+            (0, indices) => indices.max(1),
+            (members, _) => members,
+        }
     }
     /// The path a robot binding names these numbers by: the field, then
     /// each item's element.
@@ -259,7 +277,7 @@ impl RecordedValues {
         let path = self.path();
         robot.bindings().iter().find(|binding| {
             binding.topic() == self.topic
-                && binding.schema() == self.schema
+                && Some(binding.schema()) == self.schema()
                 && binding.field() == path
                 && binding.selector() == Some(&JointSelector::Index { index })
         })
@@ -268,6 +286,13 @@ impl RecordedValues {
     /// `None` when one of them is missing.
     pub fn read(&self, message: &serde_json::Value) -> Option<Vec<f64>> {
         let field = Self::walk(message, &self.field)?;
+        if !self.members.is_empty() {
+            return self
+                .members
+                .iter()
+                .map(|member| field.get(member)?.as_f64())
+                .collect();
+        }
         if self.indices.is_empty() {
             return Some(vec![field.as_f64()?]);
         }
@@ -282,12 +307,14 @@ impl RecordedValues {
     fn validate(&self) -> Result<(), String> {
         let named = |path: &[String]| path.iter().all(|name| !name.is_empty());
         if self.topic.is_empty()
-            || self.schema.is_empty()
-            || self.field.is_empty()
+            || self.schema.as_deref().is_some_and(str::is_empty)
+            || (self.field.is_empty() && self.members.is_empty())
             || !named(&self.field)
             || !named(&self.element)
+            || !named(&self.members)
             || (self.indices.is_empty() && !self.element.is_empty())
-            || self.indices.len() > 64
+            || (!self.indices.is_empty() && !self.members.is_empty())
+            || self.count() > 64
         {
             return Err(format!("Invalid recorded field on {}", self.topic));
         }
@@ -347,6 +374,55 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(scalar.read(&json!({"opening": 0.75})), Some(vec![0.75]));
+    }
+
+    #[test]
+    fn a_lerobot_named_vector_reads_its_members_without_a_schema() {
+        // SO-101: `observation.state` and `action` are one struct of named
+        // positions each, the gripper one of the names.
+        let joints = ["shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos"];
+        let values = |topic: &str, members: &[&str]| json!({"topic": topic, "schema": null, "field": [], "element": [], "indices": [], "members": members});
+        let gripper = |topic: &str| json!({"topic": topic, "schema": null, "field": ["gripper.pos"], "element": [], "indices": []});
+        let so101 = roles(json!({"arms": [{"name": "so101",
+            "state": values("observation.state", &joints), "action": values("action", &joints),
+            "gripper": {"state": gripper("observation.state"), "action": gripper("action"), "open": 100.0, "closed": 0.0}}]}));
+        so101.validate().unwrap();
+        let state = so101.arms()[0].state();
+        assert_eq!((state.schema(), state.count()), (None, 3));
+        let message = json!({"shoulder_pan.pos": 1.5, "shoulder_lift.pos": -98.7, "elbow_flex.pos": 98.9, "gripper.pos": 1.4});
+        assert_eq!(state.read(&message), Some(vec![1.5, -98.7, 98.9]));
+        assert_eq!(
+            so101.arms()[0].gripper().unwrap().state().read(&message),
+            Some(vec![1.4])
+        );
+        assert_eq!(state.read(&json!({"shoulder_pan.pos": 1.5})), None);
+        let joints = so101.policy_joints().unwrap();
+        assert_eq!(
+            joints.state_names(),
+            ["so101.j1", "so101.j2", "so101.j3", "so101.gripper"]
+        );
+        // Positions and members do not mix, and an arm commands as many
+        // joints as it measures.
+        let mixed: RecordedValues =
+            serde_json::from_value(json!({"topic": "action", "schema": null,
+            "field": [], "element": [], "indices": [0], "members": ["a"]}))
+            .unwrap();
+        assert!(mixed.validate().is_err());
+        let short = roles(json!({"arms": [{"name": "so101",
+            "state": values("observation.state", &["a", "b"]), "action": values("action", &["a"]), "gripper": null}]}));
+        assert!(short.validate().is_err());
+        // Roles saved before members existed read as they did.
+        let saved: RecordedValues =
+            serde_json::from_value(json!({"topic": "/arm", "schema": "RobotState",
+            "field": ["position"], "element": [], "indices": [0, 1]}))
+            .unwrap();
+        assert_eq!((saved.schema(), saved.count()), (Some("RobotState"), 2));
+        assert!(
+            serde_json::to_value(&saved)
+                .unwrap()
+                .get("members")
+                .is_none()
+        );
     }
 
     #[test]

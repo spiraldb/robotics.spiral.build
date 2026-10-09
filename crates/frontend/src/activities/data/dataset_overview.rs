@@ -2,13 +2,14 @@
 //! every episode's streams found.
 use super::DatasetClient;
 use super::dataset_checks::{CheckedEpisode, DatasetCheckReport};
+use crate::activities::episode::EpisodeListing;
 use crate::format::{
     ByteCountPresentation, ClockPresentation, GroupedCountPresentation, LongDurationPresentation,
     UtcTimestampPresentation, WallClockPresentation,
 };
 use dioxus::prelude::*;
 use serde::Deserialize;
-use spiral_robotics_common::datasets::DatasetSelection;
+use spiral_robotics_common::datasets::{DatasetProducer, DatasetSelection};
 use spiral_robotics_common::sql::SqlLiteral;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, Fact, FactLayout, FactList, KindMark,
@@ -26,13 +27,33 @@ struct DatasetFacts {
 }
 
 impl DatasetFacts {
-    fn sql(dataset: &DatasetSelection) -> String {
+    /// The totals `listing`'s producer records: an MCAP dataset's size is
+    /// the size of its files, and a LeRobot episode has no file of its own.
+    fn sql(listing: &EpisodeListing) -> String {
+        let bytes = match listing.producer() {
+            DatasetProducer::Mcap => " sum(source.size) AS bytes,",
+            DatasetProducer::LeRobot => "",
+        };
         format!(
-            "SELECT count(*) AS episodes, sum(duration_ns) AS duration_ns, sum(source.size) AS bytes, \
+            "SELECT count(*) AS episodes, sum(duration_ns) AS duration_ns,{bytes} \
              min(message_start_time) AS first_start, max(message_end_time) AS last_end \
              FROM spql.mcap.episodes({})",
-            SqlLiteral::text(&dataset.sql_name())
+            SqlLiteral::text(&listing.dataset().sql_name())
         )
+    }
+    /// The totals of `dataset`, read as its producer records them.
+    async fn read(listing: &EpisodeListing) -> Result<Self, String> {
+        let snapshot = DatasetClient::current()
+            .run_spiral_query(Self::sql(listing), 1)
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = snapshot
+            .into_rows()
+            .into_iter()
+            .next()
+            .ok_or("Dataset totals returned no row")?;
+        serde_json::from_value::<Self>(serde_json::Value::Object(row))
+            .map_err(|error| format!("Reading dataset totals: {error}"))
     }
     fn episodes_label(&self) -> Option<String> {
         self.episodes.map(GroupedCountPresentation::grouped_label)
@@ -101,25 +122,16 @@ impl DatasetOverviewMemory {
 /// and Curation's Dataset node both show.
 #[component]
 pub(in crate::activities) fn DatasetOverview(
-    dataset: DatasetSelection,
+    listing: EpisodeListing,
     /// Opens an episode a finding names, where the finding is.
     on_open: EventHandler<CheckedEpisode>,
 ) -> Element {
     // The totals belong to this dataset alone: choosing another one
     // re-queries instead of keeping the first answer under a new name.
-    let facts = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
-        let snapshot = DatasetClient::current()
-            .run_spiral_query(DatasetFacts::sql(&dataset), 1)
-            .await
-            .map_err(|error| error.to_string())?;
-        let row = snapshot
-            .into_rows()
-            .into_iter()
-            .next()
-            .ok_or("Dataset totals returned no row")?;
-        serde_json::from_value::<DatasetFacts>(serde_json::Value::Object(row))
-            .map_err(|error| format!("Reading dataset totals: {error}"))
+    let facts = use_resource(use_reactive((&listing,), |(listing,)| async move {
+        DatasetFacts::read(&listing).await
     }));
+    let dataset = listing.dataset().clone();
     // Once read, the totals are the dataset's last answer; until they are
     // read the last answer stands in for them.
     let memory = DatasetOverviewMemory::current();
@@ -150,14 +162,18 @@ pub(in crate::activities) fn DatasetOverview(
                             FactList { class: "data-overview-facts", layout: FactLayout::Strip,
                                 Fact { label: "Episodes", {shown(facts.episodes_label())} }
                                 Fact { label: "Recorded", {shown(facts.recorded_label())} }
-                                Fact { label: "Size", {shown(facts.size_label())} }
+                                // A LeRobot dataset's episodes have no files of
+                                // their own to size.
+                                if let Some(size) = facts.size_label() {
+                                    Fact { label: "Size", "{size}" }
+                                }
                             }
                         }
                     },
                     None => rsx! { p { class: "data-overview-alert", role: "status", "Counting recordings…" } },
                 }
                 section { class: "data-overview-section", "aria-label": "Checks",
-                    DatasetCheckReport { dataset: dataset.clone(), on_open }
+                    DatasetCheckReport { listing: listing.clone(), on_open }
                 }
             }
         }
@@ -180,12 +196,12 @@ pub(super) fn DatasetsAtAGlance(
                 // An empty project says once what a dataset is; a listed one
                 // shows it.
                 if datasets.is_empty() {
-                    p { "A dataset is a folder of MCAP recordings; each file is one episode." }
+                    p { "A dataset holds episodes: MCAP recordings, each file one episode, or a LeRobot dataset's." }
                 }
             }
             if datasets.is_empty() {
                 Button { purpose: ActionPurpose::Import, variant: ButtonVariant::Solid, size: ButtonSize::Standard,
-                    onclick: move |_| on_import.call(()), "Import MCAP recordings" }
+                    onclick: move |_| on_import.call(()), "Import a dataset" }
             } else {
                 DatasetLedger { datasets, on_select }
             }
@@ -228,15 +244,11 @@ fn DatasetRow(
     order: usize,
     on_select: EventHandler<DatasetSelection>,
 ) -> Element {
+    // A row knows only the dataset's name, so it asks which producer made it
+    // before reading the totals that producer records.
     let facts = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
-        let row = DatasetClient::current()
-            .run_spiral_query(DatasetFacts::sql(&dataset), 1)
-            .await
-            .ok()?
-            .into_rows()
-            .into_iter()
-            .next()?;
-        serde_json::from_value::<DatasetFacts>(serde_json::Value::Object(row)).ok()
+        let listing = EpisodeListing::read(&dataset).await.ok()?;
+        DatasetFacts::read(&listing).await.ok()
     }));
     let memory = DatasetOverviewMemory::current();
     let remembered = dataset.clone();
@@ -310,7 +322,13 @@ mod tests {
         let simulated: DatasetFacts =
             serde_json::from_value(serde_json::json!({"first_start": 5, "last_end": 9})).unwrap();
         assert_eq!(simulated.span_label(), None);
-        let dataset = DatasetSelection::new(vec!["owner's data".into()]).unwrap();
-        assert!(DatasetFacts::sql(&dataset).contains("'owner''s data'"));
+        let mcap = EpisodeListing::mcap_fixture("owner's data");
+        assert!(DatasetFacts::sql(&mcap).contains("'owner''s data'"));
+        assert!(DatasetFacts::sql(&mcap).contains("sum(source.size) AS bytes"));
+        let lerobot = EpisodeListing::new(
+            DatasetSelection::new(vec!["so101".into()]).unwrap(),
+            DatasetProducer::LeRobot,
+        );
+        assert!(!DatasetFacts::sql(&lerobot).contains("source"));
     }
 }

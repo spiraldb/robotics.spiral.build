@@ -1,12 +1,13 @@
 //! Datasets and their episodes, the way an operator thinks about recordings:
-//! a dataset is a folder of MCAP files, and each file is one episode. Above
-//! them, the views curations published of those episodes.
+//! a dataset is a folder of MCAP files, each file one episode, or a LeRobot
+//! dataset's episodes. Above them, the views curations published of those
+//! episodes.
 use super::curated_view::ViewSpans;
 use super::dataset_checks::CheckedEpisode;
 use crate::activities::curation::{CuratedView, ViewFill};
 use crate::activities::episode::{
-    Episode, EpisodeFactsPresentation as _, EpisodeRows, EpisodeStill, EpisodeStills, PlayRequest,
-    RowFaceView, SourceLabel, StillMoment,
+    Episode, EpisodeFactsPresentation as _, EpisodeListing, EpisodeRows, EpisodeStill,
+    EpisodeStills, PlayRequest, RowFaceView, SourceLabel, StillMoment,
 };
 use crate::client::queries::{QueryDomain, QueryPolicy};
 use crate::components::page_keys::PageKeys;
@@ -324,12 +325,16 @@ fn DatasetEpisodes(
     let mut offset = use_signal(|| 0_usize);
     let query_dataset = dataset.clone();
     // Refresh reads the page again along with the catalog, so the rail's
-    // Refresh refreshes what the rail shows, not only its datasets.
+    // Refresh refreshes what the rail shows, not only its datasets. A page
+    // is listed as the dataset's producer lists episodes, which the catalog
+    // says.
     let mut page = QueryPolicy::on_demand(QueryDomain::Catalog).use_resource(move || {
         let dataset = query_dataset.clone();
         let offset = offset();
         async move {
-            Episode::page(&dataset, offset, EPISODE_PAGE_SIZE)
+            EpisodeListing::read(&dataset)
+                .await?
+                .page(offset, EPISODE_PAGE_SIZE)
                 .await
                 .map(|page| (offset, page))
         }

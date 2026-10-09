@@ -1,6 +1,7 @@
 //! Studio's MCAP datasets: each one's files are rows of its own files table,
 //! and its Dataset copies every topic of them into Spiral at each refresh, so
 //! reads never reopen the files.
+use super::StudioDataset;
 use crate::ProjectConnection;
 use crate::StorageManager;
 use arrow_array::{
@@ -10,7 +11,7 @@ use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use spiral_robotics_common::curation::AnswerTable;
+use spiral_robotics_common::datasets::DatasetProducer;
 use spiral_robotics_common::sql::SqlLiteral;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -222,25 +223,25 @@ impl McapSources {
         names: &[String],
     ) -> Result<(), String> {
         for name in names {
-            let relations = McapDatasetDefinition::new(name);
+            let relations = StudioDataset::new(name);
             // Refreshing materializes each topic as a signal under the
             // Dataset, which only a cascading drop removes.
             connection
                 .execute_update_sql(&format!(
                     "DROP DATASET IF EXISTS {} CASCADE",
-                    McapDatasetDefinition::quoted(&relations.dataset)
+                    StudioDataset::quoted(relations.dataset())
                 ))
                 .await?;
             connection
                 .execute_update_sql(&format!(
                     "DROP TABLE IF EXISTS {}",
-                    McapDatasetDefinition::quoted(&relations.files)
+                    StudioDataset::quoted(relations.files())
                 ))
                 .await?;
             connection
                 .execute_update_sql(&format!(
                     "DROP TABLE IF EXISTS {}",
-                    relations.answers.quoted()
+                    relations.answers().quoted()
                 ))
                 .await?;
         }
@@ -248,41 +249,20 @@ impl McapSources {
     }
 }
 
-/// The relations Studio keeps for one MCAP dataset: its `dataset_<id>`
-/// Dataset, the `dataset_files_<id>` table of the files it is made from, and
-/// the `dataset_answers_<id>` table of model answers about its episodes.
+/// One MCAP dataset Studio keeps: its Dataset made from the files table of
+/// its MCAP files, each one episode.
 pub(crate) struct McapDatasetDefinition {
-    dataset: String,
-    files: String,
-    answers: AnswerTable,
+    relations: StudioDataset,
 }
 impl McapDatasetDefinition {
     pub(crate) fn new(dataset_id: &str) -> Self {
         Self {
-            dataset: format!("dataset_{dataset_id}"),
-            files: format!("dataset_files_{dataset_id}"),
-            answers: AnswerTable::for_dataset_id(dataset_id),
+            relations: StudioDataset::new(dataset_id),
         }
     }
-    /// The Dataset's SQL name.
-    pub(crate) fn dataset(&self) -> &str {
-        &self.dataset
-    }
-    pub(crate) fn answers(&self) -> &AnswerTable {
-        &self.answers
-    }
-    fn quoted(name: &str) -> String {
-        name.split('.')
-            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(".")
-    }
-    pub(crate) fn planned(&self) -> Vec<String> {
-        vec![
-            self.dataset.clone(),
-            self.files.clone(),
-            self.answers.name(),
-        ]
+    /// What it is named.
+    pub(crate) fn relations(&self) -> &StudioDataset {
+        &self.relations
     }
     /// The files table's columns: each file's name, and the Blob holding it.
     pub(crate) fn files_schema() -> SchemaRef {
@@ -296,16 +276,29 @@ impl McapDatasetDefinition {
     pub(crate) fn create_sql(&self) -> String {
         format!(
             "CREATE DATASET {} USING spql.mcap.dataset FROM {} WITH (key = 'recording', blob = 'source', on_error = 'fail', materialization = 'all')",
-            Self::quoted(&self.dataset),
-            Self::quoted(&self.files)
+            StudioDataset::quoted(self.relations.dataset()),
+            StudioDataset::quoted(self.relations.files())
         )
+    }
+    /// Whether `definition` is the one [`Self::create_sql`] creates: over
+    /// this dataset's own files table, keyed and read as Studio keys and
+    /// reads it.
+    fn accepts(&self, definition: &super::DatasetDefinition) -> Result<(), String> {
+        let payload = definition.payload()?;
+        if payload["sourceRelation"] != json!([self.relations.files()])
+            || payload["options"]["key"] != "recording"
+            || payload["options"]["blob"] != "source"
+        {
+            return Err("This dataset does not use Studio's managed MCAP source; choose a MCAP append destination with its own files table".into());
+        }
+        Ok(())
     }
     /// The files as a project bundle carries them, each read back whole from
     /// wherever its Blob points.
     pub(crate) fn bundle_sql(&self) -> String {
         format!(
             "SELECT recording, spql.io.read_bytes(source) AS payload FROM {}",
-            Self::quoted(&self.files)
+            StudioDataset::quoted(self.relations.files())
         )
     }
 }
@@ -381,11 +374,11 @@ impl McapDatasetDefinition {
         files: Vec<RecordBatch>,
     ) -> Result<(), String> {
         connection
-            .create_or_append_batches(&self.files, files)
+            .create_or_append_batches(self.relations.files(), files)
             .await?;
         connection.execute_update_sql(&self.create_sql()).await?;
         self.refresh(connection).await?;
-        self.create_answers(connection).await
+        self.relations.create_answers(connection).await
     }
 
     /// Add `files` to the files table, refresh the Dataset, and give each
@@ -396,10 +389,10 @@ impl McapDatasetDefinition {
         files: Vec<RecordBatch>,
     ) -> Result<(), String> {
         connection
-            .create_or_append_batches(&self.files, files)
+            .create_or_append_batches(self.relations.files(), files)
             .await?;
         self.refresh(connection).await?;
-        self.add_answer_rows(connection).await
+        self.relations.add_answer_rows(connection).await
     }
 
     /// Whether the files table already holds `file`. Another file under its
@@ -413,7 +406,7 @@ impl McapDatasetDefinition {
             .query_rows(
                 &format!(
                     "SELECT s.source.sha256 AS sha256 FROM {} s WHERE s.recording = {} LIMIT 2",
-                    Self::quoted(&self.files),
+                    StudioDataset::quoted(self.relations.files()),
                     SqlLiteral::text(file.key)
                 ),
                 2,
@@ -435,23 +428,15 @@ impl McapDatasetDefinition {
     }
 
     async fn refresh(&self, connection: &mut ProjectConnection) -> Result<(), String> {
-        connection
-            .execute_update_sql(&format!("REFRESH DATASET {}", Self::quoted(&self.dataset)))
-            .await?;
+        self.relations.refresh(connection).await?;
         let members = connection
-            .query_rows(
-                &format!(
-                    "SELECT COUNT(*) AS members FROM spql.mcap.episodes({})",
-                    SqlLiteral::text(&self.dataset)
-                ),
-                1,
-            )
+            .query_rows(&self.relations.members_sql(), 1)
             .await?;
         let sources = connection
             .query_rows(
                 &format!(
                     "SELECT COUNT(*) AS members FROM {}",
-                    Self::quoted(&self.files)
+                    StudioDataset::quoted(self.relations.files())
                 ),
                 1,
             )
@@ -487,51 +472,44 @@ impl crate::ProjectStore {
         let dataset = resource
             .dataset()
             .ok_or("MCAP destination is not a Spiral dataset")?;
-        let response: serde_json::Value = client
-            .request(client.client.get(format!(
-                "{}/datasets/{}/versions/{}",
-                client.endpoint,
-                dataset.resource_id(),
-                dataset.version_id()
-            )))
-            .await?;
-        let definition = &response["version"]["definition"];
-        let payload: serde_json::Value = serde_json::from_str(
-            definition["canonicalPayload"]
-                .as_str()
-                .ok_or("Dataset has no source definition")?,
-        )
-        .map_err(|e| e.to_string())?;
-        if definition["producerId"] != "spql.mcap.dataset"
-            || payload["sourceRelation"] != json!([files_name])
-            || payload["options"]["key"] != "recording"
-            || payload["options"]["blob"] != "source"
-        {
-            return Err("This dataset does not use Studio's managed MCAP source; choose a MCAP append destination with its own files table".into());
+        let definition = client.version(&dataset).await?.definition;
+        if definition.producer_id != DatasetProducer::Mcap.id() {
+            return Err(format!(
+                "{name} is made by {}, not from MCAP recordings; record into another dataset",
+                definition.producer_id
+            ));
         }
+        McapDatasetDefinition::new(name).accepts(&definition)?;
         Ok(true)
     }
 }
 
 impl crate::ProjectStore {
+    /// The datasets Studio made from MCAP files, each beside its own files
+    /// table: what a project bundle carries. A dataset another producer made
+    /// is not one of them.
     pub(crate) async fn managed_mcap_datasets(&self) -> Result<Vec<String>, String> {
         let client = self.dataset_catalog();
         let resources = client.resources().await?;
         let mut names = Vec::new();
         for resource in &resources {
-            if resource.dataset().is_none() {
+            let Some(dataset) = resource.dataset() else {
                 continue;
-            }
+            };
             let label = resource.selection().label();
             let Some(name) = label.strip_prefix("dataset_") else {
                 continue;
             };
             let files_name = format!("dataset_files_{name}");
-            if resources
+            if !resources
                 .iter()
                 .any(|resource| resource.selection().label() == files_name)
-                && self.validate_mcap_destination(name).await?
             {
+                continue;
+            }
+            let definition = client.version(&dataset).await?.definition;
+            if definition.producer_id == DatasetProducer::Mcap.id() {
+                McapDatasetDefinition::new(name).accepts(&definition)?;
                 names.push(name.to_owned());
             }
         }

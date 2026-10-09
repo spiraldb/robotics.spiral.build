@@ -14,6 +14,7 @@ use super::document::{CurationGraph, CurationNode, CurationNodeKind};
 use super::graph::PublishedViews;
 use super::path::{ColumnMeaning, CurationPath};
 use super::state::CurationDraft as _;
+use crate::activities::episode::EpisodeListing;
 use crate::client::queries::{QueryDomain, QueryRefresh};
 use futures_util::future::try_join_all;
 use spiral_robotics_common::curation::{
@@ -90,7 +91,7 @@ struct ViewRecipe {
 pub(crate) struct CuratedView {
     view: String,
     recipe: ViewRecipe,
-    dataset: DatasetSelection,
+    dataset: EpisodeListing,
     subtasks: Vec<SubtaskColumn>,
     published: Option<String>,
     fill: Option<ViewFill>,
@@ -164,7 +165,7 @@ impl CuratedView {
         let Ok(graph) = CurationGraph::decode(document.encoding(), document.payload()) else {
             return Vec::new();
         };
-        let Some(dataset) = graph.dataset() else {
+        let Some(dataset) = graph.listing() else {
             return Vec::new();
         };
         graph
@@ -203,6 +204,10 @@ impl CuratedView {
     }
     /// The dataset its episodes belong to.
     pub(crate) fn dataset(&self) -> &DatasetSelection {
+        self.dataset.dataset()
+    }
+    /// How that dataset lists its episodes.
+    pub(crate) fn listing(&self) -> &EpisodeListing {
         &self.dataset
     }
     /// Whether it is still what its curation's saved recipe compiles to.
@@ -305,7 +310,7 @@ mod tests {
                 output: "Score progress",
                 current: true,
             },
-            dataset: DatasetSelection::new(vec!["dataset_folding".into()]).unwrap(),
+            dataset: EpisodeListing::mcap_fixture("dataset_folding"),
             subtasks: Vec::new(),
             published: None,
             fill: None,

@@ -19,11 +19,16 @@ behind this model.
 
 Every edge carries one table with **one row per episode**, never more
 (upstream SpiralDB is moving to one episode as one row, and Curation follows
-it). The Dataset node starts it: `episode_id`, the episode's facts
-(`duration_seconds`, `messages`, `channels`, `size_megabytes`), and `kept`,
-the episode's kept time ranges as a list of `{start_ns, end_ns}`, starting as
-the whole episode. Times are MCAP log time in nanoseconds everywhere in the
-table, so a reader can join the recording's streams without converting them.
+it). The Dataset node starts it: `episode_id`, the facts the dataset's
+producer records for each episode (`duration_seconds`, `messages`, and for
+MCAP recordings `channels` and `size_megabytes`; a LeRobot episode has no file
+of its own), and `kept`, the episode's kept time ranges as a list of
+`{start_ns, end_ns}`, starting as the whole episode. Times are the
+recording's log time in nanoseconds everywhere in the table (a LeRobot
+episode's count from its start), so a reader can join the recording's streams
+without converting them. The document keeps the dataset with its producer
+(`dataset: {path, producer}`), read from the catalog when the dataset is
+chosen; one saved without a producer names MCAP recordings.
 
 **Model nodes only add columns.** They never drop a row or narrow `kept`, and
 they have no rule. Each reads whole episodes, and only the episodes that
@@ -36,7 +41,7 @@ many objects a picture holds, stays inside the cell. Timelines hold one
 | --- | --- | --- |
 | Track objects | Track [prompt] on [camera] at [rate] pictures a second (1 to 30, default 5) | One timeline: `List<{timestamp_ns, objects: List<{id, score, x, y, width, height}>}>`, by sampled picture, each object's box as fractions of the picture from its top left |
 | Score progress | the model it scores with: the released head, or a published progress model by name ([Training](training.md#published-models)) | One timeline: `List<{timestamp_ns, progress_rate}>`; a frame the scorer had no support for has no rate |
-| Break down subtasks | camera, sample interval, instruction topic | `List<{description, start_ns, end_ns}>`, the subtasks of the whole episode |
+| Break down subtasks | camera, sample interval, where the episode's task is read | `List<{description, start_ns, end_ns}>`, the subtasks of the whole episode |
 | Find similar subtasks | query | `List<{start_ns, end_ns, similarity}>`: every subtask of its Break down with how likely it is what the query names |
 | Group similar subtasks | categories | One column per category: `List<{start_ns, end_ns}>` of the subtasks it put there |
 
@@ -75,8 +80,8 @@ upstream: the dataset's facts, and what SQL can derive from each column a
 node above added (`CurationGraph::conditions_for`).
 
 **Episode conditions** keep or drop the row: a number per episode compared
-*at least*, *at most*, *lowest N%*, or *highest N%*. The numbers are the four
-facts and, for each Track objects node above, the most of what it tracks one
+*at least*, *at most*, *lowest N%*, or *highest N%*. The numbers are the
+facts the dataset records and, for each Track objects node above, the most of what it tracks one
 picture held ("most bottles at once") and the episode's duration per that
 count ("duration per bottle"). An episode without the number fails the
 condition. *Lowest N%* keeps an episode whose percent rank, among the
@@ -156,7 +161,7 @@ from the Dataset's first refresh and given a row by each append. Every model
 call a node makes is one column, named for what it measures and six hex
 digits of a SHA-256 of the exact call (`score_progress_3f9a2c`): the function
 or service, the model revision, the Modal service revision, the arguments
-(Track objects' rate among them), the camera or instruction topic, and for a
+(Track objects' rate among them), the camera or where the task is read, and for a
 judgment the Break down column it reads. Identical calls across curations
 share a column. A value is `STRUCT(value …)`: a NULL struct is an episode not
 asked yet, a NULL `value` one the model could not answer, which is never
@@ -168,7 +173,7 @@ without asking any model. Unpublishing drops only the view.
 | --- | --- |
 | Score progress | the Modal service's WARP scores, by the chosen model, of the camera that model was trained on (the released head's: the top camera): `{timestamp_ns, frame_index, velocity, support, …}` per frame, from the episode's first message |
 | Track objects | the Modal object tracking service's SAM 3.1 tracks at the node's rate: `{timestamp_ns, objects}` per sampled picture, from the episode's first message |
-| Break down | `spql.ai.breakdown_task` over the chosen camera's packet video, with the episode's first `/instruction` message as its `task` when the dataset records one: `{description, start_ns, end_ns}` on the video's timeline |
+| Break down | `spql.ai.breakdown_task` over the chosen camera's packet video, with the episode's task as its `task` when the dataset records one — its first `/instruction` message, or the first of the `tasks` a LeRobot dataset lists (`EpisodeTask`) —: `{description, start_ns, end_ns}` on the video's timeline |
 | Find similar | `spql.ai.similarity(subtask, query)` of every subtask of the Break down above, one list aligned with its subtasks |
 | Group similar | `spql.ai.classify(subtask, categories)` the same way, the categories written into the call as a literal list: `{category, probability}` |
 
@@ -343,8 +348,9 @@ deletes it at the revision just read. A view that fails to drop stops
 the delete. Deleting the open one opens a blank graph. The payload is
 opaque to the backend and versioned by the frontend. Encoding 5 keeps only the
 recipe: nodes, edges, each node's configuration, and the published nodes.
-Break down keeps its camera, sample interval, and the topic it reads each
-episode's task from; Find similar its query; Group similar its categories,
+Break down keeps its camera, sample interval, and where it reads each
+episode's task: the topic (`task_topic`), or the task the dataset lists
+(`listed_task`); Find similar its query; Group similar its categories,
 each with its id; Track objects its camera, what it tracks, and its rate; a
 Select its conditions, naming the nodes they read by id. Nothing any node
 read is saved. A document in an earlier encoding is refused. Encoding 5

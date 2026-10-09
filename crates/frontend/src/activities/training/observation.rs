@@ -21,7 +21,7 @@ use spiral_robotics_ui::{
 use super::source::DatasetCameras;
 use super::state::TrainingController;
 use crate::activities::data::DatasetClient;
-use crate::activities::episode::Episode;
+use crate::activities::episode::EpisodeListing;
 use crate::components::scoped_task::ScopedTask;
 
 /// How long after its episode's first message a camera's first frame may be
@@ -95,7 +95,9 @@ impl DatasetCamera {
     /// The size of the first frame the camera logged in the dataset's first
     /// episode.
     async fn recorded_size(&self) -> Result<ImageSize, String> {
-        let episode = Episode::page(&self.dataset, 0, 1)
+        let episode = EpisodeListing::read(&self.dataset)
+            .await?
+            .page(0, 1)
             .await?
             .into_episodes()
             .into_iter()

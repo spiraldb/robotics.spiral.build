@@ -5,12 +5,13 @@ use crate::activities::curation::document::{
     SubtaskCategory, SubtaskGrouping, SubtaskSearch,
 };
 use crate::activities::curation::score_progress::ProgressScorer;
+use crate::activities::episode::EpisodeTask;
 use spiral_robotics_common::curation::{AnswerSource, FillEpisodes};
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        DatasetSelection::new(vec!["dataset_abc130k".to_owned()]).unwrap(),
+        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_abc130k"),
     ))
 }
 
@@ -54,7 +55,7 @@ fn preview(graph: &CurationGraph, node: &str) -> String {
 fn breakdown() -> CurationNodeKind {
     let mut annotation = SubtaskAnnotation::default();
     annotation.set_camera(Some("/top-camera".to_owned()));
-    annotation.set_task_topic(Some("/instruction".to_owned()));
+    annotation.set_task(Some(EpisodeTask::Recorded("/instruction".to_owned())));
     CurationNodeKind::BreakDownSubtasks(annotation)
 }
 
@@ -351,7 +352,7 @@ fn a_breakdown_reads_each_episode_whole_and_lists_its_subtasks_in_log_time() {
     if let CurationNodeKind::BreakDownSubtasks(annotation) =
         graph.node_mut(&annotate).unwrap().kind_mut()
     {
-        annotation.set_task_topic(None);
+        annotation.set_task(None);
     }
     assert_ne!(column(&graph, &annotate), subtasks);
 }
@@ -503,7 +504,7 @@ fn one_call_shares_its_column_across_curations_and_another_call_does_not() {
 #[test]
 fn only_a_dataset_studio_imported_keeps_the_answers_a_model_node_publishes() {
     let mut graph = CurationGraph::new(Some(
-        DatasetSelection::new(vec!["recordings".to_owned()]).unwrap(),
+        crate::activities::episode::EpisodeListing::mcap_fixture("recordings"),
     ));
     let long = selecting(
         &mut graph,

@@ -414,7 +414,7 @@ impl PendingStream {
 mod tests {
     use super::*;
     use serde_json::json;
-    use spiral_robotics_common::datasets::{DatasetSummary, DatasetTopic};
+    use spiral_robotics_common::datasets::{DatasetProducer, DatasetSummary, DatasetTopic};
 
     fn roles(value: serde_json::Value) -> DatasetJointRoles {
         serde_json::from_value(value).unwrap()
@@ -490,6 +490,7 @@ mod tests {
         let selection = DatasetSelection::new(vec!["dataset_abc".into()]).unwrap();
         let inspection = DatasetInspection::new(
             DatasetSummary::new(selection.clone(), ("resource".into(), "v1".into())),
+            DatasetProducer::Mcap,
             None,
             vec![
                 DatasetTopic::new(
@@ -512,6 +513,60 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    /// A LeRobot dataset's camera is a video feature, and its joints the
+    /// named members of `observation.state` and `action`, read by name.
+    #[test]
+    fn a_lerobot_policy_reads_its_video_features_and_named_joints() {
+        let selection = DatasetSelection::new(vec!["dataset_so101".into()]).unwrap();
+        let feature = |name: &str, encoding: &str| {
+            DatasetTopic::new(name.into(), vec![]).with_encodings(vec![encoding.into()])
+        };
+        let inspection = DatasetInspection::new(
+            DatasetSummary::new(selection.clone(), ("resource".into(), "v1".into())),
+            DatasetProducer::LeRobot,
+            Some(50),
+            vec![
+                feature("observation.images.up", "mp4"),
+                feature("observation.state", "parquet"),
+            ],
+        );
+        let dataset = DatasetVersion::of(&selection, &inspection);
+        assert!(
+            dataset
+                .records_cameras(&inspection, &["observation.images.up".into()])
+                .is_ok()
+        );
+        assert!(
+            dataset
+                .records_cameras(&inspection, &["observation.state".into()])
+                .is_err()
+        );
+        let named = |topic: &str, members: &[&str]| json!({"topic": topic, "schema": null, "field": [], "element": [], "indices": [], "members": members});
+        let gripper = |topic: &str| json!({"topic": topic, "schema": null, "field": ["gripper.pos"], "element": [], "indices": []});
+        let roles = roles(json!({"arms": [{"name": "so101",
+            "state": named("observation.state", &["shoulder_pan.pos", "elbow_flex.pos"]),
+            "action": named("action", &["shoulder_pan.pos", "elbow_flex.pos"]),
+            "gripper": {"state": gripper("observation.state"), "action": gripper("action"), "open": 100.0, "closed": 0.0}}]}));
+        let reads =
+            ActReads::new("dataset_so101", &["observation.images.up".into()], &roles).unwrap();
+        assert_eq!(
+            reads.joints.state(),
+            ["so101.j1", "so101.j2", "so101.gripper"]
+        );
+        assert_eq!(
+            reads.state[0].statement(),
+            "WITH joint AS (SELECT id, log_time, \"value\".\"shoulder_pan.pos\" AS v0, \"value\".\"elbow_flex.pos\" AS v1 FROM spql.mcap.read_topic('dataset_so101', 'observation.state') WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0, CAST(v1 AS DOUBLE) AS v1 FROM joint ORDER BY log_time"
+        );
+        assert_eq!(
+            reads.action[1].statement(),
+            "WITH joint AS (SELECT id, log_time, \"value\".\"gripper.pos\" AS v0 FROM spql.mcap.read_topic('dataset_so101', 'action') WHERE id = $1) SELECT CAST(log_time AS BIGINT) AS log_time_ns, CAST(v0 AS DOUBLE) AS v0 FROM joint ORDER BY log_time"
+        );
+        assert_eq!(
+            reads.cameras[0].statement(),
+            "SELECT CAST(r.log_time AS BIGINT) AS log_time_ns, r.value.data AS payload FROM spql.mcap.read_topic('dataset_so101', 'observation.images.up') r WHERE r.id = $1 ORDER BY r.chunk_start_offset, r.sample_ordinal"
+        );
     }
 
     #[test]

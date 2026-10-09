@@ -1,22 +1,27 @@
-//! The background runs one project's curations start — preview runs and fill
-//! runs — each held under an id until it is forgotten. A run lives in
-//! memory: a restarted backend holds none.
+//! The background runs one project starts — a curation's preview and fill
+//! runs, a dataset's import — each held under an id until it is forgotten.
+//! A run lives in memory: a restarted backend holds none.
 use crate::OperationError;
 use crate::clock::StableIdSequence;
 use crate::sync::MutexRecovery;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::task::AbortHandle;
 
+/// How long a run goes unpolled before a run that needs a reader starts
+/// nothing new, and a settled run before it is dropped.
+pub(crate) const ABANDONED_AFTER: Duration = Duration::from_secs(30);
+
 /// What the registry asks of a run it holds.
-pub(super) trait HeldWork: Send + Sync + 'static {
+pub(crate) trait HeldWork: Send + Sync + 'static {
     /// Whether nothing will ask about the run again, so it may be dropped.
     fn is_forgotten(&self) -> bool;
 }
 
 /// The runs of one kind a project has started, by id.
-pub(super) struct HeldRuns<R> {
+pub(crate) struct HeldRuns<R> {
     ids: StableIdSequence,
     runs: Mutex<BTreeMap<String, HeldRun<R>>>,
 }
@@ -28,7 +33,7 @@ struct HeldRun<R> {
 }
 
 impl<R: HeldWork> HeldRuns<R> {
-    pub(super) fn new(prefix: &'static str) -> Self {
+    pub(crate) fn new(prefix: &'static str) -> Self {
         Self {
             ids: StableIdSequence::new(prefix, 1),
             runs: Mutex::new(BTreeMap::new()),
@@ -36,7 +41,7 @@ impl<R: HeldWork> HeldRuns<R> {
     }
 
     /// Hold `run` under a new id, worked by `work` from now on.
-    pub(super) fn start(
+    pub(crate) fn start(
         &self,
         run: Arc<R>,
         work: impl Future<Output = ()> + Send + 'static,
@@ -51,7 +56,7 @@ impl<R: HeldWork> HeldRuns<R> {
     }
 
     /// Run `id`, or why it is not held.
-    pub(super) fn get(&self, id: &str) -> Result<Arc<R>, OperationError> {
+    pub(crate) fn get(&self, id: &str) -> Result<Arc<R>, OperationError> {
         self.runs
             .recover_lock()
             .get(id)
@@ -62,7 +67,7 @@ impl<R: HeldWork> HeldRuns<R> {
     }
 
     /// Every run held, by id.
-    pub(super) fn all(&self) -> Vec<(String, Arc<R>)> {
+    pub(crate) fn all(&self) -> Vec<(String, Arc<R>)> {
         self.forget();
         self.runs
             .recover_lock()
@@ -72,7 +77,7 @@ impl<R: HeldWork> HeldRuns<R> {
     }
 
     /// End the task working run `id` now, keeping the run to be read.
-    pub(super) fn abort(&self, id: &str) -> Result<(), OperationError> {
+    pub(crate) fn abort(&self, id: &str) -> Result<(), OperationError> {
         let runs = self.runs.recover_lock();
         let held = runs.get(id).ok_or_else(|| {
             OperationError::NotFound("This run is no longer held; run it again.".into())
@@ -82,7 +87,7 @@ impl<R: HeldWork> HeldRuns<R> {
     }
 
     /// End and drop every run `replaced` picks.
-    pub(super) fn replace(&self, replaced: impl Fn(&R) -> bool) {
+    pub(crate) fn replace(&self, replaced: impl Fn(&R) -> bool) {
         self.runs.recover_lock().retain(|_, held| {
             let keep = !replaced(&held.run);
             if !keep {
@@ -93,14 +98,14 @@ impl<R: HeldWork> HeldRuns<R> {
     }
 
     /// End and drop every run: the project they work on is closing.
-    pub(super) fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         for held in std::mem::take(&mut *self.runs.recover_lock()).into_values() {
             held.task.abort();
         }
     }
 
     /// Drop every run nothing will ask about again.
-    pub(super) fn forget(&self) {
+    pub(crate) fn forget(&self) {
         self.runs
             .recover_lock()
             .retain(|_, held| !held.run.is_forgotten());
@@ -108,7 +113,7 @@ impl<R: HeldWork> HeldRuns<R> {
 
     /// Whether the task working run `id` has ended.
     #[cfg(test)]
-    pub(super) fn is_finished(&self, id: &str) -> bool {
+    pub(crate) fn is_finished(&self, id: &str) -> bool {
         self.runs
             .recover_lock()
             .get(id)

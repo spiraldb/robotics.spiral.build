@@ -2,6 +2,7 @@
 //! each one and what it holds. A reader of a view is told what a column is
 //! from here, never by inspecting its type.
 use crate::activities::curation::document::{CategoryId, DATASET_NODE_ID, EpisodeFact};
+use crate::activities::episode::EpisodeListing;
 
 /// What one column of the table holds for each episode.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,10 +75,10 @@ impl TableColumn {
 pub(in crate::activities::curation) struct TableColumns(Vec<TableColumn>);
 
 impl TableColumns {
-    /// The dataset's facts, which start every table.
-    pub(super) fn facts() -> Self {
+    /// The facts `listing`'s dataset records, which start every table.
+    pub(super) fn facts(listing: &EpisodeListing) -> Self {
         Self(
-            EpisodeFact::ALL
+            EpisodeFact::listed_by(listing)
                 .into_iter()
                 .map(|fact| TableColumn {
                     name: fact.key().to_owned(),

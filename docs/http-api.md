@@ -229,16 +229,31 @@ explicit dataset/member identities; no recording-header fallback exists.
 
 ### Hugging Face import
 
-Dataset import accepts public Hugging Face repositories containing MCAP files. The
-request has `dataset_id`, `repository`, and optional `revision` (default `main`);
-imports create `dataset_files_<dataset_id>`, a table of the repository's MCAP
-files, and derive `dataset_<dataset_id>` from it in one transaction, copying
-every topic into Spiral.
-There is no format selector or LeRobot import. Inspection pins a revision and
-lists the dataset and source relation to create. Import uses Spiral's
-`spql.mcap.dataset` producer, refreshes its population, and checks episode count
-before committing. Existing targets are refused. It does not publish rows into a
-separate Studio dataset registry. Project snapshot restore is a separate operation.
+Dataset import accepts public Hugging Face repositories holding MCAP files or
+a LeRobot v3 dataset. Both requests are `HuggingFaceDatasetSource`:
+`dataset_id`, `repository`, and optional `revision` (default `main`). No
+token is sent. See [datasets](datasets.md#hugging-face-import).
+
+- `POST /datasets/hugging-face/inspect` and `POST /datasets/lerobot/inspect`
+  pin the revision to its commit and list the files an import reads, their
+  size, and the relations it creates; they change nothing. A LeRobot
+  repository must hold `meta/info.json`.
+- `POST /datasets/hugging-face/import` imports MCAP files in one request:
+  `dataset_files_<dataset_id>`, a table of the repository's MCAP files, and
+  `dataset_<dataset_id>` derived from it in one transaction, copying every
+  topic into Spiral, with its episode count checked before committing.
+- `POST /datasets/lerobot/imports` starts a LeRobot import the backend holds
+  and answers its `LeRobotImportStatus` at once: `id`, the `source` at its
+  resolved commit, and `phase` (`listing_files`, `creating_dataset`,
+  `copying_episodes`, `creating_answers`, `done`, or `failed` with Spiral's
+  `error`). `GET /datasets/lerobot/imports/{id}` reads it; a run settled and
+  unread for 30 seconds is dropped. The run creates the Location
+  `dataset_files_<dataset_id>` over the repository at that commit, lists it,
+  and creates and refreshes `dataset_<dataset_id>` with
+  `spql.lerobot.dataset`, in one transaction.
+
+Existing targets are refused. Neither publishes rows into a separate Studio
+dataset registry. Project snapshot restore is a separate operation.
 
 ### Curation
 

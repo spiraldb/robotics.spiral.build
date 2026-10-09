@@ -115,10 +115,49 @@ impl DatasetSummary {
     }
 }
 
+/// The Spiral producer that made a Dataset's members from its source files,
+/// which decides what `spql.mcap.episodes` lists for each episode and what
+/// its topics record. Spiral's `spql.mcap` functions read these two.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum DatasetProducer {
+    /// One member per MCAP file, each topic the file's channels.
+    #[serde(rename = "spql.mcap.dataset")]
+    Mcap,
+    /// One member per episode of a LeRobot v3 dataset, each feature a topic.
+    #[serde(rename = "spql.lerobot.dataset")]
+    LeRobot,
+}
+
+impl DatasetProducer {
+    /// The producer Spiral registered under `id`, or why Studio cannot read
+    /// a Dataset it made.
+    pub fn from_id(id: &str) -> Result<Self, String> {
+        match id {
+            "spql.mcap.dataset" => Ok(Self::Mcap),
+            "spql.lerobot.dataset" => Ok(Self::LeRobot),
+            other => Err(format!(
+                "Studio reads datasets made by spql.mcap.dataset or spql.lerobot.dataset, not {other}"
+            )),
+        }
+    }
+    /// The id Spiral registers it under.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Mcap => "spql.mcap.dataset",
+            Self::LeRobot => "spql.lerobot.dataset",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetTopic {
     name: String,
     schemas: Vec<String>,
+    /// How the producer recorded the topic's messages: `protobuf` for an
+    /// MCAP channel, `mp4` for a LeRobot camera, `parquet` for a LeRobot
+    /// feature.
+    #[serde(default)]
+    encodings: Vec<String>,
     members: u64,
     samples: Option<u64>,
     revision: Option<super::TopicRevision>,
@@ -128,6 +167,7 @@ impl DatasetTopic {
         Self {
             name,
             schemas,
+            encodings: Vec::new(),
             members: 0,
             samples: None,
             revision: None,
@@ -142,20 +182,39 @@ impl DatasetTopic {
         self.revision = Some(revision);
         self
     }
+    /// The message encodings its producer recorded.
+    pub fn with_encodings(mut self, encodings: Vec<String>) -> Self {
+        self.encodings = encodings;
+        self
+    }
     pub fn revision(&self) -> Option<&super::TopicRevision> {
         self.revision.as_ref()
     }
     pub fn name(&self) -> &str {
         &self.name
     }
+    /// The native schema names its messages were recorded with; a LeRobot
+    /// feature has none.
     pub fn schemas(&self) -> &[String] {
         &self.schemas
     }
-    /// Whether the stream carries camera video rather than data messages.
+    /// Whether the stream carries camera video rather than data messages:
+    /// recorded as `foxglove.CompressedVideo`, or a LeRobot video feature,
+    /// which Spiral keeps as the same H.264 packets.
     pub fn is_video(&self) -> bool {
         self.schemas
             .iter()
             .any(|schema| schema == "foxglove.CompressedVideo")
+            || self.encodings.iter().any(|encoding| encoding == "mp4")
+    }
+    /// Whether it is the stream `schema` names on its topic: the one of that
+    /// schema, or, with no schema, the topic's only recording.
+    pub fn is_recorded_as(&self, topic: &str, schema: Option<&str>) -> bool {
+        self.name == topic
+            && match schema {
+                Some(schema) => self.schemas.iter().any(|recorded| recorded == schema),
+                None => self.schemas.is_empty(),
+            }
     }
     pub fn members(&self) -> u64 {
         self.members
@@ -168,19 +227,30 @@ impl DatasetTopic {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetInspection {
     dataset: DatasetSummary,
+    producer: DatasetProducer,
     members: Option<u64>,
     topics: Vec<DatasetTopic>,
 }
 impl DatasetInspection {
-    pub fn new(dataset: DatasetSummary, members: Option<u64>, topics: Vec<DatasetTopic>) -> Self {
+    pub fn new(
+        dataset: DatasetSummary,
+        producer: DatasetProducer,
+        members: Option<u64>,
+        topics: Vec<DatasetTopic>,
+    ) -> Self {
         Self {
             dataset,
+            producer,
             members,
             topics,
         }
     }
     pub fn dataset(&self) -> &DatasetSummary {
         &self.dataset
+    }
+    /// Which producer made its members.
+    pub fn producer(&self) -> DatasetProducer {
+        self.producer
     }
     pub fn members(&self) -> Option<u64> {
         self.members
@@ -212,6 +282,40 @@ mod tests {
         assert_eq!(named("dataset_abc130k_sample"), "abc130k_sample");
         assert_eq!(named("recordings"), "recordings");
         assert_eq!(named("dataset_"), "dataset_");
+    }
+
+    #[test]
+    fn a_producer_is_named_by_its_spiral_id() {
+        for producer in [DatasetProducer::Mcap, DatasetProducer::LeRobot] {
+            assert_eq!(DatasetProducer::from_id(producer.id()), Ok(producer));
+            assert_eq!(
+                serde_json::to_value(producer).unwrap(),
+                serde_json::json!(producer.id())
+            );
+        }
+        assert!(
+            DatasetProducer::from_id("spql.parquet.dataset")
+                .unwrap_err()
+                .contains("spql.parquet.dataset")
+        );
+    }
+
+    #[test]
+    fn a_camera_is_compressed_video_or_a_lerobot_video_feature() {
+        let mcap = DatasetTopic::new("/top".into(), vec!["foxglove.CompressedVideo".into()]);
+        assert!(mcap.is_video());
+        let feature = |encoding: &str| {
+            DatasetTopic::new("observation.images.up".into(), vec![])
+                .with_encodings(vec![encoding.into()])
+        };
+        assert!(feature("mp4").is_video());
+        assert!(!feature("parquet").is_video());
+        // A stream is named by its schema, or by its topic alone when it has
+        // none.
+        assert!(mcap.is_recorded_as("/top", Some("foxglove.CompressedVideo")));
+        assert!(!mcap.is_recorded_as("/top", None));
+        assert!(feature("parquet").is_recorded_as("observation.images.up", None));
+        assert!(!feature("parquet").is_recorded_as("observation.images.up", Some("x")));
     }
 }
 

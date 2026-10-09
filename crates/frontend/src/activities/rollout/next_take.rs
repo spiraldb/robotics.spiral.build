@@ -85,18 +85,11 @@ impl NextTake {
         self.starting.set(starting);
     }
 
-    /// The catalog's dataset names, plus whatever is currently typed.
+    /// The datasets a take may join, plus whatever is currently typed.
     pub(super) fn suggestions(self) -> BTreeSet<String> {
         self.catalog
-            .datasets()
+            .recording_destinations()
             .into_iter()
-            .filter_map(|dataset| {
-                dataset
-                    .selection()
-                    .label()
-                    .strip_prefix("dataset_")
-                    .map(str::to_owned)
-            })
             .chain(std::iter::once(self.dataset.read().to_owned()))
             .collect()
     }

@@ -21,6 +21,7 @@ mod selection;
 mod tests;
 
 use super::annotate::SubtaskRow;
+use crate::activities::episode::{EpisodeListing, EpisodeTask};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_common::sql::UnquotedSqlIdentifier;
@@ -48,8 +49,10 @@ const MAX_NODE_ID_LEN: usize = 64;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CurationGraph {
+    /// The dataset it reads, and the producer that made it, which decide
+    /// how its episodes are listed.
     #[serde(default)]
-    dataset: Option<DatasetSelection>,
+    dataset: Option<EpisodeListing>,
     nodes: Vec<CurationNode>,
     #[serde(default)]
     edges: Vec<CurationEdge>,
@@ -169,6 +172,10 @@ pub(crate) struct SubtaskAnnotation {
     /// the episode's task; unset for a dataset that records none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     task_topic: Option<String>,
+    /// Whether each episode's task is the one its dataset lists beside it,
+    /// as a LeRobot dataset does; never with a task topic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    listed_task: bool,
 }
 impl Default for SubtaskAnnotation {
     fn default() -> Self {
@@ -176,6 +183,7 @@ impl Default for SubtaskAnnotation {
             camera: None,
             sample_interval_seconds: DEFAULT_SAMPLE_INTERVAL_SECONDS,
             task_topic: None,
+            listed_task: false,
         }
     }
 }
@@ -196,15 +204,28 @@ impl SubtaskAnnotation {
         self.sample_interval_seconds = seconds;
         Ok(())
     }
-    pub(crate) fn task_topic(&self) -> Option<&str> {
-        self.task_topic.as_deref()
+    /// Where each episode's task is read; none for a dataset that records
+    /// none.
+    pub(crate) fn task(&self) -> Option<EpisodeTask> {
+        match (&self.task_topic, self.listed_task) {
+            (Some(topic), _) => Some(EpisodeTask::Recorded(topic.clone())),
+            (None, true) => Some(EpisodeTask::Listed),
+            (None, false) => None,
+        }
     }
-    pub(crate) fn set_task_topic(&mut self, topic: Option<String>) {
-        self.task_topic = topic.filter(|value| !value.trim().is_empty());
+    pub(crate) fn set_task(&mut self, task: Option<EpisodeTask>) {
+        (self.task_topic, self.listed_task) = match task {
+            Some(EpisodeTask::Recorded(topic)) if !topic.trim().is_empty() => (Some(topic), false),
+            Some(EpisodeTask::Listed) => (None, true),
+            Some(EpisodeTask::Recorded(_)) | None => (None, false),
+        };
     }
     fn validate(&self) -> Result<(), String> {
         if !self.sample_interval_seconds.is_finite() || self.sample_interval_seconds <= 0.0 {
             return Err("The sample interval must be a positive number of seconds.".into());
+        }
+        if self.task_topic.is_some() && self.listed_task {
+            return Err("An episode's task is read from one place.".into());
         }
         Ok(())
     }
@@ -400,7 +421,7 @@ impl SubtaskKey {
 
 impl CurationGraph {
     /// A graph with only its dataset node.
-    pub(crate) fn new(dataset: Option<DatasetSelection>) -> Self {
+    pub(crate) fn new(dataset: Option<EpisodeListing>) -> Self {
         Self {
             dataset,
             nodes: vec![CurationNode {
@@ -412,9 +433,13 @@ impl CurationGraph {
         }
     }
     pub(crate) fn dataset(&self) -> Option<&DatasetSelection> {
+        self.dataset.as_ref().map(EpisodeListing::dataset)
+    }
+    /// How the dataset it reads lists its episodes.
+    pub(crate) fn listing(&self) -> Option<&EpisodeListing> {
         self.dataset.as_ref()
     }
-    pub(crate) fn set_dataset(&mut self, dataset: Option<DatasetSelection>) {
+    pub(crate) fn set_dataset(&mut self, dataset: Option<EpisodeListing>) {
         self.dataset = dataset;
     }
     pub(crate) fn nodes(&self) -> &[CurationNode] {

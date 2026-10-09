@@ -23,7 +23,7 @@ mod stuck_joints;
 pub(in crate::activities) use report_view::CheckedEpisode;
 
 use super::DatasetClient;
-use crate::activities::episode::{Episode, EpisodeRows, SourceLabel};
+use crate::activities::episode::{Episode, EpisodeListing, EpisodeRows, SourceLabel};
 use crate::components::scoped_task::ScopedTask;
 use camera_frames::CameraFrames;
 use clock_offset::ClockOffset;
@@ -347,16 +347,17 @@ impl CheckRun {
 /// any surface shows the dataset's current version and read from then on.
 #[component]
 pub(super) fn DatasetCheckReport(
-    dataset: DatasetSelection,
+    listing: EpisodeListing,
     on_open: EventHandler<CheckedEpisode>,
 ) -> Element {
     let checks = DatasetChecks::current();
+    let dataset = listing.dataset().clone();
     use_effect(use_reactive((&dataset,), move |(dataset,)| {
         checks.ensure(&dataset)
     }));
     // The episodes a finding names open as the dataset's list labels them.
-    let listing = use_resource(use_reactive((&dataset,), |(dataset,)| async move {
-        let episodes = Episode::page(&dataset, 0, 1000).await.ok()?.into_episodes();
+    let listing = use_resource(use_reactive((&listing,), |(listing,)| async move {
+        let episodes = listing.page(0, 1000).await.ok()?.into_episodes();
         let rows = EpisodeRows::of(episodes.iter());
         Some(
             episodes

@@ -14,7 +14,7 @@ use spiral_robotics_common::datasets::{
     DatasetCheckLookup, DatasetCheckSave, DatasetInspection, DatasetJointRoles,
     DatasetJointRolesSave, DatasetRobot, DatasetRobotSave, DatasetSelection, DatasetTopic,
     EpisodeSelection, HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection,
-    HuggingFaceDatasetSource, ProjectResource,
+    HuggingFaceDatasetSource, LeRobotImportStatus, ProjectResource,
 };
 use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest, SpiralQuerySnapshot};
 use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
@@ -44,6 +44,14 @@ impl DatasetQueryEndpoints {
                 "/datasets/hugging-face/inspect",
                 post(Self::inspect_hugging_face_dataset),
             )
+            .route(
+                "/datasets/lerobot/inspect",
+                post(Self::inspect_lerobot_dataset),
+            )
+            .route(
+                "/datasets/lerobot/imports/{id}",
+                get(Self::lerobot_import_status),
+            )
     }
     pub(crate) fn commands() -> Router<StudioContext> {
         Router::new()
@@ -59,6 +67,10 @@ impl DatasetQueryEndpoints {
             .route(
                 "/datasets/hugging-face/import",
                 post(Self::import_hugging_face_dataset),
+            )
+            .route(
+                "/datasets/lerobot/imports",
+                post(Self::import_lerobot_dataset),
             )
             .route(
                 "/datasets/{dataset}/recordings/{episode}",
@@ -222,6 +234,28 @@ impl DatasetQueryEndpoints {
             .await
             .map_err(OperationError::External)?;
         Ok(Json(inspection))
+    }
+    async fn inspect_lerobot_dataset(
+        ApiJson(request): ApiJson<HuggingFaceDatasetSource>,
+    ) -> Result<Json<HuggingFaceDatasetInspection>, OperationError> {
+        let inspection = HuggingFaceDatasetInspection::discover_lerobot(request)
+            .await
+            .map_err(OperationError::External)?;
+        Ok(Json(inspection))
+    }
+    /// Start importing a LeRobot dataset; the run answers its status at once
+    /// and is polled from then on.
+    async fn import_lerobot_dataset(
+        Project(project): Project,
+        ApiJson(request): ApiJson<HuggingFaceDatasetSource>,
+    ) -> Result<Json<LeRobotImportStatus>, OperationError> {
+        Ok(Json(project.lerobot_imports().start(request).await?))
+    }
+    async fn lerobot_import_status(
+        Project(project): Project,
+        ApiPath(id): ApiPath<String>,
+    ) -> Result<Json<LeRobotImportStatus>, OperationError> {
+        Ok(Json(project.lerobot_imports().status(&id)?))
     }
     async fn import_hugging_face_dataset(
         Project(project): Project,

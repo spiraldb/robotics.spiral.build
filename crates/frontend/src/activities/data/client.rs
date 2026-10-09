@@ -44,6 +44,44 @@ impl DatasetClient {
             .request(HttpRequest::new("POST", "/api/datasets/hugging-face/import").json(&source))
     }
 
+    /// What importing the LeRobot dataset `source` names would read, at the
+    /// commit its revision resolves to now.
+    pub(super) fn inspect_lerobot(
+        &self,
+        source: &spiral_robotics_common::datasets::HuggingFaceDatasetSource,
+    ) -> impl Future<
+        Output = Result<
+            spiral_robotics_common::datasets::HuggingFaceDatasetInspection,
+            CommandError,
+        >,
+    > + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/lerobot/inspect").json(source))
+    }
+    /// Start importing the LeRobot dataset `source` names; the backend holds
+    /// the run, which answers its status at once.
+    pub(super) fn start_lerobot_import(
+        &self,
+        source: &spiral_robotics_common::datasets::HuggingFaceDatasetSource,
+    ) -> impl Future<
+        Output = Result<spiral_robotics_common::datasets::LeRobotImportStatus, CommandError>,
+    > + use<> {
+        self.project
+            .request(HttpRequest::new("POST", "/api/datasets/lerobot/imports").json(source))
+    }
+    /// Where the import run `id` has got.
+    pub(super) fn lerobot_import(
+        &self,
+        id: &str,
+    ) -> impl Future<
+        Output = Result<spiral_robotics_common::datasets::LeRobotImportStatus, CommandError>,
+    > + use<> {
+        self.project.request(HttpRequest::new(
+            "GET",
+            format!("/api/datasets/lerobot/imports/{id}"),
+        ))
+    }
+
     /// Robot files are public; the relay authenticates Hugging Face requests
     /// when a token is saved.
     pub(super) async fn read_robot_description(&self, url: &str) -> Result<String, CommandError> {

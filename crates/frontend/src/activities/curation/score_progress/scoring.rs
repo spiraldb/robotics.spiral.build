@@ -172,7 +172,7 @@ mod tests {
     /// Score progress node.
     fn scored(scoring: ProgressScoring) -> (CurationGraph, String) {
         let mut graph = CurationGraph::new(Some(
-            DatasetSelection::new(vec!["dataset_bottles".to_owned()]).unwrap(),
+            crate::activities::episode::EpisodeListing::mcap_fixture("dataset_bottles"),
         ));
         let node = graph
             .add_child(DATASET_NODE_ID, CurationNodeKind::ScoreProgress(scoring))

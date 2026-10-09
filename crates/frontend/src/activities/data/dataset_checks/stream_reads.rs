@@ -62,13 +62,7 @@ impl<'a> CheckedStreams<'a> {
     pub(super) fn read_values(&self, values: &RecordedValues) -> Result<String, String> {
         self.topics
             .iter()
-            .find(|topic| {
-                topic.name() == values.topic()
-                    && topic
-                        .schemas()
-                        .iter()
-                        .any(|schema| schema == values.schema())
-            })
+            .find(|topic| topic.is_recorded_as(values.topic(), values.schema()))
             .map(|topic| self.read(topic))
             .ok_or_else(|| format!("The dataset no longer records {}", values.topic()))
     }

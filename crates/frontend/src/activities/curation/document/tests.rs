@@ -299,7 +299,7 @@ fn a_select_chooses_the_same_categories_through_every_edit_of_them() {
 
 #[test]
 fn a_select_reads_only_nodes_above_it_of_the_kind_each_condition_reads() {
-    let mut payload = CurationGraph::new(None);
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_bottles")));
     let mut tracking = ObjectTracking::default();
     tracking.set_prompt("bottle");
     let track = payload
@@ -391,6 +391,31 @@ fn a_select_reads_only_nodes_above_it_of_the_kind_each_condition_reads() {
     assert_eq!(payload.validate(), Ok(()));
 }
 
+/// A LeRobot episode has no file or channels of its own, so a Select over a
+/// LeRobot dataset offers only the facts its producer records.
+#[test]
+fn a_select_offers_only_the_facts_its_dataset_records() {
+    let lerobot = EpisodeListing::new(
+        DatasetSelection::new(vec!["dataset_so101".into()]).unwrap(),
+        spiral_robotics_common::datasets::DatasetProducer::LeRobot,
+    );
+    let mut payload = CurationGraph::new(Some(lerobot));
+    let keep = payload.add_child(DATASET_NODE_ID, select()).unwrap();
+    assert_eq!(
+        payload
+            .conditions_for(&keep)
+            .iter()
+            .map(|choice| choice.label().to_owned())
+            .collect::<Vec<_>>(),
+        ["Duration", "Message count"]
+    );
+    // Neither does the table it starts from, nor the dataset step.
+    let path = crate::activities::curation::path::CurationPath::to(&payload, &keep).unwrap();
+    let statement = path.statement().unwrap();
+    assert!(statement.contains("episode_index, tasks"));
+    assert!(!statement.contains("channel_count") && !statement.contains("size_megabytes"));
+}
+
 #[test]
 fn asking_about_a_row_reuses_the_first_search_node_and_remembers_the_row() {
     let (mut payload, annotate) = annotated_graph();
@@ -478,7 +503,7 @@ fn encoding_round_trips_and_rejects_other_versions_and_broken_graphs() {
         payload.node_mut(&annotate).unwrap().kind_mut()
     {
         annotation.set_camera(Some("/top-camera".into()));
-        annotation.set_task_topic(Some("/instruction".into()));
+        annotation.set_task(Some(EpisodeTask::Recorded("/instruction".into())));
     }
     let search = payload
         .add_child(

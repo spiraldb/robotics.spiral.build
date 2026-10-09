@@ -91,7 +91,9 @@ impl RobotDiscoveryAgent {
             let key = (binding.topic(), binding.schema());
             let evidence = match samples.entry(key) {
                 Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => entry.insert(episode.stream_evidence(key.0, key.1).await?),
+                Entry::Vacant(entry) => {
+                    entry.insert(episode.stream_evidence(key.0, Some(key.1)).await?)
+                }
             };
             if !evidence["samples"].as_array().is_some_and(|rows| {
                 rows.iter().any(|row| {

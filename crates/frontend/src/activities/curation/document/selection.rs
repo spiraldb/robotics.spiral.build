@@ -14,9 +14,10 @@
 //! the preview read as a threshold slides (`select/reading.rs`), and the path
 //! compiles them to the SQL a published view keeps by (`select/step.rs`).
 use super::{CategoryId, CurationGraph, CurationNode, CurationNodeKind};
-use crate::activities::episode::Episode;
+use crate::activities::episode::{Episode, EpisodeListing};
 use crate::format::{ClockPresentation as _, GroupedCountPresentation as _};
 use serde::{Deserialize, Serialize};
+use spiral_robotics_common::datasets::DatasetProducer;
 
 /// One statistic Spiral records for every episode.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -29,12 +30,25 @@ pub(crate) enum EpisodeFact {
 }
 
 impl EpisodeFact {
-    pub(crate) const ALL: [Self; 4] = [
+    const ALL: [Self; 4] = [
         Self::DurationSeconds,
         Self::Messages,
         Self::Channels,
         Self::SizeMegabytes,
     ];
+    /// The facts `listing`'s dataset records for every episode: its
+    /// producer's. A LeRobot episode has no file or channels of its own.
+    pub(crate) fn listed_by(listing: &EpisodeListing) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|fact| match listing.producer() {
+                DatasetProducer::Mcap => true,
+                DatasetProducer::LeRobot => {
+                    matches!(fact, Self::DurationSeconds | Self::Messages)
+                }
+            })
+            .collect()
+    }
     /// Its column in the curation table.
     pub(crate) const fn key(self) -> &'static str {
         match self {
@@ -526,7 +540,10 @@ impl CurationGraph {
     /// the recorded facts, then what each Track objects node above it
     /// counted.
     pub(crate) fn numbers_for(&self, select: &str) -> Vec<EpisodeNumber> {
-        let mut numbers = EpisodeFact::ALL
+        let mut numbers = self
+            .listing()
+            .map(EpisodeFact::listed_by)
+            .unwrap_or_default()
             .into_iter()
             .map(EpisodeNumber::Fact)
             .collect::<Vec<_>>();

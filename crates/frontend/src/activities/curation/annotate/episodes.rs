@@ -1,37 +1,31 @@
 //! The episodes one annotation node reads, and what their recordings hold
-//! that its step reads: the cameras, and the operator's instruction.
+//! that its step reads: the cameras, and the episode's task.
 use crate::activities::curation::state::CurationController;
-use crate::activities::episode::{Episode, StreamCatalog};
+use crate::activities::episode::{Episode, EpisodeTask, StreamCatalog};
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
-
-/// The topic a dataset records the operator's own words on, when it has one.
-const INSTRUCTION_TOPIC: &str = "/instruction";
+use spiral_robotics_common::datasets::EpisodeId;
 
 /// What one of a dataset's recordings holds that Break down reads: its
-/// camera topics, and whether it records the operator's instruction. Every
-/// episode of one recording session carries the same topics, so one episode
-/// answers for the sample.
+/// camera topics, and where it records its task. Every episode of one
+/// dataset carries the same topics, so one episode answers for the sample.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct RecordedTopics {
     cameras: Vec<String>,
-    instructed: bool,
+    task: Option<EpisodeTask>,
 }
 
 impl RecordedTopics {
     /// What `episode` recorded: `None` until it is read, or when it cannot be.
-    pub(super) fn use_topics(episode: Option<EpisodeSelection>) -> Option<Self> {
+    pub(super) fn use_topics(episode: Option<Episode>) -> Option<Self> {
         let topics = use_resource(use_reactive(&episode, move |episode| async move {
-            let catalog = StreamCatalog::load(episode?).await.ok()?;
+            let episode = episode?;
+            let catalog = StreamCatalog::load(episode.selection()).await.ok()?;
             Some(Self {
                 cameras: catalog
                     .videos()
                     .map(|stream| stream.name().to_owned())
                     .collect(),
-                instructed: catalog
-                    .streams()
-                    .iter()
-                    .any(|stream| stream.name() == INSTRUCTION_TOPIC),
+                task: EpisodeTask::of(episode.listing(), &catalog),
             })
         }));
         topics.read().clone().flatten()
@@ -44,8 +38,8 @@ impl RecordedTopics {
         StreamCatalog::overview_camera(&self.cameras).map(str::to_owned)
     }
     /// Where each episode's task is read, when the dataset records one.
-    pub(super) fn task_topic(&self) -> Option<String> {
-        self.instructed.then(|| INSTRUCTION_TOPIC.to_owned())
+    pub(super) fn task(&self) -> Option<EpisodeTask> {
+        self.task.clone()
     }
 }
 
@@ -94,9 +88,7 @@ mod tests {
     fn an_episode_without_a_recorded_range_is_not_annotated() {
         let facts =
             serde_json::from_value(serde_json::json!({ "id": EpisodeId::fixture(2) })).unwrap();
-        let dataset =
-            spiral_robotics_common::datasets::DatasetSelection::new(vec!["folding".into()])
-                .unwrap();
-        assert!(AnnotationEpisode::new(Episode::new(dataset, facts)).is_err());
+        let listing = crate::activities::episode::EpisodeListing::mcap_fixture("folding");
+        assert!(AnnotationEpisode::new(Episode::new(listing, facts)).is_err());
     }
 }

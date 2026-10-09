@@ -14,7 +14,7 @@ use crate::activities::curation::path::CurationPath;
 use crate::activities::curation::population::{EpisodeSample, KeptRanges, PopulationReader};
 use crate::activities::curation::preview::{PreviewReads, PreviewRows};
 use crate::activities::episode::Episode;
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::EpisodeId;
 
 /// Four episodes of 30, 10, 25, and 20 seconds, each first message at one
 /// second of log time.
@@ -32,7 +32,7 @@ fn sample() -> EpisodeSample {
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        DatasetSelection::new(vec!["dataset_bottles".to_owned()]).unwrap(),
+        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_bottles"),
     ))
 }
 

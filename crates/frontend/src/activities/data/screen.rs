@@ -14,7 +14,8 @@ use super::{
 };
 use crate::activities::curation::{CuratedFills, CuratedView};
 use crate::activities::episode::{
-    EpisodeFactsPresentation as _, EpisodeHeading, EpisodeInspection, HeadingSubject,
+    EpisodeFactsPresentation as _, EpisodeHeading, EpisodeInspection, EpisodeListing,
+    HeadingSubject,
 };
 use crate::components::page_keys::PageKeys;
 use crate::format::WallClockPresentation as _;
@@ -358,10 +359,20 @@ fn DataPanels() -> Element {
     )
     .with_view(selection.active_view());
 
+    // The overview lists the dataset's episodes as its producer records
+    // them, which its inspection says.
     let overview = match dataset {
-        Some(dataset) => rsx! {
-            DatasetOverview { dataset,
-                on_open: move |checked| selection.open_episode(OpenedEpisode::checked(checked)) }
+        Some(_) => match &dataset_inspection {
+            Some(Ok(inspection)) => rsx! {
+                DatasetOverview { listing: EpisodeListing::of(inspection),
+                    on_open: move |checked| selection.open_episode(OpenedEpisode::checked(checked)) }
+            },
+            Some(Err(error)) => {
+                rsx! { p { class: "data-overview-alert", role: "alert", "{error}" } }
+            }
+            None => {
+                rsx! { p { class: "data-overview-alert", role: "status", "Reading the dataset…" } }
+            }
         },
         None => {
             let datasets = resources

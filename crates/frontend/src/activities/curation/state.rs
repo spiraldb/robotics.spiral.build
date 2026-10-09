@@ -245,10 +245,10 @@ impl CurationController {
         let session = DocumentSession::use_session();
         let payload = use_signal(|| CurationGraph::new(None));
         // Only a new dataset reads a new sample; editing the graph never does.
-        let dataset = use_memo(move || payload.read().dataset().cloned());
+        let listing = use_memo(move || payload.read().listing().cloned());
         let sample = use_resource(move || async move {
-            match dataset() {
-                Some(dataset) => EpisodeSample::load(&dataset).await.map(Some),
+            match listing() {
+                Some(listing) => EpisodeSample::load(&listing).await.map(Some),
                 None => Ok(None),
             }
         });

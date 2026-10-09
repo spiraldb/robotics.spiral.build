@@ -85,8 +85,11 @@ impl JointRoleDiscovery {
                     arm.name()
                 ));
             }
-            for index in arm.state().indices() {
-                if !measured.insert((arm.state().topic(), arm.state().path(), *index)) {
+            let state = arm.state();
+            let places = (state.indices().iter().map(|index| format!("[{index}]")))
+                .chain(state.members().iter().cloned());
+            for place in places {
+                if !measured.insert((state.topic(), state.path(), place)) {
                     return Err(format!(
                         "The {} arm shares a joint with another arm",
                         arm.name()
@@ -214,7 +217,7 @@ impl<'a> IdentifiedJoints<'a> {
         let names = arms.iter().map(ArmRoles::name).collect::<Vec<_>>();
         let joints = arms
             .iter()
-            .map(|arm| arm.state().indices().len().to_string())
+            .map(|arm| arm.state().count().to_string())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>()
@@ -278,8 +281,17 @@ impl<'a> IdentifiedJoints<'a> {
         })
     }
 
-    /// Where numbers are read from: `/topic field[0–5].element`.
+    /// Where numbers are read from: `/topic field[0–5].element`, or the
+    /// members a LeRobot feature names, `action {shoulder_pan.pos, …}`.
     fn read(values: &RecordedValues) -> String {
+        if !values.members().is_empty() {
+            let field = values.field().join(".");
+            let members = values.members().join(", ");
+            return match field.as_str() {
+                "" => format!("{} {{{members}}}", values.topic()),
+                _ => format!("{} {field}.{{{members}}}", values.topic()),
+            };
+        }
         let indices = values.indices();
         let picked = match indices {
             [] => String::new(),
@@ -324,6 +336,19 @@ mod tests {
         assert_eq!(
             IdentifiedJoints::read(&values),
             "/studio/joints/follower state_position.values[0–4].value"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn a_named_vector_reads_as_its_topic_and_members() {
+        let values: RecordedValues = serde_json::from_value(json!({
+            "topic": "observation.state", "schema": null, "field": [], "element": [], "indices": [],
+            "members": ["shoulder_pan.pos", "shoulder_lift.pos"]
+        }))
+        .unwrap();
+        assert_eq!(
+            IdentifiedJoints::read(&values),
+            "observation.state {shoulder_pan.pos, shoulder_lift.pos}"
         );
     }
 

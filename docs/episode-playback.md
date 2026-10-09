@@ -1,8 +1,9 @@
 # Schema-driven native episode inspection
 
 Open **Data → dataset → episode**. The rail lists a dataset's members as
-chronological episodes; opening one shows the episode inspection Curation
-uses too: one camera panel per `foxglove.CompressedVideo` stream, a **Scene**
+chronological episodes, a LeRobot dataset's by index; opening one shows the
+episode inspection Curation uses too: one camera panel per camera stream (a
+`foxglove.CompressedVideo` channel, or a LeRobot video feature), a **Scene**
 tile with **Plots** behind it, and the **Timeline** across the bottom. Every
 panel reads the same episode-owned clock and the same visible span; native
 tabs, splits, and resizing remain available, and each dataset remembers its
@@ -16,8 +17,13 @@ unticked row stays one quiet line and reads nothing. Cameras are named by what
 tells them apart (`left-wrist`, `top`), as their pictures are captioned; a
 row's topic, schemas and message count are in its tooltip. Expanding a data stream reads its schema once and
 lists nested structs, lists, scalar types, and nullability (`?`) with
-per-field checkboxes. Kind is decided from recorded schema names only; topic and field names carry no
-physical meaning, and a validity flag is an ordinary selectable boolean.
+per-field checkboxes. Kind is decided from what the producer recorded only —
+a `foxglove.CompressedVideo` schema, or the `mp4` message encoding of a
+LeRobot video feature; topic and field names carry no physical meaning, and a
+validity flag is an ordinary selectable boolean. A LeRobot named vector, such
+as `observation.state`, is a struct of one field per name, so it plots one
+lane per joint; a name holding punctuation (`shoulder_pan.pos`) is labelled
+quoted, `["shoulder_pan.pos"]`, so it never reads as a nested path.
 
 Plots draw one section per plotted stream and one lane per field, one trace
 per recorded array index; the playhead and the hover cursor cross every lane.
@@ -35,9 +41,12 @@ decoded on the server.
 
 ## One message transport
 
-`POST /api/datasets/episode-topics` reads the selected member's native
-`spql.mcap.channels` summary and joins topic identities to native catalog
-observations. Incompatible schema variants remain distinct. Each source carries
+`POST /api/datasets/episode-topics` lists the selected member's topics the
+way its dataset's producer allows and joins them to native catalog
+observations: an MCAP member's native `spql.mcap.channels` summary, or, for a
+LeRobot member, whose source is a frame table it shares, a count of its
+messages of each of the dataset's topics with `spql.mcap.read_topic`, in one
+statement. Incompatible schema variants remain distinct. Each source carries
 its native schema variant; requests bind the member UUID.
 
 The browser reads messages with ordinary episode SQL. `MessageRead` (in

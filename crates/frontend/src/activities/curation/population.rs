@@ -12,7 +12,7 @@ use super::document::{CurationGraph, CurationNodeKind};
 use super::measured_timeline::MeasuredTimeline;
 use super::path::CurationPath;
 use super::preview::PreviewReads;
-use crate::activities::episode::Episode;
+use crate::activities::episode::{Episode, EpisodeListing};
 use spiral_robotics_common::curation::AnswerColumn;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use std::collections::BTreeMap;
@@ -33,10 +33,10 @@ pub(crate) struct EpisodeSample {
 }
 
 impl EpisodeSample {
-    pub(super) async fn load(dataset: &DatasetSelection) -> Result<Self, String> {
-        let page = Episode::page(dataset, 0, INTERPRETED_EPISODES).await?;
+    pub(super) async fn load(listing: &EpisodeListing) -> Result<Self, String> {
+        let page = listing.page(0, INTERPRETED_EPISODES).await?;
         Ok(Self {
-            dataset: dataset.clone(),
+            dataset: listing.dataset().clone(),
             partial: page.has_more(),
             episodes: page.into_episodes(),
         })

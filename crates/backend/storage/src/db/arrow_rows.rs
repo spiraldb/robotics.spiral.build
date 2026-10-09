@@ -8,7 +8,7 @@
 //! downcast panic.
 
 use arrow_array::{
-    Array, LargeStringArray, RecordBatch, StringViewArray, UInt32Array, UInt64Array,
+    Array, Int64Array, LargeStringArray, RecordBatch, StringViewArray, UInt32Array, UInt64Array,
 };
 
 /// Column reads scoped to one relation, so every failure names the relation.
@@ -67,6 +67,12 @@ impl<'a> ArrowColumns<'a> {
         }
         if let Some(values) = column.as_any().downcast_ref::<UInt64Array>() {
             return Ok(Some(values.value(row)));
+        }
+        // A count is signed in SQL, but never negative.
+        if let Some(values) = column.as_any().downcast_ref::<Int64Array>() {
+            return u64::try_from(values.value(row))
+                .map(Some)
+                .map_err(|_| self.mismatch(name, "an unsigned integer"));
         }
         column
             .as_any()

@@ -8,7 +8,7 @@
 //! dropped. Spiral adds a column only as nullable and spelled in SQL, with
 //! every nested field nullable, so an answer's Arrow type is spelled out for
 //! it and every answer cast to what the table stores.
-use super::{EpisodeUuids, McapDatasetDefinition};
+use super::{EpisodeUuids, StudioDataset};
 use crate::{ProjectConnection, ProjectStore, StorageManager};
 use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, StructArray};
 use arrow_buffer::OffsetBuffer;
@@ -24,7 +24,7 @@ use std::sync::Arc;
 const VALUE: &str = "value";
 /// The column of a fill statement's result holding its answer.
 const ANSWER: &str = "answer";
-impl McapDatasetDefinition {
+impl StudioDataset {
     /// Create the answers table with one row per episode the dataset holds
     /// now, and no answer yet.
     pub(crate) async fn create_answers(
@@ -564,7 +564,7 @@ mod tests {
         use spiral_robotics_common::relations::EpisodeQueryRequest;
         let (store, storage) = HostedProject::storage();
         let name = format!("probe_answers_{}", uuid::Uuid::new_v4().simple());
-        let definition = McapDatasetDefinition::new(&name);
+        let definition = StudioDataset::new(&name);
         let table = definition.answers().clone();
         let dataset = DatasetSelection::new(vec![definition.dataset().to_owned()]).unwrap();
         let rows = async |store: &crate::ProjectStore| -> Result<usize, String> {

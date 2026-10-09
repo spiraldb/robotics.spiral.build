@@ -1,12 +1,15 @@
 //! Which recording an episode is, what is known about it, and what every
 //! surface calls it.
 //!
-//! Each native member is one MCAP file, identified by the id Spiral gave it
-//! when it joined the dataset. That id is also its name — "Episode …2635e3d1"
-//! is the same file in Data's rail and a Curation index, and
-//! stays that file however many recordings are imported around it. A list
-//! labels each episode by the part of its source path that differs from its
-//! neighbours, so an operator recognizes their own recordings at a glance.
+//! Each native member is one recording — an MCAP file, or one episode of a
+//! LeRobot dataset — identified by the id Spiral gave it when it joined the
+//! dataset. That id is also its name — "Episode …2635e3d1" is the same
+//! recording in Data's rail and a Curation index, and stays that recording
+//! however many are imported around it. A list labels each episode by the
+//! part of its source path that differs from its neighbours, or a LeRobot
+//! episode by its index, so an operator recognizes their own recordings at a
+//! glance.
+use super::dataset_listing::EpisodeListing;
 use super::transport::EpisodeTimeRange;
 use crate::activities::data::DatasetClient;
 use crate::format::{
@@ -15,25 +18,46 @@ use crate::format::{
 };
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId, EpisodeSelection};
-use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::SqlLiteral;
 
-/// The statistics Spiral lists for every episode of a dataset.
+/// The statistics Spiral lists for every episode of a dataset: the span
+/// and message count every producer records, and what its producer records
+/// beside them.
 #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
 pub(in crate::activities) struct EpisodeFacts {
     id: EpisodeId,
+    #[serde(default)]
+    message_count: Option<u64>,
+    #[serde(default)]
+    message_start_time: Option<u64>,
+    #[serde(default)]
+    duration_ns: Option<u64>,
+    #[serde(flatten)]
+    file: RecordedFile,
+    #[serde(flatten)]
+    source_episode: SourceEpisode,
+}
+
+/// What an MCAP member records of the file it is: where it is, how big,
+/// and how many channels it holds.
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
+struct RecordedFile {
     #[serde(default)]
     source_uri: Option<String>,
     #[serde(default)]
     source_bytes: Option<u64>,
     #[serde(default)]
-    message_count: Option<u64>,
-    #[serde(default)]
     channel_count: Option<u64>,
+}
+
+/// What a LeRobot member records of the episode it is: its index in the
+/// dataset, and the tasks it was recorded doing.
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq)]
+struct SourceEpisode {
     #[serde(default)]
-    message_start_time: Option<u64>,
+    episode_index: Option<u64>,
     #[serde(default)]
-    duration_ns: Option<u64>,
+    tasks: Option<Vec<String>>,
 }
 
 impl EpisodeFacts {
@@ -41,16 +65,24 @@ impl EpisodeFacts {
         &self.id
     }
     pub(in crate::activities) fn source_uri(&self) -> Option<&str> {
-        self.source_uri.as_deref()
+        self.file.source_uri.as_deref()
     }
     pub(in crate::activities) const fn source_bytes(&self) -> Option<u64> {
-        self.source_bytes
+        self.file.source_bytes
     }
     pub(in crate::activities) const fn message_count(&self) -> Option<u64> {
         self.message_count
     }
     pub(in crate::activities) const fn channel_count(&self) -> Option<u64> {
-        self.channel_count
+        self.file.channel_count
+    }
+    /// Its place in a LeRobot dataset.
+    pub(in crate::activities) const fn episode_index(&self) -> Option<u64> {
+        self.source_episode.episode_index
+    }
+    /// The tasks a LeRobot dataset lists for it.
+    pub(in crate::activities) fn tasks(&self) -> &[String] {
+        self.source_episode.tasks.as_deref().unwrap_or_default()
     }
     pub(in crate::activities) const fn message_start_time(&self) -> Option<u64> {
         self.message_start_time
@@ -63,8 +95,7 @@ impl EpisodeFacts {
     }
     /// The file name at the end of the source path, when there is one.
     fn file_name(&self) -> &str {
-        self.source_uri
-            .as_deref()
+        self.source_uri()
             .and_then(|uri| uri.rsplit('/').next())
             .filter(|name| !name.is_empty())
             .unwrap_or(self.id.as_str())
@@ -74,7 +105,7 @@ impl EpisodeFacts {
 /// One episode of a dataset, as every surface opens and names it.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::activities) struct Episode {
-    dataset: DatasetSelection,
+    listing: EpisodeListing,
     facts: EpisodeFacts,
 }
 
@@ -85,6 +116,9 @@ pub(in crate::activities) struct EpisodePage {
 }
 
 impl EpisodePage {
+    pub(super) fn new(episodes: Vec<Episode>, has_more: bool) -> Self {
+        Self { episodes, has_more }
+    }
     pub(in crate::activities) fn into_episodes(self) -> Vec<Episode> {
         self.episodes
     }
@@ -97,32 +131,13 @@ impl EpisodePage {
 }
 
 impl Episode {
-    /// An episode whose facts a caller already read.
-    pub(in crate::activities) fn new(dataset: DatasetSelection, facts: EpisodeFacts) -> Self {
-        Self { dataset, facts }
+    /// An episode of the dataset `listing` lists, whose facts a caller
+    /// already read.
+    pub(in crate::activities) fn new(listing: EpisodeListing, facts: EpisodeFacts) -> Self {
+        Self { listing, facts }
     }
 
-    /// Up to `limit` of a dataset's episodes from `offset`, in recording order.
-    pub(in crate::activities) async fn page(
-        dataset: &DatasetSelection,
-        offset: usize,
-        limit: usize,
-    ) -> Result<EpisodePage, String> {
-        let snapshot = DatasetClient::current()
-            .run_spiral_query(Self::page_sql(dataset, offset, limit), limit + 1)
-            .await
-            .map_err(|error| error.to_string())?;
-        let has_more = snapshot.rows().len() > limit || snapshot.truncated();
-        let episodes = snapshot
-            .into_rows()
-            .into_iter()
-            .take(limit)
-            .map(|row| Self::from_row(dataset, row))
-            .collect::<Result<_, _>>()?;
-        Ok(EpisodePage { episodes, has_more })
-    }
-
-    /// How many episodes `dataset` holds.
+    /// How many episodes `dataset` holds, whichever producer made it.
     pub(in crate::activities) async fn count(dataset: &DatasetSelection) -> Result<u64, String> {
         let sql = format!(
             "SELECT count(*) AS episodes FROM spql.mcap.episodes({})",
@@ -139,133 +154,34 @@ impl Episode {
             .ok_or_else(|| "Counting episodes returned no row".to_owned())
     }
 
-    /// One episode by its id.
-    pub(in crate::activities) async fn open(selection: EpisodeSelection) -> Result<Self, String> {
-        let dataset = selection.dataset().clone();
-        let sql = format!(
-            "SELECT * FROM ({}) listed WHERE id = $1",
-            Self::listing_sql(&dataset)
-        );
-        let row = DatasetClient::current()
-            .run_episode_query(&EpisodeQueryRequest::new(selection, sql, 1))
-            .await
-            .map_err(|error| error.to_string())?
-            .into_rows()
-            .into_iter()
-            .next()
-            .ok_or("This episode is no longer in the dataset.")?;
-        Self::from_row(&dataset, row)
-    }
-
-    /// The order of `listing_sql`'s columns every list of episodes follows.
-    const RECORDING_ORDER: &'static str = "message_start_time, source_uri, id";
-    /// The facts `listing_sql` lists beside each episode's id.
-    const LISTED_FACTS: [&'static str; 6] = [
-        "source_uri",
-        "source_bytes",
-        "message_count",
-        "message_start_time",
-        "duration_ns",
-        "channel_count",
-    ];
-
-    /// Every episode of `dataset` with the facts every surface shows.
-    pub(in crate::activities) fn listing_sql(dataset: &DatasetSelection) -> String {
-        format!(
-            "SELECT id, source.uri AS source_uri, source.size AS source_bytes, message_count, \
-             message_start_time, duration_ns, channel_count FROM spql.mcap.episodes({})",
-            SqlLiteral::text(&dataset.sql_name())
-        )
-    }
-
-    /// The first `count` episodes of `dataset`, in recording order: the ones
-    /// every page and sample starts from.
-    pub(in crate::activities) fn first_sql(dataset: &DatasetSelection, count: usize) -> String {
-        format!(
-            "{} ORDER BY {} LIMIT {count}",
-            Self::listing_sql(dataset),
-            Self::RECORDING_ORDER
-        )
-    }
-
-    /// Every row of `rows`, a statement whose rows each name an episode of
-    /// `dataset` in `episode_id`, with that episode's listed facts beside it,
-    /// each named after `prefix`: one read answers both what the rows hold
-    /// and which episodes they belong to, however far into the dataset.
-    pub(in crate::activities) fn beside_sql(
-        dataset: &DatasetSelection,
-        rows: &str,
-        prefix: &str,
-    ) -> String {
-        let facts = Self::LISTED_FACTS
-            .map(|fact| format!("listed.{fact} AS {prefix}{fact}"))
-            .join(", ");
-        format!(
-            "SELECT named.*, {facts} FROM ({rows}) named JOIN ({}) listed ON listed.id = named.episode_id",
-            Self::listing_sql(dataset)
-        )
-    }
-
-    /// The episode a row read by `beside_sql` names, from the facts under
-    /// `prefix`.
-    pub(in crate::activities) fn beside(
-        dataset: &DatasetSelection,
-        row: &serde_json::Map<String, serde_json::Value>,
-        prefix: &str,
-    ) -> Result<Self, String> {
-        let id = row
-            .get("episode_id")
-            .cloned()
-            .ok_or("A row names no episode.")?;
-        let facts = Self::LISTED_FACTS
-            .iter()
-            .filter_map(|fact| {
-                Some((
-                    (*fact).to_owned(),
-                    row.get(&format!("{prefix}{fact}"))?.clone(),
-                ))
-            })
-            .chain(std::iter::once(("id".to_owned(), id)))
-            .collect();
-        Self::from_row(dataset, facts)
-    }
-
     /// Where the episode falls in recording order, as every list orders
-    /// episodes.
+    /// episodes: by its index in a LeRobot dataset, else by its first
+    /// message, then its source path.
     pub(in crate::activities) fn recording_place(&self) -> (Option<u64>, Option<&str>, &EpisodeId) {
         (
-            self.facts.message_start_time(),
+            self.facts
+                .episode_index()
+                .or(self.facts.message_start_time()),
             self.facts.source_uri(),
             self.facts.id(),
         )
-    }
-
-    /// In recording order, with one more row than the page holds, which says
-    /// whether another follows.
-    fn page_sql(dataset: &DatasetSelection, offset: usize, limit: usize) -> String {
-        format!("{} OFFSET {offset}", Self::first_sql(dataset, limit + 1))
-    }
-
-    fn from_row(
-        dataset: &DatasetSelection,
-        row: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Self, String> {
-        serde_json::from_value(serde_json::Value::Object(row))
-            .map(|facts| Self::new(dataset.clone(), facts))
-            .map_err(|error| format!("Reading episode metadata: {error}"))
     }
 
     pub(in crate::activities) fn id(&self) -> &EpisodeId {
         self.facts.id()
     }
     pub(in crate::activities) fn dataset(&self) -> &DatasetSelection {
-        &self.dataset
+        self.listing.dataset()
+    }
+    /// How its dataset lists episodes.
+    pub(in crate::activities) fn listing(&self) -> &EpisodeListing {
+        &self.listing
     }
     pub(in crate::activities) fn facts(&self) -> &EpisodeFacts {
         &self.facts
     }
     pub(in crate::activities) fn selection(&self) -> EpisodeSelection {
-        EpisodeSelection::new(self.dataset.clone(), self.facts.id().clone())
+        EpisodeSelection::new(self.dataset().clone(), self.facts.id().clone())
     }
     /// What every heading calls this episode.
     pub(in crate::activities) fn name(&self) -> String {
@@ -287,16 +203,20 @@ impl Episode {
         let end = start.checked_add(self.facts.duration_ns()?)?;
         Some(EpisodeTimeRange::new(start, end))
     }
-    /// Whether a search term appears in its id or source path, whatever its
-    /// case — the one test every list of episodes filters by.
+    /// Whether a search term appears in its id, its source path, or the
+    /// task it was recorded doing, whatever its case, or is its index — the
+    /// one test every list of episodes filters by.
     pub(in crate::activities) fn matches(&self, needle: &str) -> bool {
         let needle = needle.trim().to_lowercase();
+        let holds = |text: &str| text.to_lowercase().contains(&needle);
         needle.is_empty()
             || self.id().as_str().contains(&needle)
+            || self.facts.source_uri().is_some_and(holds)
+            || self.facts.tasks().iter().any(|task| holds(task))
             || self
                 .facts
-                .source_uri()
-                .is_some_and(|uri| uri.to_lowercase().contains(&needle))
+                .episode_index()
+                .is_some_and(|index| index.to_string() == needle)
     }
 
     /// One episode of a fixed length, for tests that only need its identity
@@ -310,10 +230,7 @@ impl Episode {
             "duration_ns": duration_ns,
         }))
         .expect("a fixture episode");
-        Self::new(
-            DatasetSelection::new(vec!["folding".into()]).expect("a dataset name"),
-            facts,
-        )
+        Self::new(EpisodeListing::mcap_fixture("folding"), facts)
     }
 }
 
@@ -356,6 +273,9 @@ impl EpisodeFactsPresentation for EpisodeFacts {
         if let Some(bytes) = self.source_bytes() {
             facts.push(bytes.byte_label());
         }
+        if !self.tasks().is_empty() {
+            facts.push(self.tasks().join("; "));
+        }
         facts.join(" · ")
     }
 }
@@ -387,8 +307,15 @@ impl EpisodeLabels {
             shared_prefix: prefix.rfind('/').map_or(0, |slash| slash + 1),
         }
     }
-    /// The source path below the directory every listed episode shares.
+    /// The source path below the directory every listed episode shares; a
+    /// LeRobot episode, whose source is a frame table it shares with others,
+    /// goes by its index in the dataset.
     pub(in crate::activities) fn label(&self, facts: &EpisodeFacts) -> SourceLabel {
+        if let Some(index) = facts.episode_index() {
+            return SourceLabel {
+                head: Some(format!("Episode {index}")),
+            };
+        }
         let relative = facts
             .source_uri()
             .and_then(|uri| uri.get(self.shared_prefix..))
@@ -449,10 +376,6 @@ impl SourceLabel {
 mod tests {
     use super::*;
 
-    fn dataset() -> DatasetSelection {
-        DatasetSelection::new(vec!["recordings".into()]).unwrap()
-    }
-
     /// Listed episodes whose ids are the fixtures `1, 2, …` in list order.
     fn episodes(rows: &[(&str, u64)]) -> Vec<Episode> {
         rows.iter()
@@ -464,7 +387,9 @@ mod tests {
                     "message_start_time": start, "duration_ns": 20_501_879_296_u64,
                     "channel_count": 23,
                 });
-                Episode::from_row(&dataset(), row.as_object().unwrap().clone()).unwrap()
+                EpisodeListing::mcap_fixture("recordings")
+                    .episode(row.as_object().unwrap().clone())
+                    .unwrap()
             })
             .collect()
     }
@@ -565,14 +490,16 @@ mod tests {
         assert!(fruit.matches(""));
     }
 
+    /// A LeRobot episode shares its source with its neighbours, so it goes
+    /// by its index in the dataset.
     #[test]
-    fn a_page_reads_in_recording_order_and_bad_rows_are_errors() {
-        assert!(Episode::from_row(&dataset(), Default::default()).is_err());
-        let named = serde_json::json!({ "id": "Episode 7" });
-        assert!(Episode::from_row(&dataset(), named.as_object().unwrap().clone()).is_err());
-        let owned = DatasetSelection::new(vec!["owner's recordings".into()]).unwrap();
-        let sql = Episode::page_sql(&owned, 50, 50);
-        assert!(sql.contains("spql.mcap.episodes('owner''s recordings')"));
-        assert!(sql.ends_with("ORDER BY message_start_time, source_uri, id LIMIT 51 OFFSET 50"));
+    fn a_lerobot_episode_is_labelled_by_its_index() {
+        let listing = EpisodeListing::new(
+            DatasetSelection::new(vec!["so101".into()]).unwrap(),
+            spiral_robotics_common::datasets::DatasetProducer::LeRobot,
+        );
+        let row = serde_json::json!({"id": EpisodeId::fixture(1), "episode_index": 12, "tasks": ["fold"]});
+        let episode = listing.episode(row.as_object().unwrap().clone()).unwrap();
+        assert_eq!(labels(&[episode])[0].head(), Some("Episode 12"));
     }
 }

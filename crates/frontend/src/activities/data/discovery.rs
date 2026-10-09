@@ -131,7 +131,7 @@ impl DiscoveryEpisode {
         mut messages: Vec<ProviderMessage>,
     ) -> Result<T::Outcome, String> {
         let mut tools = vec![
-            json!({"type":"function", "function":{"name":"inspect_stream", "description":"Read the Arrow schema and three actual messages of an episode stream before mapping it.", "parameters":{"type":"object", "properties":{"topic":{"type":"string"},"schema":{"type":"string"}}, "required":["topic","schema"], "additionalProperties":false}}}),
+            json!({"type":"function", "function":{"name":"inspect_stream", "description":"Read the Arrow schema and three actual messages of an episode stream before mapping it. A stream recorded without a schema name, such as a LeRobot feature, is named by its topic and a null schema.", "parameters":{"type":"object", "properties":{"topic":{"type":"string"},"schema":{"type":["string","null"]}}, "required":["topic","schema"], "additionalProperties":false}}}),
             json!({"type":"function", "function":{"name":"read_description", "description":"Read a public robot description, included file, dataset documentation, or repository file listing. Follow only references supplied by the dataset or its linked model.", "parameters":{"type":"object", "properties":{"url":{"type":"string"}}, "required":["url"], "additionalProperties":false}}}),
         ];
         tools.extend(T::tools());
@@ -190,27 +190,27 @@ impl DiscoveryEpisode {
             .get("topic")
             .and_then(Value::as_str)
             .ok_or("A topic is required")?;
-        let schema = arguments
-            .get("schema")
-            .and_then(Value::as_str)
-            .ok_or("A schema is required")?;
+        let schema = arguments.get("schema").and_then(Value::as_str);
         self.stream_evidence(topic, schema).await
     }
 
-    /// The Arrow schema and first three messages of one data stream.
-    pub(super) async fn stream_evidence(&self, topic: &str, schema: &str) -> Result<Value, String> {
-        let mut matching = self.topics.iter().filter(|candidate| {
-            candidate.name() == topic && candidate.schemas().iter().any(|name| name == schema)
-        });
+    /// The Arrow schema and first three messages of one data stream: the
+    /// one `schema` names on `topic`, or with no schema, the topic's only
+    /// stream.
+    pub(super) async fn stream_evidence(
+        &self,
+        topic: &str,
+        schema: Option<&str>,
+    ) -> Result<Value, String> {
+        let mut matching = self
+            .topics
+            .iter()
+            .filter(|candidate| candidate.is_recorded_as(topic, schema));
         let found = matching.next().ok_or("Unknown topic/schema")?;
         if matching.next().is_some() {
             return Err("Joint stream has ambiguous schema revisions".into());
         }
-        if found
-            .schemas()
-            .iter()
-            .any(|name| name == "foxglove.CompressedVideo")
-        {
+        if found.is_video() {
             return Err("Choose a joint data stream".into());
         }
         let revision = found.revision().ok_or("Missing topic revision")?;

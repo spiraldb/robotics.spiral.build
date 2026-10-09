@@ -327,8 +327,9 @@ mod tests {
 
     #[test]
     fn each_kind_says_what_it_holds_in_one_line() {
-        let mut payload =
-            CurationGraph::new(DatasetSelection::new(vec!["cloth_fold_demo".to_owned()]).ok());
+        let mut payload = CurationGraph::new(Some(
+            crate::activities::episode::EpisodeListing::mcap_fixture("cloth_fold_demo"),
+        ));
         let mut annotation = SubtaskAnnotation::default();
         annotation.set_camera(Some("/camera/top".to_owned()));
         let annotate = payload

@@ -3,6 +3,7 @@
 //! episode, one column each, which their entries read.
 use super::{PathError, PathSource};
 use crate::activities::curation::graph::DatasetStep;
+use crate::activities::episode::EpisodeTask;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
 use spiral_robotics_common::datasets::{CameraVideo, DatasetSelection};
 use spiral_robotics_common::sql::SqlLiteral;
@@ -41,6 +42,8 @@ impl EpisodeRow {
     const INSTRUCTIONS: &'static str = "instruction";
     /// What the answers table is read as.
     const STORED: &'static str = "a";
+    /// What the dataset's listing of the bound episode is read as.
+    const LISTED: &'static str = "e";
 
     pub(in crate::activities::curation) fn new(
         dataset: &DatasetSelection,
@@ -64,13 +67,19 @@ impl EpisodeRow {
         let entry = Self::entry(Self::VIDEOS, Self::read_once(&mut self.cameras, camera));
         format!("{entry}.source")
     }
-    /// The first message the episode records on `topic`: its task.
-    pub(in crate::activities::curation) fn instruction(&mut self, topic: &str) -> String {
-        let entry = Self::entry(
-            Self::INSTRUCTIONS,
-            Self::read_once(&mut self.instructions, topic),
-        );
-        format!("{entry}.task")
+    /// The episode's task, where its dataset records it: the first message
+    /// on an instruction topic, or the first task its dataset lists.
+    pub(in crate::activities::curation) fn task(&mut self, task: &EpisodeTask) -> String {
+        match task {
+            EpisodeTask::Recorded(topic) => {
+                let entry = Self::entry(
+                    Self::INSTRUCTIONS,
+                    Self::read_once(&mut self.instructions, topic),
+                );
+                format!("{entry}.task")
+            }
+            EpisodeTask::Listed => format!("spql.list.get({}.tasks, 0)", Self::LISTED),
+        }
     }
     /// Read each episode's answers in `column` from the answers table.
     pub(in crate::activities::curation) fn stored(
@@ -143,14 +152,15 @@ impl EpisodeRow {
 
     /// The bound episode's row, read from the dataset's listing.
     fn bound_episode(&self) -> Result<String, PathError> {
+        let listed = Self::LISTED;
         Ok(format!(
-            "{} AS (SELECT e.id AS episode_id, CAST(e.message_start_time AS BIGINT) AS {}{} \
-             FROM spql.mcap.episodes({}) e{} WHERE e.id = $1)",
+            "{} AS (SELECT {listed}.id AS episode_id, CAST({listed}.message_start_time AS BIGINT) AS {}{} \
+             FROM spql.mcap.episodes({}) {listed}{} WHERE {listed}.id = $1)",
             Self::EPISODES,
             Self::ORIGIN,
             self.answer_columns(),
             SqlLiteral::text(&self.dataset.sql_name()),
-            self.joins("e.id")?
+            self.joins(&format!("{listed}.id"))?
         ))
     }
 

@@ -2,8 +2,8 @@
 //! subtasks every judgment of them reads too.
 //!
 //! The node asks each episode for `spql.ai.breakdown_task` over the chosen
-//! camera's video, with the episode's recorded instruction as its task when
-//! the dataset records one. A fill stores the answer in the dataset's
+//! camera's video, with the episode's task when the dataset records one: its
+//! recorded instruction, or the task a LeRobot dataset lists. A fill stores the answer in the dataset's
 //! answers table, and the published view and the preview read it from there.
 //! The model reads each episode whole, so what it is asked never depends on
 //! anything above the node. Its entries list the subtasks of every episode,
@@ -16,6 +16,7 @@ use crate::activities::curation::path::{
     ColumnMeaning, EpisodeRow, ModelEntries, ModelNode, ModelStep, PathError, PathSource,
     TableColumn,
 };
+use crate::activities::episode::EpisodeTask;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource};
 use spiral_robotics_common::datasets::DatasetSelection;
 use spiral_robotics_common::sql::SqlLiteral;
@@ -32,8 +33,8 @@ impl SubtaskAnnotation {
             .ok_or_else(|| PathError::new("The sample interval must be a number."))?;
         let video = row.video(self.watched()?);
         let task = self
-            .task_topic()
-            .map(|topic| format!(", task => {}", row.instruction(topic)))
+            .task()
+            .map(|task| format!(", task => {}", row.task(&task)))
             .unwrap_or_default();
         Ok(format!(
             "spql.ai.breakdown_task({video}, sample_interval => {interval}, model => {}{task})",
@@ -43,15 +44,21 @@ impl SubtaskAnnotation {
 }
 
 /// Each episode's subtasks are stored under the model, the camera, the
-/// sample interval, and the instruction topic it was told its task by.
+/// sample interval, and where it was told its task from: the instruction
+/// topic, or the task its dataset lists.
 impl ModelNode for SubtaskAnnotation {
     fn answer_column(&self, _subtasks: Option<&AnswerColumn>) -> Result<AnswerColumn, PathError> {
+        let task = match self.task() {
+            Some(EpisodeTask::Recorded(topic)) => serde_json::json!(topic),
+            Some(EpisodeTask::Listed) => serde_json::json!({"listed": "tasks"}),
+            None => serde_json::Value::Null,
+        };
         let call = serde_json::json!([
             "spql.ai.breakdown_task",
             DEFAULT_ANNOTATION_MODEL,
             self.watched()?,
             self.sample_interval_seconds(),
-            self.task_topic(),
+            task,
         ]);
         AnswerColumn::of("breakdown_task", &call).map_err(PathError::new)
     }

@@ -166,8 +166,10 @@ in recorded order.
   row per recorded message, in log-time order. A row with a null value is
   skipped.
 
-`log_time_ns` is the absolute MCAP log time, the clock the view's `kept`
-ranges use. A key is the lowercase hex SHA-256 of the JSON array
+`log_time_ns` is the recording's log time, the clock the view's `kept`
+ranges use: absolute for MCAP, from the episode's start for a LeRobot
+episode, whose cameras are its video features and whose joints are the named
+members of `observation.state` and `action` (`RecordedValues::members`). A key is the lowercase hex SHA-256 of the JSON array
 `[dataset resource id, dataset version id, episode id, statement]`: the same
 read of the same dataset version is uploaded once, by any run.
 

@@ -10,9 +10,9 @@
 //! and its answer is thrown away. A run nobody polls only starts nothing new,
 //! since the page that wanted it has gone. Runs live in memory: a restarted
 //! backend holds none, as a reloaded page holds no preview.
-use super::held_runs::{HeldRuns, HeldWork};
 use crate::OperationError;
 use crate::data::query::QueryCommand;
+use crate::held_runs::{ABANDONED_AFTER, HeldRuns, HeldWork};
 use crate::sync::MutexRecovery;
 use futures_util::StreamExt as _;
 use spiral_robotics_common::curation::{PreviewQuery, PreviewQueryState, PreviewRunStatus};
@@ -20,14 +20,10 @@ use spiral_robotics_common::relations::SpiralQuerySnapshot;
 use spiral_robotics_storage::StorageManager;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::time::Instant;
 
 /// How many of a run's queries are in flight at once.
 const QUERIES_IN_FLIGHT: usize = 8;
-/// How long a run goes unpolled before it starts nothing new, and a settled
-/// run before it is dropped.
-pub(super) const ABANDONED_AFTER: Duration = Duration::from_secs(30);
 
 /// One query's answer, in the form it was asked for.
 #[derive(Clone)]

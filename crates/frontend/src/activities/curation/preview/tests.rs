@@ -8,7 +8,7 @@ use crate::activities::curation::path::CurationPath;
 use crate::activities::curation::population::{EpisodeSample, PopulationReader};
 use crate::activities::episode::Episode;
 use spiral_robotics_common::curation::{AnswerColumn, AnswerSource, FillEpisodes};
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::EpisodeId;
 
 /// Two episodes of 20 and 12 seconds, whose first messages are at one second
 /// of log time.
@@ -21,7 +21,7 @@ fn sample() -> EpisodeSample {
 
 fn graph() -> CurationGraph {
     CurationGraph::new(Some(
-        DatasetSelection::new(vec!["dataset_folding".to_owned()]).unwrap(),
+        crate::activities::episode::EpisodeListing::mcap_fixture("dataset_folding"),
     ))
 }
 

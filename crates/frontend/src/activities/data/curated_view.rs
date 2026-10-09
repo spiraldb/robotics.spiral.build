@@ -12,7 +12,8 @@ use super::DatasetClient;
 use super::catalog_rail::OpenedEpisode;
 use crate::activities::curation::{CuratedView, SubtaskColumn, ViewFill};
 use crate::activities::episode::{
-    Episode, EpisodeRows, EpisodeStill, EpisodeStills, RowFace, RowFaceView, StillMoment,
+    Episode, EpisodeListing, EpisodeRows, EpisodeStill, EpisodeStills, RowFace, RowFaceView,
+    StillMoment,
 };
 use crate::components::icons::SpinnerIcon;
 use crate::components::timeline::{IntervalTrack, TimelineInterval};
@@ -21,7 +22,7 @@ use crate::shell::notifications::MessageSource;
 use crate::shell::state::StudioProjectState;
 use dioxus::prelude::*;
 use serde_json::{Map, Value};
-use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
+use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::relations::SpiralQuerySnapshot;
 use spiral_robotics_ui::{
     ActionPurpose, Button, ButtonSize, ButtonVariant, ConfirmationCopy, ConfirmationDismissal,
@@ -157,24 +158,21 @@ impl ViewReading {
             .collect::<String>();
         let rows = format!("SELECT v.episode_id, v.kept{columns} FROM ({statement}) v");
         let answer = DatasetClient::current()
-            .run_spiral_query(
-                Episode::beside_sql(view.dataset(), &rows, LISTED),
-                VIEW_ROWS,
-            )
+            .run_spiral_query(view.listing().beside_sql(&rows, LISTED), VIEW_ROWS)
             .await
             .map_err(|error| error.to_string())?;
-        Self::of(view.dataset(), view.subtasks(), &answer)
+        Self::of(view.listing(), view.subtasks(), &answer)
     }
 
     fn of(
-        dataset: &DatasetSelection,
+        listing: &EpisodeListing,
         subtasks: &[SubtaskColumn],
         answer: &SpiralQuerySnapshot,
     ) -> Result<Self, String> {
         let mut episodes = Vec::<Episode>::new();
         let mut rows = Vec::new();
         for row in answer.rows() {
-            let episode = Episode::beside(dataset, row, LISTED)?;
+            let episode = listing.beside(row, LISTED)?;
             let origin = episode
                 .facts()
                 .message_start_time()
@@ -491,8 +489,8 @@ mod tests {
     use serde_json::json;
     use spiral_robotics_common::relations::QueryColumn;
 
-    fn dataset() -> DatasetSelection {
-        DatasetSelection::new(vec!["dataset_bottles".into()]).unwrap()
+    fn dataset() -> EpisodeListing {
+        EpisodeListing::mcap_fixture("dataset_bottles")
     }
 
     /// A row of the view on episode `id`, recorded from `start`, with the

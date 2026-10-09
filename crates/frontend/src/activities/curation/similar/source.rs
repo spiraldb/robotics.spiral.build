@@ -66,7 +66,7 @@ impl SubtaskSource {
                 Some(CurationNodeKind::FindSimilarSubtasks(search)) => Some(search.clone()),
                 _ => None,
             };
-            (payload.dataset().cloned(), search)
+            (payload.listing().cloned(), search)
         });
         Self {
             annotation: annotation.map(|annotation| annotation.id().to_owned()),

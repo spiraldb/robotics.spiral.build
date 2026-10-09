@@ -23,7 +23,7 @@ use super::review::{
 };
 use super::state::{CurationController, RunState};
 use super::thumbnail::Thumbnails;
-use crate::activities::episode::{Episode, StreamCatalog};
+use crate::activities::episode::StreamCatalog;
 use crate::components::icons::{SettingsIcon, SpinnerIcon};
 use dioxus::prelude::*;
 use episodes::{AnnotationEpisode, RecordedTopics};
@@ -138,20 +138,20 @@ impl AnnotationNode {
 #[component]
 pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) -> Element {
     let annotation = AnnotationNode::new(node.clone(), controller);
-    let dataset = controller.with_payload(|payload| payload.dataset().cloned());
+    let listing = controller.with_payload(|payload| payload.listing().cloned());
     let listed = AnnotationEpisode::reaching(controller, &node);
     // Every episode of a dataset records the same topics, and the first one
     // is known before anything reaches the node.
     let topics = RecordedTopics::use_topics(
         controller
             .sample()
-            .and_then(|sample| sample.episodes().first().map(Episode::selection)),
+            .and_then(|sample| sample.episodes().first().cloned()),
     );
 
     // What the dataset records decides two settings, written into the node so
     // its step can read them and a run can start at once: a new node starts
     // on the camera that shows the whole workspace, and every node reads the
-    // operator's instruction when the dataset records one.
+    // episode's task where the dataset records one.
     let recorded = annotation.clone();
     use_effect(use_reactive(&topics, move |topics| {
         let (Some(topics), Some(settings)) = (topics, recorded.settings()) else {
@@ -161,15 +161,13 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
             .camera()
             .map(str::to_owned)
             .or_else(|| topics.overview_camera());
-        let task_topic = topics.task_topic();
-        if settings.camera().map(str::to_owned) == camera
-            && settings.task_topic().map(str::to_owned) == task_topic
-        {
+        let task = topics.task();
+        if settings.camera().map(str::to_owned) == camera && settings.task() == task {
             return;
         }
         let _ = recorded.configure(|annotation| {
             annotation.set_camera(camera);
-            annotation.set_task_topic(task_topic);
+            annotation.set_task(task);
             Ok(())
         });
     }));
@@ -253,7 +251,7 @@ pub(super) fn AnnotationWorkspace(controller: CurationController, node: String) 
     let rows = annotation.rows();
     let groups = EpisodeSubtasks::group(rows.clone().into_iter());
     let context = SubtaskContext::new(
-        dataset.clone(),
+        listing.clone(),
         settings.camera().map(str::to_owned),
         EpisodeOrder::of(listed.iter().map(AnnotationEpisode::id)),
     );
@@ -541,9 +539,8 @@ fn AnnotationSettings(
                             },
                         }
                     }
-                    if settings.task_topic().is_some() {
-                        p { class: "curation-annotate-settings-note",
-                            "Each episode's task is read from the instruction it recorded." }
+                    if let Some(task) = settings.task() {
+                        p { class: "curation-annotate-settings-note", "{task.note()}" }
                     }
                     span { class: "curation-annotate-replace-slot", {reannotate} }
                 }
