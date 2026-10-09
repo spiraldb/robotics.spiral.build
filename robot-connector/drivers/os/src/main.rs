@@ -1,8 +1,8 @@
 //! The robot connector for computers — Mac, Linux, and Raspberry Pi — started
 //! from the command line.
 //!
-//! The connector itself is the shared library; this program supplies what a
-//! computer offers it: USB serial ports, webcams, and FFmpeg.
+//! The connector itself is the shared library; this program supplies a
+//! computer's device drivers: USB serial ports, webcams, and FFmpeg.
 
 mod cameras;
 mod ffmpeg;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use spiral_robotics_connector::{
-    CameraDevices, ConnectorPlatform, ConnectorSettings, NoCameraDevices, RobotConnector,
+    CameraDriver, ConnectorSettings, DeviceDrivers, NoCameraDriver, RobotConnector,
 };
 use spiral_robotics_hardware::{
     ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS,
@@ -111,10 +111,10 @@ impl MotionArguments {
 }
 
 /// Everything the connector needs before it listens.
-struct DesktopStartup {
+struct ConnectorStartup {
     bind: SocketAddr,
     demo: bool,
-    platform: ConnectorPlatform,
+    drivers: DeviceDrivers,
     settings: ConnectorSettings,
     camera_access_error: Option<String>,
 }
@@ -132,8 +132,8 @@ fn main() -> ExitCode {
     }
 
     let arguments = RobotConnectorArguments::parse();
-    DesktopStartup::install_logging();
-    let startup = match DesktopStartup::from_arguments(arguments) {
+    ConnectorStartup::install_logging();
+    let startup = match ConnectorStartup::from_arguments(arguments) {
         Ok(startup) => startup,
         Err(error) => {
             eprintln!("error: {error}");
@@ -159,7 +159,7 @@ fn main() -> ExitCode {
     }
 }
 
-impl DesktopStartup {
+impl ConnectorStartup {
     fn install_logging() {
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -188,12 +188,12 @@ impl DesktopStartup {
         } else {
             None
         };
-        let cameras: Arc<dyn CameraDevices> = if look_for_cameras {
+        let cameras: Arc<dyn CameraDriver> = if look_for_cameras {
             Arc::new(SystemCameras)
         } else {
-            Arc::new(NoCameraDevices)
+            Arc::new(NoCameraDriver)
         };
-        let platform = ConnectorPlatform::new(
+        let drivers = DeviceDrivers::new(
             Arc::new(SystemSerialPorts),
             cameras,
             Arc::new(FfmpegEncoder::new(video.ffmpeg, video.video_codec)?),
@@ -201,7 +201,7 @@ impl DesktopStartup {
         Ok(Self {
             bind,
             demo,
-            platform,
+            drivers,
             settings: ConnectorSettings::new(data_dir, policy_runtime, control),
             camera_access_error,
         })
@@ -231,11 +231,11 @@ impl DesktopStartup {
         let Self {
             bind,
             demo,
-            platform,
+            drivers,
             settings,
             camera_access_error,
         } = self;
-        let connector = RobotConnector::open(platform, settings)?;
+        let connector = RobotConnector::open(drivers, settings)?;
         if demo {
             connector.install_demo_bench().await?;
         }

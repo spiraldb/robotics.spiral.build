@@ -299,5 +299,5 @@ impl RecordingGap {
 
 mod requests;
 pub use requests::{
-    PauseUpdate, RecordingCameraRequest, RecordingDriver, RecordingFinish, RecordingStart,
+    ControlSource, PauseUpdate, RecordingCameraRequest, RecordingFinish, RecordingStart,
 };

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use spiral_robotics_common::robots::config::{MotorAccess, SimulatedMotors};
-use spiral_robotics_hardware::{ControlSettings, HardwareHandle, NoSerialLines};
+use spiral_robotics_hardware::{ControlSettings, HardwareHandle, NoSerialDriver};
 
 use super::world::ParsedModels;
 use super::{DemoBench, SimulatedWorld};
@@ -55,7 +55,7 @@ async fn the_demo_bench_is_a_guided_leader_and_a_filmed_follower() {
         workspace.clone(),
         Arc::new(HardwareHandle::spawn(
             ControlSettings::default(),
-            Arc::new(NoSerialLines),
+            Arc::new(NoSerialDriver),
         )),
     );
     let cameras = world.cameras();

@@ -31,7 +31,7 @@ use nokhwa::{Camera, query};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_common::robots::{CameraStatus, CameraStreamFormat};
 use spiral_robotics_connector::{
-    CameraDevice, CameraDevices, DEFAULT_JPEG_QUALITY, DiscoveredCameras,
+    CameraDevice, CameraDriver, DEFAULT_JPEG_QUALITY, DiscoveredCameras,
 };
 use tempfile::{Builder as TempDirBuilder, TempDir};
 
@@ -348,7 +348,7 @@ impl DetectedCamera {
 /// The cameras the operating system reports, each probed in a worker process.
 pub(crate) struct SystemCameras;
 
-impl CameraDevices for SystemCameras {
+impl CameraDriver for SystemCameras {
     fn discover(&self) -> DiscoveredCameras {
         match ProbeOutcome::discover() {
             Ok(outcome) => {

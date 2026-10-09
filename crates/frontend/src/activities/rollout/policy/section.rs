@@ -1,4 +1,4 @@
-//! The Policy driver's rows under the Control modes: which checkpoint runs
+//! The Policy control source's rows under the Control modes: which checkpoint runs
 //! for how long, and what the run is doing.
 
 use dioxus::prelude::*;

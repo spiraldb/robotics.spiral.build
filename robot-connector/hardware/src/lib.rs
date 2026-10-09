@@ -5,8 +5,8 @@
 //! requests; [`HardwareHandle`] serializes them onto the one thread that owns
 //! every motor bus and publishes immutable [`HardwareState`] snapshots.
 //! Calibration and the Feetech protocol live here because their invariants
-//! depend on physical devices. The platform supplies the serial lines buses
-//! hang off ([`SerialLines`]), so this crate builds for a computer and a
+//! depend on physical devices. The machine's serial driver opens the lines buses
+//! hang off ([`SerialDriver`]), so this crate builds for a computer and a
 //! microcontroller alike. HTTP contracts, operator workflow, episode schemas,
 //! persistence, and policy inference remain in the composing application.
 //!
@@ -23,7 +23,7 @@ mod calibration;
 mod control;
 mod control_policy;
 mod feetech;
-mod serial_line;
+mod serial_driver;
 mod simulated;
 mod state;
 
@@ -34,8 +34,8 @@ pub use control::{
     PolicyGoals, RecordingCompletion, RecordingWriter, RobotSpec, Sample,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use serial_line::NoSerialLines;
-pub use serial_line::{SERIAL_READ_TIMEOUT, SerialLine, SerialLines};
+pub use serial_driver::NoSerialDriver;
+pub use serial_driver::{SERIAL_READ_TIMEOUT, SerialDriver, SerialLine};
 pub use spiral_robotics_common::robots::{ModeSelection, MotorLimits, RobotTelemetry};
 pub use state::CompletedRecording;
 

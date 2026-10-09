@@ -8,7 +8,7 @@ members = [
     "robot-connector/inference",
     "robot-connector/recording",
     "robot-connector",
-    "robot-connector/desktop",
+    "robot-connector/drivers/os",
     "crates/viewport",
     "crates/frontend",
     "crates/ui",

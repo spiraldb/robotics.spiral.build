@@ -1,4 +1,4 @@
-//! The Policy driver: a trained checkpoint drives the follower for a set
+//! The Policy control source: a trained checkpoint drives the follower for a set
 //! time. The robot connector runs the policy; Studio picks the checkpoint,
 //! writes it there, and watches the run.
 

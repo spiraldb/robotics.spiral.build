@@ -10,19 +10,27 @@ use crate::components::dataset_catalog::DatasetCatalog;
 /// What moves the follower through the next take. Record starts it with the
 /// take, and the take ends with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RecordDriver {
+pub(super) enum ControlKind {
     /// The operator moves the leader; the follower mirrors it.
     Teleop,
     /// The chosen checkpoint drives the follower for its duration.
     Policy,
 }
 
-impl RecordDriver {
+impl ControlKind {
     /// What the Record button says it starts.
     pub(super) const fn record_label(self) -> &'static str {
         match self {
             Self::Teleop => "Record teleop",
             Self::Policy => "Record policy",
+        }
+    }
+
+    /// What Record does when nothing blocks it.
+    pub(super) const fn record_description(self) -> &'static str {
+        match self {
+            Self::Teleop => "Start teleoperation and record a new episode",
+            Self::Policy => "Start the policy and record a new episode",
         }
     }
 }
@@ -36,7 +44,7 @@ impl RecordDriver {
 pub(super) struct NextTake {
     dataset: Signal<String>,
     video: Signal<bool>,
-    driver: Signal<Option<RecordDriver>>,
+    control: Signal<Option<ControlKind>>,
     starting: Signal<bool>,
     catalog: DatasetCatalog,
 }
@@ -46,7 +54,7 @@ impl NextTake {
         Self {
             dataset: use_signal(|| "default".to_owned()),
             video: use_signal(|| true),
-            driver: use_signal(|| None),
+            control: use_signal(|| None),
             starting: use_signal(|| false),
             catalog: DatasetCatalog::use_catalog(),
         }
@@ -66,17 +74,17 @@ impl NextTake {
         self.catalog
     }
 
-    /// The driver the operator last started, or `default` before they have.
-    pub(super) fn driver(self, default: RecordDriver) -> RecordDriver {
-        self.driver.read().unwrap_or(default)
+    /// The control source the operator last started, or `default` before they have.
+    pub(super) fn control(self, default: ControlKind) -> ControlKind {
+        self.control.read().unwrap_or(default)
     }
 
-    /// Starting a driver by hand makes it the one Record starts next.
-    pub(super) fn choose_driver(mut self, driver: RecordDriver) {
-        self.driver.set(Some(driver));
+    /// Starting a control source by hand makes it the one Record starts next.
+    pub(super) fn choose_control(mut self, control: ControlKind) {
+        self.control.set(Some(control));
     }
 
-    /// Whether Record is waiting for its driver to take the follower.
+    /// Whether Record is waiting for its control source to take the follower.
     pub(super) fn starting(self) -> bool {
         *self.starting.read()
     }

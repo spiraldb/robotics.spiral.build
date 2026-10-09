@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
-use spiral_robotics_connector::VideoEncoder;
+use spiral_robotics_connector::EncoderDriver;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
@@ -37,7 +37,7 @@ impl FfmpegEncoder {
     }
 }
 
-impl VideoEncoder for FfmpegEncoder {
+impl EncoderDriver for FfmpegEncoder {
     fn encode(
         &self,
         fps: u32,

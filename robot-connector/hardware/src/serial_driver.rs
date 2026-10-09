@@ -1,8 +1,10 @@
-//! The serial lines motor buses hang off, as each platform opens them.
+//! The serial driver: how one machine lists and opens the serial lines motor
+//! buses hang off.
 //!
 //! A computer reaches a bus through a USB serial adapter; a microcontroller
 //! wires it to one of its UARTs. The bus protocol above only needs bytes in
-//! and out, so the platform supplies the line and the protocol stays shared.
+//! and out, so each machine's driver supplies the line and the protocol stays
+//! shared.
 
 use std::io;
 use std::time::Duration;
@@ -26,7 +28,7 @@ pub trait SerialLine: io::Read + io::Write + Send {
 }
 
 /// The serial ports one machine offers for motor buses.
-pub trait SerialLines: Send + Sync {
+pub trait SerialDriver: Send + Sync {
     /// Ports that could carry a motor bus, described for an operator.
     fn available(&self) -> io::Result<Vec<SerialPortSummary>>;
 
@@ -36,10 +38,10 @@ pub trait SerialLines: Send + Sync {
 
 /// A machine without serial ports, for tests that only drive simulated arms.
 #[cfg(any(test, feature = "test-support"))]
-pub struct NoSerialLines;
+pub struct NoSerialDriver;
 
 #[cfg(any(test, feature = "test-support"))]
-impl SerialLines for NoSerialLines {
+impl SerialDriver for NoSerialDriver {
     fn available(&self) -> io::Result<Vec<SerialPortSummary>> {
         Ok(Vec::new())
     }

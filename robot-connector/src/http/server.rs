@@ -1,20 +1,21 @@
-//! Open a robot connector on the machine's devices and serve its HTTP API.
+//! Open a robot connector on the machine's device drivers and serve its HTTP
+//! API.
 //!
 //! The program around it — a computer's command line or a microcontroller's
-//! firmware — supplies the platform's devices, binds the listener, and decides
+//! firmware — supplies the device drivers, binds the listener, and decides
 //! when to stop.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::context::{RobotConnectorContext, RobotConnectorDevices};
-use crate::robotics::cameras::{CameraDevices, CameraManager};
-use crate::robotics::video::VideoEncoder;
+use crate::robotics::cameras::{CameraDriver, CameraManager};
+use crate::robotics::video::EncoderDriver;
 use crate::robots::models::RobotModelStore;
 use crate::robots::workspace::RobotWorkspace;
 #[cfg(feature = "simulation")]
 use crate::simulation::{DemoBench, SimulatedWorld};
-use spiral_robotics_hardware::{ControlSettings, HardwareHandle, SerialLines};
+use spiral_robotics_hardware::{ControlSettings, HardwareHandle, SerialDriver};
 use tokio::sync::watch;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -26,24 +27,26 @@ const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_mill
 /// the final encoder segment and recording file need time to finish.
 const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
-/// What the machine running the connector provides: the serial ports arms
-/// are wired to, its cameras, and an H.264 encoder for recordings.
-pub struct ConnectorPlatform {
-    serial_lines: Arc<dyn SerialLines>,
-    cameras: Arc<dyn CameraDevices>,
-    video_encoder: Arc<dyn VideoEncoder>,
+/// The device drivers of the machine running the connector: the serial
+/// ports arms are wired to, its cameras, and an H.264 encoder for recordings.
+/// A computer drives them through its operating system; a microcontroller
+/// through its own peripherals.
+pub struct DeviceDrivers {
+    serial_driver: Arc<dyn SerialDriver>,
+    camera_driver: Arc<dyn CameraDriver>,
+    encoder_driver: Arc<dyn EncoderDriver>,
 }
 
-impl ConnectorPlatform {
+impl DeviceDrivers {
     pub fn new(
-        serial_lines: Arc<dyn SerialLines>,
-        cameras: Arc<dyn CameraDevices>,
-        video_encoder: Arc<dyn VideoEncoder>,
+        serial_driver: Arc<dyn SerialDriver>,
+        camera_driver: Arc<dyn CameraDriver>,
+        encoder_driver: Arc<dyn EncoderDriver>,
     ) -> Self {
         Self {
-            serial_lines,
-            cameras,
-            video_encoder,
+            serial_driver,
+            camera_driver,
+            encoder_driver,
         }
     }
 }
@@ -72,21 +75,21 @@ impl ConnectorSettings {
 pub struct RobotConnector(RobotConnectorContext);
 
 impl RobotConnector {
-    /// Start the control loop on `platform`'s devices and open the state
-    /// `settings` names.
-    pub fn open(platform: ConnectorPlatform, settings: ConnectorSettings) -> Result<Self> {
-        let ConnectorPlatform {
-            serial_lines,
-            cameras,
-            video_encoder,
-        } = platform;
+    /// Start the control loop on `drivers` and open the state `settings`
+    /// names.
+    pub fn open(drivers: DeviceDrivers, settings: ConnectorSettings) -> Result<Self> {
+        let DeviceDrivers {
+            serial_driver,
+            camera_driver,
+            encoder_driver,
+        } = drivers;
         let ConnectorSettings {
             data_dir,
             policy_runtime,
             control,
         } = settings;
         tracing::info!(path = %data_dir.display(), "robot connector data directory");
-        let hardware = Arc::new(HardwareHandle::spawn(control, serial_lines.clone()));
+        let hardware = Arc::new(HardwareHandle::spawn(control, serial_driver.clone()));
         let workspace = Arc::new(RobotWorkspace::open(
             data_dir.join("robots.json"),
             RobotModelStore::new(data_dir.join("models")),
@@ -95,12 +98,12 @@ impl RobotConnector {
         #[cfg(feature = "simulation")]
         let simulated = Some(
             Arc::new(SimulatedWorld::new(workspace.clone(), hardware.clone()))
-                as Arc<dyn CameraDevices>,
+                as Arc<dyn CameraDriver>,
         );
         #[cfg(not(feature = "simulation"))]
         let simulated = None;
-        let cameras = Arc::new(CameraManager::new(cameras, simulated));
-        let devices = RobotConnectorDevices::new(hardware, serial_lines, cameras, video_encoder);
+        let cameras = Arc::new(CameraManager::new(camera_driver, simulated));
+        let devices = RobotConnectorDevices::new(hardware, serial_driver, cameras, encoder_driver);
         Ok(Self(RobotConnectorContext::open(
             devices,
             workspace,

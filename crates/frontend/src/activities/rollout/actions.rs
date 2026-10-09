@@ -4,7 +4,7 @@ use crate::robots::RobotClient;
 use dioxus::prelude::{ReadableExt, WritableExt};
 use spiral_robotics_common::robots::ModeSelection;
 
-use super::next_take::RecordDriver;
+use super::next_take::ControlKind;
 use super::policy::PolicyClient;
 use crate::activities::rollout::session::RolloutSession;
 use crate::robots::Selection;
@@ -59,7 +59,7 @@ impl RolloutSession {
     }
 
     fn teleoperate(self, leader: String, follower: String) {
-        self.next_take().choose_driver(RecordDriver::Teleop);
+        self.next_take().choose_control(ControlKind::Teleop);
         self.commands().run("", async move {
             RobotClient::current()
                 .set_mode(ModeSelection::Teleoperate { leader, follower })
@@ -86,7 +86,7 @@ impl RolloutSession {
         else {
             return;
         };
-        self.next_take().choose_driver(RecordDriver::Policy);
+        self.next_take().choose_control(ControlKind::Policy);
         self.selection()
             .selected()
             .set(Some(Selection::Robot(follower)));

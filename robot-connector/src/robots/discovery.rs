@@ -12,8 +12,8 @@ impl SerialPortDiscovery {
     pub(super) async fn list(
         connector: &RobotConnectorContext,
     ) -> Result<Vec<SerialPortSummary>, OperationError> {
-        let serial_lines = connector.serial_lines().clone();
-        let ports = tokio::task::spawn_blocking(move || serial_lines.available())
+        let serial_driver = connector.serial_driver().clone();
+        let ports = tokio::task::spawn_blocking(move || serial_driver.available())
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?
             .map_err(|error| {

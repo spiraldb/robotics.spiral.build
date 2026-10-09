@@ -8,7 +8,7 @@ and Studio's server never reaches it. It never reaches Spiral either. The two
 share request and response types through `crates/common`.
 
 ```console
-cargo run -p spiral-robotics-connector-desktop -- --help
+cargo run -p spiral-robotics-connector-os -- --help
 ```
 
 | Flag | Default | Meaning |
@@ -70,9 +70,9 @@ Robots, saved in the robot connector's `robots.json`:
 
 Takes:
 
-- `POST /recording`: `{dataset_id, driver, video}` starts the driver and
-  records a take of the arms it moves, with their cameras when `video` is true.
-  Answers 201 with the take. `driver` is one of:
+- `POST /recording`: `{dataset_id, control, video}` starts the control source
+  and records a take of the arms it moves, with their cameras when `video` is
+  true. Answers 201 with the take. `control` is one of:
   - `{"teleoperate": {"leader": …, "follower": …}}`: teleoperate the pair and
     record both arms.
   - `{"policy": RolloutConfig}`: roll the policy out on its `robot` and record
@@ -83,7 +83,7 @@ Takes:
     follower answers 409 with its reason, and no take is opened.
 - `PATCH /recording` (`{"paused": …}`) pauses or resumes a teleoperation take;
   a policy's take cannot pause. `POST /recording/stop` (`{"keep": …}`) stops
-  the take and its driver: teleoperation returns to idle, a policy stops and
+  the take and its control source: teleoperation returns to idle, a policy stops and
   the follower holds. Stopping saves the take as an MCAP file; a discarded take
   is saved too, marked as discarded.
 - `GET /recording/signals`, `GET /recording/takes/{id}`, and

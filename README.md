@@ -46,7 +46,7 @@ Start the robot connector next to the arms, from the workspace root in the
 Nix shell (which supplies FFmpeg for camera recording):
 
 ```console
-cargo run -p spiral-robotics-connector-desktop
+cargo run -p spiral-robotics-connector-os
 ```
 
 It listens on `http://127.0.0.1:7070` and keeps its robots, unsent takes, and

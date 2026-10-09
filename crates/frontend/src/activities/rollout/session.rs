@@ -1,6 +1,6 @@
 //! State owned by the mounted Rollout workspace and shared by its panels.
 use super::RecordingClient;
-use super::next_take::{NextTake, RecordDriver};
+use super::next_take::{ControlKind, NextTake};
 use super::policy::{PolicyControl, PolicyReadiness};
 use super::signals::SignalStore;
 use super::transport::TimelineController;
@@ -86,10 +86,10 @@ impl RolloutSession {
         self.recording_signals.map(|value| value)
     }
 
-    /// What Record starts next: the driver the operator last started, or,
-    /// before they have, Teleop on a bench with a leader and Policy on one
+    /// What Record starts next: the control source the operator last started,
+    /// or, before they have, Teleop on a bench with a leader and Policy on one
     /// without.
-    pub(super) fn record_driver(self) -> RecordDriver {
+    pub(super) fn record_control(self) -> ControlKind {
         let teleop_ready = self
             .telemetry
             .snapshot()
@@ -97,11 +97,11 @@ impl RolloutSession {
             .default_teleoperation_pair()
             .is_some();
         let default = if teleop_ready || self.policy.selected().is_none() {
-            RecordDriver::Teleop
+            ControlKind::Teleop
         } else {
-            RecordDriver::Policy
+            ControlKind::Policy
         };
-        self.next_take.driver(default)
+        self.next_take.control(default)
     }
 
     /// Why the chosen checkpoint cannot drive the follower now, if it cannot.

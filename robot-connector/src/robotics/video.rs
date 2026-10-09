@@ -47,7 +47,7 @@ const ENCODER_QUEUE_FRAMES: usize = 4;
 /// Turns one camera's JPEG frames into H.264 for a recording.
 ///
 /// A computer runs FFmpeg; a microcontroller drives its hardware encoder.
-pub trait VideoEncoder: Send + Sync {
+pub trait EncoderDriver: Send + Sync {
     /// Encode each JPEG frame `frames` yields, at `fps`, until the channel
     /// closes. Answers an Annex B H.264 stream without B-frames whose every
     /// keyframe carries its parameter sets, so a recording decodes from any
@@ -68,7 +68,7 @@ struct VideoCaptureSource {
     episode_id: String,
     cameras: Arc<CameraManager>,
     specs: Vec<CameraCaptureSpec>,
-    encoder: Arc<dyn VideoEncoder>,
+    encoder: Arc<dyn EncoderDriver>,
     clock: CaptureClock,
 }
 
@@ -188,7 +188,7 @@ impl PreparedCameraSegment {
 
 /// Immutable configuration for one encoded interval of one camera stream.
 struct CameraSegment {
-    encoder: Arc<dyn VideoEncoder>,
+    encoder: Arc<dyn EncoderDriver>,
     clock: CaptureClock,
 }
 
@@ -202,7 +202,7 @@ impl VideoCapture {
     pub(crate) async fn start(
         cameras: Arc<CameraManager>,
         request: VideoCaptureRequest,
-        encoder: &Arc<dyn VideoEncoder>,
+        encoder: &Arc<dyn EncoderDriver>,
     ) -> Result<Option<Self>, String> {
         if request.cameras.is_empty() {
             return Ok(None);
@@ -379,7 +379,7 @@ mod tests {
     /// Stands in for a platform encoder in tests that never start one.
     struct UnusedEncoder;
 
-    impl VideoEncoder for UnusedEncoder {
+    impl EncoderDriver for UnusedEncoder {
         fn encode(
             &self,
             _fps: u32,

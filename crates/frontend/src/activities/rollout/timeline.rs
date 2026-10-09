@@ -207,7 +207,7 @@ fn CaptureControls(
         let blocker = transport.record_blocker();
         let title = blocker
             .clone()
-            .unwrap_or_else(|| "Start the driver and record a new episode".into());
+            .unwrap_or_else(|| transport.record_description().into());
         return rsx! {
             Button {
                 purpose: ActionPurpose::Start, variant: ButtonVariant::Solid, size: ButtonSize::Standard,

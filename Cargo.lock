@@ -5409,7 +5409,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "spiral-robotics-connector-desktop"
+name = "spiral-robotics-connector-os"
 version = "0.1.0"
 dependencies = [
  "bytes",

@@ -5,12 +5,12 @@ use std::io;
 
 use serialport::{ClearBuffer, SerialPort, SerialPortInfo, SerialPortType};
 use spiral_robotics_common::robots::{PortSettings, SerialPortSummary};
-use spiral_robotics_hardware::{SERIAL_READ_TIMEOUT, SerialLine, SerialLines};
+use spiral_robotics_hardware::{SERIAL_READ_TIMEOUT, SerialDriver, SerialLine};
 
 /// The serial ports the operating system reports.
 pub(crate) struct SystemSerialPorts;
 
-impl SerialLines for SystemSerialPorts {
+impl SerialDriver for SystemSerialPorts {
     fn available(&self) -> io::Result<Vec<SerialPortSummary>> {
         let catalog = SerialPortCatalog::discover().map_err(io::Error::from)?;
         Ok(catalog

@@ -7,7 +7,7 @@
 //! the policies Studio trained here. The connector never reaches Spiral.
 //!
 //! This library is the connector itself; the program around it supplies the
-//! machine's devices ([`ConnectorPlatform`]) — a computer's USB serial ports,
+//! machine's device drivers ([`DeviceDrivers`]) — a computer's USB serial ports,
 //! webcams, and FFmpeg, or a microcontroller's UARTs and hardware encoder.
 
 #![allow(async_fn_in_trait)]
@@ -26,8 +26,8 @@ mod simulation;
 mod sync;
 
 pub(crate) use error::OperationError;
-pub use http::server::{ConnectorPlatform, ConnectorSettings, RobotConnector};
+pub use http::server::{ConnectorSettings, DeviceDrivers, RobotConnector};
 pub use robotics::cameras::{
-    CameraDevice, CameraDevices, DEFAULT_JPEG_QUALITY, DiscoveredCameras, NoCameraDevices,
+    CameraDevice, CameraDriver, DEFAULT_JPEG_QUALITY, DiscoveredCameras, NoCameraDriver,
 };
-pub use robotics::video::VideoEncoder;
+pub use robotics::video::EncoderDriver;

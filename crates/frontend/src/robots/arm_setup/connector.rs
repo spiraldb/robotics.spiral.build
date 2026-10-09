@@ -12,7 +12,7 @@ use crate::client::project::ProjectClient;
 use crate::client::robot_connector::RobotConnector;
 
 /// The command that starts the robot connector from a Studio checkout.
-const START_COMMAND: &str = "cargo run -p spiral-robotics-connector-desktop";
+const START_COMMAND: &str = "cargo run -p spiral-robotics-connector-os";
 
 /// Until the robot connector answers: the command that starts it. Always: the
 /// address this workspace looks at, and what it heard there. Connecting saves

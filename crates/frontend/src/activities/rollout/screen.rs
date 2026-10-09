@@ -1,4 +1,4 @@
-//! Rollout owns the drivers, recording controls, scene, cameras, timeline,
+//! Rollout owns the control sources, recording controls, scene, cameras, timeline,
 //! and docking, and, until a follower is ready, the guide that gets it there.
 
 use super::playback::TakeTimeline;

@@ -282,10 +282,15 @@ impl TakeTransport {
 
     /// What the Record button says it starts.
     pub(super) fn record_label(&self) -> &'static str {
-        self.session().record_driver().record_label()
+        self.session().record_control().record_label()
     }
 
-    /// Whether Record is waiting for its driver to take the follower.
+    /// What Record does when nothing blocks it.
+    pub(super) fn record_description(&self) -> &'static str {
+        self.session().record_control().record_description()
+    }
+
+    /// Whether Record is waiting for its control source to take the follower.
     pub(super) fn starting(&self) -> bool {
         self.session().next_take().starting()
     }

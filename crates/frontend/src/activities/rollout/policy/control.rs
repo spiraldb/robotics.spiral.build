@@ -1,4 +1,4 @@
-//! The Policy driver's state: the robot connector's run as it reports it,
+//! The Policy control source's state: the robot connector's run as it reports it,
 //! the checkpoints Studio could run, and the operator's choice for the next
 //! run. The robot connector owns activation, inference, and motion; these
 //! signals only preserve the choice while the operator moves around Studio.

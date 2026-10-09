@@ -1,8 +1,8 @@
 [package]
-name = "spiral-robotics-connector-desktop"
+name = "spiral-robotics-connector-os"
 version.workspace = true
 edition.workspace = true
-description = "The robot connector for computers: Mac, Linux, and Raspberry Pi"
+description = "The robot connector on an operating system (Mac, Linux, Raspberry Pi), with its device drivers"
 publish.workspace = true
 
 [lints]

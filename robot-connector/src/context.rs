@@ -4,37 +4,37 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use spiral_robotics_hardware::{HardwareHandle, SerialLines};
+use spiral_robotics_hardware::{HardwareHandle, SerialDriver};
 use spiral_robotics_recording::RecordingBuffer;
 
 use crate::policies::PolicyStore;
 use crate::recording::files::RecordingFiles;
 use crate::recording::session::RecordingSession;
 use crate::robotics::cameras::CameraManager;
-use crate::robotics::video::VideoEncoder;
+use crate::robotics::video::EncoderDriver;
 use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::manager::{RolloutHardwareResources, RolloutManager, RolloutPolicies};
 
 /// The physical devices one connector process owns.
 pub(crate) struct RobotConnectorDevices {
     hardware: Arc<HardwareHandle>,
-    serial_lines: Arc<dyn SerialLines>,
+    serial_driver: Arc<dyn SerialDriver>,
     cameras: Arc<CameraManager>,
-    video_encoder: Arc<dyn VideoEncoder>,
+    encoder_driver: Arc<dyn EncoderDriver>,
 }
 
 impl RobotConnectorDevices {
     pub(crate) fn new(
         hardware: Arc<HardwareHandle>,
-        serial_lines: Arc<dyn SerialLines>,
+        serial_driver: Arc<dyn SerialDriver>,
         cameras: Arc<CameraManager>,
-        video_encoder: Arc<dyn VideoEncoder>,
+        encoder_driver: Arc<dyn EncoderDriver>,
     ) -> Self {
         Self {
             hardware,
-            serial_lines,
+            serial_driver,
             cameras,
-            video_encoder,
+            encoder_driver,
         }
     }
 }
@@ -92,14 +92,14 @@ impl RobotConnectorContext {
     pub(crate) fn hardware(&self) -> &Arc<HardwareHandle> {
         &self.0.devices.hardware
     }
-    pub(crate) fn serial_lines(&self) -> &Arc<dyn SerialLines> {
-        &self.0.devices.serial_lines
+    pub(crate) fn serial_driver(&self) -> &Arc<dyn SerialDriver> {
+        &self.0.devices.serial_driver
     }
     pub(crate) fn cameras(&self) -> &Arc<CameraManager> {
         &self.0.devices.cameras
     }
-    pub(crate) fn video_encoder(&self) -> &Arc<dyn VideoEncoder> {
-        &self.0.devices.video_encoder
+    pub(crate) fn encoder_driver(&self) -> &Arc<dyn EncoderDriver> {
+        &self.0.devices.encoder_driver
     }
     pub(crate) fn workspace(&self) -> &Arc<RobotWorkspace> {
         &self.0.workspace

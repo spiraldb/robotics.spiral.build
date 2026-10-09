@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::bus::{BusError, MotorBus, MotorElectricalSample, MotorMechanicalSample};
 use crate::bus::{MotorFaults, MotorSample};
 use crate::calibration::EncoderCounts;
-use crate::serial_line::{SerialLine, SerialLines};
+use crate::serial_driver::{SerialDriver, SerialLine};
 use spiral_robotics_common::robots::config::MotorConfig;
 use spiral_robotics_common::robots::{MotorLimits, PortSettings};
 
@@ -342,15 +342,15 @@ pub(crate) struct FeetechBus {
 }
 
 impl FeetechBus {
-    /// Open `port` among `lines` and validate that all motor definitions are
+    /// Open `port` through `driver` and validate that all motor definitions are
     /// supported.
     pub(crate) fn connect(
-        lines: &dyn SerialLines,
+        driver: &dyn SerialDriver,
         port: &PortSettings,
         specs: &BTreeMap<String, MotorConfig>,
     ) -> Result<Self, FeetechError> {
         let motors = Motor::from_specs(specs)?;
-        let port = lines.open(port).map_err(|source| FeetechError::Open {
+        let port = driver.open(port).map_err(|source| FeetechError::Open {
             port: port.path().to_owned(),
             baud_rate: port.baud_rate(),
             source,

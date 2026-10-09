@@ -10,12 +10,12 @@ use spiral_robotics_hardware::HardwareHandle;
 use spiral_robotics_viewport::{ArmPresentation, CameraAttachment, CameraMount, Frame, RobotModel};
 
 use super::SimulatedCamera;
-use crate::robotics::cameras::{CameraDevice, CameraDevices, DiscoveredCameras};
+use crate::robotics::cameras::{CameraDevice, CameraDriver, DiscoveredCameras};
 use crate::robots::models::RobotModelStore;
 use crate::robots::workspace::{RobotRecord, RobotWorkspace};
 
 /// Every mounted camera on a simulated arm is one of the machine's cameras.
-impl CameraDevices for SimulatedWorld {
+impl CameraDriver for SimulatedWorld {
     fn discover(&self) -> DiscoveredCameras {
         let cameras = self
             .cameras()

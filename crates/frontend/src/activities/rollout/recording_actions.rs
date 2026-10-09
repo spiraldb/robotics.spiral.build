@@ -4,26 +4,26 @@
 //! this module to translate consequential intent into admitted commands. The
 //! robot connector remains authoritative for recording, hardware, and safety.
 
-use super::next_take::RecordDriver;
+use super::next_take::ControlKind;
 use super::policy::PolicyClient;
 use super::recording_client::RecordingTransfer;
 use crate::activities::rollout::RecordingClient;
 use dioxus::prelude::*;
-use spiral_robotics_common::recording::{EpisodeInfo, RecordingDriver, RecordingStart};
+use spiral_robotics_common::recording::{ControlSource, EpisodeInfo, RecordingStart};
 
 use crate::activities::rollout::session::RolloutSession;
 use crate::shell::notifications::MessageSource;
 
 impl RolloutSession {
-    /// Why Record cannot start a take with its driver now, if it cannot.
+    /// Why Record cannot start a take with its control source now, if it cannot.
     pub(super) fn recording_blocker(self) -> Option<String> {
         if !spiral_robotics_common::identity::DatasetId::is_canonical(
             self.next_take().dataset().read().trim(),
         ) {
             return Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned());
         }
-        match self.record_driver() {
-            RecordDriver::Teleop
+        match self.record_control() {
+            ControlKind::Teleop
                 if self
                     .telemetry()
                     .snapshot()
@@ -33,19 +33,19 @@ impl RolloutSession {
             {
                 Some("Connect and calibrate a compatible leader and follower first.".to_owned())
             }
-            RecordDriver::Teleop if !self.telemetry().controls_available() => {
+            ControlKind::Teleop if !self.telemetry().controls_available() => {
                 Some("Recording is paused while telemetry reconnects.".to_owned())
             }
-            RecordDriver::Teleop => None,
+            ControlKind::Teleop => None,
             // A take is a whole run: it starts with the policy, not partway in.
-            RecordDriver::Policy if self.policy().active_session().is_some() => {
+            ControlKind::Policy if self.policy().active_session().is_some() => {
                 Some("Recording starts with the next policy run.".to_owned())
             }
-            RecordDriver::Policy => self.policy_blocker(),
+            ControlKind::Policy => self.policy_blocker(),
         }
     }
 
-    /// Start the next take's driver and record it: the leader and follower
+    /// Start the next take's control source and record it: the leader and follower
     /// for Teleop, or the chosen checkpoint on the follower for Policy, whose
     /// take begins with its first action once it has loaded.
     pub(super) fn start_recording(self) {
@@ -54,25 +54,25 @@ impl RolloutSession {
             return;
         }
         let setup = self.telemetry().snapshot();
-        let (driver, policy) = match self.record_driver() {
-            RecordDriver::Teleop => {
+        let (control, policy) = match self.record_control() {
+            ControlKind::Teleop => {
                 let Some((leader, follower)) = setup.read().default_teleoperation_pair() else {
                     return;
                 };
-                (RecordingDriver::Teleoperate { leader, follower }, None)
+                (ControlSource::Teleoperate { leader, follower }, None)
             }
-            RecordDriver::Policy => {
+            ControlKind::Policy => {
                 let follower = setup.read().follower().map(|robot| robot.id().to_owned());
                 let Some(config) = follower.and_then(|id| self.policy().next_run(&id)) else {
                     return;
                 };
-                (RecordingDriver::Policy(config.clone()), Some(config))
+                (ControlSource::Policy(config.clone()), Some(config))
             }
         };
         let next_take = self.next_take();
         let request = RecordingStart::new(
             next_take.dataset().read().trim().to_owned(),
-            driver,
+            control,
             *next_take.video().read(),
         );
         self.commands().run("", async move {

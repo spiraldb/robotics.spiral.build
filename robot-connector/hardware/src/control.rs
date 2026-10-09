@@ -28,7 +28,7 @@ use crate::bus::{
     MotorBus, MotorFault as BusMotorFault, MotorFaults as BusMotorFaults, MotorSample,
 };
 use crate::feetech::FeetechBus;
-use crate::serial_line::SerialLines;
+use crate::serial_driver::SerialDriver;
 use crate::simulated::SimulatedBus;
 
 use crate::HardwareInputError;
@@ -725,11 +725,11 @@ pub struct HardwareHandle {
 
 impl HardwareHandle {
     /// Start the control thread, reaching real motor buses through
-    /// `serial_lines`.
-    pub fn spawn(settings: ControlSettings, serial_lines: Arc<dyn SerialLines>) -> Self {
+    /// `serial_driver`.
+    pub fn spawn(settings: ControlSettings, serial_driver: Arc<dyn SerialDriver>) -> Self {
         let (commands, requests) = mpsc::channel();
         let (state, receiver) = watch::channel(HardwareState::default());
-        let controller = Controller::new(settings, serial_lines, state);
+        let controller = Controller::new(settings, serial_driver, state);
         let recording_signals = controller.recording_signals.clone();
         let thread = thread::Builder::new()
             .name("spiral-robotics-control".to_owned())
@@ -1399,7 +1399,7 @@ impl From<ControlMode> for ModeSelection {
 struct Controller {
     settings: ControlSettings,
     /// How this machine opens the serial ports real arms are wired to.
-    serial_lines: Arc<dyn SerialLines>,
+    serial_driver: Arc<dyn SerialDriver>,
     robots: BTreeMap<String, ConnectedRobot>,
     published: PublishedControllerState,
     state: watch::Sender<HardwareState>,
@@ -1427,12 +1427,12 @@ struct PublishedControllerState {
 impl Controller {
     fn new(
         settings: ControlSettings,
-        serial_lines: Arc<dyn SerialLines>,
+        serial_driver: Arc<dyn SerialDriver>,
         state: watch::Sender<HardwareState>,
     ) -> Self {
         Self {
             settings,
-            serial_lines,
+            serial_driver,
             robots: BTreeMap::new(),
             published: PublishedControllerState::default(),
             state,
@@ -1859,7 +1859,7 @@ impl Controller {
         let open = |spec: &RobotSpec| -> Result<Box<dyn MotorBus>, String> {
             match spec.motor_access() {
                 MotorAccess::Serial(port) => {
-                    FeetechBus::connect(self.serial_lines.as_ref(), port, spec.motors())
+                    FeetechBus::connect(self.serial_driver.as_ref(), port, spec.motors())
                         .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
                         .map_err(|error| error.to_string())
                 }
@@ -2551,7 +2551,7 @@ mod tests {
 
     use super::*;
     use crate::bus::{BusError, MotorElectricalSample, MotorMechanicalSample};
-    use crate::serial_line::NoSerialLines;
+    use crate::serial_driver::NoSerialDriver;
 
     fn motors() -> BTreeMap<String, MotorConfig> {
         MotorConfig::so101_arm()
@@ -2594,7 +2594,7 @@ mod tests {
 
     fn controller() -> Controller {
         let (state, _receiver) = watch::channel(HardwareState::default());
-        Controller::new(ControlSettings::default(), Arc::new(NoSerialLines), state)
+        Controller::new(ControlSettings::default(), Arc::new(NoSerialDriver), state)
     }
 
     struct FailingEnableBus {

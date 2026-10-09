@@ -7,27 +7,27 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub struct RecordingStart {
     dataset_id: String,
-    driver: RecordingDriver,
+    control: ControlSource,
     video: bool,
 }
 impl RecordingStart {
-    pub fn new(dataset_id: String, driver: RecordingDriver, video: bool) -> Self {
+    pub fn new(dataset_id: String, control: ControlSource, video: bool) -> Self {
         Self {
             dataset_id,
-            driver,
+            control,
             video,
         }
     }
-    pub fn into_parts(self) -> (String, RecordingDriver, bool) {
-        (self.dataset_id, self.driver, self.video)
+    pub fn into_parts(self) -> (String, ControlSource, bool) {
+        (self.dataset_id, self.control, self.video)
     }
 }
 
-/// What moves the follower while a take records. A take starts its driver
-/// and ends with it.
+/// What moves the follower while a take records. A take starts its control
+/// source and ends with it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RecordingDriver {
+pub enum ControlSource {
     /// The operator moves the leader and the follower mirrors it; both arms
     /// are recorded.
     Teleoperate { leader: String, follower: String },

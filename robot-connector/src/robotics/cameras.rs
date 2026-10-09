@@ -51,16 +51,16 @@ impl DiscoveredCameras {
 }
 
 /// How one machine finds its cameras.
-pub trait CameraDevices: Send + Sync {
+pub trait CameraDriver: Send + Sync {
     /// Find the cameras attached now. May block, so it never runs on an
     /// async runtime thread.
     fn discover(&self) -> DiscoveredCameras;
 }
 
 /// A machine that films with no physical camera.
-pub struct NoCameraDevices;
+pub struct NoCameraDriver;
 
-impl CameraDevices for NoCameraDevices {
+impl CameraDriver for NoCameraDriver {
     fn discover(&self) -> DiscoveredCameras {
         DiscoveredCameras::new(Vec::new(), Vec::new())
     }
@@ -207,10 +207,10 @@ struct ManagerState {
 /// Discovers cameras, lists the simulated ones, and owns their capture threads.
 pub(crate) struct CameraManager {
     state: Mutex<ManagerState>,
-    devices: Arc<dyn CameraDevices>,
+    driver: Arc<dyn CameraDriver>,
     /// Cameras drawn from simulated arms. Saving a robot changes them, so
     /// they are listed afresh on every call rather than on refresh.
-    simulated: Option<Arc<dyn CameraDevices>>,
+    simulated: Option<Arc<dyn CameraDriver>>,
 }
 
 impl CameraManager {
@@ -224,15 +224,15 @@ impl CameraManager {
         Ok(self.statuses())
     }
 
-    /// A manager that films the `simulated` cameras beside the `devices`
+    /// A manager that films the `simulated` cameras beside the ones `driver`
     /// [`CameraManager::refresh_blocking`] finds.
     pub(crate) fn new(
-        devices: Arc<dyn CameraDevices>,
-        simulated: Option<Arc<dyn CameraDevices>>,
+        driver: Arc<dyn CameraDriver>,
+        simulated: Option<Arc<dyn CameraDriver>>,
     ) -> Self {
         Self {
             state: Mutex::default(),
-            devices,
+            driver,
             simulated,
         }
     }
@@ -249,7 +249,7 @@ impl CameraManager {
     /// Discovery may block (a computer probes in child processes), so this
     /// must not run on an async runtime thread.
     pub(crate) fn refresh_blocking(&self) {
-        let DiscoveredCameras { cameras, issues } = self.devices.discover();
+        let DiscoveredCameras { cameras, issues } = self.driver.discover();
         let discovered = cameras
             .into_iter()
             .map(|camera| (camera.status().id().to_owned(), camera))
@@ -379,7 +379,7 @@ impl Default for CameraManager {
     fn default() -> Self {
         Self {
             state: Mutex::default(),
-            devices: Arc::new(NoCameraDevices),
+            driver: Arc::new(NoCameraDriver),
             simulated: None,
         }
     }
