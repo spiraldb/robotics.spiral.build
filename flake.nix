@@ -141,6 +141,7 @@
               ./Cargo.lock
               ./.cargo
               ./crates
+              ./robot-connector
             ];
           };
           cargoDeps = rustPlatform.importCargoLock {
