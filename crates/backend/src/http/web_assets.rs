@@ -5,7 +5,7 @@ use std::{convert::Infallible, path::PathBuf};
 use axum::{
     Router,
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -25,8 +25,12 @@ impl StudioWebAssets {
     /// browser bundle for every other path.
     pub(super) fn router(self, api: Router, pages: Router) -> Router {
         let index = self.public.join("index.html");
-        let files = ServeDir::new(self.public).fallback(get(Self::navigation).with_state(index));
+        // Directories, like `/`, are client-side routes that the entrypoint serves.
+        let files = ServeDir::new(self.public)
+            .append_index_html_on_directories(false)
+            .fallback(get(Self::navigation).with_state(index.clone()));
         Router::new()
+            .route("/", get(Self::entrypoint).with_state(index))
             .nest("/api", api)
             .merge(pages)
             .fallback_service(files)
@@ -49,11 +53,24 @@ impl StudioWebAssets {
         if !html_navigation {
             return StatusCode::NOT_FOUND.into_response();
         }
+        Self::entrypoint(State(index), request).await
+    }
+
+    /// The application entrypoint, fresh on every navigation. It names its release's
+    /// hashed bundle, and every file of the hosted image carries one fixed modification
+    /// time, so a cached or revalidated copy keeps naming a bundle that a later release
+    /// no longer serves.
+    async fn entrypoint(State(index): State<PathBuf>, mut request: Request) -> Response {
+        request.headers_mut().remove(header::IF_MODIFIED_SINCE);
         let result: Result<_, Infallible> = ServeFile::new(index).oneshot(request).await;
-        match result {
+        let mut response = match result {
             Ok(response) => response.into_response(),
             Err(never) => match never {},
-        }
+        };
+        let headers = response.headers_mut();
+        headers.remove(header::LAST_MODIFIED);
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
     }
 }
 
@@ -120,6 +137,30 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(&body[..], b"<!doctype html><div id=\"main\"></div>");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_entrypoint_is_never_cached_or_revalidated() {
+        let fixture = WebFixture::new();
+        for (path, accept) in [("/", "text/html"), ("/", "*/*"), ("/data", "text/html")] {
+            let response = fixture
+                .router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::ACCEPT, accept)
+                        // Later than the one modification time every image file carries.
+                        .header(header::IF_MODIFIED_SINCE, "Fri, 01 Jan 2100 00:00:00 GMT")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path} {accept}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(response.headers().get(header::LAST_MODIFIED).is_none());
         }
     }
 
