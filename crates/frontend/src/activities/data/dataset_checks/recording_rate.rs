@@ -82,7 +82,8 @@ impl RecordingRate {
             .iter()
             .filter(|topic| Self::repeats(topic))
             .collect::<Vec<_>>();
-        let parts = repeated
+        let mut timings = StreamTimings::default();
+        for (part, row) in streams.parts::<TimingRow>(|streams| Ok(repeated
             .iter()
             .map(|topic| {
                 format!(
@@ -90,9 +91,7 @@ impl RecordingRate {
                     streams.read(topic)
                 )
             })
-            .collect::<Vec<_>>();
-        let mut timings = StreamTimings::default();
-        for (part, row) in streams.parts::<TimingRow>(&parts).await? {
+            .collect::<Vec<_>>())).await? {
             timings
                 .streams
                 .entry(repeated[part].name().to_owned())

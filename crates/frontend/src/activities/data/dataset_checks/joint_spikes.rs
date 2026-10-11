@@ -36,10 +36,6 @@ impl JointSpikes {
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
     ) -> Result<Self, String> {
-        let parts = arms
-            .iter()
-            .map(|arm| Self::sql(streams, arm))
-            .collect::<Result<Vec<_>, _>>()?;
         let mut measured = arms
             .iter()
             .map(|arm| ArmSpikes {
@@ -47,7 +43,14 @@ impl JointSpikes {
                 episodes: Vec::new(),
             })
             .collect::<Vec<_>>();
-        for (arm, row) in streams.parts::<EpisodeSpikes>(&parts).await? {
+        for (arm, row) in streams
+            .parts::<EpisodeSpikes>(|streams| {
+                arms.iter()
+                    .map(|arm| Self::sql(streams, arm))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await?
+        {
             if row.spikes > 0 {
                 measured[arm].episodes.push(row);
             }

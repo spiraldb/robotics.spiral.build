@@ -187,7 +187,7 @@ pub(super) fn CatalogRail(
                 Button { purpose: ActionPurpose::Refresh, variant: ButtonVariant::Icon, aria_label: "Refresh catalog", title: "Refresh catalog",
                     onclick: move |_| super::relations::CatalogRefresh::request(), RefreshIcon {} }
                 Button { purpose: ActionPurpose::Import, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
-                    title: "Import MCAP recordings as a new dataset", onclick: move |_| actions.on_import.call(()), "Import" }
+                    title: "Import a dataset from MCAP recordings or Hugging Face", onclick: move |_| actions.on_import.call(()), "Import" }
             }
             div { class: "data-rail-scroll",
                 match &*result {

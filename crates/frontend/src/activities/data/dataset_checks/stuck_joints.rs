@@ -53,10 +53,6 @@ impl StuckJoints {
             .iter()
             .filter_map(|arm| Some((arm, arm.action()?)))
             .collect::<Vec<_>>();
-        let parts = commanded
-            .iter()
-            .map(|(arm, action)| Self::sql(streams, &PairedColumns::new(arm.state(), action)))
-            .collect::<Result<Vec<_>, _>>()?;
         let mut measured = commanded
             .iter()
             .map(|(arm, _)| ArmStuck {
@@ -65,7 +61,17 @@ impl StuckJoints {
                 unpaired: Vec::new(),
             })
             .collect::<Vec<_>>();
-        for (arm, row) in streams.parts::<StuckRow>(&parts).await? {
+        for (arm, row) in streams
+            .parts::<StuckRow>(|streams| {
+                commanded
+                    .iter()
+                    .map(|(arm, action)| {
+                        Self::sql(streams, &PairedColumns::new(arm.state(), action))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await?
+        {
             let arm = &mut measured[arm];
             if Pairing::together(row.paired, row.commands) {
                 arm.episodes.push(row.stuck);

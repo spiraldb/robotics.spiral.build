@@ -70,16 +70,6 @@ impl GripperCloses {
             .iter()
             .filter_map(|arm| Some((arm, arm.gripper()?)))
             .collect::<Vec<_>>();
-        let parts = grippers
-            .iter()
-            .map(|(_, gripper)| {
-                Self::sql(
-                    streams,
-                    &PairedColumns::new(gripper.state(), gripper.action()),
-                    gripper.range(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let mut measured = grippers
             .iter()
             .map(|(arm, _)| ArmCloses {
@@ -88,7 +78,21 @@ impl GripperCloses {
                 unpaired: Vec::new(),
             })
             .collect::<Vec<_>>();
-        for (arm, row) in streams.parts::<CloseRow>(&parts).await? {
+        for (arm, row) in streams
+            .parts::<CloseRow>(|streams| {
+                grippers
+                    .iter()
+                    .map(|(_, gripper)| {
+                        Self::sql(
+                            streams,
+                            &PairedColumns::new(gripper.state(), gripper.action()),
+                            gripper.range(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await?
+        {
             let arm = &mut measured[arm];
             if !Pairing::together(row.paired, row.commands) {
                 arm.unpaired.push(row.id);

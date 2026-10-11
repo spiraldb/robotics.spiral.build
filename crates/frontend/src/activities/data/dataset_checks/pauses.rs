@@ -51,7 +51,7 @@ impl Pauses {
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
     ) -> Result<Self, String> {
-        let rows: Vec<PauseRow> = streams.rows(Self::sql(streams, arms)?).await?;
+        let rows: Vec<PauseRow> = streams.rows(|streams| Self::sql(streams, arms)).await?;
         let mut episodes = Vec::new();
         let mut apart = Vec::new();
         for row in rows {

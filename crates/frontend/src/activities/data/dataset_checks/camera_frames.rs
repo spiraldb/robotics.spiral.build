@@ -33,6 +33,12 @@ struct EpisodeFrames {
     late: u64,
 }
 
+/// A camera's usual frame interval, over every episode.
+#[derive(Deserialize)]
+struct PeriodRow {
+    period_ns: Option<f64>,
+}
+
 #[derive(Deserialize)]
 struct FramesRow {
     period_ns: f64,
@@ -61,11 +67,22 @@ impl CameraFrames {
                 episodes: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let parts = cameras
+        let periods = cameras
             .iter()
-            .map(|topic| Self::sql(streams, topic))
+            .map(|topic| Self::period_sql(streams, topic))
             .collect::<Vec<_>>();
-        for (camera, row) in streams.parts::<FramesRow>(&parts).await? {
+        let mut period_ns = vec![None; cameras.len()];
+        for (camera, row) in streams.dataset_parts::<PeriodRow>(&periods).await? {
+            period_ns[camera] = row.period_ns;
+        }
+        let frames = streams.parts::<FramesRow>(|streams| {
+            Ok(cameras
+                .iter()
+                .zip(&period_ns)
+                .map(|(topic, period)| Self::sql(streams, topic, *period))
+                .collect())
+        });
+        for (camera, row) in frames.await? {
             measured[camera].period_ns = row.period_ns;
             measured[camera].episodes.push(row.frames);
         }
@@ -81,12 +98,30 @@ impl CameraFrames {
             .filter(|period| *period > 0.0)
     }
 
-    fn sql(streams: CheckedStreams<'_>, camera: &DatasetTopic) -> String {
+    /// Each frame of `camera` beside the nanoseconds since the one before.
+    fn gaps(streams: CheckedStreams<'_>, camera: &DatasetTopic) -> String {
+        format!(
+            "SELECT id, log_time, CAST(log_time AS BIGINT) - CAST(LAG(log_time) OVER (PARTITION BY id ORDER BY log_time) AS BIGINT) AS gap FROM {}",
+            streams.read(camera)
+        )
+    }
+
+    /// The median gap between frames of `camera`, over every episode.
+    fn period_sql(streams: CheckedStreams<'_>, camera: &DatasetTopic) -> String {
+        format!(
+            "SELECT spql.agg.approx_quantile(gap, 0.5) AS period_ns FROM ({})",
+            Self::gaps(streams, camera)
+        )
+    }
+
+    /// Each episode's frames of `camera`, judged against its usual interval.
+    fn sql(streams: CheckedStreams<'_>, camera: &DatasetTopic, period_ns: Option<f64>) -> String {
         let late = Self::LATE;
+        let period = period_ns.map_or_else(|| "NULL".to_owned(), |period| period.to_string());
         format!(
             "WITH \
-             g AS (SELECT id, log_time, CAST(log_time AS BIGINT) - CAST(LAG(log_time) OVER (PARTITION BY id ORDER BY log_time) AS BIGINT) AS gap FROM {read}), \
-             p AS (SELECT spql.agg.approx_quantile(gap, 0.5) AS period FROM g), \
+             g AS ({gaps}), \
+             p AS (SELECT CAST({period} AS DOUBLE) AS period), \
              l AS (SELECT id, log_time, gap, LEAD(gap) OVER (PARTITION BY id ORDER BY log_time) AS next_gap FROM g), \
              w AS (SELECT id, log_time, ROW_NUMBER() OVER (PARTITION BY id ORDER BY gap DESC) AS rank FROM g WHERE gap IS NOT NULL), \
              f AS (SELECT l.id AS id, count(*) AS frames, max(l.log_time) - min(l.log_time) AS span_ns, max(l.gap) AS worst_gap_ns, \
@@ -94,7 +129,7 @@ impl CameraFrames {
                FROM l CROSS JOIN p GROUP BY l.id) \
              SELECT f.id AS id, f.frames AS frames, f.span_ns AS span_ns, f.worst_gap_ns AS worst_gap_ns, f.late AS late, f.period_ns AS period_ns, {since} AS worst_at \
              FROM f JOIN {episodes} e ON e.id = f.id LEFT JOIN w ON w.id = f.id AND w.rank = 1",
-            read = streams.read(camera),
+            gaps = Self::gaps(streams, camera),
             slow = 1.0 + late,
             quick = 1.0 - late,
             since = CheckedStreams::since_start("w.log_time"),

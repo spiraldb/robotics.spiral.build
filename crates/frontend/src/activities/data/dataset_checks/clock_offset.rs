@@ -41,13 +41,12 @@ struct EpisodeOffset {
     opening_ms: Option<f64>,
 }
 
+/// Frame time minus message time over every pair of every episode.
 #[derive(Deserialize)]
-struct OffsetRow {
-    pooled_ms: f64,
-    low_ms: f64,
-    high_ms: f64,
-    #[serde(flatten)]
-    episode: EpisodeOffset,
+struct PooledRow {
+    median_ms: Option<f64>,
+    low_ms: Option<f64>,
+    high_ms: Option<f64>,
 }
 
 impl ClockOffset {
@@ -89,15 +88,26 @@ impl ClockOffset {
                 episodes: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let parts = groups
+        let pooled = groups
             .iter()
-            .map(|group| Self::sql(streams, (camera_topic, group[0])))
+            .map(|group| Self::pooled_sql(streams, (camera_topic, group[0])))
             .collect::<Vec<_>>();
-        for (part, row) in streams.parts::<OffsetRow>(&parts).await? {
+        for (part, row) in streams.dataset_parts::<PooledRow>(&pooled).await? {
             let pairing = &mut pairings[part];
-            (pairing.median_ms, pairing.low_ms, pairing.high_ms) =
-                (row.pooled_ms, row.low_ms, row.high_ms);
-            pairing.episodes.push(row.episode);
+            (pairing.median_ms, pairing.low_ms, pairing.high_ms) = (
+                row.median_ms.unwrap_or_default(),
+                row.low_ms.unwrap_or_default(),
+                row.high_ms.unwrap_or_default(),
+            );
+        }
+        let offsets = streams.parts::<EpisodeOffset>(|streams| {
+            Ok(groups
+                .iter()
+                .map(|group| Self::sql(streams, (camera_topic, group[0])))
+                .collect())
+        });
+        for (part, episode) in offsets.await? {
+            pairings[part].episodes.push(episode);
         }
         Ok(Self {
             camera: Some(camera),
@@ -140,25 +150,41 @@ impl ClockOffset {
         groups
     }
 
-    fn sql(
+    /// `p`: each frame of `camera` paired with the message of `stream` with
+    /// its number, in episodes logging as many of each, as the offset
+    /// between them and how far into its episode the frame is.
+    fn pairs(
         streams: CheckedStreams<'_>,
         (camera, stream): (&DatasetTopic, &DatasetTopic),
     ) -> String {
         let numbered = "log_time, ROW_NUMBER() OVER (PARTITION BY id ORDER BY log_time) AS i, count(*) OVER (PARTITION BY id) AS n";
         format!(
-            "WITH \
-             c AS (SELECT id, {numbered} FROM {camera}), \
+            "c AS (SELECT id, {numbered} FROM {camera}), \
              s AS (SELECT id, {numbered} FROM {stream}), \
              p AS (SELECT c.id AS id, (CAST(c.log_time AS BIGINT) - CAST(s.log_time AS BIGINT)) / 1e6 AS offset_ms, \
                CAST(c.log_time AS BIGINT) - min(CAST(c.log_time AS BIGINT)) OVER (PARTITION BY c.id) AS since_ns \
-               FROM c JOIN s ON s.id = c.id AND s.i = c.i WHERE c.n = s.n), \
-             d AS (SELECT spql.agg.approx_quantile(offset_ms, 0.5) AS pooled_ms, min(offset_ms) AS low_ms, max(offset_ms) AS high_ms FROM p), \
-             r AS (SELECT id, spql.agg.approx_quantile(offset_ms, 0.5) AS median_ms, \
-               spql.agg.approx_quantile(CASE WHEN since_ns < {opening} THEN offset_ms END, 0.5) AS opening_ms FROM p GROUP BY id) \
-             SELECT r.id AS id, r.median_ms AS median_ms, r.opening_ms AS opening_ms, d.pooled_ms AS pooled_ms, d.low_ms AS low_ms, d.high_ms AS high_ms \
-             FROM r CROSS JOIN d",
+               FROM c JOIN s ON s.id = c.id AND s.i = c.i WHERE c.n = s.n)",
             camera = streams.read(camera),
             stream = streams.read(stream),
+        )
+    }
+
+    /// The offset over every pair of every episode.
+    fn pooled_sql(streams: CheckedStreams<'_>, pair: (&DatasetTopic, &DatasetTopic)) -> String {
+        format!(
+            "WITH {} SELECT spql.agg.approx_quantile(offset_ms, 0.5) AS median_ms, min(offset_ms) AS low_ms, max(offset_ms) AS high_ms FROM p",
+            Self::pairs(streams, pair)
+        )
+    }
+
+    /// Each episode's offset, over the whole of it and over its opening.
+    fn sql(streams: CheckedStreams<'_>, pair: (&DatasetTopic, &DatasetTopic)) -> String {
+        format!(
+            "WITH {pairs}, \
+             r AS (SELECT id, spql.agg.approx_quantile(offset_ms, 0.5) AS median_ms, \
+               spql.agg.approx_quantile(CASE WHEN since_ns < {opening} THEN offset_ms END, 0.5) AS opening_ms FROM p GROUP BY id) \
+             SELECT id, median_ms, opening_ms FROM r",
+            pairs = Self::pairs(streams, pair),
             opening = Self::OPENING_NS,
         )
     }

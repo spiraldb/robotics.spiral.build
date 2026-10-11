@@ -90,7 +90,9 @@ impl JointLimits {
             if limited.is_empty() {
                 continue;
             }
-            let rows: Vec<LimitRow> = streams.rows(Self::sql(streams, arm, &limited)?).await?;
+            let rows: Vec<LimitRow> = streams
+                .rows(|streams| Self::sql(streams, arm, &limited))
+                .await?;
             checked.push(ArmLimits::from_rows(arm.name(), &limited, rows));
         }
         Ok(if checked.is_empty() {

@@ -70,10 +70,6 @@ impl StateActionLag {
             .iter()
             .filter_map(|arm| Some((arm, arm.action()?)))
             .collect::<Vec<_>>();
-        let parts = commanded
-            .iter()
-            .map(|(arm, action)| Self::sql(streams, &PairedColumns::new(arm.state(), action)))
-            .collect::<Result<Vec<_>, _>>()?;
         let mut measured = commanded
             .iter()
             .map(|(arm, _)| ArmLag {
@@ -82,7 +78,17 @@ impl StateActionLag {
                 unpaired: Vec::new(),
             })
             .collect::<Vec<_>>();
-        for (arm, row) in streams.parts::<LagRow>(&parts).await? {
+        for (arm, row) in streams
+            .parts::<LagRow>(|streams| {
+                commanded
+                    .iter()
+                    .map(|(arm, action)| {
+                        Self::sql(streams, &PairedColumns::new(arm.state(), action))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await?
+        {
             let arm = &mut measured[arm];
             match row
                 .lag()
