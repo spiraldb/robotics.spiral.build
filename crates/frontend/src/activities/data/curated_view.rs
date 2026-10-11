@@ -77,6 +77,15 @@ struct ViewRow {
 }
 
 impl ViewRow {
+    /// Whether this is all of `episode` with nothing of its own to say, so
+    /// the episode's row already describes it.
+    fn is_whole_of(&self, episode: &Episode) -> bool {
+        let duration = episode.facts().duration_seconds().unwrap_or_default();
+        self.name.is_none()
+            && self.measures.is_empty()
+            && self.span.0 <= 0.05
+            && self.span.1 >= duration - 0.05
+    }
     /// The kept ranges of one row of the view, each named and measured by
     /// the subtask columns' entries its middle lies in.
     fn of_row(
@@ -218,6 +227,20 @@ impl ViewReading {
             .iter()
             .filter_map(|episode| episode.facts().duration_seconds())
             .sum()
+    }
+    /// How long what it keeps is, out of its episodes' whole length when it
+    /// keeps only part of them.
+    fn kept_time_label(&self) -> String {
+        let (kept, read) = (self.kept_seconds(), self.read_seconds());
+        if read - kept < 0.05 {
+            kept.long_duration_label()
+        } else {
+            format!(
+                "{} of {}",
+                kept.long_duration_label(),
+                read.long_duration_label()
+            )
+        }
     }
     /// `row` as its episode's list words it: named by the subtask it lies
     /// in when it has one, else by its span, drawn where it sits in the
@@ -428,15 +451,14 @@ fn CuratedRows(view: CuratedView, on_open: EventHandler<OpenedEpisode>) -> Eleme
             let groups = reading.by_episode();
             let listing = EpisodeRows::of(reading.episodes.iter());
             let intervals = reading.rows.len();
+            let kept_time = reading.kept_time_label();
             rsx! {
                 FactList { class: "data-overview-facts", layout: FactLayout::Strip,
                     Fact { label: "Episodes",
                         if reading.truncated { "first {groups.len()}" } else { "{groups.len()}" }
                     }
                     Fact { label: "Intervals", "{intervals}" }
-                    Fact { label: "Kept time",
-                        "{reading.kept_seconds().long_duration_label()} of {reading.read_seconds().long_duration_label()}"
-                    }
+                    Fact { label: "Kept time", "{kept_time}" }
                 }
                 if groups.is_empty() {
                     p { class: "data-rail-note", "It keeps nothing of the episodes it reads." }
@@ -455,21 +477,24 @@ fn CuratedRows(view: CuratedView, on_open: EventHandler<OpenedEpisode>) -> Eleme
                                     still: rsx! { EpisodeStill { moment: StillMoment::opening(episode), camera: camera.clone() } },
                                 }
                                 span { class: "data-curated-count",
-                                    if rows.len() == 1 { "1 interval" } else { "{rows.len()} intervals" }
+                                    if matches!(rows.as_slice(), [row] if row.is_whole_of(episode)) { "Whole episode" }
+                                    else if rows.len() == 1 { "1 interval" } else { "{rows.len()} intervals" }
                                 }
                             }
-                            ol { class: "data-curated-rows",
-                                for row in rows.iter() {
-                                    li { key: "{row.span.0}",
-                                        button { class: "data-curated-row", r#type: "button",
-                                            title: "Play this interval in its episode",
-                                            onclick: {
-                                                let opened = OpenedEpisode::from_view(episode.clone(), listing.label(episode), reading.spans(view.view(), episode, Some(*row)));
-                                                move |_| on_open.call(opened.clone())
-                                            },
-                                            RowFaceView {
-                                                face: reading.face(row, episode),
-                                                still: rsx! { EpisodeStill { moment: StillMoment::at(episode, f64::midpoint(row.span.0, row.span.1)), camera: camera.clone() } },
+                            if !matches!(rows.as_slice(), [row] if row.is_whole_of(episode)) {
+                                ol { class: "data-curated-rows",
+                                    for row in rows.iter() {
+                                        li { key: "{row.span.0}",
+                                            button { class: "data-curated-row", r#type: "button",
+                                                title: "Play this interval in its episode",
+                                                onclick: {
+                                                    let opened = OpenedEpisode::from_view(episode.clone(), listing.label(episode), reading.spans(view.view(), episode, Some(*row)));
+                                                    move |_| on_open.call(opened.clone())
+                                                },
+                                                RowFaceView {
+                                                    face: reading.face(row, episode),
+                                                    still: rsx! { EpisodeStill { moment: StillMoment::at(episode, f64::midpoint(row.span.0, row.span.1)), camera: camera.clone() } },
+                                                }
                                             }
                                         }
                                     }

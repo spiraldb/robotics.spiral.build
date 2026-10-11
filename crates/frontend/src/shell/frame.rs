@@ -146,7 +146,7 @@ fn ShortcutSheet(on_close: EventHandler<()>) -> Element {
             "Rollout",
             vec![
                 ("R".into(), "Start or finish recording"),
-                ("Shift  X".into(), "Discard the take"),
+                ("Shift  X".into(), "Discard the episode"),
             ],
         ),
     ];

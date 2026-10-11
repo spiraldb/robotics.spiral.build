@@ -22,7 +22,7 @@
   .curation-select-condition {
     @apply grid items-center gap-x-2 border-b py-1.5;
     border-bottom-color: var(--tone-line-soft);
-    grid-template-columns: 9rem 6rem 5.5rem minmax(10rem, 28rem) 6.5rem 1.5rem;
+    grid-template-columns: 12rem 6rem 5.5rem minmax(10rem, 28rem) 6.5rem 1.5rem;
   }
   .curation-select-condition-fact,
   .curation-select-condition-comparison {
@@ -55,7 +55,7 @@
     @apply flex pt-1.5;
   }
   .curation-select-condition-add .ui-select {
-    width: 9rem;
+    width: 12rem;
   }
 
   /* The strips over the episode map: where each threshold falls among the

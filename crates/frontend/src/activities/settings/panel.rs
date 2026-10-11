@@ -234,6 +234,8 @@ fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
         .map(|settings| settings.spiral().project_id().to_owned())
         .unwrap_or_default();
     let shows_draft = !creating && section() == SettingsSection::Workspace;
+    // Nothing to save or discard until the draft differs from what is saved.
+    let changed = current() != base();
 
     rsx! {
         section {
@@ -362,8 +364,8 @@ fn SettingsPanel(project: StudioProjectState, place: SettingsPlace) -> Element {
             }
             if shows_draft {
                 footer { class: "settings-footer",
-                    Button { purpose: ActionPurpose::Cancel, disabled: saving() || import_project.pending(), onclick: move |_| { current.set(base()); save_error.set(None); test_result.set(None); }, "Discard changes" }
-                    Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Solid, disabled: saving() || import_project.pending() || !settings_loaded || !chosen, aria_busy: saving(), onclick: move |_| save(), if saving() { "Saving…" } else { "Save settings" } }
+                    Button { purpose: ActionPurpose::Cancel, disabled: !changed || saving() || import_project.pending(), onclick: move |_| { current.set(base()); save_error.set(None); test_result.set(None); }, "Discard changes" }
+                    Button { purpose: ActionPurpose::Apply, variant: ButtonVariant::Solid, disabled: !changed || saving() || import_project.pending() || !settings_loaded || !chosen, aria_busy: saving(), onclick: move |_| save(), if saving() { "Saving…" } else { "Save settings" } }
                 }
             }
         }

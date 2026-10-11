@@ -21,7 +21,7 @@ use spiral_robotics_ui::{
 use super::source::DatasetCameras;
 use super::state::TrainingController;
 use crate::activities::data::DatasetClient;
-use crate::activities::episode::EpisodeListing;
+use crate::activities::episode::{EpisodeListing, StreamCatalog};
 use crate::components::scoped_task::ScopedTask;
 
 /// How long after its episode's first message a camera's first frame may be
@@ -227,7 +227,8 @@ pub(super) fn ActObservationSection(
                         for camera in cameras.names().iter().cloned() {
                             Toggle {
                                 key: "{camera}",
-                                label: camera.clone(),
+                                label: StreamCatalog::camera_title_among(&camera, cameras.names()),
+                                title: camera.clone(),
                                 checked: chosen.contains(&camera),
                                 // A run reads at least one camera.
                                 disabled: locked || chosen == [camera.clone()],
@@ -304,7 +305,8 @@ pub(super) fn ProgressObservationSection(
                         disabled: locked,
                         onchange: move |camera: String| controller.set_progress_camera(camera),
                         for name in cameras.names().iter().cloned() {
-                            option { key: "{name}", value: "{name}", selected: name == camera, "{name}" }
+                            option { key: "{name}", value: "{name}", selected: name == camera,
+                                "{StreamCatalog::camera_title_among(&name, cameras.names())}" }
                         }
                     }
                 }

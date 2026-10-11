@@ -26,7 +26,10 @@ impl SelectView {
             .kept(id)
             .ranges()
             .iter()
-            .map(|(start, end)| TimelineInterval::labeled(*start, *end, "Kept"))
+            .map(|(start, end)| {
+                let range = format!("{} – {}", start.clock_label(), end.clock_label());
+                TimelineInterval::labeled(*start, *end, range)
+            })
             .collect();
         let mut tracks = vec![IntervalTrack::new("curation-kept", "Kept", kept).into()];
         for condition in self.selection.conditions() {
