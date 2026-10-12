@@ -95,6 +95,17 @@ async fn a_run_is_admitted_only_with_read_only_statements_and_the_services_it_ne
         &fills,
         FillRequest::new(dataset("dataset_folding"), vec![writing])
     ));
+    let writing_at_once = column(
+        "Health check",
+        FillEpisodes::Listed(Vec::new()),
+        AnswerSource::DatasetStatement {
+            statement: "DELETE FROM dataset_answers_folding".into(),
+        },
+    );
+    assert!(refused(
+        &fills,
+        FillRequest::new(dataset("dataset_folding"), vec![writing_at_once])
+    ));
     let published = FillRequest::new(dataset("dataset_folding"), Vec::new())
         .publishing(vec![PublishedView::new("folds", "SELECT 1; SELECT 2")]);
     assert!(refused(&fills, published));
@@ -202,11 +213,25 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
             ),
         },
     );
+    // A dataset statement answers every episode in one read.
+    let frames = column(
+        "Health check",
+        FillEpisodes::Reaching(format!(
+            "SELECT id AS episode_id FROM spql.mcap.episodes('dataset_{name}')"
+        )),
+        AnswerSource::DatasetStatement {
+            statement: format!(
+                "SELECT id AS episode_id, count(*) AS answer \
+                 FROM spql.mcap.read_topic('dataset_{name}', '/camera/top/video') GROUP BY id"
+            ),
+        },
+    );
+    let frames_column = frames.column().clone();
     let statement = format!(
         "SELECT a.episode_id, p.frame_index, p.velocity FROM {} a CROSS JOIN LATERAL UNNEST(a.{score_column}.value) p",
         answers.quoted()
     );
-    let request = FillRequest::new(dataset.clone(), vec![scores, velocities])
+    let request = FillRequest::new(dataset.clone(), vec![scores, velocities, frames])
         .publishing(vec![PublishedView::new(view.clone(), statement)]);
     // An assertion that fails still lets the probe be dropped.
     let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
@@ -225,6 +250,11 @@ async fn a_run_fills_each_column_once_and_then_publishes_its_view() {
             .query(&format!("SELECT COUNT(*) AS frames FROM {view}"), 1)
             .await?;
         assert_eq!(read.rows()[0]["frames"].as_u64(), Some(24));
+        let counted = storage
+            .dataset_answers(answers.clone())
+            .filled(&frames_column)
+            .await?;
+        assert_eq!(counted.len(), 3, "every episode answered by one read");
         // Publishing again asks nothing again, and replaces the first run.
         let again = fills.start(fills.admit(request).map_err(|e| e.to_string())?);
         let status = settled(&fills, again.id()).await;

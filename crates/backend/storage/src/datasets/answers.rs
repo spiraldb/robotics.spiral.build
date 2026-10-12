@@ -16,7 +16,7 @@ use arrow_schema::{DataType, Field, Fields, Schema};
 use spiral_robotics_common::curation::{AnswerColumn, AnswerTable};
 use spiral_robotics_common::datasets::EpisodeId;
 use spiral_robotics_common::sql::{SqlLiteral, UnquotedSqlIdentifier};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The field every stored answer is wrapped in: a NULL struct is an episode
@@ -229,6 +229,47 @@ impl EpisodeAnswer {
     fn concatenated(arrays: &[ArrayRef]) -> Result<ArrayRef, String> {
         let arrays = arrays.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         arrow_select::concat::concat(&arrays).map_err(|error| error.to_string())
+    }
+}
+
+/// What one statement over the whole dataset answered: one answer per
+/// episode it measured, all of one type.
+pub struct StatementAnswers {
+    answer_type: DataType,
+    answers: BTreeMap<EpisodeId, EpisodeAnswer>,
+}
+
+impl StatementAnswers {
+    /// Each row's `episode_id` and `answer`. An episode answered twice is an
+    /// error: a dataset statement measures each episode once.
+    pub fn from_statement(schema: &Schema, batches: &[RecordBatch]) -> Result<Self, String> {
+        let missing = |name: &str| format!("A dataset statement must answer `{name}`.");
+        let episode = schema
+            .index_of("episode_id")
+            .map_err(|_| missing("episode_id"))?;
+        let answer = schema.index_of(ANSWER).map_err(|_| missing(ANSWER))?;
+        let mut answers = BTreeMap::new();
+        for batch in batches {
+            let episodes = EpisodeUuids::read(batch.column(episode).as_ref())?;
+            for (row, id) in episodes.into_iter().enumerate() {
+                let answered = EpisodeAnswer(batch.column(answer).slice(row, 1));
+                if answers.insert(id.clone(), answered).is_some() {
+                    return Err(format!("A dataset statement answered episode {id} twice."));
+                }
+            }
+        }
+        Ok(Self {
+            answer_type: schema.field(answer).data_type().clone(),
+            answers,
+        })
+    }
+
+    /// `episode`'s answer; a failed one when the statement measured nothing
+    /// for it, so it is not asked again.
+    pub fn answer(&mut self, episode: &EpisodeId) -> EpisodeAnswer {
+        self.answers
+            .remove(episode)
+            .unwrap_or_else(|| EpisodeAnswer::failed(&self.answer_type))
     }
 }
 
@@ -554,6 +595,49 @@ mod tests {
                 .is_failed()
         );
         assert!(EpisodeAnswer::from_statement(&one, &[row(vec![Some(0.5), None])]).is_err());
+    }
+
+    #[test]
+    fn a_dataset_statement_answers_each_episode_it_measured_once() {
+        let schema = Schema::new(vec![
+            EpisodeUuids::field("episode_id"),
+            Field::new(ANSWER, DataType::Float64, true),
+        ]);
+        let rows = |episodes: Vec<EpisodeId>, values: Vec<f64>| {
+            RecordBatch::try_new(
+                Arc::new(schema.clone()),
+                vec![
+                    EpisodeUuids::array(&episodes).unwrap(),
+                    Arc::new(Float64Array::from(values)),
+                ],
+            )
+            .unwrap()
+        };
+        let mut answered = StatementAnswers::from_statement(
+            &schema,
+            &[
+                rows(vec![episode(1)], vec![0.5]),
+                rows(vec![episode(2)], vec![0.25]),
+            ],
+        )
+        .unwrap();
+        let second = answered.answer(&episode(2));
+        let second = second
+            .value()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(second.value(0), 0.25);
+        assert!(!answered.answer(&episode(1)).is_failed());
+        // An episode it measured nothing for is answered as failed.
+        assert!(answered.answer(&episode(3)).is_failed());
+        assert!(
+            StatementAnswers::from_statement(
+                &schema,
+                &[rows(vec![episode(1), episode(1)], vec![0.5, 0.5])]
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

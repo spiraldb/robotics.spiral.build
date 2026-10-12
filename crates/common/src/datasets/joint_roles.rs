@@ -2,21 +2,21 @@
 //! dataset checks read to measure how the robot moved. Unlike a robot model,
 //! roles need no robot description, so a dataset without one still gets its
 //! joints checked.
-use super::{DatasetRobot, DatasetSelection, JointBinding, JointSelector};
+use super::{DatasetRobot, DatasetSummary, JointBinding, JointSelector};
 use serde::{Deserialize, Serialize};
 
-/// The joint roles the browser resolved for a dataset's current version.
+/// The joint roles the browser resolved for the dataset version it read.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetJointRolesSave {
-    dataset: DatasetSelection,
+    dataset: DatasetSummary,
     roles: DatasetJointRoles,
 }
 impl DatasetJointRolesSave {
-    pub fn new(dataset: DatasetSelection, roles: DatasetJointRoles) -> Self {
+    pub fn new(dataset: DatasetSummary, roles: DatasetJointRoles) -> Self {
         Self { dataset, roles }
     }
-    pub fn into_parts(self) -> (DatasetSelection, DatasetJointRoles) {
+    pub fn into_parts(self) -> (DatasetSummary, DatasetJointRoles) {
         (self.dataset, self.roles)
     }
 }

@@ -14,7 +14,7 @@
 //! run, records every chosen view in one edit, and saves again; and nothing
 //! else publishes or unpublishes until that is done.
 use super::node_card::NodeCard;
-use crate::activities::curation::client::CurationClient;
+use crate::activities::curation::client::FillRuns;
 use crate::activities::curation::document::{NodePublication, PublishedOutput};
 use crate::activities::curation::path::{CurationPath, PathError};
 use crate::activities::curation::state::CurationController;
@@ -247,8 +247,8 @@ impl ViewPublisher {
             }
             let dataset = controller.with_payload(|payload| payload.dataset().cloned());
             let started = match dataset {
-                Some(dataset) => CurationClient::current()
-                    .start_fill(&ChosenView::run(dataset, &views))
+                Some(dataset) => FillRuns::current()
+                    .start(&ChosenView::run(dataset, &views))
                     .await
                     .map_err(|error| error.to_string()),
                 None => Err("Choose the dataset this curation reads.".to_owned()),

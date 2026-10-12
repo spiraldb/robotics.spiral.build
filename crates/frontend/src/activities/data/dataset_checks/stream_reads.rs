@@ -2,71 +2,36 @@
 //! reads and how, an arm's joints as columns, and the start of each episode a
 //! moment is measured from. Every check composes its statement from these,
 //! so a topic, a field path or a clock is spelled one way.
-use crate::activities::data::DatasetClient;
-use serde::de::DeserializeOwned;
 use spiral_robotics_common::datasets::{
     DatasetSelection, DatasetTopic, RecordedValues, ValueColumns,
 };
 use spiral_robotics_common::sql::SqlLiteral;
 
-/// The most rows one check statement may answer with; the checks aggregate
-/// per episode, and a dataset with more episodes is read in chunks of them.
-const MAX_ROWS: usize = 1000;
-
-/// The dataset a report checks, the streams it declares, the client its
-/// statements run through, and the chunk of its episodes a statement covers.
+/// The dataset a check reads and the streams it declares.
 #[derive(Clone, Copy)]
 pub(super) struct CheckedStreams<'a> {
-    client: &'a DatasetClient,
     dataset: &'a DatasetSelection,
     topics: &'a [DatasetTopic],
-    chunk: Option<EpisodeChunk>,
-}
-
-/// The consecutive episodes, in UUID order, one statement covers: those
-/// after the first `after`, through the `through`-th or to the last.
-#[derive(Clone, Copy)]
-struct EpisodeChunk {
-    after: u64,
-    through: Option<u64>,
 }
 
 impl<'a> CheckedStreams<'a> {
-    pub(super) fn new(
-        client: &'a DatasetClient,
-        dataset: &'a DatasetSelection,
-        topics: &'a [DatasetTopic],
-    ) -> Self {
-        Self {
-            client,
-            dataset,
-            topics,
-            chunk: None,
-        }
+    pub(super) fn new(dataset: &'a DatasetSelection, topics: &'a [DatasetTopic]) -> Self {
+        Self { dataset, topics }
     }
     pub(super) fn topics(&self) -> &'a [DatasetTopic] {
         self.topics
-    }
-    /// How many episodes the dataset holds: as many as its most widely
-    /// recorded stream appears in.
-    pub(super) fn episode_count(&self) -> u64 {
-        self.topics
-            .iter()
-            .map(DatasetTopic::members)
-            .max()
-            .unwrap_or_default()
     }
     /// The statement reading one declared topic.
     pub(super) fn read(&self, topic: &DatasetTopic) -> String {
         let dataset = SqlLiteral::text(&self.dataset.sql_name());
         let name = SqlLiteral::text(topic.name());
-        self.in_chunk(match topic.revision() {
+        match topic.revision() {
             Some(revision) => format!(
                 "spql.mcap.read_topic({dataset}, {name}, {})",
                 SqlLiteral::text(revision.variant())
             ),
             None => format!("spql.mcap.read_topic({dataset}, {name})"),
-        })
+        }
     }
     /// The statement reading the stream `values` names.
     pub(super) fn read_values(&self, values: &RecordedValues) -> Result<String, String> {
@@ -78,47 +43,10 @@ impl<'a> CheckedStreams<'a> {
     }
     /// Every episode, joined as `e`, which a moment is measured from.
     pub(super) fn episodes(&self) -> String {
-        self.in_chunk(self.all_episodes())
-    }
-    fn all_episodes(&self) -> String {
         format!(
             "spql.mcap.episodes({})",
             SqlLiteral::text(&self.dataset.sql_name())
         )
-    }
-    /// `relation` cut to this chunk's episodes, when a statement covers one.
-    /// Spiral reads only the episodes an `id IN` query selects.
-    fn in_chunk(&self, relation: String) -> String {
-        let Some(chunk) = self.chunk else {
-            return relation;
-        };
-        let through = chunk
-            .through
-            .map(|through| format!(" AND position <= {through}"))
-            .unwrap_or_default();
-        format!(
-            "(SELECT * FROM {relation} WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS position FROM {episodes}) WHERE position > {after}{through}))",
-            episodes = self.all_episodes(),
-            after = chunk.after,
-        )
-    }
-    /// These streams in chunks of `size` episodes, or whole when the dataset
-    /// holds no more than that.
-    fn chunks(self, size: u64) -> Vec<Self> {
-        let episodes = self.episode_count();
-        if episodes <= size {
-            return vec![self];
-        }
-        (0..episodes)
-            .step_by(size as usize)
-            .map(|after| Self {
-                chunk: Some(EpisodeChunk {
-                    after,
-                    through: (after + size < episodes).then_some(after + size),
-                }),
-                ..self
-            })
-            .collect()
     }
     /// Seconds from the start of episode `e` to the nanosecond `time`: the
     /// instant an episode's player seeks to.
@@ -129,97 +57,6 @@ impl<'a> CheckedStreams<'a> {
     pub(super) fn step_seconds() -> &'static str {
         "(CAST(log_time AS BIGINT) - CAST(LAG(log_time) OVER (PARTITION BY id ORDER BY log_time) AS BIGINT)) / 1e9"
     }
-    /// The rows of the statement `build` makes, at most one per episode,
-    /// each read as `R`. A dataset with more episodes than one answer may
-    /// hold is read a chunk of them at a time.
-    pub(super) async fn rows<R: DeserializeOwned>(
-        &self,
-        build: impl Fn(CheckedStreams<'a>) -> Result<String, String>,
-    ) -> Result<Vec<R>, String> {
-        let mut rows = Vec::new();
-        for streams in self.chunks(MAX_ROWS as u64) {
-            rows.extend(streams.answer(build(streams)?).await?);
-        }
-        Ok(rows)
-    }
-    /// Run the statements `build` makes, answering at most a row per
-    /// episode each with the same columns, in as few statements as the row
-    /// limit allows, a chunk of episodes at a time when the dataset holds
-    /// more than one answer may, and read each row as `R` beside the
-    /// position of the part it answers.
-    pub(super) async fn parts<R: DeserializeOwned>(
-        &self,
-        build: impl Fn(CheckedStreams<'a>) -> Result<Vec<String>, String>,
-    ) -> Result<Vec<(usize, R)>, String> {
-        let episodes = self.episode_count().clamp(1, MAX_ROWS as u64);
-        let per_statement = (MAX_ROWS as u64 / episodes) as usize;
-        let mut answered = Vec::new();
-        for streams in self.chunks(episodes) {
-            answered.extend(streams.union(&build(streams)?, per_statement).await?);
-        }
-        Ok(answered)
-    }
-    /// Run `parts`, statements over every episode answering one row each,
-    /// and read each row as `R` beside the position of the part it answers.
-    pub(super) async fn dataset_parts<R: DeserializeOwned>(
-        &self,
-        parts: &[String],
-    ) -> Result<Vec<(usize, R)>, String> {
-        self.union(parts, MAX_ROWS).await
-    }
-    /// Run `parts`, `per_statement` of them a statement, tagging each row
-    /// with the position of the part it answers.
-    async fn union<R: DeserializeOwned>(
-        &self,
-        parts: &[String],
-        per_statement: usize,
-    ) -> Result<Vec<(usize, R)>, String> {
-        let mut answered = Vec::new();
-        for (chunk, statements) in parts.chunks(per_statement).enumerate() {
-            let sql = statements
-                .iter()
-                .enumerate()
-                .map(|(part, sql)| format!("SELECT {part} AS part, * FROM ({sql}) x"))
-                .collect::<Vec<_>>()
-                .join(" UNION ALL ");
-            let rows: Vec<PartRow<R>> = self.answer(sql).await?;
-            answered.extend(
-                rows.into_iter()
-                    .map(|tagged| (chunk * per_statement + tagged.part, tagged.row)),
-            );
-        }
-        Ok(answered)
-    }
-    /// Run `sql` and read each row as `R`. A report aggregates per episode,
-    /// so an answer cut short is an error rather than a smaller report.
-    async fn answer<R: DeserializeOwned>(&self, sql: String) -> Result<Vec<R>, String> {
-        let snapshot = self
-            .client
-            .run_spiral_query(sql, MAX_ROWS)
-            .await
-            .map_err(|error| error.to_string())?;
-        if snapshot.truncated() {
-            return Err(format!(
-                "A check answered with more than {MAX_ROWS} rows for one chunk of episodes"
-            ));
-        }
-        snapshot
-            .into_rows()
-            .into_iter()
-            .map(|row| {
-                serde_json::from_value(serde_json::Value::Object(row))
-                    .map_err(|error| format!("Reading a check's answer: {error}"))
-            })
-            .collect()
-    }
-}
-
-/// One row of a part, and which part it answers.
-#[derive(serde::Deserialize)]
-struct PartRow<R> {
-    part: usize,
-    #[serde(flatten)]
-    row: R,
 }
 
 /// What the checks read from a stream's value columns beyond the numbers
@@ -317,6 +154,72 @@ impl Greatest {
         match terms {
             [one] => one.clone(),
             _ => format!("greatest({})", terms.join(", ")),
+        }
+    }
+}
+
+/// A dataset recording two arms, as the joint checks' tests read it: the
+/// left arm's six joints, its commands and its gripper, and the right
+/// arm's six joints alone. The streams are named as
+/// `dataset_abc130k_sample` records them, so a statement printed in a test
+/// reads that dataset.
+#[cfg(test)]
+pub(super) struct TwoArmDataset {
+    dataset: DatasetSelection,
+    topics: Vec<DatasetTopic>,
+    roles: spiral_robotics_common::datasets::DatasetJointRoles,
+}
+
+#[cfg(test)]
+impl TwoArmDataset {
+    pub(super) fn new() -> Self {
+        let values = |topic: &str, joints: usize| {
+            serde_json::json!({
+                "topic": topic, "schema": "JointState", "field": ["position"], "element": [],
+                "indices": (0..joints).collect::<Vec<_>>(),
+            })
+        };
+        let roles = serde_json::from_value(serde_json::json!({"arms": [
+            {
+                "name": "left",
+                "state": values("/left-arm-state", 6),
+                "action": values("/left-arm-action", 6),
+                "gripper": {
+                    "state": values("/left-ee-state", 1), "action": values("/left-ee-action", 1),
+                    "open": 1.0, "closed": 0.0,
+                },
+            },
+            {"name": "right", "state": values("/right-arm-state", 6), "action": null, "gripper": null},
+        ]}))
+        .unwrap();
+        let topics = [
+            "/left-arm-state",
+            "/left-arm-action",
+            "/left-ee-state",
+            "/left-ee-action",
+            "/right-arm-state",
+        ]
+        .map(|topic| DatasetTopic::new(topic.into(), vec!["JointState".into()]))
+        .into();
+        Self {
+            dataset: DatasetSelection::new(vec!["dataset_abc130k_sample".into()]).unwrap(),
+            topics,
+            roles,
+        }
+    }
+    pub(super) fn streams(&self) -> CheckedStreams<'_> {
+        CheckedStreams::new(&self.dataset, &self.topics)
+    }
+    pub(super) fn arms(&self) -> &[spiral_robotics_common::datasets::ArmRoles] {
+        self.roles.arms()
+    }
+    /// The statement filling `column` over every episode.
+    pub(super) fn statement(&self, column: &super::check_columns::CheckColumn) -> String {
+        match column.fill(self.streams()).source() {
+            spiral_robotics_common::curation::AnswerSource::DatasetStatement { statement } => {
+                statement.clone()
+            }
+            other => panic!("a check column is filled by one dataset statement, not {other:?}"),
         }
     }
 }

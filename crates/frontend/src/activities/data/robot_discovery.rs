@@ -61,8 +61,13 @@ impl RobotDiscoveryAgent {
             Some(robot) => Some(self.prepare(episode, robot).await?),
             None => None,
         };
+        let inspection = self
+            .data
+            .inspect_dataset(episode.dataset().clone())
+            .await
+            .map_err(|error| error.to_string())?;
         self.data
-            .save_dataset_robot(&DatasetRobotSave::new(episode.dataset().clone(), robot))
+            .save_dataset_robot(&DatasetRobotSave::new(inspection.dataset().clone(), robot))
             .await
             .map_err(|error| error.to_string())
     }

@@ -367,7 +367,7 @@ fn DatasetEpisodes(
     );
     // Stills of the camera that shows the workspace best, as the Dataset
     // node's are; every episode of a dataset records the same cameras.
-    let camera = EpisodeStills::use_overview_camera(loaded.read().first().map(Episode::selection));
+    let camera = EpisodeStills::use_overview_camera(Some(dataset.clone()));
     let pending = *page.state().read() == UseResourceState::Pending;
     let episodes = loaded.read();
     let listing = EpisodeRows::of(episodes.iter());

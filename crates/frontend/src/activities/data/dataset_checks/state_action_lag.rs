@@ -2,21 +2,25 @@
 //! commands. For each shift from two samples early to ten late, the mean
 //! distance between each command and the measured position that many samples
 //! later; the shift with the least is the lag, and that distance is how
-//! closely the arm tracks its commands.
+//! closely the arm tracks its commands. Each episode's cell keeps, for every
+//! arm with commands, the distance at every shift; the lag is picked, and
+//! each episode judged against the arm's typical one, when the report is
+//! read.
+use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
 use super::recording_rate::Median;
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct StateActionLag {
     arms: Vec<ArmLag>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct ArmLag {
     arm: String,
     episodes: Vec<EpisodeLag>,
@@ -24,7 +28,7 @@ struct ArmLag {
     unpaired: Vec<EpisodeId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct EpisodeLag {
     episode: EpisodeId,
     samples: i64,
@@ -35,9 +39,13 @@ struct EpisodeLag {
     tracking: f64,
 }
 
+/// One arm's commands and positions in one episode, as its cell keeps them:
+/// how many commands met a position logged at the same instant, how many
+/// it logged, its median nanoseconds between samples, and the mean
+/// distance at each shift, by the shift's field.
 #[derive(Deserialize)]
-struct LagRow {
-    id: EpisodeId,
+pub(super) struct LagPart {
+    part: String,
     paired: u64,
     commands: u64,
     step_ns: Option<f64>,
@@ -61,52 +69,70 @@ impl StateActionLag {
     /// An episode tracking its commands this many times worse than the
     /// arm's typical episode is flagged.
     const WORSE: f64 = 2.0;
+    /// What a cell keeps of each arm: the counts and step, then the error
+    /// at every shift from `EARLIEST` to `LATEST`, each named by
+    /// `error_field`.
+    const FIELDS: &'static [&'static str] = &[
+        "paired",
+        "commands",
+        "step_ns",
+        "err_back_2",
+        "err_back_1",
+        "err_ahead_0",
+        "err_ahead_1",
+        "err_ahead_2",
+        "err_ahead_3",
+        "err_ahead_4",
+        "err_ahead_5",
+        "err_ahead_6",
+        "err_ahead_7",
+        "err_ahead_8",
+        "err_ahead_9",
+        "err_ahead_10",
+    ];
 
-    pub(super) async fn measure(
+    /// The column keeping, for every arm with commands, each episode's
+    /// distance between commands and positions at every shift; `None` when
+    /// no arm records its commands.
+    pub(super) fn column(
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
-    ) -> Result<Self, String> {
-        let commanded = arms
-            .iter()
-            .filter_map(|arm| Some((arm, arm.action()?)))
-            .collect::<Vec<_>>();
-        let mut measured = commanded
-            .iter()
-            .map(|(arm, _)| ArmLag {
-                arm: arm.name().to_owned(),
-                episodes: Vec::new(),
-                unpaired: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        for (arm, row) in streams
-            .parts::<LagRow>(|streams| {
-                commanded
-                    .iter()
-                    .map(|(arm, action)| {
-                        Self::sql(streams, &PairedColumns::new(arm.state(), action))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .await?
-        {
-            let arm = &mut measured[arm];
-            match row
-                .lag()
-                .filter(|_| Pairing::together(row.paired, row.commands))
-            {
-                Some(lag) => arm.episodes.push(lag),
-                None => arm.unpaired.push(row.id),
-            }
+    ) -> Result<Option<CheckColumn>, String> {
+        let mut parts = PartsStatement::new(Self::FIELDS);
+        for arm in arms {
+            let Some(action) = arm.action() else {
+                continue;
+            };
+            let paired = PairedColumns::new(arm.state(), action);
+            parts = parts.part(arm.name(), Self::sql(streams, &paired)?);
         }
-        Ok(Self { arms: measured })
+        CheckColumn::of(CheckKind::Lag, parts)
     }
 
+    /// Each commanded arm's lag in every episode its `cells` measured.
+    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<LagPart>) -> Self {
+        Self {
+            arms: arms
+                .iter()
+                .filter(|arm| arm.action().is_some())
+                .map(|arm| ArmLag::read(arm.name(), cells))
+                .collect(),
+        }
+    }
+
+    /// What a shift of `shift` samples is called: back_2 for two samples
+    /// early, ahead_3 for three late.
     fn shift_name(shift: i64) -> String {
         if shift < 0 {
-            format!("m{}", -shift)
+            format!("back_{}", -shift)
         } else {
-            shift.to_string()
+            format!("ahead_{shift}")
         }
+    }
+
+    /// The field keeping the mean distance at `shift`.
+    fn error_field(shift: i64) -> String {
+        format!("err_{}", Self::shift_name(shift))
     }
 
     fn sql(streams: CheckedStreams<'_>, paired: &PairedColumns<'_>) -> Result<String, String> {
@@ -136,7 +162,10 @@ impl StateActionLag {
                     .map(|joint| format!("spql.math.abs(a{joint} - q{joint}_{name})"))
                     .collect::<Vec<_>>()
                     .join(" + ");
-                format!("avg(({distance}) / {joints}.0) AS error_{name}")
+                format!(
+                    "avg(({distance}) / {joints}.0) AS {}",
+                    Self::error_field(shift)
+                )
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -148,7 +177,7 @@ impl StateActionLag {
             "r AS (SELECT id, count(*) AS paired, spql.agg.approx_quantile(step_ns, 0.5) AS step_ns, {errors} FROM t GROUP BY id)"
         ));
         let names = (Self::EARLIEST..=Self::LATEST)
-            .map(|shift| format!("r.error_{0} AS error_{0}", Self::shift_name(shift)))
+            .map(|shift| format!("r.{0} AS {0}", Self::error_field(shift)))
             .collect::<Vec<_>>()
             .join(", ");
         Ok(format!(
@@ -231,19 +260,17 @@ impl StateActionLag {
     }
 }
 
-impl LagRow {
-    /// The shift with the least error, and that error.
-    fn lag(&self) -> Option<EpisodeLag> {
+impl LagPart {
+    /// The shift with the least error in `episode`, and that error.
+    fn lag(&self, episode: &EpisodeId) -> Option<EpisodeLag> {
         let (samples, tracking) = (StateActionLag::EARLIEST..=StateActionLag::LATEST)
             .filter_map(|shift| {
-                let error = (*self
-                    .errors
-                    .get(&format!("error_{}", StateActionLag::shift_name(shift)))?)?;
+                let error = (*self.errors.get(&StateActionLag::error_field(shift))?)?;
                 error.is_finite().then_some((shift, error))
             })
             .min_by(|left, right| left.1.total_cmp(&right.1))?;
         Some(EpisodeLag {
-            episode: self.id.clone(),
+            episode: episode.clone(),
             samples,
             step_ms: self.step_ns.unwrap_or_default() / 1e6,
             tracking,
@@ -259,6 +286,25 @@ impl EpisodeLag {
 }
 
 impl ArmLag {
+    /// The arm's lag in each episode `cells` measured it in whose commands
+    /// and positions were logged together; the others are unpaired.
+    fn read(arm: &str, cells: &CheckCells<LagPart>) -> Self {
+        let mut read = Self {
+            arm: arm.to_owned(),
+            episodes: Vec::new(),
+            unpaired: Vec::new(),
+        };
+        for (episode, part) in cells.parts().filter(|(_, part)| part.part == arm) {
+            match part
+                .lag(episode)
+                .filter(|_| Pairing::together(part.paired, part.commands))
+            {
+                Some(lag) => read.episodes.push(lag),
+                None => read.unpaired.push(episode.clone()),
+            }
+        }
+        read
+    }
     fn lag_label(&self) -> String {
         let settled = self
             .episodes
@@ -343,51 +389,103 @@ impl Radians {
 
 #[cfg(test)]
 mod tests {
+    use super::super::stream_reads::TwoArmDataset;
     use super::*;
+
+    fn episode(ordinal: u32) -> EpisodeId {
+        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
+    }
+
+    /// The left arm's part in one episode: every command paired, a 33.4 ms
+    /// step, and the least distance at `closest` samples late.
+    fn part(paired: u64, closest: i64) -> LagPart {
+        LagPart {
+            part: "left".into(),
+            paired,
+            commands: 1000,
+            step_ns: Some(33_400_000.0),
+            errors: (StateActionLag::EARLIEST..=StateActionLag::LATEST)
+                .map(|shift| {
+                    (
+                        StateActionLag::error_field(shift),
+                        Some(0.02 + ((shift - closest) as f64).abs() * 0.01),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn every_commanded_arm_keeps_its_error_at_each_shift() {
+        let dataset = TwoArmDataset::new();
+        let column = StateActionLag::column(dataset.streams(), dataset.arms())
+            .unwrap()
+            .unwrap();
+        assert_eq!(column.kind(), CheckKind::Lag);
+        let statement = dataset.statement(&column);
+        // Only the left arm records its commands.
+        assert!(statement.contains(&format!(
+            "SELECT 'left' AS part, id, {} FROM (WITH ",
+            StateActionLag::FIELDS.join(", ")
+        )));
+        assert!(!statement.contains("'right'"));
+        assert!(
+            statement.contains("LAG(q0, 2) OVER (PARTITION BY id ORDER BY log_time) AS q0_back_2")
+        );
+        assert!(statement.contains("AS err_ahead_10 FROM t GROUP BY id"));
+        // Every shift's error is one of the cell's fields.
+        assert_eq!(
+            StateActionLag::FIELDS[3..],
+            (StateActionLag::EARLIEST..=StateActionLag::LATEST)
+                .map(StateActionLag::error_field)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            StateActionLag::column(dataset.streams(), &dataset.arms()[1..])
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn the_lag_is_the_closest_shift_and_the_range_edge_is_flagged() {
-        let id = EpisodeId::try_from(format!("{:032x}", 7)).unwrap();
-        let errors = (StateActionLag::EARLIEST..=StateActionLag::LATEST)
-            .map(|shift| {
-                (
-                    format!("error_{}", StateActionLag::shift_name(shift)),
-                    Some(0.02 + ((shift - 5) as f64).abs() * 0.01),
-                )
-            })
-            .collect();
-        let row = LagRow {
-            id: id.clone(),
-            paired: 1000,
-            commands: 1000,
-            step_ns: Some(33_400_000.0),
-            errors,
-        };
-        let lag = row.lag().unwrap();
-        assert_eq!(lag.samples, 5);
-        assert!((lag.tracking - 0.02).abs() < 1e-12);
-        assert!(!lag.at_edge());
+        let dataset = TwoArmDataset::new();
+        let cells = CheckCells::fixture(vec![
+            (episode(1), vec![part(1000, 5)]),
+            (episode(2), vec![part(1000, 10)]),
+            (episode(3), vec![part(2, 5)]),
+            (episode(4), Vec::new()),
+        ]);
+        let lag = StateActionLag::read(dataset.arms(), &cells);
+        // The right arm records no commands, so has no lag.
+        assert_eq!(lag.arms.len(), 1);
+        let arm = &lag.arms[0];
+        assert_eq!(arm.episodes[0].samples, 5);
+        assert!((arm.episodes[0].tracking - 0.02).abs() < 1e-12);
+        assert!((arm.episodes[0].step_ms - 33.4).abs() < 1e-9);
+        assert!(!arm.episodes[0].at_edge());
+        assert!(arm.episodes[1].at_edge());
+        // An episode whose commands met no position is unpaired; one the
+        // check measured nothing in is neither.
+        assert_eq!(arm.unpaired, [episode(3)]);
+        assert_eq!(arm.at_edge().len(), 1);
+        assert_eq!(arm.lag_label(), "5 samples");
         assert!(Pairing::together(1000, 1000));
         assert!(!Pairing::together(2, 25_958));
-        let arm = ArmLag {
-            arm: "left".into(),
+        let worse = ArmLag {
             episodes: vec![
-                lag.clone(),
-                EpisodeLag {
-                    samples: 10,
-                    ..lag.clone()
-                },
+                arm.episodes[0].clone(),
                 EpisodeLag {
                     tracking: 0.05,
                     samples: 6,
-                    ..lag
+                    ..arm.episodes[0].clone()
                 },
+                arm.episodes[1].clone(),
             ],
-            unpaired: Vec::new(),
+            ..arm.clone()
         };
-        assert_eq!(arm.at_edge().len(), 1);
-        assert_eq!(arm.flagged().len(), 2);
-        assert_eq!(arm.lag_label(), "5–6 samples");
+        assert_eq!(worse.flagged().len(), 2);
+        assert_eq!(worse.lag_label(), "5–6 samples");
         assert_eq!(Span::of(4.0, 6.0, "samples", 0), "4–6 samples");
         assert_eq!(Radians::milli(0.0205), "20.5 mrad");
     }

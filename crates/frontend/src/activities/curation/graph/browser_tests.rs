@@ -73,6 +73,7 @@ impl CanvasHarness {
         let studio = StudioProjectState::use_provider();
         let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
         use_context_provider(|| ProjectClient::new(project, refresh));
+        crate::activities::data::DatasetInspections::use_provider();
         let controller = CurationController::use_controller();
         *self.0.borrow_mut() = Some((controller, studio));
         rsx! { CurationGraphCanvas { controller } }

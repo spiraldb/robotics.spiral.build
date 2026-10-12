@@ -5,11 +5,13 @@ The backend owns two persistence boundaries:
 - **SQLite / SeaORM:** each browser's Spiral session (its application OAuth tokens and
   chosen workspace), the workspaces and their robot connector tokens, the
   episodes those connectors uploaded until a browser stores them, each dataset's
-  robot model, joint roles and check report, saved
+  robot model and joint roles, saved
   curation recipes and the statements of the views they publish, and a record
   of each training run Studio started (its configuration and what it was
   given).
-- **Spiral / ADBC:** datasets, their MCAP sources and model answers. Training
+- **Spiral / ADBC:** datasets, their MCAP sources, and each dataset's answers
+  table: model answers and the health check's columns, one cell per episode.
+  Training
   runs' metrics, logs, and checkpoints live on the Modal training service
   ([Training](training.md)).
 

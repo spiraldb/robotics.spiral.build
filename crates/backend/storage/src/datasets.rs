@@ -6,7 +6,7 @@ mod lerobot;
 mod managed;
 mod sources;
 mod topics;
-pub use answers::{ColumnAnswers, DatasetAnswers, EpisodeAnswer};
+pub use answers::{ColumnAnswers, DatasetAnswers, EpisodeAnswer, StatementAnswers};
 pub(crate) use lerobot::LeRobotDatasetDefinition;
 pub(crate) use managed::StudioDataset;
 pub(crate) use sources::{McapDatasetDefinition, McapSourceBlob, McapSources};

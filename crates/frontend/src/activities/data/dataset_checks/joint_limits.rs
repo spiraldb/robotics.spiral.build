@@ -2,17 +2,20 @@
 //! a limit its robot model sets, and how far past a limit any joint went.
 //! Limits come only from the robot model's URDF, through the bindings that
 //! name each measured joint; a dataset without a model has none to check.
+//! Each episode's cell keeps, for every arm with a limited joint, how long
+//! it was near a limit and the lowest and highest each of its joints
+//! reached; the furthest any episode went is found when the report is read.
+use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Verdict};
 use super::state_action_lag::Span;
 use super::stream_reads::{CheckedStreams, CheckedValueColumns as _};
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use spiral_robotics_common::datasets::ValueColumns;
 use spiral_robotics_common::datasets::{ArmRoles, DatasetRobot, EpisodeId};
 use spiral_robotics_viewport::RobotModel;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum JointLimits {
     /// The dataset has no robot model to take limits from.
     NeedsRobot,
@@ -23,7 +26,7 @@ pub(super) enum JointLimits {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ArmLimits {
     arm: String,
     joints: Vec<JointRange>,
@@ -31,7 +34,7 @@ pub(super) struct ArmLimits {
 }
 
 /// One limited joint, in recorded units, and the furthest it went each way.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct JointRange {
     joint: String,
     lower: f64,
@@ -40,13 +43,13 @@ struct JointRange {
     highest: Option<Extreme>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct Extreme {
     value: f64,
     episode: EpisodeId,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct EpisodeNearLimit {
     episode: EpisodeId,
     near_s: f64,
@@ -62,44 +65,73 @@ struct LimitedJoint {
     near: (f64, f64),
 }
 
+/// One arm in one episode, as its cell keeps it: how long any limited joint
+/// was near its limit, where the longest such stretch starts, and the
+/// lowest and highest every joint of its state reached, in recorded units,
+/// by the joint's place in the state.
 #[derive(Deserialize)]
-struct LimitRow {
-    id: EpisodeId,
+pub(super) struct LimitsPart {
+    part: String,
     near_s: f64,
     longest_at: Option<f64>,
-    #[serde(flatten)]
-    extremes: std::collections::BTreeMap<String, Option<f64>>,
+    lowest: Vec<Option<f64>>,
+    highest: Vec<Option<f64>>,
 }
 
 impl JointLimits {
     /// How close to a limit, in the model's radians, counts as near it.
     const MARGIN: f64 = 0.05;
 
-    pub(super) async fn measure(
+    /// The column keeping, for every arm the robot model limits a joint
+    /// of, each episode's time near a limit and its joints' extremes;
+    /// `None` without a robot model or a limited joint.
+    pub(super) fn column(
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
         robot: Option<&DatasetRobot>,
+    ) -> Result<Option<CheckColumn>, String> {
+        let Some(robot) = robot else {
+            return Ok(None);
+        };
+        let mut parts = PartsStatement::new(&["near_s", "longest_at", "lowest", "highest"]);
+        for (arm, limited) in Self::bounded(arms, robot)? {
+            parts = parts.part(arm.name(), Self::sql(streams, arm, &limited)?);
+        }
+        CheckColumn::of(CheckKind::Limits, parts)
+    }
+
+    /// Each limited arm's time near a limit in every episode its `cells`
+    /// measured, and the furthest each limited joint went in any of them.
+    pub(super) fn read(
+        arms: &[ArmRoles],
+        robot: Option<&DatasetRobot>,
+        cells: &CheckCells<LimitsPart>,
     ) -> Result<Self, String> {
         let Some(robot) = robot else {
             return Ok(Self::NeedsRobot);
         };
-        let limits = RobotModel::joint_limits(robot.urdf())?;
-        let mut checked = Vec::new();
-        for arm in arms {
-            let limited = Self::limited(arm, robot, &limits);
-            if limited.is_empty() {
-                continue;
-            }
-            let rows: Vec<LimitRow> = streams
-                .rows(|streams| Self::sql(streams, arm, &limited))
-                .await?;
-            checked.push(ArmLimits::from_rows(arm.name(), &limited, rows));
-        }
+        let checked = Self::bounded(arms, robot)?
+            .into_iter()
+            .map(|(arm, limited)| ArmLimits::read(arm.name(), &limited, cells))
+            .collect::<Vec<_>>();
         Ok(if checked.is_empty() {
             Self::Unbound
         } else {
             Self::Checked { arms: checked }
         })
+    }
+
+    /// Every arm with a joint `robot` limits, beside those joints.
+    fn bounded<'a>(
+        arms: &'a [ArmRoles],
+        robot: &DatasetRobot,
+    ) -> Result<Vec<(&'a ArmRoles, Vec<LimitedJoint>)>, String> {
+        let limits = RobotModel::joint_limits(robot.urdf())?;
+        Ok(arms
+            .iter()
+            .map(|arm| (arm, Self::limited(arm, robot, &limits)))
+            .filter(|(_, limited)| !limited.is_empty())
+            .collect())
     }
 
     /// The arm's measured joints a binding names and the model limits.
@@ -155,23 +187,31 @@ impl JointLimits {
         ctes.push("g AS (SELECT id, log_time, dt, near, ROW_NUMBER() OVER (PARTITION BY id ORDER BY log_time) - ROW_NUMBER() OVER (PARTITION BY id, near ORDER BY log_time) AS grp FROM k)".into());
         ctes.push("runs AS (SELECT id, grp, sum(dt) AS run_s, min(log_time) AS start FROM g WHERE near = 1 GROUP BY id, grp)".into());
         ctes.push("longest AS (SELECT id, start, ROW_NUMBER() OVER (PARTITION BY id ORDER BY run_s DESC) AS rank FROM runs)".into());
-        let extremes = limited
-            .iter()
-            .map(|joint| format!("min(q{0}) AS low{0}, max(q{0}) AS high{0}", joint.position))
+        let joints = 0..columns.count();
+        let extremes = joints
+            .clone()
+            .map(|joint| {
+                format!("CAST(min(q{joint}) AS DOUBLE) AS low{joint}, CAST(max(q{joint}) AS DOUBLE) AS high{joint}")
+            })
             .collect::<Vec<_>>()
             .join(", ");
         ctes.push(format!(
             "ep AS (SELECT id, sum(CASE WHEN near = 1 THEN dt ELSE 0 END) AS near_s, {extremes} FROM k GROUP BY id)"
         ));
-        let picked = limited
-            .iter()
-            .map(|joint| format!("ep.low{0} AS low{0}, ep.high{0} AS high{0}", joint.position))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let listed = |extreme: &str| {
+            joints
+                .clone()
+                .map(|joint| format!("ep.{extreme}{joint}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         Ok(format!(
-            "WITH {} SELECT ep.id AS id, ep.near_s AS near_s, {picked}, {} AS longest_at FROM ep JOIN {} e ON e.id = ep.id LEFT JOIN longest ON longest.id = ep.id AND longest.rank = 1",
+            "WITH {} SELECT ep.id AS id, ep.near_s AS near_s, {} AS longest_at, [{}] AS lowest, [{}] AS highest \
+             FROM ep JOIN {} e ON e.id = ep.id LEFT JOIN longest ON longest.id = ep.id AND longest.rank = 1",
             ctes.join(", "),
             CheckedStreams::since_start("longest.start"),
+            listed("low"),
+            listed("high"),
             streams.episodes(),
         ))
     }
@@ -252,38 +292,55 @@ impl JointLimits {
     }
 }
 
+impl LimitsPart {
+    /// The lowest the joint at `position` of the arm's state reached.
+    fn lowest(&self, position: usize) -> Option<f64> {
+        self.lowest.get(position).copied().flatten()
+    }
+    /// The highest the joint at `position` of the arm's state reached.
+    fn highest(&self, position: usize) -> Option<f64> {
+        self.highest.get(position).copied().flatten()
+    }
+}
+
 impl ArmLimits {
-    fn from_rows(arm: &str, limited: &[LimitedJoint], rows: Vec<LimitRow>) -> Self {
+    /// The arm's time near a limit in each episode its parts in `cells`
+    /// measured, and the furthest each of its `limited` joints went in any.
+    fn read(arm: &str, limited: &[LimitedJoint], cells: &CheckCells<LimitsPart>) -> Self {
+        let parts = cells
+            .parts()
+            .filter(|(_, part)| part.part == arm)
+            .collect::<Vec<_>>();
         let joints = limited
             .iter()
             .map(|joint| {
-                let extreme = |key: String, pick: fn(f64, f64) -> bool| {
-                    rows.iter()
-                        .filter_map(|row| Some((row.extremes.get(&key).copied()??, &row.id)))
-                        .reduce(|kept, next| if pick(next.0, kept.0) { next } else { kept })
-                        .map(|(value, episode)| Extreme {
-                            value,
-                            episode: episode.clone(),
-                        })
+                let reached = |reach: fn(&LimitsPart, usize) -> Option<f64>| {
+                    parts
+                        .iter()
+                        .map(move |(episode, part)| (*episode, reach(part, joint.position)))
                 };
                 JointRange {
                     joint: ValueColumns::joint_name(joint.position),
                     lower: joint.range.0,
                     upper: joint.range.1,
-                    lowest: extreme(format!("low{}", joint.position), |next, kept| next < kept),
-                    highest: extreme(format!("high{}", joint.position), |next, kept| next > kept),
+                    lowest: Extreme::furthest(reached(LimitsPart::lowest), |next, kept| {
+                        next < kept
+                    }),
+                    highest: Extreme::furthest(reached(LimitsPart::highest), |next, kept| {
+                        next > kept
+                    }),
                 }
             })
             .collect();
         Self {
             arm: arm.to_owned(),
             joints,
-            episodes: rows
-                .into_iter()
-                .map(|row| EpisodeNearLimit {
-                    episode: row.id,
-                    near_s: row.near_s,
-                    longest_at: row.longest_at,
+            episodes: parts
+                .iter()
+                .map(|(episode, part)| EpisodeNearLimit {
+                    episode: (*episode).clone(),
+                    near_s: part.near_s,
+                    longest_at: part.longest_at,
                 })
                 .collect(),
         }
@@ -337,43 +394,125 @@ impl ArmLimits {
     }
 }
 
+impl Extreme {
+    /// The furthest of the values each episode `reached`, `further` telling
+    /// whether its first value goes further than its second.
+    fn furthest<'a>(
+        reached: impl Iterator<Item = (&'a EpisodeId, Option<f64>)>,
+        further: fn(f64, f64) -> bool,
+    ) -> Option<Self> {
+        reached
+            .filter_map(|(episode, value)| Some((value?, episode)))
+            .reduce(|kept, next| if further(next.0, kept.0) { next } else { kept })
+            .map(|(value, episode)| Self {
+                value,
+                episode: episode.clone(),
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::stream_reads::TwoArmDataset;
     use super::*;
     use serde_json::json;
 
+    fn episode(ordinal: u32) -> EpisodeId {
+        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
+    }
+
+    /// A robot whose elbow, the left arm's second joint, is limited to
+    /// 0–2 rad and recorded at half scale.
+    fn robot() -> DatasetRobot {
+        serde_json::from_value(json!({
+            "urdf": "<robot name=\"arm\"><link name=\"base\"/><link name=\"upper\"/><joint name=\"elbow\" type=\"revolute\"><parent link=\"base\"/><child link=\"upper\"/><axis xyz=\"0 0 1\"/><limit lower=\"0\" upper=\"2\"/></joint></robot>",
+            "bindings": [{"joint": "elbow", "topic": "/left-arm-state", "schema": "JointState", "field": ["position"], "selector": {"kind": "index", "index": 1}, "scale": 0.5, "offset": 0.0}],
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn limits_come_from_bound_joints_in_recorded_units() {
-        let robot: DatasetRobot = serde_json::from_value(json!({
-            "urdf": "<robot name=\"arm\"><link name=\"base\"/><link name=\"upper\"/><joint name=\"elbow\" type=\"revolute\"><parent link=\"base\"/><child link=\"upper\"/><axis xyz=\"0 0 1\"/><limit lower=\"0\" upper=\"2\"/></joint></robot>",
-            "bindings": [{"joint": "elbow", "topic": "/frame", "schema": "Frame", "field": ["state"], "selector": {"kind": "index", "index": 3}, "scale": 0.5, "offset": 0.0}],
-        }))
-        .unwrap();
-        let arm: ArmRoles = serde_json::from_value(json!({
-            "name": "left",
-            "state": {"topic": "/frame", "schema": "Frame", "field": ["state"], "element": [], "indices": [2, 3]},
-            "action": null, "gripper": null
-        }))
-        .unwrap();
+        let dataset = TwoArmDataset::new();
+        let robot = robot();
         let limits = RobotModel::joint_limits(robot.urdf()).unwrap();
-        let limited = JointLimits::limited(&arm, &robot, &limits);
+        let limited = JointLimits::limited(&dataset.arms()[0], &robot, &limits);
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].position, 1);
         assert_eq!(limited[0].range, (0.0, 4.0));
         assert!((limited[0].near.0 - 0.1).abs() < 1e-9 && (limited[0].near.1 - 3.9).abs() < 1e-9);
-        let id = EpisodeId::try_from(format!("{:032x}", 3)).unwrap();
-        let rows = vec![LimitRow {
-            id: id.clone(),
-            near_s: 5.5,
-            longest_at: Some(12.0),
-            extremes: [
-                ("low1".to_owned(), Some(-0.004)),
-                ("high1".to_owned(), Some(3.95)),
-            ]
-            .into(),
-        }];
-        let checked = ArmLimits::from_rows("left", &limited, rows);
-        assert_eq!(checked.beyond(), ["j2 dips to -0.004 (limit 0.000)"]);
-        assert_eq!(checked.near()[0].measure(), "5.5 s");
+    }
+
+    #[test]
+    fn only_arms_with_a_limited_joint_keep_their_extremes() {
+        let dataset = TwoArmDataset::new();
+        let robot = robot();
+        let column = JointLimits::column(dataset.streams(), dataset.arms(), Some(&robot))
+            .unwrap()
+            .unwrap();
+        assert_eq!(column.kind(), CheckKind::Limits);
+        let statement = dataset.statement(&column);
+        // The right arm's joints are not bound to the model.
+        assert!(statement.contains(
+            "SELECT 'left' AS part, id, near_s, longest_at, lowest, highest FROM (WITH "
+        ));
+        assert!(!statement.contains("'right'"));
+        assert!(statement.contains("CASE WHEN q1 < 0.1 OR q1 > 3.9 THEN 1 ELSE 0 END AS near"));
+        assert!(
+            statement.contains("[ep.low0, ep.low1, ep.low2, ep.low3, ep.low4, ep.low5] AS lowest")
+        );
+        assert!(
+            JointLimits::column(dataset.streams(), dataset.arms(), None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            JointLimits::column(dataset.streams(), &dataset.arms()[1..], Some(&robot))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_furthest_any_episode_went_is_read_from_every_cell() {
+        let dataset = TwoArmDataset::new();
+        let robot = robot();
+        let part = |near_s, low: f64, high: f64| LimitsPart {
+            part: "left".into(),
+            near_s,
+            longest_at: (near_s > 0.0).then_some(12.0),
+            lowest: vec![Some(-3.0), Some(low), None],
+            highest: vec![Some(3.0), Some(high), None],
+        };
+        let cells = CheckCells::fixture(vec![
+            (episode(1), vec![part(0.0, 0.5, 3.5)]),
+            (episode(2), vec![part(5.5, -0.004, 3.95)]),
+            (episode(3), Vec::new()),
+        ]);
+        let JointLimits::Checked { arms } =
+            JointLimits::read(dataset.arms(), Some(&robot), &cells).unwrap()
+        else {
+            panic!("the left arm's elbow is limited")
+        };
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].episodes.len(), 2);
+        assert_eq!(
+            arms[0].joints[0].lowest,
+            Some(Extreme {
+                value: -0.004,
+                episode: episode(2)
+            })
+        );
+        assert_eq!(arms[0].beyond(), ["j2 dips to -0.004 (limit 0.000)"]);
+        assert_eq!(arms[0].near().len(), 1);
+        assert_eq!(arms[0].near()[0].measure(), "5.5 s");
+        assert_eq!(
+            JointLimits::read(dataset.arms(), None, &cells).unwrap(),
+            JointLimits::NeedsRobot
+        );
+        assert_eq!(
+            JointLimits::read(&dataset.arms()[1..], Some(&robot), &cells).unwrap(),
+            JointLimits::Unbound
+        );
     }
 }

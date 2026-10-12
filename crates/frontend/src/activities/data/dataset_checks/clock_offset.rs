@@ -3,17 +3,21 @@
 //! message n record the same instant, so their timestamps should agree. The
 //! offset between them is measured per episode, over the whole episode and
 //! over its first five seconds, which tells a constant offset from a drift.
-//! Streams logged at the same instants read alike, so they are measured once.
+//! Each episode's cell keeps, for every stream logged more than once, its
+//! offset in that episode when it logs one message per frame; which streams
+//! are logged at the same instants, read alike and are shown once, and the
+//! offset over every episode, are read from every cell.
 use super::camera_frames::CameraFrames;
-use super::recording_rate::{Median, StreamTimings};
+use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
+use super::recording_rate::{Median, RecordingRate, StreamTimings};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, StreamName, Verdict};
 use super::stream_reads::CheckedStreams;
 use crate::activities::episode::StreamCatalog;
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetTopic, EpisodeId};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ClockOffset {
     /// The camera every stream is paired with; `None` without a camera.
     camera: Option<String>,
@@ -22,98 +26,104 @@ pub(super) struct ClockOffset {
 }
 
 /// The streams logged at one set of instants, paired with the camera.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct ClockPairing {
     streams: Vec<String>,
-    /// Frame time minus message time, over every pair of every episode.
+    /// Frame time minus message time over every episode: the median of the
+    /// episodes' medians, each episode weighing alike, and the lowest and
+    /// the highest of any pair.
     median_ms: f64,
     low_ms: f64,
     high_ms: f64,
     episodes: Vec<EpisodeOffset>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct EpisodeOffset {
-    #[serde(rename = "id")]
     episode: EpisodeId,
     median_ms: f64,
     /// Over the episode's first five seconds.
     opening_ms: Option<f64>,
 }
 
-/// Frame time minus message time over every pair of every episode.
+/// One stream's offset from the camera in one episode, as its cell keeps
+/// it: frame time minus message time over the episode's pairs — their
+/// median, the median over its first five seconds, the lowest and the
+/// highest.
 #[derive(Deserialize)]
-struct PooledRow {
-    median_ms: Option<f64>,
-    low_ms: Option<f64>,
-    high_ms: Option<f64>,
+pub(super) struct OffsetPart {
+    part: String,
+    median_ms: f64,
+    opening_ms: Option<f64>,
+    low_ms: f64,
+    high_ms: f64,
 }
 
 impl ClockOffset {
     /// The stretch at the start of an episode compared with the whole of it.
     const OPENING_NS: u64 = 5_000_000_000;
 
-    pub(super) async fn measure(
+    /// The column keeping each episode's offset from the camera of every
+    /// stream logged more than once, in the episodes logging one of its
+    /// messages per frame; `None` without a camera or such a stream. Which
+    /// streams share a clock is only known once every episode is read, so
+    /// each stream is paired on its own.
+    pub(super) fn column(streams: CheckedStreams<'_>) -> Result<Option<CheckColumn>, String> {
+        let Some(camera) = Self::camera(streams) else {
+            return Ok(None);
+        };
+        let parts = streams
+            .topics()
+            .iter()
+            .filter(|topic| !topic.is_video() && RecordingRate::repeats(topic))
+            .fold(
+                PartsStatement::new(&["median_ms", "opening_ms", "low_ms", "high_ms"]),
+                |parts, stream| parts.part(stream.name(), Self::sql(streams, (camera, stream))),
+            );
+        CheckColumn::of(CheckKind::Clock, parts)
+    }
+
+    /// The offsets `cells` measured, each set of streams logged at the same
+    /// instants — as `timings` tell them — once, judged against the
+    /// camera's usual frame interval in `frames`.
+    pub(super) fn read(
         streams: CheckedStreams<'_>,
         timings: &StreamTimings,
         frames: &CameraFrames,
-    ) -> Result<Self, String> {
+        cells: &CheckCells<OffsetPart>,
+    ) -> Self {
+        let Some(camera) = Self::camera(streams).map(DatasetTopic::name) else {
+            return Self {
+                camera: None,
+                period_ms: 0.0,
+                pairings: Vec::new(),
+            };
+        };
+        let pairings = Self::groups(streams, timings, camera)
+            .iter()
+            .map(|group| ClockPairing::read(group, cells))
+            .collect();
+        Self {
+            camera: Some(camera.to_owned()),
+            period_ms: frames.period_ns(camera).unwrap_or_default() / 1e6,
+            pairings: ClockPairing::merged(pairings),
+        }
+    }
+
+    /// The camera every stream is paired with: the one that shows the
+    /// workspace best.
+    fn camera<'a>(streams: CheckedStreams<'a>) -> Option<&'a DatasetTopic> {
         let cameras = streams
             .topics()
             .iter()
             .filter(|topic| topic.is_video())
+            .collect::<Vec<_>>();
+        let names = cameras
+            .iter()
             .map(|topic| topic.name().to_owned())
             .collect::<Vec<_>>();
-        let Some(camera) = StreamCatalog::overview_camera(&cameras).map(str::to_owned) else {
-            return Ok(Self {
-                camera: None,
-                period_ms: 0.0,
-                pairings: Vec::new(),
-            });
-        };
-        let period_ms = frames.period_ns(&camera).unwrap_or_default() / 1e6;
-        let groups = Self::groups(streams, timings, &camera);
-        let camera_topic = streams
-            .topics()
-            .iter()
-            .find(|topic| topic.name() == camera)
-            .ok_or("The camera is no longer in the dataset")?;
-        let mut pairings = groups
-            .iter()
-            .map(|group| ClockPairing {
-                streams: group.iter().map(|topic| topic.name().to_owned()).collect(),
-                median_ms: 0.0,
-                low_ms: 0.0,
-                high_ms: 0.0,
-                episodes: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let pooled = groups
-            .iter()
-            .map(|group| Self::pooled_sql(streams, (camera_topic, group[0])))
-            .collect::<Vec<_>>();
-        for (part, row) in streams.dataset_parts::<PooledRow>(&pooled).await? {
-            let pairing = &mut pairings[part];
-            (pairing.median_ms, pairing.low_ms, pairing.high_ms) = (
-                row.median_ms.unwrap_or_default(),
-                row.low_ms.unwrap_or_default(),
-                row.high_ms.unwrap_or_default(),
-            );
-        }
-        let offsets = streams.parts::<EpisodeOffset>(|streams| {
-            Ok(groups
-                .iter()
-                .map(|group| Self::sql(streams, (camera_topic, group[0])))
-                .collect())
-        });
-        for (part, episode) in offsets.await? {
-            pairings[part].episodes.push(episode);
-        }
-        Ok(Self {
-            camera: Some(camera),
-            period_ms,
-            pairings: ClockPairing::merged(pairings),
-        })
+        let overview = StreamCatalog::overview_camera(&names)?;
+        cameras.into_iter().find(|topic| topic.name() == overview)
     }
 
     /// The data streams logged at the same instants in every episode, each
@@ -150,41 +160,26 @@ impl ClockOffset {
         groups
     }
 
-    /// `p`: each frame of `camera` paired with the message of `stream` with
-    /// its number, in episodes logging as many of each, as the offset
-    /// between them and how far into its episode the frame is.
-    fn pairs(
+    /// Each episode's offset between `camera` and `stream`: frame n paired
+    /// with message n, in episodes logging as many of each, over the whole
+    /// episode and over its opening, and the lowest and highest of any pair.
+    fn sql(
         streams: CheckedStreams<'_>,
         (camera, stream): (&DatasetTopic, &DatasetTopic),
     ) -> String {
         let numbered = "log_time, ROW_NUMBER() OVER (PARTITION BY id ORDER BY log_time) AS i, count(*) OVER (PARTITION BY id) AS n";
         format!(
-            "c AS (SELECT id, {numbered} FROM {camera}), \
+            "WITH \
+             c AS (SELECT id, {numbered} FROM {camera}), \
              s AS (SELECT id, {numbered} FROM {stream}), \
              p AS (SELECT c.id AS id, (CAST(c.log_time AS BIGINT) - CAST(s.log_time AS BIGINT)) / 1e6 AS offset_ms, \
                CAST(c.log_time AS BIGINT) - min(CAST(c.log_time AS BIGINT)) OVER (PARTITION BY c.id) AS since_ns \
-               FROM c JOIN s ON s.id = c.id AND s.i = c.i WHERE c.n = s.n)",
+               FROM c JOIN s ON s.id = c.id AND s.i = c.i WHERE c.n = s.n) \
+             SELECT id, spql.agg.approx_quantile(offset_ms, 0.5) AS median_ms, \
+               spql.agg.approx_quantile(CASE WHEN since_ns < {opening} THEN offset_ms END, 0.5) AS opening_ms, \
+               min(offset_ms) AS low_ms, max(offset_ms) AS high_ms FROM p GROUP BY id",
             camera = streams.read(camera),
             stream = streams.read(stream),
-        )
-    }
-
-    /// The offset over every pair of every episode.
-    fn pooled_sql(streams: CheckedStreams<'_>, pair: (&DatasetTopic, &DatasetTopic)) -> String {
-        format!(
-            "WITH {} SELECT spql.agg.approx_quantile(offset_ms, 0.5) AS median_ms, min(offset_ms) AS low_ms, max(offset_ms) AS high_ms FROM p",
-            Self::pairs(streams, pair)
-        )
-    }
-
-    /// Each episode's offset, over the whole of it and over its opening.
-    fn sql(streams: CheckedStreams<'_>, pair: (&DatasetTopic, &DatasetTopic)) -> String {
-        format!(
-            "WITH {pairs}, \
-             r AS (SELECT id, spql.agg.approx_quantile(offset_ms, 0.5) AS median_ms, \
-               spql.agg.approx_quantile(CASE WHEN since_ns < {opening} THEN offset_ms END, 0.5) AS opening_ms FROM p GROUP BY id) \
-             SELECT id, median_ms, opening_ms FROM r",
-            pairs = Self::pairs(streams, pair),
             opening = Self::OPENING_NS,
         )
     }
@@ -263,6 +258,37 @@ impl ClockOffset {
 }
 
 impl ClockPairing {
+    /// The streams of `group`, logged at the same instants, as `cells`
+    /// measured the first of them in each episode.
+    fn read(group: &[&DatasetTopic], cells: &CheckCells<OffsetPart>) -> Self {
+        let measured = cells
+            .parts()
+            .filter(|(_, part)| part.part == group[0].name())
+            .collect::<Vec<_>>();
+        Self {
+            streams: group.iter().map(|topic| topic.name().to_owned()).collect(),
+            median_ms: Median::of(measured.iter().map(|(_, part)| part.median_ms))
+                .unwrap_or_default(),
+            low_ms: measured
+                .iter()
+                .map(|(_, part)| part.low_ms)
+                .reduce(f64::min)
+                .unwrap_or_default(),
+            high_ms: measured
+                .iter()
+                .map(|(_, part)| part.high_ms)
+                .reduce(f64::max)
+                .unwrap_or_default(),
+            episodes: measured
+                .iter()
+                .map(|&(episode, part)| EpisodeOffset {
+                    episode: episode.clone(),
+                    median_ms: part.median_ms,
+                    opening_ms: part.opening_ms,
+                })
+                .collect(),
+        }
+    }
     /// Pairings whose every episode reads alike are one set of instants.
     fn merged(pairings: Vec<Self>) -> Vec<Self> {
         let mut merged: Vec<Self> = Vec::new();
@@ -370,14 +396,28 @@ impl Milliseconds {
 
 #[cfg(test)]
 mod tests {
+    use super::super::camera_frames::FramesPart;
+    use super::super::recording_rate::TimingPart;
     use super::*;
+    use serde_json::json;
+    use spiral_robotics_common::curation::AnswerSource;
+    use spiral_robotics_common::datasets::DatasetSelection;
+
+    fn episode_id(ordinal: u32) -> EpisodeId {
+        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
+    }
 
     fn episode(ordinal: u32, median_ms: f64, opening_ms: f64) -> EpisodeOffset {
         EpisodeOffset {
-            episode: EpisodeId::try_from(format!("{ordinal:032x}")).unwrap(),
+            episode: episode_id(ordinal),
             median_ms,
             opening_ms: Some(opening_ms),
         }
+    }
+
+    /// One part of a cell, as the answers table stores it.
+    fn stored<P: serde::de::DeserializeOwned>(part: serde_json::Value) -> P {
+        serde_json::from_value(part).unwrap()
     }
 
     #[test]
@@ -414,5 +454,103 @@ mod tests {
         assert!(!aligned.flagged(33.3));
         assert_eq!(Milliseconds::signed(0.0), "0 ms");
         assert_eq!(Milliseconds::signed(12.4), "+12 ms");
+    }
+
+    #[test]
+    fn each_repeated_stream_pairs_with_the_overview_camera_and_shared_clocks_read_once() {
+        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
+        let video = || vec!["foxglove.CompressedVideo".to_owned()];
+        let topics = [
+            DatasetTopic::new("/left-wrist-camera".into(), video()).with_coverage(2, Some(7)),
+            DatasetTopic::new("/top-camera".into(), video()).with_coverage(2, Some(7)),
+            DatasetTopic::new("/left-arm-state".into(), vec![]).with_coverage(2, Some(7)),
+            DatasetTopic::new("/left-arm-action".into(), vec![]).with_coverage(2, Some(7)),
+            DatasetTopic::new("/instruction".into(), vec![]).with_coverage(2, Some(2)),
+        ];
+        let streams = CheckedStreams::new(&dataset, &topics);
+        let column = ClockOffset::column(streams).unwrap().unwrap();
+        assert_eq!(column.kind(), CheckKind::Clock);
+        let fill = column.fill(streams);
+        let AnswerSource::DatasetStatement { statement } = fill.source() else {
+            panic!("a check fills its column from one statement over every episode");
+        };
+        // Every stream logged more than once pairs with the overview camera.
+        assert!(statement.contains("'/left-arm-state' AS part"));
+        assert!(statement.contains("'/left-arm-action' AS part"));
+        assert!(!statement.contains("'/instruction'"));
+        assert!(statement.contains("'/top-camera'"));
+        assert!(!statement.contains("'/left-wrist-camera'"));
+        assert!(
+            ClockOffset::column(CheckedStreams::new(&dataset, &topics[2..]))
+                .unwrap()
+                .is_none()
+        );
+
+        let timing = |topic: &str, messages: u64| -> TimingPart {
+            stored(
+                json!({"part": topic, "messages": messages, "first_ns": 0, "last_ns": messages * 33_000_000}),
+            )
+        };
+        let (_, timings) = RecordingRate::read(
+            streams,
+            &CheckCells::fixture(vec![
+                (
+                    episode_id(1),
+                    vec![
+                        timing("/top-camera", 3),
+                        timing("/left-arm-state", 3),
+                        timing("/left-arm-action", 3),
+                    ],
+                ),
+                (
+                    episode_id(2),
+                    vec![
+                        timing("/top-camera", 4),
+                        timing("/left-arm-state", 4),
+                        timing("/left-arm-action", 4),
+                    ],
+                ),
+            ]),
+        );
+        let camera: FramesPart = stored(json!({
+            "part": "/top-camera", "frames": 3, "span_ns": 66_000_000, "worst_gap_ns": 33_000_000,
+            "worst_at": 0.033, "late": 0, "period_ns": 33_300_000.0
+        }));
+        let frames = CameraFrames::read(
+            streams,
+            &CheckCells::fixture(vec![(episode_id(1), vec![camera])]),
+        );
+        let offset = |topic: &str, (median, low, high): (f64, f64, f64)| -> OffsetPart {
+            stored(
+                json!({"part": topic, "median_ms": median, "opening_ms": null, "low_ms": low, "high_ms": high}),
+            )
+        };
+        let cells = CheckCells::fixture(
+            [(1, (-100.0, -120.0, -30.0)), (2, (-110.0, -130.0, -90.0))]
+                .into_iter()
+                .map(|(ordinal, measured)| {
+                    (
+                        episode_id(ordinal),
+                        vec![
+                            offset("/left-arm-state", measured),
+                            offset("/left-arm-action", measured),
+                        ],
+                    )
+                })
+                .collect(),
+        );
+        let clock = ClockOffset::read(streams, &timings, &frames, &cells);
+        assert_eq!(clock.camera.as_deref(), Some("/top-camera"));
+        assert!((clock.period_ms - 33.3).abs() < 1e-9);
+        // The state and action share a clock, so they read as one.
+        assert_eq!(clock.pairings.len(), 1);
+        let pairing = &clock.pairings[0];
+        assert_eq!(pairing.streams, ["/left-arm-state", "/left-arm-action"]);
+        assert_eq!(
+            (pairing.median_ms, pairing.low_ms, pairing.high_ms),
+            (-105.0, -130.0, -30.0)
+        );
+        assert_eq!(pairing.episodes.len(), 2);
+        assert!(pairing.flagged(clock.period_ms));
     }
 }

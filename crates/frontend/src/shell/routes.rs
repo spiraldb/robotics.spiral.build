@@ -110,6 +110,7 @@ fn ProjectStudioShell(project: ProjectKey) -> Element {
     use_context_provider(|| ProjectSelection::current().client(project));
     let settings = crate::shell::workspace::WorkspaceSettings::use_provider();
     crate::client::robot_connector::RobotConnector::use_provider(settings);
+    crate::activities::data::DatasetInspections::use_provider();
     crate::activities::episode::EpisodeStills::use_provider();
     crate::activities::data::DatasetOverviewMemory::use_provider();
     crate::activities::data::DatasetChecks::use_provider();

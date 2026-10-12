@@ -2,14 +2,17 @@
 //! joint moving faster than 0.05 rad/s. One arm waiting while the other
 //! works is how two arms share a task, so only stillness of all of them
 //! counts. Arms are compared at the instants they were logged together.
+//! Each episode's cell keeps its own pauses; the longest across episodes is
+//! found when the report is read.
+use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Verdict};
 use super::stream_reads::{CheckedStreams, CheckedValueColumns as _, Greatest};
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use spiral_robotics_common::datasets::ValueColumns;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Pauses {
     /// How many arms are measured.
     arms: usize,
@@ -18,7 +21,7 @@ pub(super) struct Pauses {
     apart: Vec<EpisodeId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct EpisodePauses {
     episode: EpisodeId,
     measured_s: f64,
@@ -30,9 +33,12 @@ struct EpisodePauses {
     long: u64,
 }
 
+/// Every arm's stillness in one episode, as its cell keeps it: how long the
+/// episode is, how much of it the arms were logged together over, how much
+/// of that every arm was still, its longest pause and where that starts,
+/// and how many pauses were long.
 #[derive(Deserialize)]
-struct PauseRow {
-    id: EpisodeId,
+pub(super) struct PausesPart {
     episode_ns: Option<u64>,
     measured_s: Option<f64>,
     still_s: Option<f64>,
@@ -47,24 +53,43 @@ impl Pauses {
     /// Pauses longer than this, in seconds, are flagged.
     const LONG: f64 = 2.0;
 
-    pub(super) async fn measure(
+    /// The column keeping each episode's pauses of every arm at once, as
+    /// one part; `None` without an arm.
+    pub(super) fn column(
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
-    ) -> Result<Self, String> {
-        let rows: Vec<PauseRow> = streams.rows(|streams| Self::sql(streams, arms)).await?;
+    ) -> Result<Option<CheckColumn>, String> {
+        if arms.is_empty() {
+            return Ok(None);
+        }
+        let parts = PartsStatement::new(&[
+            "episode_ns",
+            "measured_s",
+            "still_s",
+            "longest_s",
+            "longest_at",
+            "long_pauses",
+        ])
+        .part("arms", Self::sql(streams, arms)?);
+        CheckColumn::of(CheckKind::Pauses, parts)
+    }
+
+    /// The pauses of every episode `cells` measured whose arms were logged
+    /// together, and the episodes whose were not.
+    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<PausesPart>) -> Self {
         let mut episodes = Vec::new();
         let mut apart = Vec::new();
-        for row in rows {
-            match row.measured() {
+        for (episode, part) in cells.parts() {
+            match part.measured(episode) {
                 Some(measured) => episodes.push(measured),
-                None => apart.push(row.id),
+                None => apart.push(episode.clone()),
             }
         }
-        Ok(Self {
+        Self {
             arms: arms.len(),
             episodes,
             apart,
-        })
+        }
     }
 
     fn sql(streams: CheckedStreams<'_>, arms: &[ArmRoles]) -> Result<String, String> {
@@ -206,16 +231,16 @@ impl Pauses {
     }
 }
 
-impl PauseRow {
-    /// The episode's pauses, when its arms were logged together over nearly
+impl PausesPart {
+    /// `episode`'s pauses, when its arms were logged together over nearly
     /// all of it.
-    fn measured(&self) -> Option<EpisodePauses> {
+    fn measured(&self, episode: &EpisodeId) -> Option<EpisodePauses> {
         let measured = self.measured_s?;
         if measured < 0.9 * self.episode_ns? as f64 / 1e9 {
             return None;
         }
         Some(EpisodePauses {
-            episode: self.id.clone(),
+            episode: episode.clone(),
             measured_s: measured,
             still_s: self.still_s.unwrap_or_default(),
             longest_s: self.longest_s,
@@ -232,5 +257,56 @@ impl EpisodePauses {
             self.longest_at,
             format!("{:.1} s", self.longest_s.unwrap_or_default()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::stream_reads::TwoArmDataset;
+    use super::*;
+
+    fn episode(ordinal: u32) -> EpisodeId {
+        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
+    }
+
+    #[test]
+    fn every_arm_is_read_at_the_instants_they_were_logged_together() {
+        let dataset = TwoArmDataset::new();
+        let column = Pauses::column(dataset.streams(), dataset.arms())
+            .unwrap()
+            .unwrap();
+        assert_eq!(column.kind(), CheckKind::Pauses);
+        let statement = dataset.statement(&column);
+        assert!(statement.contains(
+            "SELECT 'arms' AS part, id, episode_ns, measured_s, still_s, longest_s, longest_at, long_pauses FROM (WITH "
+        ));
+        assert!(statement.contains(" JOIN arm1_motion ON arm1_motion.id = arm0_motion.id AND arm1_motion.log_time = arm0_motion.log_time"));
+        assert!(Pauses::column(dataset.streams(), &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_episode_whose_arms_were_logged_apart_is_not_measured() {
+        let dataset = TwoArmDataset::new();
+        let part = |measured_s: Option<f64>, longest_s: f64, long_pauses| PausesPart {
+            episode_ns: Some(10_000_000_000),
+            measured_s,
+            still_s: Some(longest_s),
+            longest_s: Some(longest_s),
+            longest_at: Some(1.5),
+            long_pauses: Some(long_pauses),
+        };
+        let cells = CheckCells::fixture(vec![
+            (episode(1), vec![part(Some(9.9), 3.0, 1)]),
+            (episode(2), vec![part(Some(9.9), 0.5, 0)]),
+            (episode(3), vec![part(Some(2.0), 0.0, 0)]),
+            (episode(4), vec![part(None, 0.0, 0)]),
+            (episode(5), Vec::new()),
+        ]);
+        let pauses = Pauses::read(dataset.arms(), &cells);
+        assert_eq!(pauses.arms, 2);
+        assert_eq!(pauses.episodes.len(), 2);
+        assert_eq!(pauses.episodes[0].long, 1);
+        assert_eq!(pauses.episodes[0].longest().measure(), "3.0 s");
+        assert_eq!(pauses.apart, [episode(3), episode(4)]);
     }
 }

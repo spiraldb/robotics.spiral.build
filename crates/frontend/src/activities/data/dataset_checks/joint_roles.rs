@@ -185,9 +185,14 @@ impl DiscoveryTask for JointRoleDiscovery {
         };
         let saved = async {
             let roles = self.prepare(episode, roles).await?;
+            let inspection = self
+                .data
+                .inspect_dataset(episode.dataset().clone())
+                .await
+                .map_err(|error| error.to_string())?;
             self.data
                 .save_joint_roles(&DatasetJointRolesSave::new(
-                    episode.dataset().clone(),
+                    inspection.dataset().clone(),
                     roles.clone(),
                 ))
                 .await

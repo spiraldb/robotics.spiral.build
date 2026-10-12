@@ -7,7 +7,7 @@
 use super::held_run::HeldRun;
 use super::reads::PreviewRows;
 use crate::activities::curation::annotate::{MAX_SUBTASKS, SubtaskReading};
-use crate::activities::curation::client::CurationClient;
+use crate::activities::curation::client::{CurationClient, FillRuns};
 use crate::activities::curation::document::{CurationGraph, CurationNodeKind};
 use crate::activities::curation::measured_timeline::MeasuredTimeline;
 use crate::activities::curation::path::{CurationPath, PathError};
@@ -297,12 +297,12 @@ impl PreviewPass {
     /// run stopped or failed, when nothing more is read.
     async fn filled(&self, verb: &str) -> Option<Vec<EpisodeSelection>> {
         let episodes = &self.plan.episodes;
-        let client = CurationClient::current();
+        let client = FillRuns::current();
         let request = FillRequest::new(
             self.plan.sample.dataset().clone(),
             vec![self.plan.fill.clone()],
         );
-        let mut status = match client.start_fill(&request).await {
+        let mut status = match client.start(&request).await {
             Ok(status) => status,
             Err(error) => {
                 self.fail(episodes, &error.to_string());
@@ -316,10 +316,10 @@ impl PreviewPass {
                     .report(format!("{verb} {} of {total} episodes", step.done()));
             }
             if !stopping && !self.run.wanted() {
-                stopping = client.stop_fill(status.id()).await.is_ok();
+                stopping = client.stop(status.id()).await.is_ok();
             }
             self.pause(stopping).await;
-            status = match client.fill(status.id()).await {
+            status = match client.status(status.id()).await {
                 Ok(status) => status,
                 Err(error) => {
                     self.fail(episodes, &error.to_string());

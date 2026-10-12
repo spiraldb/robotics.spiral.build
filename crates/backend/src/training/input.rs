@@ -235,8 +235,12 @@ impl StreamReads {
     ) -> Result<Self, OperationError> {
         match config.model() {
             TrainingModel::Act(act) => {
+                let inspection = storage
+                    .inspect_dataset(config.source().dataset().clone())
+                    .await
+                    .map_err(OperationError::External)?;
                 let roles = storage
-                    .dataset_joint_roles(config.source().dataset().clone())
+                    .dataset_joint_roles(inspection.dataset())
                     .await
                     .map_err(OperationError::External)?
                     .ok_or_else(|| {

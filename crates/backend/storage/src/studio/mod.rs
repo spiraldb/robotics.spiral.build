@@ -23,8 +23,6 @@ mod transfer;
 pub(crate) mod workspaces;
 pub(crate) use transfer::StudioSnapshot;
 #[allow(unreachable_pub)]
-mod dataset_check_reports;
-#[allow(unreachable_pub)]
 mod dataset_joint_roles;
 #[allow(unreachable_pub)]
 mod dataset_robots;
@@ -183,10 +181,9 @@ impl StudioProject {
     /// Tables whose rows belong to one project, under its key in their
     /// `project` column. Published views are not among them: a project
     /// bundle carries none.
-    pub(crate) const RECORD_TABLES: [&str; 6] = [
+    pub(crate) const RECORD_TABLES: [&str; 5] = [
         "dataset_robots",
         "dataset_joint_roles",
-        "dataset_check_reports",
         "curations",
         "training_runs",
         "published_models",

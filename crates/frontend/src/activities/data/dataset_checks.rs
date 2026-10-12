@@ -1,13 +1,17 @@
-//! The dataset check report: data-quality checks over every episode's
+//! The dataset health check: data-quality checks over every episode's
 //! recorded streams — how often each stream logs, dropped camera frames,
 //! camera clock offsets — and, once the joint streams are known, how each
 //! arm followed its commands, neared its limits, spiked, paused, stuck, and
 //! closed its gripper.
 //!
-//! The browser composes every statement and reads the answers; the report is
-//! computed once per dataset version and kept by the backend, so every later
-//! view, on any surface, reads the kept one.
+//! Each check is a column of the dataset's answers table with one cell per
+//! episode (see `check_columns`). The operator runs the health check, and a
+//! backend fill run fills every column the dataset lacks, reading each check
+//! over every episode at once; a dataset is checked once, and episodes
+//! appended later are checked on their own. Every surface that shows the
+//! dataset reads the report from those columns.
 mod camera_frames;
+mod check_columns;
 mod clock_offset;
 mod gripper_closes;
 mod joint_limits;
@@ -23,9 +27,12 @@ mod stuck_joints;
 pub(in crate::activities) use report_view::CheckedEpisode;
 
 use super::DatasetClient;
+use crate::activities::curation::FillRuns;
 use crate::activities::episode::{Episode, EpisodeListing, EpisodeRows, SourceLabel};
+use crate::client::CommandError;
 use crate::components::scoped_task::ScopedTask;
 use camera_frames::CameraFrames;
+use check_columns::{CheckColumn, CheckKind, CheckRows};
 use clock_offset::ClockOffset;
 use dioxus::dioxus_core::{ScopeId, current_scope_id};
 use dioxus::prelude::*;
@@ -36,9 +43,9 @@ use joint_spikes::JointSpikes;
 use pauses::Pauses;
 use recording_rate::RecordingRate;
 use report_view::{CheckReport, CheckSection, EvidenceOpener, SectionAbout, Verdict, VerdictMark};
-use serde::{Deserialize, Serialize};
+use spiral_robotics_common::curation::{FillRequest, FillState};
 use spiral_robotics_common::datasets::{
-    DatasetCheckLookup, DatasetCheckSave, DatasetJointRoles, DatasetRobot, DatasetSelection,
+    DatasetInspection, DatasetJointRoles, DatasetRobot, DatasetSelection,
 };
 use spiral_robotics_ui::{ActionPurpose, Button, ButtonSize, ButtonVariant, Notice, NoticeTone};
 use state_action_lag::StateActionLag;
@@ -47,12 +54,13 @@ use std::rc::Rc;
 use stream_reads::CheckedStreams;
 use stuck_joints::StuckJoints;
 
-/// The version of the checks a kept report was computed by. Changing what
-/// any check reads or keeps bumps it, and every dataset is checked again.
-const DEFINITION: u32 = 1;
+/// How often a running health check asks where its run has got.
+const POLL_MS: u32 = 1_000;
+/// The step a run takes first when nobody has found the joint streams yet.
+const FINDING_JOINTS: &str = "Finding the joint streams";
 
-/// Every check's findings for one dataset version, as the backend keeps them.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Every check's findings, judged from every episode's cells.
+#[derive(Clone, Debug, PartialEq)]
 struct CheckedDataset {
     episodes: u64,
     rates: RecordingRate,
@@ -61,8 +69,7 @@ struct CheckedDataset {
     joints: JointChecks,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 enum JointChecks {
     /// No stream records joint positions.
     Unidentified,
@@ -70,7 +77,7 @@ enum JointChecks {
 }
 
 /// The checks that read each arm's joints, and the joint streams they read.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct ArmChecks {
     roles: DatasetJointRoles,
     lag: StateActionLag,
@@ -82,6 +89,48 @@ struct ArmChecks {
 }
 
 impl CheckedDataset {
+    /// The findings `rows` hold in `columns`, the columns `inputs` name,
+    /// which a run has filled.
+    fn read(
+        inputs: &CheckInputs,
+        roles: &DatasetJointRoles,
+        columns: &[CheckColumn],
+        rows: &CheckRows,
+    ) -> Result<Self, String> {
+        let streams = inputs.streams();
+        let (rates, timings) =
+            RecordingRate::read(streams, &rows.cells(columns, CheckKind::Rates)?);
+        let frames = CameraFrames::read(streams, &rows.cells(columns, CheckKind::Frames)?);
+        let clock = ClockOffset::read(
+            streams,
+            &timings,
+            &frames,
+            &rows.cells(columns, CheckKind::Clock)?,
+        );
+        let arms = roles.arms();
+        let joints = if arms.is_empty() {
+            JointChecks::Unidentified
+        } else {
+            let robot = inputs.robot.as_ref();
+            JointChecks::Checked(Box::new(ArmChecks {
+                roles: roles.clone(),
+                lag: StateActionLag::read(arms, &rows.cells(columns, CheckKind::Lag)?),
+                limits: JointLimits::read(arms, robot, &rows.cells(columns, CheckKind::Limits)?)?,
+                spikes: JointSpikes::read(arms, &rows.cells(columns, CheckKind::Spikes)?),
+                pauses: Pauses::read(arms, &rows.cells(columns, CheckKind::Pauses)?),
+                stuck: StuckJoints::read(arms, &rows.cells(columns, CheckKind::Stuck)?),
+                grippers: GripperCloses::read(arms, &rows.cells(columns, CheckKind::Grippers)?),
+            }))
+        };
+        Ok(Self {
+            episodes: rows.episodes() as u64,
+            rates,
+            frames,
+            clock,
+            joints,
+        })
+    }
+
     /// The report's sections: what the recording's streams did, then what
     /// the arms' joints did, led by which streams those are.
     fn sections(&self) -> Vec<CheckSection> {
@@ -114,89 +163,132 @@ impl CheckedDataset {
     }
 }
 
-/// How far a report being computed has got.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CheckStep {
-    Reading,
-    Rates,
-    Frames,
-    Clock,
-    Roles,
-    Lag,
-    Limits,
-    Spikes,
-    Pauses,
-    Stuck,
-    Grippers,
+/// What a dataset's checks read besides its recordings: its streams, as the
+/// project inspected them, which streams hold the arms' joints, and its
+/// robot. Every check's column follows from these.
+#[derive(Clone)]
+struct CheckInputs {
+    dataset: DatasetSelection,
+    inspection: DatasetInspection,
+    roles: Option<DatasetJointRoles>,
+    robot: Option<DatasetRobot>,
 }
 
-impl CheckStep {
-    const ALL: [Self; 11] = [
-        Self::Reading,
-        Self::Rates,
-        Self::Frames,
-        Self::Clock,
-        Self::Roles,
-        Self::Lag,
-        Self::Limits,
-        Self::Spikes,
-        Self::Pauses,
-        Self::Stuck,
-        Self::Grippers,
-    ];
-    fn label(self) -> &'static str {
-        match self {
-            Self::Reading => "Reading the report",
-            Self::Rates => "Measuring recording rates",
-            Self::Frames => "Counting camera frames",
-            Self::Clock => "Pairing camera and stream clocks",
-            Self::Roles => "Finding the joint streams",
-            Self::Lag => "Measuring state–action lag",
-            Self::Limits => "Checking joint limits",
-            Self::Spikes => "Looking for spikes",
-            Self::Pauses => "Finding pauses",
-            Self::Stuck => "Looking for stuck joints",
-            Self::Grippers => "Classifying gripper closes",
+impl CheckInputs {
+    async fn read(client: &DatasetClient, dataset: &DatasetSelection) -> Result<Self, String> {
+        let text = |error: CommandError| error.to_string();
+        let inspection = client
+            .inspect_dataset(dataset.clone())
+            .await
+            .map_err(text)?;
+        let robot = client.robot(inspection.dataset()).await.map_err(text)?;
+        let roles = client
+            .joint_roles(inspection.dataset())
+            .await
+            .map_err(text)?;
+        Ok(Self {
+            dataset: dataset.clone(),
+            inspection,
+            roles,
+            robot,
+        })
+    }
+    /// These inputs with the joint streams found, by the model, when
+    /// nobody has found them for this version of the dataset yet.
+    async fn with_roles(mut self, client: &DatasetClient) -> Result<Self, String> {
+        if self.roles.is_none() {
+            let discovery = JointRoleDiscovery::new(client.clone(), self.robot.clone());
+            self.roles = Some(discovery.discover(&self.dataset).await?);
         }
+        Ok(self)
     }
-    fn position(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|step| *step == self)
-            .unwrap_or_default()
-            + 1
+    fn streams(&self) -> CheckedStreams<'_> {
+        CheckedStreams::new(&self.dataset, self.inspection.topics())
     }
-    /// Where `self` stands while the run is at `current`.
-    fn progress(self, current: Self) -> &'static str {
-        match self.position().cmp(&current.position()) {
-            std::cmp::Ordering::Less => "done",
-            std::cmp::Ordering::Equal => "current",
-            std::cmp::Ordering::Greater => "ahead",
+    /// Every check's column, in the order a run fills them: the joint
+    /// checks' only once the joint streams are known.
+    fn columns(&self) -> Result<Vec<CheckColumn>, String> {
+        let streams = self.streams();
+        let mut columns = vec![
+            RecordingRate::column(streams)?,
+            CameraFrames::column(streams)?,
+            ClockOffset::column(streams)?,
+        ];
+        if let Some(roles) = &self.roles {
+            let arms = roles.arms();
+            columns.extend([
+                StateActionLag::column(streams, arms)?,
+                JointLimits::column(streams, arms, self.robot.as_ref())?,
+                JointSpikes::column(streams, arms)?,
+                Pauses::column(streams, arms)?,
+                StuckJoints::column(streams, arms)?,
+                GripperCloses::column(streams, arms)?,
+            ]);
+        }
+        Ok(columns.into_iter().flatten().collect())
+    }
+}
+
+/// What a dataset's check columns hold.
+#[derive(Clone, Debug, PartialEq)]
+enum CheckReading {
+    /// The health check has not run, or a run stopped before it filled
+    /// every column.
+    NotRun,
+    /// The report, and how many episodes no run has checked yet, such as
+    /// ones appended since.
+    Read {
+        report: Rc<CheckedDataset>,
+        unchecked: usize,
+    },
+}
+
+/// How far a run has got: its steps in order — finding the joint streams
+/// first, when nobody has — the one it is on, and its backend run, which
+/// Stop stops, once it has one.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CheckProgress {
+    steps: Vec<&'static str>,
+    current: Option<String>,
+    run: Option<String>,
+    stopping: bool,
+}
+
+impl CheckProgress {
+    /// Where `step` stands in the run: done, current or ahead.
+    fn of(&self, step: &str) -> &'static str {
+        let position = |wanted: &str| self.steps.iter().position(|step| *step == wanted);
+        match (position(step), self.current.as_deref().and_then(position)) {
+            (Some(step), Some(current)) if step < current => "done",
+            (Some(step), Some(current)) if step == current => "current",
+            _ => "ahead",
         }
     }
 }
 
-/// Where one dataset's report stands this session.
+/// Where one dataset's health check stands this session.
 #[derive(Clone, Debug, PartialEq)]
 enum CheckState {
-    Checking(CheckStep),
-    Ready(Rc<CheckedDataset>),
+    Reading,
+    Read(CheckReading),
+    Running(CheckProgress),
     Failed(String),
 }
 
-/// Each dataset's report this session, by SQL name: read or computed once
-/// for the project, whichever surface asked first, so a surface that mounts
-/// again, or another surface showing the same dataset, joins the same one.
+/// Each dataset's health check this session, by SQL name: read once for the
+/// project, whichever surface asked first, so a surface that mounts again,
+/// or another surface showing the same dataset, joins the same one; and a
+/// run keeps going while the operator works elsewhere.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct DatasetChecks {
-    reports: Signal<HashMap<String, CheckState>>,
+    states: Signal<HashMap<String, CheckState>>,
     owner: ScopeId,
 }
 
 impl DatasetChecks {
     pub(crate) fn use_provider() -> Self {
         use_context_provider(|| Self {
-            reports: Signal::new(HashMap::new()),
+            states: Signal::new(HashMap::new()),
             owner: current_scope_id(),
         })
     }
@@ -204,44 +296,56 @@ impl DatasetChecks {
         consume_context()
     }
     fn state(self, dataset: &DatasetSelection) -> Option<CheckState> {
-        self.reports.read().get(&dataset.sql_name()).cloned()
+        self.states.read().get(&dataset.sql_name()).cloned()
     }
-    /// Read `dataset`'s kept report, or compute and keep it, unless this
-    /// session already has.
-    fn ensure(mut self, dataset: &DatasetSelection) {
-        let key = dataset.sql_name();
-        if self.reports.peek().contains_key(&key) {
+    fn set(mut self, dataset: &DatasetSelection, state: CheckState) {
+        self.states.write().insert(dataset.sql_name(), state);
+    }
+    /// Read what `dataset`'s check columns hold, unless this session
+    /// already has.
+    fn ensure(self, dataset: &DatasetSelection) {
+        if self.states.peek().contains_key(&dataset.sql_name()) {
             return;
         }
-        self.reports
-            .write()
-            .insert(key.clone(), CheckState::Checking(CheckStep::Reading));
-        let run = CheckRun {
-            client: DatasetClient::current(),
-            dataset: dataset.clone(),
-            checks: self,
-        };
-        ScopedTask::spawn(self.owner, async move {
-            let state = match run.report().await {
-                Ok(report) => CheckState::Ready(Rc::new(report)),
-                Err(error) => CheckState::Failed(error),
-            };
-            self.reports.write().insert(key, state);
-        });
+        self.set(dataset, CheckState::Reading);
+        let run = CheckRun::new(dataset.clone(), self);
+        ScopedTask::spawn(self.owner, async move { run.settle(run.read().await) });
     }
-    /// Try again after a failure.
+    /// Read again, as after a failure.
     fn retry(mut self, dataset: &DatasetSelection) {
-        self.reports.write().remove(&dataset.sql_name());
+        self.states.write().remove(&dataset.sql_name());
         self.ensure(dataset);
     }
-    fn advance(mut self, dataset: &DatasetSelection, step: CheckStep) {
-        self.reports
-            .write()
-            .insert(dataset.sql_name(), CheckState::Checking(step));
+    /// Run every check `dataset`'s columns lack.
+    fn run(self, dataset: &DatasetSelection) {
+        self.set(dataset, CheckState::Running(CheckProgress::default()));
+        let run = CheckRun::new(dataset.clone(), self);
+        ScopedTask::spawn(self.owner, async move { run.settle(run.run().await) });
+    }
+    /// Ask `dataset`'s run to start nothing more; what it filled stays.
+    fn stop(self, dataset: &DatasetSelection) {
+        let Some(CheckState::Running(progress)) = self.state(dataset) else {
+            return;
+        };
+        let Some(run) = progress.run.clone().filter(|_| !progress.stopping) else {
+            return;
+        };
+        self.advance(dataset, |progress| progress.stopping = true);
+        ScopedTask::spawn(self.owner, async move {
+            let _ = FillRuns::current().stop(&run).await;
+        });
+    }
+    /// Move `dataset`'s run on, while it runs.
+    fn advance(mut self, dataset: &DatasetSelection, change: impl FnOnce(&mut CheckProgress)) {
+        if let Some(CheckState::Running(progress)) =
+            self.states.write().get_mut(&dataset.sql_name())
+        {
+            change(progress);
+        }
     }
 }
 
-/// One report being read or computed.
+/// One read of a dataset's check columns, or one run filling them.
 struct CheckRun {
     client: DatasetClient,
     dataset: DatasetSelection,
@@ -249,102 +353,90 @@ struct CheckRun {
 }
 
 impl CheckRun {
-    /// The kept report, or a new one, computed and kept.
-    async fn report(&self) -> Result<CheckedDataset, String> {
-        let lookup = DatasetCheckLookup::new(self.dataset.clone(), DEFINITION);
-        let kept = self
-            .client
-            .check_report(&lookup)
-            .await
-            .map_err(|error| error.to_string())?;
-        if let Some(kept) = kept {
-            return serde_json::from_value(kept)
-                .map_err(|error| format!("Reading the kept report: {error}"));
+    fn new(dataset: DatasetSelection, checks: DatasetChecks) -> Self {
+        Self {
+            client: DatasetClient::current(),
+            dataset,
+            checks,
         }
-        let report = self.compute().await?;
-        let document = serde_json::to_value(&report).map_err(|error| error.to_string())?;
-        self.client
-            .save_check_report(&DatasetCheckSave::new(lookup, document))
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(report)
+    }
+    fn settle(&self, reading: Result<CheckReading, String>) {
+        let state = match reading {
+            Ok(reading) => CheckState::Read(reading),
+            Err(error) => CheckState::Failed(error),
+        };
+        self.checks.set(&self.dataset, state);
     }
 
-    async fn compute(&self) -> Result<CheckedDataset, String> {
-        let text = |error: crate::client::transport::CommandError| error.to_string();
-        self.step(CheckStep::Rates);
-        let inspection = self
-            .client
-            .inspect_dataset(self.dataset.clone())
-            .await
-            .map_err(text)?;
-        let streams = CheckedStreams::new(&self.client, &self.dataset, inspection.topics());
-        let (rates, timings) = RecordingRate::measure(streams).await?;
-        self.step(CheckStep::Frames);
-        let frames = CameraFrames::measure(streams).await?;
-        self.step(CheckStep::Clock);
-        let clock = ClockOffset::measure(streams, &timings, &frames).await?;
-        self.step(CheckStep::Roles);
-        let robot = self.client.robot(&self.dataset).await.map_err(text)?;
-        let roles = match self.client.joint_roles(&self.dataset).await.map_err(text)? {
-            Some(roles) => roles,
-            None => {
-                JointRoleDiscovery::new(self.client.clone(), robot.clone())
-                    .discover(&self.dataset)
-                    .await?
-            }
+    async fn read(&self) -> Result<CheckReading, String> {
+        let inputs = CheckInputs::read(&self.client, &self.dataset).await?;
+        self.reading(&inputs).await
+    }
+
+    /// What the columns `inputs` name hold: the report once every one of
+    /// them has been filled.
+    async fn reading(&self, inputs: &CheckInputs) -> Result<CheckReading, String> {
+        let Some(roles) = &inputs.roles else {
+            return Ok(CheckReading::NotRun);
         };
-        let joints = if roles.arms().is_empty() {
-            JointChecks::Unidentified
-        } else {
-            JointChecks::Checked(Box::new(self.arms(streams, &roles, robot.as_ref()).await?))
-        };
-        Ok(CheckedDataset {
-            episodes: streams.episode_count(),
-            rates,
-            frames,
-            clock,
-            joints,
+        let columns = inputs.columns()?;
+        let rows = CheckRows::read(&self.client, &self.dataset, &columns).await?;
+        if !columns.iter().all(|column| rows.holds(column)) {
+            return Ok(CheckReading::NotRun);
+        }
+        Ok(CheckReading::Read {
+            report: Rc::new(CheckedDataset::read(inputs, roles, &columns, &rows)?),
+            unchecked: rows.unchecked(&columns),
         })
     }
 
-    async fn arms(
-        &self,
-        streams: CheckedStreams<'_>,
-        roles: &DatasetJointRoles,
-        robot: Option<&DatasetRobot>,
-    ) -> Result<ArmChecks, String> {
-        let arms = roles.arms();
-        self.step(CheckStep::Lag);
-        let lag = StateActionLag::measure(streams, arms).await?;
-        self.step(CheckStep::Limits);
-        let limits = JointLimits::measure(streams, arms, robot).await?;
-        self.step(CheckStep::Spikes);
-        let spikes = JointSpikes::measure(streams, arms).await?;
-        self.step(CheckStep::Pauses);
-        let pauses = Pauses::measure(streams, arms).await?;
-        self.step(CheckStep::Stuck);
-        let stuck = StuckJoints::measure(streams, arms).await?;
-        self.step(CheckStep::Grippers);
-        let grippers = GripperCloses::measure(streams, arms).await?;
-        Ok(ArmChecks {
-            roles: roles.clone(),
-            lag,
-            limits,
-            spikes,
-            pauses,
-            stuck,
-            grippers,
-        })
-    }
-
-    fn step(&self, step: CheckStep) {
-        self.checks.advance(&self.dataset, step);
+    /// Find the joint streams when nobody has, have the backend fill every
+    /// check's column for the episodes it lacks, following it until it
+    /// settles, and read what the columns hold then.
+    async fn run(&self) -> Result<CheckReading, String> {
+        let text = |error: CommandError| error.to_string();
+        let inputs = CheckInputs::read(&self.client, &self.dataset).await?;
+        if inputs.roles.is_none() {
+            self.checks.advance(&self.dataset, |progress| {
+                progress.steps = vec![FINDING_JOINTS];
+                progress.current = Some(FINDING_JOINTS.to_owned());
+            });
+        }
+        let inputs = inputs.with_roles(&self.client).await?;
+        let columns = inputs.columns()?;
+        self.checks.advance(&self.dataset, |progress| {
+            progress
+                .steps
+                .extend(columns.iter().map(|column| column.kind().doing()));
+        });
+        let request = FillRequest::new(
+            self.dataset.clone(),
+            columns
+                .iter()
+                .map(|column| column.fill(inputs.streams()))
+                .collect(),
+        );
+        let fills = FillRuns::current();
+        let mut status = fills.start(&request).await.map_err(text)?;
+        let run = status.id().to_owned();
+        self.checks
+            .advance(&self.dataset, |progress| progress.run = Some(run));
+        while let FillState::Running(step) = status.state() {
+            let step = step.node().to_owned();
+            self.checks
+                .advance(&self.dataset, |progress| progress.current = Some(step));
+            gloo_timers::future::TimeoutFuture::new(POLL_MS).await;
+            status = fills.status(status.id()).await.map_err(text)?;
+        }
+        if let FillState::Failed(reason) = status.state() {
+            return Err(reason.clone());
+        }
+        self.reading(&inputs).await
     }
 }
 
-/// The dataset's checks as the overview shows them, computed the first time
-/// any surface shows the dataset's current version and read from then on.
+/// The dataset's health check as the overview shows it: the report once the
+/// check has run, the way to run it until then, and how far a run has got.
 #[component]
 pub(super) fn DatasetCheckReport(
     listing: EpisodeListing,
@@ -368,35 +460,93 @@ pub(super) fn DatasetCheckReport(
     }));
     let listed = use_memo(move || listing.read().clone().flatten());
     EvidenceOpener::provide(listed.into(), on_open);
+    let run = {
+        let dataset = dataset.clone();
+        move |_| checks.run(&dataset)
+    };
     match checks.state(&dataset) {
-        None | Some(CheckState::Checking(CheckStep::Reading)) => rsx! {
-            p { class: "data-checks-status", role: "status", "{CheckStep::Reading.label()}…" }
+        None | Some(CheckState::Reading) => rsx! {
+            p { class: "data-checks-status", role: "status", "Reading the health check…" }
         },
-        // The first look at a dataset version reads every episode, which
-        // takes a minute; the steps say how far it has got.
-        Some(CheckState::Checking(step)) => rsx! {
-            div { class: "data-checks-progress", role: "status", "aria-live": "polite",
-                p { class: "data-checks-progress-lede", "Checking every episode" }
-                ol { class: "data-checks-steps", "aria-label": "Steps",
-                    for each in CheckStep::ALL.into_iter().skip(1) {
-                        li { key: "{each.label()}", "data-step": each.progress(step),
-                            "aria-current": if each == step { "step" },
-                            span { class: "data-checks-step-mark",
-                                if each.progress(step) == "done" { VerdictMark { verdict: Verdict::Clean } }
+        Some(CheckState::Read(CheckReading::NotRun)) => rsx! {
+            div { class: "data-checks-start",
+                p { class: "data-checks-progress-lede", "Not checked yet" }
+                p { class: "data-checks-status",
+                    "The health check reads every episode once: how often each stream logs, dropped camera frames, clock offsets, and how the arms moved."
+                }
+                Button { purpose: ActionPurpose::Start, variant: ButtonVariant::Solid, size: ButtonSize::Compact,
+                    onclick: run, "Run health check" }
+            }
+        },
+        Some(CheckState::Read(CheckReading::Read { report, unchecked })) => rsx! {
+            if unchecked > 0 {
+                div { class: "data-checks-start",
+                    Notice { tone: NoticeTone::Quiet,
+                        if unchecked == 1 { "1 episode is not checked yet." } else { "{unchecked} episodes are not checked yet." }
+                    }
+                    Button { purpose: ActionPurpose::Start, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
+                        onclick: run, "Check them" }
+                }
+            }
+            CheckReport { sections: report.sections() }
+        },
+        // A run reads every episode once per check, which takes a minute on
+        // a large dataset; the steps say how far it has got.
+        Some(CheckState::Running(progress)) => {
+            let stopping = progress.stopping;
+            let stop = dataset.clone();
+            rsx! {
+                div { class: "data-checks-progress", role: "status", "aria-live": "polite",
+                    p { class: "data-checks-progress-lede", "Checking every episode" }
+                    ol { class: "data-checks-steps", "aria-label": "Steps",
+                        for step in progress.steps.iter().copied() {
+                            li { key: "{step}", "data-step": progress.of(step),
+                                "aria-current": if progress.of(step) == "current" { "step" },
+                                span { class: "data-checks-step-mark",
+                                    if progress.of(step) == "done" { VerdictMark { verdict: Verdict::Clean } }
+                                }
+                                span { "{step}" }
                             }
-                            span { "{each.label()}" }
+                        }
+                    }
+                    if progress.run.is_some() {
+                        Button { purpose: ActionPurpose::Stop, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
+                            disabled: stopping, onclick: move |_| checks.stop(&stop),
+                            if stopping { "Stopping…" } else { "Stop" }
                         }
                     }
                 }
             }
-        },
+        }
         Some(CheckState::Failed(error)) => rsx! {
             div { class: "data-checks-failure",
-                Notice { tone: NoticeTone::Danger, "The checks could not run: {error}" }
+                Notice { tone: NoticeTone::Danger, "The health check could not run: {error}" }
                 Button { purpose: ActionPurpose::Retry, variant: ButtonVariant::Outline, size: ButtonSize::Compact,
                     onclick: move |_| checks.retry(&dataset), "Retry" }
             }
         },
-        Some(CheckState::Ready(report)) => rsx! { CheckReport { sections: report.sections() } },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_run_marks_its_steps_done_up_to_the_one_it_is_on() {
+        let progress = CheckProgress {
+            steps: vec![
+                FINDING_JOINTS,
+                "Measuring recording rates",
+                "Counting camera frames",
+            ],
+            current: Some("Measuring recording rates".into()),
+            run: None,
+            stopping: false,
+        };
+        assert_eq!(progress.of(FINDING_JOINTS), "done");
+        assert_eq!(progress.of("Measuring recording rates"), "current");
+        assert_eq!(progress.of("Counting camera frames"), "ahead");
+        assert_eq!(CheckProgress::default().of(FINDING_JOINTS), "ahead");
     }
 }

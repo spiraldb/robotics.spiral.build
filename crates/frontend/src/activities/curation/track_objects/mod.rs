@@ -72,12 +72,10 @@ pub(super) fn TrackingWorkspace(controller: CurationController, node: String) ->
     };
     let run = MeasureRun::use_run(controller, &node, MeasureVerb::Track);
     let input = MeasureInput::of(controller, &node);
-    // Every episode of a dataset records the same cameras, and the first one
-    // is known before anything reaches the node.
+    // Every episode of a dataset records the same cameras, known before
+    // anything reaches the node.
     let cameras = StreamCatalog::use_camera_topics(
-        controller
-            .sample()
-            .and_then(|sample| sample.episodes().first().map(Episode::selection)),
+        controller.sample().map(|sample| sample.dataset().clone()),
     );
     // A new node starts on the camera that shows the whole workspace, so a
     // run can start as soon as it names what to track.

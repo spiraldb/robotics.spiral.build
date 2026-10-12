@@ -25,7 +25,8 @@ impl PartialEq for RobotModel {
 }
 
 impl RobotModel {
-    /// The model `dataset` ships, or `None` when it has none to draw.
+    /// The model the version of `dataset` the project inspected ships, or
+    /// `None` when it has none to draw.
     pub(super) fn use_dataset(
         dataset: &DatasetSelection,
     ) -> Resource<Result<Option<Self>, String>> {
@@ -33,8 +34,13 @@ impl RobotModel {
         use_resource(move || {
             let dataset = dataset.clone();
             async move {
-                DatasetClient::current()
-                    .robot(&dataset)
+                let client = DatasetClient::current();
+                let inspection = client
+                    .inspect_dataset(dataset)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                client
+                    .robot(inspection.dataset())
                     .await
                     .map(|model| model.map(|model| Self(Rc::new(model))))
                     .map_err(|error| error.to_string())

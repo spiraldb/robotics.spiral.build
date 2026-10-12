@@ -1,21 +1,24 @@
 //! Recording rate: how often every stream logs a message, and the episodes
 //! that log a stream at another rate than the dataset's other episodes do.
-//! The same read says when each stream's first and last message were
-//! logged, which is how the clock check tells which streams share a clock.
+//! Each episode's cell keeps, for every stream it logs more than once, how
+//! many messages it logged and when the first and the last were; the
+//! typical rate a departure is judged against is read over every cell. The
+//! same timings are how the clock check tells which streams share a clock.
+use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, StreamName, Verdict};
 use super::stream_reads::CheckedStreams;
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use spiral_robotics_common::datasets::{DatasetTopic, EpisodeId};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct RecordingRate {
     streams: Vec<StreamRate>,
 }
 
 /// One stream's rate in each episode that logs it more than once.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct StreamRate {
     topic: String,
     camera: bool,
@@ -24,7 +27,7 @@ struct StreamRate {
     rates: Vec<EpisodeRate>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct EpisodeRate {
     episode: EpisodeId,
     hz: f64,
@@ -62,9 +65,10 @@ impl StreamTimings {
     }
 }
 
+/// One stream's timing in one episode, as its cell keeps it.
 #[derive(Deserialize)]
-struct TimingRow {
-    id: EpisodeId,
+pub(super) struct TimingPart {
+    part: String,
     #[serde(flatten)]
     timing: StreamTiming,
 }
@@ -74,29 +78,41 @@ impl RecordingRate {
     /// for the stream, as a share of it.
     const DEPARTURE: f64 = 0.1;
 
-    pub(super) async fn measure(
-        streams: CheckedStreams<'_>,
-    ) -> Result<(Self, StreamTimings), String> {
-        let repeated = streams
+    /// The column keeping each episode's timing of every stream that logs
+    /// more than once in an episode; `None` when no stream does.
+    pub(super) fn column(streams: CheckedStreams<'_>) -> Result<Option<CheckColumn>, String> {
+        let parts = streams
             .topics()
             .iter()
             .filter(|topic| Self::repeats(topic))
-            .collect::<Vec<_>>();
+            .fold(
+                PartsStatement::new(&["messages", "first_ns", "last_ns"]),
+                |parts, topic| {
+                    parts.part(
+                        topic.name(),
+                        format!(
+                            "SELECT id, count(*) AS messages, min(log_time) AS first_ns, max(log_time) AS last_ns FROM {} GROUP BY id",
+                            streams.read(topic)
+                        ),
+                    )
+                },
+            );
+        CheckColumn::of(CheckKind::Rates, parts)
+    }
+
+    /// Every stream's rate in each episode its `cells` time, and the
+    /// timings themselves, by topic.
+    pub(super) fn read(
+        streams: CheckedStreams<'_>,
+        cells: &CheckCells<TimingPart>,
+    ) -> (Self, StreamTimings) {
         let mut timings = StreamTimings::default();
-        for (part, row) in streams.parts::<TimingRow>(|streams| Ok(repeated
-            .iter()
-            .map(|topic| {
-                format!(
-                    "SELECT id, count(*) AS messages, min(log_time) AS first_ns, max(log_time) AS last_ns FROM {} GROUP BY id",
-                    streams.read(topic)
-                )
-            })
-            .collect::<Vec<_>>())).await? {
+        for (episode, part) in cells.parts() {
             timings
                 .streams
-                .entry(repeated[part].name().to_owned())
+                .entry(part.part.clone())
                 .or_default()
-                .insert(row.id, row.timing);
+                .insert(episode.clone(), part.timing);
         }
         let rates = streams
             .topics()
@@ -117,12 +133,12 @@ impl RecordingRate {
                     .collect(),
             })
             .collect();
-        Ok((Self { streams: rates }, timings))
+        (Self { streams: rates }, timings)
     }
 
     /// Whether `topic` logs more than one message per episode, so it has a
     /// rate to measure.
-    fn repeats(topic: &DatasetTopic) -> bool {
+    pub(super) fn repeats(topic: &DatasetTopic) -> bool {
         topic
             .samples()
             .is_none_or(|samples| samples > topic.members())
@@ -271,5 +287,36 @@ mod tests {
         };
         assert_eq!(timing.hz(), Some(30.0));
         assert_eq!(Median::of([3.0, 1.0, 2.0, 10.0]), Some(2.5));
+    }
+
+    #[test]
+    fn rates_are_read_from_each_episodes_cell_and_once_per_episode_streams_listed() {
+        use spiral_robotics_common::datasets::{DatasetSelection, DatasetTopic};
+        let dataset = DatasetSelection::new(vec!["dataset_folding".into()]).unwrap();
+        let topics = [
+            DatasetTopic::new("/joints".into(), vec![]).with_coverage(2, Some(600)),
+            DatasetTopic::new("/instruction".into(), vec![]).with_coverage(2, Some(2)),
+        ];
+        let streams = CheckedStreams::new(&dataset, &topics);
+        let column = RecordingRate::column(streams).unwrap().unwrap();
+        assert_eq!(column.kind(), CheckKind::Rates);
+        let timing = |messages, last_ns| TimingPart {
+            part: "/joints".into(),
+            timing: StreamTiming {
+                messages,
+                first_ns: 0,
+                last_ns,
+            },
+        };
+        let cells = CheckCells::fixture(vec![
+            (episode(1), vec![timing(301, 10_000_000_000)]),
+            (episode(2), Vec::new()),
+        ]);
+        let (rates, timings) = RecordingRate::read(streams, &cells);
+        assert_eq!(rates.streams.len(), 2);
+        assert_eq!(rates.streams[0].rates.len(), 1);
+        assert_eq!(rates.streams[0].rate_label(), "30.0 Hz");
+        assert_eq!(rates.streams[1].rate_label(), "once per episode");
+        assert_eq!(timings.of("/joints").map(BTreeMap::len), Some(1));
     }
 }

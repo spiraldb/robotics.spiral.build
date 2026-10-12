@@ -1,7 +1,6 @@
 //! Native SQLite snapshots contain one project's records and no backend secrets.
 use super::{
-    StudioProject, curations, dataset_check_reports, dataset_joint_roles, dataset_robots,
-    published_models, training_runs,
+    StudioProject, curations, dataset_joint_roles, dataset_robots, published_models, training_runs,
 };
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -265,17 +264,6 @@ impl StudioSnapshot {
                 .map_err(|error| error.to_string())?;
         }
         for mut row in dataset_joint_roles::Entity::find()
-            .all(&self.database)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            row.project = project.key().to_owned();
-            row.into_active_model()
-                .insert(&transaction)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        for mut row in dataset_check_reports::Entity::find()
             .all(&self.database)
             .await
             .map_err(|error| error.to_string())?

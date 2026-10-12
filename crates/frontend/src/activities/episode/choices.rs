@@ -221,9 +221,12 @@ impl StreamChoices {
             }
         });
     }
-    /// Reads every data stream's schema in one query and plots the busiest
-    /// stream with numeric fields, so Plots is never empty on open. The other
-    /// schemas serve the fold and the disabled checks.
+    /// Plots the busiest data stream with numeric fields, so Plots is never
+    /// empty on open. The busiest stream's schema is read alone first, so its
+    /// plot need not wait for every stream's: each stream a schema read names
+    /// costs Spiral its own catalog work. The others' schemas follow in one
+    /// query; they serve the fold and the disabled checks, and the plot when
+    /// the busiest stream has nothing to draw.
     fn plot_default_stream(&mut self, catalog: &StreamCatalog) {
         let ranked = catalog.data_by_traffic();
         if ranked.is_empty() {
@@ -238,37 +241,57 @@ impl StreamChoices {
         let generation = *self.generation.peek();
         let mut choices = *self;
         self.spawn(async move {
-            let reads = ranked
-                .iter()
-                .map(|stream| stream.read().clone())
-                .collect::<Vec<_>>();
-            let answer = MessageField::values_of(&reads).await;
-            if *choices.generation.peek() != generation {
+            let (busiest, others) = ranked.split_at(1);
+            let Some(plotted) = choices.read_schemas(generation, busiest, false).await else {
                 return;
-            }
-            let mut schemas = choices.schemas.write();
-            let roots = match answer {
-                Ok(roots) => roots,
-                Err(error) => {
-                    for stream in &ranked {
-                        schemas
-                            .insert(stream.key().to_owned(), StreamSchema::Failed(error.clone()));
-                    }
-                    return;
-                }
             };
-            if let Some((stream, leaves)) = ranked
+            if !others.is_empty() {
+                choices.read_schemas(generation, others, plotted).await;
+            }
+        });
+    }
+    /// Read `streams`' schemas in one query and keep them, plotting the first
+    /// with numeric fields unless the default plot is `plotted` already.
+    /// Whether the default plot is chosen now; `None` once the episode's
+    /// streams were opened again, which answers nobody.
+    async fn read_schemas(
+        &mut self,
+        generation: u64,
+        streams: &[RecordedStream],
+        plotted: bool,
+    ) -> Option<bool> {
+        let reads = streams
+            .iter()
+            .map(|stream| stream.read().clone())
+            .collect::<Vec<_>>();
+        let answer = MessageField::values_of(&reads).await;
+        if *self.generation.peek() != generation {
+            return None;
+        }
+        let mut schemas = self.schemas.write();
+        let roots = match answer {
+            Ok(roots) => roots,
+            Err(error) => {
+                for stream in streams {
+                    schemas.insert(stream.key().to_owned(), StreamSchema::Failed(error.clone()));
+                }
+                return Some(plotted);
+            }
+        };
+        let plotted = plotted
+            || streams
                 .iter()
                 .zip(&roots)
                 .map(|(stream, root)| (stream, root.default_plot_leaves()))
                 .find(|(_, leaves)| !leaves.is_empty())
-            {
-                choices.plots.write().adopt_default(stream.key(), leaves);
-            }
-            for (stream, root) in ranked.iter().zip(roots) {
-                schemas.insert(stream.key().to_owned(), StreamSchema::Ready(root));
-            }
-        });
+                .is_some_and(|(stream, leaves)| {
+                    self.plots.write().adopt_default(stream.key(), leaves);
+                    true
+                });
+        for (stream, root) in streams.iter().zip(roots) {
+            schemas.insert(stream.key().to_owned(), StreamSchema::Ready(root));
+        }
+        Some(plotted)
     }
     /// A stream with nothing to plot: at most one message, or a schema known
     /// to have no numeric fields. Cameras are never quiet. This is a count

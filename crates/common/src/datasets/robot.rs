@@ -1,20 +1,21 @@
 //! A dataset's resolved visualization, independent of connected hardware.
-use super::DatasetSelection;
+use super::DatasetSummary;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// A dataset's resolved robot, or `None` when it supplies no usable model.
+/// The robot the browser resolved for the dataset version it read, or
+/// `None` when the dataset supplies no usable model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetRobotSave {
-    dataset: DatasetSelection,
+    dataset: DatasetSummary,
     robot: Option<DatasetRobot>,
 }
 impl DatasetRobotSave {
-    pub fn new(dataset: DatasetSelection, robot: Option<DatasetRobot>) -> Self {
+    pub fn new(dataset: DatasetSummary, robot: Option<DatasetRobot>) -> Self {
         Self { dataset, robot }
     }
-    pub fn into_parts(self) -> (DatasetSelection, Option<DatasetRobot>) {
+    pub fn into_parts(self) -> (DatasetSummary, Option<DatasetRobot>) {
         (self.dataset, self.robot)
     }
 }

@@ -90,6 +90,9 @@ impl EpisodeTopicRequest {
     }
 }
 
+/// A dataset at one version: what Studio keeps about a dataset, such as its
+/// robot and joint roles, is filed under this identity, as the browser read
+/// it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DatasetSummary {
     selection: DatasetSelection,
@@ -112,6 +115,11 @@ impl DatasetSummary {
     }
     pub fn version_id(&self) -> &str {
         &self.version_id
+    }
+    /// The resource and version what Studio keeps about this dataset is
+    /// filed under.
+    pub fn identity(&self) -> (&str, &str) {
+        (&self.resource_id, &self.version_id)
     }
 }
 

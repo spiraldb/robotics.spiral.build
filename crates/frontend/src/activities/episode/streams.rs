@@ -7,7 +7,8 @@
 use crate::activities::data::DatasetClient;
 use dioxus::prelude::*;
 use spiral_robotics_common::datasets::{
-    DatasetTopic, EpisodeSelection, EpisodeTopicRequest, MessageRead,
+    DatasetInspection, DatasetSelection, DatasetTopic, EpisodeSelection, EpisodeTopicRequest,
+    MessageRead,
 };
 use std::collections::BTreeMap;
 
@@ -145,26 +146,41 @@ impl StreamCatalog {
             .map_err(|error| error.to_string())?;
         Ok(Self::new(topics, &episode))
     }
-    /// The camera topics `episode` recorded: every episode of one recording
-    /// session carries the same cameras, so one episode answers for a sample.
-    /// `None` until they are read, or when they cannot be; no episode records
-    /// no cameras.
+    /// The camera topics `dataset` records, in its own topic order, from the
+    /// project's inspection of it: every episode of a dataset carries the
+    /// same cameras, so the dataset answers for each of them. `None` until
+    /// the inspection is read, or when it cannot be; no dataset records no
+    /// cameras.
     pub(in crate::activities) fn use_camera_topics(
-        episode: Option<EpisodeSelection>,
+        dataset: Option<DatasetSelection>,
     ) -> Option<Vec<String>> {
-        let cameras = use_resource(use_reactive(&episode, move |episode| async move {
-            let Some(episode) = episode else {
+        // An inspection already read answers on the first frame, and is
+        // always the current dataset's.
+        let known = dataset
+            .as_ref()
+            .and_then(|dataset| DatasetClient::current().inspected(dataset))
+            .map(|inspection| Self::cameras_of(&inspection));
+        let cameras = use_resource(use_reactive(&dataset, move |dataset| async move {
+            let Some(dataset) = dataset else {
                 return Some(Vec::new());
             };
-            let catalog = Self::load(episode).await.ok()?;
-            Some(
-                catalog
-                    .videos()
-                    .map(|stream| stream.name().to_owned())
-                    .collect::<Vec<_>>(),
-            )
+            let inspection = DatasetClient::current()
+                .inspect_dataset(dataset)
+                .await
+                .ok()?;
+            Some(Self::cameras_of(&inspection))
         }));
-        cameras.read().clone().flatten()
+        known.or_else(|| cameras.read().clone().flatten())
+    }
+    /// The camera topics `inspection` names, each once, in its topic order.
+    fn cameras_of(inspection: &DatasetInspection) -> Vec<String> {
+        let mut cameras = Vec::<String>::new();
+        for topic in inspection.topics().iter().filter(|topic| topic.is_video()) {
+            if !cameras.iter().any(|camera| camera == topic.name()) {
+                cameras.push(topic.name().to_owned());
+            }
+        }
+        cameras
     }
     pub(in crate::activities) fn streams(&self) -> &[RecordedStream] {
         &self.streams

@@ -32,6 +32,7 @@
 pub(crate) mod state;
 pub(crate) mod workspace;
 
+pub(in crate::activities) use client::FillRuns;
 pub(crate) use curated_view::{CuratedFills, CuratedView, SubtaskColumn, ViewFill};
 
 mod annotate;

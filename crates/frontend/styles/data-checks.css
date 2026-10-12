@@ -629,10 +629,15 @@
     }
   }
 
-  .data-checks-failure {
+  .data-checks-failure,
+  .data-checks-start {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+
+  .data-checks-start + .data-checks-report {
+    margin-top: 16px;
   }
 }

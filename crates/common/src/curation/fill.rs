@@ -20,6 +20,11 @@ pub enum AnswerSource {
     /// A statement over the episode bound as `$1`, answering `episode_id`
     /// and `answer` in one row.
     Statement { statement: String },
+    /// A statement over the whole dataset, answering `episode_id` and
+    /// `answer` in one row per episode it measures: one read answers every
+    /// episode the column is filled for, where reading each episode alone
+    /// would read the dataset's tables once per episode.
+    DatasetStatement { statement: String },
     /// The progress service's scores of the episode's video on `camera`,
     /// from the checkpoint `model`, as the service `revision` computes them.
     ProgressService {

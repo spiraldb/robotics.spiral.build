@@ -178,6 +178,9 @@ fn every_model_node_previews_what_it_has_the_backend_answer_and_store_first() {
             AnswerSource::Statement { statement } => {
                 assert!(statement.contains("spql.ai.breakdown_task("), "{statement}")
             }
+            AnswerSource::DatasetStatement { .. } => {
+                panic!("A preview asks about its listed episodes, one at a time")
+            }
         }
     }
     // A Select asks nothing, so it has no preview.

@@ -58,6 +58,10 @@ impl MigratorTrait for Migrator {
                 "m20261011_000001_curations_encoding_6",
                 include_str!("m20261011_000001_curations_encoding_6.sql"),
             )),
+            Box::new(SqlMigration::new(
+                "m20261012_000001_drop_dataset_check_reports",
+                include_str!("m20261012_000001_drop_dataset_check_reports.sql"),
+            )),
         ]
     }
 }

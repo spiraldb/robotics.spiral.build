@@ -14,7 +14,7 @@ use crate::activities::episode::{Episode, StreamCatalog};
 use crate::components::scoped_task::ScopedTask;
 use dioxus::dioxus_core::{ScopeId, current_scope_id};
 use dioxus::prelude::*;
-use spiral_robotics_common::datasets::{EpisodeId, EpisodeSelection};
+use spiral_robotics_common::datasets::{DatasetSelection, EpisodeId};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::SqlLiteral;
 use std::collections::HashMap;
@@ -138,9 +138,6 @@ impl StillState {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct EpisodeStills {
     decoded: Signal<HashMap<StillKey, Signal<StillState>>>,
-    /// Each dataset's overview camera, by SQL name: every list of its
-    /// episodes shows its stills on that one.
-    cameras: Signal<HashMap<String, String>>,
     /// The project's scope: decodes run as its tasks, so one outlives the row
     /// that asked for it and stops with the project.
     owner: ScopeId,
@@ -150,36 +147,20 @@ impl EpisodeStills {
     pub(crate) fn use_provider() -> Self {
         use_context_provider(|| Self {
             decoded: Signal::new(HashMap::new()),
-            cameras: Signal::new(HashMap::new()),
             owner: current_scope_id(),
         })
     }
     fn current() -> Self {
         consume_context()
     }
-    /// The camera a list of `first`'s dataset shows its stills on: the one
-    /// that shows the workspace best. Every episode of a dataset records the
-    /// same cameras, so one answers for all of them, once per project.
+    /// The camera every list of `dataset`'s episodes shows its stills on:
+    /// the one that shows the workspace best, among the cameras the
+    /// project's inspection of the dataset names.
     pub(in crate::activities) fn use_overview_camera(
-        first: Option<EpisodeSelection>,
+        dataset: Option<DatasetSelection>,
     ) -> Option<String> {
-        let mut stills = Self::current();
-        let dataset = first.as_ref().map(|episode| episode.dataset().sql_name());
-        let known = dataset
-            .as_ref()
-            .and_then(|dataset| stills.cameras.read().get(dataset).cloned());
-        let recorded = StreamCatalog::use_camera_topics(first.filter(|_| known.is_none()));
-        let found = known
-            .or_else(|| StreamCatalog::overview_camera(recorded.as_deref()?).map(str::to_owned));
-        use_effect(use_reactive((&dataset, &found), move |(dataset, found)| {
-            let (Some(dataset), Some(found)) = (dataset, found) else {
-                return;
-            };
-            if stills.cameras.peek().get(&dataset) != Some(&found) {
-                stills.cameras.write().insert(dataset, found);
-            }
-        }));
-        found
+        let recorded = StreamCatalog::use_camera_topics(dataset);
+        StreamCatalog::overview_camera(recorded.as_deref()?).map(str::to_owned)
     }
     /// The still of `moment` on `camera` if another row already asked for
     /// it, without asking: a row that mounts over a decoded picture shows it

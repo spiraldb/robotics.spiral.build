@@ -1,28 +1,31 @@
 //! Stuck joints: samples where every measured joint of an arm holds exactly
 //! still while one of its commands moves more than 0.01 rad — an arm that
-//! did not follow, or a position stream that stopped updating.
+//! did not follow, or a position stream that stopped updating. Each
+//! episode's cell keeps every commanded arm's stuck samples; whether its
+//! commands and positions were logged together is judged when the report
+//! is read.
+use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::state_action_lag::Pairing;
 use super::stream_reads::{CheckedStreams, Greatest, PairedColumns};
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct StuckJoints {
     arms: Vec<ArmStuck>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct ArmStuck {
     arm: String,
     episodes: Vec<EpisodeStuck>,
     unpaired: Vec<EpisodeId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct EpisodeStuck {
-    #[serde(rename = "id")]
     episode: EpisodeId,
     samples: u64,
     stuck_s: f64,
@@ -30,12 +33,17 @@ struct EpisodeStuck {
     first_at: Option<f64>,
 }
 
+/// One commanded arm in one episode, as its cell keeps it: how many
+/// commands met a position logged at the same instant and how many it
+/// logged, then its stuck samples, their seconds, and when the first was.
 #[derive(Deserialize)]
-struct StuckRow {
+pub(super) struct StuckPart {
+    part: String,
     paired: u64,
     commands: u64,
-    #[serde(flatten)]
-    stuck: EpisodeStuck,
+    samples: u64,
+    stuck_s: f64,
+    first_at: Option<f64>,
 }
 
 impl StuckJoints {
@@ -45,41 +53,34 @@ impl StuckJoints {
     /// a few single samples are noise.
     const FLAGGED: f64 = 0.5;
 
-    pub(super) async fn measure(
+    /// The column keeping every commanded arm's stuck samples in each
+    /// episode; `None` when no arm records its commands.
+    pub(super) fn column(
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
-    ) -> Result<Self, String> {
-        let commanded = arms
-            .iter()
-            .filter_map(|arm| Some((arm, arm.action()?)))
-            .collect::<Vec<_>>();
-        let mut measured = commanded
-            .iter()
-            .map(|(arm, _)| ArmStuck {
-                arm: arm.name().to_owned(),
-                episodes: Vec::new(),
-                unpaired: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        for (arm, row) in streams
-            .parts::<StuckRow>(|streams| {
-                commanded
-                    .iter()
-                    .map(|(arm, action)| {
-                        Self::sql(streams, &PairedColumns::new(arm.state(), action))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .await?
-        {
-            let arm = &mut measured[arm];
-            if Pairing::together(row.paired, row.commands) {
-                arm.episodes.push(row.stuck);
-            } else {
-                arm.unpaired.push(row.stuck.episode);
-            }
+    ) -> Result<Option<CheckColumn>, String> {
+        let mut parts =
+            PartsStatement::new(&["paired", "commands", "samples", "stuck_s", "first_at"]);
+        for arm in arms {
+            let Some(action) = arm.action() else {
+                continue;
+            };
+            let paired = PairedColumns::new(arm.state(), action);
+            parts = parts.part(arm.name(), Self::sql(streams, &paired)?);
         }
-        Ok(Self { arms: measured })
+        CheckColumn::of(CheckKind::Stuck, parts)
+    }
+
+    /// Each commanded arm's stuck samples in every episode its `cells`
+    /// measured.
+    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<StuckPart>) -> Self {
+        Self {
+            arms: arms
+                .iter()
+                .filter(|arm| arm.action().is_some())
+                .map(|arm| ArmStuck::read(arm.name(), cells))
+                .collect(),
+        }
     }
 
     fn sql(streams: CheckedStreams<'_>, paired: &PairedColumns<'_>) -> Result<String, String> {
@@ -169,6 +170,29 @@ impl StuckJoints {
 }
 
 impl ArmStuck {
+    /// The arm's stuck samples in each episode `cells` measured it in whose
+    /// commands and positions were logged together; the others are
+    /// unpaired.
+    fn read(arm: &str, cells: &CheckCells<StuckPart>) -> Self {
+        let mut read = Self {
+            arm: arm.to_owned(),
+            episodes: Vec::new(),
+            unpaired: Vec::new(),
+        };
+        for (episode, part) in cells.parts().filter(|(_, part)| part.part == arm) {
+            if Pairing::together(part.paired, part.commands) {
+                read.episodes.push(EpisodeStuck {
+                    episode: episode.clone(),
+                    samples: part.samples,
+                    stuck_s: part.stuck_s,
+                    first_at: part.first_at,
+                });
+            } else {
+                read.unpaired.push(episode.clone());
+            }
+        }
+        read
+    }
     fn most(&self) -> String {
         let most = self
             .episodes
@@ -190,5 +214,54 @@ impl ArmStuck {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::stream_reads::TwoArmDataset;
+    use super::*;
+
+    fn episode(ordinal: u32) -> EpisodeId {
+        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
+    }
+
+    #[test]
+    fn a_commanded_arms_stuck_time_is_read_where_it_was_logged_together() {
+        let dataset = TwoArmDataset::new();
+        let column = StuckJoints::column(dataset.streams(), dataset.arms())
+            .unwrap()
+            .unwrap();
+        assert_eq!(column.kind(), CheckKind::Stuck);
+        let statement = dataset.statement(&column);
+        assert!(statement.contains(
+            "SELECT 'left' AS part, id, paired, commands, samples, stuck_s, first_at FROM (WITH "
+        ));
+        assert!(!statement.contains("'right'"));
+        assert!(
+            StuckJoints::column(dataset.streams(), &dataset.arms()[1..])
+                .unwrap()
+                .is_none()
+        );
+        let part = |paired, stuck_s| StuckPart {
+            part: "left".into(),
+            paired,
+            commands: 1000,
+            samples: 30,
+            stuck_s,
+            first_at: Some(2.5),
+        };
+        let cells = CheckCells::fixture(vec![
+            (episode(1), vec![part(1000, 1.0)]),
+            (episode(2), vec![part(1000, 0.1)]),
+            (episode(3), vec![part(10, 2.0)]),
+            (episode(4), Vec::new()),
+        ]);
+        let stuck = StuckJoints::read(dataset.arms(), &cells);
+        assert_eq!(stuck.arms.len(), 1);
+        assert_eq!(stuck.arms[0].episodes.len(), 2);
+        assert_eq!(stuck.arms[0].unpaired, [episode(3)]);
+        assert_eq!(stuck.arms[0].flagged().len(), 1);
+        assert_eq!(stuck.arms[0].most(), "30 samples");
     }
 }

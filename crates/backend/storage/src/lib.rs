@@ -19,7 +19,7 @@ mod workspaces;
 pub mod answers {
     //! Each dataset's table of stored model answers, which curation fills write.
 
-    pub use crate::datasets::{ColumnAnswers, DatasetAnswers, EpisodeAnswer};
+    pub use crate::datasets::{ColumnAnswers, DatasetAnswers, EpisodeAnswer, StatementAnswers};
 }
 
 pub mod bundle {

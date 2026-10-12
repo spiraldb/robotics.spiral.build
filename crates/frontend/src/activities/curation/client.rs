@@ -1,6 +1,7 @@
 //! The saved curations: list them, load one by id, store one back, delete one;
-//! the fill runs that store their model answers and publish their views; and
-//! which episodes a column of those answers already holds.
+//! which episodes a column of their answers already holds; and the fill runs
+//! that compute answers-table columns, which curations and the dataset health
+//! check both start.
 //!
 //! Build one inside the task that awaits it, as every other Studio client is
 //! built, so the request names the mounting scope's project.
@@ -60,37 +61,6 @@ impl CurationClient {
             .await
     }
 
-    /// Start filling what `request` asks for; the backend works on it after
-    /// this returns.
-    pub(super) async fn start_fill(
-        &self,
-        request: &FillRequest,
-    ) -> Result<FillStatus, CommandError> {
-        self.0
-            .request(HttpRequest::new("POST", "/api/curation-fills").json(request))
-            .await
-    }
-
-    /// Where fill run `id` stands.
-    pub(super) async fn fill(&self, id: &str) -> Result<FillStatus, CommandError> {
-        self.0
-            .request(HttpRequest::new(
-                "GET",
-                format!("/api/curation-fills/{}", id.url_component()),
-            ))
-            .await
-    }
-
-    /// Ask fill run `id` to start nothing more; what is in flight is written.
-    pub(super) async fn stop_fill(&self, id: &str) -> Result<(), CommandError> {
-        self.0
-            .request(HttpRequest::new(
-                "POST",
-                format!("/api/curation-fills/{}/stop", id.url_component()),
-            ))
-            .await
-    }
-
     /// The episodes `request`'s column holds an answer for, failed ones
     /// included.
     pub(super) async fn filled(
@@ -102,18 +72,59 @@ impl CurationClient {
             .await
     }
 
-    /// Every fill run that publishes a view.
-    pub(super) async fn publications(&self) -> Result<Vec<FillStatus>, CommandError> {
-        self.0
-            .request(HttpRequest::new("GET", "/api/curation-fills"))
-            .await
-    }
-
     /// Every view the project's curations published, with the statement each
     /// is read through.
     pub(super) async fn published_views(&self) -> Result<Vec<PublishedView>, CommandError> {
         self.0
             .request(HttpRequest::new("GET", "/api/curated-views"))
+            .await
+    }
+}
+
+/// The backend's fill runs: each computes columns of a dataset's answers
+/// table, and a curation's may publish views once they are written.
+pub(in crate::activities) struct FillRuns(ProjectClient);
+
+impl FillRuns {
+    pub(in crate::activities) fn current() -> Self {
+        Self(ProjectClient::current())
+    }
+
+    /// Start filling what `request` asks for; the backend works on it after
+    /// this returns.
+    pub(in crate::activities) async fn start(
+        &self,
+        request: &FillRequest,
+    ) -> Result<FillStatus, CommandError> {
+        self.0
+            .request(HttpRequest::new("POST", "/api/curation-fills").json(request))
+            .await
+    }
+
+    /// Where run `id` stands.
+    pub(in crate::activities) async fn status(&self, id: &str) -> Result<FillStatus, CommandError> {
+        self.0
+            .request(HttpRequest::new(
+                "GET",
+                format!("/api/curation-fills/{}", id.url_component()),
+            ))
+            .await
+    }
+
+    /// Ask run `id` to start nothing more; what is in flight is written.
+    pub(in crate::activities) async fn stop(&self, id: &str) -> Result<(), CommandError> {
+        self.0
+            .request(HttpRequest::new(
+                "POST",
+                format!("/api/curation-fills/{}/stop", id.url_component()),
+            ))
+            .await
+    }
+
+    /// Every run that publishes a view.
+    pub(super) async fn publications(&self) -> Result<Vec<FillStatus>, CommandError> {
+        self.0
+            .request(HttpRequest::new("GET", "/api/curation-fills"))
             .await
     }
 }

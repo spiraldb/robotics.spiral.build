@@ -77,17 +77,11 @@ impl Thumbnails {
         });
         // Only an index about no camera has to ask which ones were recorded,
         // and it asks what Data's rail asks, so both show the same camera.
-        let first = named
+        let dataset = named
             .is_none()
-            .then(|| {
-                controller
-                    .sample()?
-                    .episodes()
-                    .first()
-                    .map(Episode::selection)
-            })
+            .then(|| controller.sample().map(|sample| sample.dataset().clone()))
             .flatten();
-        let overview = EpisodeStills::use_overview_camera(first);
+        let overview = EpisodeStills::use_overview_camera(dataset);
         let camera = named.or(overview);
         let source = use_memo(use_reactive((&camera,), move |(camera,)| {
             Some(ThumbnailSource {

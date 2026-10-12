@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pyarrow as pa
 from PIL import Image
+from video_service.episode import RejectedVideo
 from video_service.service import RetryLater
 
 from object_tracking.video import SampledPicture
@@ -52,6 +53,11 @@ OUTPUT_SCHEMA = pa.schema(
 
 class TrackingFailed(RetryLater):
     """The tracker failed on an episode, such as running out of GPU memory: a service error."""
+
+
+# What SAM 3.1 raises when it propagates objects left with no conditioning frame. It reaches that
+# state on some episodes' pictures every time it tracks them, so asking again cannot help.
+SAM_DEAD_END = "No points are provided"
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,8 @@ class TrackerPool:
                 continue
             if kind == "tracked":
                 answer.set_result(detail)
+            elif kind == "rejected":
+                answer.set_exception(RejectedVideo(f"SAM 3.1 cannot track this episode: {detail}"))
             else:
                 answer.set_exception(TrackingFailed(detail))
 
@@ -163,8 +171,17 @@ class TrackerWorker:
                 answers.put((job.number, "tracked", TrackerWorker._track(predictor, job)))
             except Exception as error:  # one episode's failure, not the worker's
                 LOG.exception("tracking failed")
-                answers.put((job.number, "failed", f"{type(error).__name__}: {error}"))
+                answers.put((job.number, TrackerWorker.outcome(error), f"{type(error).__name__}: {error}"))
                 torch.cuda.empty_cache()
+
+    @staticmethod
+    def outcome(error: Exception) -> str:
+        """How an episode's failure is answered: `rejected` when SAM 3.1 refuses its pictures every
+        time, so the episode is answered as one it cannot track; else `failed`, a service error to
+        ask again, as running out of GPU memory is."""
+        if type(error) is RuntimeError and SAM_DEAD_END in str(error):
+            return "rejected"
+        return "failed"
 
     @staticmethod
     def _track(predictor, job: TrackingJob) -> dict[int, list[dict]]:

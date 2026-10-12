@@ -39,6 +39,11 @@ impl QueryRefresh {
     fn revision(self, domain: QueryDomain) -> Signal<u64> {
         self.revisions[domain as usize]
     }
+    /// How many times `domain` has been invalidated, read without
+    /// subscribing to it.
+    pub(crate) fn invalidations(self, domain: QueryDomain) -> u64 {
+        *self.revision(domain).peek()
+    }
 }
 
 /// How long a policy waits before reading again.

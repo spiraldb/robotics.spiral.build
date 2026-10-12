@@ -26,7 +26,7 @@ use spiral_robotics_common::curation::{
 use spiral_robotics_common::datasets::{CameraVideo, EpisodeId, EpisodeSelection};
 use spiral_robotics_common::relations::EpisodeQueryRequest;
 use spiral_robotics_common::sql::{ReadOnlyQuery, ReadOnlyQueryMode};
-use spiral_robotics_storage::answers::{ColumnAnswers, EpisodeAnswer};
+use spiral_robotics_storage::answers::{ColumnAnswers, EpisodeAnswer, StatementAnswers};
 use spiral_robotics_storage::{ProviderKeys, StorageManager};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -88,7 +88,8 @@ impl FillRuns {
                 Self::read_only(statement)?;
             }
             match column.source() {
-                AnswerSource::Statement { statement } => Self::read_only(statement)?,
+                AnswerSource::Statement { statement }
+                | AnswerSource::DatasetStatement { statement } => Self::read_only(statement)?,
                 AnswerSource::ProgressService { .. } if progress.is_none() => {
                     progress = Some(
                         ProgressService::of(&self.keys, self.scorings.clone()).map_err(invalid)?,
@@ -200,7 +201,9 @@ impl FillWork {
     /// How many of a column's episodes `source` is asked about at once.
     fn in_flight(source: &AnswerSource) -> usize {
         match source {
-            AnswerSource::Statement { .. } => STATEMENTS_IN_FLIGHT,
+            AnswerSource::Statement { .. } | AnswerSource::DatasetStatement { .. } => {
+                STATEMENTS_IN_FLIGHT
+            }
             AnswerSource::ProgressService { .. } => SCORINGS_IN_FLIGHT,
             AnswerSource::ObjectTracking { .. } => TRACKINGS_IN_FLIGHT,
         }
@@ -225,6 +228,9 @@ impl FillWork {
                     .then(|| "The model could not answer.".to_owned());
                 Ok(Answered { answer, failure })
             }
+            AnswerSource::DatasetStatement { .. } => Err(
+                "A dataset statement answers every episode in one read, not one at a time.".into(),
+            ),
             AnswerSource::ProgressService {
                 camera,
                 model,
@@ -368,14 +374,64 @@ impl FillRun {
         let total = needed.len();
         self.report(FillStep::new(node, 0, Some(total)));
         let mut held = ColumnAnswers::default();
+        let failed = match column.source() {
+            AnswerSource::DatasetStatement { statement } => self
+                .answer_at_once(node, statement, needed, work, &mut held)
+                .await
+                .err(),
+            source => {
+                self.answer_each(node, source, needed, work, &mut held)
+                    .await
+            }
+        };
+        answers.write(column.column(), held).await?;
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// Answer `needed` with one read of `statement` over the whole dataset.
+    /// An episode it measured nothing for is answered as failed, so it is
+    /// not asked again.
+    async fn answer_at_once(
+        &self,
+        node: &str,
+        statement: &str,
+        needed: Vec<EpisodeId>,
+        work: &FillWork,
+        held: &mut ColumnAnswers,
+    ) -> Result<(), String> {
+        if needed.is_empty() {
+            return Ok(());
+        }
+        let total = needed.len();
+        let (schema, batches) = work.storage.queries().batches(statement).await?;
+        let mut answered = StatementAnswers::from_statement(&schema, &batches)?;
+        for episode in needed {
+            let answer = answered.answer(&episode);
+            held.hold(episode, answer);
+        }
+        self.report(FillStep::new(node, held.len(), Some(total)));
+        Ok(())
+    }
+
+    /// Ask `source` about each of `needed`, a few at a time, holding every
+    /// answer; why the run must end, if it must.
+    async fn answer_each(
+        &self,
+        node: &str,
+        source: &AnswerSource,
+        needed: Vec<EpisodeId>,
+        work: &FillWork,
+        held: &mut ColumnAnswers,
+    ) -> Option<String> {
+        let total = needed.len();
         let mut failed = None::<String>;
         let mut answering = futures_util::stream::iter(needed)
             .take_while(|_| std::future::ready(!self.progress.recover_lock().halted))
             .map(|episode| async move {
-                let answer = work.answer(&self.request, column.source(), &episode).await;
+                let answer = work.answer(&self.request, source, &episode).await;
                 (episode, answer)
             })
-            .buffer_unordered(FillWork::in_flight(column.source()));
+            .buffer_unordered(FillWork::in_flight(source));
         while let Some((episode, answer)) = answering.next().await {
             match answer {
                 Ok(Answered { answer, failure }) => {
@@ -396,8 +452,7 @@ impl FillRun {
             }
         }
         drop(answering);
-        answers.write(column.column(), held).await?;
-        failed.map_or(Ok(()), Err)
+        failed
     }
 
     fn report(&self, step: FillStep) {

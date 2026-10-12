@@ -234,6 +234,23 @@ impl<'a> ProjectQueries<'a> {
         Ok((schema, batches))
     }
 
+    /// A read-only statement over the whole dataset, read whole: every
+    /// batch, and the schema they share even when there is none.
+    pub async fn batches(&self, sql: &str) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+        SpiralSql::ensure_read_only(sql)?;
+        let mut connection = self.project_store.connect().await?;
+        let mut records = connection
+            .query(SqlStatement::from(sql.trim()))
+            .await
+            .map_err(|error| format!("executing Spiral query: {error}"))?;
+        let schema = Arc::clone(records.schema());
+        let mut batches = Vec::new();
+        while let Some(batch) = records.next().await {
+            batches.push(batch.map_err(|error| format!("reading Spiral result: {error}"))?);
+        }
+        Ok((schema, batches))
+    }
+
     /// The same episode read as it arrives, for a caller that passes it on
     /// without holding it: the stream keeps its connection until it ends.
     pub async fn stream_for_episode(

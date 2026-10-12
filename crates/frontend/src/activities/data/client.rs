@@ -1,23 +1,28 @@
 //! Dataset requests and their query invalidation policy.
+use super::inspections::{DatasetInspections, Inspecting};
 use crate::client::project::ProjectClient;
 use crate::client::transport::{CommandError, HttpRequest};
-use spiral_robotics_common::datasets::{DatasetInspection, DatasetSelection, ProjectResource};
+use spiral_robotics_common::datasets::{
+    DatasetInspection, DatasetSelection, DatasetSummary, ProjectResource,
+};
 use spiral_robotics_common::relations::{EpisodeQueryRequest, QueryRequest, SpiralQuerySnapshot};
 use std::future::Future;
 
 #[derive(Clone)]
 pub(crate) struct DatasetClient {
     project: ProjectClient,
+    inspections: DatasetInspections,
 }
 impl DatasetClient {
+    /// The robot saved for `dataset`'s version.
     pub(in crate::activities) fn robot(
         &self,
-        selection: &DatasetSelection,
+        dataset: &DatasetSummary,
     ) -> impl Future<
         Output = Result<Option<spiral_robotics_common::datasets::DatasetRobot>, CommandError>,
     > + use<> {
         self.project
-            .request(HttpRequest::new("POST", "/api/datasets/robot").json(selection))
+            .request(HttpRequest::new("POST", "/api/datasets/robot").json(dataset))
     }
     pub(super) fn inspect_import(
         &self,
@@ -112,16 +117,16 @@ impl DatasetClient {
             .await
     }
 
-    /// The joint roles resolved for the dataset's current version; `None`
-    /// until they are.
+    /// The joint roles resolved for `dataset`'s version; `None` until they
+    /// are.
     pub(in crate::activities) fn joint_roles(
         &self,
-        selection: &DatasetSelection,
+        dataset: &DatasetSummary,
     ) -> impl Future<
         Output = Result<Option<spiral_robotics_common::datasets::DatasetJointRoles>, CommandError>,
     > + use<> {
         self.project
-            .request(HttpRequest::new("POST", "/api/datasets/joint-roles").json(selection))
+            .request(HttpRequest::new("POST", "/api/datasets/joint-roles").json(dataset))
     }
 
     pub(super) async fn save_joint_roles(
@@ -133,41 +138,31 @@ impl DatasetClient {
             .await
     }
 
-    /// The check report kept for the dataset's current version, from checks
-    /// at the lookup's definition.
-    pub(super) fn check_report(
-        &self,
-        lookup: &spiral_robotics_common::datasets::DatasetCheckLookup,
-    ) -> impl Future<Output = Result<Option<serde_json::Value>, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/checks").json(lookup))
-    }
-
-    pub(super) async fn save_check_report(
-        &self,
-        save: &spiral_robotics_common::datasets::DatasetCheckSave,
-    ) -> Result<(), CommandError> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/checks/save").json(save))
-            .await
-    }
-
     pub(crate) fn project_resources(
         &self,
     ) -> impl Future<Output = Result<Vec<ProjectResource>, CommandError>> + use<> {
         self.project
             .request(HttpRequest::new("GET", "/api/data-catalog"))
     }
-    pub(in crate::activities) fn inspect_dataset(
+    /// `selection`'s inspection if the project has read it already.
+    pub(in crate::activities) fn inspected(
         &self,
-        selection: DatasetSelection,
-    ) -> impl Future<Output = Result<DatasetInspection, CommandError>> + use<> {
-        self.project
-            .request(HttpRequest::new("POST", "/api/datasets/inspect").json(&selection))
+        selection: &DatasetSelection,
+    ) -> Option<DatasetInspection> {
+        self.inspections.known(selection)
+    }
+    /// `selection`'s inspection, read once for every surface that asks.
+    pub(in crate::activities) fn inspect_dataset(&self, selection: DatasetSelection) -> Inspecting {
+        let project = self.project.clone();
+        let dataset = selection.clone();
+        self.inspections.inspect(&dataset, move || {
+            project.request(HttpRequest::new("POST", "/api/datasets/inspect").json(&selection))
+        })
     }
     pub(crate) fn current() -> Self {
         Self {
             project: ProjectClient::current(),
+            inspections: DatasetInspections::current(),
         }
     }
     pub(in crate::activities) fn episode_topics(

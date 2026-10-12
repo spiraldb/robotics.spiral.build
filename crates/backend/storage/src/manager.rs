@@ -6,8 +6,7 @@
 use std::sync::Arc;
 
 use spiral_robotics_common::datasets::{
-    DatasetCheckLookup, DatasetCheckSave, DatasetJointRoles, DatasetJointRolesSave, DatasetRobot,
-    DatasetRobotSave, DatasetSelection,
+    DatasetJointRoles, DatasetJointRolesSave, DatasetRobot, DatasetRobotSave, DatasetSummary,
 };
 
 use crate::curations::{CuratedViews, CurationPersistence};
@@ -63,84 +62,40 @@ impl StorageManager {
         CuratedViews::new(&self.studio, &self.project_store)
     }
 
-    /// The robot saved for the dataset version `selection` resolves to now.
+    /// The robot saved for `dataset`'s version.
     pub async fn dataset_robot(
         &self,
-        selection: DatasetSelection,
+        dataset: &DatasetSummary,
     ) -> Result<Option<DatasetRobot>, String> {
-        let inspection = self.inspect_dataset(selection).await?;
-        let dataset = inspection.dataset();
-        self.studio
-            .dataset_robot((dataset.resource_id(), dataset.version_id()))
-            .await
+        self.studio.dataset_robot(dataset.identity()).await
     }
 
-    /// Save the robot the browser resolved for the dataset's current version.
+    /// Save the robot the browser resolved for the dataset version it read.
     pub async fn save_dataset_robot(&self, save: DatasetRobotSave) -> Result<(), String> {
-        let (selection, robot) = save.into_parts();
-        let inspection = self.inspect_dataset(selection).await?;
-        let dataset = inspection.dataset();
+        let (dataset, robot) = save.into_parts();
         self.studio
-            .save_dataset_robot(
-                (dataset.resource_id(), dataset.version_id()),
-                robot.as_ref(),
-            )
+            .save_dataset_robot(dataset.identity(), robot.as_ref())
             .await
     }
 
-    /// The joint roles resolved for the dataset version `selection`
-    /// resolves to now; `None` until the browser has resolved them.
+    /// The joint roles resolved for `dataset`'s version; `None` until the
+    /// browser has resolved them.
     pub async fn dataset_joint_roles(
         &self,
-        selection: DatasetSelection,
+        dataset: &DatasetSummary,
     ) -> Result<Option<DatasetJointRoles>, String> {
-        let inspection = self.inspect_dataset(selection).await?;
-        let dataset = inspection.dataset();
-        self.studio
-            .dataset_joint_roles((dataset.resource_id(), dataset.version_id()))
-            .await
+        self.studio.dataset_joint_roles(dataset.identity()).await
     }
 
-    /// Save the joint roles the browser resolved for the dataset's current
-    /// version.
+    /// Save the joint roles the browser resolved for the dataset version it
+    /// read.
     pub async fn save_dataset_joint_roles(
         &self,
         save: DatasetJointRolesSave,
     ) -> Result<(), String> {
-        let (selection, roles) = save.into_parts();
-        let inspection = self.inspect_dataset(selection).await?;
-        let dataset = inspection.dataset();
+        let (dataset, roles) = save.into_parts();
         self.studio
-            .save_dataset_joint_roles((dataset.resource_id(), dataset.version_id()), &roles)
-            .await
-    }
-
-    /// The check report for the dataset version `lookup` resolves to now,
-    /// from checks at its definition.
-    pub async fn dataset_check_report(
-        &self,
-        lookup: DatasetCheckLookup,
-    ) -> Result<Option<serde_json::Value>, String> {
-        let (selection, definition) = lookup.into_parts();
-        let inspection = self.inspect_dataset(selection).await?;
-        let dataset = inspection.dataset();
-        self.studio
-            .dataset_check_report((dataset.resource_id(), dataset.version_id()), definition)
-            .await
-    }
-
-    /// Keep the report the browser computed for the dataset's current version.
-    pub async fn save_dataset_check_report(&self, save: DatasetCheckSave) -> Result<(), String> {
-        let (lookup, report) = save.into_parts();
-        let (selection, definition) = lookup.into_parts();
-        let inspection = self.inspect_dataset(selection).await?;
-        let dataset = inspection.dataset();
-        self.studio
-            .save_dataset_check_report(
-                (dataset.resource_id(), dataset.version_id()),
-                definition,
-                report,
-            )
+            .save_dataset_joint_roles(dataset.identity(), &roles)
             .await
     }
 }

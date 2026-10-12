@@ -105,15 +105,22 @@ impl DataSelection {
             .cloned()
     }
     /// Choosing a dataset shows it in the Overview tab; open episodes stay.
-    fn select_dataset(mut self, dataset: DatasetSelection) {
-        self.dataset.set(Some(dataset));
+    fn select_dataset(self, dataset: DatasetSelection) {
+        self.show_dataset(dataset);
         self.activate(PanelId::new(OVERVIEW_PANEL));
+    }
+    /// The Overview shows `dataset`. Showing the one it shows already reads
+    /// nothing again: the Overview stays as it is.
+    fn show_dataset(mut self, dataset: DatasetSelection) {
+        if self.dataset.peek().as_ref() != Some(&dataset) {
+            self.dataset.set(Some(dataset));
+        }
     }
     /// An episode opens in a tab of its own, or brings its tab forward with
     /// whatever a curated view asks of it.
     fn open_episode(mut self, opened: OpenedEpisode) {
         let panel = Self::episode_panel(opened.episode().id());
-        self.dataset.set(Some(opened.episode().dataset().clone()));
+        self.show_dataset(opened.episode().dataset().clone());
         let open = self
             .episodes
             .peek()

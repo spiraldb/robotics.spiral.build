@@ -71,7 +71,7 @@ async fn dataset_models_follow_dataset_revision_and_project() {
 }
 
 #[tokio::test]
-async fn joint_roles_and_check_reports_follow_dataset_version_definition_and_project() {
+async fn joint_roles_follow_dataset_version_and_project() {
     let store = StudioStore::in_memory();
     let project = store.project(&Fixture::connection("checks"));
     let identity = ("dataset-id", "revision-1");
@@ -99,34 +99,8 @@ async fn joint_roles_and_check_reports_follow_dataset_version_definition_and_pro
         None
     );
 
-    let report = serde_json::json!({"streams": []});
-    assert_eq!(
-        project.dataset_check_report(identity, 1).await.unwrap(),
-        None
-    );
-    project
-        .save_dataset_check_report(identity, 1, report.clone())
-        .await
-        .unwrap();
-    assert_eq!(
-        project.dataset_check_report(identity, 1).await.unwrap(),
-        Some(report.clone())
-    );
-    // Changed checks, or a new dataset version, read as no report.
-    assert_eq!(
-        project.dataset_check_report(identity, 2).await.unwrap(),
-        None
-    );
-    assert_eq!(
-        project
-            .dataset_check_report((identity.0, "revision-2"), 1)
-            .await
-            .unwrap(),
-        None
-    );
-
     let other = store.project(&Fixture::connection("other"));
-    assert_eq!(other.dataset_check_report(identity, 1).await.unwrap(), None);
+    assert_eq!(other.dataset_joint_roles(identity).await.unwrap(), None);
     let archive = StudioSnapshot::capture(&project).await.unwrap();
     StudioSnapshot::open(&archive.bytes().unwrap(), &other)
         .await
@@ -140,10 +114,6 @@ async fn joint_roles_and_check_reports_follow_dataset_version_definition_and_pro
     assert_eq!(
         other.dataset_joint_roles(identity).await.unwrap(),
         Some(roles)
-    );
-    assert_eq!(
-        other.dataset_check_report(identity, 1).await.unwrap(),
-        Some(report)
     );
 }
 

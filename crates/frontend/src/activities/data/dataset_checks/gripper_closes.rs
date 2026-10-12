@@ -1,27 +1,30 @@
 //! Gripper closes: each time a gripper is commanded nearly shut for longer
 //! than half a second, how far it actually closed — all the way, onto
 //! nothing, or stopped on something it holds. Openings read on one scale for
-//! every dataset: 0 closed, 1 open.
+//! every dataset: 0 closed, 1 open. Each episode's cell keeps every
+//! gripper's closes; whether its commands and openings were logged
+//! together is judged when the report is read.
+use super::check_columns::{CheckCells, CheckColumn, CheckKind, PartsStatement};
 use super::report_view::{CheckRow, Evidence, EvidenceChips, Finding, Plural, Verdict};
 use super::state_action_lag::Pairing;
 use super::stream_reads::{CheckedStreams, PairedColumns};
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use spiral_robotics_common::datasets::{ArmRoles, EpisodeId};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct GripperCloses {
     arms: Vec<ArmCloses>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct ArmCloses {
     arm: String,
     episodes: Vec<EpisodeCloses>,
     unpaired: Vec<EpisodeId>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct CloseCounts {
     /// Closed all the way: nothing in the gripper.
     shut: u64,
@@ -31,19 +34,21 @@ struct CloseCounts {
     holding: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct EpisodeCloses {
-    #[serde(rename = "id")]
     episode: EpisodeId,
-    #[serde(flatten)]
     counts: CloseCounts,
     /// Seconds into the episode of its first close all the way.
     first_shut_at: Option<f64>,
 }
 
+/// One arm's gripper in one episode, as its cell keeps it: how many
+/// commands met an opening logged at the same instant and how many it
+/// logged, how many closes went each way — none when it never closed — and
+/// when the first close all the way was.
 #[derive(Deserialize)]
-struct CloseRow {
-    id: EpisodeId,
+pub(super) struct ClosesPart {
+    part: String,
     paired: u64,
     commands: u64,
     shut: Option<u64>,
@@ -62,53 +67,39 @@ impl GripperCloses {
     const SHUT: f64 = 0.05;
     const NEARLY: f64 = 0.15;
 
-    pub(super) async fn measure(
+    /// The column keeping every gripper's closes in each episode, by its
+    /// arm; `None` when no arm records a gripper.
+    pub(super) fn column(
         streams: CheckedStreams<'_>,
         arms: &[ArmRoles],
-    ) -> Result<Self, String> {
-        let grippers = arms
-            .iter()
-            .filter_map(|arm| Some((arm, arm.gripper()?)))
-            .collect::<Vec<_>>();
-        let mut measured = grippers
-            .iter()
-            .map(|(arm, _)| ArmCloses {
-                arm: arm.name().to_owned(),
-                episodes: Vec::new(),
-                unpaired: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        for (arm, row) in streams
-            .parts::<CloseRow>(|streams| {
-                grippers
-                    .iter()
-                    .map(|(_, gripper)| {
-                        Self::sql(
-                            streams,
-                            &PairedColumns::new(gripper.state(), gripper.action()),
-                            gripper.range(),
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .await?
-        {
-            let arm = &mut measured[arm];
-            if !Pairing::together(row.paired, row.commands) {
-                arm.unpaired.push(row.id);
+    ) -> Result<Option<CheckColumn>, String> {
+        let mut parts = PartsStatement::new(&[
+            "paired",
+            "commands",
+            "shut",
+            "nearly",
+            "holding",
+            "first_shut_at",
+        ]);
+        for arm in arms {
+            let Some(gripper) = arm.gripper() else {
                 continue;
-            }
-            arm.episodes.push(EpisodeCloses {
-                episode: row.id,
-                counts: CloseCounts {
-                    shut: row.shut.unwrap_or_default(),
-                    nearly: row.nearly.unwrap_or_default(),
-                    holding: row.holding.unwrap_or_default(),
-                },
-                first_shut_at: row.first_shut_at,
-            });
+            };
+            let paired = PairedColumns::new(gripper.state(), gripper.action());
+            parts = parts.part(arm.name(), Self::sql(streams, &paired, gripper.range())?);
         }
-        Ok(Self { arms: measured })
+        CheckColumn::of(CheckKind::Grippers, parts)
+    }
+
+    /// Each gripper's closes in every episode its `cells` measured.
+    pub(super) fn read(arms: &[ArmRoles], cells: &CheckCells<ClosesPart>) -> Self {
+        Self {
+            arms: arms
+                .iter()
+                .filter(|arm| arm.gripper().is_some())
+                .map(|arm| ArmCloses::read(arm.name(), cells))
+                .collect(),
+        }
     }
 
     fn sql(
@@ -203,6 +194,31 @@ impl CloseCounts {
 }
 
 impl ArmCloses {
+    /// The arm's gripper closes in each episode `cells` measured it in whose
+    /// commands and openings were logged together; the others are unpaired.
+    fn read(arm: &str, cells: &CheckCells<ClosesPart>) -> Self {
+        let mut read = Self {
+            arm: arm.to_owned(),
+            episodes: Vec::new(),
+            unpaired: Vec::new(),
+        };
+        for (episode, part) in cells.parts().filter(|(_, part)| part.part == arm) {
+            if !Pairing::together(part.paired, part.commands) {
+                read.unpaired.push(episode.clone());
+                continue;
+            }
+            read.episodes.push(EpisodeCloses {
+                episode: episode.clone(),
+                counts: CloseCounts {
+                    shut: part.shut.unwrap_or_default(),
+                    nearly: part.nearly.unwrap_or_default(),
+                    holding: part.holding.unwrap_or_default(),
+                },
+                first_shut_at: part.first_shut_at,
+            });
+        }
+        read
+    }
     fn counts(&self) -> CloseCounts {
         self.episodes
             .iter()
@@ -246,5 +262,63 @@ fn CloseSplit(counts: CloseCounts) -> Element {
                 i { class: "is-holding", style: "width: {share(counts.holding)}", title: "{counts.holding} on something" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::stream_reads::TwoArmDataset;
+    use super::*;
+
+    fn episode(ordinal: u32) -> EpisodeId {
+        EpisodeId::try_from(format!("{ordinal:032x}")).unwrap()
+    }
+
+    #[test]
+    fn each_grippers_closes_are_read_where_it_was_logged_together() {
+        let dataset = TwoArmDataset::new();
+        let column = GripperCloses::column(dataset.streams(), dataset.arms())
+            .unwrap()
+            .unwrap();
+        assert_eq!(column.kind(), CheckKind::Grippers);
+        let statement = dataset.statement(&column);
+        assert!(statement.contains(
+            "SELECT 'left' AS part, id, paired, commands, shut, nearly, holding, first_shut_at FROM (WITH "
+        ));
+        assert!(!statement.contains("'right'"));
+        assert!(
+            GripperCloses::column(dataset.streams(), &dataset.arms()[1..])
+                .unwrap()
+                .is_none()
+        );
+        let part = |paired, shut| ClosesPart {
+            part: "left".into(),
+            paired,
+            commands: 100,
+            shut,
+            nearly: shut.map(|_| 1),
+            holding: shut.map(|_| 2),
+            first_shut_at: Some(3.0),
+        };
+        let cells = CheckCells::fixture(vec![
+            (episode(1), vec![part(100, Some(4))]),
+            (episode(2), vec![part(100, None)]),
+            (episode(3), vec![part(5, Some(9))]),
+            (episode(4), Vec::new()),
+        ]);
+        let closes = GripperCloses::read(dataset.arms(), &cells);
+        assert_eq!(closes.arms.len(), 1);
+        let arm = &closes.arms[0];
+        assert_eq!(arm.unpaired, [episode(3)]);
+        assert_eq!(
+            arm.counts(),
+            CloseCounts {
+                shut: 4,
+                nearly: 1,
+                holding: 2
+            }
+        );
+        assert_eq!(arm.most_shut().len(), 1);
+        assert_eq!(arm.most_shut()[0].measure(), "4 closes");
     }
 }

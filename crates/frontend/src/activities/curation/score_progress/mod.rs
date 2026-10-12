@@ -92,7 +92,7 @@ pub(super) fn ScoringWorkspace(controller: CurationController, node: String) -> 
         input
             .as_ref()
             .and_then(|input| input.episodes().first())
-            .map(Episode::selection),
+            .map(|episode| episode.dataset().clone()),
     )
     .filter(|cameras| !cameras.contains(&camera))
     .map(|_| format!("Progress is scored from {camera}, which this dataset does not record"));

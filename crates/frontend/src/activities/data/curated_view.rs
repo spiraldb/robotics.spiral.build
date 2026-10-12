@@ -428,11 +428,7 @@ fn CuratedRows(view: CuratedView, on_open: EventHandler<OpenedEpisode>) -> Eleme
     let read = view.clone();
     let mut view_read = use_resource(move || ViewReading::read(read.clone()));
     let answer = view_read.read();
-    let first = match &*answer {
-        Some(Ok(reading)) => reading.episodes.first().map(Episode::selection),
-        _ => None,
-    };
-    let camera = EpisodeStills::use_overview_camera(first);
+    let camera = EpisodeStills::use_overview_camera(Some(view.dataset().clone()));
     match &*answer {
         None => rsx! {
             p { class: "data-curated-status", role: "status",

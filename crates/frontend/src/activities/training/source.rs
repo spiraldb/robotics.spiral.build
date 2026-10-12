@@ -132,13 +132,14 @@ pub(super) struct DatasetInputs {
 impl DatasetInputs {
     async fn read(dataset: DatasetSelection) -> Result<Self, String> {
         let client = DatasetClient::current();
-        let (inspection, roles) = futures_util::future::join(
-            client.inspect_dataset(dataset.clone()),
-            client.joint_roles(&dataset),
-        )
-        .await;
-        let inspection = inspection.map_err(|error| error.to_string())?;
-        let roles = roles.map_err(|error| error.to_string())?;
+        let inspection = client
+            .inspect_dataset(dataset.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let roles = client
+            .joint_roles(inspection.dataset())
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             cameras: DatasetCameras::recorded(inspection.topics()),
             joints: JointSummary::of(roles.as_ref()),

@@ -9,7 +9,7 @@
 //! published it records both, and its compiler says what each column of the
 //! view is. The run publishing it is the backend's, which keeps it until the
 //! view is published again.
-use super::client::CurationClient;
+use super::client::{CurationClient, FillRuns};
 use super::document::{CurationGraph, CurationNode, CurationNodeKind};
 use super::graph::PublishedViews;
 use super::path::{ColumnMeaning, CurationPath};
@@ -255,7 +255,7 @@ pub(crate) struct CuratedFills(Vec<FillStatus>);
 
 impl CuratedFills {
     pub(crate) async fn read() -> Result<Self, String> {
-        CurationClient::current()
+        FillRuns::current()
             .publications()
             .await
             .map(Self)

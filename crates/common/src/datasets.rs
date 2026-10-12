@@ -2,7 +2,6 @@
 
 mod camera_video;
 mod catalog;
-mod check_report;
 mod episode_id;
 mod h264;
 mod joint_roles;
@@ -15,7 +14,6 @@ pub use catalog::{
     DatasetInspection, DatasetProducer, DatasetSelection, DatasetSummary, DatasetTopic,
     EpisodeSelection, EpisodeTopicRequest, EpisodeVideo, ProjectResource, VideoPacket,
 };
-pub use check_report::{DatasetCheckLookup, DatasetCheckSave};
 pub use episode_id::EpisodeId;
 pub use h264::H264AccessUnit;
 pub use joint_roles::{

@@ -34,6 +34,10 @@ export function installRobotDiscoveryFetch() {
         if (path === '/api/queries') return Response.json({
             columns:[{name:'id'}],rows:[{id:'01a0989fb65870a7a5459902f9e3e090'}],truncated:false
         });
+        if (path === '/api/datasets/inspect') return Response.json({
+            dataset:{selection:{path:['dataset_demo']},resource_id:'demo-resource',version_id:'demo-version'},
+            producer:'spql.mcap.dataset',members:1,topics:[]
+        });
         if (path === '/api/datasets/episode-topics') return Response.json([
             {name:'/joints',schemas:['sensor_msgs/JointState'],members:1,samples:3,revision:{variant:'joints'}}
         ]);
@@ -93,6 +97,7 @@ impl DiscoveryHarness {
         let refresh = QueryRefresh::use_provider();
         let project = ProjectKey::new("https://api.spiraldb.dev", "test-project");
         use_context_provider(|| ProjectClient::new(project, refresh));
+        crate::activities::data::DatasetInspections::use_provider();
         *self.client.borrow_mut() = Some(DatasetClient::current());
         rsx! {}
     }
@@ -195,6 +200,10 @@ async fn browser_dispatches_native_tools_and_repairs_a_rejected_result() {
         .filter(|request| request["path"] == "/api/datasets/robot/save")
         .collect::<Vec<_>>();
     assert_eq!(saves.len(), 1);
-    assert_eq!(saves[0]["body"]["dataset"]["path"], json!(["dataset_demo"]));
+    // The robot is filed under the dataset version the browser inspected.
+    assert_eq!(
+        saves[0]["body"]["dataset"],
+        json!({"selection": {"path": ["dataset_demo"]}, "resource_id": "demo-resource", "version_id": "demo-version"})
+    );
     assert_eq!(saves[0]["body"]["robot"]["bindings"], json!([]));
 }
