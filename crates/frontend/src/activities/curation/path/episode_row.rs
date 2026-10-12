@@ -182,8 +182,7 @@ impl EpisodeRow {
         let members = "r.id = $1";
         let videos = self.cameras.iter().enumerate().map(|(index, camera)| {
             let videos = Self::entry(Self::VIDEOS, index);
-            CameraVideo::new(&dataset, camera)
-                .videos((&format!("{videos}_packets"), &videos), members)
+            CameraVideo::new(&dataset, camera).videos((&format!("{videos}_packets"), &videos))
         });
         let instructions = self.instructions.iter().enumerate().map(|(index, topic)| {
             format!(
