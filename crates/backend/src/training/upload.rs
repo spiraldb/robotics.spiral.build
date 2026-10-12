@@ -1,6 +1,6 @@
 //! Studio's half of starting a run: upload the streams the training service
-//! lacks, each straight from its Spiral read into the request, then ask the
-//! service to start the run. An upload lives in the backend's memory; a
+//! lacks, each read whole from Spiral and then sent, then ask the service to
+//! start the run. An upload lives in the backend's memory; a
 //! restarted backend loses it, and starting the run again uploads only what
 //! is still missing.
 use std::collections::BTreeMap;
@@ -217,8 +217,10 @@ impl StreamUpload {
                 1,
             );
             let records = self.storage.queries().stream_for_episode(&request).await?;
-            let body = IpcUpload::new(records, self.stream.read().shape()).body()?;
-            match self.service.upload(self.stream.key(), body).await {
+            let body = IpcUpload::new(records, self.stream.read().shape())
+                .encoded()
+                .await?;
+            match self.service.upload(self.stream.key(), body.into()).await {
                 Ok(()) => return Ok(()),
                 Err(reason) => last_failure = reason,
             }
@@ -231,7 +233,9 @@ impl StreamUpload {
 }
 
 /// One stream's Spiral records as the Arrow IPC stream the service stores,
-/// encoded batch by batch as they arrive, in the stream's shape.
+/// in the stream's shape. It is encoded whole before it is sent: Modal drops
+/// an upload whose body stalls for 15 s, and Spiral hands over an episode's
+/// first records only once it has read and ordered all of them.
 struct IpcUpload {
     records: RecordBatchStream,
     shape: StreamShape,
@@ -242,50 +246,17 @@ impl IpcUpload {
         Self { records, shape }
     }
 
-    fn body(self) -> Result<reqwest::Body, String> {
-        let schema = self.shape.schema();
-        let mut writer =
-            StreamWriter::try_new(Vec::new(), &schema).map_err(|error| error.to_string())?;
-        let head = std::mem::take(writer.get_mut());
-        let encoder = IpcEncoder {
-            records: self.records,
-            writer: Some(writer),
-            shape: self.shape,
-        };
-        let chunks = futures_util::stream::once(std::future::ready(Ok(head))).chain(
-            futures_util::stream::unfold(encoder, IpcEncoder::next_chunk),
-        );
-        Ok(reqwest::Body::wrap_stream(chunks))
-    }
-}
-
-/// The encoder behind an upload's body: each record batch becomes one chunk,
-/// and the end of the records the stream's end marker.
-struct IpcEncoder {
-    records: RecordBatchStream,
-    writer: Option<StreamWriter<Vec<u8>>>,
-    shape: StreamShape,
-}
-
-impl IpcEncoder {
-    async fn next_chunk(mut self) -> Option<(Result<Vec<u8>, std::io::Error>, Self)> {
-        let mut writer = self.writer.take()?;
-        let written = match self.records.next().await {
-            Some(Ok(batch)) => self
-                .conform(&batch)
-                .and_then(|batch| writer.write(&batch).map_err(|error| error.to_string()))
-                .map(|()| {
-                    let chunk = std::mem::take(writer.get_mut());
-                    self.writer = Some(writer);
-                    chunk
-                }),
-            Some(Err(error)) => Err(format!("reading Spiral result: {error}")),
-            None => writer
-                .finish()
-                .map(|()| std::mem::take(writer.get_mut()))
-                .map_err(|error| error.to_string()),
-        };
-        Some((written.map_err(std::io::Error::other), self))
+    async fn encoded(mut self) -> Result<Vec<u8>, String> {
+        let mut writer = StreamWriter::try_new(Vec::new(), &self.shape.schema())
+            .map_err(|error| error.to_string())?;
+        while let Some(batch) = self.records.next().await {
+            let batch = batch.map_err(|error| format!("reading Spiral result: {error}"))?;
+            writer
+                .write(&self.conform(&batch)?)
+                .map_err(|error| error.to_string())?;
+        }
+        writer.finish().map_err(|error| error.to_string())?;
+        writer.into_inner().map_err(|error| error.to_string())
     }
 
     /// `batch` with the stream's columns, types, and metadata.
@@ -302,5 +273,49 @@ impl IpcEncoder {
             })
             .collect::<Result<Vec<_>, _>>()?;
         RecordBatch::try_new(schema, columns).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{BinaryArray, UInt64Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use spiral_robotics_storage::DatabaseError;
+
+    #[tokio::test]
+    async fn a_read_is_encoded_whole_in_its_streams_shape() {
+        let read = Arc::new(Schema::new(vec![
+            Field::new("log_time_ns", DataType::UInt64, false),
+            Field::new("payload", DataType::Binary, false),
+        ]));
+        let batch = |times: &[u64]| {
+            let payloads = times.iter().map(|time| time.to_le_bytes());
+            Ok::<_, DatabaseError>(
+                RecordBatch::try_new(
+                    read.clone(),
+                    vec![
+                        Arc::new(UInt64Array::from(times.to_vec())),
+                        Arc::new(BinaryArray::from_iter_values(payloads)),
+                    ],
+                )
+                .unwrap(),
+            )
+        };
+        let records = RecordBatchStream::new(
+            read.clone(),
+            futures_util::stream::iter([batch(&[1, 2]), batch(&[3])]).boxed(),
+        );
+
+        let encoded = IpcUpload::new(records, StreamShape::Camera)
+            .encoded()
+            .await
+            .unwrap();
+
+        let reader =
+            arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(encoded), None).unwrap();
+        assert_eq!(reader.schema(), StreamShape::Camera.schema());
+        let rows = reader.map(|batch| batch.unwrap().num_rows()).sum::<usize>();
+        assert_eq!(rows, 3);
     }
 }

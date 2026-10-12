@@ -39,8 +39,10 @@ Browser ── POST /api/training/runs ──▶ Studio backend ── 1. upload
    packets and, for ACT, each joint stream's values are one **stream**,
    content-addressed by what was read; a progress run's camera stream is the
    same stream an ACT run of that camera uploads. The backend asks Modal which streams it lacks and uploads
-   only those, a few at a time, each straight from the Spiral result into the
-   request body. Then it asks Modal to start the run. A restarted backend
+   only those, a few at a time, each read whole from Spiral before it is
+   sent: Modal drops an upload whose body stalls for 15 s, and Spiral hands
+   over an episode's first records only once it has read and ordered them
+   all. Then it asks Modal to start the run. A restarted backend
    loses an upload in progress; the run reads as unavailable and starting it
    again uploads only what is still missing.
 4. **Prepare** (Modal). ACT decodes each episode's cameras once, lays the
