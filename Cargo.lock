@@ -5439,6 +5439,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "serde_urlencoded",
+ "sha2",
  "spiral-robotics-common",
  "spiral-robotics-ui",
  "spiral-robotics-viewport",

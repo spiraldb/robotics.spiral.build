@@ -468,11 +468,6 @@ impl CurationController {
             .write()
             .record(node, episode, read);
     }
-    /// The revision Studio holds the open curation at; 0 before its first save.
-    pub(super) fn saved_revision(&self) -> u64 {
-        self.session.with_draft(CurationDocument::revision)
-    }
-
     pub(crate) fn id(&self) -> String {
         self.session.with_draft(|document| document.id().to_owned())
     }

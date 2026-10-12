@@ -4,7 +4,7 @@
 use spiral_robotics_common::datasets::DatasetSelection;
 
 use super::super::document::{
-    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, PublishedOutput,
+    CurationGraph, CurationNode, CurationNodeKind, DATASET_NODE_ID, NodePublication,
 };
 use super::super::population::{EpisodeSample, PopulationReader};
 use super::super::preview::PreviewProgress;
@@ -106,7 +106,7 @@ pub(super) struct NodeCard {
     face: NodeFace,
     label: &'static str,
     line: CardLine,
-    published: Option<PublishedOutput>,
+    published: Option<NodePublication>,
     menu: Option<ChildMenu>,
     order: usize,
 }
@@ -122,7 +122,7 @@ impl NodeCard {
                 face: NodeFace::of(node.kind()),
                 label: node.kind().label(),
                 line: CardLine::Holds(Self::describe(payload, node, reader)),
-                published: payload.publication(node.id()).cloned(),
+                published: payload.node_publication(node.id()),
                 menu: ChildMenu::of(payload, node),
                 order: 0,
             })
@@ -271,7 +271,7 @@ impl NodeCard {
         matches!(self.line, CardLine::Running(_))
     }
     /// The view the node is published as, when it is.
-    pub(super) fn published(&self) -> Option<&PublishedOutput> {
+    pub(super) fn published(&self) -> Option<&NodePublication> {
         self.published.as_ref()
     }
     pub(super) fn menu(&self) -> Option<&ChildMenu> {

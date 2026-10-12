@@ -84,6 +84,11 @@ class MetricSeries:
 class TrainingProgress:
     elapsed_seconds: float = 0.0
     validation_loss: float | None = None
+    # The lowest validation loss yet, and the step it was measured at.
+    best_validation_loss: float | None = None
+    best_validation_step: int | None = None
+    # The step of the checkpoint kept only for holding the lowest validation loss yet.
+    best_only_checkpoint: int | None = None
 
 
 class RunReport:
@@ -111,22 +116,54 @@ class RunReport:
 
     def record(self, metric: dict[str, Any]) -> None:
         """One optimizer step's metrics."""
+        progress = self._progress
         self._status.current_step = metric["step"]
-        self._progress.elapsed_seconds = metric["elapsed_seconds"]
-        if metric["validation_loss"] is not None:
-            self._progress.validation_loss = metric["validation_loss"]
+        progress.elapsed_seconds = metric["elapsed_seconds"]
+        loss = metric["validation_loss"]
+        if loss is not None:
+            progress.validation_loss = loss
+            if progress.best_validation_loss is None or loss < progress.best_validation_loss:
+                progress.best_validation_loss = loss
+                progress.best_validation_step = metric["step"]
         series = self._steps if metric["event"] is None else self._events
         series.append(metric)
 
-    def add_checkpoint(self, created_ms: int) -> None:
-        """A checkpoint of the current step, with the latest validation loss."""
+    @property
+    def at_best(self) -> bool:
+        """Whether the current step measured the lowest validation loss yet, so its weights are
+        the run's best."""
+        return self._progress.best_validation_step == self._status.current_step
+
+    @property
+    def best_checkpoint_step(self) -> int | None:
+        """The checkpoint holding the lowest validation loss yet, when one does."""
+        step = self._progress.best_validation_step
+        listed = any(checkpoint.step == step for checkpoint in self._status.checkpoints)
+        return step if listed else None
+
+    def add_checkpoint(self, created_ms: int, regular: bool) -> None:
+        """A checkpoint of the current step, with the latest validation loss: `regular` when the
+        run's interval or its end asks for it, else kept only for holding the lowest validation
+        loss yet. A best checkpoint replaces the one kept only for being best before it."""
+        progress = self._progress
         step = self._status.current_step
+        if self.at_best:
+            superseded = progress.best_only_checkpoint
+            self._status.checkpoints = [
+                checkpoint
+                for checkpoint in self._status.checkpoints
+                if checkpoint.step != superseded
+            ]
+            progress.best_only_checkpoint = None if regular else step
         self._status.checkpoints.append(
             CheckpointRecord(
-                step=step, validation_loss=self._progress.validation_loss, created_ms=created_ms
+                step=step, validation_loss=progress.validation_loss, created_ms=created_ms
             )
         )
-        self.log(f"Checkpoint {step} saved.")
+        if regular:
+            self.log(f"Checkpoint {step} saved.")
+        else:
+            self.log(f"Checkpoint {step} saved: the lowest validation loss yet.")
 
     @property
     def last_checkpoint_step(self) -> int:

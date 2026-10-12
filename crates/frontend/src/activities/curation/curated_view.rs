@@ -150,7 +150,7 @@ impl CuratedView {
             .find(|(published, _)| published.view() == self.view)
             .map(|(published, _)| published.node().to_owned());
         if let Some(node) = node {
-            graph.remove_publication(&node, stored.revision())?;
+            graph.remove_publication(&node)?;
             documents
                 .save(&stored.carrying(&graph))
                 .await
@@ -176,7 +176,7 @@ impl CuratedView {
                     curation_id: document.id().to_owned(),
                     curation: document.name().to_owned(),
                     output: node.kind().label(),
-                    current: published.is_current(document.revision()),
+                    current: published.is_current(&graph),
                 },
                 dataset: dataset.clone(),
                 subtasks: SubtaskColumn::of(&graph, node.id()),

@@ -92,6 +92,17 @@ class RunFiles:
     def checkpoint(self, step: int) -> Path:
         return self._directory / "checkpoints" / str(step)
 
+    def keep_checkpoints(self, steps: Iterable[int]) -> None:
+        """Deletes every checkpoint but those of `steps`: one a best checkpoint replaced, and any an
+        attempt saved after the state its retry resumed from."""
+        kept = {str(step) for step in steps}
+        directory = self._directory / "checkpoints"
+        if not directory.is_dir():
+            return
+        for checkpoint in directory.iterdir():
+            if checkpoint.name not in kept:
+                shutil.rmtree(checkpoint, ignore_errors=True)
+
     def read_request(self) -> bytes | None:
         return self._read("request.json")
 

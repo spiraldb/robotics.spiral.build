@@ -78,8 +78,8 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Break down: one take recorded as one bar splits into its steps; two
-     more takes arrive, slide until their folds line up, and every fold is
+  /* Break down: one episode recorded as one bar splits into its steps; two
+     more episodes arrive, slide until their folds line up, and every fold is
      picked out together — in lime, because picking them is what the rest
      of Curation does with them. */
   .curation-primer-track {
@@ -106,24 +106,24 @@
     animation: curation-primer-picked 420ms 1620ms ease-out both;
   }
 
-  /* The first take is the one seen splitting. */
-  .curation-primer-take:first-child .curation-primer-step {
+  /* The first episode is the one seen splitting. */
+  .curation-primer-row:first-child .curation-primer-step {
     animation:
       curation-primer-split 420ms calc(520ms + var(--step) * 60ms) var(--ease-out-expo) both,
       curation-primer-dim 420ms 1560ms ease-out both;
   }
 
-  .curation-primer-take:first-child .curation-primer-step[data-picked="true"] {
+  .curation-primer-row:first-child .curation-primer-step[data-picked="true"] {
     animation:
       curation-primer-split 420ms calc(520ms + var(--step) * 60ms) var(--ease-out-expo) both,
       curation-primer-picked 420ms 1620ms ease-out both;
   }
 
-  .curation-primer-take:not(:first-child) .curation-primer-episode {
+  .curation-primer-row:not(:first-child) .curation-primer-episode {
     animation: curation-primer-arrive 460ms calc(900ms + var(--row) * 100ms) var(--ease-out-expo) both;
   }
 
-  .curation-primer-take {
+  .curation-primer-row {
     transform: translateX(var(--align));
     animation: curation-primer-align 680ms 1560ms var(--ease-out-expo) both;
   }

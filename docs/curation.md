@@ -294,12 +294,12 @@ Publish, at the end of the document bar, lists every node but the Dataset
 with the name of its view. Choose the nodes to publish and give each a view
 name: one plain identifier. A view is the node's table: one row per episode,
 `episode_id`, `kept`, the facts, and every column of the model nodes on its
-path. Publish saves the curation first, because each view is compiled from
-the saved recipe. Studio then starts one fill run
+path. Publish saves the curation first, because Data judges each view
+against the saved recipe. Studio then starts one fill run
 (`POST /api/curation-fills`) with every column the chosen views read, each
-once, and the views, records every `node → view name, revision` in one edit,
-and saves once: a publication is recorded against the saved revision, and the
-save that records it must come next.
+once, and the views, records every `node → view name, statement digest` in
+one edit (the SHA-256 of the statement the view was created with), and saves
+once.
 
 Before the run starts, the backend checks each view name and admits every
 statement as one read-only query. The run is the backend's and outlives the
@@ -331,10 +331,12 @@ subtask it lies in and measured by that subtask's similarity and category.
 Training unnests `kept` into the intervals it trains on
 ([Training](training.md)).
 
-A later save that changes the recipe moves the curation past the published
-revision, and Publish then lists the node's view as out of date until it is
-published again. Removing a published node's branch waits until it is
-unpublished.
+A view is out of date once its node compiles to another statement: an edit
+on its path, from the dataset down to the node. Edits to other branches, and
+steps added after the node, leave it current. The canvas and Publish judge the
+open curation, so an edit shows as soon as it is made; Data judges the saved
+one. An out-of-date view stays as it was until the node is published again.
+Removing a published node's branch waits until it is unpublished.
 
 ## Documents
 
@@ -346,17 +348,19 @@ stay unsaved. Any saved curation can be deleted from its row in the switcher, op
 Studio reads its stored copy, drops every view that copy publishes, and then
 deletes it at the revision just read. A view that fails to drop stops
 the delete. Deleting the open one opens a blank graph. The payload is
-opaque to the backend and versioned by the frontend. Encoding 5 keeps only the
-recipe: nodes, edges, each node's configuration, and the published nodes.
+opaque to the backend and versioned by the frontend. Encoding 6 keeps only the
+recipe: nodes, edges, each node's configuration, and the published nodes,
+each with its view's name and statement digest.
 Break down keeps its camera, sample interval, and where it reads each
 episode's task: the topic (`task_topic`), or the task the dataset lists
 (`listed_task`); Find similar its query; Group similar its categories,
 each with its id; Track objects its camera, what it tracks, and its rate; a
 Select its conditions, naming the nodes they read by id. Nothing any node
-read is saved. A document in an earlier encoding is refused. Encoding 5
+read is saved. A document in an earlier encoding is refused. Each encoding
 replaced every earlier one: the Studio migration that brought it in
-(`m20261008_000001_curations_encoding_5`) dropped each older curation and
-the views its payload lists as published.
+(`m20261008_000001_curations_encoding_5`, then
+`m20261011_000001_curations_encoding_6`) dropped each older curation and the
+views its payload lists as published.
 
 ## Why
 

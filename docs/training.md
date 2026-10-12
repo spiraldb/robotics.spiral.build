@@ -50,8 +50,10 @@ Browser ── POST /api/training/runs ──▶ Studio backend ── 1. upload
    and embeds every picture of every kept interval with Score progress's own
    code (below), once, onto the local disk.
 5. **Train** (Modal). The job samples its batches at random, writes metrics
-   as it goes, and checkpoints to the Volume. A preempted job is retried and
-   resumes from its last checkpoint.
+   as it goes, and checkpoints to the Volume: every checkpoint interval, and
+   at each step measuring the lowest validation loss yet. A preempted job is
+   retried and resumes from its last interval checkpoint. A run that
+   diverges fails at once (see Phases).
 6. **Monitor.** The browser polls `/api/training/runs`; the backend answers
    from its records, its uploads, and Modal.
 7. **Publish** (progress runs). A progress run's detail lists its
@@ -117,8 +119,10 @@ config.
   fp32); weights, optimizer state and checkpoints stay fp32. Batches are
   windows (1,024 by default) drawn from intervals picked uniformly, built in
   parallel by six worker processes over the embeddings, memory-mapped.
-- **Validation loss**: the training loss on windows of the held-out episodes;
-  there is no best-checkpoint pick.
+- **Validation loss**: the training loss on windows of the held-out episodes.
+  The step measuring the lowest one yet is checkpointed, so the best model
+  is kept even when it comes early: on the 50-episode sample it came near
+  step 750 of 15,000, every run overfitting after.
 
 Upstream's model, sampler, labeler and loss are copied verbatim, with their
 MIT license, into `modal/training/…/warp_rm_upstream/`; the package itself
@@ -210,7 +214,17 @@ episode has its one `camera` stream.
 sets a flag the job reads between steps; it saves a checkpoint and ends
 `stopped`. A run stopped before its job starts ends `stopped` without one. A
 run whose function call ended while its status still says active reads
-`failed`.
+`failed`. A run that diverges ends `failed` at once, saying where and which
+checkpoint has the lowest validation loss; it keeps its checkpoints and saves
+none of the diverged weights. Diverged means the training loss, averaged over
+100 steps, held above three times its lowest such average for 250 steps
+(`divergence.py`): a collapsed model, which never recovers.
+
+Checkpoints are saved every checkpoint interval, and at each step measuring
+the lowest validation loss yet; that best one replaces the best one before it
+unless the interval also asked for it, so a run keeps at most one checkpoint
+beyond its interval ones. Only interval checkpoints carry the state a retry
+resumes from.
 
 ### Checkpoints
 

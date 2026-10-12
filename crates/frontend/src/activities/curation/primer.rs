@@ -28,7 +28,7 @@ impl Primer {
             }
             Self::TrackObjects => {
                 "The same task gets harder with more to handle: three bottles take longer to \
-                 clear than two, and a slow take may only be a busy one."
+                 clear than two, and a slow episode may only be a busy one."
             }
         }
     }
@@ -83,7 +83,7 @@ struct DrawnEpisode {
 }
 
 impl DrawnEpisode {
-    /// Three takes of one task, each timed differently, so their folds start
+    /// Three episodes of one task, each timed differently, so their folds start
     /// at three different moments until the drawing lines them up.
     const ALL: [Self; 3] = [
         Self {
@@ -112,7 +112,7 @@ impl DrawnEpisode {
         (399.0, "place"),
     ];
 
-    /// Where the whole take runs, for the bar it is recorded as before it
+    /// Where the whole episode runs, for the bar it is recorded as before it
     /// splits.
     fn span(&self) -> (f64, f64) {
         let (first, _) = self.steps[0];
@@ -121,8 +121,8 @@ impl DrawnEpisode {
     }
 }
 
-/// One episode recorded as one bar, split into its steps; two more takes
-/// arrive, slide until their folds line up, and the fold of every take is
+/// One episode recorded as one bar, split into its steps; two more episodes
+/// arrive, slide until their folds line up, and the fold of every episode is
 /// picked out together.
 #[component]
 fn BreakDownDrawing() -> Element {
@@ -131,7 +131,7 @@ fn BreakDownDrawing() -> Element {
             for (row, episode) in DrawnEpisode::ALL.iter().enumerate() {
                 g {
                     key: "{row}",
-                    class: "curation-primer-take",
+                    class: "curation-primer-row",
                     style: "--row: {row}; --align: {episode.align}px",
                     g { class: "curation-primer-episode",
                         rect {
@@ -201,8 +201,8 @@ fn ScoreProgressDrawing() -> Element {
     }
 }
 
-/// Three takes of one task with two, three, and four bottles on the table:
-/// each bottle is boxed as it is found, and a Select keeps the takes with
+/// Three episodes of one task with two, three, and four bottles on the table:
+/// each bottle is boxed as it is found, and a Select keeps the episodes with
 /// three or four.
 #[component]
 fn TrackObjectsDrawing() -> Element {

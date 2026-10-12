@@ -183,12 +183,8 @@ fn TrackedSettings(
     let keep_on_enter = keep.clone();
     let paced = tracked.clone();
     rsx! {
-        form {
-            class: "curation-track-objects-settings",
-            onsubmit: move |event: FormEvent| {
-                event.prevent_default();
-                keep_on_enter();
-            },
+        // Not a form: with the rate field beside it, Enter would submit none.
+        div { class: "curation-track-objects-settings",
             label { class: "curation-track-objects-label", r#for: "curation-track-objects-prompt", "Track" }
             TextInput {
                 id: "curation-track-objects-prompt",
@@ -197,6 +193,11 @@ fn TrackedSettings(
                 placeholder: "bottle",
                 "aria-label": "What to track",
                 oninput: move |value| draft.set(value),
+                onkeydown: move |event: KeyboardEvent| {
+                    if event.key() == Key::Enter {
+                        keep_on_enter();
+                    }
+                },
                 onblur: move |_| keep(),
             }
             label { class: "curation-track-objects-label", r#for: "curation-track-objects-camera", "on" }

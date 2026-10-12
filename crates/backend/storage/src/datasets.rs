@@ -9,7 +9,7 @@ mod topics;
 pub use answers::{ColumnAnswers, DatasetAnswers, EpisodeAnswer};
 pub(crate) use lerobot::LeRobotDatasetDefinition;
 pub(crate) use managed::StudioDataset;
-pub(crate) use sources::{McapDatasetDefinition, McapFile, McapSourceBlob, McapSources};
+pub(crate) use sources::{McapDatasetDefinition, McapSourceBlob, McapSources};
 
 use crate::{SpiralAccess, SpiralConnection, StorageManager};
 use serde::Deserialize;
@@ -477,6 +477,7 @@ impl StorageManager {
     /// creating it with the first: eight frames of `/camera/top/video`, 33 ms
     /// apart.
     pub async fn record_probe_episode(&self, dataset: &str, episode: &str) -> Result<(), String> {
+        use sources::McapFile;
         use spiral_robotics_recording::{CameraRecording, EpisodeFixture, McapRecording};
         let camera = CameraRecording::from_annex_b(
             "top".into(),

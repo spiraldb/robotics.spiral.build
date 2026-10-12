@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .divergence import DivergenceWatch
 from .family import Family, PreparedRun, Session
 from .report import RunReport
 from .stop import StopFlags, StopRequest
@@ -77,7 +78,9 @@ class TrainingJob:
 
     def _optimize(self, prepared: PreparedRun, report: RunReport) -> None:
         """Steps on from the report's current step until the last step or a stop, then saves a
-        final checkpoint when the last one is behind."""
+        final checkpoint when the last one is behind. Every step measuring the lowest validation
+        loss yet is checkpointed too. A run that diverges fails at once, keeping its
+        checkpoints."""
         session, samples = prepared.session, prepared.samples
         optimization = self._request.config.optimization
         first_step = report.status.current_step + 1
@@ -89,6 +92,7 @@ class TrainingJob:
         validation_rng = np.random.default_rng([optimization.seed, first_step, 1])
         started = time.perf_counter() - report.elapsed_seconds
         stopped = False
+        watch = DivergenceWatch()
         with closing(samples.train_batches(seed, optimization.batch_size)) as batches:
             for step in range(first_step, optimization.steps + 1):
                 if self._stop.requested():
@@ -118,15 +122,23 @@ class TrainingJob:
                         "model_ms": result.model_ms,
                     }
                 )
-                if step % optimization.checkpoint_every == 0:
-                    self._checkpoint(session, report)
+                regular = step % optimization.checkpoint_every == 0
+                if regular or report.at_best:
+                    self._checkpoint(session, report, regular)
                 elif time.monotonic() - self._flushed_at >= FLUSH_SECONDS:
                     self._flush(report)
+                divergence = watch.observe(step, result.loss)
+                if divergence is not None:
+                    message = divergence.message(report.best_checkpoint_step)
+                    report.log(message)
+                    report.enter("failed", message)
+                    self._flush(report)
+                    return
         if stopped:
             report.enter("stopping", "Saving a final checkpoint.")
             self._flush(report)
         if report.status.current_step > report.last_checkpoint_step:
-            self._checkpoint(session, report)
+            self._checkpoint(session, report, regular=True)
         steps = report.status.current_step
         if stopped:
             report.enter("stopped", f"Stopped after {steps} steps.")
@@ -134,18 +146,23 @@ class TrainingJob:
             report.enter("completed", f"Completed {steps} steps.")
         self._flush(report)
 
-    def _checkpoint(self, session: Session, report: RunReport) -> None:
-        """Saves the current step's checkpoint and the state a retry resumes from, then reports
-        it; the status lists a checkpoint only once its files are complete."""
+    def _checkpoint(self, session: Session, report: RunReport, regular: bool) -> None:
+        """Saves the current step's checkpoint, and for a `regular` one the state a retry resumes
+        from, then reports it; the status lists a checkpoint only once its files are complete,
+        and the Volume keeps only those the status lists."""
         step = report.status.current_step
         with self._volume.writing():
             session.save_checkpoint(self._files.checkpoint(step), step)
-            report.add_checkpoint(created_ms=int(time.time() * 1_000))
-            resume = io.BytesIO()
-            torch.save({"session": session.state(), "report": report.state()}, resume)
-            self._files.write_resume(resume.getvalue())
+            report.add_checkpoint(created_ms=int(time.time() * 1_000), regular=regular)
+            if regular:
+                resume = io.BytesIO()
+                torch.save({"session": session.state(), "report": report.state()}, resume)
+                self._files.write_resume(resume.getvalue())
             self._files.write_status(report.status)
             self._files.write_history(report.history())
+            self._files.keep_checkpoints(
+                checkpoint.step for checkpoint in report.status.checkpoints
+            )
         self._flushed_at = time.monotonic()
 
     def _flush(self, report: RunReport) -> None:

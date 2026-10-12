@@ -104,7 +104,9 @@ def test_a_progress_run_trains_reports_and_checkpoints(trained: TestClient) -> N
 
     assert history["phase"] == "completed", history["message"]
     assert history["message"] == "Completed 6 steps."
-    assert [checkpoint["step"] for checkpoint in history["checkpoints"]] == [3, 6]
+    # Every third step, and the one measuring the lowest validation loss.
+    best = min(history["metrics"], key=lambda metric: metric["validation_loss"])["step"]
+    assert [checkpoint["step"] for checkpoint in history["checkpoints"]] == sorted({3, 6, best})
     assert set(history) == set(fixture("run-history.json"))
     metric_keys = set(fixture("run-history.json")["metrics"][0])
     assert [set(metric) for metric in history["metrics"]] == [metric_keys] * 6

@@ -1,5 +1,7 @@
 use super::*;
 use crate::activities::curation::annotate::SubtaskRow;
+use crate::activities::curation::path::CurationPath;
+use spiral_robotics_common::curation::PublishedView;
 use spiral_robotics_common::datasets::EpisodeId;
 
 fn annotated_graph() -> (CurationGraph, String) {
@@ -574,16 +576,14 @@ fn every_node_saves_its_recipe_and_nothing_it_read() {
     }
 }
 
-/// A graph with two Selects over whole episodes: longer and shorter ones.
+/// A graph over a dataset with two Selects over whole episodes: longer and
+/// shorter ones.
 fn two_outputs() -> (CurationGraph, String, String) {
-    let mut payload = CurationGraph::new(None);
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_abc130k")));
     let mut add = |comparison| {
         let id = payload.add_child(DATASET_NODE_ID, select()).unwrap();
         payload
-            .set_selection(
-                &id,
-                Selection::episodes_where(EpisodeFact::DurationSeconds, comparison, 10.0),
-            )
+            .set_selection(&id, lasting(comparison, 10.0))
             .unwrap();
         id
     };
@@ -591,45 +591,90 @@ fn two_outputs() -> (CurationGraph, String, String) {
     (payload, long, short)
 }
 
+fn lasting(comparison: Comparison, seconds: f64) -> Selection {
+    Selection::episodes_where(EpisodeFact::DurationSeconds, comparison, seconds)
+}
+
+/// Record `node` as published as `view`, created with the statement the
+/// node compiles to now.
+fn publish(payload: &mut CurationGraph, node: &str, view: &str) -> Result<(), String> {
+    let statement = CurationPath::to(payload, node)
+        .and_then(|path| path.statement())
+        .map_err(|error| error.message().to_owned())?;
+    payload.record_publication(node, &PublishedView::new(view, statement))
+}
+
+fn is_current(payload: &CurationGraph, node: &str) -> bool {
+    payload.node_publication(node).unwrap().is_current()
+}
+
 #[test]
-fn a_view_is_current_until_a_later_save_changes_the_recipe() {
+fn a_view_is_current_while_its_node_compiles_to_it() {
     let (mut payload, long, short) = two_outputs();
-    // Published from the recipe saved at 3; the save recording it is 4.
-    payload
-        .record_publication(&long, "long_episodes", 3)
+    publish(&mut payload, &long, "long_episodes").unwrap();
+    assert_eq!(
+        payload.node_publication(&long).unwrap().view(),
+        "long_episodes"
+    );
+    assert!(is_current(&payload, &long));
+    // Editing another branch, or adding a step after the node, leaves its
+    // view what the node keeps.
+    let mut elsewhere = payload.clone();
+    elsewhere
+        .set_selection(&short, lasting(Comparison::AtMost, 30.0))
         .unwrap();
-    let published = payload.publication(&long).unwrap().clone();
-    assert_eq!(published.view(), "long_episodes");
-    assert!(published.is_current(3) && published.is_current(4));
-    // An edit saved as 5 moves the recipe past the view.
-    assert!(!published.is_current(5));
-    // Publishing the other node records nothing new about the first: a
-    // view current before stays current, and one out of date stays so.
-    let mut current = payload.clone();
-    current
-        .record_publication(&short, "short_episodes", 4)
+    elsewhere
+        .add_child(
+            &long,
+            CurationNodeKind::ScoreProgress(ProgressScoring::default()),
+        )
         .unwrap();
-    assert!(current.publication(&long).unwrap().is_current(5));
-    payload
-        .record_publication(&short, "short_episodes", 5)
+    assert!(is_current(&elsewhere, &long));
+    // Editing the node puts its view out of date, until the edit is undone.
+    let mut edited = payload.clone();
+    edited
+        .set_selection(&long, lasting(Comparison::AtLeast, 20.0))
         .unwrap();
-    assert!(!payload.publication(&long).unwrap().is_current(6));
-    assert!(payload.publication(&short).unwrap().is_current(6));
+    assert!(!is_current(&edited, &long));
+    edited
+        .set_selection(&long, lasting(Comparison::AtLeast, 10.0))
+        .unwrap();
+    assert!(is_current(&edited, &long));
     // Unpublishing forgets the node, and only a published one.
-    payload.remove_publication(&short, 6).unwrap();
-    assert!(payload.publication(&short).is_none());
-    assert!(payload.remove_publication(&short, 7).is_err());
+    payload.remove_publication(&long).unwrap();
+    assert!(payload.node_publication(&long).is_none());
+    assert!(payload.remove_publication(&long).is_err());
+}
+
+#[test]
+fn an_edit_above_a_node_on_its_path_puts_its_view_out_of_date() {
+    let mut payload = CurationGraph::new(Some(EpisodeListing::mcap_fixture("dataset_abc130k")));
+    let mut tracking = ObjectTracking::default();
+    tracking.set_camera(Some("/top-camera".to_owned()));
+    tracking.set_prompt("bottle");
+    let track = payload
+        .add_child(DATASET_NODE_ID, CurationNodeKind::TrackObjects(tracking))
+        .unwrap();
+    let kept = payload.add_child(&track, select()).unwrap();
+    publish(&mut payload, &kept, "bottle_episodes").unwrap();
+    assert!(is_current(&payload, &kept));
+    let Some(CurationNodeKind::TrackObjects(tracking)) =
+        payload.node_mut(&track).map(CurationNode::kind_mut)
+    else {
+        panic!("the node tracks objects");
+    };
+    tracking.set_prompt("cup");
+    assert!(!is_current(&payload, &kept));
 }
 
 #[test]
 fn a_copy_unpublished_elsewhere_differs_by_its_publications_alone() {
     let (mut open, long, short) = two_outputs();
-    open.record_publication(&long, "long_episodes", 3).unwrap();
-    open.record_publication(&short, "short_episodes", 4)
-        .unwrap();
+    publish(&mut open, &long, "long_episodes").unwrap();
+    publish(&mut open, &short, "short_episodes").unwrap();
     // Data unpublished one view and stored the curation.
     let mut stored = open.clone();
-    stored.remove_publication(&long, 5).unwrap();
+    stored.remove_publication(&long).unwrap();
     assert!(open.same_recipe(&stored));
     open.take_publications(&stored);
     assert_eq!(open, stored);
@@ -642,9 +687,7 @@ fn a_copy_unpublished_elsewhere_differs_by_its_publications_alone() {
 #[test]
 fn the_views_a_stored_payload_publishes_are_read_without_decoding_it() {
     let (mut payload, long, _) = two_outputs();
-    payload
-        .record_publication(&long, "long_episodes", 3)
-        .unwrap();
+    publish(&mut payload, &long, "long_episodes").unwrap();
     assert_eq!(
         PublishedOutput::views_in(&payload.encode().unwrap()),
         ["long_episodes"]
@@ -657,27 +700,17 @@ fn the_views_a_stored_payload_publishes_are_read_without_decoding_it() {
 #[test]
 fn a_publication_names_one_node_by_one_view_name() {
     let (mut payload, long, short) = two_outputs();
-    assert!(
-        payload
-            .record_publication(DATASET_NODE_ID, "episodes", 1)
-            .is_err()
-    );
-    assert!(
-        payload
-            .record_publication(&long, "long episodes", 1)
-            .is_err()
-    );
-    payload.record_publication(&long, "episodes", 1).unwrap();
-    assert!(payload.record_publication(&short, "episodes", 2).is_err());
+    assert!(publish(&mut payload, DATASET_NODE_ID, "episodes").is_err());
+    assert!(publish(&mut payload, &long, "long episodes").is_err());
+    publish(&mut payload, &long, "episodes").unwrap();
+    assert!(publish(&mut payload, &short, "episodes").is_err());
     assert_eq!(payload.validate(), Ok(()));
 }
 
 #[test]
 fn a_published_node_keeps_its_branch_until_it_is_unpublished() {
     let (mut payload, long, _) = two_outputs();
-    payload
-        .record_publication(&long, "long_episodes", 1)
-        .unwrap();
+    publish(&mut payload, &long, "long_episodes").unwrap();
     // A step after it leaves it published as it was.
     let mut followed = payload.clone();
     followed
@@ -687,7 +720,7 @@ fn a_published_node_keeps_its_branch_until_it_is_unpublished() {
         )
         .unwrap();
     assert_eq!(followed.validate(), Ok(()));
-    assert!(followed.publication(&long).is_some());
+    assert!(is_current(&followed, &long));
     // Its branch does not go while the view is there.
     assert!(
         payload
@@ -695,7 +728,7 @@ fn a_published_node_keeps_its_branch_until_it_is_unpublished() {
             .unwrap_err()
             .contains("long_episodes")
     );
-    payload.remove_publication(&long, 2).unwrap();
+    payload.remove_publication(&long).unwrap();
     payload.remove_node(&long).unwrap();
 }
 

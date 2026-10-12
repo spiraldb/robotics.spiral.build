@@ -351,17 +351,21 @@ async fn projects_with_records_become_workspaces_named_by_their_id() {
     );
 }
 
+/// Encoding 5 dropped every curation before it, and encoding 6 every one
+/// before it; each took the views its curations published.
 #[tokio::test]
-async fn curations_before_encoding_5_are_dropped_with_the_views_they_published() {
+async fn curations_before_encoding_6_are_dropped_with_the_views_they_published() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("before-encoding-5.sqlite3");
+    let path = directory.path().join("before-encoding-6.sqlite3");
     let raw = migrated_until(&path, "m20261008_000001_curations_encoding_5").await;
     raw.execute_unprepared(
         r#"INSERT INTO curations VALUES ('p', 'old', 'Steady drops', 1, 4, '{"published":[{"node":"select_1","view":"steady_drops","revision":1}]}', 1);
            INSERT INTO curations VALUES ('p', 'broken', 'Broken', 1, 3, 'not json', 1);
-           INSERT INTO curations VALUES ('p', 'new', 'Experts', 1, 5, '{"published":[{"node":"select_2","view":"expert_demos","revision":1}]}', 1);
+           INSERT INTO curations VALUES ('p', 'revised', 'Experts', 1, 5, '{"published":[{"node":"select_2","view":"expert_demos","revision":1}]}', 1);
+           INSERT INTO curations VALUES ('p', 'new', 'Bottles', 1, 6, '{"published":[{"node":"select_3","view":"bottle_experts","statement":"5e0f"}]}', 1);
            INSERT INTO curated_views VALUES ('p', 'Steady_Drops', 'SELECT 1');
            INSERT INTO curated_views VALUES ('p', 'expert_demos', 'SELECT 1');
+           INSERT INTO curated_views VALUES ('p', 'bottle_experts', 'SELECT 1');
            INSERT INTO curated_views VALUES ('q', 'steady_drops', 'SELECT 1');"#,
     )
     .await
@@ -387,7 +391,7 @@ async fn curations_before_encoding_5_are_dropped_with_the_views_they_published()
     // A view of the same name in another project is not the dropped one.
     assert_eq!(
         left,
-        [vec!["new"], vec!["p:expert_demos", "q:steady_drops"]]
+        [vec!["new"], vec!["p:bottle_experts", "q:steady_drops"]]
     );
 }
 

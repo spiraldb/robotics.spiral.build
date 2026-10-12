@@ -29,14 +29,14 @@ use spiral_robotics_common::training::PublishedModel;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) use grouping::{CategoryId, SubtaskCategory, SubtaskGrouping};
-pub(crate) use publication::PublishedOutput;
+pub(crate) use publication::{NodePublication, PublishedOutput};
 pub(crate) use selection::{
     Comparison, EpisodeCondition, EpisodeFact, EpisodeNumber, SelectCondition, Selection,
 };
 
 /// The payload's encoding. A payload of any other encoding is refused, not
 /// converted.
-pub(crate) const CURATION_ENCODING_VERSION: u32 = 5;
+pub(crate) const CURATION_ENCODING_VERSION: u32 = 6;
 /// The root node every curation starts with.
 pub(crate) const DATASET_NODE_ID: &str = "dataset";
 /// OpenRouter id of the newest Gemini Flash as of 2026-09-21; it accepts image

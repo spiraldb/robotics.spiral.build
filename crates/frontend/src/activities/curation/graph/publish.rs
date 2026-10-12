@@ -15,7 +15,7 @@
 //! else publishes or unpublishes until that is done.
 use super::node_card::NodeCard;
 use crate::activities::curation::client::CurationClient;
-use crate::activities::curation::document::PublishedOutput;
+use crate::activities::curation::document::{NodePublication, PublishedOutput};
 use crate::activities::curation::path::{CurationPath, PathError};
 use crate::activities::curation::state::CurationController;
 use crate::client::project::ProjectClient;
@@ -62,7 +62,7 @@ struct PublishableOutput {
     label: &'static str,
     summary: String,
     compiled: Result<CompiledOutput, String>,
-    published: Option<PublishedOutput>,
+    published: Option<NodePublication>,
 }
 
 /// One chosen output: its node, and the view it publishes as with the
@@ -106,7 +106,7 @@ impl PublishableOutput {
                         compiled: CurationPath::to(payload, output.id())
                             .and_then(|path| CompiledOutput::of(&path))
                             .map_err(|error| error.message().to_owned()),
-                        published: payload.publication(output.id()).cloned(),
+                        published: payload.node_publication(output.id()),
                     })
                 })
                 .collect()
@@ -133,7 +133,7 @@ impl PublishChoice {
             names: outputs
                 .iter()
                 .map(|output| {
-                    let name = output.published.as_ref().map(PublishedOutput::view);
+                    let name = output.published.as_ref().map(NodePublication::view);
                     (output.node.clone(), name.unwrap_or_default().to_owned())
                 })
                 .collect(),
@@ -219,9 +219,9 @@ struct ViewPublisher {
 }
 
 impl ViewPublisher {
-    /// Save what is drawn, since a view is recorded against the saved recipe;
-    /// then start the one run filling every column the chosen views read and
-    /// creating them, record every view in one edit, and save again.
+    /// Save what is drawn, since Data judges a view against the stored
+    /// recipe; then start the one run filling every column the chosen views
+    /// read and creating them, record every view in one edit, and save again.
     fn publish(self, views: Vec<ChosenView>) {
         let Self {
             controller,
@@ -234,7 +234,6 @@ impl ViewPublisher {
                 busy.set(false);
                 return;
             }
-            let saved = controller.saved_revision();
             let names = views
                 .iter()
                 .map(|chosen| chosen.view.name().to_owned())
@@ -260,7 +259,7 @@ impl ViewPublisher {
             let recorded = started.and_then(|_| {
                 controller.edit(|payload| {
                     views.iter().try_for_each(|chosen| {
-                        payload.record_publication(&chosen.node, chosen.view.name(), saved)
+                        payload.record_publication(&chosen.node, &chosen.view)
                     })
                 })
             });
@@ -288,13 +287,12 @@ impl ViewPublisher {
             studio,
             mut busy,
         } = self;
-        let saved = controller.saved_revision();
         busy.set(true);
         spawn(async move {
             controller.report_activity(&node, Some(format!("Unpublishing {view}")));
             let forgotten = PublishedViews::drop_view(view)
                 .await
-                .and_then(|()| controller.edit(|payload| payload.remove_publication(&node, saved)));
+                .and_then(|()| controller.edit(|payload| payload.remove_publication(&node)));
             controller.report_activity(&node, None);
             match forgotten {
                 Ok(()) => controller.save_when_idle(studio).await,
@@ -407,7 +405,6 @@ pub(in crate::activities::curation) fn CurationPublish(controller: CurationContr
                                 problem: choice.read().shown_problem(&output, &outputs),
                                 name: choice.read().name(&output.node).to_owned(),
                                 chosen: choice.read().chosen.contains(&output.node),
-                                current: controller.saved_revision(),
                                 disabled: waiting,
                                 on_choose: {
                                     let node = output.node.clone();
@@ -481,9 +478,6 @@ fn PublishRow(
     name: String,
     chosen: bool,
     problem: Option<String>,
-    /// The revision Studio holds the curation at, which a view is current
-    /// against.
-    current: u64,
     disabled: bool,
     on_choose: EventHandler<bool>,
     on_name: EventHandler<String>,
@@ -505,14 +499,14 @@ fn PublishRow(
                 // The view's name is the field under the row, so the state
                 // is one word at the row's end, as the card says it.
                 if let Some(published) = output.published.clone() {
-                    if published.is_current(current) {
+                    if published.is_current() {
                         p { class: "curation-publish-status is-published", role: "status",
-                            title: "Published as {published.view()}: the view is what the saved curation keeps here",
+                            title: "Published as {published.view()}: the view is what this node keeps",
                             "Published"
                         }
                     } else {
                         p { class: "curation-publish-status is-stale", role: "status",
-                            title: "The saved curation has changed since {published.view()} was published; publish it again to update the view",
+                            title: "What this node keeps has changed since {published.view()} was published; publish it again to update the view",
                             "Out of date"
                         }
                     }

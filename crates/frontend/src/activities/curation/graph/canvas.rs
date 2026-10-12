@@ -405,7 +405,7 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
             // outline: clear of the title and of the trash in the corner
             // above, and of the + centred under it.
             match card.published() {
-                Some(published) if published.is_current(hand.controller.saved_revision()) => rsx! {
+                Some(published) if published.is_current() => rsx! {
                     span {
                         class: "curation-canvas-output is-published",
                         title: "Published as the catalog view {published.view()}",
@@ -415,7 +415,7 @@ fn NodeCardView(ctx: NodeViewCtx<NodeCard>, hand: CanvasHand) -> Element {
                 Some(published) => rsx! {
                     span {
                         class: "curation-canvas-output is-stale",
-                        title: "The saved curation has changed since {published.view()} was published; publish it again from the document bar",
+                        title: "What this node keeps has changed since {published.view()} was published; publish it again from the document bar",
                         "Out of date"
                     }
                 },

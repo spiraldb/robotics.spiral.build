@@ -1,15 +1,16 @@
 //! Which nodes are published as catalog views, and whether each view is
-//! still what the saved recipe compiles to.
+//! still what its node compiles to.
 //!
 //! A view cannot be turned back into a graph, so the recipe stays in the
-//! document and each publication records the view's name and the saved
-//! revision it was compiled from. Saving an edit moves the saved revision past
-//! it, which is how a node says its view is out of date. Recording a
-//! publication is itself a save that edits no recipe, so every view current
-//! before it stays current after it.
+//! document and each publication records the view's name and the digest of
+//! the statement it was created with. A view is out of date once its node
+//! compiles to another statement: an edit on its path, from the dataset down
+//! to the node, and only such an edit.
 use super::{CurationGraph, CurationNode};
+use crate::activities::curation::path::CurationPath;
 use serde::{Deserialize, Serialize};
-use spiral_robotics_common::curation::ViewName;
+use sha2::{Digest as _, Sha256};
+use spiral_robotics_common::curation::{PublishedView, ViewName};
 use std::collections::BTreeSet;
 
 /// One node published as a catalog view, over every episode of the
@@ -19,8 +20,20 @@ use std::collections::BTreeSet;
 pub(crate) struct PublishedOutput {
     node: String,
     view: String,
-    /// The saved revision whose recipe the view was compiled from.
-    revision: u64,
+    /// The statement the view was created with.
+    statement: StatementDigest,
+}
+
+/// The SHA-256 of a view's statement, which tells whether a node still
+/// compiles to its view without keeping the statement in the document.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+struct StatementDigest(String);
+
+impl StatementDigest {
+    fn of(statement: &str) -> Self {
+        Self(format!("{:x}", Sha256::digest(statement.as_bytes())))
+    }
 }
 
 impl PublishedOutput {
@@ -50,18 +63,46 @@ impl PublishedOutput {
     pub(crate) fn view(&self) -> &str {
         &self.view
     }
-    /// Whether the view is still what the recipe saved at `saved` compiles to.
-    pub(crate) fn is_current(&self, saved: u64) -> bool {
-        self.revision >= saved
+    /// Whether the view is still what `graph` compiles its node to.
+    pub(crate) fn is_current(&self, graph: &CurationGraph) -> bool {
+        CurationPath::to(graph, &self.node)
+            .and_then(|path| path.statement())
+            .is_ok_and(|statement| StatementDigest::of(&statement) == self.statement)
+    }
+}
+
+/// The view one node is published as, judged against the graph it is in.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NodePublication {
+    view: String,
+    current: bool,
+}
+
+impl NodePublication {
+    pub(crate) fn view(&self) -> &str {
+        &self.view
+    }
+    /// Whether the node still compiles to its view.
+    pub(crate) fn is_current(&self) -> bool {
+        self.current
     }
 }
 
 impl CurationGraph {
     /// The view `node` is published as, if it is.
-    pub(crate) fn publication(&self, node: &str) -> Option<&PublishedOutput> {
+    pub(super) fn publication(&self, node: &str) -> Option<&PublishedOutput> {
         self.published
             .iter()
             .find(|published| published.node == node)
+    }
+
+    /// The view `node` is published as, if it is, and whether `node` still
+    /// compiles to it.
+    pub(crate) fn node_publication(&self, node: &str) -> Option<NodePublication> {
+        self.publication(node).map(|published| NodePublication {
+            view: published.view.clone(),
+            current: published.is_current(self),
+        })
     }
 
     /// Every output published as a view, beside its node.
@@ -71,32 +112,29 @@ impl CurationGraph {
             .filter_map(|published| Some((published, self.node(&published.node)?)))
     }
 
-    /// Record that `node` is published as `view`, compiled from the recipe
-    /// saved at `saved`. The save that records it comes next, at
-    /// `saved + 1`. A refused record changes nothing.
+    /// Record that `node` is published as `view`. A refused record changes
+    /// nothing.
     pub(crate) fn record_publication(
         &mut self,
         node: &str,
-        view: &str,
-        saved: u64,
+        view: &PublishedView,
     ) -> Result<(), String> {
-        self.check_publication(node, view)?;
+        self.check_publication(node, view.name())?;
         if let Some(other) = self
             .published
             .iter()
-            .find(|published| published.view == view && published.node != node)
+            .find(|published| published.view == view.name() && published.node != node)
         {
             return Err(format!(
                 "Another output is already published as “{}”.",
                 other.view
             ));
         }
-        self.advance_current(saved);
         self.published.retain(|published| published.node != node);
         self.published.push(PublishedOutput {
             node: node.to_owned(),
-            view: view.to_owned(),
-            revision: saved + 1,
+            view: view.name().to_owned(),
+            statement: StatementDigest::of(view.statement()),
         });
         Ok(())
     }
@@ -113,23 +151,12 @@ impl CurationGraph {
     }
 
     /// Forget that `node` is published, once its view is dropped.
-    pub(crate) fn remove_publication(&mut self, node: &str, saved: u64) -> Result<(), String> {
+    pub(crate) fn remove_publication(&mut self, node: &str) -> Result<(), String> {
         if self.publication(node).is_none() {
             return Err("That output is not published.".into());
         }
-        self.advance_current(saved);
         self.published.retain(|published| published.node != node);
         Ok(())
-    }
-
-    /// Carry every view current at `saved` to the next save, which records a
-    /// publication and edits no recipe.
-    fn advance_current(&mut self, saved: u64) {
-        for published in &mut self.published {
-            if published.is_current(saved) {
-                published.revision = saved + 1;
-            }
-        }
     }
 
     /// Whether `node` may be published as `view`: it is a node but the

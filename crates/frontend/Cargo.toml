@@ -38,6 +38,7 @@ dioxus-flow.workspace = true
 dioxus-workbench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 schemars = "1.2"
 serde_urlencoded = "0.7"
 serde-wasm-bindgen = "0.6"
