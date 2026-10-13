@@ -10,7 +10,7 @@ trained policy on a robot is not supported yet.
 
 It runs as two programs. **Studio** (`crates/backend` and `crates/frontend`)
 serves the browser app, keeps Studio state, and reaches SpiralDB; it runs at
-`robotics.spiraldb.com` or on `localhost`. The **robot connector**
+`robotics.spiral.build` or on `localhost`. The **robot connector**
 (`robot-connector`) runs next to the arms: it owns their serial buses,
 cameras, calibration, and control loop, and records episodes.
 The connector links itself to Studio over plain HTTP, and the browser reaches
@@ -103,7 +103,7 @@ The Cargo profile's `debug = 0` does not disable DX's separate bundling option.
 ### Hosted
 
 [`deploy/hosted`](deploy/hosted/README.md) runs Studio for Spiral colleagues at
-`robotics.spiraldb.com`, on one Compute Engine VM behind Cloudflare Access.
+`robotics.spiral.build`, on one Compute Engine VM behind Cloudflare Access.
 Each release, a pushed `v*` tag, publishes its Linux image, the flake's
 `hosted-image`, through `.github/workflows/hosted-image.yml`.
 
@@ -193,7 +193,7 @@ sets Prod (`client_PiwYy0njXU92`). These IDs are public, not secrets.
 `SPIRAL_ROBOTICS_PUBLIC_URL` (or `--public-url`) sets the address browsers reach
 Studio at, `http://localhost:3000` by default. Register its exact `/callback` URL:
 `http://localhost:3000/callback` for Dev and
-`https://robotics.spiraldb.com/callback` for Prod. The two registrations belong to
+`https://robotics.spiral.build/callback` for Prod. The two registrations belong to
 the Spiral organization and have separate client IDs. No client secret is needed.
 `SPIRAL_ROBOTICS_AUTH_URL` defaults to `https://auth.spiraldb.com`.
 

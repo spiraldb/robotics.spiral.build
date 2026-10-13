@@ -52,8 +52,8 @@ impl EncoderDriver for NoEncoder {
 
 #[test]
 fn a_studio_link_needs_a_web_address_and_a_token() {
-    assert!(StudioLink::new("https://robotics.spiraldb.com/", "rc_token").is_ok());
-    assert!(StudioLink::new("robotics.spiraldb.com", "rc_token").is_err());
+    assert!(StudioLink::new("https://robotics.spiral.build/", "rc_token").is_ok());
+    assert!(StudioLink::new("robotics.spiral.build", "rc_token").is_err());
     assert!(StudioLink::new("http://localhost:3000", " ").is_err());
 }
 
